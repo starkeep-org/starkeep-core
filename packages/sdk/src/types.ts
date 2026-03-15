@@ -1,0 +1,104 @@
+import type {
+  StarkeepId,
+  DataRecord,
+  MetadataRecord,
+  HLCClock,
+  CreateDataRecordInput,
+} from "@starkeep/core";
+import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import type {
+  GeneratingFunctionDefinition,
+  GeneratorRegistry,
+  DependencyGraph,
+  MetadataEngine,
+  GenerationResult,
+} from "@starkeep/metadata-engine";
+import type { UnifiedIndex, IndexQuery, IndexResult } from "@starkeep/index";
+import type {
+  AggregationEngine,
+  AggregationResult,
+  AggregationOptions,
+} from "@starkeep/aggregations";
+import type { SyncEngine, ChangeListener } from "@starkeep/sync-engine";
+import type {
+  AccessControlEngine,
+  CreatePolicyInput,
+  AccessPolicy,
+  AccessCheckRequest,
+  AccessCheckResult,
+} from "@starkeep/access-control";
+import type { SharedSpaceApi, ApiRequest, ApiResponse } from "@starkeep/shared-space-api";
+
+export interface DataOperations {
+  put(input: CreateDataRecordInput): Promise<DataRecord>;
+  putWithFile(
+    input: CreateDataRecordInput,
+    file: Buffer | Uint8Array,
+    contentType?: string,
+  ): Promise<DataRecord>;
+  get(recordId: StarkeepId): Promise<DataRecord | null>;
+  delete(recordId: StarkeepId): Promise<void>;
+}
+
+export interface MetadataOperations {
+  generate(
+    generatorId: string,
+    targetId: StarkeepId,
+  ): Promise<GenerationResult>;
+  generateAll(
+    targetId: StarkeepId,
+    dataType: string,
+  ): Promise<GenerationResult[]>;
+  getForRecord(targetId: StarkeepId): Promise<MetadataRecord[]>;
+}
+
+export interface IndexOperations {
+  search(query: IndexQuery): Promise<IndexResult>;
+}
+
+export interface AggregationOperations {
+  compute(options?: AggregationOptions): Promise<AggregationResult>;
+}
+
+export interface SyncOperations {
+  push(): Promise<{ pushed: number; conflicts: number }>;
+  pull(): Promise<{ pulled: number }>;
+  fullSync(): Promise<{ pulled: number; pushed: number; conflicts: number }>;
+  onUpdate(listener: ChangeListener): () => void;
+}
+
+export interface AccessControlOperations {
+  createPolicy(input: CreatePolicyInput): Promise<AccessPolicy>;
+  revokePolicy(policyId: StarkeepId): Promise<void>;
+  listPolicies(options?: {
+    subjectId?: string;
+    resourceId?: string;
+  }): Promise<AccessPolicy[]>;
+  checkAccess(request: AccessCheckRequest): Promise<AccessCheckResult>;
+}
+
+export interface ApiOperations {
+  handleRequest(request: ApiRequest): Promise<ApiResponse>;
+}
+
+export interface StarkeepSdk {
+  readonly data: DataOperations;
+  readonly metadata: MetadataOperations;
+  readonly index: IndexOperations;
+  readonly aggregations: AggregationOperations;
+  readonly sync: SyncOperations | null;
+  readonly accessControl: AccessControlOperations;
+  readonly api: ApiOperations;
+  close(): Promise<void>;
+}
+
+export interface StarkeepSdkOptions {
+  readonly databaseAdapter: DatabaseAdapter;
+  readonly objectStorageAdapter: ObjectStorageAdapter;
+  readonly ownerId: string;
+  readonly nodeId: string;
+  readonly clock?: HLCClock;
+  readonly remoteDatabaseAdapter?: DatabaseAdapter;
+  readonly remoteObjectStorageAdapter?: ObjectStorageAdapter;
+  readonly generators?: GeneratingFunctionDefinition[];
+}
