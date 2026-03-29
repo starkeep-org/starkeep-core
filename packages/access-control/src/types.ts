@@ -54,6 +54,7 @@ export interface SharingTokenOptions {
 }
 
 export interface AccessControlEngine {
+  loadPolicies(): Promise<void>;
   createPolicy(input: CreatePolicyInput): Promise<AccessPolicy>;
   revokePolicy(policyId: StarkeepId): Promise<void>;
   listPolicies(options?: { subjectId?: string; resourceId?: string }): Promise<AccessPolicy[]>;

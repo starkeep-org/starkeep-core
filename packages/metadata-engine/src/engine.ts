@@ -69,7 +69,7 @@ export function createMetadataEngine(
         }
       }
 
-      const inputHash = computeInputHash(
+      const inputHash = await computeInputHash(
         request.targetId,
         dependencyIds,
         request.parameters ?? {},
@@ -194,7 +194,7 @@ export function createMetadataEngine(
         }
       }
 
-      const currentInputHash = computeInputHash(
+      const currentInputHash = await computeInputHash(
         metadataRecord.targetId,
         dependencyIds,
         {},

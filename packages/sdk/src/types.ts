@@ -27,13 +27,13 @@ import type {
   AccessCheckRequest,
   AccessCheckResult,
 } from "@starkeep/access-control";
-import type { SharedSpaceApi, ApiRequest, ApiResponse } from "@starkeep/shared-space-api";
+import type { SharedSpaceApi, ApiRequest, ApiResponse, ApiRouter, WebSocketConnection } from "@starkeep/shared-space-api";
 
 export interface DataOperations {
   put(input: CreateDataRecordInput): Promise<DataRecord>;
   putWithFile(
     input: CreateDataRecordInput,
-    file: Buffer | Uint8Array,
+    file: Uint8Array,
     contentType?: string,
   ): Promise<DataRecord>;
   get(recordId: StarkeepId): Promise<DataRecord | null>;
@@ -78,8 +78,19 @@ export interface AccessControlOperations {
 }
 
 export interface ApiOperations {
+  readonly router: ApiRouter;
   handleRequest(request: ApiRequest): Promise<ApiResponse>;
+  /**
+   * Register a connected WebSocket client. Returns a cleanup function to call
+   * when the connection closes. Requires a changeNotifier (i.e. sync must be
+   * configured) otherwise this is a no-op unsubscribe.
+   */
+  handleWebSocketConnect(connection: WebSocketConnection): () => void;
 }
+
+export type { ApiRouter };
+
+export type { WebSocketConnection };
 
 export interface StarkeepSdk {
   readonly data: DataOperations;

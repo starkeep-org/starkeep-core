@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "@starkeep/core": "workspace:*",
-    "@starkeep/storage-adapter": "workspace:*"
+    "@starkeep/storage-adapter": "workspace:*",
+    "@starkeep/sync-engine": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^25.4.0",

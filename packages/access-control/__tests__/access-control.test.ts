@@ -208,6 +208,62 @@ describe("AccessControl", () => {
     });
   });
 
+  describe("persistence via loadPolicies", () => {
+    it("should restore policies after re-creating the engine with the same adapter", async () => {
+      const policy = await engine.createPolicy({
+        subjectType: "user",
+        subjectId: "user-persist",
+        resourceType: "item",
+        resourceId: "item-xyz",
+        permissions: ["read", "write"],
+      });
+
+      // Create a fresh engine backed by the same databaseAdapter
+      const engine2 = createAccessControlEngine({ databaseAdapter, clock, ownerId });
+      await engine2.loadPolicies();
+
+      const policies = await engine2.listPolicies({ subjectId: "user-persist" });
+      expect(policies).toHaveLength(1);
+      expect(policies[0].policyId).toBe(policy.policyId);
+      expect(policies[0].permissions).toEqual(["read", "write"]);
+    });
+
+    it("should restore sharing tokens after re-creating the engine", async () => {
+      const policy = await engine.createPolicy({
+        subjectType: "token",
+        subjectId: "*",
+        resourceType: "item",
+        resourceId: "item-abc",
+        permissions: ["read"],
+      });
+      const { token } = await engine.createSharingToken(policy.policyId);
+
+      const engine2 = createAccessControlEngine({ databaseAdapter, clock, ownerId });
+      await engine2.loadPolicies();
+
+      const validated = await engine2.validateSharingToken(token);
+      expect(validated).not.toBeNull();
+      expect(validated!.policyId).toBe(policy.policyId);
+    });
+
+    it("should not restore revoked policies", async () => {
+      const policy = await engine.createPolicy({
+        subjectType: "user",
+        subjectId: "user-revoke",
+        resourceType: "item",
+        resourceId: "item-revoke",
+        permissions: ["read"],
+      });
+      await engine.revokePolicy(policy.policyId);
+
+      const engine2 = createAccessControlEngine({ databaseAdapter, clock, ownerId });
+      await engine2.loadPolicies();
+
+      const policies = await engine2.listPolicies({ subjectId: "user-revoke" });
+      expect(policies).toHaveLength(0);
+    });
+  });
+
   describe("enforced database adapter", () => {
     it("should allow reads with read permission", async () => {
       const record = createDataRecord({ type: "@test/note", ownerId }, clock);

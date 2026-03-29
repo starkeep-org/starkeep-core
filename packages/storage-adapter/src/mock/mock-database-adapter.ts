@@ -43,7 +43,11 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     if (query.filters) {
       for (const filter of query.filters) {
         records = records.filter((record) => {
-          const value = (record as unknown as Record<string, unknown>)[filter.field];
+          const parts = filter.field.split(".");
+          let value: unknown = record;
+          for (const part of parts) {
+            value = (value as Record<string, unknown>)?.[part];
+          }
           switch (filter.operator) {
             case "eq": return value === filter.value;
             case "neq": return value !== filter.value;

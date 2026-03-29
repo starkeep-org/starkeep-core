@@ -6,7 +6,13 @@ import {
   type DataRecord,
   type MetadataRecord,
 } from "@starkeep/core";
-import { createHash } from "node:crypto";
+async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
+  const copy = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+  const buf = await crypto.subtle.digest("SHA-256", copy);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 import {
   createGeneratorRegistry,
   createDependencyGraph,
@@ -62,13 +68,7 @@ export async function createStarkeepSdk(
     clock,
     ownerId,
   });
-
-  const sharedSpaceApi = createSharedSpaceApi({
-    databaseAdapter,
-    objectStorageAdapter,
-    clock,
-    ownerId,
-  });
+  await accessControlEngine.loadPolicies();
 
   let syncEngine = null;
   if (remoteDatabaseAdapter && remoteObjectStorageAdapter) {
@@ -84,6 +84,14 @@ export async function createStarkeepSdk(
     });
   }
 
+  const sharedSpaceApi = createSharedSpaceApi({
+    databaseAdapter,
+    objectStorageAdapter,
+    clock,
+    ownerId,
+    changeNotifier: syncEngine?.changeNotifier,
+  });
+
   return {
     data: {
       async put(input) {
@@ -96,9 +104,7 @@ export async function createStarkeepSdk(
       },
 
       async putWithFile(input, file, contentType) {
-        const contentHash = createHash("sha256")
-          .update(file)
-          .digest("hex");
+        const contentHash = await sha256Hex(file);
         const objectStorageKey = `${contentHash.slice(0, 2)}/${contentHash}`;
 
         await objectStorageAdapter.put(objectStorageKey, file, {
@@ -219,8 +225,14 @@ export async function createStarkeepSdk(
     },
 
     api: {
+      get router() {
+        return sharedSpaceApi.router;
+      },
       async handleRequest(request) {
         return sharedSpaceApi.handleRequest(request);
+      },
+      handleWebSocketConnect(connection) {
+        return sharedSpaceApi.handleWebSocketConnect(connection);
       },
     },
 
