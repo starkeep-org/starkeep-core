@@ -1,7 +1,7 @@
 import { createDataRecord, serializeHLC, type DataRecord, type HLCClock } from "@starkeep/core";
 import type { TdoFileContent, Task } from "../types/task.js";
 
-export const TASK_RECORD_TYPE = "tasks:task";
+export const TASK_RECORD_TYPE = "todo:task";
 export const TASK_MIME_TYPE = "application/json";
 
 export function createTaskRecord(

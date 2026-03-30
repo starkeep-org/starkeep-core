@@ -4,6 +4,8 @@ import {
   taskPropertiesGenerator,
   taskHistoryGenerator,
   registerTasksEndpoints,
+  bootstrapTasksAppPolicies,
+  TASKS_APP_ID,
 } from "@tasks/tasks-lib";
 
 let _sdk: StarkeepSdk | null = null;
@@ -52,12 +54,21 @@ export async function getSdk(): Promise<StarkeepSdk> {
     });
   }
 
+  const sharedAdapterOptions = { databaseAdapter, objectStorageAdapter, ownerId, nodeId };
+
+  // Use an owner-level SDK (no subject) solely to seed access policies on first run.
+  const ownerSdk = await createStarkeepSdk({
+    ...sharedAdapterOptions,
+    generators: [],
+  });
+  await bootstrapTasksAppPolicies(ownerSdk);
+  await ownerSdk.close();
+
+  // Re-initialise as the tasks app subject so all data operations are enforced.
   _sdk = await createStarkeepSdk({
-    databaseAdapter,
-    objectStorageAdapter,
-    ownerId,
-    nodeId,
+    ...sharedAdapterOptions,
     generators: [taskPropertiesGenerator, taskHistoryGenerator],
+    subject: { subjectType: "app", subjectId: TASKS_APP_ID },
   });
 
   registerTasksEndpoints(_sdk.api.router);

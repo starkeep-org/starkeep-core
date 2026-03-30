@@ -308,5 +308,60 @@ describe("AccessControl", () => {
 
       await expect(enforcedAdapter.put(record)).rejects.toThrow(AccessDeniedError);
     });
+
+    it("should throw AccessDeniedError on put when no policy covers the record type", async () => {
+      // No policy exists for "media:photo" — type-based check must deny.
+      const record = createDataRecord({ type: "media:photo", ownerId }, clock);
+
+      const enforcedAdapter = createEnforcedDatabaseAdapter({
+        databaseAdapter,
+        accessControlEngine: engine,
+        subjectType: "app",
+        subjectId: "@starkeep/photos",
+      });
+
+      await expect(enforcedAdapter.put(record)).rejects.toThrow(AccessDeniedError);
+    });
+
+    it("should throw AccessDeniedError accessing another app's private type, even with a wildcard policy", async () => {
+      // Record owned by "starkeep-tasks" private namespace.
+      const record = createDataRecord({ type: "starkeep-tasks:private:settings", ownerId }, clock);
+      await databaseAdapter.put(record);
+
+      // Grant a wildcard policy to @starkeep/photos — structural rule must still block.
+      await engine.createPolicy({
+        subjectType: "app",
+        subjectId: "@starkeep/photos",
+        resourceType: "wildcard",
+        resourceId: "*",
+        permissions: ["read", "write", "delete"],
+      });
+
+      const enforcedAdapter = createEnforcedDatabaseAdapter({
+        databaseAdapter,
+        accessControlEngine: engine,
+        subjectType: "app",
+        subjectId: "@starkeep/photos",
+      });
+
+      await expect(enforcedAdapter.get(record.id)).rejects.toThrow(AccessDeniedError);
+    });
+
+    it("should allow access to own private types without any policy", async () => {
+      // "starkeep-photos" is the normalized form of "@starkeep/photos".
+      const record = createDataRecord({ type: "starkeep-photos:private:settings", ownerId }, clock);
+      await databaseAdapter.put(record);
+
+      // No policies created — structural rule alone should permit access.
+      const enforcedAdapter = createEnforcedDatabaseAdapter({
+        databaseAdapter,
+        accessControlEngine: engine,
+        subjectType: "app",
+        subjectId: "@starkeep/photos",
+      });
+
+      const retrieved = await enforcedAdapter.get(record.id);
+      expect(retrieved).toEqual(record);
+    });
   });
 });

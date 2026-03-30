@@ -18,6 +18,10 @@
     "fs:allow-remove",
     "fs:allow-read-dir",
     "fs:allow-stat",
-    "fs:scope-applocaldata-recursive"
+    "fs:scope-applocaldata-recursive",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "agent-sidecar", "sidecar": true }]
+    }
   ]
 }

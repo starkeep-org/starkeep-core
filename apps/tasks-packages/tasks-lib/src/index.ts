@@ -46,6 +46,10 @@ export {
 // API
 export { registerTasksEndpoints } from "./api/register-endpoints.js";
 
+// App manifest constants and bootstrap
+export { TASKS_APP_ID, TASKS_APP_RECORD_TYPES } from "./manifest.js";
+export { bootstrapTasksAppPolicies } from "./bootstrap.js";
+
 // AI
 export { runAgenticLoop } from "./ai/agentic-loop.js";
 export type { AgenticLoopContext } from "./ai/agentic-loop.js";

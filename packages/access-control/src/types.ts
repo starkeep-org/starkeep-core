@@ -30,6 +30,8 @@ export interface AccessCheckRequest {
   readonly subjectId: string;
   readonly resourceId: StarkeepId;
   readonly permission: Permission;
+  /** When provided, the engine uses this type directly and skips the DB lookup. */
+  readonly recordType?: string;
 }
 
 export interface AccessCheckResult {

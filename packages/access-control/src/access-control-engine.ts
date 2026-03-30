@@ -152,8 +152,8 @@ export function createAccessControlEngine(options: {
       };
     }
 
-    const record = await databaseAdapter.get(request.resourceId);
-    const recordType = record?.type ?? "";
+    const recordType =
+      request.recordType ?? (await databaseAdapter.get(request.resourceId))?.type ?? "";
 
     return resolvePolicy(
       subjectPolicies,

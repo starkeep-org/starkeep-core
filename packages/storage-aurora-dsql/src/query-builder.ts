@@ -21,6 +21,10 @@ const FIELD_MAP: Record<string, string> = {
 };
 
 function mapField(field: string): string {
+  if (field.startsWith("payload.")) {
+    const jsonKey = field.slice("payload.".length);
+    return `payload->>'${jsonKey}'`;
+  }
   return FIELD_MAP[field] ?? field;
 }
 

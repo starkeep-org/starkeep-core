@@ -39,3 +39,22 @@ export interface MetadataRecord extends BaseRecord {
 }
 
 export type AnyRecord = DataRecord | MetadataRecord;
+
+/**
+ * Stored as a DataRecord with type `@starkeep/type-registration`.
+ * Only the admin layer (owner subject) may write these records.
+ * `registeredByAppId` is provenance metadata only — it does not restrict
+ * other apps from being granted access to the type.
+ */
+export interface TypeRegistration {
+  /** Global type identifier, e.g. "media:photo" or "@starkeep/access-policy". */
+  readonly typeId: string;
+  /** JSON Schema for the record payload. */
+  readonly schema: object;
+  /** Semver string; increment on schema changes. */
+  readonly schemaVersion: string;
+  readonly description: string;
+  readonly registeredAt: HLCTimestamp;
+  /** Provenance only — does not imply ownership or exclusive access. */
+  readonly registeredByAppId: string;
+}

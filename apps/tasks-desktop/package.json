@@ -8,7 +8,8 @@
     "prebuild": "bash ../../scripts/check-browser-compat.sh",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "sidecar:build": "mkdir -p src-tauri/binaries && bun build --compile sidecar/index.ts --outfile \"src-tauri/binaries/agent-sidecar-$(rustc --print host-triple)\""
   },
   "dependencies": {
     "@tasks/tasks-lib": "workspace:*",
@@ -16,6 +17,8 @@
     "@starkeep/core": "workspace:*",
     "@starkeep/sdk": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
+    "@starkeep/storage-sqlite": "workspace:*",
+    "@starkeep/storage-fs": "workspace:*",
     "@anthropic-ai/sdk": "^0.39.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-fs": "^2.0.0",

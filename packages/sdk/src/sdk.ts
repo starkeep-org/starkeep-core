@@ -1,7 +1,7 @@
 import {
   createHLCClock,
   createDataRecord,
-  generateId,
+  makePrivateType,
   type StarkeepId,
   type DataRecord,
   type MetadataRecord,
@@ -21,7 +21,7 @@ import {
 import { createUnifiedIndex } from "@starkeep/index";
 import { createAggregationEngine } from "@starkeep/aggregations";
 import { createSyncEngine } from "@starkeep/sync-engine";
-import { createAccessControlEngine } from "@starkeep/access-control";
+import { createAccessControlEngine, createEnforcedDatabaseAdapter } from "@starkeep/access-control";
 import { createSharedSpaceApi } from "@starkeep/shared-space-api";
 import type { StarkeepSdk, StarkeepSdkOptions } from "./types.js";
 
@@ -29,20 +29,39 @@ export async function createStarkeepSdk(
   options: StarkeepSdkOptions,
 ): Promise<StarkeepSdk> {
   const {
-    databaseAdapter,
+    databaseAdapter: rawDatabaseAdapter,
     objectStorageAdapter,
     ownerId,
     nodeId,
     remoteDatabaseAdapter,
     remoteObjectStorageAdapter,
     generators = [],
+    subject,
   } = options;
 
   const clock =
     options.clock ?? createHLCClock({ nodeId, wallClockFunction: Date.now });
 
-  await databaseAdapter.init();
+  await rawDatabaseAdapter.init();
   await objectStorageAdapter.init();
+
+  // When a subject is provided, wrap the adapter so every operation is
+  // gated by access control and the private-storage structural rule.
+  const accessControlEngine = createAccessControlEngine({
+    databaseAdapter: rawDatabaseAdapter,
+    clock,
+    ownerId,
+  });
+  await accessControlEngine.loadPolicies();
+
+  const databaseAdapter = subject
+    ? createEnforcedDatabaseAdapter({
+        databaseAdapter: rawDatabaseAdapter,
+        accessControlEngine,
+        subjectType: subject.subjectType,
+        subjectId: subject.subjectId,
+      })
+    : rawDatabaseAdapter;
 
   const generatorRegistry = createGeneratorRegistry();
   const dependencyGraph = createDependencyGraph();
@@ -63,12 +82,6 @@ export async function createStarkeepSdk(
 
   const unifiedIndex = createUnifiedIndex({ databaseAdapter });
   const aggregationEngine = createAggregationEngine({ databaseAdapter });
-  const accessControlEngine = createAccessControlEngine({
-    databaseAdapter,
-    clock,
-    ownerId,
-  });
-  await accessControlEngine.loadPolicies();
 
   let syncEngine = null;
   if (remoteDatabaseAdapter && remoteObjectStorageAdapter) {
@@ -143,6 +156,11 @@ export async function createStarkeepSdk(
           }
         }
       },
+
+      async query(params) {
+        const result = await databaseAdapter.query({ ...params, kind: "data" });
+        return result.records.filter((r): r is DataRecord => r.kind === "data");
+      },
     },
 
     metadata: {
@@ -208,10 +226,20 @@ export async function createStarkeepSdk(
 
     accessControl: {
       async createPolicy(input) {
+        if (subject) {
+          throw new Error(
+            "createPolicy is not available on an app-scoped SDK. Policies are managed by the admin layer.",
+          );
+        }
         return accessControlEngine.createPolicy(input);
       },
 
       async revokePolicy(policyId) {
+        if (subject) {
+          throw new Error(
+            "revokePolicy is not available on an app-scoped SDK. Policies are managed by the admin layer.",
+          );
+        }
         return accessControlEngine.revokePolicy(policyId);
       },
 
@@ -223,6 +251,30 @@ export async function createStarkeepSdk(
         return accessControlEngine.checkAccess(request);
       },
     },
+
+    privateStore:
+      subject?.subjectType === "app"
+        ? (() => {
+            return {
+              async put(subtype: string, payload: Record<string, unknown> = {}) {
+                const privateType = makePrivateType(subject.subjectId, subtype);
+                const record = createDataRecord({ type: privateType, ownerId, payload }, clock);
+                await databaseAdapter.put(record);
+                return record;
+              },
+
+              async get(recordId: StarkeepId) {
+                const record = await databaseAdapter.get(recordId);
+                if (!record || record.kind !== "data") return null;
+                return record as DataRecord;
+              },
+
+              async delete(recordId: StarkeepId) {
+                await databaseAdapter.delete(recordId);
+              },
+            };
+          })()
+        : null,
 
     api: {
       get router() {

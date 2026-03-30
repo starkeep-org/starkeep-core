@@ -26,6 +26,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": []
+    "icon": [],
+    "externalBin": ["binaries/agent-sidecar"]
   }
 }
