@@ -8,3 +8,4 @@ dist/
 .DS_Store
 .next/
 apps/tasks-desktop/src-tauri/target/
+apps/tasks-desktop/src-tauri/gen/schemas/
