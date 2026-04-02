@@ -8,7 +8,7 @@
     "prebuild": "bash ../../scripts/check-browser-compat.sh",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "tauri": "tauri",
+    "tauri": "npm run sidecar:build && tauri",
     "sidecar:build": "mkdir -p src-tauri/binaries && ${BUN_BIN:-\"${HOME}/Library/Application Support/sst/bin/bun\"} build --compile sidecar/index.ts --outfile \"src-tauri/binaries/agent-sidecar-$(rustc --print host-tuple)\""
   },
   "dependencies": {

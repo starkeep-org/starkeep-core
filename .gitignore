@@ -9,3 +9,4 @@ dist/
 .next/
 apps/tasks-desktop/src-tauri/target/
 apps/tasks-desktop/src-tauri/gen/schemas/
+apps/tasks-desktop/src-tauri/binaries/
