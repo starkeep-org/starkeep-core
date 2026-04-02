@@ -28,7 +28,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "list_tasks",
     description:
-      "List tasks in the active group with optional filters. Returns tasks in comprehensive order.",
+      "List tasks in the active group with optional filters. Returns tasks with their IDs. Use mode: \"importance\" before calling set_task_order — the response preserves the exact importance ordering so you can use the returned IDs to construct a new order.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -126,16 +126,22 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
-    name: "reorder_tasks",
+    name: "set_task_order",
     description:
-      "Move a task to a new position in the importance ordering. Position 0 is highest priority.",
+      "Atomically set the importance ordering for all tasks in the active group. " +
+      "Call list_tasks with mode: \"importance\" first to get the current task IDs and their order, " +
+      "then provide the complete re-ordered array. Every task ID from the group must be included. " +
+      "Position 0 = highest priority. One call replaces the entire ordering — never call this multiple times in sequence.",
     input_schema: {
       type: "object" as const,
       properties: {
-        taskId: { type: "string", description: "Task ID to move" },
-        newIndex: { type: "number", description: "New 0-based position in the importance order" },
+        orderedTaskIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Complete ordered list of all task IDs, highest priority first.",
+        },
       },
-      required: ["taskId", "newIndex"],
+      required: ["orderedTaskIds"],
     },
   },
   {
@@ -285,40 +291,14 @@ export async function executeTool(
       return response.body;
     }
 
-    case "reorder_tasks": {
-      // Get ordering record, remove task, re-insert at new position, update record
-      const orderedResponse = await sdk.api.handleRequest(
-        makeRequest("tasks:v1/tasks/ordered", "GET", userId, undefined, {
+    case "set_task_order": {
+      const response = await sdk.api.handleRequest(
+        makeRequest("tasks:v1/tasks/order", "POST", userId, {
           groupId,
-          mode: "importance",
+          orderedTaskIds: Array.isArray(input.orderedTaskIds) ? input.orderedTaskIds : [],
         }),
       );
-      const tasks = (orderedResponse.body as { tasks?: Array<{ id: string }> }).tasks ?? [];
-      const currentIds = tasks.map((t) => t.id);
-      const taskId = String(input.taskId);
-      const filtered = currentIds.filter((id) => id !== taskId);
-      const newIndex = Math.max(0, Math.min(Number(input.newIndex), filtered.length));
-      filtered.splice(newIndex, 0, taskId);
-      // Update the ordering record via the API (uses the reorder endpoint indirectly)
-      // We update by calling the create-task handler, which is the ordering record mechanism.
-      // Directly update via sdk.data with the correct ordering record.
-      // Find the ordering record using the index search (no metadataFilters needed, query by type)
-      const orderingQuery = await sdk.index.search({
-        types: ["tasks:ordering"],
-      });
-      const orderingItem = orderingQuery.items.find(
-        (item) =>
-          (item.dataRecord.payload as { groupId?: string }).groupId === groupId,
-      );
-      if (orderingItem) {
-        const orderingRecord = orderingItem.dataRecord;
-        await sdk.data.put({
-          type: orderingRecord.type,
-          ownerId: orderingRecord.ownerId,
-          payload: { groupId, orderedTaskIds: filtered },
-        });
-      }
-      return { success: true, newOrder: filtered };
+      return response.body;
     }
 
     case "analyze_problems": {

@@ -7,17 +7,14 @@ async function sha256Hex(data: Uint8Array): Promise<string> {
     .join("");
 }
 import type { TdoFileContent } from "../../types/task.js";
+import type { TdgFileContent } from "../../types/group.js";
 import {
   createTaskRecord,
   taskRecordToTask,
   encodeTdoFile,
 } from "../../data/task-record.js";
-import {
-  ORDERING_RECORD_TYPE,
-  getOrderingPayload,
-  insertTaskInOrdering,
-} from "../../data/ordering-record.js";
-import type { DataRecord } from "@starkeep/core";
+import { loadTdgFile, writeTdgFile } from "../../data/group-record.js";
+import type { DataRecord, StarkeepId } from "@starkeep/core";
 
 export const createTaskHandler: ApiEndpointDefinition = {
   namespace: "tasks",
@@ -71,17 +68,24 @@ export const createTaskHandler: ApiEndpointDefinition = {
 
     await context.databaseAdapter.put(record);
 
-    // Append task to the group's ordering record
-    const orderingResult = await context.databaseAdapter.query({
-      type: ORDERING_RECORD_TYPE,
-      filters: [{ field: "payload.groupId", operator: "eq", value: content.groupId }],
-      limit: 1,
-    });
-    if (orderingResult.records.length > 0) {
-      const orderingRecord = orderingResult.records[0] as DataRecord;
-      const payload = getOrderingPayload(orderingRecord);
-      const updated = insertTaskInOrdering(payload, record.id, payload.orderedTaskIds.length);
-      await context.databaseAdapter.put({ ...orderingRecord, payload: updated as unknown as Record<string, unknown>, updatedAt: context.clock.now() });
+    // Append task to the group's .tdg file ordering
+    const groupRecord = await context.databaseAdapter.get(content.groupId as StarkeepId);
+    if (groupRecord) {
+      const groupDataRecord = groupRecord as DataRecord;
+      const fileContent = await loadTdgFile(groupDataRecord, context.objectStorageAdapter);
+      if (fileContent) {
+        const newContent: TdgFileContent = {
+          ...fileContent,
+          orderedTaskIds: [...fileContent.orderedTaskIds, record.id],
+        };
+        const { updatedRecord } = await writeTdgFile(
+          groupDataRecord,
+          newContent,
+          context.objectStorageAdapter,
+          context.clock,
+        );
+        await context.databaseAdapter.put(updatedRecord);
+      }
     }
 
     const task = taskRecordToTask(record, content);

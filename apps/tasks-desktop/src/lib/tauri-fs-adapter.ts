@@ -7,7 +7,7 @@ import {
   stat,
   BaseDirectory,
 } from "@tauri-apps/plugin-fs";
-import { join } from "@tauri-apps/api/path";
+import { join, dirname } from "@tauri-apps/api/path";
 import type {
   ObjectStorageAdapter,
   PutOptions,
@@ -44,7 +44,7 @@ export class TauriFsObjectStorageAdapter implements ObjectStorageAdapter {
 
   async put(key: string, data: Uint8Array, options?: PutOptions): Promise<void> {
     const filePath = await this.keyToPath(key);
-    const dirPath = await join(OBJECTS_DIR, key.slice(0, 2));
+    const dirPath = await dirname(filePath);
     await mkdir(dirPath, { baseDir: BASE_DIR, recursive: true });
     await writeFile(filePath, data, { baseDir: BASE_DIR });
     if (options?.contentType || options?.metadata) {

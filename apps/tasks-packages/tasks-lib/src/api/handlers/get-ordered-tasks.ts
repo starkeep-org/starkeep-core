@@ -1,13 +1,10 @@
 import type { ApiEndpointDefinition, ApiRequest, ApiContext } from "@starkeep/shared-space-api";
 import type { Task } from "../../types/task.js";
 import { TASK_RECORD_TYPE, taskRecordToTask, decodeTdoFile } from "../../data/task-record.js";
-import {
-  ORDERING_RECORD_TYPE,
-  getOrderingPayload,
-} from "../../data/ordering-record.js";
+import { loadTdgFile } from "../../data/group-record.js";
 import { importanceOrder } from "../../ordering/importance-order.js";
 import { comprehensiveOrder } from "../../ordering/comprehensive-order.js";
-import type { DataRecord } from "@starkeep/core";
+import type { DataRecord, StarkeepId } from "@starkeep/core";
 import type { TaskOrderingPayload } from "../../types/ordering.js";
 
 export const getOrderedTasksHandler: ApiEndpointDefinition = {
@@ -31,16 +28,14 @@ export const getOrderedTasksHandler: ApiEndpointDefinition = {
       };
     }
 
-    // Fetch the ordering record for this group
-    const orderingResult = await context.databaseAdapter.query({
-      type: ORDERING_RECORD_TYPE,
-      filters: [{ field: "payload.groupId", operator: "eq", value: groupId }],
-      limit: 1,
-    });
-
+    // Load ordering from the group's .tdg file
     let ordering: TaskOrderingPayload = { groupId, orderedTaskIds: [] };
-    if (orderingResult.records.length > 0) {
-      ordering = getOrderingPayload(orderingResult.records[0] as DataRecord);
+    const groupRecord = await context.databaseAdapter.get(groupId as StarkeepId);
+    if (groupRecord) {
+      const fileContent = await loadTdgFile(groupRecord as DataRecord, context.objectStorageAdapter);
+      if (fileContent) {
+        ordering = { groupId, orderedTaskIds: fileContent.orderedTaskIds };
+      }
     }
 
     // Fetch all task records for the group

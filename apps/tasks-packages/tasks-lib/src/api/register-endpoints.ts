@@ -12,6 +12,7 @@ import { createGroupHandler } from "./handlers/create-group.js";
 import { updateGroupHandler } from "./handlers/update-group.js";
 import { deleteGroupHandler } from "./handlers/delete-group.js";
 import { shareGroupHandler } from "./handlers/share-group.js";
+import { setTaskOrderHandler } from "./handlers/set-task-order.js";
 
 export function registerTasksEndpoints(router: ApiRouter): void {
   router.register(listTasksHandler);
@@ -27,4 +28,5 @@ export function registerTasksEndpoints(router: ApiRouter): void {
   router.register(updateGroupHandler);
   router.register(deleteGroupHandler);
   router.register(shareGroupHandler);
+  router.register(setTaskOrderHandler);
 }

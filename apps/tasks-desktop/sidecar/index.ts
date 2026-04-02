@@ -17,10 +17,17 @@ import {
   taskHistoryGenerator,
   registerTasksEndpoints,
   TASKS_APP_ID,
+  GROUP_RECORD_TYPE,
+  GROUP_MIME_TYPE,
+  groupObjectStorageKey,
+  encodeTdgFile,
+  ORDERING_RECORD_TYPE,
+  getOrderingPayload,
 } from "@tasks/tasks-lib";
-import { SqliteDatabaseAdapter } from "@starkeep/storage-sqlite";
+import { BunSqliteDatabaseAdapter } from "./bun-sqlite-adapter.ts";
 import { FsObjectStorageAdapter } from "@starkeep/storage-fs";
 import type Anthropic from "@anthropic-ai/sdk";
+import type { DataRecord } from "@starkeep/core";
 
 interface SidecarInput {
   sessionId: string;
@@ -32,6 +39,74 @@ interface SidecarInput {
   /** Absolute path to the objects directory (e.g. .../AppLocalData/objects) */
   objectsPath: string;
   anthropicApiKey: string;
+}
+
+async function sha256Hex(data: Uint8Array): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * One-time idempotent migration: for each tasks:group record that has no
+ * objectStorageKey, find its corresponding tasks:ordering record, build a
+ * TdgFileContent, write the .tdg file, and update the group DataRecord.
+ *
+ * Safe to run on every startup — records with objectStorageKey are skipped.
+ */
+async function migrateLegacyGroupFiles(
+  databaseAdapter: { query: Function; put: Function },
+  objectStorageAdapter: { put: Function },
+  ownerId: string,
+): Promise<void> {
+  const groupResult = await databaseAdapter.query({
+    type: GROUP_RECORD_TYPE,
+    filters: [{ field: "ownerId", operator: "eq", value: ownerId }],
+  });
+
+  for (const record of groupResult.records) {
+    const dataRecord = record as DataRecord;
+    if (dataRecord.objectStorageKey) continue; // already migrated
+
+    const payload = dataRecord.payload as { name?: string; description?: string; ownerId?: string };
+
+    // Find the corresponding ordering record
+    let orderedTaskIds: string[] = [];
+    try {
+      const orderingResult = await databaseAdapter.query({
+        type: ORDERING_RECORD_TYPE,
+        filters: [{ field: "payload.groupId", operator: "eq", value: dataRecord.id }],
+        limit: 1,
+      });
+      if (orderingResult.records.length > 0) {
+        orderedTaskIds = getOrderingPayload(orderingResult.records[0] as DataRecord).orderedTaskIds;
+      }
+    } catch {
+      // No ordering record found — start with empty list
+    }
+
+    const fileContent = {
+      name: payload.name ?? "",
+      description: payload.description ?? "",
+      ownerId: payload.ownerId ?? ownerId,
+      orderedTaskIds,
+    };
+
+    const fileBytes = encodeTdgFile(fileContent);
+    const contentHash = await sha256Hex(fileBytes);
+    const key = groupObjectStorageKey(dataRecord.id);
+
+    await objectStorageAdapter.put(key, fileBytes, { contentType: GROUP_MIME_TYPE });
+
+    const updatedRecord: DataRecord = {
+      ...dataRecord,
+      objectStorageKey: key,
+      contentHash,
+      sizeBytes: fileBytes.length,
+    };
+    await databaseAdapter.put(updatedRecord);
+  }
 }
 
 function emitEvent(event: object): void {
@@ -52,17 +127,8 @@ try {
   process.exit(1);
 }
 
-// Enable WAL mode so the sidecar and the Tauri SQL plugin can safely share the
-// same SQLite file. WAL mode is sticky (written to the DB file) so it carries
-// over to every subsequent connection.
-const { Database: BunSqlite } = await import("bun:sqlite");
-{
-  const db = new BunSqlite(input.dbPath);
-  db.exec("PRAGMA journal_mode=WAL");
-  db.close();
-}
-
-const dbAdapter = new SqliteDatabaseAdapter({ path: input.dbPath });
+// BunSqliteDatabaseAdapter sets WAL mode on init, so no separate pragma step needed.
+const dbAdapter = new BunSqliteDatabaseAdapter({ path: input.dbPath });
 const fsAdapter = new FsObjectStorageAdapter({ basePath: input.objectsPath });
 
 const sharedOptions = {
@@ -76,6 +142,10 @@ const sharedOptions = {
 // Bootstrap access policies with an owner-level SDK, then close it.
 const ownerSdk = await createStarkeepSdk({ ...sharedOptions, generators: [] });
 await bootstrapTasksAppPolicies(ownerSdk);
+
+// Migrate legacy data: convert tasks:group + tasks:ordering pairs into .tdg files.
+await migrateLegacyGroupFiles(dbAdapter, fsAdapter, input.userId);
+
 await ownerSdk.close();
 
 // Re-initialise as the tasks app subject so access control is enforced.

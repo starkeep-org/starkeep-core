@@ -7,3 +7,4 @@ dist/
 !.env.example
 .DS_Store
 .next/
+apps/tasks-desktop/src-tauri/target/

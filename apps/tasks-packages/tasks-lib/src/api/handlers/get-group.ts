@@ -1,7 +1,7 @@
 import type { ApiEndpointDefinition, ApiRequest, ApiContext } from "@starkeep/shared-space-api";
 import type { StarkeepId } from "@starkeep/core";
 import type { DataRecord } from "@starkeep/core";
-import { groupRecordToGroup } from "../../data/group-record.js";
+import { groupRecordToGroup, loadTdgFile } from "../../data/group-record.js";
 
 export const getGroupHandler: ApiEndpointDefinition = {
   namespace: "tasks",
@@ -21,7 +21,13 @@ export const getGroupHandler: ApiEndpointDefinition = {
       return { status: 404, body: { error: "Group not found" } };
     }
 
-    const group = groupRecordToGroup(record as DataRecord);
+    const dataRecord = record as DataRecord;
+    const fileContent = await loadTdgFile(dataRecord, context.objectStorageAdapter);
+    if (!fileContent) {
+      return { status: 404, body: { error: "Group file not found" } };
+    }
+
+    const group = groupRecordToGroup(dataRecord, fileContent);
     return { status: 200, body: { group } };
   },
 };

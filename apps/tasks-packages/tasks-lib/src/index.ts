@@ -1,6 +1,6 @@
 // Types
 export type { TaskStatus, TaskComment, Blocker, TdoFileContent, Task } from "./types/task.js";
-export type { TaskGroupPayload, TaskGroup } from "./types/group.js";
+export type { TaskGroupPayload, TaskGroup, TdgFileContent } from "./types/group.js";
 export type { OrderingMode, TaskOrderingPayload, RankedTask } from "./types/ordering.js";
 export type { TaskListView, TaskListViewFilters } from "./types/view.js";
 export type { LocalSettings, CollaboratorConnection } from "./types/settings.js";
@@ -18,8 +18,14 @@ export {
 } from "./data/task-record.js";
 export {
   GROUP_RECORD_TYPE,
+  GROUP_MIME_TYPE,
+  groupObjectStorageKey,
   createGroupRecord,
   groupRecordToGroup,
+  encodeTdgFile,
+  decodeTdgFile,
+  loadTdgFile,
+  writeTdgFile,
 } from "./data/group-record.js";
 export {
   ORDERING_RECORD_TYPE,

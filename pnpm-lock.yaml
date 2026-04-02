@@ -47,6 +47,12 @@ importers:
       '@starkeep/storage-adapter':
         specifier: workspace:*
         version: link:../../packages/storage-adapter
+      '@starkeep/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
+      '@starkeep/storage-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/storage-sqlite
       '@tasks/tasks-lib':
         specifier: workspace:*
         version: link:../tasks-packages/tasks-lib
@@ -335,6 +341,18 @@ importers:
       vitest:
         specifier: ^3.0.0
         version: 3.2.4(@types/node@25.4.0)
+
+  packages/infra-core:
+    devDependencies:
+      '@types/node':
+        specifier: ^25.4.0
+        version: 25.4.0
+      tsup:
+        specifier: ^8.0.0
+        version: 8.5.1(postcss@8.5.8)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
 
   packages/metadata-core:
     dependencies:

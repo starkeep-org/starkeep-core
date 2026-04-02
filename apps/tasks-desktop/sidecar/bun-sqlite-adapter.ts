@@ -1,5 +1,14 @@
-import Database from "@tauri-apps/plugin-sql";
-import type { HLCTimestamp, AnyRecord, DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
+/**
+ * SQLite DatabaseAdapter implemented with bun:sqlite.
+ *
+ * This avoids the node:sqlite dependency in @starkeep/storage-sqlite, which
+ * Bun cannot resolve when compiling a standalone binary. The schema, DDL,
+ * serialization, and query-builder logic are identical to the node:sqlite
+ * adapter — only the driver calls differ.
+ */
+
+import { Database } from "bun:sqlite";
+import type { AnyRecord, DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
 import { serializeHLC, deserializeHLC, SyncStatus, createStarkeepId } from "@starkeep/core";
 import type {
   DatabaseAdapter,
@@ -12,7 +21,7 @@ import type {
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
 
 // ---------------------------------------------------------------------------
-// Schema DDL — identical to packages/storage-sqlite/src/adapter.ts
+// Schema DDL
 // ---------------------------------------------------------------------------
 
 const CREATE_TABLE_SQL = `
@@ -56,8 +65,7 @@ const CREATE_MIGRATIONS_TABLE_SQL = `
 `;
 
 // ---------------------------------------------------------------------------
-// Serialization — copied from packages/storage-sqlite/src/serialization.ts
-// (cannot import from @starkeep/storage-sqlite: that package uses node:sqlite)
+// Serialization
 // ---------------------------------------------------------------------------
 
 interface SqliteRow {
@@ -162,8 +170,7 @@ function rowToRecord(row: SqliteRow): AnyRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Query builder — copied from packages/storage-sqlite/src/query-builder.ts
-// Uses ? positional params (SQLite style, not $1 Postgres style)
+// Query builder
 // ---------------------------------------------------------------------------
 
 const FIELD_MAP: Record<string, string> = {
@@ -198,49 +205,22 @@ function buildSelectQuery(query: Query): { sql: string; params: unknown[] } {
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  if (query.type) {
-    conditions.push("type = ?");
-    params.push(query.type);
-  }
-
-  if (query.kind) {
-    conditions.push("kind = ?");
-    params.push(query.kind);
-  }
+  if (query.type) { conditions.push("type = ?"); params.push(query.type); }
+  if (query.kind) { conditions.push("kind = ?"); params.push(query.kind); }
 
   if (query.filters) {
     for (const filter of query.filters) {
       const column = mapField(filter.field);
       switch (filter.operator) {
-        case "eq":
-          conditions.push(`${column} = ?`);
-          params.push(filter.value);
-          break;
-        case "neq":
-          conditions.push(`${column} != ?`);
-          params.push(filter.value);
-          break;
-        case "gt":
-          conditions.push(`${column} > ?`);
-          params.push(filter.value);
-          break;
-        case "gte":
-          conditions.push(`${column} >= ?`);
-          params.push(filter.value);
-          break;
-        case "lt":
-          conditions.push(`${column} < ?`);
-          params.push(filter.value);
-          break;
-        case "lte":
-          conditions.push(`${column} <= ?`);
-          params.push(filter.value);
-          break;
+        case "eq":   conditions.push(`${column} = ?`);  params.push(filter.value); break;
+        case "neq":  conditions.push(`${column} != ?`); params.push(filter.value); break;
+        case "gt":   conditions.push(`${column} > ?`);  params.push(filter.value); break;
+        case "gte":  conditions.push(`${column} >= ?`); params.push(filter.value); break;
+        case "lt":   conditions.push(`${column} < ?`);  params.push(filter.value); break;
+        case "lte":  conditions.push(`${column} <= ?`); params.push(filter.value); break;
         case "in": {
           const values = filter.value as unknown[];
-          conditions.push(
-            `${column} IN (${values.map(() => "?").join(", ")})`,
-          );
+          conditions.push(`${column} IN (${values.map(() => "?").join(", ")})`);
           params.push(...values);
           break;
         }
@@ -252,30 +232,18 @@ function buildSelectQuery(query: Query): { sql: string; params: unknown[] } {
     }
   }
 
-  if (query.cursor) {
-    conditions.push("id > ?");
-    params.push(query.cursor);
-  }
+  if (query.cursor) { conditions.push("id > ?"); params.push(query.cursor); }
 
   let sql = "SELECT * FROM records";
-  if (conditions.length > 0) {
-    sql += ` WHERE ${conditions.join(" AND ")}`;
-  }
+  if (conditions.length > 0) sql += ` WHERE ${conditions.join(" AND ")}`;
 
   if (query.sort && query.sort.length > 0) {
-    const orderClauses = query.sort.map(
-      (s) =>
-        `${mapField(s.field)} ${s.direction === "desc" ? "DESC" : "ASC"}`,
-    );
-    sql += ` ORDER BY ${orderClauses.join(", ")}`;
+    sql += ` ORDER BY ${query.sort.map(s => `${mapField(s.field)} ${s.direction === "desc" ? "DESC" : "ASC"}`).join(", ")}`;
   } else {
     sql += " ORDER BY id ASC";
   }
 
-  if (query.limit) {
-    sql += " LIMIT ?";
-    params.push(query.limit + 1); // +1 to detect hasMore
-  }
+  if (query.limit) { sql += " LIMIT ?"; params.push(query.limit + 1); }
 
   return { sql, params };
 }
@@ -284,29 +252,34 @@ function buildSelectQuery(query: Query): { sql: string; params: unknown[] } {
 // Adapter
 // ---------------------------------------------------------------------------
 
-export class TauriDbAdapter implements DatabaseAdapter {
+export interface BunSqliteDatabaseAdapterOptions {
+  path: string;
+}
+
+export class BunSqliteDatabaseAdapter implements DatabaseAdapter {
   private db: Database | null = null;
+  private readonly path: string;
+
+  constructor(options: BunSqliteDatabaseAdapterOptions) {
+    this.path = options.path;
+  }
 
   async init(): Promise<void> {
-    this.db = await Database.load("sqlite:tasks.db");
-    await this.db.execute(CREATE_TABLE_SQL, []);
-    for (const sql of CREATE_INDEXES_SQL) {
-      await this.db.execute(sql, []);
-    }
-    await this.db.execute(CREATE_MIGRATIONS_TABLE_SQL, []);
+    this.db = new Database(this.path, { create: true });
+    this.db.exec("PRAGMA journal_mode=WAL");
+    this.db.exec(CREATE_TABLE_SQL);
+    for (const sql of CREATE_INDEXES_SQL) this.db.exec(sql);
+    this.db.exec(CREATE_MIGRATIONS_TABLE_SQL);
   }
 
   async close(): Promise<void> {
-    if (this.db) {
-      await this.db.close();
-      this.db = null;
-    }
+    this.db?.close();
+    this.db = null;
   }
 
   async healthCheck(): Promise<boolean> {
-    if (!this.db) return false;
     try {
-      await this.db.select("SELECT 1", []);
+      this.getDb().query("SELECT 1").get();
       return true;
     } catch {
       return false;
@@ -314,9 +287,7 @@ export class TauriDbAdapter implements DatabaseAdapter {
   }
 
   private getDb(): Database {
-    if (!this.db) {
-      throw new StorageError("Database not initialized. Call init() first.");
-    }
+    if (!this.db) throw new StorageError("Database not initialized. Call init() first.");
     return this.db;
   }
 
@@ -324,108 +295,97 @@ export class TauriDbAdapter implements DatabaseAdapter {
     const row = recordToRow(record);
     const columns = Object.keys(row);
     const placeholders = columns.map(() => "?").join(", ");
-    const updates = columns
-      .filter((c) => c !== "id")
-      .map((c) => `${c} = excluded.${c}`)
-      .join(", ");
+    const updates = columns.filter(c => c !== "id").map(c => `${c} = excluded.${c}`).join(", ");
     const sql = `INSERT INTO records (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`;
-    await this.getDb().execute(sql, Object.values(row));
+    this.getDb().run(sql, Object.values(row) as string[]);
   }
 
   async get(id: StarkeepId): Promise<AnyRecord | null> {
-    const rows = await this.getDb().select<SqliteRow[]>(
-      "SELECT * FROM records WHERE id = ?",
-      [id],
-    );
-    return rows.length > 0 ? rowToRecord(rows[0]) : null;
+    const row = this.getDb().query<SqliteRow, [string]>("SELECT * FROM records WHERE id = ?").get(id as string);
+    return row ? rowToRecord(row) : null;
   }
 
   async delete(id: StarkeepId): Promise<void> {
-    await this.getDb().execute("DELETE FROM records WHERE id = ?", [id]);
+    this.getDb().run("DELETE FROM records WHERE id = ?", [id as string]);
   }
 
   async query(query: Query): Promise<QueryResult> {
     const { sql, params } = buildSelectQuery(query);
-    const rows = await this.getDb().select<SqliteRow[]>(sql, params);
+    const rows = this.getDb().query<SqliteRow, unknown[]>(sql).all(params);
     const limit = query.limit;
     const hasMore = limit ? rows.length > limit : false;
     const resultRows = hasMore ? rows.slice(0, limit) : rows;
     return {
       records: resultRows.map(rowToRecord),
-      nextCursor: hasMore ? resultRows[resultRows.length - 1].id : null,
+      nextCursor: hasMore ? resultRows[resultRows.length - 1]!.id : null,
       hasMore,
     };
   }
 
   async batch(operations: BatchOperation[]): Promise<void> {
-    await this.getDb().execute("BEGIN", []);
-    try {
+    const db = this.getDb();
+    const run = db.transaction(() => {
       for (const op of operations) {
-        if (op.type === "put") await this.put(op.record);
-        else await this.delete(op.id);
+        if (op.type === "put") {
+          const row = recordToRow(op.record);
+          const columns = Object.keys(row);
+          const placeholders = columns.map(() => "?").join(", ");
+          const updates = columns.filter(c => c !== "id").map(c => `${c} = excluded.${c}`).join(", ");
+          db.run(
+            `INSERT INTO records (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`,
+            Object.values(row) as string[],
+          );
+        } else {
+          db.run("DELETE FROM records WHERE id = ?", [op.id as string]);
+        }
       }
-      await this.getDb().execute("COMMIT", []);
-    } catch (error) {
-      await this.getDb().execute("ROLLBACK", []);
-      throw error;
-    }
+    });
+    run();
   }
 
-  async transaction<T>(
-    callback: (transaction: Transaction) => Promise<T>,
-  ): Promise<T> {
-    await this.getDb().execute("SAVEPOINT starkeep_tx", []);
+  async transaction<T>(callback: (transaction: Transaction) => Promise<T>): Promise<T> {
+    // bun:sqlite transactions are synchronous, so we run the async callback
+    // inside a try/catch and handle rollback manually via savepoints.
+    const db = this.getDb();
+    db.run("SAVEPOINT starkeep_tx");
     try {
       const tx: Transaction = {
-        put: (record) => this.put(record),
+        put: (r) => this.put(r),
         get: (id) => this.get(id),
         delete: (id) => this.delete(id),
         query: (q) => this.query(q),
       };
       const result = await callback(tx);
-      await this.getDb().execute("RELEASE SAVEPOINT starkeep_tx", []);
+      db.run("RELEASE SAVEPOINT starkeep_tx");
       return result;
     } catch (error) {
-      await this.getDb().execute(
-        "ROLLBACK TO SAVEPOINT starkeep_tx",
-        [],
-      );
-      await this.getDb().execute("RELEASE SAVEPOINT starkeep_tx", []);
+      db.run("ROLLBACK TO SAVEPOINT starkeep_tx");
+      db.run("RELEASE SAVEPOINT starkeep_tx");
       throw new TransactionError("Transaction failed", error);
     }
   }
 
   async runMigrations(migrations: Migration[]): Promise<void> {
-    const applied = await this.getDb().select<{ version: number }[]>(
-      "SELECT version FROM migrations ORDER BY version",
-      [],
-    );
-    const appliedVersions = new Set(applied.map((r) => r.version));
-    const pending = migrations
-      .filter((m) => !appliedVersions.has(m.version))
-      .sort((a, b) => a.version - b.version);
+    const db = this.getDb();
+    const applied = db.query<{ version: number }, []>("SELECT version FROM migrations ORDER BY version").all();
+    const appliedVersions = new Set(applied.map(r => r.version));
+    const pending = migrations.filter(m => !appliedVersions.has(m.version)).sort((a, b) => a.version - b.version);
 
     for (const migration of pending) {
-      await this.getDb().execute("BEGIN", []);
+      db.run("BEGIN");
       try {
         const tx: Transaction = {
-          put: (record) => this.put(record),
+          put: (r) => this.put(r),
           get: (id) => this.get(id),
           delete: (id) => this.delete(id),
           query: (q) => this.query(q),
         };
         await migration.up(tx);
-        await this.getDb().execute(
-          "INSERT INTO migrations (version, name) VALUES (?, ?)",
-          [migration.version, migration.name],
-        );
-        await this.getDb().execute("COMMIT", []);
+        db.run("INSERT INTO migrations (version, name) VALUES (?, ?)", [migration.version, migration.name]);
+        db.run("COMMIT");
       } catch (error) {
-        await this.getDb().execute("ROLLBACK", []);
-        throw new StorageError(
-          `Migration ${migration.version} (${migration.name}) failed`,
-          error,
-        );
+        db.run("ROLLBACK");
+        throw new StorageError(`Migration ${migration.version} (${migration.name}) failed`, error);
       }
     }
   }

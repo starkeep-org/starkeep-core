@@ -1,8 +1,8 @@
 import type { ApiEndpointDefinition, ApiRequest, ApiContext } from "@starkeep/shared-space-api";
 import type { StarkeepId } from "@starkeep/core";
 import type { DataRecord } from "@starkeep/core";
-import type { TaskGroupPayload } from "../../types/group.js";
-import { groupRecordToGroup } from "../../data/group-record.js";
+import type { TdgFileContent } from "../../types/group.js";
+import { groupRecordToGroup, loadTdgFile, writeTdgFile } from "../../data/group-record.js";
 
 export const updateGroupHandler: ApiEndpointDefinition = {
   namespace: "tasks",
@@ -23,24 +23,37 @@ export const updateGroupHandler: ApiEndpointDefinition = {
     }
 
     const dataRecord = record as DataRecord;
-    const existingPayload = dataRecord.payload as unknown as TaskGroupPayload;
-    const body = (request.body ?? {}) as Partial<{ name: string; description: string }>;
+    const existing = await loadTdgFile(dataRecord, context.objectStorageAdapter);
+    if (!existing) {
+      return { status: 404, body: { error: "Group file not found" } };
+    }
 
-    const updatedPayload: TaskGroupPayload = {
-      ...existingPayload,
+    const body = (request.body ?? {}) as Partial<{ name: string; description: string }>;
+    const newContent: TdgFileContent = {
+      ...existing,
       ...(body.name !== undefined ? { name: body.name } : {}),
       ...(body.description !== undefined ? { description: body.description } : {}),
     };
 
-    const updatedRecord: DataRecord = {
-      ...dataRecord,
-      updatedAt: context.clock.now(),
-      payload: updatedPayload as unknown as Record<string, unknown>,
+    const { updatedRecord } = await writeTdgFile(
+      dataRecord,
+      newContent,
+      context.objectStorageAdapter,
+      context.clock,
+    );
+
+    // Keep DataRecord payload in sync with the file's name/description/ownerId
+    const finalRecord: DataRecord = {
+      ...updatedRecord,
+      payload: {
+        name: newContent.name,
+        description: newContent.description,
+        ownerId: newContent.ownerId,
+      } as unknown as Record<string, unknown>,
     };
+    await context.databaseAdapter.put(finalRecord);
 
-    await context.databaseAdapter.put(updatedRecord);
-
-    const group = groupRecordToGroup(updatedRecord);
+    const group = groupRecordToGroup(finalRecord, newContent);
     return { status: 200, body: { group } };
   },
 };
