@@ -1,6 +1,6 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import type { Task, TdoFileContent } from "@tasks/tasks-lib";
-import { useTask } from "@tasks/tasks-ui";
+import { useTask, useView } from "@tasks/tasks-ui";
 
 async function fetchApi<T>(
   path: string,
@@ -24,6 +24,24 @@ async function fetchApi<T>(
 
 export function useWebTasks(userId: string) {
   const { dispatch } = useTask();
+  const { activeView } = useView();
+
+  const loadTasks = useCallback(async (groupId: string, ordering = "importance") => {
+    const params = new URLSearchParams({ groupId, mode: ordering });
+    const result = await fetchApi<{ tasks: Task[] }>(
+      `/api/tasks?${params}`,
+      "GET",
+      userId,
+    );
+    dispatch({ type: "SET_TASKS", tasks: result.tasks });
+  }, [userId, dispatch]);
+
+  useEffect(() => {
+    if (!activeView?.groupId) return;
+    loadTasks(activeView.groupId, activeView.ordering).catch((err) =>
+      console.error("[useWebTasks loadTasks]", err),
+    );
+  }, [activeView, loadTasks]);
 
   const createTask = useCallback(
     async (content: TdoFileContent) => {
@@ -60,5 +78,5 @@ export function useWebTasks(userId: string) {
     [userId, dispatch],
   );
 
-  return { createTask, updateTask, deleteTask };
+  return { loadTasks, createTask, updateTask, deleteTask };
 }

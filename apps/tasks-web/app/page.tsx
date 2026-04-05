@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useEffect } from "react";
 import {
   TaskProvider,
   ViewProvider,
@@ -11,14 +11,40 @@ import {
   TaskListPanel,
   TaskDetailPanel,
   useSettings,
+  useView,
 } from "@tasks/tasks-ui";
 import type { TdoFileContent } from "@tasks/tasks-lib";
 import { SseChatTransport } from "../src/transport/sse-chat-transport";
 import { useWebTasks } from "../src/hooks/use-tasks";
+import { useWebGroups } from "../src/hooks/use-groups";
 
 function TasksApp() {
-  const { settings } = useSettings();
+  const { settings, dispatch: dispatchSettings } = useSettings();
+  const { dispatch: dispatchView } = useView();
   const { createTask, updateTask } = useWebTasks(settings.userId);
+  const { groups, createGroup } = useWebGroups(settings.userId);
+
+  // Initialize active group: on first load (or when groups arrive), ensure
+  // settings.activeGroupId is set and the view context reflects it.
+  useEffect(() => {
+    if (groups.length === 0) return;
+    const id = settings.activeGroupId && groups.some((g) => g.id === settings.activeGroupId)
+      ? settings.activeGroupId
+      : groups[0]!.id;
+    if (id !== settings.activeGroupId) {
+      dispatchSettings({ type: "UPDATE_SETTINGS", updates: { activeGroupId: id } });
+    }
+    dispatchView({
+      type: "SET_VIEW",
+      view: {
+        viewId: "all-tasks",
+        label: "All Tasks",
+        groupId: id,
+        filters: {},
+        ordering: "importance",
+      },
+    });
+  }, [groups]);
 
   const transport = new SseChatTransport(
     settings.userId,
@@ -43,6 +69,25 @@ function TasksApp() {
     await updateTask(id, updates);
   };
 
+  const handleSelectGroup = (groupId: string) => {
+    dispatchSettings({ type: "UPDATE_SETTINGS", updates: { activeGroupId: groupId } });
+    dispatchView({
+      type: "SET_VIEW",
+      view: {
+        viewId: "all-tasks",
+        label: "All Tasks",
+        groupId,
+        filters: {},
+        ordering: "importance",
+      },
+    });
+  };
+
+  const handleCreateGroup = async (name: string) => {
+    const group = await createGroup(name);
+    handleSelectGroup(group.id);
+  };
+
   const isMobile =
     typeof window !== "undefined" && window.innerWidth < 768;
 
@@ -51,7 +96,15 @@ function TasksApp() {
   return (
     <Layout
       chatPanel={<ChatPanel transport={transport} />}
-      taskListPanel={<TaskListPanel onCreateTask={handleCreateTask} />}
+      taskListPanel={
+        <TaskListPanel
+          onCreateTask={handleCreateTask}
+          groups={groups}
+          activeGroupId={settings.activeGroupId}
+          onSelectGroup={handleSelectGroup}
+          onCreateGroup={handleCreateGroup}
+        />
+      }
       taskDetailPanel={
         <TaskDetailPanel onUpdate={handleUpdate} historyEntries={[]} />
       }

@@ -1,14 +1,26 @@
 import React, { useRef, useState } from "react";
+import type { TaskGroup } from "@tasks/tasks-lib";
 import { useTask } from "../../context/task-context.js";
 import { useView } from "../../context/view-context.js";
 import { TaskCard } from "./task-card.js";
 import { ViewPicker } from "./view-picker.js";
+import { GroupSelector } from "./group-selector.js";
 
 interface TaskListPanelProps {
   onCreateTask: (title: string) => Promise<void>;
+  groups?: TaskGroup[];
+  activeGroupId?: string | null;
+  onSelectGroup?: (groupId: string) => void;
+  onCreateGroup?: (name: string) => Promise<void>;
 }
 
-export function TaskListPanel({ onCreateTask }: TaskListPanelProps) {
+export function TaskListPanel({
+  onCreateTask,
+  groups,
+  activeGroupId,
+  onSelectGroup,
+  onCreateGroup,
+}: TaskListPanelProps) {
   const { tasks, selectedTaskId } = useTask();
   const { activeView, savedViews, dispatch: dispatchView } = useView();
   const [quickAddValue, setQuickAddValue] = useState("");
@@ -54,23 +66,34 @@ export function TaskListPanel({ onCreateTask }: TaskListPanelProps) {
         style={{
           padding: "12px 16px",
           borderBottom: "1px solid #e2e8f0",
-          fontWeight: 600,
-          fontSize: "14px",
-          color: "#1e293b",
           flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
         }}
       >
-        Tasks
-        <span
-          style={{
-            marginLeft: "8px",
-            fontSize: "12px",
-            fontWeight: 400,
-            color: "#94a3b8",
-          }}
-        >
-          ({tasks.length})
+        <span style={{ fontWeight: 600, fontSize: "14px", color: "#1e293b" }}>
+          Tasks
+          <span
+            style={{
+              marginLeft: "8px",
+              fontSize: "12px",
+              fontWeight: 400,
+              color: "#94a3b8",
+            }}
+          >
+            ({tasks.length})
+          </span>
         </span>
+
+        {groups && onSelectGroup && onCreateGroup && (
+          <GroupSelector
+            groups={groups}
+            activeGroupId={activeGroupId ?? null}
+            onSelectGroup={onSelectGroup}
+            onCreateGroup={onCreateGroup}
+          />
+        )}
       </div>
 
       {savedViews.length > 0 && (

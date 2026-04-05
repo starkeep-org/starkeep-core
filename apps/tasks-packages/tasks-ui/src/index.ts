@@ -23,6 +23,7 @@ export { MessageItem } from "./components/chat/message-item.js";
 export { TaskCard } from "./components/task-list/task-card.js";
 export { ViewPicker } from "./components/task-list/view-picker.js";
 export { TaskListPanel } from "./components/task-list/task-list-panel.js";
+export { GroupSelector } from "./components/task-list/group-selector.js";
 
 // Task detail components
 export { CommentThread } from "./components/task-detail/comment-thread.js";
