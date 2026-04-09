@@ -17,10 +17,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tasks/tasks-lib": "workspace:*",
     "@anthropic-ai/sdk": "^0.39.0",
+    "@tasks/tasks-lib": "workspace:*",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0"
   },
   "devDependencies": {
     "@types/node": "^25.4.0",

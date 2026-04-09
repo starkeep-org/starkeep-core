@@ -3,13 +3,37 @@ import type { StarkeepSdk } from "@starkeep/sdk";
 import type { AgentEvent } from "../types/agent.js";
 import type { TaskListView } from "../types/view.js";
 import { TOOLS, executeTool } from "./tools.js";
-import { buildSystemPrompt } from "./prompts.js";
+import { buildSystemPrompt, type TaskSummary } from "./prompts.js";
 
 export interface AgenticLoopContext {
   sdk: StarkeepSdk;
   userId: string;
   groupId: string;
   apiKey: string;
+}
+
+async function fetchTaskSummaries(
+  sdk: StarkeepSdk,
+  userId: string,
+  groupId: string,
+): Promise<TaskSummary[]> {
+  try {
+    const response = await sdk.api.handleRequest({
+      path: "tasks:v1/tasks/ordered",
+      method: "GET",
+      body: undefined,
+      query: { groupId, mode: "comprehensive" },
+      subject: { subjectType: "user", subjectId: userId },
+    });
+    const tasks = (response.body as { tasks?: Array<{
+      id: string; title: string; status: string; assignee?: string | null;
+    }> }).tasks ?? [];
+    return tasks
+      .filter((t) => t.status !== "Done")
+      .map((t) => ({ id: t.id, title: t.title, status: t.status, assignee: t.assignee }));
+  } catch {
+    return [];
+  }
 }
 
 export async function* runAgenticLoop(
@@ -19,11 +43,13 @@ export async function* runAgenticLoop(
   const client = new Anthropic({ apiKey: context.apiKey });
   const currentMessages: Anthropic.MessageParam[] = [...messages];
 
+  const tasks = await fetchTaskSummaries(context.sdk, context.userId, context.groupId);
+
   while (true) {
     const stream = client.messages.stream({
       model: "claude-sonnet-4-6",
       max_tokens: 8096,
-      system: buildSystemPrompt(context.userId, context.groupId),
+      system: buildSystemPrompt(context.userId, context.groupId, tasks),
       messages: currentMessages,
       tools: TOOLS,
     });

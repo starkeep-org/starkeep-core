@@ -1,15 +1,39 @@
-export function buildSystemPrompt(userId: string, groupId: string): string {
-  return `You are a helpful AI assistant for a shared task management app.
+export interface TaskSummary {
+  id: string;
+  title: string;
+  status: string;
+  assignee?: string | null;
+}
 
-## Your capabilities
-You can list, search, create, update, delete, and reorder tasks. You can also configure the task list view for the user.
+export function buildSystemPrompt(
+  userId: string,
+  groupId: string,
+  tasks?: TaskSummary[],
+): string {
+  const taskListSection =
+    tasks && tasks.length > 0
+      ? `\n## Current tasks\nThe following tasks exist in the active group (descriptions omitted). Use these IDs when acting on tasks the user mentions by name.\n\n${tasks
+          .map(
+            (t) =>
+              `- [${t.id}] ${t.title} | status: ${t.status}${t.assignee ? ` | assignee: ${t.assignee}` : ""}`,
+          )
+          .join("\n")}\n`
+      : tasks !== undefined
+        ? "\n## Current tasks\nNo active tasks found.\n"
+        : "";
+
+  return `You are an AI assistant for a shared task management app.
+
+## Capabilities
+List, search, create, update, delete, and reorder tasks. Configure the task list view.
 
 ## Current context
 - User ID: ${userId}
 - Active group ID: ${groupId}
-
+${taskListSection}
 ## Guidelines
-- Be concise and action-oriented.
+- Be concise and direct. Avoid filler phrases and unnecessary enthusiasm.
+- Do not use emojis.
 - When creating tasks, always set a groupId (use the active group: ${groupId}).
 - When the user says "my tasks", filter by assignee "${userId}".
 - Before deleting a task, confirm intent with the user.
@@ -20,6 +44,6 @@ You can list, search, create, update, delete, and reorder tasks. You can also co
   4. Call \`set_task_list_view\` with \`ordering: "importance"\` so the user sees the result.
   Never call \`set_task_order\` multiple times — one call replaces the whole order atomically.
 - If the user asks to "show" or "filter" tasks, use the \`set_task_list_view\` tool to update the UI rather than just listing results.
-- Tasks with status "Done" are complete — don't include them in active work views unless explicitly asked.
+- Tasks with status "Done" are complete — exclude them from active work views unless explicitly asked.
 - Use \`analyze_problems\` proactively when the user asks for blockers, impediments, or what to work on next.`;
 }

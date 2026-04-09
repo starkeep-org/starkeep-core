@@ -155,6 +155,37 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "manage_task_blockers",
+    description:
+      "Add or remove a blocking relation on a task. A blocker is either another task (by ID) or an external dependency (by description). " +
+      "Use this to record what is blocking a task from progressing.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        id: { type: "string", description: "ID of the task to modify" },
+        action: {
+          type: "string",
+          enum: ["add", "remove"],
+          description: "Whether to add or remove the blocker",
+        },
+        blockerType: {
+          type: "string",
+          enum: ["task", "external"],
+          description: "Type of blocker",
+        },
+        taskId: {
+          type: "string",
+          description: "ID of the blocking task (required when blockerType is 'task')",
+        },
+        description: {
+          type: "string",
+          description: "Description of the external blocker (required when blockerType is 'external')",
+        },
+      },
+      required: ["id", "action", "blockerType"],
+    },
+  },
+  {
     name: "set_task_list_view",
     description:
       "Configure the task list panel UI. This is a client-side tool — the UI updates immediately.",
@@ -335,6 +366,47 @@ export async function executeTool(
       }
 
       return { analysis: problems.join("\n\n") };
+    }
+
+    case "manage_task_blockers": {
+      const existing = await sdk.api.handleRequest(
+        makeRequest("tasks:v1/tasks/item", "GET", userId, undefined, { id: String(input.id) }),
+      );
+      const existingTask = (existing.body as { task?: { blockers?: Array<{ type: string; taskId?: string; description?: string }> } }).task;
+      let blockers = existingTask?.blockers ?? [];
+
+      if (input.action === "add") {
+        if (input.blockerType === "task") {
+          const alreadyExists = blockers.some(
+            (b) => b.type === "task" && b.taskId === String(input.taskId),
+          );
+          if (!alreadyExists) {
+            blockers = [...blockers, { type: "task", taskId: String(input.taskId) }];
+          }
+        } else {
+          const alreadyExists = blockers.some(
+            (b) => b.type === "external" && b.description === String(input.description),
+          );
+          if (!alreadyExists) {
+            blockers = [...blockers, { type: "external", description: String(input.description) }];
+          }
+        }
+      } else {
+        if (input.blockerType === "task") {
+          blockers = blockers.filter(
+            (b) => !(b.type === "task" && b.taskId === String(input.taskId)),
+          );
+        } else {
+          blockers = blockers.filter(
+            (b) => !(b.type === "external" && b.description === String(input.description)),
+          );
+        }
+      }
+
+      const response = await sdk.api.handleRequest(
+        makeRequest("tasks:v1/tasks/item", "PUT", userId, { blockers }, { id: String(input.id) }),
+      );
+      return response.body;
     }
 
     default:

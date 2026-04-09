@@ -1,48 +1,49 @@
 # Architecture
 
-## Overview
+## Layers
 
-Starkeep is a user-owned data platform where each app user controls their own cloud infrastructure. App developers build on a shared, governed data layer called the **data protocol**, which defines how data and metadata are stored, indexed, synced, and accessed — both locally and in the cloud.
-
-## Design Principles
-
-- **User-owned infrastructure.** Each user gets their own isolated AWS resources (Aurora DSQL, S3, API Gateway). No shared multi-tenant database.
-- **Database-agnostic storage.** All data access goes through abstract adapter interfaces. Swap SQLite for Aurora DSQL (or any future adapter) without changing application code.
-- **Data independence from metadata.** Data records stand alone. Metadata references data, but data never depends on metadata. This allows metadata generators to evolve independently.
-- **Hybrid Logical Clocks (HLC).** Conflict resolution uses HLCs — they combine physical timestamps with logical counters and node IDs, providing causal ordering without coordination.
-- **Functional style.** Factory functions (`createXyz()`) over classes throughout the codebase.
-
-## Layer Diagram
+Starkeep is organized into four layers, each building on the one below it.
 
 ```
 +-----------------------------------------------------------+
 |                       App Layer                           |
-|  (photo-app, ai-assistant, admin-panel)                   |
+|  Your application — uses the SDK directly                 |
 +-----------------------------------------------------------+
 |                      SDK Facade                           |
-|  createStarkeepSdk() -> unified API                       |
+|  createStarkeepSdk() — single entry point                 |
 +------------+-------------------+----------+---------------+
 |   Index    |  Metadata Engine  |  Aggreg. |  Shared Space |
-|  (search & |  (generators,     |  (counts,|    APIs       |
-|   sync     |   dependencies,   |   sizes, |  (versioned   |
-|   boundary)|   migrations)     |   histo.)|   router)     |
+|  (search)  |  (generators)     |  (stats) |    API        |
 +------------+-------------------+----------+---------------+
 |  Sync Engine           |  Access Control                  |
-|  (HLC conflict res.,   |  (policies, enforced adapter,    |
-|   file sync, notifs)   |   sharing tokens)                |
 +------------------------+----------------------------------+
-|                Data Protocol Core                         |
-|  (identifiers, records, HLC, type registry, validation)   |
+|                Protocol Core                              |
+|  Identifiers · Records · HLC · Type Registry             |
 +-----------------------------------------------------------+
-|              Storage Abstraction Layer                     |
-|  +----------+  +-----------+  +------+  +-------------+  |
-|  |  SQLite   |  | Aurora    |  |  S3  |  |  Local FS   |  |
-|  |  (local)  |  | DSQL      |  |      |  |             |  |
-|  +----------+  +-----------+  +------+  +-------------+  |
+|              Storage Abstraction Layer                    |
+|  SQLite    Aurora DSQL    S3    Local Filesystem          |
 +-----------------------------------------------------------+
 ```
 
-## Package Dependency Graph
+**App layer** — your code. Apps call `createStarkeepSdk()` and use the returned object.
+No app code should import from individual protocol packages directly; the SDK exposes
+everything needed.
+
+**SDK facade** (`@starkeep/sdk`) — wires all subsystems together with a single call. Accepts
+local and optional remote adapters; exposes `data`, `metadata`, `index`, `aggregations`,
+`sync`, `accessControl`, and `api` namespaces.
+
+**Services layer** — independent, composable subsystems. Each can be used directly if you
+need lower-level control, but most apps don't need to.
+
+**Protocol core** (`@starkeep/core`) — the shared foundation: identifiers, record types,
+HLC clocks, the type registry, and validation schemas. Every other package depends on this.
+
+**Storage abstraction** — two interfaces (`DatabaseAdapter`, `ObjectStorageAdapter`) with
+multiple implementations. Swapping implementations changes the storage backend without
+changing any application code.
+
+## Package dependency graph
 
 ```
 @starkeep/core
@@ -63,96 +64,70 @@ Starkeep is a user-owned data platform where each app user controls their own cl
     +---> @starkeep/shared-space-api
     |
     v
-@starkeep/sdk  (depends on all above)
+@starkeep/sdk  (depends on all of the above)
 
-@starkeep/aws-provider  (independent — infrastructure orchestration)
+@starkeep/aws-provider  (independent — infrastructure only)
 ```
 
-## Data Model
+## Local vs. cloud
 
-### Records
+The same application code runs in two configurations, distinguished only by which adapters
+are passed to the SDK:
 
-Every piece of data in Starkeep is a **record**. There are two kinds:
-
-**Data records** represent user content — photos, documents, conversations, messages. They have:
-- A globally unique ULID identifier
-- HLC timestamps for creation and last update
-- An owner, sync status, and version number
-- Optional file backing (content hash, object storage key, MIME type, size)
-- A freeform `payload` object for structured data
-
-**Metadata records** are derived from data records by generators. They have:
-- The same base fields as data records
-- A `targetId` pointing to the data record they describe
-- Generator identification (ID + version) for staleness tracking
-- An `inputHash` for cache validation
-- A `value` object containing the generated metadata
-
-### Identifiers
-
-All records use **ULIDs** (Universally Unique Lexicographically Sortable Identifiers). ULIDs encode a millisecond timestamp in their first 48 bits, making them naturally sortable by creation time while remaining globally unique.
-
-### Timestamps
-
-Starkeep uses **Hybrid Logical Clocks** for all timestamps. An HLC timestamp has three components:
-
-| Component | Purpose |
-|-----------|---------|
-| `wallTime` | Physical clock time (milliseconds) |
-| `counter` | Logical counter for events at the same wall time |
-| `nodeId` | Node identifier for total ordering across nodes |
-
-HLCs provide:
-- Causal ordering without coordination
-- Monotonic progression (never goes backward)
-- Total ordering for deterministic conflict resolution
-
-## Sync Architecture
+**Local only** — SQLite + local filesystem. No network required. Data stays on the device.
 
 ```
-Local Device                        Cloud (per-user)
-+------------------+               +------------------+
-| SQLite           |  <-- sync --> | Aurora DSQL      |
-| Local FS         |  <-- sync --> | S3               |
-| Change Log       |               | Change Log       |
-+------------------+               +------------------+
+App ──> SDK ──> SQLite (database)
+             └─> Local FS (files)
 ```
 
-Sync follows a pull-then-push model:
-
-1. **Pull**: Fetch remote changes since last sync point
-2. **Merge**: Apply HLC ordering to resolve conflicts (last-writer-wins per field)
-3. **Push**: Send local changes to remote
-4. **File sync**: Transfer files by content hash to avoid redundant transfers
-5. **Notify**: Emit change events for UI updates
-
-## Access Control Model
-
-Access control is enforced at the storage abstraction layer via an **enforced adapter wrapper**. This means access checks apply uniformly regardless of which component accesses data.
-
-Policies specify:
-- **Subject**: who (user, app, API, token)
-- **Resource**: what (specific item, type, collection, or wildcard)
-- **Permissions**: which operations (read, write, delete, admin)
-- **Expiration**: optional time-limited access
-
-External sharing uses cryptographically secure tokens tied to policies.
-
-## AWS Deployment Model
-
-Each user gets isolated infrastructure provisioned via the Pulumi Automation API:
+**With sync** — local adapters plus remote adapters. Pull-then-push sync keeps both sides
+in agreement.
 
 ```
-Per-user stack:
+App ──> SDK ──> SQLite   <──sync──> Aurora DSQL
+             └─> Local FS <──sync──> S3
+```
+
+The Tasks desktop app uses the local configuration by default and syncs when cloud
+credentials are provided. The Tasks web app uses the cloud configuration directly.
+
+## Design principles
+
+**Database-agnostic.** All data access goes through the `DatabaseAdapter` and
+`ObjectStorageAdapter` interfaces. Storage backends can be swapped or mocked without
+changing application logic.
+
+**Data is independent of metadata.** Data records stand alone. Metadata records reference
+data, but data records have no knowledge of their metadata. Adding or removing generators
+has no effect on stored data.
+
+**Access control at the storage layer.** The `EnforcedDatabaseAdapter` wrapper checks
+every operation against access policies before forwarding it. Access control is uniform
+regardless of which code path triggered the operation.
+
+**Causal ordering without coordination.** Hybrid Logical Clocks timestamp every mutation.
+Because HLC timestamps incorporate a node identifier, two events on different devices can
+always be put in a deterministic total order — no coordination or consensus required.
+
+**Functional factory pattern.** Subsystems are created with `createXyz()` functions rather
+than classes. This makes dependencies explicit and simplifies testing.
+
+## Per-user infrastructure model
+
+Each user gets an isolated AWS stack provisioned by `@starkeep/aws-provider`:
+
+```
+Per-user stack
 +--------------------------------------------------+
-|  API Gateway  -->  Lambda Functions               |
-|                    (sync, metadata, API handlers) |
-|                                                   |
-|  Aurora DSQL  <->  Data + Metadata Records        |
-|  S3 Bucket    <->  Files (photos, documents)      |
-|                                                   |
-|  IAM Roles + Security Groups                      |
+|  API Gateway  -->  handlers                      |
+|                                                  |
+|  Aurora DSQL  <->  data + metadata records       |
+|  S3 Bucket    <->  files (photos, documents)     |
+|                                                  |
+|  IAM roles + security groups                     |
 +--------------------------------------------------+
 ```
 
-The `@starkeep/aws-provider` package orchestrates provisioning and deprovisioning through a `StackProgram` interface that abstracts Pulumi operations.
+Provisioning and deprovisioning are orchestrated through the Pulumi Automation API.
+No shared database, no shared bucket — every user's data is physically separate.

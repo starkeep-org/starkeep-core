@@ -1,6 +1,13 @@
 # Getting Started
 
+## Prerequisites
+
+- Node.js 22 or later (required for built-in `node:sqlite`)
+- pnpm 10.20 or later
+
 ## Installation
+
+Clone the repository and install dependencies:
 
 ```bash
 git clone <repo-url>
@@ -9,32 +16,28 @@ pnpm install
 pnpm build
 ```
 
-## Quick start: local SDK
+## Your first app
 
-The fastest way to use the data protocol is with the SDK and local adapters (SQLite + filesystem). No AWS account needed.
+### 1. Initialize the SDK
+
+The SDK needs a database adapter and an object storage adapter. For local development,
+use SQLite and the local filesystem — no cloud account required.
 
 ```typescript
 import { createStarkeepSdk } from "@starkeep/sdk"
 import { SqliteDatabaseAdapter } from "@starkeep/storage-sqlite"
 import { FsObjectStorageAdapter } from "@starkeep/storage-fs"
-import { registerCoreMetadataGenerators } from "@starkeep/metadata-core"
-import { createGeneratorRegistry } from "@starkeep/metadata-engine"
 import {
   IMAGE_DIMENSIONS_GENERATOR,
   FILE_PROPERTIES_GENERATOR,
   TEXT_PREVIEW_GENERATOR,
 } from "@starkeep/metadata-core"
 
-// Initialize adapters
-const databaseAdapter = new SqliteDatabaseAdapter({ path: "./my-app.db" })
-const objectStorageAdapter = new FsObjectStorageAdapter({ basePath: "./storage" })
-
-// Create SDK
 const sdk = await createStarkeepSdk({
-  databaseAdapter,
-  objectStorageAdapter,
+  databaseAdapter: new SqliteDatabaseAdapter({ path: "./my-app.db" }),
+  objectStorageAdapter: new FsObjectStorageAdapter({ basePath: "./storage" }),
   ownerId: "user-123",
-  nodeId: "device-abc",
+  nodeId: "my-device",
   generators: [
     IMAGE_DIMENSIONS_GENERATOR,
     FILE_PROPERTIES_GENERATOR,
@@ -43,25 +46,25 @@ const sdk = await createStarkeepSdk({
 })
 ```
 
-## Storing data
+### 2. Store a record
 
-### Record-only data (no file)
+Records that are purely structured data (no attached file):
 
 ```typescript
-const message = await sdk.data.put({
-  type: "ai:message",
+const task = await sdk.data.put({
+  type: "tasks:task",
   ownerId: "user-123",
   payload: {
-    conversationId: "conv-1",
-    role: "user",
-    content: "Hello, world!",
+    title: "Write documentation",
+    status: "todo",
   },
 })
 
-console.log(message.id)  // ULID like "01HXYZ..."
+console.log(task.id)         // ULID like "01HXYZ..."
+console.log(task.createdAt)  // HLC timestamp
 ```
 
-### File-backed data
+Records with an attached file:
 
 ```typescript
 import { readFile } from "node:fs/promises"
@@ -78,18 +81,18 @@ const photo = await sdk.data.putWithFile(
   "image/jpeg",
 )
 
-console.log(photo.contentHash)       // SHA-256 hash
-console.log(photo.objectStorageKey)  // storage path
+console.log(photo.contentHash)       // SHA-256 of file content
+console.log(photo.objectStorageKey)  // path in object storage
 console.log(photo.sizeBytes)         // file size
 ```
 
-## Retrieving data
+### 3. Retrieve records
 
 ```typescript
 // By ID
 const record = await sdk.data.get(photo.id)
 
-// Search with the index
+// Search — returns data records joined with their metadata
 const results = await sdk.index.search({
   types: ["photos:photo"],
   limit: 20,
@@ -97,34 +100,33 @@ const results = await sdk.index.search({
 
 for (const item of results.items) {
   console.log(item.dataRecord.payload.caption)
-  console.log(item.metadata)  // all generated metadata
+  console.log(item.metadata)  // keyed by generatorId
 }
+
+// Next page
+const page2 = await sdk.index.search({
+  types: ["photos:photo"],
+  limit: 20,
+  cursor: results.nextCursor,
+})
 ```
 
-## Generating metadata
+### 4. Generate metadata
 
-If you registered generators when creating the SDK, metadata is generated on demand:
+If you registered generators, call `generateAll` after storing a record:
 
 ```typescript
-// Generate all applicable metadata for a record
 const results = await sdk.metadata.generateAll(photo.id, "photos:photo")
 
 for (const result of results) {
-  console.log(result.metadataRecord.generatorId)  // e.g., "image-dimensions"
-  console.log(result.metadataRecord.value)         // e.g., { width: 4032, height: 3024, format: "jpeg" }
+  console.log(result.metadataRecord.generatorId)
+  // "image-dimensions" → { width: 4032, height: 3024, format: "jpeg" }
+  // "file-properties"  → { extension: ".jpg", mimeType: "image/jpeg", sizeBytes: 2048 }
+  console.log(result.metadataRecord.value)
 }
-
-// Generate a specific metadata type
-const dimensions = await sdk.metadata.generate("image-dimensions", photo.id)
-console.log(dimensions.metadataRecord.value.width)
-
-// Fetch all metadata for a record
-const allMetadata = await sdk.metadata.getForRecord(photo.id)
 ```
 
-## Querying with metadata filters
-
-Search across data and metadata simultaneously:
+### 5. Search with metadata filters
 
 ```typescript
 const largePhotos = await sdk.index.search({
@@ -141,7 +143,7 @@ const largePhotos = await sdk.index.search({
 })
 ```
 
-## Aggregations
+### 6. Aggregations
 
 ```typescript
 const stats = await sdk.aggregations.compute({
@@ -149,75 +151,49 @@ const stats = await sdk.aggregations.compute({
   dateGranularity: "month",
 })
 
-console.log(`${stats.totalCount} photos, ${stats.totalSizeBytes} bytes total`)
-console.log(stats.countsByMimeType)   // { "image/jpeg": 42, "image/png": 7 }
-console.log(stats.dateHistogram)      // [{ period: "2025-01", count: 12, sizeBytes: ... }, ...]
+console.log(`${stats.totalCount} photos, ${stats.totalSizeBytes} bytes`)
+console.log(stats.countsByMimeType)
+// { "image/jpeg": 42, "image/png": 7 }
+console.log(stats.dateHistogram)
+// [{ period: "2025-01", count: 12, sizeBytes: 3_000_000 }, ...]
 ```
 
-## Access control
+### 7. Cleanup
 
 ```typescript
-// Grant read access to another user
-const policy = await sdk.accessControl.createPolicy({
-  subjectType: "user",
-  subjectId: "user-456",
-  resourceType: "collection",
-  resourceId: "vacation-album",
-  permissions: ["read"],
-})
-
-// Check access
-const check = await sdk.accessControl.checkAccess({
-  subjectType: "user",
-  subjectId: "user-456",
-  resourceId: photo.id,
-  permission: "read",
-})
-console.log(check.allowed)  // true or false
-console.log(check.reason)   // explanation
-
-// Create a shareable token
-const { token } = await sdk.accessControl.createSharingToken(policy.policyId, {
-  maxUses: 10,
-})
-// Share `token` externally — recipient validates it to get access
+await sdk.close()
 ```
 
-## Sync (local to cloud)
+## Adding sync
 
-Sync requires remote adapters. Here's an example using S3 + Aurora DSQL:
+To sync local data to the cloud, pass remote adapters when initializing:
 
 ```typescript
-import { createStarkeepSdk } from "@starkeep/sdk"
-import { SqliteDatabaseAdapter } from "@starkeep/storage-sqlite"
-import { FsObjectStorageAdapter } from "@starkeep/storage-fs"
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3"
-// Aurora DSQL adapter requires a DatabaseClientFactory (see api-reference.md)
 
 const sdk = await createStarkeepSdk({
+  // local (required)
   databaseAdapter: new SqliteDatabaseAdapter({ path: "./local.db" }),
   objectStorageAdapter: new FsObjectStorageAdapter({ basePath: "./local-files" }),
   ownerId: "user-123",
-  nodeId: "laptop",
+  nodeId: "my-laptop",
 
-  // Enable sync by providing remote adapters
-  remoteDatabaseAdapter: remoteDatabaseAdapter,
+  // remote (enables sdk.sync)
+  remoteDatabaseAdapter: auroraDsqlAdapter,
   remoteObjectStorageAdapter: new S3ObjectStorageAdapter({
     bucketName: "starkeep-user-123-data",
     region: "us-east-1",
   }),
 })
 
-// sdk.sync is now available (non-null)
-
 // Bidirectional sync
 const result = await sdk.sync.fullSync()
-console.log(`Pulled ${result.pulled}, pushed ${result.pushed}, ${result.conflicts} conflicts`)
+console.log(`pulled: ${result.pulled}, pushed: ${result.pushed}, conflicts: ${result.conflicts}`)
 
 // Subscribe to sync events
 const unsubscribe = sdk.sync.onUpdate((event) => {
   if (event.eventType === "remote-update-available") {
-    console.log("New data available from cloud!")
+    console.log("New data from cloud:", event.recordIds)
   }
 })
 ```
@@ -227,86 +203,54 @@ const unsubscribe = sdk.sync.onUpdate((event) => {
 ```typescript
 import type { GeneratingFunctionDefinition } from "@starkeep/metadata-engine"
 
-const sentimentGenerator: GeneratingFunctionDefinition = {
-  generatorId: "my-app:sentiment",
+const wordCountGenerator: GeneratingFunctionDefinition = {
+  generatorId: "my-app:word-count",
   generatorVersion: 1,
-  inputTypes: ["ai:message"],
+  inputTypes: ["docs:document"],
   dependsOn: [],
 
   async generate(input, context) {
     const record = await context.databaseAdapter.get(input.dataRecordId)
     const text = record?.payload?.content as string ?? ""
-
-    // Your analysis logic here
-    const sentiment = text.includes("!") ? "positive" : "neutral"
-
-    return {
-      value: { sentiment, confidence: 0.85 },
-    }
+    const words = text.trim().split(/\s+/).filter(Boolean).length
+    return { value: { wordCount: words } }
   },
 }
 
-// Register when creating the SDK
 const sdk = await createStarkeepSdk({
   // ...
-  generators: [sentimentGenerator],
+  generators: [wordCountGenerator],
 })
 ```
 
-## Registering Shared Space API endpoints
+## Registering an HTTP endpoint
 
 ```typescript
-import { createSharedSpaceApi } from "@starkeep/shared-space-api"
-
-const api = createSharedSpaceApi({
-  databaseAdapter,
-  objectStorageAdapter,
-  clock,
-  ownerId: "user-123",
-})
-
-api.router.register({
-  namespace: "photos",
+sdk.api.router.register({
+  namespace: "docs",
   version: "v1",
-  path: "/albums",
+  path: "/documents",
   method: "GET",
-  description: "List all photo albums",
+  description: "List documents",
   handler: async (request, context) => {
     const results = await context.databaseAdapter.query({
-      type: "photos:album",
-      sort: [{ field: "createdAt", direction: "desc" }],
+      type: "docs:document",
+      sort: [{ field: "updatedAt", direction: "desc" }],
       limit: 50,
     })
     return { status: 200, body: results }
   },
 })
 
-// Handle an incoming request
-const response = await api.handleRequest({
-  path: "/photos/v1/albums",
+const response = await sdk.api.handleRequest({
+  path: "/docs/v1/documents",
   method: "GET",
   subject: { subjectType: "user", subjectId: "user-123" },
 })
 ```
 
-## Cleanup
+## Next steps
 
-```typescript
-await sdk.close()  // closes all adapters
-```
-
-## Running the example apps
-
-```bash
-# Photo management app
-pnpm --filter @starkeep/example-photo-app dev
-
-# AI assistant
-pnpm --filter @starkeep/example-ai-assistant dev
-
-# Admin panel (browser)
-pnpm --filter @starkeep/example-admin-panel dev
-
-# Admin panel (Tauri desktop)
-pnpm --filter @starkeep/example-admin-panel tauri:dev
-```
+- [Building an App](building-an-app.md) — a full walkthrough using the Tasks app
+- [Core Concepts](concepts.md) — deeper explanation of records, sync, and access control
+- [Architecture](architecture.md) — how the packages fit together
