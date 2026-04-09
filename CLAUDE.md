@@ -1,0 +1,1 @@
+For functionality and implementation details, see docs/README.md
