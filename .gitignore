@@ -6,3 +6,20 @@ dist/
 .env.*
 !.env.example
 .DS_Store
+
+# Xcode
+*.xcuserstate
+xcuserdata/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
+
+# Starkeep local data
+.starkeep/
+
+# FUSE mount lib (vendored native binary)
+apps/fuse-mount/lib/
+apps/fuse-mount/package-lock.json

@@ -1,0 +1,16 @@
+{
+  "name": "@starkeep/fuse-mount",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node mount.js",
+    "postinstall": "install_name_tool -change @rpath/libfuse-t.dylib /usr/local/lib/libfuse-t.dylib node_modules/fuse-native/build/Release/fuse.node 2>/dev/null || true"
+  },
+  "dependencies": {
+    "fuse-native": "^2.2.6"
+  },
+  "overrides": {
+    "fuse-shared-library-darwin": "file:./lib/fuse-shared-library-darwin"
+  }
+}

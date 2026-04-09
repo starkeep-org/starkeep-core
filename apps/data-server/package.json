@@ -1,0 +1,27 @@
+{
+  "name": "@starkeep/data-server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx server.ts",
+    "dev": "tsx --watch server.ts"
+  },
+  "dependencies": {
+    "@starkeep/core": "workspace:*",
+    "@starkeep/storage-adapter": "workspace:*",
+    "@starkeep/storage-sqlite": "workspace:*",
+    "@starkeep/storage-fs": "workspace:*",
+    "@starkeep/storage-s3": "workspace:*",
+    "@starkeep/sdk": "workspace:*",
+    "@starkeep/access-control": "workspace:*",
+    "@starkeep/metadata-engine": "workspace:*",
+    "@starkeep/index": "workspace:*",
+    "@starkeep/aggregations": "workspace:*",
+    "@starkeep/sync-engine": "workspace:*",
+    "@starkeep/shared-space-api": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
+  }
+}
