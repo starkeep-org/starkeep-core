@@ -16,7 +16,7 @@ export function createTaskRecord(
     {
       type: TASK_RECORD_TYPE,
       ownerId,
-      payload: { groupId: content.groupId },
+      content: { groupId: content.groupId },
       contentHash,
       objectStorageKey,
       mimeType: TASK_MIME_TYPE,

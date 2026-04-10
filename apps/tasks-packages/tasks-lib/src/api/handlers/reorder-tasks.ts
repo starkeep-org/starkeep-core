@@ -18,7 +18,7 @@ export const reorderTasksHandler: ApiEndpointDefinition = {
 
     const orderingResult = await context.databaseAdapter.query({
       type: ORDERING_RECORD_TYPE,
-      filters: [{ field: "payload.groupId", operator: "eq", value: groupId }],
+      filters: [{ field: "content.groupId", operator: "eq", value: groupId }],
       sort: [{ field: "updatedAt", direction: "desc" }],
       limit: 1,
     });
@@ -36,7 +36,7 @@ export const reorderTasksHandler: ApiEndpointDefinition = {
 
     await context.databaseAdapter.put({
       ...orderingRecord,
-      payload: { groupId, orderedTaskIds: filtered } as unknown as Record<string, unknown>,
+      content: { groupId, orderedTaskIds: filtered } as unknown as Record<string, unknown>,
       updatedAt: context.clock.now(),
     });
 

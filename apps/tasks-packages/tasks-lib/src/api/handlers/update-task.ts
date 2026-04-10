@@ -65,7 +65,7 @@ export const updateTaskHandler: ApiEndpointDefinition = {
       contentHash: newHash,
       objectStorageKey: newKey,
       updatedAt: context.clock.now(),
-      payload: { groupId: updatedContent.groupId },
+      content: { groupId: updatedContent.groupId },
     };
 
     await context.databaseAdapter.put(updatedRecord);

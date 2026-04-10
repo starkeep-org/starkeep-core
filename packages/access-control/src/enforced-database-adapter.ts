@@ -1,4 +1,4 @@
-import type { AnyRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -6,6 +6,9 @@ import type {
   BatchOperation,
   Migration,
   Transaction,
+  MetadataColumnDefinition,
+  MetadataQuery,
+  MetadataQueryResult,
 } from "@starkeep/storage-adapter";
 import type { AccessControlEngine, EnforcedDatabaseAdapter, SubjectType } from "./types.js";
 import { AccessDeniedError } from "./errors.js";
@@ -84,14 +87,14 @@ export function createEnforcedDatabaseAdapter(options: {
     return databaseAdapter.healthCheck();
   }
 
-  async function get(id: StarkeepId): Promise<AnyRecord | null> {
+  async function get(id: StarkeepId): Promise<DataRecord | null> {
     const record = await databaseAdapter.get(id);
     if (!record) return null;
     await assertTypeAccess(record.type, record.id, "read");
     return record;
   }
 
-  async function put(record: AnyRecord): Promise<void> {
+  async function put(record: DataRecord): Promise<void> {
     await assertTypeAccess(record.type, record.id, "write");
     return databaseAdapter.put(record);
   }
@@ -105,7 +108,7 @@ export function createEnforcedDatabaseAdapter(options: {
 
   async function query(queryInput: Query): Promise<QueryResult> {
     const result = await databaseAdapter.query(queryInput);
-    const accessibleRecords: AnyRecord[] = [];
+    const accessibleRecords: DataRecord[] = [];
 
     for (const record of result.records) {
       const privateOwner = getPrivateTypeOwner(record.type);
@@ -149,6 +152,22 @@ export function createEnforcedDatabaseAdapter(options: {
     return databaseAdapter.runMigrations(migrations);
   }
 
+  async function ensureMetadataTable(
+    targetType: string,
+    generatorId: string,
+    columns: MetadataColumnDefinition[],
+  ): Promise<void> {
+    return databaseAdapter.ensureMetadataTable(targetType, generatorId, columns);
+  }
+
+  async function putMetadata(targetType: string, entry: MetadataRecord): Promise<void> {
+    return databaseAdapter.putMetadata(targetType, entry);
+  }
+
+  async function queryMetadata(targetType: string, query: MetadataQuery): Promise<MetadataQueryResult> {
+    return databaseAdapter.queryMetadata(targetType, query);
+  }
+
   return {
     init,
     close,
@@ -160,5 +179,8 @@ export function createEnforcedDatabaseAdapter(options: {
     batch,
     transaction,
     runMigrations,
+    ensureMetadataTable,
+    putMetadata,
+    queryMetadata,
   };
 }

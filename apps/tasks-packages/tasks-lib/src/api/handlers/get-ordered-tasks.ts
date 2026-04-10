@@ -41,7 +41,7 @@ export const getOrderedTasksHandler: ApiEndpointDefinition = {
     // Fetch all task records for the group
     const taskResult = await context.databaseAdapter.query({
       type: TASK_RECORD_TYPE,
-      filters: [{ field: "payload.groupId", operator: "eq", value: groupId }],
+      filters: [{ field: "content.groupId", operator: "eq", value: groupId }],
     });
 
     const tasks: Task[] = [];

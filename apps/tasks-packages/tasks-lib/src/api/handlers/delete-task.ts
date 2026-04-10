@@ -23,7 +23,7 @@ export const deleteTaskHandler: ApiEndpointDefinition = {
     }
 
     const dataRecord = record as DataRecord;
-    const groupId = (dataRecord.payload as { groupId?: string }).groupId;
+    const groupId = (dataRecord.content as { groupId?: string }).groupId;
 
     // Remove task from group ordering before deleting
     if (groupId) {

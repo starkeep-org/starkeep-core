@@ -42,10 +42,10 @@ export const updateGroupHandler: ApiEndpointDefinition = {
       context.clock,
     );
 
-    // Keep DataRecord payload in sync with the file's name/description/ownerId
+    // Keep DataRecord content in sync with the file's name/description/ownerId
     const finalRecord: DataRecord = {
       ...updatedRecord,
-      payload: {
+      content: {
         name: newContent.name,
         description: newContent.description,
         ownerId: newContent.ownerId,

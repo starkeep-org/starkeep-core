@@ -30,18 +30,18 @@ export async function bootstrapTasksAppPolicies(ownerSdk: StarkeepSdk): Promise<
   // --- 1. Type registration ---
   const existingRegistrations = await ownerSdk.data.query({
     type: TYPE_REGISTRATION_RECORD_TYPE,
-    filters: [{ field: "payload.typeId", operator: "eq", value: TASK_RECORD_TYPE }],
+    filters: [{ field: "content.typeId", operator: "eq", value: TASK_RECORD_TYPE }],
   });
 
   if (existingRegistrations.length === 0) {
     await ownerSdk.data.put({
       type: TYPE_REGISTRATION_RECORD_TYPE,
       ownerId: "owner",
-      payload: {
+      content: {
         typeId: TASK_RECORD_TYPE,
         schema: TODO_TASK_SCHEMA,
         schemaVersion: "1.0.0",
-        description: "A task stored in the shared space. Full content is in object storage (.tdo file); payload carries the groupId index field.",
+        description: "A task stored in the shared space. Full content is in object storage (.tdo file); content carries the groupId index field.",
         registeredByAppId: TASKS_APP_ID,
       },
     });

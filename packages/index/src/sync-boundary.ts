@@ -45,7 +45,6 @@ export function createSyncBoundary(databaseAdapter: DatabaseAdapter): SyncBounda
       }
 
       const result = await databaseAdapter.query({
-        kind: "data",
         filters,
       });
 

@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   createHLCClock,
   createDataRecord,
-  createMetadataRecord,
   createStarkeepId,
   SyncStatus,
 } from "@starkeep/core";
@@ -38,7 +37,7 @@ describe("SqliteDatabaseAdapter", () => {
         {
           type: "@test/photo",
           ownerId: "u1",
-          payload: { name: "sunset.jpg" },
+          content: { name: "sunset.jpg" },
           contentHash: "sha256:abc",
           mimeType: "image/jpeg",
           sizeBytes: 1024,
@@ -52,33 +51,10 @@ describe("SqliteDatabaseAdapter", () => {
       expect(retrieved!.id).toBe(record.id);
       expect(retrieved!.kind).toBe("data");
       expect(retrieved!.type).toBe("@test/photo");
-      expect((retrieved as typeof record).payload).toEqual({ name: "sunset.jpg" });
-      expect((retrieved as typeof record).contentHash).toBe("sha256:abc");
-      expect((retrieved as typeof record).mimeType).toBe("image/jpeg");
-      expect((retrieved as typeof record).sizeBytes).toBe(1024);
-    });
-
-    it("should store and retrieve a metadata record", async () => {
-      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-      const record = createMetadataRecord(
-        {
-          type: "@test:dims",
-          ownerId: "u1",
-          targetId,
-          generatorId: "gen",
-          generatorVersion: 1,
-          inputHash: "h123",
-          value: { width: 1920, height: 1080 },
-        },
-        clock,
-      );
-      await adapter.put(record);
-
-      const retrieved = await adapter.get(record.id);
-      expect(retrieved).not.toBeNull();
-      expect(retrieved!.kind).toBe("metadata");
-      expect((retrieved as typeof record).targetId).toBe(targetId);
-      expect((retrieved as typeof record).value).toEqual({ width: 1920, height: 1080 });
+      expect(retrieved!.content).toEqual({ name: "sunset.jpg" });
+      expect(retrieved!.contentHash).toBe("sha256:abc");
+      expect(retrieved!.mimeType).toBe("image/jpeg");
+      expect(retrieved!.sizeBytes).toBe(1024);
     });
 
     it("should return null for non-existent ID", async () => {
@@ -121,21 +97,6 @@ describe("SqliteDatabaseAdapter", () => {
       const result = await adapter.query({ type: "@test/photo" });
       expect(result.records).toHaveLength(1);
       expect(result.records[0].type).toBe("@test/photo");
-    });
-
-    it("should filter by kind", async () => {
-      await adapter.put(createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock));
-      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-      await adapter.put(
-        createMetadataRecord(
-          { type: "@test:dims", ownerId: "u1", targetId, generatorId: "g", generatorVersion: 1, inputHash: "h", value: {} },
-          clock,
-        ),
-      );
-
-      const result = await adapter.query({ kind: "metadata" });
-      expect(result.records).toHaveLength(1);
-      expect(result.records[0].kind).toBe("metadata");
     });
 
     it("should support eq filter", async () => {
@@ -197,6 +158,47 @@ describe("SqliteDatabaseAdapter", () => {
       const page3 = await adapter.query({ limit: 2, cursor: page2.nextCursor! });
       expect(page3.records).toHaveLength(1);
       expect(page3.hasMore).toBe(false);
+    });
+  });
+
+  describe("ensureMetadataTable / putMetadata / queryMetadata", () => {
+    it("should store and retrieve metadata", async () => {
+      const targetType = "todo:task";
+      const generatorId = "tasks:properties";
+      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+
+      await adapter.ensureMetadataTable(targetType, generatorId, [
+        { name: "status", columnType: "text" },
+        { name: "comment_count", columnType: "integer" },
+      ]);
+
+      await adapter.putMetadata(targetType, {
+        targetId,
+        generatorId,
+        generatorVersion: 1,
+        inputHash: "hash-abc",
+        value: { status: "todo", commentCount: 3 },
+      });
+
+      const result = await adapter.queryMetadata(targetType, { targetId });
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].generatorId).toBe(generatorId);
+      expect(result.entries[0].value).toMatchObject({ status: "todo", commentCount: 3 });
+    });
+
+    it("should filter by generatorId", async () => {
+      const targetType = "todo:task";
+      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+
+      await adapter.ensureMetadataTable(targetType, "gen-a", [{ name: "x", columnType: "integer" }]);
+      await adapter.ensureMetadataTable(targetType, "gen-b", [{ name: "y", columnType: "text" }]);
+
+      await adapter.putMetadata(targetType, { targetId, generatorId: "gen-a", generatorVersion: 1, inputHash: "h1", value: { x: 1 } });
+      await adapter.putMetadata(targetType, { targetId, generatorId: "gen-b", generatorVersion: 1, inputHash: "h2", value: { y: "hello" } });
+
+      const result = await adapter.queryMetadata(targetType, { targetId, generatorId: "gen-a" });
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].generatorId).toBe("gen-a");
     });
   });
 

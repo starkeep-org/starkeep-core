@@ -69,7 +69,7 @@ export function GroupSelector({
         }}
       >
         <span style={{ fontWeight: 500, color: "#475569" }}>
-          {activeGroup?.payload.name ?? "No group"}
+          {activeGroup?.content.name ?? "No group"}
         </span>
         <span style={{ fontSize: "9px", color: "#94a3b8" }}>▾</span>
       </button>
@@ -127,7 +127,7 @@ export function GroupSelector({
               <span style={{ width: "12px", color: "#3b82f6", fontSize: "11px" }}>
                 {group.id === activeGroupId ? "✓" : ""}
               </span>
-              {group.payload.name}
+              {group.content.name}
             </button>
           ))}
 

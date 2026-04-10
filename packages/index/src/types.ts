@@ -2,6 +2,7 @@ import type { StarkeepId, HLCTimestamp, DataRecord, MetadataRecord } from "@star
 import type { Filter } from "@starkeep/storage-adapter";
 
 export interface MetadataFilter {
+  readonly targetType: string;
   readonly generatorId: string;
   readonly field: string;
   readonly operator: Filter["operator"];

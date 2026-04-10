@@ -19,13 +19,22 @@ export const taskPropertiesGenerator: GeneratingFunctionDefinition = {
   generatorVersion: 1,
   inputTypes: [TASK_RECORD_TYPE],
   dependsOn: [],
+  outputColumns: [
+    { name: "group_id", columnType: "text" },
+    { name: "assignee", columnType: "text" },
+    { name: "status", columnType: "text" },
+    { name: "labels", columnType: "text" },
+    { name: "task_blocker_ids", columnType: "text" },
+    { name: "has_external_blockers", columnType: "boolean" },
+    { name: "comment_count", columnType: "integer" },
+  ],
 
   async generate(
     input: GeneratingFunctionInput,
     context: GenerationContext,
   ) {
     const record = await context.databaseAdapter.get(input.dataRecordId);
-    if (!record || record.kind !== "data" || !record.objectStorageKey) {
+    if (!record || !record.objectStorageKey) {
       throw new Error(`Task record not found or has no file: ${input.dataRecordId}`);
     }
 

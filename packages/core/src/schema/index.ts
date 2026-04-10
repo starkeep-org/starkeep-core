@@ -2,8 +2,6 @@ export { createTypeRegistry, type TypeRegistry, type TypeDefinition } from "./re
 export {
   dataRecordSchema,
   metadataRecordSchema,
-  anyRecordSchema,
   validateDataRecord,
   validateMetadataRecord,
-  validateAnyRecord,
 } from "./validator.js";

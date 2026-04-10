@@ -12,15 +12,15 @@ and Aurora DSQL (cloud).
 import { type DatabaseAdapter } from "@starkeep/storage-adapter"
 ```
 
-Key operations:
+### Data record operations
 
 | Method | Description |
 |--------|-------------|
 | `init()` / `close()` | Lifecycle — open and close the connection |
 | `healthCheck()` | Verify the connection is healthy |
-| `put(record)` | Insert or replace a record |
-| `get(id)` | Fetch a record by ID |
-| `delete(id)` | Remove a record |
+| `put(record)` | Insert or replace a data record |
+| `get(id)` | Fetch a data record by ID |
+| `delete(id)` | Remove a data record |
 | `query(query)` | Query with filters, sorting, and cursor-based pagination |
 | `batch(operations)` | Execute multiple operations atomically |
 | `transaction(callback)` | Run a block of operations in a transaction |
@@ -33,9 +33,8 @@ import { type Query, type Filter } from "@starkeep/storage-adapter"
 
 const results = await adapter.query({
   type: "tasks:task",            // filter by record type
-  kind: "data",                  // "data" or "metadata"
   filters: [
-    { field: "payload.status", operator: "eq", value: "todo" },
+    { field: "content.status", operator: "eq", value: "todo" },
     { field: "createdAt", operator: "gte", value: someTimestamp },
   ],
   sort: [{ field: "updatedAt", direction: "desc" }],
@@ -45,6 +44,34 @@ const results = await adapter.query({
 ```
 
 Filter operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `like`
+
+### Per-type metadata table operations
+
+Metadata is stored in separate tables — one per data record type — rather than in the
+main `records` table. Each table has typed columns per generator.
+
+| Method | Description |
+|--------|-------------|
+| `ensureMetadataTable(targetType, generatorId, columns)` | Create the metadata table and add the generator's columns if missing. Idempotent. Called at init time by the SDK for each registered generator. |
+| `putMetadata(targetType, entry)` | Upsert one generator's output for a target record. Only the generator's own columns are written. |
+| `queryMetadata(targetType, query)` | Query entries from a type's metadata table. |
+
+```typescript
+import { type MetadataColumnDefinition, type MetadataQuery } from "@starkeep/storage-adapter"
+
+// Declaring columns in a generator definition:
+const outputColumns: MetadataColumnDefinition[] = [
+  { name: "status", columnType: "text" },
+  { name: "comment_count", columnType: "integer" },
+]
+
+// Querying metadata:
+const result = await adapter.queryMetadata("tasks:task", {
+  targetIds: [recordId1, recordId2],
+  generatorId: "tasks:properties",
+  filters: [{ field: "status", operator: "eq", value: "done" }],
+})
+```
 
 ## ObjectStorageAdapter
 

@@ -1,12 +1,12 @@
 import type { StarkeepId } from "../identifiers/types.js";
-import type { HLCClock, HLCTimestamp } from "../hlc/types.js";
+import type { HLCClock } from "../hlc/types.js";
 import { generateId } from "../identifiers/ulid.js";
 import { type DataRecord, type MetadataRecord, SyncStatus } from "./types.js";
 
 export interface CreateDataRecordInput {
   type: string;
   ownerId: string;
-  payload?: Record<string, unknown>;
+  content?: Record<string, unknown>;
   contentHash?: string | null;
   objectStorageKey?: string | null;
   mimeType?: string | null;
@@ -14,8 +14,6 @@ export interface CreateDataRecordInput {
 }
 
 export interface CreateMetadataRecordInput {
-  type: string;
-  ownerId: string;
   targetId: StarkeepId;
   generatorId: string;
   generatorVersion: number;
@@ -39,25 +37,12 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     objectStorageKey: input.objectStorageKey ?? null,
     mimeType: input.mimeType ?? null,
     sizeBytes: input.sizeBytes ?? null,
-    payload: input.payload ?? {},
+    content: input.content ?? {},
   };
 }
 
-export function createMetadataRecord(
-  input: CreateMetadataRecordInput,
-  clock: HLCClock,
-): MetadataRecord {
-  const now = clock.now();
+export function createMetadataRecord(input: CreateMetadataRecordInput): MetadataRecord {
   return {
-    id: generateId(),
-    kind: "metadata",
-    type: input.type,
-    createdAt: now,
-    updatedAt: now,
-    ownerId: input.ownerId,
-    syncStatus: SyncStatus.Local,
-    deletedAt: null,
-    version: 1,
     targetId: input.targetId,
     generatorId: input.generatorId,
     generatorVersion: input.generatorVersion,

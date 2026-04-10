@@ -69,14 +69,14 @@ async function migrateLegacyGroupFiles(
     const dataRecord = record as DataRecord;
     if (dataRecord.objectStorageKey) continue; // already migrated
 
-    const payload = dataRecord.payload as { name?: string; description?: string; ownerId?: string };
+    const content = dataRecord.content as { name?: string; description?: string; ownerId?: string };
 
     // Find the corresponding ordering record
     let orderedTaskIds: string[] = [];
     try {
       const orderingResult = await databaseAdapter.query({
         type: ORDERING_RECORD_TYPE,
-        filters: [{ field: "payload.groupId", operator: "eq", value: dataRecord.id }],
+        filters: [{ field: "content.groupId", operator: "eq", value: dataRecord.id }],
         limit: 1,
       });
       if (orderingResult.records.length > 0) {
@@ -87,9 +87,9 @@ async function migrateLegacyGroupFiles(
     }
 
     const fileContent = {
-      name: payload.name ?? "",
-      description: payload.description ?? "",
-      ownerId: payload.ownerId ?? ownerId,
+      name: content.name ?? "",
+      description: content.description ?? "",
+      ownerId: content.ownerId ?? ownerId,
       orderedTaskIds,
     };
 

@@ -21,26 +21,6 @@ describe("buildPostgresQuery", () => {
     expect(result.values).toEqual(["@test/photo"]);
   });
 
-  it("should filter by kind", () => {
-    const query: Query = { kind: "metadata" };
-    const result = buildPostgresQuery(query);
-
-    expect(result.text).toBe(
-      "SELECT * FROM records WHERE kind = $1 ORDER BY id ASC",
-    );
-    expect(result.values).toEqual(["metadata"]);
-  });
-
-  it("should filter by type and kind together", () => {
-    const query: Query = { type: "@test/photo", kind: "data" };
-    const result = buildPostgresQuery(query);
-
-    expect(result.text).toBe(
-      "SELECT * FROM records WHERE type = $1 AND kind = $2 ORDER BY id ASC",
-    );
-    expect(result.values).toEqual(["@test/photo", "data"]);
-  });
-
   it("should handle eq filter", () => {
     const query: Query = {
       filters: [{ field: "ownerId", operator: "eq", value: "user-1" }],
@@ -232,7 +212,6 @@ describe("buildPostgresQuery", () => {
   it("should handle a complex query with all options", () => {
     const query: Query = {
       type: "@test/photo",
-      kind: "data",
       filters: [
         { field: "ownerId", operator: "eq", value: "user-1" },
         { field: "syncStatus", operator: "in", value: ["local", "pending"] },
@@ -244,11 +223,10 @@ describe("buildPostgresQuery", () => {
     const result = buildPostgresQuery(query);
 
     expect(result.text).toBe(
-      "SELECT * FROM records WHERE type = $1 AND kind = $2 AND owner_id = $3 AND sync_status IN ($4, $5) AND id > $6 ORDER BY updated_at DESC LIMIT $7",
+      "SELECT * FROM records WHERE type = $1 AND owner_id = $2 AND sync_status IN ($3, $4) AND id > $5 ORDER BY updated_at DESC LIMIT $6",
     );
     expect(result.values).toEqual([
       "@test/photo",
-      "data",
       "user-1",
       "local",
       "pending",
@@ -262,15 +240,15 @@ describe("buildPostgresQuery", () => {
       filters: [
         { field: "contentHash", operator: "eq", value: "sha256:abc" },
         { field: "objectStorageKey", operator: "eq", value: "key-123" },
-        { field: "generatorVersion", operator: "gte", value: 1 },
+        { field: "mimeType", operator: "eq", value: "image/jpeg" },
       ],
     };
     const result = buildPostgresQuery(query);
 
     expect(result.text).toBe(
-      "SELECT * FROM records WHERE content_hash = $1 AND object_storage_key = $2 AND generator_version >= $3 ORDER BY id ASC",
+      "SELECT * FROM records WHERE content_hash = $1 AND object_storage_key = $2 AND mime_type = $3 ORDER BY id ASC",
     );
-    expect(result.values).toEqual(["sha256:abc", "key-123", 1]);
+    expect(result.values).toEqual(["sha256:abc", "key-123", "image/jpeg"]);
   });
 
   it("should pass through unmapped field names as-is", () => {

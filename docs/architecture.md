@@ -98,9 +98,10 @@ credentials are provided. The Tasks web app uses the cloud configuration directl
 `ObjectStorageAdapter` interfaces. Storage backends can be swapped or mocked without
 changing application logic.
 
-**Data is independent of metadata.** Data records stand alone. Metadata records reference
-data, but data records have no knowledge of their metadata. Adding or removing generators
-has no effect on stored data.
+**Data is independent of metadata.** Data records stand alone in the unified `records`
+table. Metadata is stored in separate per-type tables (e.g. `metadata_todo_task`) with
+typed columns for each generator's output. Data records have no knowledge of their
+metadata; adding or removing generators has no effect on stored data.
 
 **Access control at the storage layer.** The `EnforcedDatabaseAdapter` wrapper checks
 every operation against access policies before forwarding it. Access control is uniform
@@ -122,7 +123,7 @@ Per-user stack
 +--------------------------------------------------+
 |  API Gateway  -->  handlers                      |
 |                                                  |
-|  Aurora DSQL  <->  data + metadata records       |
+|  Aurora DSQL  <->  data records + per-type metadata tables       |
 |  S3 Bucket    <->  files (photos, documents)     |
 |                                                  |
 |  IAM roles + security groups                     |

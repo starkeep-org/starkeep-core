@@ -1,4 +1,3 @@
-import type { StarkeepId, MetadataRecord } from "@starkeep/core";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 import type { MigrationRunner, MetadataMigration } from "./types.js";
 
@@ -15,56 +14,40 @@ export function createMigrationRunner(
       migrations.set(migration.generatorId, existing);
     },
 
-    async applyPendingMigrations(generatorId: string): Promise<number> {
+    async applyPendingMigrations(generatorId: string, targetType: string): Promise<number> {
       const generatorMigrations = migrations.get(generatorId);
       if (!generatorMigrations || generatorMigrations.length === 0) {
         return 0;
       }
 
       let migratedCount = 0;
-      let cursor: string | undefined;
 
-      while (true) {
-        const result = await databaseAdapter.query({
-          kind: "metadata",
-          filters: [
-            { field: "generatorId", operator: "eq", value: generatorId },
-          ],
-          limit: 100,
-          cursor,
-        });
+      const result = await databaseAdapter.queryMetadata(targetType, { generatorId });
 
-        for (const record of result.records) {
-          const metadataRecord = record as MetadataRecord;
-          let currentVersion = metadataRecord.generatorVersion;
-          let currentValue = { ...metadataRecord.value };
-          let wasMigrated = false;
+      for (const entry of result.entries) {
+        let currentVersion = entry.generatorVersion;
+        let currentValue = { ...entry.value };
+        let wasMigrated = false;
 
-          for (const migration of generatorMigrations) {
-            if (
-              migration.fromVersion === currentVersion &&
-              migration.toVersion > currentVersion
-            ) {
-              currentValue = migration.migrate(currentValue);
-              currentVersion = migration.toVersion;
-              wasMigrated = true;
-            }
-          }
-
-          if (wasMigrated) {
-            const updated: MetadataRecord = {
-              ...metadataRecord,
-              generatorVersion: currentVersion,
-              value: currentValue,
-              version: metadataRecord.version + 1,
-            };
-            await databaseAdapter.put(updated);
-            migratedCount++;
+        for (const migration of generatorMigrations) {
+          if (
+            migration.fromVersion === currentVersion &&
+            migration.toVersion > currentVersion
+          ) {
+            currentValue = migration.migrate(currentValue);
+            currentVersion = migration.toVersion;
+            wasMigrated = true;
           }
         }
 
-        if (!result.hasMore) break;
-        cursor = result.nextCursor ?? undefined;
+        if (wasMigrated) {
+          await databaseAdapter.putMetadata(targetType, {
+            ...entry,
+            generatorVersion: currentVersion,
+            value: currentValue,
+          });
+          migratedCount++;
+        }
       }
 
       return migratedCount;

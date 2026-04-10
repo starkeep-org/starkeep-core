@@ -69,6 +69,14 @@ export async function createStarkeepSdk(
   for (const generator of generators) {
     generatorRegistry.register(generator);
     dependencyGraph.addGenerator(generator);
+    // Ensure the per-type metadata table exists for each input type.
+    for (const inputType of generator.inputTypes) {
+      await databaseAdapter.ensureMetadataTable(
+        inputType,
+        generator.generatorId,
+        generator.outputColumns,
+      );
+    }
   }
 
   const metadataEngine = createMetadataEngine({
@@ -142,9 +150,7 @@ export async function createStarkeepSdk(
       },
 
       async get(recordId) {
-        const record = await databaseAdapter.get(recordId);
-        if (!record || record.kind !== "data") return null;
-        return record as DataRecord;
+        return databaseAdapter.get(recordId);
       },
 
       async delete(recordId) {
@@ -158,16 +164,21 @@ export async function createStarkeepSdk(
       },
 
       async query(params) {
-        const result = await databaseAdapter.query({ ...params, kind: "data" });
-        return result.records.filter((r): r is DataRecord => r.kind === "data");
+        const result = await databaseAdapter.query(params);
+        return result.records;
       },
     },
 
     metadata: {
       async generate(generatorId, targetId) {
+        const record = await databaseAdapter.get(targetId);
+        if (!record) {
+          throw new Error(`Target record not found: ${targetId}`);
+        }
         return metadataEngine.generate({
           generatorId,
           targetId,
+          targetType: record.type,
           mode: "on-demand",
         });
       },
@@ -177,13 +188,10 @@ export async function createStarkeepSdk(
       },
 
       async getForRecord(targetId) {
-        const result = await databaseAdapter.query({
-          kind: "metadata",
-          filters: [
-            { field: "targetId", operator: "eq", value: targetId },
-          ],
-        });
-        return result.records as MetadataRecord[];
+        const record = await databaseAdapter.get(targetId);
+        if (!record) return [];
+        const result = await databaseAdapter.queryMetadata(record.type, { targetId });
+        return result.entries;
       },
     },
 
@@ -256,17 +264,15 @@ export async function createStarkeepSdk(
       subject?.subjectType === "app"
         ? (() => {
             return {
-              async put(subtype: string, payload: Record<string, unknown> = {}) {
+              async put(subtype: string, content: Record<string, unknown> = {}) {
                 const privateType = makePrivateType(subject.subjectId, subtype);
-                const record = createDataRecord({ type: privateType, ownerId, payload }, clock);
+                const record = createDataRecord({ type: privateType, ownerId, content }, clock);
                 await databaseAdapter.put(record);
                 return record;
               },
 
               async get(recordId: StarkeepId) {
-                const record = await databaseAdapter.get(recordId);
-                if (!record || record.kind !== "data") return null;
-                return record as DataRecord;
+                return databaseAdapter.get(recordId);
               },
 
               async delete(recordId: StarkeepId) {

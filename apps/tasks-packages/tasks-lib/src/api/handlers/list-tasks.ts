@@ -24,7 +24,7 @@ export const listTasksHandler: ApiEndpointDefinition = {
 
     const queryResult = await context.databaseAdapter.query({
       type: TASK_RECORD_TYPE,
-      filters: [{ field: "payload.groupId", operator: "eq", value: groupId }],
+      filters: [{ field: "content.groupId", operator: "eq", value: groupId }],
       limit,
       cursor,
     });
@@ -32,7 +32,7 @@ export const listTasksHandler: ApiEndpointDefinition = {
     const tasks: Task[] = [];
 
     for (const record of queryResult.records) {
-      const dataRecord = record as DataRecord;
+      const dataRecord = record;
       if (!dataRecord.objectStorageKey) continue;
 
       const fileResult = await context.objectStorageAdapter.get(dataRecord.objectStorageKey);

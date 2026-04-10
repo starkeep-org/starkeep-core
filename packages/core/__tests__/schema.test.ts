@@ -4,7 +4,6 @@ import { createTypeRegistry } from "../src/schema/registry.js";
 import {
   validateDataRecord,
   validateMetadataRecord,
-  validateAnyRecord,
 } from "../src/schema/validator.js";
 import { createHLCClock } from "../src/hlc/clock.js";
 import { createDataRecord, createMetadataRecord } from "../src/records/builders.js";
@@ -95,50 +94,19 @@ describe("schema validation", () => {
   describe("validateMetadataRecord", () => {
     it("should validate a correctly built metadata record", () => {
       const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-      const record = createMetadataRecord(
-        {
-          type: "@test:dims",
-          ownerId: "u1",
-          targetId,
-          generatorId: "gen-1",
-          generatorVersion: 1,
-          inputHash: "hash",
-          value: { width: 100 },
-        },
-        clock,
-      );
+      const record = createMetadataRecord({
+        targetId,
+        generatorId: "gen-1",
+        generatorVersion: 1,
+        inputHash: "hash",
+        value: { width: 100 },
+      });
       const result = validateMetadataRecord(record);
       expect(result.success).toBe(true);
     });
-  });
 
-  describe("validateAnyRecord", () => {
-    it("should validate data records", () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
-      const result = validateAnyRecord(record);
-      expect(result.success).toBe(true);
-    });
-
-    it("should validate metadata records", () => {
-      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-      const record = createMetadataRecord(
-        {
-          type: "@test:dims",
-          ownerId: "u1",
-          targetId,
-          generatorId: "g",
-          generatorVersion: 1,
-          inputHash: "h",
-          value: {},
-        },
-        clock,
-      );
-      const result = validateAnyRecord(record);
-      expect(result.success).toBe(true);
-    });
-
-    it("should reject records with invalid kind", () => {
-      const result = validateAnyRecord({ kind: "unknown" });
+    it("should reject a metadata record missing fields", () => {
+      const result = validateMetadataRecord({ targetId: "abc" });
       expect(result.success).toBe(false);
     });
   });

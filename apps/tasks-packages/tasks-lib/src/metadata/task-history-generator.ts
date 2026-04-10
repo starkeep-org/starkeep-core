@@ -34,13 +34,16 @@ export const taskHistoryGenerator: GeneratingFunctionDefinition = {
   generatorVersion: 1,
   inputTypes: [TASK_RECORD_TYPE],
   dependsOn: [],
+  outputColumns: [
+    { name: "history_entries", columnType: "text" },
+  ],
 
   async generate(
     input: GeneratingFunctionInput,
     context: GenerationContext,
   ) {
     const record = await context.databaseAdapter.get(input.dataRecordId);
-    if (!record || record.kind !== "data" || !record.objectStorageKey) {
+    if (!record || !record.objectStorageKey) {
       throw new Error(`Task record not found or has no file: ${input.dataRecordId}`);
     }
 
@@ -51,23 +54,18 @@ export const taskHistoryGenerator: GeneratingFunctionDefinition = {
     const current: TdoFileContent = decodeTdoFile(fileResult.data);
 
     // Load previous history value if it exists
-    const existingMetadata = await context.databaseAdapter.query({
-      kind: "metadata",
-      filters: [
-        { field: "targetId", operator: "eq", value: input.dataRecordId },
-        { field: "generatorId", operator: "eq", value: TASK_HISTORY_GENERATOR_ID },
-      ],
+    const existingMetadata = await context.databaseAdapter.queryMetadata(input.targetType, {
+      targetId: input.dataRecordId,
+      generatorId: TASK_HISTORY_GENERATOR_ID,
     });
 
-    const firstRecord = existingMetadata.records[0];
     const previousHistory: TaskHistoryValue =
-      firstRecord && firstRecord.kind === "metadata"
-        ? (firstRecord.value as unknown as TaskHistoryValue)
+      existingMetadata.entries[0]
+        ? (existingMetadata.entries[0].value as unknown as TaskHistoryValue)
         : { entries: [] };
 
-    // Recover previous content state from history to compute diff
+    // Recover previous content state from history to compute diff.
     // We store a snapshot of all tracked fields at each entry.
-    // For the first entry, "from" will be undefined.
     const lastEntry = previousHistory.entries[previousHistory.entries.length - 1];
     const previous = lastEntry
       ? (lastEntry as HistoryEntry & { snapshot?: Partial<TdoFileContent> }).snapshot

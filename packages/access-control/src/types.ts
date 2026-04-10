@@ -1,5 +1,5 @@
-import type { StarkeepId, HLCTimestamp, AnyRecord } from "@starkeep/core";
-import type { DatabaseAdapter, Query, QueryResult, BatchOperation, Migration, Transaction } from "@starkeep/storage-adapter";
+import type { StarkeepId, HLCTimestamp } from "@starkeep/core";
+import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 
 export type Permission = "read" | "write" | "delete" | "admin";
 export type SubjectType = "user" | "app" | "api" | "token";

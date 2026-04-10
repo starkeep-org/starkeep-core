@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createHLCClock, createDataRecord, createMetadataRecord, createStarkeepId } from "@starkeep/core";
+import { createHLCClock, createDataRecord, createStarkeepId } from "@starkeep/core";
 import { MockDatabaseAdapter } from "../src/mock/mock-database-adapter.js";
 
 describe("MockDatabaseAdapter", () => {
@@ -25,25 +25,6 @@ describe("MockDatabaseAdapter", () => {
   describe("put / get", () => {
     it("should store and retrieve a data record", async () => {
       const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
-      await adapter.put(record);
-      const retrieved = await adapter.get(record.id);
-      expect(retrieved).toEqual(record);
-    });
-
-    it("should store and retrieve a metadata record", async () => {
-      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-      const record = createMetadataRecord(
-        {
-          type: "@test:dims",
-          ownerId: "u1",
-          targetId,
-          generatorId: "gen",
-          generatorVersion: 1,
-          inputHash: "h",
-          value: { width: 100 },
-        },
-        clock,
-      );
       await adapter.put(record);
       const retrieved = await adapter.get(record.id);
       expect(retrieved).toEqual(record);
@@ -83,21 +64,6 @@ describe("MockDatabaseAdapter", () => {
       const result = await adapter.query({ type: "@test/photo" });
       expect(result.records).toHaveLength(1);
       expect(result.records[0].type).toBe("@test/photo");
-    });
-
-    it("should filter by kind", async () => {
-      const data = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
-      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-      const meta = createMetadataRecord(
-        { type: "@test:dims", ownerId: "u1", targetId, generatorId: "g", generatorVersion: 1, inputHash: "h", value: {} },
-        clock,
-      );
-      await adapter.put(data);
-      await adapter.put(meta);
-
-      const result = await adapter.query({ kind: "data" });
-      expect(result.records).toHaveLength(1);
-      expect(result.records[0].kind).toBe("data");
     });
 
     it("should support limit and cursor pagination", async () => {
@@ -144,6 +110,56 @@ describe("MockDatabaseAdapter", () => {
       });
       expect(result.records[0].type).toBe("@test/a");
       expect(result.records[1].type).toBe("@test/b");
+    });
+  });
+
+  describe("ensureMetadataTable / putMetadata / queryMetadata", () => {
+    it("should store and retrieve metadata", async () => {
+      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+
+      await adapter.ensureMetadataTable("@test/photo", "gen", [
+        { name: "width", columnType: "integer" },
+        { name: "height", columnType: "integer" },
+      ]);
+      await adapter.putMetadata("@test/photo", {
+        targetId,
+        generatorId: "gen",
+        generatorVersion: 1,
+        inputHash: "h",
+        value: { width: 1920, height: 1080 },
+      });
+
+      const result = await adapter.queryMetadata("@test/photo", { targetId });
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].generatorId).toBe("gen");
+      expect(result.entries[0].value).toEqual({ width: 1920, height: 1080 });
+    });
+
+    it("should filter queryMetadata by generatorId", async () => {
+      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+
+      await adapter.ensureMetadataTable("@test/photo", "gen-a", [{ name: "x", columnType: "integer" }]);
+      await adapter.ensureMetadataTable("@test/photo", "gen-b", [{ name: "y", columnType: "text" }]);
+
+      await adapter.putMetadata("@test/photo", { targetId, generatorId: "gen-a", generatorVersion: 1, inputHash: "h1", value: { x: 1 } });
+      await adapter.putMetadata("@test/photo", { targetId, generatorId: "gen-b", generatorVersion: 1, inputHash: "h2", value: { y: "hi" } });
+
+      const result = await adapter.queryMetadata("@test/photo", { generatorId: "gen-a" });
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].generatorId).toBe("gen-a");
+    });
+
+    it("should upsert metadata on putMetadata with same targetId + generatorId", async () => {
+      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+
+      await adapter.ensureMetadataTable("@test/photo", "gen", [{ name: "x", columnType: "integer" }]);
+      await adapter.putMetadata("@test/photo", { targetId, generatorId: "gen", generatorVersion: 1, inputHash: "h1", value: { x: 1 } });
+      await adapter.putMetadata("@test/photo", { targetId, generatorId: "gen", generatorVersion: 2, inputHash: "h2", value: { x: 99 } });
+
+      const result = await adapter.queryMetadata("@test/photo", { targetId, generatorId: "gen" });
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].generatorVersion).toBe(2);
+      expect(result.entries[0].value).toEqual({ x: 99 });
     });
   });
 

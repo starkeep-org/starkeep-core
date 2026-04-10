@@ -79,7 +79,7 @@ export function createGroupRecord(
     {
       type: GROUP_RECORD_TYPE,
       ownerId,
-      payload: payload as unknown as Record<string, unknown>,
+      content: payload as unknown as Record<string, unknown>,
       ...(objectStorageKey != null ? { objectStorageKey } : {}),
       ...(contentHash != null ? { contentHash } : {}),
       ...(fileBytes != null ? { mimeType: GROUP_MIME_TYPE, sizeBytes: fileBytes.length } : {}),
@@ -91,7 +91,7 @@ export function createGroupRecord(
 export function groupRecordToGroup(record: DataRecord, fileContent: TdgFileContent): TaskGroup {
   return {
     id: record.id,
-    payload: record.payload as unknown as TaskGroupPayload,
+    content: record.content as unknown as TaskGroupPayload,
     orderedTaskIds: fileContent.orderedTaskIds,
     createdAt: serializeHLC(record.createdAt),
     updatedAt: serializeHLC(record.updatedAt),

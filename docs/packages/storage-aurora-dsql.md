@@ -45,6 +45,7 @@ const clientFactory: DatabaseClientFactory = {
 
 ## Notes
 
-- Schema is compatible with the SQLite adapter — migrations run the same on both
+- Schema mirrors the SQLite adapter — the same records table structure and per-type
+  metadata tables; migrations run equivalently on both backends
 - Aurora DSQL requires IAM authentication; configure credentials via standard AWS
   environment variables or the credentials chain

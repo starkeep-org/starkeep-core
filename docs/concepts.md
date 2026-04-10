@@ -17,35 +17,46 @@ creates or stores: a task, a photo, a document, a message. Every data record has
 
 - A globally unique, time-sortable identifier
 - A **type** that declares what kind of data it contains (e.g., `tasks:task`, `photos:photo`)
-- A **payload** — a freeform object containing the record's actual content
+- A **content** object containing any inline structured data for the record
 - Ownership and timestamp information
 - A **sync status** tracking whether the record exists only locally, only in the cloud,
   or has been reconciled between the two
 
 Records can optionally be **file-backed**: a photo or document record carries a reference
-to a file in object storage, identified by its content hash.
+to a file in object storage, identified by its content hash. For file-backed records,
+the substantive data lives in the file; `content` carries only indexed fields (e.g.,
+`groupId`) that the database needs for querying.
+
+All data records are stored in a single unified `records` table, regardless of their type.
+This keeps cross-type pagination simple and lets the sync engine operate on a single table.
 
 ## Metadata
 
-**Metadata records** are derived from data records by generators. They are not entered by
-hand — they are computed. A generator might extract the dimensions of an image, summarize
-the properties of a file, or run an AI model over the content of a message.
+**Metadata** is derived from data records by generators. It is not entered by hand — it is
+computed. A generator might extract the dimensions of an image, summarize the properties
+of a file, or compute task properties (status, assignee, labels) from the task's file
+content.
 
-Metadata records reference their source data record but data records have no knowledge of
-their metadata. This separation means generators can be added, removed, or updated without
-touching existing data.
+Metadata is stored in **per-type tables** (e.g., `metadata_todo_task`,
+`metadata_tasks_group`). Each type gets one table; within that table, each generator
+occupies its own set of typed columns. This means metadata queries use indexed SQL columns
+rather than JSON extraction.
 
-Each metadata record tracks the version of the generator that produced it and a hash of
-the inputs it was given. This allows the system to detect when metadata is stale and needs
-to be regenerated.
+Metadata references its source data record (`target_id`) but data records have no
+knowledge of their metadata. This separation means generators can be added, removed, or
+updated without touching existing data.
+
+Each metadata row tracks per-generator `input_hash` and `generator_version` columns. These
+allow the system to detect when metadata is stale and needs to be regenerated without
+re-running the generator when nothing has changed.
 
 ## Types and the type registry
 
-Every data and metadata record has a **type**, written as `namespace:name` (e.g.,
-`tasks:task`, `@starkeep/metadata-core:image-dimensions`). Namespacing prevents collisions
-between types defined by different developers or packages.
+Every data record has a **type**, written as `namespace:name` (e.g., `tasks:task`,
+`@starkeep/access-policy`). Namespacing prevents collisions between types defined by
+different developers or packages.
 
-Types are registered in a **type registry** with an optional schema for validating payloads.
+Types are registered in a **type registry** with an optional schema for validating content.
 The registry is the single source of truth for what types exist in an application.
 
 ## Search and querying

@@ -101,7 +101,7 @@ export type { WebSocketConnection };
  */
 export interface PrivateStoreOperations {
   /** Write a record under `<appId>:private:<subtype>`. */
-  put(subtype: string, payload?: Record<string, unknown>): Promise<DataRecord>;
+  put(subtype: string, content?: Record<string, unknown>): Promise<DataRecord>;
   /** Read a record by ID (must be accessible to this app's private namespace). */
   get(recordId: StarkeepId): Promise<DataRecord | null>;
   /** Delete a record by ID (must be accessible to this app's private namespace). */

@@ -27,4 +27,7 @@ Node.js 22 or later (for `node:sqlite`).
 
 - Uses WAL mode for better concurrent read performance
 - Transactions use SQLite SAVEPOINTs to support nesting
-- Indexed on `type`, `kind`, `sync_status`, `target_id`, `updated_at` for query performance
+- Indexed on `type`, `sync_status`, `updated_at` for query performance
+- Per-type metadata tables are created via `ensureMetadataTable` at SDK init; each table
+  gets `target_id TEXT PRIMARY KEY` plus typed columns per generator, with per-generator
+  `{prefix}_input_hash` and `{prefix}_generator_version` staleness columns

@@ -15,7 +15,7 @@ export interface TdgFileContent {
 
 export interface TaskGroup {
   id: string;
-  payload: TaskGroupPayload;
+  content: TaskGroupPayload;
   /** Task IDs in importance order, from the .tdg file. */
   orderedTaskIds: string[];
   createdAt: string;

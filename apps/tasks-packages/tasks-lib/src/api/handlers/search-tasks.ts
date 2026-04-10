@@ -21,7 +21,7 @@ export const searchTasksHandler: ApiEndpointDefinition = {
     const searchLower = q.toLowerCase();
 
     const filters = groupId
-      ? [{ field: "payload.groupId", operator: "eq" as const, value: groupId }]
+      ? [{ field: "content.groupId", operator: "eq" as const, value: groupId }]
       : [];
 
     const queryResult = await context.databaseAdapter.query({

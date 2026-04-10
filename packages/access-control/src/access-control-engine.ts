@@ -34,10 +34,9 @@ export function createAccessControlEngine(options: {
     policyStore.clear();
     tokenStore.clear();
 
-    const policiesResult = await databaseAdapter.query({ type: POLICY_RECORD_TYPE, kind: "data" });
+    const policiesResult = await databaseAdapter.query({ type: POLICY_RECORD_TYPE });
     for (const record of policiesResult.records) {
-      if (record.kind !== "data") continue;
-      const p = record.payload as Record<string, unknown>;
+      const p = record.content as Record<string, unknown>;
       const policy: AccessPolicy = {
         policyId: record.id,
         subjectType: p.subjectType as SubjectType,
@@ -51,10 +50,9 @@ export function createAccessControlEngine(options: {
       policyStore.set(policy.policyId, policy);
     }
 
-    const tokensResult = await databaseAdapter.query({ type: TOKEN_RECORD_TYPE, kind: "data" });
+    const tokensResult = await databaseAdapter.query({ type: TOKEN_RECORD_TYPE });
     for (const record of tokensResult.records) {
-      if (record.kind !== "data") continue;
-      const t = record.payload as Record<string, unknown>;
+      const t = record.content as Record<string, unknown>;
       const token: SharingToken = {
         tokenId: record.id,
         tokenHash: t.tokenHash as string,
@@ -97,7 +95,7 @@ export function createAccessControlEngine(options: {
       objectStorageKey: null,
       mimeType: null,
       sizeBytes: null,
-      payload: {
+      content: {
         subjectType: policy.subjectType,
         subjectId: policy.subjectId,
         resourceType: policy.resourceType,
@@ -203,7 +201,7 @@ export function createAccessControlEngine(options: {
       objectStorageKey: null,
       mimeType: null,
       sizeBytes: null,
-      payload: {
+      content: {
         tokenHash,
         policyId,
         expiresAt: sharingToken.expiresAt,
@@ -249,7 +247,7 @@ export function createAccessControlEngine(options: {
       objectStorageKey: null,
       mimeType: null,
       sizeBytes: null,
-      payload: {
+      content: {
         tokenHash: sharingToken.tokenHash,
         policyId: sharingToken.policyId,
         expiresAt: sharingToken.expiresAt,
