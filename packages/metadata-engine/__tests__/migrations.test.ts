@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   createHLCClock,
-  createMetadataRecord,
+  createDataRecord,
   createStarkeepId,
 } from "@starkeep/core";
 import { MockDatabaseAdapter } from "@starkeep/storage-adapter";
@@ -40,19 +40,18 @@ describe("createMigrationRunner", () => {
     });
     const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
 
-    const record = createMetadataRecord(
-      {
-        type: "@test:dims",
-        ownerId: "u1",
-        targetId,
-        generatorId: "@test:dims",
-        generatorVersion: 1,
-        inputHash: "hash1",
-        value: { width: 100, height: 200 },
-      },
-      clock,
-    );
-    await databaseAdapter.put(record);
+    await databaseAdapter.ensureMetadataTable("@test/photo", "@test:dims", [
+      { name: "width", columnType: "integer" },
+      { name: "height", columnType: "integer" },
+    ]);
+
+    await databaseAdapter.putMetadata("@test/photo", {
+      targetId,
+      generatorId: "@test:dims",
+      generatorVersion: 1,
+      inputHash: "hash1",
+      value: { width: 100, height: 200 },
+    });
 
     const runner = createMigrationRunner(databaseAdapter);
     runner.registerMigration({
@@ -65,45 +64,37 @@ describe("createMigrationRunner", () => {
       }),
     });
 
-    const migratedCount = await runner.applyPendingMigrations("@test:dims");
+    const migratedCount = await runner.applyPendingMigrations("@test:dims", "@test/photo");
     expect(migratedCount).toBe(1);
 
-    const updated = await databaseAdapter.get(record.id);
-    expect(updated).toBeDefined();
-    expect(updated!.kind).toBe("metadata");
-    if (updated!.kind === "metadata") {
-      expect(updated!.generatorVersion).toBe(2);
-      expect(updated!.value).toEqual({
-        width: 100,
-        height: 200,
-        aspectRatio: 0.5,
-      });
-    }
+    const result = await databaseAdapter.queryMetadata("@test/photo", { targetId, generatorId: "@test:dims" });
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].generatorVersion).toBe(2);
+    expect(result.entries[0].value).toEqual({
+      width: 100,
+      height: 200,
+      aspectRatio: 0.5,
+    });
   });
 
   it("should apply chained migrations", async () => {
     const databaseAdapter = new MockDatabaseAdapter();
     await databaseAdapter.init();
 
-    const clock = createHLCClock({
-      nodeId: "test",
-      wallClockFunction: () => 1000,
-    });
     const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
 
-    const record = createMetadataRecord(
-      {
-        type: "@test:dims",
-        ownerId: "u1",
-        targetId,
-        generatorId: "@test:dims",
-        generatorVersion: 1,
-        inputHash: "hash1",
-        value: { w: 100, h: 200 },
-      },
-      clock,
-    );
-    await databaseAdapter.put(record);
+    await databaseAdapter.ensureMetadataTable("@test/photo", "@test:dims", [
+      { name: "w", columnType: "integer" },
+      { name: "h", columnType: "integer" },
+    ]);
+
+    await databaseAdapter.putMetadata("@test/photo", {
+      targetId,
+      generatorId: "@test:dims",
+      generatorVersion: 1,
+      inputHash: "hash1",
+      value: { w: 100, h: 200 },
+    });
 
     const runner = createMigrationRunner(databaseAdapter);
     runner.registerMigration({
@@ -126,18 +117,17 @@ describe("createMigrationRunner", () => {
       }),
     });
 
-    const migratedCount = await runner.applyPendingMigrations("@test:dims");
+    const migratedCount = await runner.applyPendingMigrations("@test:dims", "@test/photo");
     expect(migratedCount).toBe(1);
 
-    const updated = await databaseAdapter.get(record.id);
-    if (updated!.kind === "metadata") {
-      expect(updated!.generatorVersion).toBe(3);
-      expect(updated!.value).toEqual({
-        width: 100,
-        height: 200,
-        megapixels: 0.02,
-      });
-    }
+    const result = await databaseAdapter.queryMetadata("@test/photo", { targetId, generatorId: "@test:dims" });
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].generatorVersion).toBe(3);
+    expect(result.entries[0].value).toEqual({
+      width: 100,
+      height: 200,
+      megapixels: 0.02,
+    });
   });
 
   it("should return 0 when no migrations needed", async () => {
@@ -145,7 +135,7 @@ describe("createMigrationRunner", () => {
     await databaseAdapter.init();
     const runner = createMigrationRunner(databaseAdapter);
 
-    const count = await runner.applyPendingMigrations("@test:dims");
+    const count = await runner.applyPendingMigrations("@test:dims", "@test/photo");
     expect(count).toBe(0);
   });
 });

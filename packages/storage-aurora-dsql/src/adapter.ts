@@ -1,4 +1,5 @@
-import type { AnyRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
+import { createStarkeepId } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -6,6 +7,9 @@ import type {
   BatchOperation,
   Migration,
   Transaction,
+  MetadataColumnDefinition,
+  MetadataQuery,
+  MetadataQueryResult,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
 import type {
@@ -14,12 +18,17 @@ import type {
   DatabaseClientFactory,
 } from "./types.js";
 import { recordToRow, rowToRecord, type PostgresRow } from "./serialization.js";
-import { buildPostgresQuery } from "./query-builder.js";
+import {
+  buildPostgresQuery,
+  buildPostgresMetadataQuery,
+  metadataTableName,
+  generatorIdToPrefix,
+  snakeToCamel,
+} from "./query-builder.js";
 
 const CREATE_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS records (
     id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK(kind IN ('data', 'metadata')),
     type TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -27,25 +36,18 @@ const CREATE_TABLE_SQL = `
     sync_status TEXT NOT NULL DEFAULT 'local',
     deleted_at TEXT,
     version INTEGER NOT NULL DEFAULT 1,
-    payload JSONB NOT NULL DEFAULT '{}',
+    content JSONB NOT NULL DEFAULT '{}',
     content_hash TEXT,
     object_storage_key TEXT,
     mime_type TEXT,
-    size_bytes INTEGER,
-    target_id TEXT,
-    generator_id TEXT,
-    generator_version INTEGER,
-    input_hash TEXT,
-    value JSONB
+    size_bytes INTEGER
   )
 `;
 
 const CREATE_INDEXES_SQL = [
   "CREATE INDEX IF NOT EXISTS idx_records_type ON records(type)",
   "CREATE INDEX IF NOT EXISTS idx_records_sync_status ON records(sync_status)",
-  "CREATE INDEX IF NOT EXISTS idx_records_target_id ON records(target_id)",
   "CREATE INDEX IF NOT EXISTS idx_records_updated_at ON records(updated_at)",
-  "CREATE INDEX IF NOT EXISTS idx_records_kind ON records(kind)",
 ];
 
 const CREATE_MIGRATIONS_TABLE_SQL = `
@@ -56,10 +58,17 @@ const CREATE_MIGRATIONS_TABLE_SQL = `
   )
 `;
 
+/** Per-type registry of generator columns. */
+interface GeneratorColumnEntry {
+  generatorId: string;
+  columns: MetadataColumnDefinition[];
+}
+
 export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private client: DatabaseClient | null = null;
   private readonly options: AuroraDsqlDatabaseAdapterOptions;
   private readonly clientFactory: DatabaseClientFactory;
+  private readonly metadataRegistry = new Map<string, GeneratorColumnEntry[]>();
 
   constructor(
     options: AuroraDsqlDatabaseAdapterOptions,
@@ -102,7 +111,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return this.client;
   }
 
-  async put(record: AnyRecord): Promise<void> {
+  async put(record: DataRecord): Promise<void> {
     const row = recordToRow(record);
     const columns = Object.keys(row);
     const values = Object.values(row).map((value) =>
@@ -110,9 +119,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         ? JSON.stringify(value)
         : value,
     );
-    const placeholders = columns.map(
-      (_, index) => `$${index + 1}`,
-    );
+    const placeholders = columns.map((_, index) => `$${index + 1}`);
     const updates = columns
       .filter((column) => column !== "id")
       .map((column) => `${column} = EXCLUDED.${column}`)
@@ -122,7 +129,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     await this.getClient().query(text, values);
   }
 
-  async get(id: StarkeepId): Promise<AnyRecord | null> {
+  async get(id: StarkeepId): Promise<DataRecord | null> {
     const result = await this.getClient().query(
       "SELECT * FROM records WHERE id = $1",
       [id],
@@ -196,9 +203,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       "SELECT version FROM migrations ORDER BY version",
     );
     const appliedVersions = new Set(
-      applied.rows.map(
-        (record) => record.version as number,
-      ),
+      applied.rows.map((record) => record.version as number),
     );
 
     const pending = migrations
@@ -228,5 +233,149 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         );
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-type metadata table methods
+  // ---------------------------------------------------------------------------
+
+  async ensureMetadataTable(
+    targetType: string,
+    generatorId: string,
+    columns: MetadataColumnDefinition[],
+  ): Promise<void> {
+    const table = metadataTableName(targetType);
+    const prefix = generatorIdToPrefix(generatorId);
+
+    await this.getClient().query(`
+      CREATE TABLE IF NOT EXISTS ${table} (
+        target_id TEXT PRIMARY KEY
+      )
+    `);
+
+    const postgresColumnType = (col: MetadataColumnDefinition): string => {
+      switch (col.columnType) {
+        case "integer": return "INTEGER";
+        case "real": return "DOUBLE PRECISION";
+        case "boolean": return "BOOLEAN";
+        default: return "TEXT";
+      }
+    };
+
+    for (const col of columns) {
+      try {
+        await this.getClient().query(
+          `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col.name} ${postgresColumnType(col)}`,
+        );
+      } catch {
+        // Ignore.
+      }
+    }
+
+    for (const [colName, colType] of [
+      [`${prefix}_input_hash`, "TEXT"],
+      [`${prefix}_generator_version`, "INTEGER"],
+    ] as const) {
+      try {
+        await this.getClient().query(
+          `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${colName} ${colType}`,
+        );
+      } catch {
+        // Ignore.
+      }
+    }
+
+    for (const col of columns) {
+      if (col.columnType !== "boolean") {
+        try {
+          await this.getClient().query(
+            `CREATE INDEX IF NOT EXISTS idx_${table}_${col.name} ON ${table}(${col.name})`,
+          );
+        } catch {
+          // Ignore.
+        }
+      }
+    }
+
+    const existing = this.metadataRegistry.get(targetType) ?? [];
+    if (!existing.some((e) => e.generatorId === generatorId)) {
+      existing.push({ generatorId, columns });
+      this.metadataRegistry.set(targetType, existing);
+    }
+  }
+
+  async putMetadata(targetType: string, entry: MetadataRecord): Promise<void> {
+    const table = metadataTableName(targetType);
+    const prefix = generatorIdToPrefix(entry.generatorId);
+    const registered = this.metadataRegistry.get(targetType);
+    const generatorEntry = registered?.find((e) => e.generatorId === entry.generatorId);
+
+    if (!generatorEntry) {
+      throw new StorageError(
+        `Metadata table for type "${targetType}" / generator "${entry.generatorId}" not registered. Call ensureMetadataTable first.`,
+      );
+    }
+
+    const columnNames: string[] = ["target_id"];
+    const values: unknown[] = [entry.targetId];
+    let idx = 2;
+
+    for (const col of generatorEntry.columns) {
+      columnNames.push(col.name);
+      const camelKey = snakeToCamel(col.name);
+      values.push(entry.value[camelKey] ?? null);
+      idx++;
+    }
+
+    columnNames.push(`${prefix}_input_hash`, `${prefix}_generator_version`);
+    values.push(entry.inputHash, entry.generatorVersion);
+
+    const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
+    const updateCols = columnNames.filter((c) => c !== "target_id");
+    const updates = updateCols.map((c) => `${c} = EXCLUDED.${c}`).join(", ");
+
+    const text = `INSERT INTO ${table} (${columnNames.join(", ")}) VALUES (${placeholders}) ON CONFLICT(target_id) DO UPDATE SET ${updates}`;
+    await this.getClient().query(text, values);
+  }
+
+  async queryMetadata(targetType: string, query: MetadataQuery): Promise<MetadataQueryResult> {
+    const registered = this.metadataRegistry.get(targetType) ?? [];
+    const { text, values } = buildPostgresMetadataQuery(targetType, query);
+
+    const result = await this.getClient().query(text, values);
+    const rows = result.rows as unknown as Record<string, unknown>[];
+    const entries: MetadataRecord[] = [];
+
+    for (const row of rows) {
+      const targetId = createStarkeepId(row["target_id"] as string);
+
+      const generatorsToReturn = query.generatorId
+        ? registered.filter((g) => g.generatorId === query.generatorId)
+        : registered;
+
+      for (const gen of generatorsToReturn) {
+        const prefix = generatorIdToPrefix(gen.generatorId);
+        const inputHash = row[`${prefix}_input_hash`] as string | null;
+        const generatorVersion = row[`${prefix}_generator_version`] as number | null;
+
+        if (inputHash === null || generatorVersion === null) continue;
+
+        const value: Record<string, unknown> = {};
+        for (const col of gen.columns) {
+          const camelKey = snakeToCamel(col.name);
+          value[camelKey] = row[col.name] ?? null;
+        }
+
+        entries.push({
+          targetId,
+          generatorId: gen.generatorId,
+          generatorVersion,
+          inputHash,
+          value,
+        });
+      }
+    }
+
+    return { entries };
   }
 }

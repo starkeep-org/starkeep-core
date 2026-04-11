@@ -1,4 +1,4 @@
-import type { AnyRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
 
 export type SortDirection = "asc" | "desc";
 
@@ -15,7 +15,6 @@ export interface SortField {
 
 export interface Query {
   type?: string;
-  kind?: "data" | "metadata";
   filters?: Filter[];
   sort?: SortField[];
   limit?: number;
@@ -23,13 +22,13 @@ export interface Query {
 }
 
 export interface QueryResult {
-  records: AnyRecord[];
+  records: DataRecord[];
   nextCursor: string | null;
   hasMore: boolean;
 }
 
 export type BatchOperation =
-  | { type: "put"; record: AnyRecord }
+  | { type: "put"; record: DataRecord }
   | { type: "delete"; id: StarkeepId };
 
 export interface Migration {
@@ -39,8 +38,31 @@ export interface Migration {
 }
 
 export interface Transaction {
-  put(record: AnyRecord): Promise<void>;
-  get(id: StarkeepId): Promise<AnyRecord | null>;
+  put(record: DataRecord): Promise<void>;
+  get(id: StarkeepId): Promise<DataRecord | null>;
   delete(id: StarkeepId): Promise<void>;
   query(query: Query): Promise<QueryResult>;
+}
+
+/**
+ * Defines one SQL column produced by a generator. Column names use snake_case;
+ * values in MetadataRecord.value use the corresponding camelCase key.
+ */
+export interface MetadataColumnDefinition {
+  /** Snake_case SQL column name, e.g. "group_id", "comment_count". */
+  readonly name: string;
+  readonly columnType: "text" | "integer" | "real" | "boolean";
+}
+
+export interface MetadataQuery {
+  targetId?: StarkeepId;
+  targetIds?: StarkeepId[];
+  /** When specified, only return entries produced by this generator. */
+  generatorId?: string;
+  /** Field filters on generator output columns (use camelCase field names). */
+  filters?: Filter[];
+}
+
+export interface MetadataQueryResult {
+  entries: MetadataRecord[];
 }

@@ -1,4 +1,4 @@
-import { compareHLC, type StarkeepId, type AnyRecord, type DataRecord } from "@starkeep/core";
+import { compareHLC, type StarkeepId, type AnyRecord } from "@starkeep/core";
 import type {
   SyncEngine,
   SyncEngineOptions,
@@ -186,13 +186,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
       // Sync files for pushed records
       const fileKeys = localChanges
-        .map((change) => {
-          const snapshot = change.recordSnapshot;
-          if (snapshot.kind === "data") {
-            return (snapshot as DataRecord).objectStorageKey;
-          }
-          return null;
-        })
+        .map((change) => change.recordSnapshot.objectStorageKey)
         .filter((key): key is string => key !== null);
 
       if (fileKeys.length > 0) {

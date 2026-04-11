@@ -8,6 +8,9 @@ export type {
   BatchOperation,
   Migration,
   Transaction,
+  MetadataColumnDefinition,
+  MetadataQuery,
+  MetadataQueryResult,
 } from "./database/types.js";
 
 export type { ObjectStorageAdapter } from "./object-storage/adapter.js";

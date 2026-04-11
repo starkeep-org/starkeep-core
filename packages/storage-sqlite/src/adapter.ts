@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
-import type { AnyRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
+import { createStarkeepId } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -7,15 +8,24 @@ import type {
   BatchOperation,
   Migration,
   Transaction,
+  MetadataColumnDefinition,
+  MetadataQuery,
+  MetadataQueryResult,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
 import { recordToRow, rowToRecord, type SqliteRow } from "./serialization.js";
-import { buildSelectQuery } from "./query-builder.js";
+import {
+  buildSelectQuery,
+  buildMetadataSelectQuery,
+  metadataTableName,
+  generatorIdToPrefix,
+  camelToSnake,
+  snakeToCamel,
+} from "./query-builder.js";
 
 const CREATE_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS records (
     id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK(kind IN ('data', 'metadata')),
     type TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -23,25 +33,18 @@ const CREATE_TABLE_SQL = `
     sync_status TEXT NOT NULL DEFAULT 'local',
     deleted_at TEXT,
     version INTEGER NOT NULL DEFAULT 1,
-    payload TEXT NOT NULL DEFAULT '{}',
+    content TEXT NOT NULL DEFAULT '{}',
     content_hash TEXT,
     object_storage_key TEXT,
     mime_type TEXT,
-    size_bytes INTEGER,
-    target_id TEXT,
-    generator_id TEXT,
-    generator_version INTEGER,
-    input_hash TEXT,
-    value TEXT
+    size_bytes INTEGER
   )
 `;
 
 const CREATE_INDEXES_SQL = [
   "CREATE INDEX IF NOT EXISTS idx_records_type ON records(type)",
   "CREATE INDEX IF NOT EXISTS idx_records_sync_status ON records(sync_status)",
-  "CREATE INDEX IF NOT EXISTS idx_records_target_id ON records(target_id)",
   "CREATE INDEX IF NOT EXISTS idx_records_updated_at ON records(updated_at)",
-  "CREATE INDEX IF NOT EXISTS idx_records_kind ON records(kind)",
 ];
 
 const CREATE_MIGRATIONS_TABLE_SQL = `
@@ -56,9 +59,17 @@ export interface SqliteDatabaseAdapterOptions {
   path: string | ":memory:";
 }
 
+/** Per-type registry of generator columns, used when building metadata queries. */
+interface GeneratorColumnEntry {
+  generatorId: string;
+  columns: MetadataColumnDefinition[];
+}
+
 export class SqliteDatabaseAdapter implements DatabaseAdapter {
   private database: DatabaseSync | null = null;
   private readonly options: SqliteDatabaseAdapterOptions;
+  /** targetType → list of {generatorId, columns} registered via ensureMetadataTable */
+  private readonly metadataRegistry = new Map<string, GeneratorColumnEntry[]>();
 
   constructor(options: SqliteDatabaseAdapterOptions) {
     this.options = options;
@@ -105,13 +116,13 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     ) as unknown as SqliteRow | undefined;
   }
 
-  private allRows(sql: string, ...params: unknown[]): SqliteRow[] {
+  private allRows<T = SqliteRow>(sql: string, ...params: unknown[]): T[] {
     return this.getDatabase().prepare(sql).all(
       ...(params as Parameters<ReturnType<DatabaseSync["prepare"]>["all"]>),
-    ) as unknown as SqliteRow[];
+    ) as unknown as T[];
   }
 
-  async put(record: AnyRecord): Promise<void> {
+  async put(record: DataRecord): Promise<void> {
     const row = recordToRow(record);
     const columns = Object.keys(row);
     const placeholders = columns.map(() => "?").join(", ");
@@ -123,7 +134,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     this.runStmt(sql, ...Object.values(row));
   }
 
-  async get(id: StarkeepId): Promise<AnyRecord | null> {
+  async get(id: StarkeepId): Promise<DataRecord | null> {
     const row = this.getRow("SELECT * FROM records WHERE id = ?", id);
     return row ? rowToRecord(row) : null;
   }
@@ -184,7 +195,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   async runMigrations(migrations: Migration[]): Promise<void> {
-    const applied = this.allRows("SELECT version FROM migrations ORDER BY version") as unknown as { version: number }[];
+    const applied = this.allRows<{ version: number }>("SELECT version FROM migrations ORDER BY version");
     const appliedVersions = new Set(applied.map((record) => record.version));
 
     const pending = migrations
@@ -215,5 +226,151 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
         );
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-type metadata table methods
+  // ---------------------------------------------------------------------------
+
+  async ensureMetadataTable(
+    targetType: string,
+    generatorId: string,
+    columns: MetadataColumnDefinition[],
+  ): Promise<void> {
+    const table = metadataTableName(targetType);
+    const prefix = generatorIdToPrefix(generatorId);
+
+    // Ensure the table exists with at least target_id as PK.
+    this.getDatabase().exec(`
+      CREATE TABLE IF NOT EXISTS ${table} (
+        target_id TEXT PRIMARY KEY
+      )
+    `);
+
+    // Add per-generator value columns (idempotent: ALTER TABLE ADD COLUMN IF NOT EXISTS via try/catch).
+    const sqliteColumnType = (col: MetadataColumnDefinition): string => {
+      switch (col.columnType) {
+        case "integer": return "INTEGER";
+        case "real": return "REAL";
+        case "boolean": return "INTEGER"; // SQLite stores booleans as 0/1
+        default: return "TEXT";
+      }
+    };
+
+    for (const col of columns) {
+      try {
+        this.getDatabase().exec(`ALTER TABLE ${table} ADD COLUMN ${col.name} ${sqliteColumnType(col)}`);
+      } catch {
+        // Column already exists — ignore.
+      }
+    }
+
+    // Add per-generator staleness columns.
+    for (const colName of [`${prefix}_input_hash`, `${prefix}_generator_version`]) {
+      try {
+        const colType = colName.endsWith("_generator_version") ? "INTEGER" : "TEXT";
+        this.getDatabase().exec(`ALTER TABLE ${table} ADD COLUMN ${colName} ${colType}`);
+      } catch {
+        // Column already exists — ignore.
+      }
+    }
+
+    // Create index on target_id (already PK, but add generator-specific indexes).
+    for (const col of columns) {
+      if (col.columnType !== "boolean") {
+        try {
+          this.getDatabase().exec(
+            `CREATE INDEX IF NOT EXISTS idx_${table}_${col.name} ON ${table}(${col.name})`,
+          );
+        } catch {
+          // Ignore.
+        }
+      }
+    }
+
+    // Register in memory for query building.
+    const existing = this.metadataRegistry.get(targetType) ?? [];
+    if (!existing.some((e) => e.generatorId === generatorId)) {
+      existing.push({ generatorId, columns });
+      this.metadataRegistry.set(targetType, existing);
+    }
+  }
+
+  async putMetadata(targetType: string, entry: MetadataRecord): Promise<void> {
+    const table = metadataTableName(targetType);
+    const prefix = generatorIdToPrefix(entry.generatorId);
+    const registered = this.metadataRegistry.get(targetType);
+    const generatorEntry = registered?.find((e) => e.generatorId === entry.generatorId);
+
+    if (!generatorEntry) {
+      throw new StorageError(
+        `Metadata table for type "${targetType}" / generator "${entry.generatorId}" not registered. Call ensureMetadataTable first.`,
+      );
+    }
+
+    const columnNames: string[] = ["target_id"];
+    const values: unknown[] = [entry.targetId];
+
+    // Map value keys (camelCase) → column names (snake_case).
+    for (const col of generatorEntry.columns) {
+      columnNames.push(col.name);
+      const camelKey = snakeToCamel(col.name);
+      values.push(entry.value[camelKey] ?? null);
+    }
+
+    // Staleness tracking columns.
+    columnNames.push(`${prefix}_input_hash`, `${prefix}_generator_version`);
+    values.push(entry.inputHash, entry.generatorVersion);
+
+    const placeholders = columnNames.map(() => "?").join(", ");
+    // Only update columns belonging to this generator (not other generators' columns).
+    const updateCols = columnNames.filter((c) => c !== "target_id");
+    const updates = updateCols.map((c) => `${c} = excluded.${c}`).join(", ");
+
+    const sql = `INSERT INTO ${table} (${columnNames.join(", ")}) VALUES (${placeholders}) ON CONFLICT(target_id) DO UPDATE SET ${updates}`;
+    this.runStmt(sql, ...values);
+  }
+
+  async queryMetadata(targetType: string, query: MetadataQuery): Promise<MetadataQueryResult> {
+    const registered = this.metadataRegistry.get(targetType) ?? [];
+    const { sql, params } = buildMetadataSelectQuery(targetType, query, registered);
+
+    const rows = this.allRows<Record<string, unknown>>(sql, ...params);
+    const entries: MetadataRecord[] = [];
+
+    for (const row of rows) {
+      const targetId = createStarkeepId(row["target_id"] as string);
+
+      // Determine which generators to return entries for.
+      const generatorsToReturn = query.generatorId
+        ? registered.filter((g) => g.generatorId === query.generatorId)
+        : registered;
+
+      for (const gen of generatorsToReturn) {
+        const prefix = generatorIdToPrefix(gen.generatorId);
+        const inputHash = row[`${prefix}_input_hash`] as string | null;
+        const generatorVersion = row[`${prefix}_generator_version`] as number | null;
+
+        // Skip generators that haven't produced any output for this row yet.
+        if (inputHash === null || generatorVersion === null) continue;
+
+        // Reconstruct value object from columns (snake_case → camelCase).
+        const value: Record<string, unknown> = {};
+        for (const col of gen.columns) {
+          const camelKey = snakeToCamel(col.name);
+          value[camelKey] = row[col.name] ?? null;
+        }
+
+        entries.push({
+          targetId,
+          generatorId: gen.generatorId,
+          generatorVersion,
+          inputHash,
+          value,
+        });
+      }
+    }
+
+    return { entries };
   }
 }

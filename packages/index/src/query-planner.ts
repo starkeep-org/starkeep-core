@@ -45,7 +45,6 @@ export async function planQuery(
     if (targetIds.length === 0) {
       return {
         dataQuery: {
-          kind: "data",
           filters: [{ field: "id", operator: "in", value: [] }],
           limit: query.limit,
           cursor: query.cursor,
@@ -56,7 +55,6 @@ export async function planQuery(
   }
 
   const dataQuery: Query = {
-    kind: "data",
     filters: filters.length > 0 ? filters : undefined,
     limit: query.limit,
     cursor: query.cursor,
@@ -72,18 +70,22 @@ async function resolveMetadataFilterTargetIds(
   let intersectedTargetIds: Set<string> | null = null;
 
   for (const metadataFilter of metadataFilters) {
-    const metadataQueryResult = await databaseAdapter.query({
-      kind: "metadata",
-      filters: [
-        { field: "generatorId", operator: "eq", value: metadataFilter.generatorId },
-        { field: metadataFilter.field, operator: metadataFilter.operator, value: metadataFilter.value },
-      ],
-    });
+    const metadataQueryResult = await databaseAdapter.queryMetadata(
+      metadataFilter.targetType,
+      {
+        generatorId: metadataFilter.generatorId,
+        filters: [
+          {
+            field: metadataFilter.field,
+            operator: metadataFilter.operator,
+            value: metadataFilter.value,
+          },
+        ],
+      },
+    );
 
     const targetIdsForFilter = new Set(
-      metadataQueryResult.records
-        .filter((record): record is import("@starkeep/core").MetadataRecord => record.kind === "metadata")
-        .map((record) => record.targetId as string),
+      metadataQueryResult.entries.map((entry) => entry.targetId as string),
     );
 
     if (intersectedTargetIds === null) {

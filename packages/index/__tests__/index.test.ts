@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   createHLCClock,
   createDataRecord,
-  createMetadataRecord,
   createStarkeepId,
   SyncStatus,
 } from "@starkeep/core";
@@ -24,24 +23,22 @@ describe("UnifiedIndex", () => {
   describe("search", () => {
     it("should return data records with their metadata", async () => {
       const dataRecord = createDataRecord(
-        { type: "@test/photo", ownerId: "user1", payload: { title: "sunset" } },
+        { type: "@test/photo", ownerId: "user1", content: { title: "sunset" } },
         clock,
       );
       await databaseAdapter.put(dataRecord);
 
-      const metadataRecord = createMetadataRecord(
-        {
-          type: "@test:dimensions",
-          ownerId: "user1",
-          targetId: dataRecord.id,
-          generatorId: "dimension-extractor",
-          generatorVersion: 1,
-          inputHash: "hash1",
-          value: { width: 1920, height: 1080 },
-        },
-        clock,
-      );
-      await databaseAdapter.put(metadataRecord);
+      await databaseAdapter.ensureMetadataTable("@test/photo", "dimension-extractor", [
+        { name: "width", columnType: "integer" },
+        { name: "height", columnType: "integer" },
+      ]);
+      await databaseAdapter.putMetadata("@test/photo", {
+        targetId: dataRecord.id,
+        generatorId: "dimension-extractor",
+        generatorVersion: 1,
+        inputHash: "hash1",
+        value: { width: 1920, height: 1080 },
+      });
 
       const result = await index.search({});
 
@@ -124,37 +121,33 @@ describe("UnifiedIndex", () => {
   describe("getWithMetadata", () => {
     it("should return data record with all metadata", async () => {
       const dataRecord = createDataRecord(
-        { type: "@test/photo", ownerId: "user1", payload: { title: "beach" } },
+        { type: "@test/photo", ownerId: "user1", content: { title: "beach" } },
         clock,
       );
       await databaseAdapter.put(dataRecord);
 
-      const dimensionsMetadata = createMetadataRecord(
-        {
-          type: "@test:dimensions",
-          ownerId: "user1",
-          targetId: dataRecord.id,
-          generatorId: "dimension-extractor",
-          generatorVersion: 1,
-          inputHash: "hash1",
-          value: { width: 800, height: 600 },
-        },
-        clock,
-      );
-      const tagsMetadata = createMetadataRecord(
-        {
-          type: "@test:tags",
-          ownerId: "user1",
-          targetId: dataRecord.id,
-          generatorId: "tag-generator",
-          generatorVersion: 1,
-          inputHash: "hash2",
-          value: { tags: ["beach", "ocean"] },
-        },
-        clock,
-      );
-      await databaseAdapter.put(dimensionsMetadata);
-      await databaseAdapter.put(tagsMetadata);
+      await databaseAdapter.ensureMetadataTable("@test/photo", "dimension-extractor", [
+        { name: "width", columnType: "integer" },
+        { name: "height", columnType: "integer" },
+      ]);
+      await databaseAdapter.ensureMetadataTable("@test/photo", "tag-generator", [
+        { name: "tags", columnType: "text" },
+      ]);
+
+      await databaseAdapter.putMetadata("@test/photo", {
+        targetId: dataRecord.id,
+        generatorId: "dimension-extractor",
+        generatorVersion: 1,
+        inputHash: "hash1",
+        value: { width: 800, height: 600 },
+      });
+      await databaseAdapter.putMetadata("@test/photo", {
+        targetId: dataRecord.id,
+        generatorId: "tag-generator",
+        generatorVersion: 1,
+        inputHash: "hash2",
+        value: { tags: ["beach", "ocean"] },
+      });
 
       const result = await index.getWithMetadata(dataRecord.id);
 

@@ -1,11 +1,17 @@
-import { randomBytes, createHash } from "node:crypto";
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
-export function generateToken(): { token: string; tokenHash: string } {
-  const token = randomBytes(32).toString("hex");
-  const tokenHash = hashToken(token);
+export async function generateToken(): Promise<{ token: string; tokenHash: string }> {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const token = bytesToHex(bytes);
+  const tokenHash = await hashToken(token);
   return { token, tokenHash };
 }
 
-export function hashToken(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
+export async function hashToken(token: string): Promise<string> {
+  const encoded = new TextEncoder().encode(token);
+  const buf = await crypto.subtle.digest("SHA-256", encoded);
+  return bytesToHex(new Uint8Array(buf));
 }

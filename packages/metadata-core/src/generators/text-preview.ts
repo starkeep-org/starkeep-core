@@ -18,11 +18,15 @@ export const TEXT_PREVIEW_GENERATOR: GeneratingFunctionDefinition = {
   generatorVersion: 1,
   inputTypes: ["@starkeep/document", "@starkeep/note"],
   dependsOn: [],
+  outputColumns: [
+    { name: "preview", columnType: "text" },
+    { name: "character_count", columnType: "integer" },
+  ],
 
   async generate(input, context) {
     const targetRecord = await context.databaseAdapter.get(input.dataRecordId);
 
-    if (!targetRecord || targetRecord.kind !== "data") {
+    if (!targetRecord) {
       return { value: { preview: "", characterCount: 0 } };
     }
 
@@ -36,8 +40,8 @@ export const TEXT_PREVIEW_GENERATOR: GeneratingFunctionDefinition = {
       }
     }
 
-    if (rawText === null && targetRecord.payload && typeof targetRecord.payload.content === "string") {
-      rawText = targetRecord.payload.content;
+    if (rawText === null && targetRecord.content && typeof targetRecord.content.content === "string") {
+      rawText = targetRecord.content.content;
     }
 
     if (rawText === null) {

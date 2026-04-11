@@ -26,11 +26,15 @@ export interface DataRecord extends BaseRecord {
   objectStorageKey: string | null;
   mimeType: string | null;
   sizeBytes: number | null;
-  payload: Record<string, unknown>;
+  content: Record<string, unknown>;
 }
 
-export interface MetadataRecord extends BaseRecord {
-  readonly kind: "metadata";
+/**
+ * A metadata record is a lightweight value object derived from a data record
+ * by a generator. It is stored in a per-type metadata table, not in the main
+ * records table. There is one row per data record in each metadata table.
+ */
+export interface MetadataRecord {
   readonly targetId: StarkeepId;
   readonly generatorId: string;
   generatorVersion: number;
@@ -38,4 +42,23 @@ export interface MetadataRecord extends BaseRecord {
   value: Record<string, unknown>;
 }
 
-export type AnyRecord = DataRecord | MetadataRecord;
+export type AnyRecord = DataRecord;
+
+/**
+ * Stored as a DataRecord with type `@starkeep/type-registration`.
+ * Only the admin layer (owner subject) may write these records.
+ * `registeredByAppId` is provenance metadata only — it does not restrict
+ * other apps from being granted access to the type.
+ */
+export interface TypeRegistration {
+  /** Global type identifier, e.g. "media:photo" or "@starkeep/access-policy". */
+  readonly typeId: string;
+  /** JSON Schema for the record payload. */
+  readonly schema: object;
+  /** Semver string; increment on schema changes. */
+  readonly schemaVersion: string;
+  readonly description: string;
+  readonly registeredAt: HLCTimestamp;
+  /** Provenance only — does not imply ownership or exclusive access. */
+  readonly registeredByAppId: string;
+}
