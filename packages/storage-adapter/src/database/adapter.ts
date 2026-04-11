@@ -1,4 +1,4 @@
-import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
 import type {
   Query,
   QueryResult,
@@ -8,6 +8,7 @@ import type {
   MetadataColumnDefinition,
   MetadataQuery,
   MetadataQueryResult,
+  MetadataSyncRecord,
 } from "./types.js";
 
 export interface DatabaseAdapter {
@@ -47,4 +48,19 @@ export interface DatabaseAdapter {
    * Returns one MetadataRecord per (target, generator) pair that matches.
    */
   queryMetadata(targetType: string, query: MetadataQuery): Promise<MetadataQueryResult>;
+
+  /**
+   * Upsert a syncable metadata record into the `metadata_sync` table and,
+   * if the generator is registered locally, into the per-type typed-column
+   * table as well. Called by the metadata engine for `syncable` generators
+   * and by the sync engine when applying remote metadata changes.
+   */
+  upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void>;
+
+  /**
+   * Return all syncable metadata records whose `updatedAt` is strictly after
+   * `since`. Used by the sync engine to find local changes to push and remote
+   * changes to pull.
+   */
+  getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]>;
 }

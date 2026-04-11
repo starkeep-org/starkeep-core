@@ -193,6 +193,10 @@ export async function createStarkeepSdk(
         const result = await databaseAdapter.queryMetadata(record.type, { targetId });
         return result.entries;
       },
+
+      async putDirect(targetId, targetType, generatorId, value) {
+        return metadataEngine.writeDirect(targetId, targetType, generatorId, value);
+      },
     },
 
     index: {

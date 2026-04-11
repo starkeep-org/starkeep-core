@@ -1,5 +1,5 @@
 import type { StarkeepId, HLCTimestamp, AnyRecord } from "@starkeep/core";
-import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import type { DatabaseAdapter, ObjectStorageAdapter, MetadataSyncRecord } from "@starkeep/storage-adapter";
 
 export interface ChangeLogEntry {
   readonly changeId: StarkeepId;
@@ -89,6 +89,12 @@ export interface ChangeNotifier {
   emit(event: ChangeEvent): void;
 }
 
+export interface MetadataSyncResult {
+  readonly pulled: number;
+  readonly pushed: number;
+  readonly conflicts: number;
+}
+
 export interface SyncEngine {
   recordChange(
     operation: "create" | "update" | "delete",
@@ -96,6 +102,16 @@ export interface SyncEngine {
   ): Promise<void>;
   pull(): Promise<SyncPullResponse>;
   push(): Promise<SyncPushResponse>;
+  /**
+   * Pull syncable metadata from the remote adapter and apply it locally using
+   * HLC-based last-writer-wins conflict resolution.
+   */
+  pullMetadata(): Promise<MetadataSyncResult>;
+  /**
+   * Push locally-updated syncable metadata to the remote adapter using
+   * HLC-based last-writer-wins conflict resolution.
+   */
+  pushMetadata(): Promise<MetadataSyncResult>;
   fullSync(): Promise<{
     pulled: number;
     pushed: number;

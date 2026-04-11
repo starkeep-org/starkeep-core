@@ -127,12 +127,22 @@ Every piece of data in Starkeep is a **record**. There are two kinds:
 - Optional file backing (content hash, object storage key, MIME type, size)
 - A freeform `payload` object for structured data
 
-**Metadata records** are derived from data records by generators. They have:
-- The same base fields as data records
+**Metadata records** are associated with a data record and produced by generators whose
+inputs may include the data record, user-supplied parameters, or both. A generator is
+marked `syncable: true` when its output is non-deterministic or involves user input —
+meaning two devices may independently produce different values and conflict resolution is
+required. Non-syncable generators produce the same output for the same input on any device
+and do not participate in sync.
+
+All metadata records have:
 - A `targetId` pointing to the data record they describe
 - Generator identification (ID + version) for staleness tracking
 - An `inputHash` for cache validation
 - A `value` object containing the generated metadata
+
+Syncable metadata records additionally have:
+- An `updatedAt` HLC timestamp (stored in the `metadata_sync` table) for conflict resolution
+- A JSON snapshot in the `metadata_sync` table used by the sync engine for pull/push
 
 ### Identifiers
 
@@ -164,7 +174,7 @@ Local Device                        Cloud (per-user)
 Sync follows a pull-then-push model:
 
 1. **Pull** — fetch remote changes since last sync point
-2. **Merge** — apply HLC ordering to resolve conflicts (last-writer-wins per field)
+2. **Merge** — apply HLC ordering to resolve conflicts across data records and syncable metadata records (last-writer-wins per field); non-syncable metadata is excluded
 3. **Push** — send local changes to remote
 4. **File sync** — transfer files by content hash to avoid redundant transfers
 5. **Notify** — emit change events for UI updates

@@ -11,6 +11,7 @@ export type {
   MetadataColumnDefinition,
   MetadataQuery,
   MetadataQueryResult,
+  MetadataSyncRecord,
 } from "./database/types.js";
 
 export type { ObjectStorageAdapter } from "./object-storage/adapter.js";

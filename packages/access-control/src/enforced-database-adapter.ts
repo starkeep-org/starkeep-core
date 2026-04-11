@@ -1,4 +1,4 @@
-import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -9,6 +9,7 @@ import type {
   MetadataColumnDefinition,
   MetadataQuery,
   MetadataQueryResult,
+  MetadataSyncRecord,
 } from "@starkeep/storage-adapter";
 import type { AccessControlEngine, EnforcedDatabaseAdapter, SubjectType } from "./types.js";
 import { AccessDeniedError } from "./errors.js";
@@ -168,6 +169,14 @@ export function createEnforcedDatabaseAdapter(options: {
     return databaseAdapter.queryMetadata(targetType, query);
   }
 
+  async function upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void> {
+    return databaseAdapter.upsertSyncableMetadata(record);
+  }
+
+  async function getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]> {
+    return databaseAdapter.getSyncableMetadataChangesSince(since);
+  }
+
   return {
     init,
     close,
@@ -182,5 +191,7 @@ export function createEnforcedDatabaseAdapter(options: {
     ensureMetadataTable,
     putMetadata,
     queryMetadata,
+    upsertSyncableMetadata,
+    getSyncableMetadataChangesSince,
   };
 }
