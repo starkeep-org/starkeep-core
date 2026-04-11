@@ -1,5 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
-import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
 import { serializeHLC, deserializeHLC, SyncStatus, createStarkeepId } from "@starkeep/core";
 import type {
   DatabaseAdapter,
@@ -11,6 +11,7 @@ import type {
   MetadataColumnDefinition,
   MetadataQuery,
   MetadataQueryResult,
+  MetadataSyncRecord,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
 
@@ -49,6 +50,22 @@ const CREATE_MIGRATIONS_TABLE_SQL = `
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `;
+
+const CREATE_METADATA_SYNC_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS metadata_sync (
+    target_id         TEXT NOT NULL,
+    target_type       TEXT NOT NULL,
+    generator_id      TEXT NOT NULL,
+    generator_version INTEGER NOT NULL,
+    input_hash        TEXT,
+    updated_at        TEXT NOT NULL,
+    value             TEXT NOT NULL,
+    PRIMARY KEY (target_id, generator_id)
+  )
+`;
+
+const CREATE_METADATA_SYNC_INDEX_SQL =
+  "CREATE INDEX IF NOT EXISTS idx_metadata_sync_updated_at ON metadata_sync(updated_at)";
 
 // ---------------------------------------------------------------------------
 // Serialization
@@ -269,6 +286,8 @@ export class TauriDbAdapter implements DatabaseAdapter {
       await this.db.execute(sql, []);
     }
     await this.db.execute(CREATE_MIGRATIONS_TABLE_SQL, []);
+    await this.db.execute(CREATE_METADATA_SYNC_TABLE_SQL, []);
+    await this.db.execute(CREATE_METADATA_SYNC_INDEX_SQL, []);
   }
 
   async close(): Promise<void> {
@@ -505,17 +524,79 @@ export class TauriDbAdapter implements DatabaseAdapter {
         const prefix = generatorIdToPrefix(gen.generatorId);
         const inputHash = row[`${prefix}_input_hash`] as string | null;
         const generatorVersion = row[`${prefix}_generator_version`] as number | null;
-        if (inputHash === null || generatorVersion === null) continue;
+        if (generatorVersion === null) continue;
 
         const value: Record<string, unknown> = {};
         for (const col of gen.columns) {
           value[snakeToCamel(col.name)] = row[col.name] ?? null;
         }
 
-        entries.push({ targetId, generatorId: gen.generatorId, generatorVersion, inputHash, value });
+        entries.push({ targetId, generatorId: gen.generatorId, generatorVersion, inputHash: inputHash ?? "", value });
       }
     }
 
     return { entries };
+  }
+
+  async upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void> {
+    await this.getDb().execute(
+      `INSERT INTO metadata_sync
+         (target_id, target_type, generator_id, generator_version, input_hash, updated_at, value)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(target_id, generator_id) DO UPDATE SET
+         target_type       = excluded.target_type,
+         generator_version = excluded.generator_version,
+         input_hash        = excluded.input_hash,
+         updated_at        = excluded.updated_at,
+         value             = excluded.value`,
+      [
+        record.targetId,
+        record.targetType,
+        record.generatorId,
+        record.generatorVersion,
+        record.inputHash ?? null,
+        serializeHLC(record.updatedAt),
+        JSON.stringify(record.value),
+      ],
+    );
+
+    // Best-effort write to the per-type typed-column table.
+    const registered = this.metadataRegistry.get(record.targetType);
+    const generatorEntry = registered?.find((e) => e.generatorId === record.generatorId);
+    if (generatorEntry) {
+      await this.putMetadata(record.targetType, {
+        targetId: record.targetId,
+        generatorId: record.generatorId,
+        generatorVersion: record.generatorVersion,
+        inputHash: record.inputHash ?? "",
+        value: record.value,
+      });
+    }
+  }
+
+  async getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]> {
+    const sinceStr = serializeHLC(since);
+    const rows = await this.getDb().select<Array<{
+      target_id: string;
+      target_type: string;
+      generator_id: string;
+      generator_version: number;
+      input_hash: string | null;
+      updated_at: string;
+      value: string;
+    }>>(
+      "SELECT * FROM metadata_sync WHERE updated_at > ? ORDER BY updated_at ASC",
+      [sinceStr],
+    );
+
+    return rows.map((row) => ({
+      targetId: createStarkeepId(row.target_id),
+      targetType: row.target_type,
+      generatorId: row.generator_id,
+      generatorVersion: row.generator_version,
+      inputHash: row.input_hash,
+      updatedAt: deserializeHLC(row.updated_at),
+      value: JSON.parse(row.value) as Record<string, unknown>,
+    }));
   }
 }

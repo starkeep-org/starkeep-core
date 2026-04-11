@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
-import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
-import { createStarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
+import { createStarkeepId, serializeHLC, deserializeHLC } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -11,6 +11,7 @@ import type {
   MetadataColumnDefinition,
   MetadataQuery,
   MetadataQueryResult,
+  MetadataSyncRecord,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
 import { recordToRow, rowToRecord, type SqliteRow } from "./serialization.js";
@@ -55,6 +56,22 @@ const CREATE_MIGRATIONS_TABLE_SQL = `
   )
 `;
 
+const CREATE_METADATA_SYNC_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS metadata_sync (
+    target_id         TEXT NOT NULL,
+    target_type       TEXT NOT NULL,
+    generator_id      TEXT NOT NULL,
+    generator_version INTEGER NOT NULL,
+    input_hash        TEXT,
+    updated_at        TEXT NOT NULL,
+    value             TEXT NOT NULL,
+    PRIMARY KEY (target_id, generator_id)
+  )
+`;
+
+const CREATE_METADATA_SYNC_INDEX_SQL =
+  "CREATE INDEX IF NOT EXISTS idx_metadata_sync_updated_at ON metadata_sync(updated_at)";
+
 export interface SqliteDatabaseAdapterOptions {
   path: string | ":memory:";
 }
@@ -84,6 +101,8 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       this.database.exec(sql);
     }
     this.database.exec(CREATE_MIGRATIONS_TABLE_SQL);
+    this.database.exec(CREATE_METADATA_SYNC_TABLE_SQL);
+    this.database.exec(CREATE_METADATA_SYNC_INDEX_SQL);
   }
 
   async close(): Promise<void> {
@@ -352,7 +371,9 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
         const generatorVersion = row[`${prefix}_generator_version`] as number | null;
 
         // Skip generators that haven't produced any output for this row yet.
-        if (inputHash === null || generatorVersion === null) continue;
+        // generatorVersion being null means the generator has never run; inputHash
+        // may legitimately be null for user-authored entries written via putDirect.
+        if (generatorVersion === null) continue;
 
         // Reconstruct value object from columns (snake_case → camelCase).
         const value: Record<string, unknown> = {};
@@ -365,12 +386,74 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
           targetId,
           generatorId: gen.generatorId,
           generatorVersion,
-          inputHash,
+          inputHash: inputHash ?? "",
           value,
         });
       }
     }
 
     return { entries };
+  }
+
+  async upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void> {
+    // Write to the metadata_sync table.
+    this.runStmt(
+      `INSERT INTO metadata_sync
+         (target_id, target_type, generator_id, generator_version, input_hash, updated_at, value)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(target_id, generator_id) DO UPDATE SET
+         target_type       = excluded.target_type,
+         generator_version = excluded.generator_version,
+         input_hash        = excluded.input_hash,
+         updated_at        = excluded.updated_at,
+         value             = excluded.value`,
+      record.targetId,
+      record.targetType,
+      record.generatorId,
+      record.generatorVersion,
+      record.inputHash ?? null,
+      serializeHLC(record.updatedAt),
+      JSON.stringify(record.value),
+    );
+
+    // Best-effort write to the per-type typed-column table (if the generator
+    // is registered on this device).
+    const registered = this.metadataRegistry.get(record.targetType);
+    const generatorEntry = registered?.find((e) => e.generatorId === record.generatorId);
+    if (generatorEntry) {
+      await this.putMetadata(record.targetType, {
+        targetId: record.targetId,
+        generatorId: record.generatorId,
+        generatorVersion: record.generatorVersion,
+        inputHash: record.inputHash ?? "",
+        value: record.value,
+      });
+    }
+  }
+
+  async getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]> {
+    const sinceStr = serializeHLC(since);
+    const rows = this.allRows<{
+      target_id: string;
+      target_type: string;
+      generator_id: string;
+      generator_version: number;
+      input_hash: string | null;
+      updated_at: string;
+      value: string;
+    }>(
+      "SELECT * FROM metadata_sync WHERE updated_at > ? ORDER BY updated_at ASC",
+      sinceStr,
+    );
+
+    return rows.map((row) => ({
+      targetId: createStarkeepId(row.target_id),
+      targetType: row.target_type,
+      generatorId: row.generator_id,
+      generatorVersion: row.generator_version,
+      inputHash: row.input_hash,
+      updatedAt: deserializeHLC(row.updated_at),
+      value: JSON.parse(row.value) as Record<string, unknown>,
+    }));
   }
 }

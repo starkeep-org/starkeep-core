@@ -13,6 +13,7 @@ import type {
   MetadataEngine,
   GenerationResult,
 } from "@starkeep/metadata-engine";
+import type { MetadataSyncRecord } from "@starkeep/storage-adapter";
 import type { UnifiedIndex, IndexQuery, IndexResult } from "@starkeep/index";
 import type {
   AggregationEngine,
@@ -52,6 +53,20 @@ export interface MetadataOperations {
     dataType: string,
   ): Promise<GenerationResult[]>;
   getForRecord(targetId: StarkeepId): Promise<MetadataRecord[]>;
+  /**
+   * Write a metadata value directly for a `syncable` generator, bypassing the
+   * staleness check and generator function. Use this for user-authored metadata
+   * (e.g. a photo caption) where the value comes from user input rather than
+   * from a computation over the data record.
+   *
+   * The generator must be registered at SDK init with `syncable: true`.
+   */
+  putDirect(
+    targetId: StarkeepId,
+    targetType: string,
+    generatorId: string,
+    value: Record<string, unknown>,
+  ): Promise<MetadataSyncRecord>;
 }
 
 export interface IndexOperations {

@@ -1,5 +1,5 @@
-import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
-import { createStarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
+import { createStarkeepId, serializeHLC, deserializeHLC } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -10,6 +10,7 @@ import type {
   MetadataColumnDefinition,
   MetadataQuery,
   MetadataQueryResult,
+  MetadataSyncRecord,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
 import type {
@@ -58,6 +59,22 @@ const CREATE_MIGRATIONS_TABLE_SQL = `
   )
 `;
 
+const CREATE_METADATA_SYNC_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS metadata_sync (
+    target_id         TEXT NOT NULL,
+    target_type       TEXT NOT NULL,
+    generator_id      TEXT NOT NULL,
+    generator_version INTEGER NOT NULL,
+    input_hash        TEXT,
+    updated_at        TEXT NOT NULL,
+    value             TEXT NOT NULL,
+    PRIMARY KEY (target_id, generator_id)
+  )
+`;
+
+const CREATE_METADATA_SYNC_INDEX_SQL =
+  "CREATE INDEX IF NOT EXISTS idx_metadata_sync_updated_at ON metadata_sync(updated_at)";
+
 /** Per-type registry of generator columns. */
 interface GeneratorColumnEntry {
   generatorId: string;
@@ -85,6 +102,8 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       await this.client.query(sql);
     }
     await this.client.query(CREATE_MIGRATIONS_TABLE_SQL);
+    await this.client.query(CREATE_METADATA_SYNC_TABLE_SQL);
+    await this.client.query(CREATE_METADATA_SYNC_INDEX_SQL);
   }
 
   async close(): Promise<void> {
@@ -358,7 +377,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         const inputHash = row[`${prefix}_input_hash`] as string | null;
         const generatorVersion = row[`${prefix}_generator_version`] as number | null;
 
-        if (inputHash === null || generatorVersion === null) continue;
+        if (generatorVersion === null) continue;
 
         const value: Record<string, unknown> = {};
         for (const col of gen.columns) {
@@ -370,12 +389,74 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
           targetId,
           generatorId: gen.generatorId,
           generatorVersion,
-          inputHash,
+          inputHash: inputHash ?? "",
           value,
         });
       }
     }
 
     return { entries };
+  }
+
+  async upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void> {
+    await this.getClient().query(
+      `INSERT INTO metadata_sync
+         (target_id, target_type, generator_id, generator_version, input_hash, updated_at, value)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (target_id, generator_id) DO UPDATE SET
+         target_type       = EXCLUDED.target_type,
+         generator_version = EXCLUDED.generator_version,
+         input_hash        = EXCLUDED.input_hash,
+         updated_at        = EXCLUDED.updated_at,
+         value             = EXCLUDED.value`,
+      [
+        record.targetId,
+        record.targetType,
+        record.generatorId,
+        record.generatorVersion,
+        record.inputHash ?? null,
+        serializeHLC(record.updatedAt),
+        JSON.stringify(record.value),
+      ],
+    );
+
+    // Best-effort write to the per-type typed-column table.
+    const registered = this.metadataRegistry.get(record.targetType);
+    const generatorEntry = registered?.find((e) => e.generatorId === record.generatorId);
+    if (generatorEntry) {
+      await this.putMetadata(record.targetType, {
+        targetId: record.targetId,
+        generatorId: record.generatorId,
+        generatorVersion: record.generatorVersion,
+        inputHash: record.inputHash ?? "",
+        value: record.value,
+      });
+    }
+  }
+
+  async getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]> {
+    const sinceStr = serializeHLC(since);
+    const result = await this.getClient().query(
+      "SELECT * FROM metadata_sync WHERE updated_at > $1 ORDER BY updated_at ASC",
+      [sinceStr],
+    );
+
+    return (result.rows as unknown as Array<{
+      target_id: string;
+      target_type: string;
+      generator_id: string;
+      generator_version: number;
+      input_hash: string | null;
+      updated_at: string;
+      value: string;
+    }>).map((row) => ({
+      targetId: createStarkeepId(row.target_id),
+      targetType: row.target_type,
+      generatorId: row.generator_id,
+      generatorVersion: row.generator_version,
+      inputHash: row.input_hash,
+      updatedAt: deserializeHLC(row.updated_at),
+      value: JSON.parse(row.value) as Record<string, unknown>,
+    }));
   }
 }

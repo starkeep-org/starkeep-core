@@ -1,4 +1,5 @@
-import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
+import { compareHLC } from "@starkeep/core";
 import type { DatabaseAdapter } from "../database/adapter.js";
 import type {
   Query,
@@ -9,12 +10,15 @@ import type {
   MetadataColumnDefinition,
   MetadataQuery,
   MetadataQueryResult,
+  MetadataSyncRecord,
 } from "../database/types.js";
 
 export class MockDatabaseAdapter implements DatabaseAdapter {
   private store = new Map<string, DataRecord>();
   /** metadata[targetType][targetId][generatorId] = MetadataRecord */
   private metadata = new Map<string, Map<string, Map<string, MetadataRecord>>>();
+  /** metadataSync[`${targetId}:${generatorId}`] = MetadataSyncRecord */
+  private metadataSync = new Map<string, MetadataSyncRecord>();
   private initialized = false;
 
   async init(): Promise<void> {
@@ -192,6 +196,29 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     return { entries };
   }
 
+  async upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void> {
+    const key = `${record.targetId}:${record.generatorId}`;
+    this.metadataSync.set(key, structuredClone(record));
+    // Also write to the in-memory per-type metadata store.
+    await this.putMetadata(record.targetType, {
+      targetId: record.targetId,
+      generatorId: record.generatorId,
+      generatorVersion: record.generatorVersion,
+      inputHash: record.inputHash ?? "",
+      value: record.value,
+    });
+  }
+
+  async getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]> {
+    const results: MetadataSyncRecord[] = [];
+    for (const record of this.metadataSync.values()) {
+      if (compareHLC(record.updatedAt, since) > 0) {
+        results.push(structuredClone(record));
+      }
+    }
+    return results.sort((a, b) => compareHLC(a.updatedAt, b.updatedAt));
+  }
+
   get size(): number {
     return this.store.size;
   }
@@ -199,5 +226,6 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
   clear(): void {
     this.store.clear();
     this.metadata.clear();
+    this.metadataSync.clear();
   }
 }

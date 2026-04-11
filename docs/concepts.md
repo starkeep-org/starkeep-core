@@ -32,15 +32,28 @@ This keeps cross-type pagination simple and lets the sync engine operate on a si
 
 ## Metadata
 
-**Metadata** is derived from data records by generators. It is not entered by hand — it is
-computed. A generator might extract the dimensions of an image, summarize the properties
-of a file, or compute task properties (status, assignee, labels) from the task's file
-content.
+**Metadata** is associated with a data record and produced by **generators** — functions
+whose inputs may include the data record itself, user-provided parameters, or both. Because
+generators can call remote services (e.g. AI models) or incorporate user input, they are
+not assumed to be deterministic.
+
+Two generator behaviours are distinguished by the `syncable` flag:
+
+- **Non-syncable** (default) — the generator always produces the same output for the same
+  input on any device, so metadata can be recomputed locally on demand. Examples: extracting
+  image dimensions, parsing file properties.
+- **Syncable** (`syncable: true`) — two devices may independently produce different outputs,
+  so the metadata must be synced and conflict-resolved. Examples: AI summaries (non-
+  deterministic), user-authored values such as photo captions (differ across devices by
+  definition), hybrid computations that combine a data record with user-supplied parameters.
 
 Metadata is stored in **per-type tables** (e.g., `metadata_todo_task`,
 `metadata_tasks_group`). Each type gets one table; within that table, each generator
 occupies its own set of typed columns. This means metadata queries use indexed SQL columns
 rather than JSON extraction.
+
+Syncable generators additionally write a JSON snapshot to the **`metadata_sync` table**,
+which the sync engine uses for HLC-based conflict resolution and pull/push operations.
 
 Metadata references its source data record (`target_id`) but data records have no
 knowledge of their metadata. This separation means generators can be added, removed, or
@@ -80,7 +93,9 @@ updated incrementally as records change.
 
 Conflicts are resolved by **last-writer-wins**: when two versions of the same record exist,
 the one with the later timestamp is kept. Timestamps use Hybrid Logical Clocks (see below),
-which provide a reliable total ordering across devices without coordination.
+which provide a reliable total ordering across devices without coordination. This applies to
+both data records and **syncable metadata records**. Non-syncable metadata is excluded from
+conflict resolution — it is recomputed from the source data record as needed.
 
 File sync is content-addressed: files are identified by their SHA-256 hash, so a file that
 already exists in the cloud is never transferred again even if it was re-created locally.
