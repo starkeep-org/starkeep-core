@@ -35,7 +35,6 @@ export function createAggregationEngine(
 
     while (hasMore) {
       const queryResult = await databaseAdapter.query({
-        kind: "data",
         limit: PAGE_SIZE,
         cursor,
       });
@@ -97,11 +96,11 @@ export function createAggregationEngine(
 
     for (const recordId of changedRecordIds) {
       const record = await databaseAdapter.get(recordId);
-      if (!record || record.kind !== "data") {
+      if (!record) {
         continue;
       }
 
-      const dataRecord = record as DataRecord;
+      const dataRecord = record;
 
       newCount += 1;
       newSizeBytes += dataRecord.sizeBytes ?? 0;

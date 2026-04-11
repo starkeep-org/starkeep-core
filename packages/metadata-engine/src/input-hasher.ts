@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 function stableStringify(value: unknown): string {
   if (value === null || value === undefined) {
     return JSON.stringify(value);
@@ -20,16 +18,17 @@ function stableStringify(value: unknown): string {
   return "{" + entries.join(",") + "}";
 }
 
-export function computeInputHash(
+export async function computeInputHash(
   dataRecordId: string,
   dependencyIds: string[],
   parameters: Record<string, unknown>,
-): string {
+): Promise<string> {
   const input = stableStringify({
     dataRecordId,
     dependencyIds: [...dependencyIds].sort(),
     parameters,
   });
-
-  return createHash("sha256").update(input).digest("hex");
+  const encoded = new TextEncoder().encode(input);
+  const buf = await crypto.subtle.digest("SHA-256", encoded);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }

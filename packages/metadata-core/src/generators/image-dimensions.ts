@@ -40,11 +40,16 @@ export const IMAGE_DIMENSIONS_GENERATOR: GeneratingFunctionDefinition = {
   generatorVersion: 1,
   inputTypes: ["@starkeep/photo", "@starkeep/image"],
   dependsOn: [],
+  outputColumns: [
+    { name: "width", columnType: "integer" },
+    { name: "height", columnType: "integer" },
+    { name: "format", columnType: "text" },
+  ],
 
   async generate(input, context) {
     const targetRecord = await context.databaseAdapter.get(input.dataRecordId);
 
-    if (!targetRecord || targetRecord.kind !== "data" || !targetRecord.objectStorageKey) {
+    if (!targetRecord || !targetRecord.objectStorageKey) {
       return { value: { width: 0, height: 0, format: "unknown" } };
     }
 

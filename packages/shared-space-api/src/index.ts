@@ -8,6 +8,9 @@ export type {
   ApiRouter,
   SharedSpaceApi,
   SharedSpaceApiOptions,
+  WebSocketConnection,
+  ChangeEvent,
+  ChangeNotifier,
 } from "./types.js";
 
 export { createApiRouter } from "./api-router.js";

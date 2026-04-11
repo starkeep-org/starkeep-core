@@ -1,12 +1,18 @@
 import {
   createHLCClock,
   createDataRecord,
-  generateId,
+  makePrivateType,
   type StarkeepId,
   type DataRecord,
   type MetadataRecord,
 } from "@starkeep/core";
-import { createHash } from "node:crypto";
+async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
+  const copy = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+  const buf = await crypto.subtle.digest("SHA-256", copy);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 import {
   createGeneratorRegistry,
   createDependencyGraph,
@@ -15,7 +21,7 @@ import {
 import { createUnifiedIndex } from "@starkeep/index";
 import { createAggregationEngine } from "@starkeep/aggregations";
 import { createSyncEngine } from "@starkeep/sync-engine";
-import { createAccessControlEngine } from "@starkeep/access-control";
+import { createAccessControlEngine, createEnforcedDatabaseAdapter } from "@starkeep/access-control";
 import { createSharedSpaceApi } from "@starkeep/shared-space-api";
 import type { StarkeepSdk, StarkeepSdkOptions } from "./types.js";
 
@@ -23,20 +29,39 @@ export async function createStarkeepSdk(
   options: StarkeepSdkOptions,
 ): Promise<StarkeepSdk> {
   const {
-    databaseAdapter,
+    databaseAdapter: rawDatabaseAdapter,
     objectStorageAdapter,
     ownerId,
     nodeId,
     remoteDatabaseAdapter,
     remoteObjectStorageAdapter,
     generators = [],
+    subject,
   } = options;
 
   const clock =
     options.clock ?? createHLCClock({ nodeId, wallClockFunction: Date.now });
 
-  await databaseAdapter.init();
+  await rawDatabaseAdapter.init();
   await objectStorageAdapter.init();
+
+  // When a subject is provided, wrap the adapter so every operation is
+  // gated by access control and the private-storage structural rule.
+  const accessControlEngine = createAccessControlEngine({
+    databaseAdapter: rawDatabaseAdapter,
+    clock,
+    ownerId,
+  });
+  await accessControlEngine.loadPolicies();
+
+  const databaseAdapter = subject
+    ? createEnforcedDatabaseAdapter({
+        databaseAdapter: rawDatabaseAdapter,
+        accessControlEngine,
+        subjectType: subject.subjectType,
+        subjectId: subject.subjectId,
+      })
+    : rawDatabaseAdapter;
 
   const generatorRegistry = createGeneratorRegistry();
   const dependencyGraph = createDependencyGraph();
@@ -44,6 +69,14 @@ export async function createStarkeepSdk(
   for (const generator of generators) {
     generatorRegistry.register(generator);
     dependencyGraph.addGenerator(generator);
+    // Ensure the per-type metadata table exists for each input type.
+    for (const inputType of generator.inputTypes) {
+      await databaseAdapter.ensureMetadataTable(
+        inputType,
+        generator.generatorId,
+        generator.outputColumns,
+      );
+    }
   }
 
   const metadataEngine = createMetadataEngine({
@@ -57,18 +90,6 @@ export async function createStarkeepSdk(
 
   const unifiedIndex = createUnifiedIndex({ databaseAdapter });
   const aggregationEngine = createAggregationEngine({ databaseAdapter });
-  const accessControlEngine = createAccessControlEngine({
-    databaseAdapter,
-    clock,
-    ownerId,
-  });
-
-  const sharedSpaceApi = createSharedSpaceApi({
-    databaseAdapter,
-    objectStorageAdapter,
-    clock,
-    ownerId,
-  });
 
   let syncEngine = null;
   if (remoteDatabaseAdapter && remoteObjectStorageAdapter) {
@@ -84,6 +105,14 @@ export async function createStarkeepSdk(
     });
   }
 
+  const sharedSpaceApi = createSharedSpaceApi({
+    databaseAdapter,
+    objectStorageAdapter,
+    clock,
+    ownerId,
+    changeNotifier: syncEngine?.changeNotifier,
+  });
+
   return {
     data: {
       async put(input) {
@@ -96,9 +125,7 @@ export async function createStarkeepSdk(
       },
 
       async putWithFile(input, file, contentType) {
-        const contentHash = createHash("sha256")
-          .update(file)
-          .digest("hex");
+        const contentHash = await sha256Hex(file);
         const objectStorageKey = `${contentHash.slice(0, 2)}/${contentHash}`;
 
         await objectStorageAdapter.put(objectStorageKey, file, {
@@ -123,9 +150,7 @@ export async function createStarkeepSdk(
       },
 
       async get(recordId) {
-        const record = await databaseAdapter.get(recordId);
-        if (!record || record.kind !== "data") return null;
-        return record as DataRecord;
+        return databaseAdapter.get(recordId);
       },
 
       async delete(recordId) {
@@ -137,13 +162,23 @@ export async function createStarkeepSdk(
           }
         }
       },
+
+      async query(params) {
+        const result = await databaseAdapter.query(params);
+        return result.records;
+      },
     },
 
     metadata: {
       async generate(generatorId, targetId) {
+        const record = await databaseAdapter.get(targetId);
+        if (!record) {
+          throw new Error(`Target record not found: ${targetId}`);
+        }
         return metadataEngine.generate({
           generatorId,
           targetId,
+          targetType: record.type,
           mode: "on-demand",
         });
       },
@@ -153,13 +188,10 @@ export async function createStarkeepSdk(
       },
 
       async getForRecord(targetId) {
-        const result = await databaseAdapter.query({
-          kind: "metadata",
-          filters: [
-            { field: "targetId", operator: "eq", value: targetId },
-          ],
-        });
-        return result.records as MetadataRecord[];
+        const record = await databaseAdapter.get(targetId);
+        if (!record) return [];
+        const result = await databaseAdapter.queryMetadata(record.type, { targetId });
+        return result.entries;
       },
     },
 
@@ -202,10 +234,20 @@ export async function createStarkeepSdk(
 
     accessControl: {
       async createPolicy(input) {
+        if (subject) {
+          throw new Error(
+            "createPolicy is not available on an app-scoped SDK. Policies are managed by the admin layer.",
+          );
+        }
         return accessControlEngine.createPolicy(input);
       },
 
       async revokePolicy(policyId) {
+        if (subject) {
+          throw new Error(
+            "revokePolicy is not available on an app-scoped SDK. Policies are managed by the admin layer.",
+          );
+        }
         return accessControlEngine.revokePolicy(policyId);
       },
 
@@ -218,9 +260,37 @@ export async function createStarkeepSdk(
       },
     },
 
+    privateStore:
+      subject?.subjectType === "app"
+        ? (() => {
+            return {
+              async put(subtype: string, content: Record<string, unknown> = {}) {
+                const privateType = makePrivateType(subject.subjectId, subtype);
+                const record = createDataRecord({ type: privateType, ownerId, content }, clock);
+                await databaseAdapter.put(record);
+                return record;
+              },
+
+              async get(recordId: StarkeepId) {
+                return databaseAdapter.get(recordId);
+              },
+
+              async delete(recordId: StarkeepId) {
+                await databaseAdapter.delete(recordId);
+              },
+            };
+          })()
+        : null,
+
     api: {
+      get router() {
+        return sharedSpaceApi.router;
+      },
       async handleRequest(request) {
         return sharedSpaceApi.handleRequest(request);
+      },
+      handleWebSocketConnect(connection) {
+        return sharedSpaceApi.handleWebSocketConnect(connection);
       },
     },
 

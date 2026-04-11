@@ -6,3 +6,23 @@ dist/
 .env.*
 !.env.example
 .DS_Store
+
+# Xcode
+*.xcuserstate
+xcuserdata/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Starkeep local data
+.starkeep/
+
+# FUSE mount lib (vendored native binary)
+apps/fuse-mount/lib/
+apps/fuse-mount/package-lock.json
+
+# tasks-desktop Tauri build artifacts
+.next/
+apps/tasks-desktop/src-tauri/target/
+apps/tasks-desktop/src-tauri/gen/schemas/
+apps/tasks-desktop/src-tauri/binaries/

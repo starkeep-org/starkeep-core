@@ -5,7 +5,7 @@ export interface ObjectStorageAdapter {
   close(): Promise<void>;
   healthCheck(): Promise<boolean>;
 
-  put(key: string, data: Buffer | Uint8Array, options?: PutOptions): Promise<void>;
+  put(key: string, data: Uint8Array, options?: PutOptions): Promise<void>;
   get(key: string): Promise<GetResult | null>;
   delete(key: string): Promise<void>;
   list(prefix: string, options?: ListOptions): Promise<ListResult>;

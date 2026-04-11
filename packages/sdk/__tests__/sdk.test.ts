@@ -13,6 +13,10 @@ function createTestGenerator(): GeneratingFunctionDefinition {
     generatorVersion: 1,
     inputTypes: ["@test/photo"],
     dependsOn: [],
+    outputColumns: [
+      { name: "type", columnType: "text" },
+      { name: "extracted", columnType: "boolean" },
+    ],
     generate: async (input, context) => {
       const record = await context.databaseAdapter.get(input.dataRecordId);
       return {
@@ -60,7 +64,7 @@ describe("createStarkeepSdk", () => {
       const record = await sdk.data.put({
         type: "@test/photo",
         ownerId: "test-owner",
-        payload: { title: "My Photo" },
+        content: { title: "My Photo" },
       });
 
       expect(record.kind).toBe("data");
@@ -68,7 +72,7 @@ describe("createStarkeepSdk", () => {
 
       const retrieved = await sdk.data.get(record.id);
       expect(retrieved).not.toBeNull();
-      expect(retrieved!.payload).toEqual({ title: "My Photo" });
+      expect(retrieved!.content).toEqual({ title: "My Photo" });
     });
 
     it("should put with file and compute content hash", async () => {
@@ -118,7 +122,6 @@ describe("createStarkeepSdk", () => {
         record.id,
       );
 
-      expect(result.metadataRecord.kind).toBe("metadata");
       expect(result.metadataRecord.value).toEqual({
         type: "@test/photo",
         extracted: true,

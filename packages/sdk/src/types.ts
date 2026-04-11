@@ -26,18 +26,20 @@ import type {
   AccessPolicy,
   AccessCheckRequest,
   AccessCheckResult,
+  SubjectType,
 } from "@starkeep/access-control";
-import type { SharedSpaceApi, ApiRequest, ApiResponse } from "@starkeep/shared-space-api";
+import type { SharedSpaceApi, ApiRequest, ApiResponse, ApiRouter, WebSocketConnection } from "@starkeep/shared-space-api";
 
 export interface DataOperations {
   put(input: CreateDataRecordInput): Promise<DataRecord>;
   putWithFile(
     input: CreateDataRecordInput,
-    file: Buffer | Uint8Array,
+    file: Uint8Array,
     contentType?: string,
   ): Promise<DataRecord>;
   get(recordId: StarkeepId): Promise<DataRecord | null>;
   delete(recordId: StarkeepId): Promise<void>;
+  query(params: { type?: string; filters?: import("@starkeep/storage-adapter").Filter[] }): Promise<DataRecord[]>;
 }
 
 export interface MetadataOperations {
@@ -78,7 +80,32 @@ export interface AccessControlOperations {
 }
 
 export interface ApiOperations {
+  readonly router: ApiRouter;
   handleRequest(request: ApiRequest): Promise<ApiResponse>;
+  /**
+   * Register a connected WebSocket client. Returns a cleanup function to call
+   * when the connection closes. Requires a changeNotifier (i.e. sync must be
+   * configured) otherwise this is a no-op unsubscribe.
+   */
+  handleWebSocketConnect(connection: WebSocketConnection): () => void;
+}
+
+export type { ApiRouter };
+
+export type { WebSocketConnection };
+
+/**
+ * Ergonomic interface for per-app private storage.
+ * All operations are automatically scoped to `<normalizedAppId>:private:*`.
+ * Only available when the SDK is created with a `subject` of type `"app"`.
+ */
+export interface PrivateStoreOperations {
+  /** Write a record under `<appId>:private:<subtype>`. */
+  put(subtype: string, content?: Record<string, unknown>): Promise<DataRecord>;
+  /** Read a record by ID (must be accessible to this app's private namespace). */
+  get(recordId: StarkeepId): Promise<DataRecord | null>;
+  /** Delete a record by ID (must be accessible to this app's private namespace). */
+  delete(recordId: StarkeepId): Promise<void>;
 }
 
 export interface StarkeepSdk {
@@ -89,6 +116,11 @@ export interface StarkeepSdk {
   readonly sync: SyncOperations | null;
   readonly accessControl: AccessControlOperations;
   readonly api: ApiOperations;
+  /**
+   * Scoped private storage for this app. Non-null only when the SDK is
+   * created with `subject: { subjectType: "app", subjectId: "..." }`.
+   */
+  readonly privateStore: PrivateStoreOperations | null;
   close(): Promise<void>;
 }
 
@@ -101,4 +133,13 @@ export interface StarkeepSdkOptions {
   readonly remoteDatabaseAdapter?: DatabaseAdapter;
   readonly remoteObjectStorageAdapter?: ObjectStorageAdapter;
   readonly generators?: GeneratingFunctionDefinition[];
+  /**
+   * When provided, all database operations are wrapped with
+   * `EnforcedDatabaseAdapter` using this subject's identity.
+   * Required to enable `sdk.privateStore`.
+   */
+  readonly subject?: {
+    readonly subjectType: SubjectType;
+    readonly subjectId: string;
+  };
 }

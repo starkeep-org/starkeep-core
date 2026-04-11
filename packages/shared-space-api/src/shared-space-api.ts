@@ -4,6 +4,7 @@ import type {
   ApiRequest,
   ApiResponse,
   ApiContext,
+  WebSocketConnection,
 } from "./types.js";
 import { createApiRouter } from "./api-router.js";
 import { RouteNotFoundError } from "./errors.js";
@@ -33,7 +34,7 @@ function parseRoutePath(fullPath: string): {
 export function createSharedSpaceApi(
   options: SharedSpaceApiOptions,
 ): SharedSpaceApi {
-  const { databaseAdapter, objectStorageAdapter, clock, ownerId } = options;
+  const { databaseAdapter, objectStorageAdapter, clock, ownerId, changeNotifier } = options;
   const router = createApiRouter();
 
   const context: ApiContext = {
@@ -43,8 +44,30 @@ export function createSharedSpaceApi(
     ownerId,
   };
 
+  // Track connected WebSocket clients
+  const connections = new Map<string, WebSocketConnection>();
+
+  // Forward change events from the sync engine to all connected clients
+  if (changeNotifier) {
+    changeNotifier.subscribe((event) => {
+      for (const connection of connections.values()) {
+        void Promise.resolve(connection.send(event)).catch(() => {
+          // Remove dead connections silently
+          connections.delete(connection.connectionId);
+        });
+      }
+    });
+  }
+
   return {
     router,
+
+    handleWebSocketConnect(connection: WebSocketConnection): () => void {
+      connections.set(connection.connectionId, connection);
+      return () => {
+        connections.delete(connection.connectionId);
+      };
+    },
 
     async handleRequest(request: ApiRequest): Promise<ApiResponse> {
       const parsed = parseRoutePath(request.path);

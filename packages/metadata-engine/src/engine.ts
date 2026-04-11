@@ -1,5 +1,4 @@
-import { createMetadataRecord } from "@starkeep/core";
-import type { StarkeepId, MetadataRecord, DataRecord } from "@starkeep/core";
+import type { StarkeepId, MetadataRecord } from "@starkeep/core";
 import type {
   MetadataEngine,
   MetadataEngineOptions,
@@ -30,17 +29,14 @@ export function createMetadataEngine(
 
   async function findExistingMetadata(
     targetId: StarkeepId,
+    targetType: string,
     generatorId: string,
   ): Promise<MetadataRecord | null> {
-    const result = await databaseAdapter.query({
-      kind: "metadata",
-      filters: [
-        { field: "targetId", operator: "eq", value: targetId },
-        { field: "generatorId", operator: "eq", value: generatorId },
-      ],
-      limit: 1,
+    const result = await databaseAdapter.queryMetadata(targetType, {
+      targetId,
+      generatorId,
     });
-    return (result.records[0] as MetadataRecord) ?? null;
+    return result.entries[0] ?? null;
   }
 
   return {
@@ -51,32 +47,35 @@ export function createMetadataEngine(
       }
 
       const targetRecord = await databaseAdapter.get(request.targetId);
-      if (!targetRecord || targetRecord.kind !== "data") {
+      if (!targetRecord) {
         throw new GenerationError(
           `Target data record not found: ${request.targetId}`,
           request.generatorId,
         );
       }
 
-      const dependencyIds: StarkeepId[] = [];
+      // Collect dependency input hashes to include in this generator's input hash.
+      const dependencyHashes: string[] = [];
       for (const dependencyGeneratorId of definition.dependsOn) {
         const dependencyMetadata = await findExistingMetadata(
           request.targetId,
+          request.targetType,
           dependencyGeneratorId,
         );
         if (dependencyMetadata) {
-          dependencyIds.push(dependencyMetadata.id);
+          dependencyHashes.push(dependencyMetadata.inputHash);
         }
       }
 
-      const inputHash = computeInputHash(
+      const inputHash = await computeInputHash(
         request.targetId,
-        dependencyIds,
+        dependencyHashes,
         request.parameters ?? {},
       );
 
       const existing = await findExistingMetadata(
         request.targetId,
+        request.targetType,
         request.generatorId,
       );
 
@@ -93,7 +92,8 @@ export function createMetadataEngine(
         output = await definition.generate(
           {
             dataRecordId: request.targetId,
-            dependencyIds,
+            targetType: request.targetType,
+            dependencyIds: dependencyHashes as unknown as StarkeepId[],
             parameters: request.parameters ?? {},
           },
           generationContext,
@@ -106,41 +106,19 @@ export function createMetadataEngine(
         );
       }
 
-      if (existing) {
-        const updated: MetadataRecord = {
-          ...existing,
-          updatedAt: clock.now(),
-          generatorVersion: definition.generatorVersion,
-          inputHash,
-          value: output.value,
-          version: existing.version + 1,
-        };
-        await databaseAdapter.put(updated);
-        return {
-          metadataRecord: updated,
-          wasStale: true,
-          skippedBecauseCached: false,
-        };
-      }
+      const metadataRecord: MetadataRecord = {
+        targetId: request.targetId,
+        generatorId: definition.generatorId,
+        generatorVersion: definition.generatorVersion,
+        inputHash,
+        value: output.value,
+      };
 
-      const metadataRecord = createMetadataRecord(
-        {
-          type: definition.generatorId,
-          ownerId,
-          targetId: request.targetId,
-          generatorId: definition.generatorId,
-          generatorVersion: definition.generatorVersion,
-          inputHash,
-          value: output.value,
-        },
-        clock,
-      );
-
-      await databaseAdapter.put(metadataRecord);
+      await databaseAdapter.putMetadata(request.targetType, metadataRecord);
 
       return {
         metadataRecord,
-        wasStale: false,
+        wasStale: existing !== null,
         skippedBecauseCached: false,
       };
     },
@@ -156,6 +134,7 @@ export function createMetadataEngine(
         const result = await this.generate({
           generatorId,
           targetId,
+          targetType: dataType,
           mode: "on-demand",
         });
         results.push(result);
@@ -164,43 +143,35 @@ export function createMetadataEngine(
       return results;
     },
 
-    async checkStaleness(metadataRecordId: StarkeepId): Promise<boolean> {
-      const record = await databaseAdapter.get(metadataRecordId);
-      if (!record || record.kind !== "metadata") {
-        throw new GenerationError(
-          `Metadata record not found: ${metadataRecordId}`,
-          "unknown",
-        );
-      }
+    async checkStaleness(
+      targetId: StarkeepId,
+      targetType: string,
+      generatorId: string,
+    ): Promise<boolean> {
+      const existing = await findExistingMetadata(targetId, targetType, generatorId);
+      if (!existing) return true;
 
-      const metadataRecord = record as MetadataRecord;
-      const definition = generatorRegistry.get(metadataRecord.generatorId);
-      if (!definition) {
+      const definition = generatorRegistry.get(generatorId);
+      if (!definition) return true;
+
+      if (existing.generatorVersion < definition.generatorVersion) {
         return true;
       }
 
-      if (metadataRecord.generatorVersion < definition.generatorVersion) {
-        return true;
-      }
-
-      const dependencyIds: StarkeepId[] = [];
+      const dependencyHashes: string[] = [];
       for (const dependencyGeneratorId of definition.dependsOn) {
         const dependencyMetadata = await findExistingMetadata(
-          metadataRecord.targetId,
+          targetId,
+          targetType,
           dependencyGeneratorId,
         );
         if (dependencyMetadata) {
-          dependencyIds.push(dependencyMetadata.id);
+          dependencyHashes.push(dependencyMetadata.inputHash);
         }
       }
 
-      const currentInputHash = computeInputHash(
-        metadataRecord.targetId,
-        dependencyIds,
-        {},
-      );
-
-      return currentInputHash !== metadataRecord.inputHash;
+      const currentInputHash = await computeInputHash(targetId, dependencyHashes, {});
+      return currentInputHash !== existing.inputHash;
     },
   };
 }

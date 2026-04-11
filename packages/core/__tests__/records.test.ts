@@ -21,7 +21,7 @@ describe("record builders", () => {
       expect(record.version).toBe(1);
       expect(record.syncStatus).toBe(SyncStatus.Local);
       expect(record.deletedAt).toBeNull();
-      expect(record.payload).toEqual({});
+      expect(record.content).toEqual({});
       expect(record.contentHash).toBeNull();
       expect(record.objectStorageKey).toBeNull();
       expect(record.mimeType).toBeNull();
@@ -37,7 +37,7 @@ describe("record builders", () => {
           objectStorageKey: "photos/abc123",
           mimeType: "image/jpeg",
           sizeBytes: 1024,
-          payload: { name: "sunset.jpg" },
+          content: { name: "sunset.jpg" },
         },
         clock,
       );
@@ -46,7 +46,7 @@ describe("record builders", () => {
       expect(record.objectStorageKey).toBe("photos/abc123");
       expect(record.mimeType).toBe("image/jpeg");
       expect(record.sizeBytes).toBe(1024);
-      expect(record.payload).toEqual({ name: "sunset.jpg" });
+      expect(record.content).toEqual({ name: "sunset.jpg" });
     });
 
     it("should have matching createdAt and updatedAt", () => {
@@ -68,28 +68,19 @@ describe("record builders", () => {
   describe("createMetadataRecord", () => {
     it("should create a metadata record with required fields", () => {
       const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-      const record = createMetadataRecord(
-        {
-          type: "@starkeep/metadata-core:image-dimensions",
-          ownerId: "user-1",
-          targetId,
-          generatorId: "@starkeep/metadata-core:image-dimensions",
-          generatorVersion: 1,
-          inputHash: "hash-abc",
-          value: { width: 1920, height: 1080 },
-        },
-        clock,
-      );
+      const record = createMetadataRecord({
+        targetId,
+        generatorId: "@starkeep/metadata-core:image-dimensions",
+        generatorVersion: 1,
+        inputHash: "hash-abc",
+        value: { width: 1920, height: 1080 },
+      });
 
-      expect(record.kind).toBe("metadata");
-      expect(record.type).toBe("@starkeep/metadata-core:image-dimensions");
       expect(record.targetId).toBe(targetId);
       expect(record.generatorId).toBe("@starkeep/metadata-core:image-dimensions");
       expect(record.generatorVersion).toBe(1);
       expect(record.inputHash).toBe("hash-abc");
       expect(record.value).toEqual({ width: 1920, height: 1080 });
-      expect(record.syncStatus).toBe(SyncStatus.Local);
-      expect(record.version).toBe(1);
     });
   });
 });

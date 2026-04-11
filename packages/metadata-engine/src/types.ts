@@ -1,8 +1,12 @@
 import type { HLCClock, StarkeepId, MetadataRecord } from "@starkeep/core";
-import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import type { DatabaseAdapter, MetadataColumnDefinition } from "@starkeep/storage-adapter";
+import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
+
+export type { MetadataColumnDefinition };
 
 export interface GeneratingFunctionInput {
   readonly dataRecordId: StarkeepId;
+  readonly targetType: string;
   readonly dependencyIds: StarkeepId[];
   readonly parameters: Record<string, unknown>;
 }
@@ -16,6 +20,12 @@ export interface GeneratingFunctionDefinition {
   readonly generatorVersion: number;
   readonly inputTypes: string[];
   readonly dependsOn: string[];
+  /**
+   * Declares the SQL columns this generator writes into the per-type metadata
+   * table. Column names are snake_case; values in GeneratingFunctionOutput.value
+   * use the corresponding camelCase key (e.g. "group_id" ↔ "groupId").
+   */
+  readonly outputColumns: MetadataColumnDefinition[];
   generate(
     input: GeneratingFunctionInput,
     context: GenerationContext,
@@ -34,6 +44,7 @@ export type GenerationMode = "on-demand" | "queued";
 export interface GenerationRequest {
   readonly generatorId: string;
   readonly targetId: StarkeepId;
+  readonly targetType: string;
   readonly mode: GenerationMode;
   readonly priority?: number;
   readonly parameters?: Record<string, unknown>;
@@ -78,7 +89,7 @@ export interface GenerationQueue {
 export interface MetadataEngine {
   generate(request: GenerationRequest): Promise<GenerationResult>;
   generateAll(targetId: StarkeepId, dataType: string): Promise<GenerationResult[]>;
-  checkStaleness(metadataRecordId: StarkeepId): Promise<boolean>;
+  checkStaleness(targetId: StarkeepId, targetType: string, generatorId: string): Promise<boolean>;
 }
 
 export interface MetadataEngineOptions {
@@ -92,6 +103,6 @@ export interface MetadataEngineOptions {
 
 export interface MigrationRunner {
   registerMigration(migration: MetadataMigration): void;
-  applyPendingMigrations(generatorId: string): Promise<number>;
+  applyPendingMigrations(generatorId: string, targetType: string): Promise<number>;
   getMigrations(generatorId: string): MetadataMigration[];
 }

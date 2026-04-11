@@ -1,5 +1,6 @@
 import type { HLCClock } from "@starkeep/core";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import type { ChangeEvent, ChangeNotifier } from "@starkeep/sync-engine";
 
 export interface ApiEndpointDefinition {
   readonly namespace: string;
@@ -53,9 +54,20 @@ export interface ApiRouter {
   listEndpoints(): ApiEndpointDefinition[];
 }
 
+/** Platform-agnostic representation of a single connected WebSocket client. */
+export interface WebSocketConnection {
+  readonly connectionId: string;
+  send(event: ChangeEvent): void | Promise<void>;
+}
+
 export interface SharedSpaceApi {
   readonly router: ApiRouter;
   handleRequest(request: ApiRequest): Promise<ApiResponse>;
+  /**
+   * Register a connected WebSocket client. Returns an unsubscribe function that
+   * must be called when the connection closes.
+   */
+  handleWebSocketConnect(connection: WebSocketConnection): () => void;
 }
 
 export interface SharedSpaceApiOptions {
@@ -63,4 +75,8 @@ export interface SharedSpaceApiOptions {
   readonly objectStorageAdapter: ObjectStorageAdapter;
   readonly clock: HLCClock;
   readonly ownerId: string;
+  /** When provided, change events are forwarded to all connected WebSocket clients. */
+  readonly changeNotifier?: ChangeNotifier;
 }
+
+export type { ChangeEvent, ChangeNotifier };
