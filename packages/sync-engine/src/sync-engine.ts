@@ -6,6 +6,7 @@ import type {
   SyncPushResponse,
   ChangeLogEntry,
   ConflictResolution,
+  MetadataSyncResult,
 } from "./types.js";
 import { createChangeLog } from "./change-log.js";
 import { createChangeNotifier } from "./change-notifier.js";
@@ -213,6 +214,71 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       };
     },
 
+    async pullMetadata(): Promise<MetadataSyncResult> {
+      const epoch: import("@starkeep/core").HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
+      const remoteChanges = await remoteDatabaseAdapter.getSyncableMetadataChangesSince(
+        lastSyncTimestamp,
+      );
+
+      // Build a local lookup keyed by `targetId:generatorId`.
+      const localAll = await localDatabaseAdapter.getSyncableMetadataChangesSince(epoch);
+      const localMap = new Map(
+        localAll.map((r) => [`${r.targetId}:${r.generatorId}`, r]),
+      );
+
+      let pulled = 0;
+      let conflicts = 0;
+
+      for (const remote of remoteChanges) {
+        const key = `${remote.targetId}:${remote.generatorId}`;
+        const local = localMap.get(key);
+
+        if (!local || compareHLC(remote.updatedAt, local.updatedAt) > 0) {
+          // Remote is newer (or no local copy): apply locally.
+          await localDatabaseAdapter.upsertSyncableMetadata(remote);
+          pulled++;
+        } else if (compareHLC(local.updatedAt, remote.updatedAt) !== 0) {
+          // Local is newer: keep local, count as conflict resolved in local's favour.
+          conflicts++;
+        }
+      }
+
+      return { pulled, pushed: 0, conflicts };
+    },
+
+    async pushMetadata(): Promise<MetadataSyncResult> {
+      const epoch: import("@starkeep/core").HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
+      const localChanges = await localDatabaseAdapter.getSyncableMetadataChangesSince(
+        lastSyncTimestamp,
+      );
+
+      // Build a remote lookup keyed by `targetId:generatorId`.
+      const remoteAll = await remoteDatabaseAdapter.getSyncableMetadataChangesSince(epoch);
+      const remoteMap = new Map(
+        remoteAll.map((r) => [`${r.targetId}:${r.generatorId}`, r]),
+      );
+
+      let pushed = 0;
+      let conflicts = 0;
+
+      for (const local of localChanges) {
+        const key = `${local.targetId}:${local.generatorId}`;
+        const remote = remoteMap.get(key);
+
+        if (!remote || compareHLC(local.updatedAt, remote.updatedAt) >= 0) {
+          // Local is newer (or no remote copy): push to remote.
+          await remoteDatabaseAdapter.upsertSyncableMetadata(local);
+          pushed++;
+        } else {
+          // Remote is newer: apply locally and count as conflict.
+          await localDatabaseAdapter.upsertSyncableMetadata(remote);
+          conflicts++;
+        }
+      }
+
+      return { pulled: 0, pushed, conflicts };
+    },
+
     async fullSync(): Promise<{
       pulled: number;
       pushed: number;
@@ -220,11 +286,13 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     }> {
       const pullResult = await this.pull();
       const pushResult = await this.push();
+      const metadataPull = await this.pullMetadata();
+      const metadataPush = await this.pushMetadata();
 
       return {
-        pulled: pullResult.changes.length,
-        pushed: pushResult.accepted.length,
-        conflicts: pushResult.conflicts.length,
+        pulled: pullResult.changes.length + metadataPull.pulled,
+        pushed: pushResult.accepted.length + metadataPush.pushed,
+        conflicts: pushResult.conflicts.length + metadataPull.conflicts + metadataPush.conflicts,
       };
     },
 

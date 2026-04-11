@@ -1,4 +1,4 @@
-import type { DataRecord, MetadataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
 
 export type SortDirection = "asc" | "desc";
 
@@ -65,4 +65,23 @@ export interface MetadataQuery {
 
 export interface MetadataQueryResult {
   entries: MetadataRecord[];
+}
+
+/**
+ * A metadata record that participates in sync. Stored in the `metadata_sync`
+ * table alongside the per-type typed-column metadata tables.
+ *
+ * `targetType` is included (unlike `MetadataRecord`) so the sync engine can
+ * route the record back to the correct per-type table when applying remote
+ * changes. `inputHash` is nullable to accommodate user-authored entries where
+ * the value is written directly rather than derived from a data record.
+ */
+export interface MetadataSyncRecord {
+  readonly targetId: StarkeepId;
+  readonly targetType: string;
+  readonly generatorId: string;
+  generatorVersion: number;
+  inputHash: string | null;
+  updatedAt: HLCTimestamp;
+  value: Record<string, unknown>;
 }

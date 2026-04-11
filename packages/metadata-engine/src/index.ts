@@ -13,6 +13,7 @@ export type {
   MetadataEngine,
   MetadataEngineOptions,
   MigrationRunner,
+  MetadataSyncRecord,
 } from "./types.js";
 
 export { createGeneratorRegistry } from "./generator-registry.js";

@@ -4,6 +4,7 @@ import type {
   MetadataEngineOptions,
   GenerationRequest,
   GenerationResult,
+  MetadataSyncRecord,
 } from "./types.js";
 import { computeInputHash } from "./input-hasher.js";
 import { GeneratorNotFoundError, GenerationError } from "./errors.js";
@@ -63,6 +64,7 @@ export function createMetadataEngine(
           dependencyGeneratorId,
         );
         if (dependencyMetadata) {
+          // inputHash may be empty string for user-authored entries; use it as-is.
           dependencyHashes.push(dependencyMetadata.inputHash);
         }
       }
@@ -114,7 +116,19 @@ export function createMetadataEngine(
         value: output.value,
       };
 
-      await databaseAdapter.putMetadata(request.targetType, metadataRecord);
+      if (definition.syncable) {
+        await databaseAdapter.upsertSyncableMetadata({
+          targetId: request.targetId,
+          targetType: request.targetType,
+          generatorId: definition.generatorId,
+          generatorVersion: definition.generatorVersion,
+          inputHash,
+          updatedAt: clock.now(),
+          value: output.value,
+        });
+      } else {
+        await databaseAdapter.putMetadata(request.targetType, metadataRecord);
+      }
 
       return {
         metadataRecord,
@@ -172,6 +186,41 @@ export function createMetadataEngine(
 
       const currentInputHash = await computeInputHash(targetId, dependencyHashes, {});
       return currentInputHash !== existing.inputHash;
+    },
+
+    async writeDirect(
+      targetId: StarkeepId,
+      targetType: string,
+      generatorId: string,
+      value: Record<string, unknown>,
+    ): Promise<MetadataSyncRecord> {
+      const definition = generatorRegistry.get(generatorId);
+      if (!definition) {
+        throw new GeneratorNotFoundError(generatorId);
+      }
+      if (!definition.syncable) {
+        throw new GenerationError(
+          `Generator "${generatorId}" is not syncable. Set syncable: true to allow direct writes.`,
+          generatorId,
+        );
+      }
+
+      // Derive a stable input hash from the written value so dependent
+      // generators can detect when this value has changed.
+      const inputHash = await computeInputHash(targetId, [], { value });
+
+      const syncRecord: MetadataSyncRecord = {
+        targetId,
+        targetType,
+        generatorId,
+        generatorVersion: definition.generatorVersion,
+        inputHash,
+        updatedAt: clock.now(),
+        value,
+      };
+
+      await databaseAdapter.upsertSyncableMetadata(syncRecord);
+      return syncRecord;
     },
   };
 }

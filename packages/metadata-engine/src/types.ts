@@ -1,8 +1,8 @@
 import type { HLCClock, StarkeepId, MetadataRecord } from "@starkeep/core";
-import type { DatabaseAdapter, MetadataColumnDefinition } from "@starkeep/storage-adapter";
+import type { DatabaseAdapter, MetadataColumnDefinition, MetadataSyncRecord } from "@starkeep/storage-adapter";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 
-export type { MetadataColumnDefinition };
+export type { MetadataColumnDefinition, MetadataSyncRecord };
 
 export interface GeneratingFunctionInput {
   readonly dataRecordId: StarkeepId;
@@ -26,6 +26,16 @@ export interface GeneratingFunctionDefinition {
    * use the corresponding camelCase key (e.g. "group_id" ↔ "groupId").
    */
   readonly outputColumns: MetadataColumnDefinition[];
+  /**
+   * When `true`, the engine writes this generator's output to the
+   * `metadata_sync` table in addition to the per-type typed-column table,
+   * making it eligible for sync and HLC-based conflict resolution.
+   *
+   * Set this for non-deterministic generators (e.g. AI models) or generators
+   * that accept user input, where two devices may independently produce
+   * different outputs for the same data record.
+   */
+  readonly syncable?: boolean;
   generate(
     input: GeneratingFunctionInput,
     context: GenerationContext,
@@ -90,6 +100,18 @@ export interface MetadataEngine {
   generate(request: GenerationRequest): Promise<GenerationResult>;
   generateAll(targetId: StarkeepId, dataType: string): Promise<GenerationResult[]>;
   checkStaleness(targetId: StarkeepId, targetType: string, generatorId: string): Promise<boolean>;
+  /**
+   * Write a metadata value directly for a syncable generator, bypassing the
+   * staleness check and generator function. The generator must be registered
+   * with `syncable: true`. Use this for user-authored metadata where the value
+   * comes from user input rather than from a computation over the data record.
+   */
+  writeDirect(
+    targetId: StarkeepId,
+    targetType: string,
+    generatorId: string,
+    value: Record<string, unknown>,
+  ): Promise<MetadataSyncRecord>;
 }
 
 export interface MetadataEngineOptions {
