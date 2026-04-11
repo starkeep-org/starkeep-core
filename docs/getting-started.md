@@ -198,6 +198,35 @@ const unsubscribe = sdk.sync.onUpdate((event) => {
 })
 ```
 
+## Access control
+
+```typescript
+// Grant read access to another user
+const policy = await sdk.accessControl.createPolicy({
+  subjectType: "user",
+  subjectId: "user-456",
+  resourceType: "collection",
+  resourceId: "vacation-album",
+  permissions: ["read"],
+})
+
+// Check access
+const check = await sdk.accessControl.checkAccess({
+  subjectType: "user",
+  subjectId: "user-456",
+  resourceId: photo.id,
+  permission: "read",
+})
+console.log(check.allowed)  // true or false
+console.log(check.reason)   // explanation
+
+// Create a shareable token
+const { token } = await sdk.accessControl.createSharingToken(policy.policyId, {
+  maxUses: 10,
+})
+// Share `token` externally — recipient validates it to get access
+```
+
 ## Writing a custom metadata generator
 
 ```typescript
@@ -223,27 +252,37 @@ const sdk = await createStarkeepSdk({
 })
 ```
 
-## Registering an HTTP endpoint
+## Registering Shared Space API endpoints
 
 ```typescript
-sdk.api.router.register({
-  namespace: "docs",
+import { createSharedSpaceApi } from "@starkeep/shared-space-api"
+
+const api = createSharedSpaceApi({
+  databaseAdapter,
+  objectStorageAdapter,
+  clock,
+  ownerId: "user-123",
+})
+
+api.router.register({
+  namespace: "photos",
   version: "v1",
-  path: "/documents",
+  path: "/albums",
   method: "GET",
-  description: "List documents",
+  description: "List all photo albums",
   handler: async (request, context) => {
     const results = await context.databaseAdapter.query({
-      type: "docs:document",
-      sort: [{ field: "updatedAt", direction: "desc" }],
+      type: "photos:album",
+      sort: [{ field: "createdAt", direction: "desc" }],
       limit: 50,
     })
     return { status: 200, body: results }
   },
 })
 
-const response = await sdk.api.handleRequest({
-  path: "/docs/v1/documents",
+// Handle an incoming request
+const response = await api.handleRequest({
+  path: "/photos/v1/albums",
   method: "GET",
   subject: { subjectType: "user", subjectId: "user-123" },
 })

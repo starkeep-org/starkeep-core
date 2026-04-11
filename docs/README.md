@@ -22,9 +22,10 @@ so the same code runs against local SQLite in development and Aurora DSQL in pro
 The SDK wires everything together: data operations, metadata generation, search, aggregations,
 sync, and access control through a single entry point.
 
-The reference implementation is the [Tasks app](tasks-app.md) — a full task management
-application available as both a web app (Next.js) and a desktop app (Tauri), sharing the
-same data model and UI components.
+Reference apps include the [Tasks app](tasks-app.md) (web + Tauri desktop), the
+[data-server](../apps/data-server/) (a local HTTP server that exposes the data protocol
+over a REST API), and the [File Provider](../apps/file-provider/) (a macOS File Provider
+and Finder Sync extension that surfaces Starkeep data as a native filesystem location).
 
 ## Documentation
 
@@ -62,3 +63,11 @@ same data model and UI components.
 | | |
 |--|--|
 | [Tasks App](tasks-app.md) | Task management — web and desktop reference implementation |
+| [Data Server](../apps/data-server/) | Local HTTP server exposing the data protocol as a REST API |
+| [File Provider](../apps/file-provider/) | macOS File Provider + Finder Sync extension |
+
+### Analysis
+
+| | |
+|--|--|
+| [Authentication](auth-analysis.md) | Auth options for owner access, sharing, app-to-API, and sync |

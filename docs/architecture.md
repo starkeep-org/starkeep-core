@@ -114,6 +114,73 @@ always be put in a deterministic total order — no coordination or consensus re
 **Functional factory pattern.** Subsystems are created with `createXyz()` functions rather
 than classes. This makes dependencies explicit and simplifies testing.
 
+## Data model
+
+### Records
+
+Every piece of data in Starkeep is a **record**. There are two kinds:
+
+**Data records** represent user content — photos, documents, conversations, messages. They have:
+- A globally unique ULID identifier
+- HLC timestamps for creation and last update
+- An owner, sync status, and version number
+- Optional file backing (content hash, object storage key, MIME type, size)
+- A freeform `payload` object for structured data
+
+**Metadata records** are derived from data records by generators. They have:
+- The same base fields as data records
+- A `targetId` pointing to the data record they describe
+- Generator identification (ID + version) for staleness tracking
+- An `inputHash` for cache validation
+- A `value` object containing the generated metadata
+
+### Identifiers
+
+All records use **ULIDs** (Universally Unique Lexicographically Sortable Identifiers). ULIDs encode a millisecond timestamp in their first 48 bits, making them naturally sortable by creation time while remaining globally unique.
+
+### Timestamps
+
+Starkeep uses **Hybrid Logical Clocks** for all timestamps. An HLC timestamp has three components:
+
+| Component | Purpose |
+|-----------|---------|
+| `wallTime` | Physical clock time (milliseconds) |
+| `counter` | Logical counter for events at the same wall time |
+| `nodeId` | Node identifier for total ordering across nodes |
+
+HLCs provide causal ordering without coordination, monotonic progression, and total ordering for deterministic conflict resolution.
+
+## Sync architecture
+
+```
+Local Device                        Cloud (per-user)
++------------------+               +------------------+
+| SQLite           |  <-- sync --> | Aurora DSQL      |
+| Local FS         |  <-- sync --> | S3               |
+| Change Log       |               | Change Log       |
++------------------+               +------------------+
+```
+
+Sync follows a pull-then-push model:
+
+1. **Pull** — fetch remote changes since last sync point
+2. **Merge** — apply HLC ordering to resolve conflicts (last-writer-wins per field)
+3. **Push** — send local changes to remote
+4. **File sync** — transfer files by content hash to avoid redundant transfers
+5. **Notify** — emit change events for UI updates
+
+## Access control model
+
+Access control is enforced at the storage layer via the `EnforcedDatabaseAdapter` wrapper. This means access checks apply uniformly regardless of which component accesses data.
+
+Policies specify:
+- **Subject** — who (user, app, API, token)
+- **Resource** — what (specific item, type, collection, or wildcard)
+- **Permissions** — which operations (read, write, delete, admin)
+- **Expiration** — optional time-limited access
+
+External sharing uses cryptographically secure tokens tied to policies.
+
 ## Per-user infrastructure model
 
 Each user gets an isolated AWS stack provisioned by `@starkeep/aws-provider`:
@@ -121,12 +188,13 @@ Each user gets an isolated AWS stack provisioned by `@starkeep/aws-provider`:
 ```
 Per-user stack
 +--------------------------------------------------+
-|  API Gateway  -->  handlers                      |
-|                                                  |
-|  Aurora DSQL  <->  data records + per-type metadata tables       |
-|  S3 Bucket    <->  files (photos, documents)     |
-|                                                  |
-|  IAM roles + security groups                     |
+|  API Gateway  -->  Lambda Functions               |
+|                    (sync, metadata, API handlers) |
+|                                                   |
+|  Aurora DSQL  <->  Data + Metadata Records        |
+|  S3 Bucket    <->  Files (photos, documents)      |
+|                                                   |
+|  IAM Roles + Security Groups                      |
 +--------------------------------------------------+
 ```
 

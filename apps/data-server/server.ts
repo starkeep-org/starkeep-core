@@ -1,0 +1,646 @@
+/**
+ * Local data server for the Starkeep admin desktop app.
+ * Exposes the SDK over HTTP with owner-level access so the admin
+ * browses data through proper access control, not by reading the DB directly.
+ */
+
+import { createServer } from "node:http";
+import { createHmac, randomBytes } from "node:crypto";
+import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
+import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
+import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
+import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
+import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { stat as fsStat } from "node:fs/promises";
+import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
+
+// Signing key for self-hosted file tokens — regenerated each startup so
+// all outstanding tokens are invalidated on restart (revocable by design).
+const TOKEN_SECRET = randomBytes(32);
+
+const STARKEEP_DIR = join(homedir(), ".starkeep");
+const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
+const OWNER_ID = process.env.STARKEEP_OWNER_ID || "craig";
+
+async function main() {
+  const databaseAdapter = new SqliteDatabaseAdapter({
+    path: join(STARKEEP_DIR, "data.db"),
+  });
+
+  // Local FS is always available — acts as a cache when S3 is configured
+  const localAdapter = new FsObjectStorageAdapter({
+    basePath: join(STARKEEP_DIR, "objects"),
+  });
+
+  // S3 is the authoritative remote store when configured
+  const s3Bucket = process.env.STARKEEP_S3_BUCKET;
+  const remoteAdapter = s3Bucket
+    ? new S3ObjectStorageAdapter({
+        bucketName: s3Bucket,
+        region: process.env.STARKEEP_S3_REGION || "us-east-1",
+        keyPrefix: process.env.STARKEEP_S3_KEY_PREFIX || undefined,
+        credentials:
+          process.env.STARKEEP_S3_ACCESS_KEY_ID &&
+          process.env.STARKEEP_S3_SECRET_ACCESS_KEY
+            ? {
+                accessKeyId: process.env.STARKEEP_S3_ACCESS_KEY_ID,
+                secretAccessKey: process.env.STARKEEP_S3_SECRET_ACCESS_KEY,
+              }
+            : undefined,
+      })
+    : null;
+
+  const sdk = await createStarkeepSdk({
+    databaseAdapter,
+    objectStorageAdapter: localAdapter,
+    ownerId: OWNER_ID,
+    nodeId: "admin-desktop",
+  });
+
+  // File watch manager — monitors local directories and syncs to Starkeep
+  const watchManager = createFileWatchManager({ sdk, databaseAdapter, ownerId: OWNER_ID });
+
+  // Restore persisted watches
+  const existingWatches = await databaseAdapter.query({
+    kind: "data",
+    filters: [{ field: "type" as const, operator: "eq" as const, value: "system:watch" }],
+    limit: 1000,
+  });
+  for (const record of existingWatches.records) {
+    if (record.deletedAt) continue;
+    const p = (record as any).payload;
+    watchManager.startWatch({
+      id: record.id,
+      directoryPath: p.directoryPath,
+      targetType: p.targetType,
+      recursive: p.recursive ?? true,
+      includePatterns: p.includePatterns,
+      excludePatterns: p.excludePatterns,
+    }).catch((err: Error) => console.error(`Failed to restore watch ${record.id}:`, err.message));
+  }
+
+  const server = createServer(async (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url || "/", `http://localhost:${PORT}`);
+    const path = url.pathname;
+
+    try {
+      if (path === "/health") {
+        json(res, { status: "ok" });
+        return;
+      }
+
+      // GET /browse?path=/ — hierarchical folder view for File Provider
+      // Root shows: watched directories as folders + "Library" for untracked records
+      // Subpaths show: actual subfolder structure from watched directories
+      if (path === "/browse" && req.method === "GET") {
+        const browsePath = url.searchParams.get("path") || "/";
+
+        if (browsePath === "/") {
+          // Root: list watched directories as folders + Library folder
+          const watches = watchManager.getAllStatuses();
+          const folders: { name: string; id: string; type: "watch" | "virtual"; itemCount: number }[] = [];
+
+          for (const w of watches) {
+            const dirName = w.directoryPath.split("/").pop() || w.directoryPath;
+            folders.push({ name: dirName, id: `watch:${w.id}`, type: "watch", itemCount: w.syncedFiles });
+          }
+
+          // Check for records not in any watch (Library)
+          const allData = await databaseAdapter.query({ kind: "data", limit: 100000 });
+          const watchFileIds = new Set<string>();
+          const unwatchedRecords: typeof allData.records = [];
+          for (const r of allData.records) {
+            if (r.deletedAt || r.type.startsWith("system:")) continue;
+            const payload = (r as any).payload;
+            if (payload?.watchId || r.type === "system:watch-file" || r.type === "system:watch") continue;
+            // Check if this record is referenced by a watch-file
+            const isWatched = watchManager.getAllStatuses().some(w => {
+              const files = watchManager.getWatchFiles(w.id);
+              return files.some(f => f.dataRecordId === r.id);
+            });
+            if (!isWatched) unwatchedRecords.push(r);
+          }
+
+          if (unwatchedRecords.length > 0) {
+            folders.push({ name: "Library", id: "virtual:library", type: "virtual", itemCount: unwatchedRecords.length });
+          }
+
+          json(res, { path: "/", folders, files: [] });
+          return;
+        }
+
+        // /watch:<watchId> or /watch:<watchId>/subfolder/path
+        const watchMatch = browsePath.match(/^\/watch:([^/]+)(\/.*)?$/);
+        if (watchMatch) {
+          const watchId = watchMatch[1]!;
+          const subPath = (watchMatch[2] || "").replace(/^\//, "");
+          const allFiles = watchManager.getWatchFiles(watchId);
+          const status = watchManager.getStatus(watchId);
+
+          // Collect immediate children at this subpath level
+          const folders = new Set<string>();
+          const files: { name: string; relativePath: string; recordId: string; contentHash: string }[] = [];
+
+          for (const f of allFiles) {
+            const rel = f.relativePath;
+            // Check if this file is within the subpath
+            if (subPath && !rel.startsWith(subPath + "/") && rel !== subPath) continue;
+            const remainder = subPath ? rel.slice(subPath.length + 1) : rel;
+            if (!remainder) continue;
+
+            const slashIdx = remainder.indexOf("/");
+            if (slashIdx === -1) {
+              // Direct child file
+              files.push({ name: remainder, relativePath: rel, recordId: f.dataRecordId, contentHash: f.contentHash });
+            } else {
+              // Subfolder
+              folders.add(remainder.slice(0, slashIdx));
+            }
+          }
+
+          const folderList = Array.from(folders).sort().map(name => ({
+            name,
+            id: `watch:${watchId}/${subPath ? subPath + "/" : ""}${name}`,
+            type: "folder" as const,
+            itemCount: allFiles.filter(f => f.relativePath.startsWith((subPath ? subPath + "/" : "") + name + "/")).length,
+          }));
+
+          // Fetch record details for files
+          const fileList = [];
+          for (const f of files) {
+            try {
+              const record = await sdk.data.get(f.recordId as any);
+              if (record) {
+                fileList.push({
+                  id: record.id,
+                  name: f.name,
+                  relativePath: f.relativePath,
+                  mime_type: record.mimeType,
+                  size_bytes: record.sizeBytes,
+                  updated_at: new Date(record.updatedAt.wallTime).toISOString(),
+                  created_at: new Date(record.createdAt.wallTime).toISOString(),
+                });
+              }
+            } catch {}
+          }
+
+          json(res, { path: browsePath, watchId, folders: folderList, files: fileList });
+          return;
+        }
+
+        // /Library — untracked records grouped by type
+        if (browsePath === "/virtual:library") {
+          const allData = await databaseAdapter.query({ kind: "data", limit: 100000 });
+          const typeCounts = new Map<string, number>();
+
+          for (const r of allData.records) {
+            if (r.deletedAt || r.type.startsWith("system:")) continue;
+            const isWatched = watchManager.getAllStatuses().some(w => {
+              return watchManager.getWatchFiles(w.id).some(f => f.dataRecordId === r.id);
+            });
+            if (!isWatched) {
+              typeCounts.set(r.type, (typeCounts.get(r.type) || 0) + 1);
+            }
+          }
+
+          const folders = Array.from(typeCounts.entries()).map(([type, count]) => ({
+            name: type,
+            id: `library-type:${type}`,
+            type: "virtual" as const,
+            itemCount: count,
+          }));
+
+          json(res, { path: browsePath, folders, files: [] });
+          return;
+        }
+
+        // /library-type:<type> — flat list of untracked records of a type
+        const libraryTypeMatch = browsePath.match(/^\/library-type:(.+)$/);
+        if (libraryTypeMatch) {
+          const recordType = libraryTypeMatch[1]!;
+          const result = await databaseAdapter.query({
+            kind: "data",
+            filters: [{ field: "type" as const, operator: "eq" as const, value: recordType }],
+            limit: 10000,
+          });
+
+          const files = result.records
+            .filter(r => !r.deletedAt)
+            .filter(r => {
+              return !watchManager.getAllStatuses().some(w => {
+                return watchManager.getWatchFiles(w.id).some(f => f.dataRecordId === r.id);
+              });
+            })
+            .map(r => ({
+              id: r.id,
+              name: ((r as any).payload?.title || (r as any).payload?.name || r.id) + (extensionForMime((r as any).mimeType) || ""),
+              mime_type: (r as any).mimeType,
+              size_bytes: (r as any).sizeBytes,
+              updated_at: new Date(r.updatedAt.wallTime).toISOString(),
+              created_at: new Date(r.createdAt.wallTime).toISOString(),
+            }));
+
+          json(res, { path: browsePath, folders: [], files });
+          return;
+        }
+
+        res.writeHead(404);
+        json(res, { error: "Browse path not found" });
+        return;
+      }
+
+      // GET /data/types — list record types with counts
+      if (path === "/data/types" && req.method === "GET") {
+        const result = await databaseAdapter.query({ kind: "data", limit: 10000 });
+
+        const typeCounts = new Map<string, { count: number; latest: number }>();
+        for (const record of result.records) {
+          if (record.deletedAt) continue;
+          const existing = typeCounts.get(record.type);
+          const wallTime = record.updatedAt.wallTime;
+          if (!existing) {
+            typeCounts.set(record.type, { count: 1, latest: wallTime });
+          } else {
+            existing.count++;
+            if (wallTime > existing.latest) existing.latest = wallTime;
+          }
+        }
+
+        const types = Array.from(typeCounts.entries()).map(([type, info]) => ({
+          record_type: type,
+          count: info.count,
+          latest_updated: new Date(info.latest).toISOString(),
+        }));
+        types.sort((a, b) => b.count - a.count);
+
+        json(res, { types, total: result.records.filter(r => !r.deletedAt).length });
+        return;
+      }
+
+      // GET /data/records?type=xxx&limit=100
+      if (path === "/data/records" && req.method === "GET") {
+        const recordType = url.searchParams.get("type");
+        const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+
+        const filters = recordType
+          ? [{ field: "type" as const, operator: "eq" as const, value: recordType }]
+          : [];
+
+        const result = await databaseAdapter.query({
+          kind: "data",
+          filters,
+          limit,
+          sort: [{ field: "updatedAt", direction: "desc" as const }],
+        });
+
+        const records = result.records
+          .filter(r => !r.deletedAt)
+          .map(r => ({
+            id: r.id,
+            kind: r.kind,
+            type: r.type,
+            created_at: new Date(r.createdAt.wallTime).toISOString(),
+            updated_at: new Date(r.updatedAt.wallTime).toISOString(),
+            owner_id: r.ownerId,
+            sync_status: r.syncStatus,
+            version: r.version,
+            payload: r.kind === "data" ? (r as any).payload : null,
+            content_hash: r.kind === "data" ? (r as any).contentHash : null,
+            object_storage_key: r.kind === "data" ? (r as any).objectStorageKey : null,
+            mime_type: r.kind === "data" ? (r as any).mimeType : null,
+            size_bytes: r.kind === "data" ? (r as any).sizeBytes : null,
+          }));
+
+        json(res, { records });
+        return;
+      }
+
+      // POST /data/records — create a record, optionally with a file
+      // Body: JSON { type, payload, fileName?, contentType?, fileBase64? }
+      if (path === "/data/records" && req.method === "POST") {
+        const body = await readBody(req);
+        const { type, payload, fileName, contentType, fileBase64 } = JSON.parse(body);
+        if (!type) {
+          res.writeHead(400);
+          json(res, { error: "type is required" });
+          return;
+        }
+
+        let record;
+        if (fileBase64) {
+          const fileBuffer = Buffer.from(fileBase64, "base64");
+          record = await sdk.data.putWithFile(
+            { type, ownerId: OWNER_ID, payload: { ...payload, ...(fileName ? { fileName } : {}) } },
+            fileBuffer,
+            contentType,
+          );
+        } else {
+          record = await sdk.data.put({ type, ownerId: OWNER_ID, payload: payload || {} });
+        }
+
+        // Invalidate caches on the FUSE side by returning the record
+        json(res, {
+          record: {
+            id: record.id,
+            type: record.type,
+            created_at: new Date(record.createdAt.wallTime).toISOString(),
+            updated_at: new Date(record.updatedAt.wallTime).toISOString(),
+            owner_id: record.ownerId,
+            payload: record.payload,
+            mime_type: record.mimeType,
+            size_bytes: record.sizeBytes,
+            object_storage_key: record.objectStorageKey,
+          },
+        });
+        return;
+      }
+
+      // GET /data/records/:id/file-url — time-limited URL for file access
+      const fileUrlMatch = path.match(/^\/data\/records\/([^/]+)\/file-url$/);
+      if (fileUrlMatch && req.method === "GET") {
+        const record = await sdk.data.get(fileUrlMatch[1]! as any);
+        if (!record) {
+          res.writeHead(404);
+          json(res, { error: "Record not found" });
+          return;
+        }
+        if (!record.objectStorageKey) {
+          res.writeHead(404);
+          json(res, { error: "Record has no attached file" });
+          return;
+        }
+        const expiresIn = parseInt(url.searchParams.get("expiresIn") || "3600", 10);
+        const mimeType = record.mimeType ?? "application/octet-stream";
+
+        // Try local cache first — faster and keeps traffic local
+        const localHit = await localAdapter.get(record.objectStorageKey).catch(() => null);
+        if (localHit) {
+          const token = createFileToken(record.objectStorageKey, mimeType, expiresIn);
+          json(res, {
+            url: `http://127.0.0.1:${PORT}/data/files/${token}`,
+            source: "local",
+            mimeType: record.mimeType,
+            sizeBytes: record.sizeBytes,
+            expiresIn,
+          });
+          return;
+        }
+
+        // Fall back to S3 presigned URL for files not synced locally
+        if (remoteAdapter) {
+          const fileUrl = await remoteAdapter.getSignedUrl(
+            record.objectStorageKey,
+            { expiresIn },
+          );
+          json(res, { url: fileUrl, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
+          return;
+        }
+
+        res.writeHead(404);
+        json(res, { error: "File not found locally and no remote storage configured" });
+        return;
+      }
+
+      // GET /data/files/:token — serve file content, validating the signed token
+      const fileServeMatch = path.match(/^\/data\/files\/([^/]+)$/);
+      if (fileServeMatch && req.method === "GET") {
+        const parsed = verifyFileToken(fileServeMatch[1]!);
+        if (!parsed) {
+          res.writeHead(403);
+          json(res, { error: "Invalid or expired file token" });
+          return;
+        }
+        const fileResult = await localAdapter.get(parsed.key);
+        if (!fileResult) {
+          res.writeHead(404);
+          json(res, { error: "File not found" });
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": parsed.mimeType,
+          "Content-Length": fileResult.size,
+          "Cache-Control": "private, no-store",
+        });
+        res.end(Buffer.from(fileResult.data));
+        return;
+      }
+
+      // GET /data/records/:id
+      const recordMatch = path.match(/^\/data\/records\/([^/]+)$/);
+      if (recordMatch && req.method === "GET") {
+        const record = await sdk.data.get(recordMatch[1]! as any);
+        if (!record) {
+          res.writeHead(404);
+          json(res, { error: "Record not found" });
+          return;
+        }
+        json(res, {
+          record: {
+            id: record.id,
+            kind: record.kind,
+            type: record.type,
+            created_at: new Date(record.createdAt.wallTime).toISOString(),
+            updated_at: new Date(record.updatedAt.wallTime).toISOString(),
+            owner_id: record.ownerId,
+            sync_status: record.syncStatus,
+            version: record.version,
+            payload: record.payload,
+            content_hash: record.contentHash,
+            object_storage_key: record.objectStorageKey,
+            mime_type: record.mimeType,
+            size_bytes: record.sizeBytes,
+          },
+        });
+        return;
+      }
+
+      // ---------------------------------------------------------------
+      // Watch endpoints
+      // ---------------------------------------------------------------
+
+      // POST /watches — register a new directory watch
+      if (path === "/watches" && req.method === "POST") {
+        const body = await readBody(req);
+        const { directoryPath, targetType, recursive, includePatterns, excludePatterns } = JSON.parse(body);
+        if (!directoryPath || !targetType) {
+          res.writeHead(400);
+          json(res, { error: "directoryPath and targetType are required" });
+          return;
+        }
+        // Validate directory exists
+        try {
+          const s = await fsStat(directoryPath);
+          if (!s.isDirectory()) {
+            res.writeHead(400);
+            json(res, { error: "Path is not a directory" });
+            return;
+          }
+        } catch {
+          res.writeHead(400);
+          json(res, { error: "Directory does not exist" });
+          return;
+        }
+        // Create system:watch record
+        const record = await sdk.data.put({
+          type: "system:watch",
+          ownerId: OWNER_ID,
+          payload: { directoryPath, targetType, recursive: recursive ?? true, includePatterns, excludePatterns },
+        });
+        // Start watching
+        await watchManager.startWatch({
+          id: record.id,
+          directoryPath,
+          targetType,
+          recursive: recursive ?? true,
+          includePatterns,
+          excludePatterns,
+        });
+        json(res, { watch: watchManager.getStatus(record.id) });
+        return;
+      }
+
+      // GET /watches — list all watches
+      if (path === "/watches" && req.method === "GET") {
+        json(res, { watches: watchManager.getAllStatuses() });
+        return;
+      }
+
+      // GET /watches/file-status?path=... — check if a file is watched/synced
+      if (path === "/watches/file-status" && req.method === "GET") {
+        const filePath = url.searchParams.get("path");
+        if (!filePath) {
+          res.writeHead(400);
+          json(res, { error: "path query param required" });
+          return;
+        }
+        json(res, watchManager.getFileStatus(filePath));
+        return;
+      }
+
+      // GET /watches/directory-status?path=... — check if a directory is watched
+      if (path === "/watches/directory-status" && req.method === "GET") {
+        const dirPath = url.searchParams.get("path");
+        if (!dirPath) {
+          res.writeHead(400);
+          json(res, { error: "path query param required" });
+          return;
+        }
+        json(res, watchManager.getDirectoryStatus(dirPath));
+        return;
+      }
+
+      // GET /watches/:id — single watch detail
+      const watchDetailMatch = path.match(/^\/watches\/([^/]+)$/);
+      if (watchDetailMatch && req.method === "GET") {
+        const status = watchManager.getStatus(watchDetailMatch[1]!);
+        if (!status) {
+          res.writeHead(404);
+          json(res, { error: "Watch not found" });
+          return;
+        }
+        json(res, { watch: status });
+        return;
+      }
+
+      // GET /watches/:id/files — list files in a watch
+      const watchFilesMatch = path.match(/^\/watches\/([^/]+)\/files$/);
+      if (watchFilesMatch && req.method === "GET") {
+        const files = watchManager.getWatchFiles(watchFilesMatch[1]!);
+        json(res, { files });
+        return;
+      }
+
+      // DELETE /watches/:id — stop and remove a watch
+      const watchDeleteMatch = path.match(/^\/watches\/([^/]+)$/);
+      if (watchDeleteMatch && req.method === "DELETE") {
+        await watchManager.stopWatch(watchDeleteMatch[1]!);
+        await sdk.data.delete(watchDeleteMatch[1]! as any);
+        json(res, { ok: true });
+        return;
+      }
+
+      res.writeHead(404);
+      json(res, { error: "Not found" });
+    } catch (err) {
+      console.error("Request error:", err);
+      res.writeHead(500);
+      json(res, { error: err instanceof Error ? err.message : "Internal error" });
+    }
+  });
+
+  server.listen(PORT, "127.0.0.1", () => {
+    console.log(`Starkeep data server listening on http://127.0.0.1:${PORT}`);
+  });
+
+  process.on("SIGTERM", async () => {
+    server.close();
+    await watchManager.shutdown();
+    await sdk.close();
+    process.exit(0);
+  });
+}
+
+function extensionForMime(mime: string | null): string {
+  if (!mime) return "";
+  const map: Record<string, string> = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
+    "image/heic": ".heic", "application/pdf": ".pdf", "text/plain": ".txt",
+    "text/markdown": ".md", "application/json": ".json", "video/mp4": ".mp4",
+  };
+  return map[mime] ?? "";
+}
+
+function readBody(req: import("node:http").IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
+  });
+}
+
+function json(res: import("node:http").ServerResponse, body: unknown) {
+  if (!res.headersSent) res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
+/** Encode storage key + mime + expiry into a URL-safe signed token. */
+function createFileToken(key: string, mimeType: string, expiresIn: number): string {
+  const expires = Math.floor(Date.now() / 1000) + expiresIn;
+  const payload = `${key}|${mimeType}|${expires}`;
+  const sig = createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
+  return `${Buffer.from(payload).toString("base64url")}.${sig}`;
+}
+
+/** Verify and decode a file token. Returns null if invalid or expired. */
+function verifyFileToken(token: string): { key: string; mimeType: string } | null {
+  const dotIdx = token.indexOf(".");
+  if (dotIdx === -1) return null;
+  const payloadB64 = token.slice(0, dotIdx);
+  const sig = token.slice(dotIdx + 1);
+  const payload = Buffer.from(payloadB64, "base64url").toString();
+  const expected = createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
+  if (sig !== expected) return null;
+  const parts = payload.split("|");
+  if (parts.length !== 3) return null;
+  const expires = parseInt(parts[2]!, 10);
+  if (Date.now() / 1000 > expires) return null;
+  return { key: parts[0]!, mimeType: parts[1]! };
+}
+
+main().catch((err) => {
+  console.error("Failed to start data server:", err);
+  process.exit(1);
+});
