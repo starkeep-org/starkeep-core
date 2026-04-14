@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 ///   - `.rootContainer` → root
 ///   - `"type:<recordType>"` → type folder (e.g., "type:media:photo")
 ///   - `"record:<id>"` → individual record
+@objc(StarkeepFileProviderExtension)
 final class Extension: NSObject, NSFileProviderReplicatedExtension {
     let domain: NSFileProviderDomain
     let client = DataServerClient()
@@ -20,9 +21,7 @@ final class Extension: NSObject, NSFileProviderReplicatedExtension {
         super.init()
     }
 
-    func invalidate() {
-        // Cleanup if needed
-    }
+    func invalidate() {}
 
     // MARK: - Item lookup
 
@@ -144,13 +143,20 @@ final class Extension: NSObject, NSFileProviderReplicatedExtension {
         switch identifier {
         case .rootContainer:
             return RootItem()
+        case .trashContainer:
+            return TrashItem()
         default:
             let raw = identifier.rawValue
             if raw.hasPrefix("folder:") {
-                // Folder — browse to get metadata
-                let browsePath = "/" + String(raw.dropFirst(7))
-                let name = browsePath.split(separator: "/").last.map(String.init) ?? "Folder"
-                let folder = DataServerClient.BrowseFolder(name: name, id: String(raw.dropFirst(7)), type: "folder", itemCount: 0)
+                // Browse the parent to find the actual folder metadata (so itemCount matches)
+                let folderId = String(raw.dropFirst(7))
+                let result = try await client.browse(path: "/")
+                if let folder = result.folders.first(where: { $0.id == folderId }) {
+                    return FolderItem(folder: folder, parentIdentifier: .rootContainer)
+                }
+                // Fallback: construct a minimal folder item
+                let name = folderId.split(separator: "/").last.map(String.init) ?? folderId
+                let folder = DataServerClient.BrowseFolder(name: name, id: folderId, type: "folder", itemCount: 0)
                 return FolderItem(folder: folder, parentIdentifier: .rootContainer)
             } else if raw.hasPrefix("record:") {
                 let id = String(raw.dropFirst(7))

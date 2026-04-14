@@ -11,13 +11,15 @@ class FinderSyncExtension: FIFinderSync {
         super.init()
 
         // Register badge images using SF Symbols
-        let syncedImage = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Synced")!
-        let syncingImage = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Syncing")!
-        let errorImage = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Error")!
-
-        FIFinderSyncController.default().setBadgeImage(syncedImage, label: "Synced", forBadgeIdentifier: SyncBadge.synced.rawValue)
-        FIFinderSyncController.default().setBadgeImage(syncingImage, label: "Syncing", forBadgeIdentifier: SyncBadge.syncing.rawValue)
-        FIFinderSyncController.default().setBadgeImage(errorImage, label: "Error", forBadgeIdentifier: SyncBadge.error.rawValue)
+        if let syncedImage = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Synced") {
+            FIFinderSyncController.default().setBadgeImage(syncedImage, label: "Synced", forBadgeIdentifier: SyncBadge.synced.rawValue)
+        }
+        if let syncingImage = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Syncing") {
+            FIFinderSyncController.default().setBadgeImage(syncingImage, label: "Syncing", forBadgeIdentifier: SyncBadge.syncing.rawValue)
+        }
+        if let errorImage = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Error") {
+            FIFinderSyncController.default().setBadgeImage(errorImage, label: "Error", forBadgeIdentifier: SyncBadge.error.rawValue)
+        }
 
         // Monitor the user's home directory so context menus appear on any folder.
         // Badges are only shown for files within actually-watched directories.
@@ -181,7 +183,7 @@ class FinderSyncExtension: FIFinderSync {
     }
 
     override var toolbarItemImage: NSImage {
-        return NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "Starkeep")!
+        return NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "Starkeep") ?? NSImage(named: NSImage.folderName)!
     }
 
     override var toolbarItemToolTip: String {

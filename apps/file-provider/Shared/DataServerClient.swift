@@ -165,14 +165,23 @@ struct DataServerClient {
         return try JSONDecoder().decode(WatchesResponse.self, from: data).watches
     }
 
+    struct ServerError: Error, LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
     func createWatch(directoryPath: String, targetType: String, recursive: Bool = true) async throws -> WatchStatus {
         let body: [String: Any] = ["directoryPath": directoryPath, "targetType": targetType, "recursive": recursive]
         var request = URLRequest(url: baseURL.appendingPathComponent("watches"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, _) = try await URLSession.shared.data(for: request)
-        // Response wraps in { watch: ... }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            struct ErrorBody: Decodable { let error: String }
+            let message = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error ?? "Unknown server error"
+            throw ServerError(message: message)
+        }
         struct Wrapper: Decodable { let watch: WatchStatus }
         return try JSONDecoder().decode(Wrapper.self, from: data).watch
     }
