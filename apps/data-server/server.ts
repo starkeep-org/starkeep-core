@@ -328,24 +328,29 @@ async function main() {
           sort: [{ field: "updatedAt", direction: "desc" as const }],
         });
 
-        const records = result.records
-          .filter(r => !r.deletedAt)
-          .map(r => ({
-            id: r.id,
-            kind: r.kind,
-            type: r.type,
-            created_at: new Date(r.createdAt.wallTime).toISOString(),
-            updated_at: new Date(r.updatedAt.wallTime).toISOString(),
-            owner_id: r.ownerId,
-            sync_status: r.syncStatus,
-            version: r.version,
-            payload: r.kind === "data" ? r.content : null,
-            content_hash: r.kind === "data" ? r.contentHash : null,
-            object_storage_key: r.kind === "data" ? r.objectStorageKey : null,
-            mime_type: r.kind === "data" ? r.mimeType : null,
-            size_bytes: r.kind === "data" ? r.sizeBytes : null,
-            original_filename: r.kind === "data" ? r.originalFilename : null,
-          }));
+        const records = await Promise.all(
+          result.records
+            .filter(r => !r.deletedAt)
+            .map(async r => ({
+              id: r.id,
+              kind: r.kind,
+              type: r.type,
+              created_at: new Date(r.createdAt.wallTime).toISOString(),
+              updated_at: new Date(r.updatedAt.wallTime).toISOString(),
+              owner_id: r.ownerId,
+              sync_status: r.syncStatus,
+              version: r.version,
+              payload: r.kind === "data" ? r.content : null,
+              content_hash: r.kind === "data" ? r.contentHash : null,
+              object_storage_key: r.kind === "data" ? r.objectStorageKey : null,
+              mime_type: r.kind === "data" ? r.mimeType : null,
+              size_bytes: r.kind === "data" ? r.sizeBytes : null,
+              original_filename: r.kind === "data" ? r.originalFilename : null,
+              path: r.kind === "data" && r.objectStorageKey
+                ? await localAdapter.resolvePath(r.objectStorageKey)
+                : null,
+            }))
+        );
 
         json(res, { records });
         return;
@@ -393,6 +398,9 @@ async function main() {
             size_bytes: record.sizeBytes,
             object_storage_key: record.objectStorageKey,
             original_filename: record.originalFilename,
+            path: record.objectStorageKey
+              ? await localAdapter.resolvePath(record.objectStorageKey)
+              : null,
           },
         });
         return;
@@ -527,6 +535,9 @@ async function main() {
             mime_type: record.mimeType,
             size_bytes: record.sizeBytes,
             original_filename: record.originalFilename,
+            path: record.kind === "data" && record.objectStorageKey
+              ? await localAdapter.resolvePath(record.objectStorageKey)
+              : null,
           },
         });
         return;
