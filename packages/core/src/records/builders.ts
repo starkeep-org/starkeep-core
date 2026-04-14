@@ -11,6 +11,7 @@ export interface CreateDataRecordInput {
   objectStorageKey?: string | null;
   mimeType?: string | null;
   sizeBytes?: number | null;
+  originalFilename?: string | null;
 }
 
 export interface CreateMetadataRecordInput {
@@ -37,6 +38,7 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     objectStorageKey: input.objectStorageKey ?? null,
     mimeType: input.mimeType ?? null,
     sizeBytes: input.sizeBytes ?? null,
+    originalFilename: input.originalFilename ?? null,
     content: input.content ?? {},
   };
 }

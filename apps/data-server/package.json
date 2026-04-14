@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@starkeep/core": "workspace:*",
+    "valibot": "^1.2.0",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/storage-sqlite": "workspace:*",
     "@starkeep/storage-fs": "workspace:*",

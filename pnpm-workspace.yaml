@@ -3,4 +3,5 @@ packages:
   - "examples/*"
   - "apps/*"
   - "apps/tasks-packages/*"
+  - "apps/photos-packages/*"
   - "infra/*"

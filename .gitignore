@@ -21,8 +21,10 @@ DerivedData/
 apps/fuse-mount/lib/
 apps/fuse-mount/package-lock.json
 
-# tasks-desktop Tauri build artifacts
+# Tauri build artifacts
 .next/
 apps/tasks-desktop/src-tauri/target/
 apps/tasks-desktop/src-tauri/gen/schemas/
 apps/tasks-desktop/src-tauri/binaries/
+apps/photos-desktop/src-tauri/target/
+apps/photos-desktop/src-tauri/gen/schemas/

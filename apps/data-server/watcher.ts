@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join, relative, extname, basename } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -211,18 +211,16 @@ export function createFileWatchManager(opts: {
       let dataRecordId = await findExistingByHash(contentHash);
 
       if (!dataRecordId) {
-        // New content — read and store
-        const fileBuffer = await readFile(filePath);
         const contentType = mimeFromPath(filePath);
         const title = basename(filePath, extname(filePath));
 
-        const record = await sdk.data.putWithFile(
+        const record = await sdk.data.putWithLocalFile(
           {
             type: active.config.targetType,
             ownerId,
-            payload: { title, fileName: filename, sourcePath: relativePath },
+            content: { title, fileName: filename, sourcePath: relativePath },
           },
-          fileBuffer,
+          filePath,
           contentType,
         );
         dataRecordId = record.id;
@@ -232,7 +230,7 @@ export function createFileWatchManager(opts: {
       await sdk.data.put({
         type: "system:watch-file",
         ownerId,
-        payload: {
+        content: {
           watchId: active.config.id,
           filePath,
           relativePath,
