@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink } from "node:fs/promises";
+import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink, readlink } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { PutOptions, GetResult, ListOptions, ListResult } from "@starkeep/storage-adapter";
@@ -57,7 +57,12 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
   async putSymlink(key: string, targetPath: string, options?: PutOptions): Promise<void> {
     const linkPath = this.keyToPath(key);
     await mkdir(dirname(linkPath), { recursive: true });
-    await symlink(targetPath, linkPath);
+    try {
+      await symlink(targetPath, linkPath);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // Symlink already exists — content-addressed key guarantees same content, skip.
+    }
 
     if (options?.contentType || options?.metadata) {
       const meta = {
@@ -101,6 +106,18 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
       await unlink(this.metaPath(key));
     } catch {
       // Metadata may not exist
+    }
+  }
+
+  async resolvePath(key: string): Promise<string | null> {
+    const linkPath = this.keyToPath(key);
+    try {
+      return await readlink(linkPath);
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EINVAL") return linkPath; // regular file, not a symlink
+      if (code === "ENOENT") return null;
+      throw err;
     }
   }
 

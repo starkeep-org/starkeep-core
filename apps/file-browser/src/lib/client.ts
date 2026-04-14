@@ -14,6 +14,7 @@ export interface DataRecord {
   object_storage_key: string | null;
   mime_type: string | null;
   size_bytes: number | null;
+  path: string | null;
 }
 
 export interface Watch {

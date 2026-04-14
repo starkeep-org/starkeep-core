@@ -216,9 +216,12 @@ function PhotosAppDesktopInner() {
       const record = await addPhotoFromPath(filePath, mimeType, fileName, title);
       dispatch({ type: "APPEND_IMAGES", images: [photoRecordToAppImage(record)] });
 
-      // Read bytes locally only for EXIF extraction (no bytes sent to server)
-      const fileBytes = await readFile(filePath);
-      await runGenerators(record, fileBytes, fileName, title);
+      // Read bytes locally only for EXIF extraction (no bytes sent to server).
+      // Generators are best-effort — don't let a metadata failure surface as
+      // "Failed to add photo" when the record was already created successfully.
+      readFile(filePath)
+        .then((fileBytes) => runGenerators(record, fileBytes, fileName, title))
+        .catch(() => {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add photo");
     } finally {
