@@ -1,4 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
+import { mkdirSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
 import { createStarkeepId, serializeHLC, deserializeHLC } from "@starkeep/core";
 import type {
@@ -93,6 +95,10 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   async init(): Promise<void> {
+    const dir = dirname(this.options.path);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
     this.database = new DatabaseSync(this.options.path);
     this.database.exec("PRAGMA journal_mode = WAL");
     this.database.exec("PRAGMA foreign_keys = ON");

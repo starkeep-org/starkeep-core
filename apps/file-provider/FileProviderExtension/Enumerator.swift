@@ -12,19 +12,22 @@ final class Enumerator: NSObject, NSFileProviderEnumerator {
     func invalidate() {}
 
     func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
+        // Working set and trash enumeration return empty
+        guard containerIdentifier != .workingSet && containerIdentifier != .trashContainer else {
+            observer.didEnumerate([])
+            observer.finishEnumerating(upTo: nil)
+            return
+        }
+
         Task {
             do {
                 let browsePath = Self.browsePathFor(containerIdentifier)
                 let result = try await client.browse(path: browsePath)
 
                 var items: [NSFileProviderItem] = []
-
-                // Add folders
                 for folder in result.folders {
                     items.append(FolderItem(folder: folder, parentIdentifier: containerIdentifier))
                 }
-
-                // Add files
                 for file in result.files {
                     items.append(FileProviderItem(file: file, parentIdentifier: containerIdentifier))
                 }
@@ -38,14 +41,39 @@ final class Enumerator: NSObject, NSFileProviderEnumerator {
     }
 
     func enumerateChanges(for observer: NSFileProviderChangeObserver, from anchor: NSFileProviderSyncAnchor) {
-        observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+        // Working set and trash changes not supported — report nothing
+        guard containerIdentifier != .workingSet && containerIdentifier != .trashContainer else {
+            let anchor = NSFileProviderSyncAnchor("\(Date().timeIntervalSince1970)".data(using: .utf8)!)
+            observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+            return
+        }
+
+        Task {
+            do {
+                let browsePath = Self.browsePathFor(containerIdentifier)
+                let result = try await client.browse(path: browsePath)
+
+                var items: [NSFileProviderItem] = []
+                for folder in result.folders {
+                    items.append(FolderItem(folder: folder, parentIdentifier: containerIdentifier))
+                }
+                for file in result.files {
+                    items.append(FileProviderItem(file: file, parentIdentifier: containerIdentifier))
+                }
+
+                if !items.isEmpty {
+                    observer.didUpdate(items)
+                }
+                let anchor = NSFileProviderSyncAnchor("\(Date().timeIntervalSince1970)".data(using: .utf8)!)
+                observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+            } catch {
+                observer.finishEnumeratingWithError(error)
+            }
+        }
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
-        let anchor = NSFileProviderSyncAnchor(
-            "\(Date().timeIntervalSince1970)".data(using: .utf8)!
-        )
-        completionHandler(anchor)
+        completionHandler(NSFileProviderSyncAnchor("\(Date().timeIntervalSince1970)".data(using: .utf8)!))
     }
 
     /// Map File Provider identifiers to browse paths

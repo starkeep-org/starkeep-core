@@ -12,11 +12,12 @@ struct StarkeepApp: App {
 
 struct ContentView: View {
     @State private var domainEnabled = false
+    @State private var domainUserEnabled = true
     @State private var watches: [DataServerClient.WatchStatus] = []
     @State private var statusMessage = "Checking..."
 
     let client = DataServerClient()
-    private let domainIdentifier = NSFileProviderDomainIdentifier("com.starkeep.fileprovider")
+    private let domainIdentifier = NSFileProviderDomainIdentifier("com.amkoller.fileprovider")
 
     var body: some View {
         VStack(spacing: 20) {
@@ -39,6 +40,30 @@ struct ContentView: View {
                     Task { await toggleDomain(enabled: newValue) }
                 }
                 .frame(width: 250)
+
+            if domainEnabled && !domainUserEnabled {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Extension not approved")
+                            .font(.callout)
+                            .fontWeight(.medium)
+                        Text("Enable StarkeepFileProvider in System Settings → General → Login Items & Extensions.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Open Settings") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!)
+                    }
+                    .controlSize(.small)
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(8)
+                .frame(maxWidth: 420)
+            }
 
             Divider()
 
@@ -89,14 +114,11 @@ struct ContentView: View {
     func checkDomain() async {
         do {
             let domains = try await NSFileProviderManager.domains()
-            let found = domains.contains { $0.identifier == domainIdentifier }
-            domainEnabled = found
-            // Force re-enumeration so Finder picks up latest data
-            if found {
-                let domain = domains.first { $0.identifier == domainIdentifier }!
-                if let manager = NSFileProviderManager(for: domain) {
-                    try? await manager.signalEnumerator(for: .rootContainer)
-                }
+            let found = domains.first { $0.identifier == domainIdentifier }
+            domainEnabled = found != nil
+            domainUserEnabled = found.map { $0.userEnabled } ?? true
+            if let domain = found, let manager = NSFileProviderManager(for: domain) {
+                try? await manager.signalEnumerator(for: .rootContainer)
             }
         } catch {
             statusMessage = "Error checking domain: \(error.localizedDescription)"
@@ -165,7 +187,20 @@ struct ContentView: View {
                 let _ = try await client.createWatch(directoryPath: url.path, targetType: targetType)
                 await refreshWatches()
             } catch {
-                statusMessage = "Failed to create watch: \(error.localizedDescription)"
+                let message = error.localizedDescription
+                if message.contains("EPERM") || message.contains("operation not permitted") {
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "Permission Denied"
+                    alert.informativeText = "\(url.path) is protected by macOS. Grant Full Disk Access to your terminal app in System Settings, then restart the data server."
+                    alert.addButton(withTitle: "Open Privacy Settings")
+                    alert.addButton(withTitle: "Cancel")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+                    }
+                } else {
+                    statusMessage = "Failed to create watch: \(message)"
+                }
             }
         }
     }

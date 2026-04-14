@@ -21,11 +21,11 @@
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionFileProviderDocumentGroup</key>
-		<string>group.com.starkeep.fileprovider</string>
+		<string>group.com.amkoller.fileprovider</string>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.fileprovider-nonui</string>
 		<key>NSExtensionPrincipalClass</key>
-		<string>$(PRODUCT_MODULE_NAME).Extension</string>
+		<string>StarkeepFileProviderExtension</string>
 		<key>NSExtensionFileProviderSupportsEnumeration</key>
 		<true/>
 	</dict>
