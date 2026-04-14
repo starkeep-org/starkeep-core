@@ -1,6 +1,20 @@
 import FileProvider
 import UniformTypeIdentifiers
 
+// MARK: - Trash container
+
+final class TrashItem: NSObject, NSFileProviderItem {
+    var itemIdentifier: NSFileProviderItemIdentifier { .trashContainer }
+    var parentItemIdentifier: NSFileProviderItemIdentifier { .rootContainer }
+    var filename: String { ".Trash" }
+    var contentType: UTType { .folder }
+    var capabilities: NSFileProviderItemCapabilities { [.allowsContentEnumerating] }
+    var itemVersion: NSFileProviderItemVersion {
+        let v = "trash".data(using: .utf8)!
+        return NSFileProviderItemVersion(contentVersion: v, metadataVersion: v)
+    }
+}
+
 // MARK: - Root container
 
 final class RootItem: NSObject, NSFileProviderItem {
@@ -9,7 +23,10 @@ final class RootItem: NSObject, NSFileProviderItem {
     var filename: String { "Starkeep" }
     var contentType: UTType { .folder }
     var capabilities: NSFileProviderItemCapabilities { [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems] }
-    var itemVersion: NSFileProviderItemVersion { NSFileProviderItemVersion(contentVersion: Data(), metadataVersion: Data()) }
+    var itemVersion: NSFileProviderItemVersion {
+        let v = "root".data(using: .utf8)!
+        return NSFileProviderItemVersion(contentVersion: v, metadataVersion: v)
+    }
 }
 
 // MARK: - Folder item (watched directory, subfolder, or virtual folder)
@@ -39,7 +56,8 @@ final class FolderItem: NSObject, NSFileProviderItem {
     var contentType: UTType { .folder }
     var capabilities: NSFileProviderItemCapabilities { [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems] }
     var itemVersion: NSFileProviderItemVersion {
-        NSFileProviderItemVersion(contentVersion: "\(count)".data(using: .utf8) ?? Data(), metadataVersion: Data())
+        let v = browseFolderId.data(using: .utf8) ?? Data()
+        return NSFileProviderItemVersion(contentVersion: v, metadataVersion: v)
     }
     var childItemCount: NSNumber? { NSNumber(value: count) }
 }
