@@ -1,10 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   listRecords,
-  listWatches,
-  listWatchFiles,
   type DataRecord,
-  type Watch,
 } from "./lib/client.ts";
 import MetadataPanel from "./components/MetadataPanel.tsx";
 
@@ -19,7 +16,6 @@ function formatDate(iso: string): string {
 
 export default function App() {
   const [records, setRecords] = useState<DataRecord[]>([]);
-  const [pathMap, setPathMap] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<DataRecord | null>(null);
@@ -27,26 +23,8 @@ export default function App() {
   useEffect(() => {
     async function load() {
       try {
-        const [recs, watches] = await Promise.all([listRecords(), listWatches()]);
+        const recs = await listRecords();
         setRecords(recs);
-
-        // Build recordId → full path map from all watch files
-        const map: Record<string, string> = {};
-        await Promise.all(
-          watches.map(async (w: Watch) => {
-            try {
-              const files = await listWatchFiles(w.id);
-              for (const f of files) {
-                if (f.dataRecordId) {
-                  map[f.dataRecordId] = `${w.directoryPath}/${f.relativePath}`;
-                }
-              }
-            } catch {
-              // Non-fatal: skip this watch if files can't be fetched
-            }
-          }),
-        );
-        setPathMap(map);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load data");
       } finally {
@@ -101,7 +79,7 @@ export default function App() {
                   typeof r.payload?.fileName === "string"
                     ? r.payload.fileName
                     : "—";
-                const path = pathMap[r.id] ?? "—";
+                const path = r.path ?? "—";
                 return (
                   <tr
                     key={r.id}
