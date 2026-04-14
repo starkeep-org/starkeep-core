@@ -92,6 +92,59 @@ App ──> SDK ──> SQLite   <──sync──> Aurora DSQL
 The Tasks desktop app uses the local configuration by default and syncs when cloud
 credentials are provided. The Tasks web app uses the cloud configuration directly.
 
+## Local multi-app deployment with the data-server
+
+When multiple apps run on the same machine (a desktop photos app, a Finder extension, a
+future notes app), they should share a single data store. The **data-server** is the local
+hub for this configuration: a long-running HTTP service that embeds the SDK and exposes it
+over a REST API at `http://127.0.0.1:9820`.
+
+```
+photos-desktop ──┐
+                 │  HTTP (127.0.0.1:9820)    ┌─> ~/.starkeep/data.db
+file-provider  ──┼──────────────────────────>│ data-server
+                 │                           └─> ~/.starkeep/objects/
+other-app      ──┘
+```
+
+In this model:
+
+**Apps are thin HTTP clients.** Instead of embedding the SDK with their own local adapters,
+apps call the data-server's REST API. No per-app SQLite databases. No per-app file storage.
+All reads and writes converge on the shared store, so every app sees every other app's data
+immediately without sync.
+
+**The data-server owns the global type registry.** App packages export their type
+definitions; the data-server imports and registers them as the authoritative validator for
+writes. This ensures all local apps share a consistent view of which types exist and what
+their payloads look like.
+
+**Metadata generators run app-side.** Generators are app-specific and often require
+platform capabilities (browser Canvas, native image codecs). Apps run generators on the raw
+file bytes they already have and push the results to the data-server via
+`POST /data/metadata`, which stores them in the shared `metadata_sync` table.
+
+### Add-a-photo data flow (thin-client pattern)
+
+```
+1. App reads file bytes
+2. App  →  POST /data/records { type: "@starkeep/image", fileBase64, fileName, ... }
+           data-server hashes + stores file, creates record → returns { id }
+3. App runs generators locally on raw bytes (EXIF, dimensions — no SDK context needed)
+4. App  →  POST /data/metadata { targetId, generatorId, value }
+           data-server writes to metadata_sync table
+5. Any other app queries GET /data/records or GET /browse and sees the new photo
+```
+
+### When to use each pattern
+
+| Scenario | Pattern |
+|---|---|
+| Single local app | SDK embedded, SQLite + FS adapters |
+| Single app with cloud sync | SDK embedded, SQLite + Aurora DSQL/S3 adapters |
+| Multiple local apps on one machine | Thin HTTP clients to a shared data-server |
+| Web app | SDK embedded server-side; browser calls the HTTP API |
+
 ## Design principles
 
 **Database-agnostic.** All data access goes through the `DatabaseAdapter` and

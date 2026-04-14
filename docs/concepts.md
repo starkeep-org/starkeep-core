@@ -63,14 +63,45 @@ Each metadata row tracks per-generator `input_hash` and `generator_version` colu
 allow the system to detect when metadata is stale and needs to be regenerated without
 re-running the generator when nothing has changed.
 
+### Generators in the thin-client pattern
+
+In the SDK-embedded pattern, generators run in-process: the SDK calls `generateAll()` after
+storing a record, which invokes each registered generator using the SDK's storage context.
+
+In the **thin-client (data-server) pattern**, generators are app-specific and may need
+platform capabilities (browser APIs, native codecs) that the data-server doesn't have.
+The responsibility split is:
+
+- **App**: runs generators locally on the raw file bytes it already holds, produces the
+  metadata `value` objects
+- **Data-server**: stores the results via `POST /data/metadata`, writing them into the
+  shared `metadata_sync` table with an HLC `updatedAt` timestamp
+
+This means generator *logic* lives in the app package; generator *storage* happens in the
+data-server. Apps that are thin clients do not need the SDK in-process — `exifr.parse()`,
+Canvas-based dimension extraction, and similar tools work directly on bytes.
+
 ## Types and the type registry
 
 Every data record has a **type**, written as `namespace:name` (e.g., `tasks:task`,
 `@starkeep/access-policy`). Namespacing prevents collisions between types defined by
 different developers or packages.
 
-Types are registered in a **type registry** with an optional schema for validating content.
-The registry is the single source of truth for what types exist in an application.
+Types are registered in a **type registry** with an optional schema for validating payload
+content. The registry is the single source of truth for what types exist in a deployment.
+
+**Data types are global.** A type like `@starkeep/image` has a fixed, shared meaning across
+all apps. Any app that understands the type can read, display, or act on records of that
+type — this is what enables cross-app interoperability (e.g., the file-provider showing
+photos added by the photos app).
+
+**In a multi-app local deployment, the data-server owns the registry.** App packages export
+their type definitions; the data-server imports and registers them as the authoritative
+validator for all writes to the shared database. Apps do not maintain their own registries.
+
+**Metadata types are per-app.** Generator IDs and their output schemas are namespaced to
+the app that defines them (e.g., `@photos/app:exif`). Other apps are not expected to
+understand or use another app's metadata types.
 
 ## Search and querying
 

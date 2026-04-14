@@ -259,3 +259,135 @@ The full Tasks app source is in:
 - `apps/tasks-packages/tasks-ui/` — shared React components
 - `apps/tasks-web/` — Next.js web application
 - `apps/tasks-desktop/` — Tauri desktop application
+
+---
+
+## Building a data-server-backed local app
+
+The Tasks app walkthrough above describes embedding the SDK directly in the app process.
+This works well for a single app with its own isolated storage. But when multiple local apps
+on the same machine need to share data — for example, a desktop photos app and a Finder
+extension both seeing the same photos — each app should instead be a **thin HTTP client to
+the data-server**.
+
+The photos app (`apps/photos-desktop`) is the reference implementation of this pattern.
+
+### 1. Export type definitions from your app package
+
+Define your record types in your app library package, and export them so the data-server
+can import and register them:
+
+```typescript
+// photos-lib/src/manifest.ts
+export const IMAGE_RECORD_TYPE = "@starkeep/image";
+```
+
+Data types use a global namespace (e.g., `@starkeep/image`) because they are meant to be
+shared across apps. The file-provider, the photos app, and any future app that understands
+images all use the same type string.
+
+### 2. Register types in the data-server
+
+The data-server is the authoritative type registry. Import type definitions from app
+packages and register them at startup:
+
+```typescript
+// data-server/server.ts
+import { createTypeRegistry } from "@starkeep/core"
+import * as v from "valibot"
+
+const typeRegistry = createTypeRegistry()
+typeRegistry.register({
+  namespace: "@starkeep",
+  name: "image",
+  schema: v.object({
+    fileName: v.optional(v.string()),
+    title: v.optional(v.string()),
+  }),
+})
+// pass typeRegistry to createStarkeepSdk when the SDK option is available
+```
+
+### 3. Write a typed HTTP client in your app
+
+Instead of initializing the SDK, write a small client that calls the data-server:
+
+```typescript
+// photos-desktop/src/lib/data-server-client.ts
+const DATA_SERVER_URL = "http://127.0.0.1:9820";
+
+export async function addPhoto(fileBytes: Uint8Array, mimeType: string, fileName: string) {
+  const fileBase64 = uint8ToBase64(fileBytes);
+  const res = await fetch(`${DATA_SERVER_URL}/data/records`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      type: "@starkeep/image",
+      payload: { fileName },
+      fileName,
+      contentType: mimeType,
+      fileBase64,
+    }),
+  });
+  const { record } = await res.json();
+  return record;
+}
+
+export async function listPhotos() {
+  const res = await fetch(`${DATA_SERVER_URL}/data/records?type=%40starkeep%2Fimage`);
+  const { records } = await res.json();
+  return records;
+}
+```
+
+### 4. Run generators in the app, push results to the data-server
+
+Generators are defined in your app package. In the thin-client pattern they run in the app
+process using the raw bytes — no SDK context needed. Push the results via `POST /data/metadata`:
+
+```typescript
+import exifr from "exifr";
+
+async function runGenerators(recordId: string, fileBytes: Uint8Array, fileName: string) {
+  // EXIF — exifr.parse() works on raw bytes in the browser
+  const exif = await exifr.parse(fileBytes, { pick: ["DateTimeOriginal", "Make", "Model", ...] });
+  await fetch(`${DATA_SERVER_URL}/data/metadata`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      targetId: recordId,
+      targetType: "@starkeep/image",
+      generatorId: "@photos/app:exif",
+      generatorVersion: 1,
+      value: { dateTakenRaw: exif?.DateTimeOriginal ?? null, cameraMake: exif?.Make ?? null, ... },
+    }),
+  });
+
+  // Provenance
+  await fetch(`${DATA_SERVER_URL}/data/metadata`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      targetId: recordId, targetType: "@starkeep/image",
+      generatorId: "@photos/app:provenance", generatorVersion: 1,
+      value: { originalFilename: fileName, googlePhotosId: null, sourceImageId: null },
+    }),
+  });
+}
+```
+
+### 5. Cross-app visibility
+
+Any other app that calls the data-server will immediately see the new record:
+
+```
+GET /data/records?type=%40starkeep%2Fimage     → photos app list view
+GET /browse?path=/                             → file-provider root (shows Library)
+GET /browse?path=/library-type:@starkeep/image → file-provider photo listing
+GET /data/records/:id/file-url                 → signed URL to download the file
+```
+
+The `GET /browse` hierarchy is how the Finder file-provider navigates the data-server.
+Records that are not associated with a watched directory appear under `Library →
+<type-name>`. Files are named using `payload.title`, `payload.name`, `payload.fileName`,
+or the record ID as a fallback, plus the extension derived from the MIME type.

@@ -10,4 +10,5 @@ export interface ObjectStorageAdapter {
   delete(key: string): Promise<void>;
   list(prefix: string, options?: ListOptions): Promise<ListResult>;
   getSignedUrl?(key: string, options?: SignedUrlOptions): Promise<string>;
+  putSymlink?(key: string, targetPath: string, options?: PutOptions): Promise<void>;
 }

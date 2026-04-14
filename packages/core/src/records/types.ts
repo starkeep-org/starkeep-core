@@ -26,6 +26,7 @@ export interface DataRecord extends BaseRecord {
   objectStorageKey: string | null;
   mimeType: string | null;
   sizeBytes: number | null;
+  originalFilename: string | null;
   content: Record<string, unknown>;
 }
 

@@ -1,53 +1,91 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import type { StarkeepSdk } from "@starkeep/sdk";
-import type { AppImage, CropRect } from "@photos/photos-lib";
+import { open } from "@tauri-apps/plugin-dialog";
+import { readFile } from "@tauri-apps/plugin-fs";
+import type { AppImage } from "@photos/photos-lib";
 import {
   PhotoProvider,
   PhotoUrlProvider,
   PhotoGrid,
   PhotoViewer,
-  UploadZone,
-  GoogleImportPanel,
   usePhotoContext,
 } from "@photos/photos-ui";
-import { getSdk, generateImageMetadata, cropImageBytesCanvas, apiRequest } from "./lib/sdk.js";
+import {
+  addPhotoFromPath,
+  listPhotos,
+  getPhotoFileUrl,
+  postMetadata,
+  type PhotoRecord,
+} from "./lib/data-server-client.js";
 
 // ---------------------------------------------------------------------------
-// Blob URL cache for thumbnails — triggers re-renders when URLs become ready
+// Map a data-server PhotoRecord to the AppImage shape expected by the UI
+// components. Metadata fields are filled with safe defaults; they will be
+// enriched once the app-side generators run and their results are stored.
 // ---------------------------------------------------------------------------
 
-function useThumbnailCache(sdk: StarkeepSdk | null, userId: string) {
+function photoRecordToAppImage(record: PhotoRecord): AppImage {
+  return {
+    id: record.id,
+    mimeType: record.mime_type ?? "image/jpeg",
+    objectStorageKey: record.object_storage_key ?? "",
+    sizeBytes: record.size_bytes ?? 0,
+    createdAt: record.created_at,
+    updatedAt: record.updated_at,
+    // Dimensions — populated after image-dimensions generator runs
+    width: 0,
+    height: 0,
+    format: "unknown",
+    // EXIF — populated after EXIF generator runs
+    exif: {
+      dateTakenRaw: null,
+      cameraMake: null,
+      cameraModel: null,
+      fNumber: null,
+      exposureTime: null,
+      iso: null,
+      lensModel: null,
+      gpsLat: null,
+      gpsLon: null,
+      orientation: null,
+    },
+    // Provenance — set from payload on upload
+    originalFilename: String(record.payload?.fileName ?? record.id),
+    googlePhotosId: null,
+    sourceImageId: null,
+    cropRect: null,
+    // User-authored — set from payload on upload
+    caption: "",
+    title: String(record.payload?.title ?? record.payload?.fileName ?? record.id),
+    dateTakenOverride: null,
+    // Thumbnail — not generated in PoC; full image is used directly
+    thumbnailKey: null,
+    thumbnailWidth: 0,
+    thumbnailHeight: 0,
+    // Effective date for sorting: fall back to record creation timestamp
+    effectiveDateTaken: record.created_at,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// File URL cache — fetches signed URLs from the data-server on demand and
+// caches them so repeated renders don't re-request.
+// ---------------------------------------------------------------------------
+
+function useFileUrlCache() {
   const [urlMap, setUrlMap] = useState<ReadonlyMap<string, string>>(new Map());
   const loadingRef = useRef<Set<string>>(new Set());
 
-  useEffect(() => {
-    return () => {
-      for (const url of urlMap.values()) URL.revokeObjectURL(url);
-    };
-  }, []); // intentionally only on unmount
-
-  const getThumbnailSrc = useCallback(
+  const getFileSrc = useCallback(
     (imageId: string): string => {
       const cached = urlMap.get(imageId);
       if (cached) return cached;
-      if (!sdk || loadingRef.current.has(imageId)) return "";
+      if (loadingRef.current.has(imageId)) return "";
 
       loadingRef.current.add(imageId);
-      apiRequest<{ thumbnailBase64: string; contentType: string }>(
-        sdk,
-        "photos:v1/photos/thumbnail",
-        "GET",
-        userId,
-        { query: { id: imageId } },
-      )
-        .then(({ thumbnailBase64, contentType }) => {
-          const byteString = atob(thumbnailBase64);
-          const bytes = new Uint8Array(byteString.length);
-          for (let i = 0; i < byteString.length; i++) bytes[i] = byteString.charCodeAt(i);
-          const blob = new Blob([bytes], { type: contentType });
-          const blobUrl = URL.createObjectURL(blob);
+      getPhotoFileUrl(imageId)
+        .then((url) => {
           loadingRef.current.delete(imageId);
-          setUrlMap((prev) => new Map(prev).set(imageId, blobUrl));
+          setUrlMap((prev) => new Map(prev).set(imageId, url));
         })
         .catch(() => {
           loadingRef.current.delete(imageId);
@@ -55,152 +93,143 @@ function useThumbnailCache(sdk: StarkeepSdk | null, userId: string) {
 
       return "";
     },
-    [sdk, userId, urlMap],
+    [urlMap],
   );
 
-  return getThumbnailSrc;
+  return getFileSrc;
+}
+
+// ---------------------------------------------------------------------------
+// Run app-side generators after a photo is added.
+// Results are pushed to the data-server's /data/metadata endpoint so they
+// land in the shared DB alongside the record.
+// ---------------------------------------------------------------------------
+
+async function runGenerators(
+  record: PhotoRecord,
+  fileBytes: Uint8Array,
+  fileName: string,
+  title: string,
+): Promise<void> {
+  const targetId = record.id;
+  const targetType = "@starkeep/image";
+
+  // Provenance — tracks original filename and source
+  await postMetadata(targetId, targetType, "@photos/app:provenance", 1, {
+    originalFilename: fileName,
+    googlePhotosId: null,
+    sourceImageId: null,
+    cropX: null,
+    cropY: null,
+    cropWidth: null,
+    cropHeight: null,
+  });
+
+  // User-authored — default title derived from filename; caption empty
+  await postMetadata(targetId, targetType, "@photos/app:user-authored", 1, {
+    title,
+    caption: "",
+    dateTakenOverride: null,
+  });
+
+  // EXIF — parse from raw bytes using exifr (no SDK context needed)
+  try {
+    const { default: Exifr } = await import("exifr");
+    const exif = await Exifr.parse(fileBytes, {
+      pick: ["DateTimeOriginal", "Make", "Model", "FNumber", "ExposureTime", "ISO", "LensModel",
+             "GPSLatitude", "GPSLongitude", "Orientation"],
+    }) as Record<string, unknown> | undefined;
+
+    if (exif) {
+      const dateTakenRaw = exif["DateTimeOriginal"]
+        ? new Date(exif["DateTimeOriginal"] as string).toISOString()
+        : null;
+      await postMetadata(targetId, targetType, "@photos/app:exif", 1, {
+        dateTakenRaw,
+        cameraMake: (exif["Make"] as string) ?? null,
+        cameraModel: (exif["Model"] as string) ?? null,
+        fNumber: (exif["FNumber"] as number) ?? null,
+        exposureTime: exif["ExposureTime"] != null ? String(exif["ExposureTime"]) : null,
+        iso: (exif["ISO"] as number) ?? null,
+        lensModel: (exif["LensModel"] as string) ?? null,
+        gpsLat: (exif["GPSLatitude"] as number) ?? null,
+        gpsLon: (exif["GPSLongitude"] as number) ?? null,
+        orientation: (exif["Orientation"] as number) ?? null,
+      });
+    }
+  } catch {
+    // EXIF extraction is best-effort; skip if exifr fails or file has no EXIF
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Inner app (has access to PhotoProvider state)
 // ---------------------------------------------------------------------------
 
-function PhotosAppDesktopInner({ sdk, userId }: { sdk: StarkeepSdk; userId: string }) {
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+  gif: "image/gif", webp: "image/webp", heic: "image/heic",
+  heif: "image/heif", avif: "image/avif", tiff: "image/tiff",
+};
+
+function PhotosAppDesktopInner() {
   const { state, dispatch } = usePhotoContext();
-  const [uploading, setUploading] = useState(false);
-  const [showUpload, setShowUpload] = useState(false);
-  const [showGoogleImport, setShowGoogleImport] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const selectedImage = state.selectedId
     ? state.images.find((img) => img.id === state.selectedId) ?? null
     : null;
 
-  const loadPhotos = useCallback(
-    async (cursor?: string) => {
-      dispatch({ type: "SET_LOADING", loading: true });
-      try {
-        const query: Record<string, string> = {};
-        if (cursor) query.cursor = cursor;
-        const data = await apiRequest<{ images: AppImage[]; nextCursor: string | null }>(
-          sdk,
-          "photos:v1/photos/list",
-          "GET",
-          userId,
-          { query },
-        );
-        if (cursor) {
-          dispatch({ type: "APPEND_IMAGES", images: data.images });
-        } else {
-          dispatch({ type: "SET_IMAGES", images: data.images });
-        }
-        dispatch({ type: "SET_NEXT_CURSOR", cursor: data.nextCursor });
-      } finally {
-        dispatch({ type: "SET_LOADING", loading: false });
-      }
-    },
-    [sdk, userId, dispatch],
-  );
+  const loadPhotos = useCallback(async () => {
+    dispatch({ type: "SET_LOADING", loading: true });
+    try {
+      const records = await listPhotos();
+      dispatch({ type: "SET_IMAGES", images: records.map(photoRecordToAppImage) });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load photos");
+    } finally {
+      dispatch({ type: "SET_LOADING", loading: false });
+    }
+  }, [dispatch]);
 
   useEffect(() => {
     void loadPhotos();
   }, [loadPhotos]);
 
-  const handleUpload = async (file: File) => {
-    setUploading(true);
+  const handleAddClick = async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Images", extensions: Object.keys(IMAGE_EXTENSIONS) }],
+    });
+    if (!selected || typeof selected !== "string") return;
+
+    setAdding(true);
+    setError(null);
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const fileBase64 = btoa(
-        String.fromCharCode(...new Uint8Array(arrayBuffer)),
-      );
-      const result = await apiRequest<{ imageId: string }>(
-        sdk,
-        "photos:v1/photos/upload",
-        "POST",
-        userId,
-        {
-          body: {
-            fileBase64,
-            mimeType: file.type,
-            provenance: { originalFilename: file.name, googlePhotosId: null, sourceImageId: null },
-            userAuthored: {
-              title: file.name.replace(/\.[^.]+$/, ""),
-              caption: "",
-              dateTakenOverride: null,
-            },
-          },
-        },
-      );
-      await generateImageMetadata(sdk, result.imageId);
-      const imageData = await apiRequest<{ image: AppImage }>(
-        sdk,
-        "photos:v1/photos/item",
-        "GET",
-        userId,
-        { query: { id: result.imageId } },
-      );
-      dispatch({ type: "APPEND_IMAGES", images: [imageData.image] });
+      const filePath = selected;
+      const fileName = filePath.split("/").pop() ?? filePath;
+      const title = fileName.replace(/\.[^.]+$/, "");
+      const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+      const mimeType = IMAGE_EXTENSIONS[ext] ?? "application/octet-stream";
+
+      const record = await addPhotoFromPath(filePath, mimeType, fileName, title);
+      dispatch({ type: "APPEND_IMAGES", images: [photoRecordToAppImage(record)] });
+
+      // Read bytes locally only for EXIF extraction (no bytes sent to server)
+      const fileBytes = await readFile(filePath);
+      await runGenerators(record, fileBytes, fileName, title);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to add photo");
     } finally {
-      setUploading(false);
+      setAdding(false);
     }
   };
 
-  const handleUpdateCaption = async (caption: string) => {
-    if (!selectedImage) return;
-    const data = await apiRequest<{ image: AppImage }>(
-      sdk,
-      "photos:v1/photos/item",
-      "PATCH",
-      userId,
-      { body: { id: selectedImage.id, caption } },
-    );
-    dispatch({ type: "OPTIMISTIC_UPDATE", image: data.image });
-  };
-
-  const handleCrop = async (cropRect: CropRect) => {
-    if (!selectedImage) return;
-    // Inject the Canvas-based crop function — the handler calls it to produce cropped bytes.
-    const result = await apiRequest<{ imageId: string }>(
-      sdk,
-      "photos:v1/photos/crop",
-      "POST",
-      userId,
-      {
-        body: {
-          sourceImageId: selectedImage.id,
-          cropRect,
-          cropImageBytes: (bytes: Uint8Array, x: number, y: number, w: number, h: number) =>
-            cropImageBytesCanvas(bytes, x, y, w, h),
-        },
-      },
-    );
-    await generateImageMetadata(sdk, result.imageId);
-    const imageData = await apiRequest<{ image: AppImage }>(
-      sdk,
-      "photos:v1/photos/item",
-      "GET",
-      userId,
-      { query: { id: result.imageId } },
-    );
-    dispatch({ type: "APPEND_IMAGES", images: [imageData.image] });
-    dispatch({ type: "SET_SELECTED_ID", id: imageData.image.id });
-  };
-
-  const handleShare = async () => {
-    if (!selectedImage) return null;
-    return apiRequest<{ token: string; shareUrl: string }>(
-      sdk,
-      "photos:v1/photos/share",
-      "POST",
-      userId,
-      { body: { imageId: selectedImage.id } },
-    );
-  };
-
-  // Thumbnail blob URLs via SDK
-  const getThumbnailSrc = useThumbnailCache(sdk, userId);
+  const getFileSrc = useFileUrlCache();
 
   return (
-    <PhotoUrlProvider getThumbnailSrc={getThumbnailSrc}>
+    <PhotoUrlProvider getThumbnailSrc={getFileSrc}>
       <div
         style={{
           minHeight: "100vh",
@@ -224,33 +253,34 @@ function PhotosAppDesktopInner({ sdk, userId }: { sdk: StarkeepSdk; userId: stri
           }}
         >
           <span style={{ fontWeight: 700, fontSize: 17, letterSpacing: "-0.02em" }}>Photos</span>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              onClick={() => setShowGoogleImport(true)}
-              style={toolbarButtonStyle}
-            >
-              Import from Google
-            </button>
-            <button
-              onClick={() => setShowUpload(!showUpload)}
-              style={{ ...toolbarButtonStyle, background: "rgba(255,255,255,0.15)" }}
-            >
-              Upload
-            </button>
-          </div>
+          <button
+            onClick={() => { void handleAddClick(); }}
+            disabled={adding}
+            style={{ ...toolbarButtonStyle, background: "rgba(255,255,255,0.15)" }}
+          >
+            {adding ? "Adding…" : "Add Photo"}
+          </button>
         </div>
 
-        {showUpload && (
-          <div style={{ padding: "12px 20px", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-            <UploadZone onUpload={handleUpload} uploading={uploading} />
+        {error && (
+          <div
+            style={{
+              padding: "8px 20px",
+              background: "rgba(220,50,50,0.15)",
+              color: "#f88",
+              fontSize: 13,
+              borderBottom: "1px solid rgba(220,50,50,0.3)",
+            }}
+          >
+            {error}
           </div>
         )}
 
         <PhotoGrid
           images={state.images}
           loading={state.loading}
-          hasMore={!!state.nextCursor}
-          onLoadMore={() => { if (state.nextCursor) void loadPhotos(state.nextCursor); }}
+          hasMore={false}
+          onLoadMore={() => {}}
           onSelect={(id) => dispatch({ type: "SET_SELECTED_ID", id })}
         />
 
@@ -258,60 +288,14 @@ function PhotosAppDesktopInner({ sdk, userId }: { sdk: StarkeepSdk; userId: stri
           <PhotoViewer
             image={selectedImage}
             onClose={() => dispatch({ type: "SET_SELECTED_ID", id: null })}
-            onUpdateCaption={handleUpdateCaption}
-            onCrop={handleCrop}
-            onShare={handleShare}
-          />
-        )}
-
-        {showGoogleImport && (
-          <GoogleImportPanel
-            onImportComplete={(_count) => {
-              void loadPhotos();
-              setShowGoogleImport(false);
-            }}
-            onClose={() => setShowGoogleImport(false)}
+            onUpdateCaption={async () => {}}
+            onCrop={async () => {}}
+            onShare={async () => null}
           />
         )}
       </div>
     </PhotoUrlProvider>
   );
-}
-
-// ---------------------------------------------------------------------------
-// SDK loader
-// ---------------------------------------------------------------------------
-
-function SdkLoader() {
-  const [sdk, setSdk] = useState<StarkeepSdk | null>(null);
-  const userId = "local-user";
-  const nodeId = "desktop-node-1";
-
-  useEffect(() => {
-    getSdk({ ownerId: userId, nodeId })
-      .then(setSdk)
-      .catch((err) => console.error("[SdkLoader]", err));
-  }, []);
-
-  if (!sdk) {
-    return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "100vh",
-          background: "#111",
-          color: "#666",
-          fontSize: 14,
-        }}
-      >
-        Starting up...
-      </div>
-    );
-  }
-
-  return <PhotosAppDesktopInner sdk={sdk} userId={userId} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +305,7 @@ function SdkLoader() {
 export function App() {
   return (
     <PhotoProvider>
-      <SdkLoader />
+      <PhotosAppDesktopInner />
     </PhotoProvider>
   );
 }

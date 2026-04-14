@@ -38,6 +38,11 @@ export interface DataOperations {
     file: Uint8Array,
     contentType?: string,
   ): Promise<DataRecord>;
+  putWithLocalFile(
+    input: CreateDataRecordInput,
+    filePath: string,
+    contentType?: string,
+  ): Promise<DataRecord>;
   get(recordId: StarkeepId): Promise<DataRecord | null>;
   delete(recordId: StarkeepId): Promise<void>;
   query(params: { type?: string; filters?: import("@starkeep/storage-adapter").Filter[] }): Promise<DataRecord[]>;
