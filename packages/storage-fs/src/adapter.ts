@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, unlink, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { PutOptions, GetResult, ListOptions, ListResult } from "@starkeep/storage-adapter";
@@ -44,6 +44,20 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     const filePath = this.keyToPath(key);
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, data);
+
+    if (options?.contentType || options?.metadata) {
+      const meta = {
+        contentType: options.contentType,
+        metadata: options.metadata,
+      };
+      await writeFile(this.metaPath(key), JSON.stringify(meta));
+    }
+  }
+
+  async putSymlink(key: string, targetPath: string, options?: PutOptions): Promise<void> {
+    const linkPath = this.keyToPath(key);
+    await mkdir(dirname(linkPath), { recursive: true });
+    await symlink(targetPath, linkPath);
 
     if (options?.contentType || options?.metadata) {
       const meta = {

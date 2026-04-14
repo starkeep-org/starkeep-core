@@ -6,6 +6,8 @@ import {
   type DataRecord,
   type MetadataRecord,
 } from "@starkeep/core";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
   const copy = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
   const buf = await crypto.subtle.digest("SHA-256", copy);
@@ -139,6 +141,35 @@ export async function createStarkeepSdk(
             objectStorageKey,
             mimeType: contentType ?? null,
             sizeBytes: file.length,
+          },
+          clock,
+        );
+        await databaseAdapter.put(record);
+        if (syncEngine) {
+          await syncEngine.recordChange("create", record);
+        }
+        return record;
+      },
+
+      async putWithLocalFile(input, filePath, contentType) {
+        const fileBytes = await readFile(filePath);
+        const contentHash = await sha256Hex(fileBytes);
+        const objectStorageKey = `${contentHash.slice(0, 2)}/${contentHash}`;
+
+        if (objectStorageAdapter.putSymlink) {
+          await objectStorageAdapter.putSymlink(objectStorageKey, filePath, { contentType });
+        } else {
+          await objectStorageAdapter.put(objectStorageKey, fileBytes, { contentType });
+        }
+
+        const record = createDataRecord(
+          {
+            ...input,
+            contentHash,
+            objectStorageKey,
+            mimeType: contentType ?? null,
+            sizeBytes: fileBytes.length,
+            originalFilename: input.originalFilename ?? basename(filePath),
           },
           clock,
         );

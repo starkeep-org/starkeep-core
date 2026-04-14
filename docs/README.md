@@ -22,10 +22,18 @@ so the same code runs against local SQLite in development and Aurora DSQL in pro
 The SDK wires everything together: data operations, metadata generation, search, aggregations,
 sync, and access control through a single entry point.
 
+On the local machine, the **data-server** is the hub for all local apps. Rather than each
+app embedding the SDK with its own private database, local apps are thin HTTP clients that
+route all reads and writes through the data-server. This gives every local app a consistent,
+shared view of the data without coordination. See [Architecture](architecture.md) for the
+full local multi-app deployment model.
+
 Reference apps include the [Tasks app](tasks-app.md) (web + Tauri desktop), the
-[data-server](../apps/data-server/) (a local HTTP server that exposes the data protocol
-over a REST API), and the [File Provider](../apps/file-provider/) (a macOS File Provider
-and Finder Sync extension that surfaces Starkeep data as a native filesystem location).
+[data-server](../apps/data-server/) (the local data hub — embeds the SDK and exposes it
+over a REST API at `127.0.0.1:9820`), the [Photos app](../apps/photos-desktop/) (a Tauri
+desktop app and reference implementation of the thin-client pattern), and the
+[File Provider](../apps/file-provider/) (a macOS File Provider and Finder Sync extension
+that surfaces Starkeep data as a native filesystem location).
 
 ## Documentation
 
@@ -34,7 +42,7 @@ and Finder Sync extension that surfaces Starkeep data as a native filesystem loc
 | [Core Concepts](concepts.md) | Data records, metadata, sync, access control, identifiers |
 | [Architecture](architecture.md) | Layer diagram, package graph, design principles |
 | [Getting Started](getting-started.md) | Install, initialize the SDK, store and query data |
-| [Building an App](building-an-app.md) | Walkthrough using the Tasks app as a reference |
+| [Building an App](building-an-app.md) | SDK-embedded pattern (Tasks app) and thin-client pattern (Photos app) |
 | [Infrastructure](infrastructure.md) | Per-user AWS provisioning with Pulumi |
 | [Reference](reference.md) | Record fields, error types, type naming conventions |
 
@@ -62,9 +70,10 @@ and Finder Sync extension that surfaces Starkeep data as a native filesystem loc
 
 | | |
 |--|--|
-| [Tasks App](tasks-app.md) | Task management — web and desktop reference implementation |
-| [Data Server](../apps/data-server/) | Local HTTP server exposing the data protocol as a REST API |
-| [File Provider](../apps/file-provider/) | macOS File Provider + Finder Sync extension |
+| [Tasks App](tasks-app.md) | Task management — web and desktop; reference for the SDK-embedded pattern |
+| [Data Server](../apps/data-server/) | Local data hub — embeds the SDK, owns the type registry, serves all local apps over HTTP |
+| [Photos App](../apps/photos-desktop/) | Desktop photo library — reference for the thin-client (data-server) pattern |
+| [File Provider](../apps/file-provider/) | macOS File Provider + Finder Sync extension — thin client that exposes Starkeep data in Finder |
 
 ### Analysis
 
