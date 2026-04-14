@@ -115,8 +115,6 @@ function isExcluded(filename: string, patterns?: string[]): boolean {
 interface ActiveWatch {
   config: WatchConfig;
   state: "scanning" | "watching" | "error" | "stopped";
-  totalFiles: number;
-  syncedFiles: number;
   lastScanAt: string | null;
   error?: string;
   fsWatcher: FSWatcher | null;
@@ -194,12 +192,12 @@ export function createFileWatchManager(opts: {
       }
       if (fileStat.size === 0) return;
 
-      // Check if already tracked with same mtime
+      // Check if already tracked
       const existing = active.files.get(filePath);
-      if (existing && existing.status === "synced") {
-        // Already synced — skip
-        return;
-      }
+      if (existing && existing.status === "synced") return;
+
+      // Mark pending immediately so duplicate FS events skip this file while it's in-flight
+      active.files.set(filePath, { filePath, relativePath, contentHash: "", dataRecordId: "", status: "pending" });
 
       // Hash the file (streaming, no full buffer)
       const contentHash = await hashFile(filePath);
@@ -252,7 +250,6 @@ export function createFileWatchManager(opts: {
         dataRecordId,
         status: "synced",
       });
-      active.syncedFiles++;
     } catch (err) {
       console.error(`Failed to ingest ${filePath}:`, (err as Error).message);
       active.files.set(filePath, {
@@ -323,8 +320,6 @@ export function createFileWatchManager(opts: {
       const active: ActiveWatch = {
         config,
         state: "scanning",
-        totalFiles: 0,
-        syncedFiles: 0,
         lastScanAt: null,
         fsWatcher: null,
         files: new Map(),
@@ -334,14 +329,10 @@ export function createFileWatchManager(opts: {
 
       // Load existing tracking records for delta scan
       active.files = await loadTrackingRecords(config.id);
-      active.syncedFiles = active.files.size;
 
-      // Scan
+      // Scan and ingest new/changed files
       console.log(`Watch started: ${config.directoryPath} → ${config.targetType}`);
       const files = await scanDirectory(active);
-      active.totalFiles = files.length;
-
-      // Ingest new/changed files
       await processInBatches(active, files);
 
       active.lastScanAt = new Date().toISOString();
@@ -351,7 +342,8 @@ export function createFileWatchManager(opts: {
 
       // Start FS event monitoring
       startFsWatcher(active);
-      console.log(`Watch ready: ${config.directoryPath} (${active.syncedFiles}/${active.totalFiles} files)`);
+      const synced = Array.from(active.files.values()).filter(f => f.status === "synced").length;
+      console.log(`Watch ready: ${config.directoryPath} (${synced}/${active.files.size} files)`);
     },
 
     async stopWatch(watchId) {
@@ -365,29 +357,33 @@ export function createFileWatchManager(opts: {
     getStatus(watchId) {
       const active = watches.get(watchId);
       if (!active) return null;
+      const files = Array.from(active.files.values());
       return {
         id: active.config.id,
         directoryPath: active.config.directoryPath,
         targetType: active.config.targetType,
         state: active.state,
-        totalFiles: active.totalFiles,
-        syncedFiles: active.syncedFiles,
+        totalFiles: files.length,
+        syncedFiles: files.filter(f => f.status === "synced").length,
         lastScanAt: active.lastScanAt,
         error: active.error,
       };
     },
 
     getAllStatuses() {
-      return Array.from(watches.values()).map((a) => ({
-        id: a.config.id,
-        directoryPath: a.config.directoryPath,
-        targetType: a.config.targetType,
-        state: a.state,
-        totalFiles: a.totalFiles,
-        syncedFiles: a.syncedFiles,
-        lastScanAt: a.lastScanAt,
-        error: a.error,
-      }));
+      return Array.from(watches.values()).map((a) => {
+        const files = Array.from(a.files.values());
+        return {
+          id: a.config.id,
+          directoryPath: a.config.directoryPath,
+          targetType: a.config.targetType,
+          state: a.state,
+          totalFiles: files.length,
+          syncedFiles: files.filter(f => f.status === "synced").length,
+          lastScanAt: a.lastScanAt,
+          error: a.error,
+        };
+      });
     },
 
     getWatchFiles(watchId) {

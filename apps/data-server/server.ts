@@ -71,6 +71,10 @@ async function main() {
   for (const record of existingWatches.records) {
     if (record.deletedAt) continue;
     const p = (record as any).payload;
+    if (!p?.directoryPath || !p?.targetType) {
+      await sdk.data.delete(record.id as any);
+      continue;
+    }
     watchManager.startWatch({
       id: record.id,
       directoryPath: p.directoryPath,
@@ -507,7 +511,14 @@ async function main() {
           includePatterns,
           excludePatterns,
         });
-        json(res, { watch: watchManager.getStatus(record.id) });
+        const status = watchManager.getStatus(record.id);
+        if (status?.state === "error") {
+          await sdk.data.delete(record.id as any);
+          res.writeHead(500);
+          json(res, { error: status.error ?? "Failed to watch directory" });
+          return;
+        }
+        json(res, { watch: status });
         return;
       }
 
