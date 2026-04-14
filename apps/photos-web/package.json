@@ -1,0 +1,36 @@
+{
+  "name": "@photos/photos-web",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@photos/photos-lib": "workspace:*",
+    "@photos/photos-ui": "workspace:*",
+    "@starkeep/sdk": "workspace:*",
+    "@starkeep/storage-adapter": "workspace:*",
+    "@starkeep/storage-aurora-dsql": "workspace:*",
+    "@starkeep/storage-fs": "workspace:*",
+    "@starkeep/storage-s3": "workspace:*",
+    "@starkeep/storage-sqlite": "workspace:*",
+    "@aws-sdk/dsql-signer": "^3.700.0",
+    "pg": "^8.13.0",
+    "sharp": "^0.33.0",
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "@types/pg": "^8.11.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/sharp": "^0.31.0",
+    "typescript": "^5.7.0"
+  }
+}
