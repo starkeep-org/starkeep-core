@@ -11,10 +11,13 @@ import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
+import { createTypeRegistry } from "../../packages/core/src/schema/index.js";
+import { createHLCClock } from "../../packages/core/src/hlc/index.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat } from "node:fs/promises";
 import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
+import * as v from "valibot";
 
 // Signing key for self-hosted file tokens — regenerated each startup so
 // all outstanding tokens are invalidated on restart (revocable by design).
@@ -51,6 +54,22 @@ async function main() {
             : undefined,
       })
     : null;
+
+  // Global type registry — the data-server is the authoritative validator for all registered types.
+  // TODO: auto-discover and load type definitions from installed app packages as the ecosystem grows.
+  const typeRegistry = createTypeRegistry();
+  typeRegistry.register({
+    namespace: "@starkeep",
+    name: "image",
+    schema: v.object({
+      // File-backed record: substantive content lives in object storage, not payload.
+      // Payload carries app-level display fields that apps may set on creation.
+      fileName: v.optional(v.string()),
+      title: v.optional(v.string()),
+    }),
+  });
+
+  const clock = createHLCClock({ nodeId: "admin-desktop", wallClockFunction: Date.now });
 
   const sdk = await createStarkeepSdk({
     databaseAdapter,
@@ -245,7 +264,7 @@ async function main() {
             })
             .map(r => ({
               id: r.id,
-              name: ((r as any).payload?.title || (r as any).payload?.name || r.id) + (extensionForMime((r as any).mimeType) || ""),
+              name: ((r as any).payload?.title || (r as any).payload?.name || (r as any).payload?.fileName || r.id) + (extensionForMime((r as any).mimeType) || ""),
               mime_type: (r as any).mimeType,
               size_bytes: (r as any).sizeBytes,
               updated_at: new Date(r.updatedAt.wallTime).toISOString(),
@@ -316,11 +335,12 @@ async function main() {
             owner_id: r.ownerId,
             sync_status: r.syncStatus,
             version: r.version,
-            payload: r.kind === "data" ? (r as any).payload : null,
-            content_hash: r.kind === "data" ? (r as any).contentHash : null,
-            object_storage_key: r.kind === "data" ? (r as any).objectStorageKey : null,
-            mime_type: r.kind === "data" ? (r as any).mimeType : null,
-            size_bytes: r.kind === "data" ? (r as any).sizeBytes : null,
+            payload: r.kind === "data" ? r.content : null,
+            content_hash: r.kind === "data" ? r.contentHash : null,
+            object_storage_key: r.kind === "data" ? r.objectStorageKey : null,
+            mime_type: r.kind === "data" ? r.mimeType : null,
+            size_bytes: r.kind === "data" ? r.sizeBytes : null,
+            original_filename: r.kind === "data" ? r.originalFilename : null,
           }));
 
         json(res, { records });
@@ -328,10 +348,10 @@ async function main() {
       }
 
       // POST /data/records — create a record, optionally with a file
-      // Body: JSON { type, payload, fileName?, contentType?, fileBase64? }
+      // Body: JSON { type, payload, fileName?, contentType?, fileBase64?, filePath? }
       if (path === "/data/records" && req.method === "POST") {
         const body = await readBody(req);
-        const { type, payload, fileName, contentType, fileBase64 } = JSON.parse(body);
+        const { type, payload, fileName, contentType, fileBase64, filePath } = JSON.parse(body);
         if (!type) {
           res.writeHead(400);
           json(res, { error: "type is required" });
@@ -339,18 +359,24 @@ async function main() {
         }
 
         let record;
-        if (fileBase64) {
+        if (filePath) {
+          const resolvedName = fileName ?? (filePath as string).split("/").pop() ?? filePath;
+          record = await sdk.data.putWithLocalFile(
+            { type, ownerId: OWNER_ID, content: { ...payload, ...(resolvedName ? { fileName: resolvedName } : {}) }, originalFilename: resolvedName },
+            filePath,
+            contentType,
+          );
+        } else if (fileBase64) {
           const fileBuffer = Buffer.from(fileBase64, "base64");
           record = await sdk.data.putWithFile(
-            { type, ownerId: OWNER_ID, payload: { ...payload, ...(fileName ? { fileName } : {}) } },
+            { type, ownerId: OWNER_ID, content: { ...payload, ...(fileName ? { fileName } : {}) }, originalFilename: fileName ?? null },
             fileBuffer,
             contentType,
           );
         } else {
-          record = await sdk.data.put({ type, ownerId: OWNER_ID, payload: payload || {} });
+          record = await sdk.data.put({ type, ownerId: OWNER_ID, content: payload || {} });
         }
 
-        // Invalidate caches on the FUSE side by returning the record
         json(res, {
           record: {
             id: record.id,
@@ -358,12 +384,39 @@ async function main() {
             created_at: new Date(record.createdAt.wallTime).toISOString(),
             updated_at: new Date(record.updatedAt.wallTime).toISOString(),
             owner_id: record.ownerId,
-            payload: record.payload,
+            payload: record.content,
             mime_type: record.mimeType,
             size_bytes: record.sizeBytes,
             object_storage_key: record.objectStorageKey,
+            original_filename: record.originalFilename,
           },
         });
+        return;
+      }
+
+      // POST /data/metadata — accept app-generated metadata (app-side generator results)
+      // Body: { targetId, targetType, generatorId, generatorVersion, value }
+      // Apps run generators locally and push the results here so they are stored in the
+      // shared metadata_sync table alongside other syncable metadata.
+      if (path === "/data/metadata" && req.method === "POST") {
+        const body = await readBody(req);
+        const { targetId, targetType, generatorId, generatorVersion, value } = JSON.parse(body);
+        if (!targetId || !targetType || !generatorId) {
+          res.writeHead(400);
+          json(res, { error: "targetId, targetType, and generatorId are required" });
+          return;
+        }
+        const now = clock.now();
+        await databaseAdapter.upsertSyncableMetadata({
+          targetId,
+          targetType,
+          generatorId,
+          generatorVersion: generatorVersion ?? 1,
+          inputHash: null,
+          updatedAt: now,
+          value: value ?? {},
+        });
+        json(res, { ok: true });
         return;
       }
 
@@ -437,6 +490,14 @@ async function main() {
         return;
       }
 
+      // GET /data/records/:id/metadata — list metadata_sync entries for a record
+      const metadataMatch = path.match(/^\/data\/records\/([^/]+)\/metadata$/);
+      if (metadataMatch && req.method === "GET") {
+        const metadata = databaseAdapter.getMetadataForRecord(metadataMatch[1]!);
+        json(res, { metadata });
+        return;
+      }
+
       // GET /data/records/:id
       const recordMatch = path.match(/^\/data\/records\/([^/]+)$/);
       if (recordMatch && req.method === "GET") {
@@ -456,11 +517,12 @@ async function main() {
             owner_id: record.ownerId,
             sync_status: record.syncStatus,
             version: record.version,
-            payload: record.payload,
+            payload: record.content,
             content_hash: record.contentHash,
             object_storage_key: record.objectStorageKey,
             mime_type: record.mimeType,
             size_bytes: record.sizeBytes,
+            original_filename: record.originalFilename,
           },
         });
         return;

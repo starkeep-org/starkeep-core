@@ -38,7 +38,8 @@ const CREATE_TABLE_SQL = `
     content_hash TEXT,
     object_storage_key TEXT,
     mime_type TEXT,
-    size_bytes INTEGER
+    size_bytes INTEGER,
+    original_filename TEXT
   )
 `;
 
@@ -103,6 +104,8 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     this.database.exec(CREATE_MIGRATIONS_TABLE_SQL);
     this.database.exec(CREATE_METADATA_SYNC_TABLE_SQL);
     this.database.exec(CREATE_METADATA_SYNC_INDEX_SQL);
+    // Idempotent column additions for existing databases
+    try { this.database.exec("ALTER TABLE records ADD COLUMN original_filename TEXT"); } catch {}
   }
 
   async close(): Promise<void> {
@@ -429,6 +432,29 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
         value: record.value,
       });
     }
+  }
+
+  getMetadataForRecord(targetId: string): Array<{
+    generatorId: string;
+    generatorVersion: number;
+    value: Record<string, unknown>;
+    updatedAt: string;
+  }> {
+    const rows = this.allRows<{
+      generator_id: string;
+      generator_version: number;
+      value: string;
+      updated_at: string;
+    }>(
+      "SELECT generator_id, generator_version, value, updated_at FROM metadata_sync WHERE target_id = ? ORDER BY updated_at DESC",
+      targetId,
+    );
+    return rows.map((row) => ({
+      generatorId: row.generator_id,
+      generatorVersion: row.generator_version,
+      value: JSON.parse(row.value) as Record<string, unknown>,
+      updatedAt: row.updated_at,
+    }));
   }
 
   async getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]> {
