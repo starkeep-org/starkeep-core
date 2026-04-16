@@ -1,0 +1,45 @@
+{
+  "name": "@starkeep/admin-web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "scripts": {
+    "dev": "remix vite:dev",
+    "build": "remix vite:build",
+    "start": "remix-serve ./build/server/index.js",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/server": "^11.11.0",
+    "@mantine/core": "^7.17.8",
+    "@mantine/hooks": "^7.17.8",
+    "@remix-run/node": "^2.13.1",
+    "@remix-run/react": "^2.13.1",
+    "@remix-run/serve": "^2.13.1",
+    "@aws-sdk/client-cloudformation": "^3.645.0",
+    "@starkeep/admin-core": "workspace:*",
+    "@starkeep/admin-db": "workspace:*",
+    "@starkeep/admin-manifest": "workspace:*",
+    "@starkeep/admin-providers": "workspace:*",
+    "@starkeep/admin-shared": "workspace:*",
+    "@starkeep/admin-ui": "workspace:*",
+    "@tanstack/react-table": "^8.11.3",
+    "argon2": "^0.44.0",
+    "isbot": "^4",
+    "otplib": "^12.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "resend": "^4.0.0",
+    "uuid": "^11.1.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@remix-run/dev": "^2.13.1",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.4.11"
+  }
+}
