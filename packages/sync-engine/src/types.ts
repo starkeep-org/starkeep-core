@@ -51,18 +51,24 @@ export interface FileSyncManifest {
   readonly fileHash: string;
   readonly objectStorageKey: string;
   readonly sizeBytes: number;
+  readonly mimeType?: string;
+}
+
+export interface FileEntry {
+  readonly key: string;
+  readonly mimeType?: string;
 }
 
 export interface FileSyncEngine {
   getFilesToPush(
     localStorage: ObjectStorageAdapter,
     remoteStorage: ObjectStorageAdapter,
-    keys: string[],
+    entries: FileEntry[],
   ): Promise<FileSyncManifest[]>;
   getFilesToPull(
     localStorage: ObjectStorageAdapter,
     remoteStorage: ObjectStorageAdapter,
-    keys: string[],
+    entries: FileEntry[],
   ): Promise<FileSyncManifest[]>;
   transferFile(
     manifest: FileSyncManifest,
