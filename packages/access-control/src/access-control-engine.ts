@@ -95,6 +95,7 @@ export function createAccessControlEngine(options: {
       objectStorageKey: null,
       mimeType: null,
       sizeBytes: null,
+      originalFilename: null,
       content: {
         subjectType: policy.subjectType,
         subjectId: policy.subjectId,
@@ -201,6 +202,7 @@ export function createAccessControlEngine(options: {
       objectStorageKey: null,
       mimeType: null,
       sizeBytes: null,
+      originalFilename: null,
       content: {
         tokenHash,
         policyId,
@@ -247,6 +249,7 @@ export function createAccessControlEngine(options: {
       objectStorageKey: null,
       mimeType: null,
       sizeBytes: null,
+      originalFilename: null,
       content: {
         tokenHash: sharingToken.tokenHash,
         policyId: sharingToken.policyId,

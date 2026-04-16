@@ -36,25 +36,13 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     return join(this.basePath, prefix, key);
   }
 
-  private metaPath(key: string): string {
-    return this.keyToPath(key) + ".meta.json";
-  }
-
-  async put(key: string, data: Buffer | Uint8Array, options?: PutOptions): Promise<void> {
+  async put(key: string, data: Buffer | Uint8Array, _options?: PutOptions): Promise<void> {
     const filePath = this.keyToPath(key);
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, data);
-
-    if (options?.contentType || options?.metadata) {
-      const meta = {
-        contentType: options.contentType,
-        metadata: options.metadata,
-      };
-      await writeFile(this.metaPath(key), JSON.stringify(meta));
-    }
   }
 
-  async putSymlink(key: string, targetPath: string, options?: PutOptions): Promise<void> {
+  async putSymlink(key: string, targetPath: string, _options?: PutOptions): Promise<void> {
     const linkPath = this.keyToPath(key);
     await mkdir(dirname(linkPath), { recursive: true });
     try {
@@ -63,33 +51,13 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       // Symlink already exists — content-addressed key guarantees same content, skip.
     }
-
-    if (options?.contentType || options?.metadata) {
-      const meta = {
-        contentType: options.contentType,
-        metadata: options.metadata,
-      };
-      await writeFile(this.metaPath(key), JSON.stringify(meta));
-    }
   }
 
   async get(key: string): Promise<GetResult | null> {
     const filePath = this.keyToPath(key);
     try {
       const data = await readFile(filePath);
-      let contentType: string | undefined;
-      let metadata: Record<string, string> | undefined;
-
-      try {
-        const metaRaw = await readFile(this.metaPath(key), "utf-8");
-        const meta = JSON.parse(metaRaw);
-        contentType = meta.contentType;
-        metadata = meta.metadata;
-      } catch {
-        // No metadata file
-      }
-
-      return { data, contentType, metadata, size: data.length };
+      return { data, size: data.length };
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
@@ -101,11 +69,6 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
       await unlink(this.keyToPath(key));
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    try {
-      await unlink(this.metaPath(key));
-    } catch {
-      // Metadata may not exist
     }
   }
 

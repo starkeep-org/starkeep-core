@@ -1,5 +1,5 @@
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import type { FileSyncEngine, FileSyncManifest } from "./types.js";
+import type { FileSyncEngine, FileSyncManifest, FileEntry } from "./types.js";
 
 export function createFileSyncEngine(): FileSyncEngine {
   async function keyExists(
@@ -14,19 +14,20 @@ export function createFileSyncEngine(): FileSyncEngine {
     async getFilesToPush(
       localStorage: ObjectStorageAdapter,
       remoteStorage: ObjectStorageAdapter,
-      keys: string[],
+      entries: FileEntry[],
     ): Promise<FileSyncManifest[]> {
       const manifests: FileSyncManifest[] = [];
 
-      for (const key of keys) {
-        const existsRemotely = await keyExists(remoteStorage, key);
+      for (const entry of entries) {
+        const existsRemotely = await keyExists(remoteStorage, entry.key);
         if (!existsRemotely) {
-          const localFile = await localStorage.get(key);
+          const localFile = await localStorage.get(entry.key);
           if (localFile) {
             manifests.push({
-              fileHash: key,
-              objectStorageKey: key,
+              fileHash: entry.key,
+              objectStorageKey: entry.key,
               sizeBytes: localFile.size,
+              mimeType: entry.mimeType,
             });
           }
         }
@@ -38,19 +39,20 @@ export function createFileSyncEngine(): FileSyncEngine {
     async getFilesToPull(
       localStorage: ObjectStorageAdapter,
       remoteStorage: ObjectStorageAdapter,
-      keys: string[],
+      entries: FileEntry[],
     ): Promise<FileSyncManifest[]> {
       const manifests: FileSyncManifest[] = [];
 
-      for (const key of keys) {
-        const existsLocally = await keyExists(localStorage, key);
+      for (const entry of entries) {
+        const existsLocally = await keyExists(localStorage, entry.key);
         if (!existsLocally) {
-          const remoteFile = await remoteStorage.get(key);
+          const remoteFile = await remoteStorage.get(entry.key);
           if (remoteFile) {
             manifests.push({
-              fileHash: key,
-              objectStorageKey: key,
+              fileHash: entry.key,
+              objectStorageKey: entry.key,
               sizeBytes: remoteFile.size,
+              mimeType: entry.mimeType,
             });
           }
         }
@@ -69,8 +71,7 @@ export function createFileSyncEngine(): FileSyncEngine {
         return;
       }
       await destination.put(manifest.objectStorageKey, file.data, {
-        contentType: file.contentType,
-        metadata: file.metadata,
+        contentType: manifest.mimeType,
       });
     },
   };

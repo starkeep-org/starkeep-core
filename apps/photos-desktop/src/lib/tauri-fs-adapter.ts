@@ -41,39 +41,18 @@ export class TauriFsObjectStorageAdapter implements ObjectStorageAdapter {
     return join(OBJECTS_DIR, key.slice(0, 2), key);
   }
 
-  async put(key: string, data: Uint8Array, options?: PutOptions): Promise<void> {
+  async put(key: string, data: Uint8Array, _options?: PutOptions): Promise<void> {
     const filePath = await this.keyToPath(key);
     const dirPath = await dirname(filePath);
     await mkdir(dirPath, { baseDir: BASE_DIR, recursive: true });
     await writeFile(filePath, data, { baseDir: BASE_DIR });
-    if (options?.contentType || options?.metadata) {
-      const meta = JSON.stringify({
-        contentType: options.contentType,
-        metadata: options.metadata,
-      });
-      await writeFile(
-        filePath + ".meta.json",
-        new TextEncoder().encode(meta),
-        { baseDir: BASE_DIR },
-      );
-    }
   }
 
   async get(key: string): Promise<GetResult | null> {
     const filePath = await this.keyToPath(key);
     try {
       const data = await readFile(filePath, { baseDir: BASE_DIR });
-      let contentType: string | undefined;
-      let metadata: Record<string, string> | undefined;
-      try {
-        const metaBytes = await readFile(filePath + ".meta.json", { baseDir: BASE_DIR });
-        const meta = JSON.parse(new TextDecoder().decode(metaBytes));
-        contentType = meta.contentType;
-        metadata = meta.metadata;
-      } catch {
-        // no metadata sidecar — that's fine
-      }
-      return { data, contentType, metadata, size: data.length };
+      return { data, size: data.length };
     } catch {
       return null;
     }
@@ -85,11 +64,6 @@ export class TauriFsObjectStorageAdapter implements ObjectStorageAdapter {
       await remove(filePath, { baseDir: BASE_DIR });
     } catch {
       // ignore ENOENT
-    }
-    try {
-      await remove(filePath + ".meta.json", { baseDir: BASE_DIR });
-    } catch {
-      // ignore missing metadata
     }
   }
 
