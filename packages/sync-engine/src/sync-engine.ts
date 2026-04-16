@@ -186,15 +186,18 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       }
 
       // Sync files for pushed records
-      const fileKeys = localChanges
-        .map((change) => change.recordSnapshot.objectStorageKey)
-        .filter((key): key is string => key !== null);
+      const fileEntries = localChanges
+        .filter((change) => change.recordSnapshot.objectStorageKey !== null)
+        .map((change) => ({
+          key: change.recordSnapshot.objectStorageKey as string,
+          mimeType: change.recordSnapshot.mimeType ?? undefined,
+        }));
 
-      if (fileKeys.length > 0) {
+      if (fileEntries.length > 0) {
         const filesToPush = await fileSyncEngine.getFilesToPush(
           localObjectStorage,
           remoteObjectStorage,
-          fileKeys,
+          fileEntries,
         );
         for (const manifest of filesToPush) {
           await fileSyncEngine.transferFile(

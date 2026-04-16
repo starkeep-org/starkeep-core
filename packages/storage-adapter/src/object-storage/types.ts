@@ -1,12 +1,10 @@
 export interface PutOptions {
   contentType?: string;
-  metadata?: Record<string, string>;
 }
 
 export interface GetResult {
   data: Uint8Array;
   contentType?: string;
-  metadata?: Record<string, string>;
   size: number;
 }
 

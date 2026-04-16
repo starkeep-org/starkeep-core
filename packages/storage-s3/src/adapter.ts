@@ -72,7 +72,6 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
     options?: PutOptions,
   ): Promise<void> {
     const resolvedKey = this.resolveKey(key);
-    const metadata = options?.metadata;
     const contentType = options?.contentType;
 
     if (data.byteLength > MULTIPART_THRESHOLD_BYTES) {
@@ -83,7 +82,6 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
           Key: resolvedKey,
           Body: data,
           ...(contentType ? { ContentType: contentType } : {}),
-          ...(metadata ? { Metadata: metadata } : {}),
         },
       });
       await upload.done();
@@ -94,7 +92,6 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
           Key: resolvedKey,
           Body: data,
           ...(contentType ? { ContentType: contentType } : {}),
-          ...(metadata ? { Metadata: metadata } : {}),
         }),
       );
     }
@@ -119,7 +116,6 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       return {
         data: buffer,
         contentType: response.ContentType,
-        metadata: response.Metadata,
         size: buffer.length,
       };
     } catch (error: unknown) {
