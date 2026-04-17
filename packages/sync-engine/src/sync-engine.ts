@@ -246,6 +246,25 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
+      // Pull files for remote metadata records that have file backing.
+      const metaFileEntries = remoteChanges
+        .filter((r) => r.objectStorageKey != null)
+        .map((r) => ({
+          key: r.objectStorageKey as string,
+          mimeType: r.mimeType ?? undefined,
+        }));
+
+      if (metaFileEntries.length > 0) {
+        const filesToPull = await fileSyncEngine.getFilesToPull(
+          localObjectStorage,
+          remoteObjectStorage,
+          metaFileEntries,
+        );
+        for (const manifest of filesToPull) {
+          await fileSyncEngine.transferFile(manifest, remoteObjectStorage, localObjectStorage);
+        }
+      }
+
       return { pulled, pushed: 0, conflicts };
     },
 
@@ -276,6 +295,25 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           // Remote is newer: apply locally and count as conflict.
           await localDatabaseAdapter.upsertSyncableMetadata(remote);
           conflicts++;
+        }
+      }
+
+      // Sync files for pushed metadata records that have file backing.
+      const metaFileEntries = localChanges
+        .filter((r) => r.objectStorageKey != null)
+        .map((r) => ({
+          key: r.objectStorageKey as string,
+          mimeType: r.mimeType ?? undefined,
+        }));
+
+      if (metaFileEntries.length > 0) {
+        const filesToPush = await fileSyncEngine.getFilesToPush(
+          localObjectStorage,
+          remoteObjectStorage,
+          metaFileEntries,
+        );
+        for (const manifest of filesToPush) {
+          await fileSyncEngine.transferFile(manifest, localObjectStorage, remoteObjectStorage);
         }
       }
 

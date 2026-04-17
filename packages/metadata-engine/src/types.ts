@@ -13,6 +13,16 @@ export interface GeneratingFunctionInput {
 
 export interface GeneratingFunctionOutput {
   readonly value: Record<string, unknown>;
+  /**
+   * Optional file produced by this generator (e.g. a downscaled image).
+   * When present, the engine stores the bytes in object storage using a
+   * content-addressed key (SHA-256 hex) and records the key on the
+   * resulting MetadataRecord / MetadataSyncRecord.
+   */
+  readonly file?: {
+    readonly data: Uint8Array;
+    readonly mimeType: string;
+  };
 }
 
 export interface GeneratingFunctionDefinition {
@@ -111,6 +121,7 @@ export interface MetadataEngine {
     targetType: string,
     generatorId: string,
     value: Record<string, unknown>,
+    file?: { data: Uint8Array; mimeType: string },
   ): Promise<MetadataSyncRecord>;
 }
 

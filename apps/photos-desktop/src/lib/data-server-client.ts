@@ -85,10 +85,31 @@ export async function getPhotoFileUrl(id: string): Promise<string> {
   return result.url;
 }
 
+export interface FileRef {
+  key: string;
+  contentHash: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
+/**
+ * Upload raw bytes to the data-server's content-addressed file store.
+ * Returns a file reference that can be passed to postMetadata().
+ * Separate from metadata registration so each concern is independent.
+ */
+export async function uploadFile(bytes: Uint8Array, mimeType: string): Promise<FileRef> {
+  return request<FileRef>("/data/files", {
+    method: "POST",
+    headers: { "Content-Type": mimeType },
+    body: bytes,
+  });
+}
+
 /**
  * Push the result of an app-side generator to the data-server.
  * The server stores it in the shared metadata_sync table so it can be
  * read back when assembling the full image record.
+ * Pass a fileRef (from uploadFile) when the generator produced a file.
  */
 export async function postMetadata(
   targetId: string,
@@ -96,11 +117,43 @@ export async function postMetadata(
   generatorId: string,
   generatorVersion: number,
   value: Record<string, unknown>,
+  fileRef?: FileRef,
 ): Promise<void> {
   await request<{ ok: true }>("/data/metadata", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ targetId, targetType, generatorId, generatorVersion, value }),
+    body: JSON.stringify({
+      targetId,
+      targetType,
+      generatorId,
+      generatorVersion,
+      value,
+      ...(fileRef && {
+        objectStorageKey: fileRef.key,
+        contentHash: fileRef.contentHash,
+        mimeType: fileRef.mimeType,
+        sizeBytes: fileRef.sizeBytes,
+      }),
+    }),
   });
+}
+
+/**
+ * Get a time-limited signed URL for a metadata-backed file (e.g. a downsize thumbnail).
+ * Returns null if no file-backed metadata exists for this record + generator combination.
+ */
+export async function getMetadataFileUrl(
+  targetId: string,
+  generatorId: string,
+): Promise<string | null> {
+  const encodedGeneratorId = encodeURIComponent(generatorId);
+  try {
+    const result = await request<{ url: string }>(
+      `/data/metadata/${targetId}/${encodedGeneratorId}/file-url`,
+    );
+    return result.url;
+  } catch {
+    return null;
+  }
 }
 

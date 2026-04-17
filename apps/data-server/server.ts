@@ -5,7 +5,7 @@
  */
 
 import { createServer } from "node:http";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, createHash, randomBytes } from "node:crypto";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat } from "node:fs/promises";
 import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
+import { STANDARD_DOWNSIZE_GENERATORS } from "../../packages/metadata-image/src/index.js";
 import * as v from "valibot";
 
 // Signing key for self-hosted file tokens — regenerated each startup so
@@ -76,6 +77,7 @@ async function main() {
     objectStorageAdapter: localAdapter,
     ownerId: OWNER_ID,
     nodeId: "admin-desktop",
+    generators: [...STANDARD_DOWNSIZE_GENERATORS],
   });
 
   // File watch manager — monitors local directories and syncs to Starkeep
@@ -406,17 +408,56 @@ async function main() {
         return;
       }
 
-      // POST /data/metadata — accept app-generated metadata (app-side generator results)
-      // Body: { targetId, targetType, generatorId, generatorVersion, value }
+      // POST /data/files — store raw binary bytes in content-addressed local storage.
+      // General-purpose: used by thin-client apps to upload files (e.g. downsize thumbnails)
+      // before registering a metadata record that references the file.
+      // Body: raw bytes. Content-Type header is the mime type.
+      // Response: { key, contentHash, mimeType, sizeBytes }
+      if (path === "/data/files" && req.method === "POST") {
+        const fileBuffer = await readBodyBuffer(req);
+        if (fileBuffer.length === 0) {
+          res.writeHead(400);
+          json(res, { error: "Request body must not be empty" });
+          return;
+        }
+        if (fileBuffer.length > 20_000_000) {
+          res.writeHead(413);
+          json(res, { error: "File too large (20 MB limit)" });
+          return;
+        }
+        const mimeType = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0]!.trim();
+        const hex = createHash("sha256").update(fileBuffer).digest("hex");
+        const key = `metadata/${hex}`;
+        await localAdapter.put(key, fileBuffer, { contentType: mimeType });
+        json(res, { key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
+        return;
+      }
+
+      // POST /data/metadata — accept app-generated metadata (app-side generator results).
+      // Body: { targetId, targetType, generatorId, generatorVersion, value,
+      //         objectStorageKey?, contentHash?, mimeType?, sizeBytes? }
       // Apps run generators locally and push the results here so they are stored in the
       // shared metadata_sync table alongside other syncable metadata.
+      // When objectStorageKey is provided, the server validates the file exists locally
+      // before accepting the record (prevents dangling references).
       if (path === "/data/metadata" && req.method === "POST") {
         const body = await readBody(req);
-        const { targetId, targetType, generatorId, generatorVersion, value } = JSON.parse(body);
+        const {
+          targetId, targetType, generatorId, generatorVersion, value,
+          objectStorageKey, contentHash, mimeType: metaMimeType, sizeBytes,
+        } = JSON.parse(body);
         if (!targetId || !targetType || !generatorId) {
           res.writeHead(400);
           json(res, { error: "targetId, targetType, and generatorId are required" });
           return;
+        }
+        if (objectStorageKey) {
+          const exists = await localAdapter.get(objectStorageKey).catch(() => null);
+          if (!exists) {
+            res.writeHead(422);
+            json(res, { error: "objectStorageKey references a file not found in local storage" });
+            return;
+          }
         }
         const now = clock.now();
         await databaseAdapter.upsertSyncableMetadata({
@@ -427,6 +468,10 @@ async function main() {
           inputHash: null,
           updatedAt: now,
           value: value ?? {},
+          objectStorageKey: objectStorageKey ?? null,
+          contentHash: contentHash ?? null,
+          mimeType: metaMimeType ?? null,
+          sizeBytes: sizeBytes ?? null,
         });
         json(res, { ok: true });
         return;
@@ -473,6 +518,42 @@ async function main() {
           return;
         }
 
+        res.writeHead(404);
+        json(res, { error: "File not found locally and no remote storage configured" });
+        return;
+      }
+
+      // GET /data/metadata/:targetId/:generatorId/file-url — time-limited URL for a
+      // metadata-backed file (e.g. an image downsize thumbnail).
+      const metaFileUrlMatch = path.match(/^\/data\/metadata\/([^/]+)\/(.+)\/file-url$/);
+      if (metaFileUrlMatch && req.method === "GET") {
+        const [, metaTargetId, encodedGeneratorId] = metaFileUrlMatch;
+        const generatorId = decodeURIComponent(encodedGeneratorId!);
+        const entries = databaseAdapter.getMetadataForRecord(metaTargetId!);
+        const entry = entries.find((e) => e.generatorId === generatorId);
+        if (!entry?.objectStorageKey) {
+          res.writeHead(404);
+          json(res, { error: "No file-backed metadata found for this record and generator" });
+          return;
+        }
+        const expiresIn = parseInt(url.searchParams.get("expiresIn") || "3600", 10);
+        const mimeType = entry.mimeType ?? "application/octet-stream";
+        const localHit = await localAdapter.get(entry.objectStorageKey).catch(() => null);
+        if (localHit) {
+          const token = createFileToken(entry.objectStorageKey, mimeType, expiresIn);
+          json(res, {
+            url: `http://127.0.0.1:${PORT}/data/files/${token}`,
+            source: "local",
+            mimeType,
+            expiresIn,
+          });
+          return;
+        }
+        if (remoteAdapter) {
+          const fileUrl = await remoteAdapter.getSignedUrl(entry.objectStorageKey, { expiresIn });
+          json(res, { url: fileUrl, source: "remote", mimeType, expiresIn });
+          return;
+        }
         res.writeHead(404);
         json(res, { error: "File not found locally and no remote storage configured" });
         return;
@@ -691,6 +772,15 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
+  });
+}
+
+function readBodyBuffer(req: import("node:http").IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }

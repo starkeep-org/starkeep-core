@@ -34,6 +34,10 @@ export interface DataRecord extends BaseRecord {
  * A metadata record is a lightweight value object derived from a data record
  * by a generator. It is stored in a per-type metadata table, not in the main
  * records table. There is one row per data record in each metadata table.
+ *
+ * File-backed metadata (e.g. image downsizes) stores the generated file in
+ * object storage and references it via `objectStorageKey`. The key uses the
+ * same flat content-addressed scheme as `DataRecord` (SHA-256 hex).
  */
 export interface MetadataRecord {
   readonly targetId: StarkeepId;
@@ -41,6 +45,10 @@ export interface MetadataRecord {
   generatorVersion: number;
   inputHash: string;
   value: Record<string, unknown>;
+  objectStorageKey?: string | null;
+  contentHash?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
 }
 
 export type AnyRecord = DataRecord;

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
+import { invoke } from "@tauri-apps/api/core";
 import type { AppImage } from "@photos/photos-lib";
 import {
   PhotoProvider,
@@ -14,8 +15,26 @@ import {
   listPhotos,
   getPhotoFileUrl,
   postMetadata,
+  uploadFile,
+  getMetadataFileUrl,
   type PhotoRecord,
 } from "./lib/data-server-client.js";
+
+interface DownsizeResult {
+  data: string;       // base64-encoded image bytes
+  mime_type: string;
+  width: number;
+  height: number;
+}
+
+function base64ToUint8Array(b64: string): Uint8Array {
+  const binaryString = atob(b64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
 
 // ---------------------------------------------------------------------------
 // Map a data-server PhotoRecord to the AppImage shape expected by the UI
@@ -82,7 +101,8 @@ function useFileUrlCache() {
       if (loadingRef.current.has(imageId)) return "";
 
       loadingRef.current.add(imageId);
-      getPhotoFileUrl(imageId)
+      getMetadataFileUrl(imageId, "@starkeep/image:downsize-400")
+        .then((thumbnailUrl) => thumbnailUrl ?? getPhotoFileUrl(imageId))
         .then((url) => {
           loadingRef.current.delete(imageId);
           setUrlMap((prev) => new Map(prev).set(imageId, url));
@@ -110,6 +130,7 @@ async function runGenerators(
   fileBytes: Uint8Array,
   fileName: string,
   title: string,
+  filePath: string,
 ): Promise<void> {
   const targetId = record.id;
   const targetType = "@starkeep/image";
@@ -159,6 +180,25 @@ async function runGenerators(
     }
   } catch {
     // EXIF extraction is best-effort; skip if exifr fails or file has no EXIF
+  }
+
+  // Downsize thumbnail — 400px grid thumbnail, eager at ingest.
+  // 800px and 1600px are generated lazily when the photo is first viewed.
+  for (const maxDimension of [400]) {
+    try {
+      const result = await invoke<DownsizeResult>("downsize_image", { filePath, maxDimension });
+      const bytes = base64ToUint8Array(result.data);
+      const fileRef = await uploadFile(bytes, result.mime_type);
+      const generatorId = `@starkeep/image:downsize-${maxDimension}`;
+      const downsizeFormat = result.mime_type === "image/webp" ? "webp" : "jpeg";
+      await postMetadata(targetId, targetType, generatorId, 1, {
+        downsizeWidth: result.width,
+        downsizeHeight: result.height,
+        downsizeFormat,
+      }, fileRef);
+    } catch {
+      // Downsize generation is best-effort; app sweep at launch handles retries
+    }
   }
 }
 
@@ -220,7 +260,7 @@ function PhotosAppDesktopInner() {
       // Generators are best-effort — don't let a metadata failure surface as
       // "Failed to add photo" when the record was already created successfully.
       readFile(filePath)
-        .then((fileBytes) => runGenerators(record, fileBytes, fileName, title))
+        .then((fileBytes) => runGenerators(record, fileBytes, fileName, title, filePath))
         .catch(() => {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add photo");

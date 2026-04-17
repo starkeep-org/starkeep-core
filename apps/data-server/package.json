@@ -20,7 +20,8 @@
     "@starkeep/index": "workspace:*",
     "@starkeep/aggregations": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",
-    "@starkeep/shared-space-api": "workspace:*"
+    "@starkeep/shared-space-api": "workspace:*",
+    "sharp": "^0.33.0"
   },
   "devDependencies": {
     "tsx": "^4.21.0"
