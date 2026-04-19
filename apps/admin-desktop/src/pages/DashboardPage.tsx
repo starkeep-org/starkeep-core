@@ -2,6 +2,7 @@ import { Container, Title, Text, Paper, Stack, Group, SimpleGrid, Badge, Code, L
 import { Link } from "react-router-dom";
 import { StatusBadge } from "@starkeep/admin-ui";
 import { useInvoke } from "../hooks/use-invoke";
+import { listPlans } from "../lib/api";
 import { useState, useEffect } from "react";
 
 interface PlanWithDeployment {
@@ -29,7 +30,7 @@ function useDataServerStats() {
 }
 
 export function DashboardPage() {
-  const { data: plans, loading } = useInvoke<PlanWithDeployment[]>("list_plans");
+  const { data: plans, loading } = useInvoke<PlanWithDeployment[]>(listPlans);
   const dataStats = useDataServerStats();
 
   if (loading) {

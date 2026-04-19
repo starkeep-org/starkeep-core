@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useNavigate } from "react-router-dom";
+import { createPlan } from "../lib/api";
 import {
   Container, Title, Text, Button, Select, Stack, Alert,
 } from "@mantine/core";
@@ -46,15 +46,13 @@ export function NewDeploymentPage() {
     setSubmitting(true);
     setError(null);
     try {
-      const plan = await invoke<{ id: string }>("create_plan", {
-        input: {
-          stack_name: `app-${template}-${environment}`,
-          region,
-          environment,
-          template_type: template,
-          parameters: null,
-        },
-      });
+      const plan = await createPlan({
+        stack_name: `app-${template}-${environment}`,
+        region,
+        environment,
+        template_type: template,
+        parameters: null,
+      }) as { id: string };
       navigate(`/deployments/${plan.id}`);
     } catch (err) {
       setError(String(err));

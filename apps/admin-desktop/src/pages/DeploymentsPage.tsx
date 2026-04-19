@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import {
   Container, Title, Button, Table, Group, Code, Text, Badge, Loader, Alert,
 } from "@mantine/core";
 import { Link } from "react-router-dom";
 import { StatusBadge, DeleteConfirmModal } from "@starkeep/admin-ui";
 import { useInvoke } from "../hooks/use-invoke";
+import { listPlans, deletePlan } from "../lib/api";
 
 interface PlanWithDeployment {
   id: string;
@@ -23,7 +23,7 @@ interface PlanWithDeployment {
 }
 
 export function DeploymentsPage() {
-  const { data: plans, loading, error, refetch } = useInvoke<PlanWithDeployment[]>("list_plans");
+  const { data: plans, loading, error, refetch } = useInvoke<PlanWithDeployment[]>(listPlans);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [planToDelete, setPlanToDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -37,7 +37,7 @@ export function DeploymentsPage() {
     if (!planToDelete) return;
     setDeleting(true);
     try {
-      await invoke("delete_plan", { planId: planToDelete });
+      await deletePlan(planToDelete);
       refetch();
     } catch (err) {
       console.error("Delete failed:", err);

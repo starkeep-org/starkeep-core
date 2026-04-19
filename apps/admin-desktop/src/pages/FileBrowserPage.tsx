@@ -3,8 +3,9 @@ import {
   Container, Title, Table, Text, Group, Button, Loader, Alert,
   Badge, Paper, Code, Stack, JsonInput, SimpleGrid,
 } from "@mantine/core";
-
-const DATA_SERVER = "http://127.0.0.1:9820";
+import { useDataSource } from "../lib/data-source-context";
+import { resolveDataSource } from "../lib/data-client";
+import type { DataSourceMode } from "../lib/data-client";
 
 interface TypeSummary {
   record_type: string;
@@ -36,7 +37,7 @@ function formatSize(bytes: number): string {
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
 }
 
-function useDataServer<T>(path: string) {
+function useDataServer<T>(path: string, mode: DataSourceMode) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -44,19 +45,16 @@ function useDataServer<T>(path: string) {
   const refetch = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`${DATA_SERVER}${path}`)
+    resolveDataSource(mode)
+      .then(({ baseUrl, headers }) => fetch(`${baseUrl}${path}`, { headers }))
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       })
       .then(setData)
-      .catch((err) => setError(
-        err instanceof TypeError
-          ? "Data server not running. Start it with: cd ~/starkeep-protocol && pnpm --filter @starkeep/data-server start"
-          : String(err),
-      ))
+      .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
-  }, [path]);
+  }, [path, mode]);
 
   useEffect(() => { refetch(); }, [refetch]);
 
@@ -64,10 +62,11 @@ function useDataServer<T>(path: string) {
 }
 
 export function FileBrowserPage() {
+  const { mode } = useDataSource();
   const [selectedType, setSelectedType] = useState<string | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<DataRecord | null>(null);
 
-  const { data: typesData, loading, error } = useDataServer<{ types: TypeSummary[]; total: number }>("/data/types");
+  const { data: typesData, loading, error } = useDataServer<{ types: TypeSummary[]; total: number }>("/data/types", mode);
 
   if (!selectedType) {
     return (
@@ -143,8 +142,10 @@ function RecordsList({
   onBack: () => void;
   onSelectRecord: (r: DataRecord) => void;
 }) {
+  const { mode } = useDataSource();
   const { data, loading, error } = useDataServer<{ records: DataRecord[] }>(
     `/data/records?type=${encodeURIComponent(recordType)}&limit=100`,
+    mode,
   );
 
   return (

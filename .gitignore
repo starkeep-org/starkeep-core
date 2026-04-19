@@ -28,3 +28,9 @@ apps/tasks-desktop/src-tauri/gen/schemas/
 apps/tasks-desktop/src-tauri/binaries/
 apps/photos-desktop/src-tauri/target/
 apps/photos-desktop/src-tauri/gen/schemas/
+apps/admin-desktop/src-tauri/target/
+apps/admin-desktop/public/user-data-source.zip
+
+# SST local state
+infra/user-data/.sst/
+infra/user-data/.ws/
