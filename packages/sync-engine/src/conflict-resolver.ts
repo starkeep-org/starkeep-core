@@ -1,28 +1,76 @@
-import { compareHLC } from "@starkeep/core";
 import type { AnyRecord } from "@starkeep/core";
-import type { ChangeLogEntry, ConflictResolution } from "./types.js";
+import type { ChangeLogEntry } from "./types.js";
 
-export function resolveConflict(
-  localChange: ChangeLogEntry,
+export type PullApplyKind =
+  | "apply-clean"
+  | "local-dirty-conflict"
+  | "skip-already-current";
+
+export interface PullApplyDecision {
+  readonly kind: PullApplyKind;
+}
+
+/**
+ * Decide what to do when a remote change arrives during a pull.
+ *
+ *  - apply-clean: local record is absent or strictly older than the remote.
+ *  - local-dirty-conflict: local has an unsynced change to this record;
+ *    the app must resolve before we overwrite.
+ *  - skip-already-current: we already have this version (or newer).
+ */
+export function decidePullApply(
+  localRecord: AnyRecord | null,
   remoteChange: ChangeLogEntry,
-): ConflictResolution {
-  const localRecord = localChange.recordSnapshot;
-  const remoteRecord = remoteChange.recordSnapshot;
+  localUnsyncedChangeForRecord: ChangeLogEntry | undefined,
+): PullApplyDecision {
+  if (localUnsyncedChangeForRecord) {
+    return { kind: "local-dirty-conflict" };
+  }
+  if (!localRecord) {
+    return { kind: "apply-clean" };
+  }
+  if (localRecord.version >= remoteChange.recordSnapshot.version) {
+    return { kind: "skip-already-current" };
+  }
+  return { kind: "apply-clean" };
+}
 
-  // compareHLC provides total ordering: wallTime > counter > nodeId
-  const localWins = compareHLC(
-    localRecord.updatedAt,
-    remoteRecord.updatedAt,
-  ) >= 0;
+/**
+ * Authoritative server-side OCC check. Called on the cloud for each incoming
+ * push change.
+ */
+export type PushAcceptKind =
+  | "accept"
+  | "reject-version-mismatch"
+  | "reject-not-found"
+  | "reject-deleted";
 
-  const winner: "local" | "remote" = localWins ? "local" : "remote";
-  const resolvedRecord: AnyRecord = localWins ? localRecord : remoteRecord;
+export interface PushAcceptDecision {
+  readonly kind: PushAcceptKind;
+}
 
-  return {
-    recordId: localChange.recordId,
-    localChange,
-    remoteChange,
-    winner,
-    resolvedRecord,
-  };
+export function decidePushAccept(
+  currentServerRecord: AnyRecord | null,
+  incomingChange: ChangeLogEntry,
+): PushAcceptDecision {
+  if (incomingChange.operation === "create") {
+    if (currentServerRecord) {
+      return { kind: "reject-version-mismatch" };
+    }
+    return { kind: "accept" };
+  }
+
+  if (!currentServerRecord) {
+    return { kind: "reject-not-found" };
+  }
+
+  if (currentServerRecord.deletedAt && incomingChange.operation !== "delete") {
+    return { kind: "reject-deleted" };
+  }
+
+  if (currentServerRecord.version !== incomingChange.baseVersion) {
+    return { kind: "reject-version-mismatch" };
+  }
+
+  return { kind: "accept" };
 }

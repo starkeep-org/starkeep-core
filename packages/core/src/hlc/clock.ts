@@ -1,15 +1,34 @@
 import type { HLCClock, HLCTimestamp } from "./types.js";
 
+export interface ClockState {
+  wallTime: number;
+  counter: number;
+}
+
 export interface ClockOptions {
   nodeId: string;
   wallClockFunction?: () => number;
+  /**
+   * Pre-seed the clock from persisted state so a post-restart HLC never
+   * emits a timestamp earlier than one the node already sent.
+   */
+  initialState?: ClockState;
+  /**
+   * Invoked on every state change. Callers typically debounce and persist
+   * to a SyncStateStore.
+   */
+  onTick?: (state: ClockState) => void;
 }
 
 export function createHLCClock(options: ClockOptions): HLCClock {
-  const { nodeId, wallClockFunction = Date.now } = options;
+  const { nodeId, wallClockFunction = Date.now, initialState, onTick } = options;
 
-  let lastWallTime = 0;
-  let lastCounter = 0;
+  let lastWallTime = initialState?.wallTime ?? 0;
+  let lastCounter = initialState?.counter ?? 0;
+
+  function emit(): void {
+    if (onTick) onTick({ wallTime: lastWallTime, counter: lastCounter });
+  }
 
   function now(): HLCTimestamp {
     const physicalTime = wallClockFunction();
@@ -19,6 +38,7 @@ export function createHLCClock(options: ClockOptions): HLCClock {
     } else {
       lastCounter++;
     }
+    emit();
     return { wallTime: lastWallTime, counter: lastCounter, nodeId };
   }
 
@@ -39,6 +59,7 @@ export function createHLCClock(options: ClockOptions): HLCClock {
     } else {
       lastCounter++;
     }
+    emit();
     return { wallTime: lastWallTime, counter: lastCounter, nodeId };
   }
 
