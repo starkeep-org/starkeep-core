@@ -11,6 +11,7 @@
  *   AWS_REGION       — set automatically by Lambda runtime
  */
 
+import { createHash } from "node:crypto";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
@@ -137,6 +138,24 @@ function clientErr(message: string, status: number) {
   };
 }
 
+function recordToResponse(record: DataRecord) {
+  return {
+    id: record.id,
+    type: record.type,
+    created_at: new Date(record.createdAt.wallTime).toISOString(),
+    updated_at: new Date(record.updatedAt.wallTime).toISOString(),
+    owner_id: record.ownerId,
+    sync_status: record.syncStatus,
+    version: record.version,
+    payload: record.content,
+    mime_type: record.mimeType,
+    size_bytes: record.sizeBytes,
+    content_hash: record.contentHash,
+    object_storage_key: record.objectStorageKey,
+    original_filename: record.originalFilename,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // API Gateway HTTP proxy event (v2 / HTTP API format)
 // ---------------------------------------------------------------------------
@@ -150,6 +169,7 @@ interface APIGatewayEvent {
     };
   };
   body?: string;
+  isBase64Encoded?: boolean;
   queryStringParameters?: Record<string, string>;
 }
 
@@ -195,23 +215,116 @@ export async function handler(event: APIGatewayEvent) {
     // GET /data/records — list records with optional type filter and pagination
     if (method === "GET" && path === "/data/records") {
       const type = query["type"];
-      const limit = Math.min(parseInt(query["limit"] ?? "50", 10), 200);
+      const limit = Math.min(parseInt(query["limit"] ?? "50", 10), 500);
       const cursor = query["cursor"];
       const result = await db.query({ type, limit: limit + 1, cursor });
       const hasMore = result.records.length > limit;
       const records = hasMore ? result.records.slice(0, limit) : result.records;
-      return ok({ records, hasMore, nextCursor: hasMore ? records[records.length - 1].id : null });
+      return ok({ records: records.map(recordToResponse), hasMore, nextCursor: hasMore ? records[records.length - 1].id : null });
     }
 
-    // GET /data/records/:id
+    // POST /data/records — create a record, optionally with a file
+    // Body: JSON { type, payload?, content?, fileName?, contentType?, fileBase64? }
+    if (method === "POST" && path === "/data/records") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as {
+        type?: string;
+        payload?: Record<string, unknown>;
+        content?: Record<string, unknown>;
+        fileName?: string;
+        contentType?: string;
+        fileBase64?: string;
+      };
+      if (!body.type) return clientErr("type is required", 400);
+
+      const now = clock.now();
+      const recordContent = body.payload ?? body.content ?? {};
+      const originalFilename = body.fileName ?? null;
+      const mimeType = body.contentType ?? null;
+
+      let objectStorageKey: string | null = null;
+      let contentHash: string | null = null;
+      let sizeBytes: number | null = null;
+
+      if (body.fileBase64) {
+        const fileBuffer = Buffer.from(body.fileBase64, "base64");
+        const hash = createHash("sha256").update(fileBuffer).digest("hex");
+        contentHash = hash;
+        objectStorageKey = `${hash.slice(0, 2)}/${hash}`;
+        sizeBytes = fileBuffer.length;
+        await storage.put(objectStorageKey, fileBuffer, { contentType: mimeType ?? undefined });
+      }
+
+      const record: DataRecord = {
+        id: generateId(),
+        kind: "data",
+        type: body.type,
+        content: { ...recordContent, ...(originalFilename ? { fileName: originalFilename } : {}) },
+        ownerId,
+        createdAt: now,
+        updatedAt: now,
+        syncStatus: SyncStatus.Synced,
+        deletedAt: null,
+        version: 1,
+        contentHash,
+        objectStorageKey,
+        mimeType,
+        sizeBytes,
+        originalFilename,
+      };
+      await db.put(record);
+      return ok({ record: recordToResponse(record) }, 201);
+    }
+
+    // POST /data/metadata — store app-generated metadata
+    // Body: { targetId, targetType, generatorId, generatorVersion?, value? }
+    if (method === "POST" && path === "/data/metadata") {
+      const body = event.body ? (JSON.parse(event.body) as {
+        targetId?: string;
+        targetType?: string;
+        generatorId?: string;
+        generatorVersion?: number;
+        value?: Record<string, unknown>;
+      }) : null;
+      if (!body?.targetId || !body.targetType || !body.generatorId) {
+        return clientErr("targetId, targetType, and generatorId are required", 400);
+      }
+      const now = clock.now();
+      await db.upsertSyncableMetadata({
+        targetId: body.targetId as StarkeepId,
+        targetType: body.targetType,
+        generatorId: body.generatorId,
+        generatorVersion: body.generatorVersion ?? 1,
+        inputHash: null,
+        updatedAt: now,
+        value: body.value ?? {},
+      });
+      return ok({ ok: true });
+    }
+
+    // GET /data/records/:id/file-url — generate a presigned S3 URL
+    const fileUrlMatch = path.match(/^\/data\/records\/([^/]+)\/file-url$/);
+    if (fileUrlMatch && method === "GET") {
+      const id = decodeURIComponent(fileUrlMatch[1]!) as StarkeepId;
+      const record = await db.get(id);
+      if (!record) return clientErr("Record not found", 404);
+      if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
+      const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
+      const url = await storage.getSignedUrl!(record.objectStorageKey, { expiresIn });
+      return ok({ url, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
+    }
+
+    // GET /data/records/:id / PUT /data/records/:id / DELETE /data/records/:id
     const recordIdMatch = path.match(/^\/data\/records\/([^/]+)$/);
     if (recordIdMatch) {
-      const id = decodeURIComponent(recordIdMatch[1]) as StarkeepId;
+      const id = decodeURIComponent(recordIdMatch[1]!) as StarkeepId;
 
       if (method === "GET") {
         const record = await db.get(id);
         if (!record) return clientErr("Record not found", 404);
-        return ok({ record });
+        return ok({ record: recordToResponse(record) });
       }
 
       if (method === "PUT") {
@@ -222,39 +335,13 @@ export async function handler(event: APIGatewayEvent) {
         const now = clock.now();
         const updated: DataRecord = { ...existing, content: body.content, updatedAt: now, version: existing.version + 1 };
         await db.put(updated);
-        return ok({ record: updated });
+        return ok({ record: recordToResponse(updated) });
       }
 
       if (method === "DELETE") {
         await db.delete(id);
         return ok({ deleted: true });
       }
-    }
-
-    // POST /data/records — create a record
-    if (method === "POST" && path === "/data/records") {
-      const body = event.body ? (JSON.parse(event.body) as { type?: string; content?: Record<string, unknown> }) : null;
-      if (!body?.type) return clientErr("type is required", 400);
-      const now = clock.now();
-      const record: DataRecord = {
-        id: generateId(),
-        kind: "data",
-        type: body.type,
-        content: body.content ?? {},
-        ownerId,
-        createdAt: now,
-        updatedAt: now,
-        syncStatus: SyncStatus.Synced,
-        deletedAt: null,
-        version: 1,
-        contentHash: null,
-        objectStorageKey: null,
-        mimeType: null,
-        sizeBytes: null,
-        originalFilename: null,
-      };
-      await db.put(record);
-      return ok({ record }, 201);
     }
 
     return clientErr("Not found", 404);

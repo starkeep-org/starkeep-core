@@ -41,7 +41,8 @@ const CREATE_TABLE_SQL = `
     content_hash TEXT,
     object_storage_key TEXT,
     mime_type TEXT,
-    size_bytes INTEGER
+    size_bytes INTEGER,
+    original_filename TEXT
   )
 `;
 
@@ -98,6 +99,10 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async init(): Promise<void> {
     this.client = await this.clientFactory.createClient(this.options);
     await this.client.query(CREATE_TABLE_SQL);
+    // TODO(pre-prod): move original_filename into CREATE_TABLE_SQL above and remove this ALTER TABLE.
+    await this.client.query(
+      "ALTER TABLE records ADD COLUMN IF NOT EXISTS original_filename TEXT",
+    );
     for (const sql of CREATE_INDEXES_SQL) {
       await this.client.query(sql);
     }

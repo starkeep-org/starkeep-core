@@ -1,15 +1,4 @@
-/**
- * HTTP client for the local Starkeep data-server (http://127.0.0.1:9820).
- *
- * The photos app is a thin client: it delegates all storage operations to the
- * data-server so that records end up in the shared ~/.starkeep database, making
- * them visible to the file-provider and other Starkeep apps.
- *
- * App-side generators (EXIF, provenance, user-authored) run locally in the
- * webview and push their results via postMetadata().
- */
-
-const DATA_SERVER_URL = "http://127.0.0.1:9820";
+import { resolveDataSource, type DataSourceMode } from "./data-client";
 
 export interface PhotoRecord {
   id: string;
@@ -30,77 +19,121 @@ export interface PhotoRecord {
   original_filename: string | null;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${DATA_SERVER_URL}${path}`, options);
+async function request<T>(
+  path: string,
+  source: { baseUrl: string; headers: Record<string, string> },
+  options?: RequestInit,
+): Promise<T> {
+  const method = options?.method ?? "GET";
+  const url = `${source.baseUrl}${path}`;
+  const hasAuth = !!source.headers["Authorization"];
+  console.debug(`[data-server-client] ${method} ${url} (auth: ${hasAuth})`);
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: { ...source.headers, ...options?.headers },
+    });
+  } catch (err) {
+    console.error(`[data-server-client] ${method} ${url} — network error:`, err);
+    throw err;
+  }
+
+  console.debug(`[data-server-client] ${method} ${url} → ${res.status}`);
   if (!res.ok) {
     let message = res.statusText;
+    let rawBody = "";
     try {
-      const body = await res.json() as { error?: string };
-      if (body.error) message = body.error;
+      rawBody = await res.text();
+      const parsed = JSON.parse(rawBody) as { error?: string };
+      if (parsed.error) message = parsed.error;
     } catch {}
-    throw new Error(`Data server ${options?.method ?? "GET"} ${path} → ${res.status}: ${message}`);
+    console.error(`[data-server-client] ${method} ${url} → ${res.status}:`, message, rawBody ? `(body: ${rawBody.slice(0, 500)})` : "");
+    throw new Error(`Data server ${method} ${path} → ${res.status}: ${message}`);
   }
   return res.json() as Promise<T>;
 }
 
 /**
- * Register a @starkeep/image record from a local file path.
- * The server creates a symlink in ~/.starkeep/objects/ pointing to the
- * original file — no bytes are copied.
+ * Register a @starkeep/image record.
+ *
+ * Local mode: sends filePath — server creates a symlink, no bytes transferred.
+ * Remote mode: sends fileBase64 — server uploads bytes to S3.
  */
 export async function addPhotoFromPath(
   filePath: string,
+  fileBytes: Uint8Array,
   mimeType: string,
   fileName: string,
   title: string,
+  mode: DataSourceMode,
 ): Promise<PhotoRecord> {
-  const result = await request<{ record: PhotoRecord }>("/data/records", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  const source = await resolveDataSource(mode);
+
+  let body: Record<string, unknown>;
+  if (mode === "remote") {
+    console.debug(`[data-server-client] Encoding ${fileBytes.length} bytes to base64 for remote upload`);
+    let binary = "";
+    const chunkSize = 8192;
+    for (let i = 0; i < fileBytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...fileBytes.subarray(i, i + chunkSize));
+    }
+    const fileBase64 = btoa(binary);
+    console.debug(`[data-server-client] base64 length: ${fileBase64.length} chars (~${(fileBase64.length / 1024 / 1024).toFixed(1)} MB)`);
+    body = {
+      type: "@starkeep/image",
+      payload: { fileName, title },
+      fileName,
+      contentType: mimeType,
+      fileBase64,
+    };
+  } else {
+    console.debug(`[data-server-client] Local upload via filePath: ${filePath}`);
+    body = {
       type: "@starkeep/image",
       payload: { fileName, title },
       fileName,
       contentType: mimeType,
       filePath,
-    }),
+    };
+  }
+
+  const result = await request<{ record: PhotoRecord }>("/data/records", source, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
   return result.record;
 }
 
-/** Fetch all @starkeep/image records from the data-server, newest first. */
-export async function listPhotos(): Promise<PhotoRecord[]> {
+export async function listPhotos(mode: DataSourceMode): Promise<PhotoRecord[]> {
+  const source = await resolveDataSource(mode);
   const result = await request<{ records: PhotoRecord[] }>(
     "/data/records?type=%40starkeep%2Fimage&limit=500",
+    source,
   );
   return result.records;
 }
 
-/**
- * Get a short-lived signed URL for downloading a record's file.
- * The URL is served directly by the data-server (no S3 required for local-only).
- */
-export async function getPhotoFileUrl(id: string): Promise<string> {
-  const result = await request<{ url: string }>(`/data/records/${id}/file-url`);
+export async function getPhotoFileUrl(id: string, mode: DataSourceMode): Promise<string> {
+  const source = await resolveDataSource(mode);
+  const result = await request<{ url: string }>(`/data/records/${id}/file-url`, source);
   return result.url;
 }
 
-/**
- * Push the result of an app-side generator to the data-server.
- * The server stores it in the shared metadata_sync table so it can be
- * read back when assembling the full image record.
- */
 export async function postMetadata(
   targetId: string,
   targetType: string,
   generatorId: string,
   generatorVersion: number,
   value: Record<string, unknown>,
+  mode: DataSourceMode,
 ): Promise<void> {
-  await request<{ ok: true }>("/data/metadata", {
+  const source = await resolveDataSource(mode);
+  await request<{ ok: true }>("/data/metadata", source, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ targetId, targetType, generatorId, generatorVersion, value }),
   });
 }
-

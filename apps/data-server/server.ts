@@ -548,14 +548,14 @@ async function main() {
         }
 
         // Dual-write to remote S3 + Aurora DSQL when cloud config is present.
-        // TODO: This eagerly writes to remote storage at upload time. In the future, the sync
-        // engine will take over this responsibility (local-first write, async sync to remote).
+        // S3 write is awaited so the file is available for presigned URLs immediately
+        // after the response is returned (avoids 404 on the first file-url request).
         if (remoteAdapter && record.objectStorageKey) {
           const fileData = uploadedBuffer
             ?? (await localAdapter.get(record.objectStorageKey).catch(() => null))?.data
             ?? null;
           if (fileData) {
-            remoteAdapter
+            await remoteAdapter
               .put(record.objectStorageKey, fileData, { contentType: record.mimeType ?? undefined })
               .catch((err: Error) => console.error("S3 remote write failed (non-fatal):", err.message));
           }
@@ -629,7 +629,20 @@ async function main() {
         const expiresIn = parseInt(url.searchParams.get("expiresIn") || "3600", 10);
         const mimeType = record.mimeType ?? "application/octet-stream";
 
-        // Try local cache first — faster and keeps traffic local
+        // When remoteAdapter (S3) is configured, prefer presigned URLs so that remote
+        // clients (e.g. API Gateway → Lambda) don't receive a http://127.0.0.1 token URL
+        // that only works on the local machine. For local-only deployments, fall back to
+        // the fast local file token.
+        if (remoteAdapter && remoteAdapter.getSignedUrl) {
+          const fileUrl = await remoteAdapter.getSignedUrl(
+            record.objectStorageKey,
+            { expiresIn },
+          );
+          json(res, { url: fileUrl, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
+          return;
+        }
+
+        // Local-only: serve directly from the FS adapter via a signed token
         const localHit = await localAdapter.get(record.objectStorageKey).catch(() => null);
         if (localHit) {
           const token = createFileToken(record.objectStorageKey, mimeType, expiresIn);
@@ -640,16 +653,6 @@ async function main() {
             sizeBytes: record.sizeBytes,
             expiresIn,
           });
-          return;
-        }
-
-        // Fall back to S3 presigned URL for files not synced locally
-        if (remoteAdapter && remoteAdapter.getSignedUrl) {
-          const fileUrl = await remoteAdapter.getSignedUrl(
-            record.objectStorageKey,
-            { expiresIn },
-          );
-          json(res, { url: fileUrl, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
           return;
         }
 

@@ -188,6 +188,9 @@ importers:
 
   apps/photos-desktop:
     dependencies:
+      '@aws-sdk/client-cognito-identity-provider':
+        specifier: ^3.0.0
+        version: 3.1031.0
       '@photos/photos-lib':
         specifier: workspace:*
         version: link:../photos-packages/photos-lib
