@@ -2,14 +2,6 @@ import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { FileSyncEngine, FileSyncManifest, FileEntry } from "./types.js";
 
 export function createFileSyncEngine(): FileSyncEngine {
-  async function keyExists(
-    storage: ObjectStorageAdapter,
-    key: string,
-  ): Promise<boolean> {
-    const result = await storage.get(key);
-    return result !== null;
-  }
-
   return {
     async getFilesToPush(
       localStorage: ObjectStorageAdapter,
@@ -19,7 +11,7 @@ export function createFileSyncEngine(): FileSyncEngine {
       const manifests: FileSyncManifest[] = [];
 
       for (const entry of entries) {
-        const existsRemotely = await keyExists(remoteStorage, entry.key);
+        const existsRemotely = await remoteStorage.has(entry.key);
         if (!existsRemotely) {
           const localFile = await localStorage.get(entry.key);
           if (localFile) {
@@ -44,7 +36,7 @@ export function createFileSyncEngine(): FileSyncEngine {
       const manifests: FileSyncManifest[] = [];
 
       for (const entry of entries) {
-        const existsLocally = await keyExists(localStorage, entry.key);
+        const existsLocally = await localStorage.has(entry.key);
         if (!existsLocally) {
           const remoteFile = await remoteStorage.get(entry.key);
           if (remoteFile) {

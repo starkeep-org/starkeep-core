@@ -2,9 +2,9 @@ import {
   createHLCClock,
   createDataRecord,
   makePrivateType,
+  SyncStatus,
   type StarkeepId,
   type DataRecord,
-  type MetadataRecord,
 } from "@starkeep/core";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -22,10 +22,10 @@ import {
 } from "@starkeep/metadata-engine";
 import { createUnifiedIndex } from "@starkeep/index";
 import { createAggregationEngine } from "@starkeep/aggregations";
-import { createSyncEngine } from "@starkeep/sync-engine";
+import { createSyncEngine, type SyncEngine } from "@starkeep/sync-engine";
 import { createAccessControlEngine, createEnforcedDatabaseAdapter } from "@starkeep/access-control";
 import { createSharedSpaceApi } from "@starkeep/shared-space-api";
-import type { StarkeepSdk, StarkeepSdkOptions } from "./types.js";
+import type { StarkeepSdk, StarkeepSdkOptions, ConflictResolution } from "./types.js";
 
 export async function createStarkeepSdk(
   options: StarkeepSdkOptions,
@@ -35,17 +35,43 @@ export async function createStarkeepSdk(
     objectStorageAdapter,
     ownerId,
     nodeId,
-    remoteDatabaseAdapter,
+    syncTransport,
     remoteObjectStorageAdapter,
+    remoteDatabaseAdapter,
+    syncChangeLog,
+    syncStateStore,
     generators = [],
     subject,
   } = options;
 
-  const clock =
-    options.clock ?? createHLCClock({ nodeId, wallClockFunction: Date.now });
-
   await rawDatabaseAdapter.init();
   await objectStorageAdapter.init();
+
+  // Seed the clock from persisted state and debounce write-back on tick,
+  // so a restart resumes with an HLC causally after anything we emitted.
+  const initialHlcState =
+    (await syncStateStore?.getHlcClockState()) ?? undefined;
+  let pendingClockState: { wallTime: number; counter: number } | null = null;
+  let clockFlushTimer: NodeJS.Timeout | null = null;
+  const clock =
+    options.clock ??
+    createHLCClock({
+      nodeId,
+      wallClockFunction: Date.now,
+      initialState: initialHlcState,
+      onTick: syncStateStore
+        ? (state) => {
+            pendingClockState = state;
+            if (clockFlushTimer) return;
+            clockFlushTimer = setTimeout(() => {
+              clockFlushTimer = null;
+              if (pendingClockState) {
+                void syncStateStore.setHlcClockState(pendingClockState);
+              }
+            }, 5000);
+          }
+        : undefined,
+    });
 
   // When a subject is provided, wrap the adapter so every operation is
   // gated by access control and the private-storage structural rule.
@@ -71,7 +97,6 @@ export async function createStarkeepSdk(
   for (const generator of generators) {
     generatorRegistry.register(generator);
     dependencyGraph.addGenerator(generator);
-    // Ensure the per-type metadata table exists for each input type.
     for (const inputType of generator.inputTypes) {
       await databaseAdapter.ensureMetadataTable(
         inputType,
@@ -93,17 +118,18 @@ export async function createStarkeepSdk(
   const unifiedIndex = createUnifiedIndex({ databaseAdapter });
   const aggregationEngine = createAggregationEngine({ databaseAdapter });
 
-  let syncEngine = null;
-  if (remoteDatabaseAdapter && remoteObjectStorageAdapter) {
-    await remoteDatabaseAdapter.init();
+  let syncEngine: SyncEngine | null = null;
+  if (syncTransport && remoteObjectStorageAdapter) {
     await remoteObjectStorageAdapter.init();
-
     syncEngine = createSyncEngine({
       localDatabaseAdapter: databaseAdapter,
-      remoteDatabaseAdapter,
       localObjectStorage: objectStorageAdapter,
       remoteObjectStorage: remoteObjectStorageAdapter,
+      transport: syncTransport,
+      remoteDatabaseAdapter,
       clock,
+      changeLog: syncChangeLog,
+      syncState: syncStateStore,
     });
   }
 
@@ -115,13 +141,67 @@ export async function createStarkeepSdk(
     changeNotifier: syncEngine?.changeNotifier,
   });
 
+  async function resolveConflictImpl(
+    recordId: StarkeepId,
+    resolution: ConflictResolution,
+  ): Promise<DataRecord | null> {
+    if (!syncEngine) {
+      throw new Error("Sync is not configured; no conflicts to resolve.");
+    }
+    const current = syncEngine.getConflicts().find((c) => c.recordId === recordId);
+    if (!current) return null;
+
+    if (resolution.keep === "server") {
+      if (!current.server) {
+        await databaseAdapter.delete(recordId);
+        syncEngine.clearConflict(recordId);
+        return null;
+      }
+      await databaseAdapter.put({
+        ...current.server,
+        syncStatus: SyncStatus.Synced,
+      });
+      syncEngine.clearConflict(recordId);
+      return databaseAdapter.get(recordId);
+    }
+
+    if (resolution.keep === "local") {
+      const baseVersion = current.server?.version ?? null;
+      const rebased: DataRecord = {
+        ...current.local,
+        version: (baseVersion ?? 0) + 1,
+        updatedAt: clock.now(),
+        syncStatus: SyncStatus.PendingPush,
+      };
+      await databaseAdapter.put(rebased);
+      syncEngine.clearConflict(recordId);
+      await syncEngine.recordChange(
+        current.server ? "update" : "create",
+        rebased,
+        { baseVersion },
+      );
+      return rebased;
+    }
+
+    // keep: "custom" — caller supplies record verbatim, we trust its version.
+    await databaseAdapter.put({
+      ...resolution.record,
+      syncStatus: SyncStatus.PendingPush,
+    });
+    syncEngine.clearConflict(recordId);
+    await syncEngine.recordChange("update", resolution.record, {
+      baseVersion: current.server?.version ?? null,
+    });
+    return resolution.record;
+  }
+
   return {
     data: {
       async put(input) {
         const record = createDataRecord(input, clock);
         await databaseAdapter.put(record);
         if (syncEngine) {
-          await syncEngine.recordChange("create", record);
+          await syncEngine.recordChange("create", record, { baseVersion: null });
         }
         return record;
       },
@@ -130,9 +210,7 @@ export async function createStarkeepSdk(
         const contentHash = await sha256Hex(file);
         const objectStorageKey = `${contentHash.slice(0, 2)}/${contentHash}`;
 
-        await objectStorageAdapter.put(objectStorageKey, file, {
-          contentType,
-        });
+        await objectStorageAdapter.put(objectStorageKey, file, { contentType });
 
         const record = createDataRecord(
           {
@@ -146,7 +224,7 @@ export async function createStarkeepSdk(
         );
         await databaseAdapter.put(record);
         if (syncEngine) {
-          await syncEngine.recordChange("create", record);
+          await syncEngine.recordChange("create", record, { baseVersion: null });
         }
         return record;
       },
@@ -175,22 +253,56 @@ export async function createStarkeepSdk(
         );
         await databaseAdapter.put(record);
         if (syncEngine) {
-          await syncEngine.recordChange("create", record);
+          await syncEngine.recordChange("create", record, { baseVersion: null });
         }
         return record;
       },
 
       async get(recordId) {
-        return databaseAdapter.get(recordId);
+        const record = await databaseAdapter.get(recordId);
+        if (!record) return null;
+        if (record.deletedAt) return null;
+        return record;
+      },
+
+      async update(recordId, patch) {
+        const existing = await databaseAdapter.get(recordId);
+        if (!existing) {
+          throw new Error(`No data record found with id ${recordId}`);
+        }
+        const baseVersion = existing.version;
+        const updated: DataRecord = {
+          ...existing,
+          ...patch,
+          id: existing.id,
+          kind: "data",
+          createdAt: existing.createdAt,
+          version: baseVersion + 1,
+          updatedAt: clock.now(),
+          syncStatus: SyncStatus.PendingPush,
+        };
+        await databaseAdapter.put(updated);
+        if (syncEngine) {
+          await syncEngine.recordChange("update", updated, { baseVersion });
+        }
+        return updated;
       },
 
       async delete(recordId) {
-        await databaseAdapter.delete(recordId);
+        const existing = await databaseAdapter.get(recordId);
+        if (!existing) return;
+        const tombstone: DataRecord = {
+          ...existing,
+          version: existing.version + 1,
+          updatedAt: clock.now(),
+          deletedAt: clock.now(),
+          syncStatus: SyncStatus.PendingPush,
+        };
+        await databaseAdapter.put(tombstone);
         if (syncEngine) {
-          const record = await databaseAdapter.get(recordId);
-          if (record) {
-            await syncEngine.recordChange("delete", record);
-          }
+          await syncEngine.recordChange("delete", tombstone, {
+            baseVersion: existing.version,
+          });
         }
       },
 
@@ -198,6 +310,8 @@ export async function createStarkeepSdk(
         const result = await databaseAdapter.query(params);
         return result.records;
       },
+
+      resolveConflict: resolveConflictImpl,
     },
 
     metadata: {
@@ -248,7 +362,7 @@ export async function createStarkeepSdk(
             const result = await syncEngine!.push();
             return {
               pushed: result.accepted.length,
-              conflicts: result.conflicts.length,
+              rejected: result.rejected.length,
             };
           },
 
@@ -259,6 +373,10 @@ export async function createStarkeepSdk(
 
           async fullSync() {
             return syncEngine!.fullSync();
+          },
+
+          getConflicts() {
+            return syncEngine!.getConflicts();
           },
 
           onUpdate(listener) {
@@ -330,6 +448,13 @@ export async function createStarkeepSdk(
     },
 
     async close() {
+      if (clockFlushTimer) {
+        clearTimeout(clockFlushTimer);
+        clockFlushTimer = null;
+      }
+      if (pendingClockState && syncStateStore) {
+        await syncStateStore.setHlcClockState(pendingClockState);
+      }
       await databaseAdapter.close();
       await objectStorageAdapter.close();
       if (remoteDatabaseAdapter) {
