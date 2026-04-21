@@ -170,6 +170,34 @@ importers:
         specifier: ^5.4.11
         version: 5.4.21(@types/node@25.4.0)
 
+  apps/cloud-server:
+    dependencies:
+      '@starkeep/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@starkeep/storage-adapter':
+        specifier: workspace:*
+        version: link:../../packages/storage-adapter
+      '@starkeep/storage-aurora-dsql':
+        specifier: workspace:*
+        version: link:../../packages/storage-aurora-dsql
+      '@starkeep/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
+      '@starkeep/sync-engine':
+        specifier: workspace:*
+        version: link:../../packages/sync-engine
+      pg:
+        specifier: ^8.13.0
+        version: 8.20.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.11.0
+        version: 8.20.0
+      tsx:
+        specifier: ^4.21.0
+        version: 4.21.0
+
   apps/data-server:
     dependencies:
       '@starkeep/access-control':

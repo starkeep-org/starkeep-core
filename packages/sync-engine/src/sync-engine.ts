@@ -1,192 +1,255 @@
-import { compareHLC, type StarkeepId, type AnyRecord } from "@starkeep/core";
+import {
+  compareHLC,
+  maxHLC,
+  SyncStatus,
+  type StarkeepId,
+  type AnyRecord,
+  type HLCTimestamp,
+} from "@starkeep/core";
 import type {
   SyncEngine,
   SyncEngineOptions,
   SyncPullResponse,
   SyncPushResponse,
   ChangeLogEntry,
-  ConflictResolution,
+  SyncConflict,
+  RecordChangeOptions,
   MetadataSyncResult,
 } from "./types.js";
 import { createChangeLog } from "./change-log.js";
 import { createChangeNotifier } from "./change-notifier.js";
 import { createFileSyncEngine } from "./file-sync-engine.js";
-import { resolveConflict } from "./conflict-resolver.js";
+import { decidePullApply } from "./conflict-resolver.js";
+
+const ZERO_HLC: HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
 
 export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   const {
     localDatabaseAdapter,
-    remoteDatabaseAdapter,
     localObjectStorage,
     remoteObjectStorage,
+    transport,
+    remoteDatabaseAdapter,
     clock,
+    changeLog = createChangeLog(),
+    syncState,
   } = options;
 
-  const changeLog = createChangeLog();
   const changeNotifier = createChangeNotifier();
   const fileSyncEngine = createFileSyncEngine();
 
-  let lastSyncTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
+  // In-memory conflict cache. Each entry means the local record has unsynced
+  // edits that collide with the server's version. The app must resolve
+  // before sync continues on this record.
+  const conflicts = new Map<StarkeepId, SyncConflict>();
 
-  async function applyRemoteChanges(
-    remoteChanges: ChangeLogEntry[],
-  ): Promise<{
-    applied: number;
-    conflicts: ConflictResolution[];
-  }> {
-    let applied = 0;
-    const conflicts: ConflictResolution[] = [];
+  // Cursors are lazy-loaded from syncState on first use.
+  let pullCursor: HLCTimestamp | null = null;
+  let pushCursor: HLCTimestamp | null = null;
+  let cursorsLoaded = false;
 
-    for (const remoteChange of remoteChanges) {
-      const localRecord = await localDatabaseAdapter.get(
-        remoteChange.recordId,
-      );
-
-      if (!localRecord) {
-        if (remoteChange.operation !== "delete") {
-          await localDatabaseAdapter.put(remoteChange.recordSnapshot);
-          applied++;
-        }
-        continue;
-      }
-
-      const localChangesSince = await changeLog.getChangesSince(
-        lastSyncTimestamp,
-      );
-      const localConflict = localChangesSince.find(
-        (entry) => entry.recordId === remoteChange.recordId,
-      );
-
-      if (localConflict) {
-        const resolution = resolveConflict(localConflict, remoteChange);
-        conflicts.push(resolution);
-
-        if (resolution.winner === "remote") {
-          if (remoteChange.operation === "delete") {
-            await localDatabaseAdapter.delete(remoteChange.recordId);
-          } else {
-            await localDatabaseAdapter.put(resolution.resolvedRecord);
-          }
-          applied++;
-        }
-      } else {
-        if (remoteChange.operation === "delete") {
-          await localDatabaseAdapter.delete(remoteChange.recordId);
-        } else {
-          await localDatabaseAdapter.put(remoteChange.recordSnapshot);
-        }
-        applied++;
-      }
+  async function loadCursors(): Promise<void> {
+    if (cursorsLoaded) return;
+    if (syncState) {
+      pullCursor = await syncState.getPullCursor();
+      pushCursor = await syncState.getPushCursor();
     }
+    cursorsLoaded = true;
+  }
 
-    return { applied, conflicts };
+  async function savePullCursor(ts: HLCTimestamp): Promise<void> {
+    pullCursor = ts;
+    if (syncState) await syncState.setPullCursor(ts);
+  }
+
+  async function savePushCursor(ts: HLCTimestamp): Promise<void> {
+    pushCursor = ts;
+    if (syncState) await syncState.setPushCursor(ts);
+  }
+
+  function markConflict(
+    recordId: StarkeepId,
+    local: AnyRecord,
+    server: AnyRecord | null,
+    source: "pull" | "push",
+  ): void {
+    conflicts.set(recordId, {
+      recordId,
+      local,
+      server,
+      source,
+      detectedAt: clock.now(),
+    });
+  }
+
+  async function markRecordConflictStatus(
+    record: AnyRecord,
+  ): Promise<void> {
+    const updated = { ...record, syncStatus: SyncStatus.Conflict };
+    await localDatabaseAdapter.put(updated);
   }
 
   return {
     async recordChange(
       operation: "create" | "update" | "delete",
       record: AnyRecord,
+      changeOptions: RecordChangeOptions = {},
     ): Promise<void> {
+      const baseVersion =
+        operation === "create"
+          ? null
+          : changeOptions.baseVersion ?? record.version - 1;
+
+      const ts = clock.now();
       await changeLog.append({
         recordId: record.id,
         operation,
-        timestamp: clock.now(),
+        timestamp: ts,
         recordSnapshot: record,
+        baseVersion,
+      });
+      changeNotifier.emit({
+        eventType: "local-change-recorded",
+        recordIds: [record.id],
+        timestamp: ts,
       });
     },
 
     async pull(): Promise<SyncPullResponse> {
-      const remoteResult = await remoteDatabaseAdapter.query({
+      await loadCursors();
+      const since = pullCursor ?? ZERO_HLC;
+
+      const response = await transport.pullChanges({
+        sinceTimestamp: since,
         limit: 1000,
       });
 
-      const remoteChanges: ChangeLogEntry[] = [];
-      for (const record of remoteResult.records) {
-        if (compareHLC(record.updatedAt, lastSyncTimestamp) > 0) {
-          remoteChanges.push({
-            changeId: record.id,
-            recordId: record.id,
-            operation: record.deletedAt ? "delete" : "update",
-            timestamp: record.updatedAt,
-            recordSnapshot: record,
+      const conflictIds: StarkeepId[] = [];
+      const appliedIds: StarkeepId[] = [];
+
+      // Fetch local unsynced changes in bulk so dirty-conflict detection
+      // is O(1) per remote change.
+      const localUnsyncedBoundary = pushCursor ?? ZERO_HLC;
+      const localUnsynced = await changeLog.getChangesSince(
+        localUnsyncedBoundary,
+      );
+      const localUnsyncedByRecord = new Map<StarkeepId, ChangeLogEntry>();
+      for (const entry of localUnsynced) {
+        localUnsyncedByRecord.set(entry.recordId, entry);
+      }
+
+      for (const remoteChange of response.changes) {
+        // Keep our HLC causally ahead of anything we observe.
+        clock.receive(remoteChange.timestamp);
+
+        const localRecord = await localDatabaseAdapter.get(
+          remoteChange.recordId,
+        );
+
+        const decision = decidePullApply(
+          localRecord,
+          remoteChange,
+          localUnsyncedByRecord.get(remoteChange.recordId),
+        );
+
+        if (decision.kind === "local-dirty-conflict") {
+          if (localRecord) {
+            markConflict(
+              remoteChange.recordId,
+              localRecord,
+              remoteChange.recordSnapshot,
+              "pull",
+            );
+            await markRecordConflictStatus(localRecord);
+            conflictIds.push(remoteChange.recordId);
+          }
+          continue;
+        }
+
+        if (decision.kind === "skip-already-current") {
+          continue;
+        }
+
+        // apply-clean
+        if (remoteChange.operation === "delete") {
+          await localDatabaseAdapter.delete(remoteChange.recordId);
+        } else {
+          await localDatabaseAdapter.put({
+            ...remoteChange.recordSnapshot,
+            syncStatus: SyncStatus.Synced,
           });
+        }
+        appliedIds.push(remoteChange.recordId);
+
+        // Pull corresponding files if the record references one.
+        if (remoteChange.operation !== "delete") {
+          const snapshot = remoteChange.recordSnapshot;
+          if (snapshot.objectStorageKey) {
+            const filesToPull = await fileSyncEngine.getFilesToPull(
+              localObjectStorage,
+              remoteObjectStorage,
+              [
+                {
+                  key: snapshot.objectStorageKey,
+                  mimeType: snapshot.mimeType ?? undefined,
+                },
+              ],
+            );
+            for (const manifest of filesToPull) {
+              await fileSyncEngine.transferFile(
+                manifest,
+                remoteObjectStorage,
+                localObjectStorage,
+              );
+            }
+          }
         }
       }
 
-      const { applied, conflicts } =
-        await applyRemoteChanges(remoteChanges);
+      await savePullCursor(response.latestTimestamp);
 
-      if (remoteChanges.length > 0) {
+      if (appliedIds.length > 0) {
         changeNotifier.emit({
-          eventType:
-            conflicts.length > 0
-              ? "conflict-detected"
-              : "local-data-synced",
-          recordIds: remoteChanges.map((change) => change.recordId),
+          eventType: "local-data-synced",
+          recordIds: appliedIds,
+          timestamp: clock.now(),
+        });
+      }
+      if (conflictIds.length > 0) {
+        changeNotifier.emit({
+          eventType: "conflict-detected",
+          recordIds: conflictIds,
           timestamp: clock.now(),
         });
       }
 
-      const latestTimestamp =
-        (await changeLog.getLatestTimestamp()) ?? lastSyncTimestamp;
-
-      return {
-        changes: remoteChanges,
-        latestTimestamp,
-        hasMore: remoteResult.hasMore,
-      };
+      return response;
     },
 
     async push(): Promise<SyncPushResponse> {
-      const localChanges = await changeLog.getChangesSince(
-        lastSyncTimestamp,
+      await loadCursors();
+      const since = pushCursor ?? ZERO_HLC;
+
+      const localChanges = await changeLog.getChangesSince(since);
+
+      // Skip records we already know are in conflict — they need manual
+      // resolution before we push anything new for them.
+      const pushable = localChanges.filter(
+        (change) => !conflicts.has(change.recordId),
       );
 
-      const accepted: StarkeepId[] = [];
-      const conflicts: ConflictResolution[] = [];
-
-      for (const localChange of localChanges) {
-        const remoteRecord = await remoteDatabaseAdapter.get(
-          localChange.recordId,
-        );
-
-        if (
-          remoteRecord &&
-          compareHLC(remoteRecord.updatedAt, lastSyncTimestamp) > 0
-        ) {
-          const remoteChangeEntry: ChangeLogEntry = {
-            changeId: remoteRecord.id,
-            recordId: remoteRecord.id,
-            operation: remoteRecord.deletedAt ? "delete" : "update",
-            timestamp: remoteRecord.updatedAt,
-            recordSnapshot: remoteRecord,
-          };
-
-          const resolution = resolveConflict(localChange, remoteChangeEntry);
-          conflicts.push(resolution);
-
-          if (resolution.winner === "local") {
-            if (localChange.operation === "delete") {
-              await remoteDatabaseAdapter.delete(localChange.recordId);
-            } else {
-              await remoteDatabaseAdapter.put(
-                localChange.recordSnapshot,
-              );
-            }
-            accepted.push(localChange.recordId);
-          }
-        } else {
-          if (localChange.operation === "delete") {
-            await remoteDatabaseAdapter.delete(localChange.recordId);
-          } else {
-            await remoteDatabaseAdapter.put(localChange.recordSnapshot);
-          }
-          accepted.push(localChange.recordId);
-        }
+      if (pushable.length === 0) {
+        return {
+          accepted: [],
+          rejected: [],
+          latestTimestamp: since,
+        };
       }
 
-      // Sync files for pushed records
-      const fileEntries = localChanges
+      // Push files for records that carry references. Use pushable (skip
+      // records already in conflict) and propagate mimeType so the remote
+      // stores it alongside the blob.
+      const fileEntries = pushable
         .filter((change) => change.recordSnapshot.objectStorageKey !== null)
         .map((change) => ({
           key: change.recordSnapshot.objectStorageKey as string,
@@ -208,84 +271,129 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
-      lastSyncTimestamp = clock.now();
+      const response = await transport.pushChanges({ changes: pushable });
 
-      return {
-        accepted,
-        conflicts,
-        latestTimestamp: lastSyncTimestamp,
-      };
+      // Accepted: mark corresponding local records as Synced.
+      const acceptedSet = new Set(response.accepted);
+      for (const change of pushable) {
+        if (acceptedSet.has(change.recordId)) {
+          const localRecord = await localDatabaseAdapter.get(change.recordId);
+          if (
+            localRecord &&
+            localRecord.version === change.recordSnapshot.version
+          ) {
+            await localDatabaseAdapter.put({
+              ...localRecord,
+              syncStatus: SyncStatus.Synced,
+            });
+          }
+        }
+      }
+
+      // Rejected: mark as Conflict, stash server version.
+      const conflictIds: StarkeepId[] = [];
+      for (const rejection of response.rejected) {
+        const localRecord = await localDatabaseAdapter.get(rejection.recordId);
+        if (!localRecord) continue;
+        markConflict(
+          rejection.recordId,
+          localRecord,
+          rejection.serverRecord,
+          "push",
+        );
+        await markRecordConflictStatus(localRecord);
+        conflictIds.push(rejection.recordId);
+      }
+
+      if (conflictIds.length > 0) {
+        changeNotifier.emit({
+          eventType: "conflict-detected",
+          recordIds: conflictIds,
+          timestamp: clock.now(),
+        });
+      }
+
+      // Advance push cursor to max timestamp of the pushed batch —
+      // both accepted AND rejected, so rejected stays parked in the
+      // conflict map rather than being retried automatically.
+      const maxTimestamp = pushable.reduce(
+        (acc, entry) => maxHLC(acc, entry.timestamp),
+        since,
+      );
+      if (compareHLC(maxTimestamp, since) > 0) {
+        await savePushCursor(maxTimestamp);
+      }
+
+      return response;
     },
 
     async pullMetadata(): Promise<MetadataSyncResult> {
-      const epoch: import("@starkeep/core").HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
-      const remoteChanges = await remoteDatabaseAdapter.getSyncableMetadataChangesSince(
-        lastSyncTimestamp,
-      );
-
-      // Build a local lookup keyed by `targetId:generatorId`.
-      const localAll = await localDatabaseAdapter.getSyncableMetadataChangesSince(epoch);
+      if (!remoteDatabaseAdapter) {
+        return { pulled: 0, pushed: 0, conflicts: 0 };
+      }
+      const remoteChanges =
+        await remoteDatabaseAdapter.getSyncableMetadataChangesSince(
+          pullCursor ?? ZERO_HLC,
+        );
+      const localAll =
+        await localDatabaseAdapter.getSyncableMetadataChangesSince(ZERO_HLC);
       const localMap = new Map(
         localAll.map((r) => [`${r.targetId}:${r.generatorId}`, r]),
       );
 
       let pulled = 0;
-      let conflicts = 0;
+      let conflictCount = 0;
 
       for (const remote of remoteChanges) {
         const key = `${remote.targetId}:${remote.generatorId}`;
         const local = localMap.get(key);
-
         if (!local || compareHLC(remote.updatedAt, local.updatedAt) > 0) {
-          // Remote is newer (or no local copy): apply locally.
           await localDatabaseAdapter.upsertSyncableMetadata(remote);
           pulled++;
         } else if (compareHLC(local.updatedAt, remote.updatedAt) !== 0) {
-          // Local is newer: keep local, count as conflict resolved in local's favour.
-          conflicts++;
+          conflictCount++;
         }
       }
 
-      return { pulled, pushed: 0, conflicts };
+      return { pulled, pushed: 0, conflicts: conflictCount };
     },
 
     async pushMetadata(): Promise<MetadataSyncResult> {
-      const epoch: import("@starkeep/core").HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
-      const localChanges = await localDatabaseAdapter.getSyncableMetadataChangesSince(
-        lastSyncTimestamp,
-      );
-
-      // Build a remote lookup keyed by `targetId:generatorId`.
-      const remoteAll = await remoteDatabaseAdapter.getSyncableMetadataChangesSince(epoch);
+      if (!remoteDatabaseAdapter) {
+        return { pulled: 0, pushed: 0, conflicts: 0 };
+      }
+      const localChanges =
+        await localDatabaseAdapter.getSyncableMetadataChangesSince(
+          pushCursor ?? ZERO_HLC,
+        );
+      const remoteAll =
+        await remoteDatabaseAdapter.getSyncableMetadataChangesSince(ZERO_HLC);
       const remoteMap = new Map(
         remoteAll.map((r) => [`${r.targetId}:${r.generatorId}`, r]),
       );
 
       let pushed = 0;
-      let conflicts = 0;
+      let conflictCount = 0;
 
       for (const local of localChanges) {
         const key = `${local.targetId}:${local.generatorId}`;
         const remote = remoteMap.get(key);
-
         if (!remote || compareHLC(local.updatedAt, remote.updatedAt) >= 0) {
-          // Local is newer (or no remote copy): push to remote.
           await remoteDatabaseAdapter.upsertSyncableMetadata(local);
           pushed++;
         } else {
-          // Remote is newer: apply locally and count as conflict.
           await localDatabaseAdapter.upsertSyncableMetadata(remote);
-          conflicts++;
+          conflictCount++;
         }
       }
 
-      return { pulled: 0, pushed, conflicts };
+      return { pulled: 0, pushed, conflicts: conflictCount };
     },
 
     async fullSync(): Promise<{
       pulled: number;
       pushed: number;
-      conflicts: number;
+      rejected: number;
     }> {
       const pullResult = await this.pull();
       const pushResult = await this.push();
@@ -295,8 +403,16 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       return {
         pulled: pullResult.changes.length + metadataPull.pulled,
         pushed: pushResult.accepted.length + metadataPush.pushed,
-        conflicts: pushResult.conflicts.length + metadataPull.conflicts + metadataPush.conflicts,
+        rejected: pushResult.rejected.length,
       };
+    },
+
+    getConflicts(): SyncConflict[] {
+      return Array.from(conflicts.values());
+    },
+
+    clearConflict(recordId: StarkeepId): void {
+      conflicts.delete(recordId);
     },
 
     changeLog,

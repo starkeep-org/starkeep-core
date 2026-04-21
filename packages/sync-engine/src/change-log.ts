@@ -1,5 +1,5 @@
 import { generateId, compareHLC, maxHLC } from "@starkeep/core";
-import type { HLCTimestamp, StarkeepId } from "@starkeep/core";
+import type { HLCTimestamp } from "@starkeep/core";
 import type { ChangeLog, ChangeLogEntry } from "./types.js";
 
 export function createChangeLog(): ChangeLog {

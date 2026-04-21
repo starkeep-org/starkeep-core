@@ -5,6 +5,7 @@ import {
   MockObjectStorageAdapter,
 } from "@starkeep/storage-adapter";
 import type { GeneratingFunctionDefinition } from "@starkeep/metadata-engine";
+import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import { createStarkeepSdk } from "../src/sdk.js";
 
 function createTestGenerator(): GeneratingFunctionDefinition {
@@ -49,7 +50,12 @@ describe("createStarkeepSdk", () => {
     if (withSync) {
       const remoteDatabase = new MockDatabaseAdapter();
       const remoteObjectStorage = new MockObjectStorageAdapter();
-      options.remoteDatabaseAdapter = remoteDatabase;
+      await remoteDatabase.init();
+      await remoteObjectStorage.init();
+      options.syncTransport = createInProcessSyncTransport({
+        databaseAdapter: remoteDatabase,
+        clock: options.clock!,
+      });
       options.remoteObjectStorageAdapter = remoteObjectStorage;
     }
 
