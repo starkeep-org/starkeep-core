@@ -8,7 +8,9 @@
     "deploy": "sst deploy",
     "deploy:prod": "sst deploy --stage prod",
     "remove": "sst remove",
-    "build:artifact": "node build-artifact.mjs"
+    "build:artifact": "node build-artifact.mjs",
+    "local:deploy": "tsx scripts/local-deploy.ts deploy",
+    "local:remove": "tsx scripts/local-deploy.ts remove"
   },
   "dependencies": {
     "@starkeep/storage-aurora-dsql": "workspace:*",
@@ -20,6 +22,9 @@
   },
   "devDependencies": {
     "typescript": "^5.7.0",
-    "@types/pg": "^8.11.0"
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.0.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
+    "@aws-sdk/client-cognito-identity": "^3.700.0"
   }
 }

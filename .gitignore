@@ -34,3 +34,7 @@ apps/admin-desktop/public/user-data-source.zip
 # SST local state
 infra/user-data/.sst/
 infra/user-data/.ws/
+infra/user-data/sst-env.d.ts
+
+# Starkeep local CLI config (contains Cognito IDs — do not commit)
+.starkeep-config.json

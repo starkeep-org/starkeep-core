@@ -433,6 +433,23 @@ interface DeployOutputs {
 
 const POLL_INTERVAL_MS = 5000;
 
+function downloadCliConfig(config: {
+  region: string;
+  stage: string;
+  userPoolId: string;
+  userPoolClientId: string;
+  identityPoolId: string;
+}) {
+  const json = JSON.stringify(config, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = ".starkeep-config.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function Step5DeployInfra({
   onSuccess,
   onBack,
@@ -452,6 +469,7 @@ function Step5DeployInfra({
   const [phase, setPhase] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [showManualEntry, setShowManualEntry] = useState(false);
+  const [deployResult, setDeployResult] = useState<DeployOutputs | null>(null);
   const [manualBucket, setManualBucket] = useState("");
   const [manualAurora, setManualAurora] = useState("");
   const [manualApi, setManualApi] = useState("");
@@ -564,7 +582,7 @@ function Step5DeployInfra({
         );
       }
 
-      onSuccess({
+      setDeployResult({
         s3Bucket: bucketName,
         s3Region: region,
         auroraEndpoint: auroraHostname,
@@ -575,17 +593,49 @@ function Step5DeployInfra({
     } finally {
       setDeploying(false);
     }
-  }, [credentials, region, stackPrefix, cognitoConfig, onSuccess]);
+  }, [credentials, region, stackPrefix, cognitoConfig]);
 
   const handleManualSubmit = () => {
     if (!manualBucket || !manualAurora) return;
-    onSuccess({
+    setDeployResult({
       s3Bucket: manualBucket.trim(),
       s3Region: region,
       auroraEndpoint: manualAurora.trim(),
       apiGatewayUrl: manualApi.trim() || undefined,
     });
   };
+
+  if (deployResult) {
+    return (
+      <Stack gap="md">
+        <Alert color="green" title="Deployment complete">
+          Your Starkeep data infrastructure is ready.
+        </Alert>
+        <Text size="sm">
+          To deploy or remove infrastructure from your local machine using{" "}
+          <Code>pnpm run local:deploy</Code> / <Code>pnpm run local:remove</Code>, download your
+          CLI config and place it in the repo root.
+        </Text>
+        <Button
+          variant="light"
+          onClick={() =>
+            downloadCliConfig({
+              region,
+              stage: stackPrefix,
+              userPoolId: cognitoConfig.userPoolId,
+              userPoolClientId: cognitoConfig.userPoolClientId,
+              identityPoolId: cognitoConfig.identityPoolId,
+            })
+          }
+        >
+          Download CLI config (.starkeep-config.json)
+        </Button>
+        <Group justify="flex-end" mt="md">
+          <Button onClick={() => onSuccess(deployResult)}>Continue</Button>
+        </Group>
+      </Stack>
+    );
+  }
 
   if (showManualEntry) {
     return (
@@ -646,6 +696,28 @@ function Step5DeployInfra({
 
       {error && <Alert color="red" title="Deployment failed">{error}</Alert>}
 
+      <Divider label="Local deployment" labelPosition="left" />
+      <Text size="sm" c="dimmed">
+        To deploy from your local machine instead of CodeBuild, download the CLI config and run{" "}
+        <Code>pnpm run local:deploy</Code> from <Code>infra/user-data/</Code>.
+      </Text>
+      <Button
+        variant="light"
+        disabled={deploying}
+        onClick={() =>
+          downloadCliConfig({
+            region,
+            stage: stackPrefix,
+            userPoolId: cognitoConfig.userPoolId,
+            userPoolClientId: cognitoConfig.userPoolClientId,
+            identityPoolId: cognitoConfig.identityPoolId,
+          })
+        }
+      >
+        Download CLI config (.starkeep-config.json)
+      </Button>
+
+      <Divider label="Remote deployment" labelPosition="left" />
       <Text size="sm" c="dimmed">
         If you already deployed successfully or want to enter values from the AWS console,{" "}
         <Anchor size="sm" onClick={() => setShowManualEntry(true)}>
