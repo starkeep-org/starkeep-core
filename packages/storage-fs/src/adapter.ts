@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink, readlink } from "node:fs/promises";
+import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink, readlink, access } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { PutOptions, GetResult, ListOptions, ListResult } from "@starkeep/storage-adapter";
@@ -61,6 +61,15 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
+    }
+  }
+
+  async has(key: string): Promise<boolean> {
+    try {
+      await access(this.keyToPath(key));
+      return true;
+    } catch {
+      return false;
     }
   }
 

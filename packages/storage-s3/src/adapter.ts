@@ -5,6 +5,7 @@ import {
   DeleteObjectCommand,
   ListObjectsV2Command,
   HeadBucketCommand,
+  HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl as awsGetSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
@@ -127,6 +128,26 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
         (error.name === "NoSuchKey" || error.name === "NotFound")
       ) {
         return null;
+      }
+      throw error;
+    }
+  }
+
+  async has(key: string): Promise<boolean> {
+    try {
+      await this.getClient().send(
+        new HeadObjectCommand({
+          Bucket: this.options.bucketName,
+          Key: this.resolveKey(key),
+        }),
+      );
+      return true;
+    } catch (error: unknown) {
+      if (
+        error instanceof Error &&
+        (error.name === "NoSuchKey" || error.name === "NotFound")
+      ) {
+        return false;
       }
       throw error;
     }

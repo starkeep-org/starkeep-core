@@ -4,32 +4,39 @@ import type {
   MetadataRecord,
   HLCClock,
   CreateDataRecordInput,
+  AnyRecord,
 } from "@starkeep/core";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type {
   GeneratingFunctionDefinition,
-  GeneratorRegistry,
-  DependencyGraph,
-  MetadataEngine,
   GenerationResult,
 } from "@starkeep/metadata-engine";
 import type { MetadataSyncRecord } from "@starkeep/storage-adapter";
-import type { UnifiedIndex, IndexQuery, IndexResult } from "@starkeep/index";
+import type { IndexQuery, IndexResult } from "@starkeep/index";
 import type {
-  AggregationEngine,
   AggregationResult,
   AggregationOptions,
 } from "@starkeep/aggregations";
-import type { SyncEngine, ChangeListener } from "@starkeep/sync-engine";
 import type {
-  AccessControlEngine,
+  ChangeListener,
+  SyncTransport,
+  SyncConflict,
+  SyncStateStore,
+  ChangeLog,
+} from "@starkeep/sync-engine";
+import type {
   CreatePolicyInput,
   AccessPolicy,
   AccessCheckRequest,
   AccessCheckResult,
   SubjectType,
 } from "@starkeep/access-control";
-import type { SharedSpaceApi, ApiRequest, ApiResponse, ApiRouter, WebSocketConnection } from "@starkeep/shared-space-api";
+import type { ApiRequest, ApiResponse, ApiRouter, WebSocketConnection } from "@starkeep/shared-space-api";
+
+export type ConflictResolution =
+  | { keep: "local" }
+  | { keep: "server" }
+  | { keep: "custom"; record: AnyRecord };
 
 export interface DataOperations {
   put(input: CreateDataRecordInput): Promise<DataRecord>;
@@ -44,8 +51,22 @@ export interface DataOperations {
     contentType?: string,
   ): Promise<DataRecord>;
   get(recordId: StarkeepId): Promise<DataRecord | null>;
+  update(
+    recordId: StarkeepId,
+    patch: Partial<Omit<DataRecord, "id" | "kind" | "createdAt" | "version">>,
+  ): Promise<DataRecord>;
   delete(recordId: StarkeepId): Promise<void>;
   query(params: { type?: string; filters?: import("@starkeep/storage-adapter").Filter[] }): Promise<DataRecord[]>;
+  /**
+   * Resolve a sync conflict (OCC reject or local-dirty pull). `keep:"server"`
+   * replaces the local record with the server's; `keep:"local"` rebases the
+   * local change on top of the server's current version and queues a re-push;
+   * `keep:"custom"` writes an arbitrary merged record.
+   */
+  resolveConflict(
+    recordId: StarkeepId,
+    resolution: ConflictResolution,
+  ): Promise<DataRecord | null>;
 }
 
 export interface MetadataOperations {
@@ -58,14 +79,6 @@ export interface MetadataOperations {
     dataType: string,
   ): Promise<GenerationResult[]>;
   getForRecord(targetId: StarkeepId): Promise<MetadataRecord[]>;
-  /**
-   * Write a metadata value directly for a `syncable` generator, bypassing the
-   * staleness check and generator function. Use this for user-authored metadata
-   * (e.g. a photo caption) where the value comes from user input rather than
-   * from a computation over the data record.
-   *
-   * The generator must be registered at SDK init with `syncable: true`.
-   */
   putDirect(
     targetId: StarkeepId,
     targetType: string,
@@ -83,9 +96,10 @@ export interface AggregationOperations {
 }
 
 export interface SyncOperations {
-  push(): Promise<{ pushed: number; conflicts: number }>;
+  push(): Promise<{ pushed: number; rejected: number }>;
   pull(): Promise<{ pulled: number }>;
-  fullSync(): Promise<{ pulled: number; pushed: number; conflicts: number }>;
+  fullSync(): Promise<{ pulled: number; pushed: number; rejected: number }>;
+  getConflicts(): SyncConflict[];
   onUpdate(listener: ChangeListener): () => void;
 }
 
@@ -102,29 +116,15 @@ export interface AccessControlOperations {
 export interface ApiOperations {
   readonly router: ApiRouter;
   handleRequest(request: ApiRequest): Promise<ApiResponse>;
-  /**
-   * Register a connected WebSocket client. Returns a cleanup function to call
-   * when the connection closes. Requires a changeNotifier (i.e. sync must be
-   * configured) otherwise this is a no-op unsubscribe.
-   */
   handleWebSocketConnect(connection: WebSocketConnection): () => void;
 }
 
 export type { ApiRouter };
-
 export type { WebSocketConnection };
 
-/**
- * Ergonomic interface for per-app private storage.
- * All operations are automatically scoped to `<normalizedAppId>:private:*`.
- * Only available when the SDK is created with a `subject` of type `"app"`.
- */
 export interface PrivateStoreOperations {
-  /** Write a record under `<appId>:private:<subtype>`. */
   put(subtype: string, content?: Record<string, unknown>): Promise<DataRecord>;
-  /** Read a record by ID (must be accessible to this app's private namespace). */
   get(recordId: StarkeepId): Promise<DataRecord | null>;
-  /** Delete a record by ID (must be accessible to this app's private namespace). */
   delete(recordId: StarkeepId): Promise<void>;
 }
 
@@ -136,10 +136,6 @@ export interface StarkeepSdk {
   readonly sync: SyncOperations | null;
   readonly accessControl: AccessControlOperations;
   readonly api: ApiOperations;
-  /**
-   * Scoped private storage for this app. Non-null only when the SDK is
-   * created with `subject: { subjectType: "app", subjectId: "..." }`.
-   */
   readonly privateStore: PrivateStoreOperations | null;
   close(): Promise<void>;
 }
@@ -150,14 +146,18 @@ export interface StarkeepSdkOptions {
   readonly ownerId: string;
   readonly nodeId: string;
   readonly clock?: HLCClock;
-  readonly remoteDatabaseAdapter?: DatabaseAdapter;
+  /** OCC sync transport to the remote (cloud) data-record endpoints. */
+  readonly syncTransport?: SyncTransport;
+  /** Object storage that the cloud is authoritative for, used for file sync. */
   readonly remoteObjectStorageAdapter?: ObjectStorageAdapter;
-  readonly generators?: GeneratingFunctionDefinition[];
   /**
-   * When provided, all database operations are wrapped with
-   * `EnforcedDatabaseAdapter` using this subject's identity.
-   * Required to enable `sdk.privateStore`.
+   * Optional direct remote adapter for metadata sync. Kept temporarily while
+   * metadata sync still bypasses the transport abstraction.
    */
+  readonly remoteDatabaseAdapter?: DatabaseAdapter;
+  readonly syncChangeLog?: ChangeLog;
+  readonly syncStateStore?: SyncStateStore;
+  readonly generators?: GeneratingFunctionDefinition[];
   readonly subject?: {
     readonly subjectType: SubjectType;
     readonly subjectId: string;

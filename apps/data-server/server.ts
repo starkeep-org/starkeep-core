@@ -18,12 +18,18 @@ import type {
   AuroraDsqlDatabaseAdapterOptions,
 } from "../../packages/storage-aurora-dsql/src/types.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
+import {
+  createHttpSyncTransport,
+  createSqliteChangeLog,
+  createSqliteSyncStateStore,
+} from "../../packages/sync-engine/src/index.js";
 import { createTypeRegistry } from "../../packages/core/src/schema/index.js";
 import { createHLCClock } from "../../packages/core/src/hlc/index.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile } from "node:fs/promises";
 import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
+import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import * as v from "valibot";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
@@ -32,9 +38,13 @@ import pg from "pg";
 // all outstanding tokens are invalidated on restart (revocable by design).
 const TOKEN_SECRET = randomBytes(32);
 
-const STARKEEP_DIR = join(homedir(), ".starkeep");
+const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
 const OWNER_ID = process.env.STARKEEP_OWNER_ID || "craig";
+const CLOUD_URL = process.env.STARKEEP_CLOUD_URL;
+const NODE_ID = process.env.STARKEEP_NODE_ID || "admin-desktop";
+const PULL_INTERVAL_MS = parseInt(process.env.STARKEEP_PULL_INTERVAL_MS || "30000", 10);
+const PUSH_DEBOUNCE_MS = parseInt(process.env.STARKEEP_PUSH_DEBOUNCE_MS || "500", 10);
 
 interface CloudConfig {
   stackPrefix: string;
@@ -229,14 +239,87 @@ async function main() {
     }),
   });
 
-  const clock = createHLCClock({ nodeId: "admin-desktop", wallClockFunction: Date.now });
+  const clock = createHLCClock({ nodeId: NODE_ID, wallClockFunction: Date.now });
+
+  // Pre-init so we can hand the raw SQLite handle to the sync change log +
+  // state store, which share the records DB file.
+  await databaseAdapter.init();
+
+  const syncTransport = CLOUD_URL
+    ? createHttpSyncTransport({ baseUrl: CLOUD_URL })
+    : undefined;
+  const syncRemoteStorage: ObjectStorageAdapter | undefined = CLOUD_URL
+    ? new HttpObjectStorageAdapter({ baseUrl: `${CLOUD_URL}/files` })
+    : undefined;
+  const syncChangeLog = CLOUD_URL
+    ? createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() })
+    : undefined;
+  const syncStateStore = CLOUD_URL
+    ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
+    : undefined;
 
   const sdk = await createStarkeepSdk({
     databaseAdapter,
     objectStorageAdapter: localAdapter,
     ownerId: OWNER_ID,
-    nodeId: "admin-desktop",
+    nodeId: NODE_ID,
+    syncTransport,
+    remoteObjectStorageAdapter: syncRemoteStorage,
+    syncChangeLog,
+    syncStateStore,
   });
+
+  const syncRuntime = {
+    lastPullAt: null as string | null,
+    lastPushAt: null as string | null,
+    lastError: null as string | null,
+    pullBackoffMs: PULL_INTERVAL_MS,
+  };
+
+  let pushTimer: NodeJS.Timeout | null = null;
+  function schedulePush(): void {
+    if (!sdk.sync) return;
+    if (pushTimer) return;
+    pushTimer = setTimeout(async () => {
+      pushTimer = null;
+      try {
+        await sdk.sync!.push();
+        syncRuntime.lastPushAt = new Date().toISOString();
+        syncRuntime.lastError = null;
+      } catch (err) {
+        syncRuntime.lastError = (err as Error).message;
+        console.error("push failed:", err);
+      }
+    }, PUSH_DEBOUNCE_MS);
+  }
+
+  if (sdk.sync) {
+    sdk.sync.onUpdate((event) => {
+      console.log(`[sync] ${event.eventType} records=${event.recordIds.length}`);
+      if (event.eventType === "local-change-recorded") {
+        schedulePush();
+      }
+    });
+  }
+
+  let pullTimer: NodeJS.Timeout | null = null;
+  async function runPull(): Promise<void> {
+    if (!sdk.sync) return;
+    try {
+      await sdk.sync.pull();
+      syncRuntime.lastPullAt = new Date().toISOString();
+      syncRuntime.lastError = null;
+      syncRuntime.pullBackoffMs = PULL_INTERVAL_MS;
+    } catch (err) {
+      syncRuntime.lastError = (err as Error).message;
+      syncRuntime.pullBackoffMs = Math.min(syncRuntime.pullBackoffMs * 2, 5 * 60 * 1000);
+      console.error("pull failed:", err);
+    }
+    pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
+  }
+  if (sdk.sync) {
+    pullTimer = setTimeout(runPull, PULL_INTERVAL_MS);
+  }
 
   // File watch manager — monitors local directories and syncs to Starkeep
   const watchManager = createFileWatchManager({ sdk, databaseAdapter, ownerId: OWNER_ID });
@@ -281,6 +364,64 @@ async function main() {
     try {
       if (path === "/health") {
         json(res, { status: "ok" });
+        return;
+      }
+
+      // Sync observability + manual trigger
+      if (path === "/sync/status" && req.method === "GET") {
+        json(res, {
+          enabled: sdk.sync !== null,
+          cloudUrl: CLOUD_URL ?? null,
+          lastPullAt: syncRuntime.lastPullAt,
+          lastPushAt: syncRuntime.lastPushAt,
+          lastError: syncRuntime.lastError,
+          pullBackoffMs: syncRuntime.pullBackoffMs,
+          conflictCount: sdk.sync ? sdk.sync.getConflicts().length : 0,
+        });
+        return;
+      }
+
+      if (path === "/sync/now" && req.method === "POST") {
+        if (!sdk.sync) {
+          res.writeHead(400);
+          json(res, { error: "sync not configured" });
+          return;
+        }
+        const result = await sdk.sync.fullSync();
+        syncRuntime.lastPullAt = new Date().toISOString();
+        syncRuntime.lastPushAt = new Date().toISOString();
+        json(res, result);
+        return;
+      }
+
+      if (path === "/sync/conflicts" && req.method === "GET") {
+        if (!sdk.sync) {
+          json(res, { conflicts: [] });
+          return;
+        }
+        json(res, { conflicts: sdk.sync.getConflicts() });
+        return;
+      }
+
+      const resolveMatch = path.match(/^\/sync\/conflicts\/([^/]+)\/resolve$/);
+      if (resolveMatch && req.method === "POST") {
+        if (!sdk.sync) {
+          res.writeHead(400);
+          json(res, { error: "sync not configured" });
+          return;
+        }
+        const body = JSON.parse(await readBody(req));
+        if (body.keep !== "local" && body.keep !== "server") {
+          res.writeHead(400);
+          json(res, { error: 'body must include { keep: "local" | "server" }' });
+          return;
+        }
+        const record = await sdk.data.resolveConflict(
+          resolveMatch[1]! as any,
+          { keep: body.keep },
+        );
+        schedulePush();
+        json(res, { record });
         return;
       }
 
@@ -851,11 +992,18 @@ async function main() {
     console.log(`Starkeep data server listening on http://127.0.0.1:${PORT}`);
   });
 
-  process.on("SIGTERM", async () => {
+  const shutdown = async () => {
     server.close();
+    if (pullTimer) clearTimeout(pullTimer);
+    if (pushTimer) clearTimeout(pushTimer);
     await watchManager.shutdown();
     await sdk.close();
     process.exit(0);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", async () => {
+    // Reuse shutdown so Ctrl-C on a dev process drains cleanly.
+    await shutdown();
   });
 }
 
