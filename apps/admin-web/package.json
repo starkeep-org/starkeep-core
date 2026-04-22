@@ -1,0 +1,31 @@
+{
+  "name": "admin-web",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@starkeep/admin-core": "workspace:*",
+    "@starkeep/admin-ui": "workspace:*",
+    "@mantine/core": "^7.17.8",
+    "@mantine/hooks": "^7.17.8",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1031.0",
+    "@aws-sdk/client-cognito-identity": "^3.1030.0",
+    "@aws-sdk/client-codebuild": "^3.700.0",
+    "@aws-sdk/client-s3": "^3.700.0",
+    "next": "^15.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.7.0"
+  }
+}
