@@ -1,5 +1,5 @@
 import type { StarkeepId, HLCTimestamp, AnyRecord } from "@starkeep/core";
-import type { DatabaseAdapter, ObjectStorageAdapter, MetadataSyncRecord } from "@starkeep/storage-adapter";
+import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 
 export interface ChangeLogEntry {
   readonly changeId: StarkeepId;
@@ -7,6 +7,9 @@ export interface ChangeLogEntry {
   readonly operation: "create" | "update" | "delete";
   readonly timestamp: HLCTimestamp;
   readonly recordSnapshot: AnyRecord;
+  // Version the client believed was current when producing this change.
+  // null for creates. Used by the server for optimistic concurrency control.
+  readonly baseVersion: number | null;
 }
 
 export interface ChangeLog {
@@ -33,18 +36,36 @@ export interface SyncPushRequest {
   readonly changes: ChangeLogEntry[];
 }
 
+export type RejectionReason =
+  | "version-mismatch"
+  | "deleted"
+  | "not-found";
+
+export interface RejectedChange {
+  readonly recordId: StarkeepId;
+  readonly clientChange: ChangeLogEntry;
+  // Server's current record, or null if reason === "not-found".
+  readonly serverRecord: AnyRecord | null;
+  readonly reason: RejectionReason;
+}
+
 export interface SyncPushResponse {
   readonly accepted: StarkeepId[];
-  readonly conflicts: ConflictResolution[];
+  readonly rejected: RejectedChange[];
   readonly latestTimestamp: HLCTimestamp;
 }
 
-export interface ConflictResolution {
+export interface SyncTransport {
+  pullChanges(request: SyncPullRequest): Promise<SyncPullResponse>;
+  pushChanges(request: SyncPushRequest): Promise<SyncPushResponse>;
+}
+
+export interface SyncConflict {
   readonly recordId: StarkeepId;
-  readonly localChange: ChangeLogEntry;
-  readonly remoteChange: ChangeLogEntry;
-  readonly winner: "local" | "remote";
-  readonly resolvedRecord: AnyRecord;
+  readonly local: AnyRecord;
+  readonly server: AnyRecord | null;
+  readonly source: "pull" | "push";
+  readonly detectedAt: HLCTimestamp;
 }
 
 export interface FileSyncManifest {
@@ -80,6 +101,7 @@ export interface FileSyncEngine {
 export type ChangeEventType =
   | "remote-update-available"
   | "local-data-synced"
+  | "local-change-recorded"
   | "conflict-detected";
 
 export interface ChangeEvent {
@@ -95,6 +117,23 @@ export interface ChangeNotifier {
   emit(event: ChangeEvent): void;
 }
 
+export interface SyncStateStore {
+  // HLC cursor up to which we've successfully pulled remote changes.
+  getPullCursor(): Promise<HLCTimestamp | null>;
+  setPullCursor(ts: HLCTimestamp): Promise<void>;
+
+  // HLC timestamp of the last local change-log entry successfully pushed.
+  getPushCursor(): Promise<HLCTimestamp | null>;
+  setPushCursor(ts: HLCTimestamp): Promise<void>;
+
+  getHlcClockState(): Promise<{ wallTime: number; counter: number } | null>;
+  setHlcClockState(state: { wallTime: number; counter: number }): Promise<void>;
+}
+
+export interface RecordChangeOptions {
+  readonly baseVersion?: number | null;
+}
+
 export interface MetadataSyncResult {
   readonly pulled: number;
   readonly pushed: number;
@@ -105,32 +144,45 @@ export interface SyncEngine {
   recordChange(
     operation: "create" | "update" | "delete",
     record: AnyRecord,
+    options?: RecordChangeOptions,
   ): Promise<void>;
   pull(): Promise<SyncPullResponse>;
   push(): Promise<SyncPushResponse>;
   /**
    * Pull syncable metadata from the remote adapter and apply it locally using
-   * HLC-based last-writer-wins conflict resolution.
+   * HLC-based last-writer-wins. Metadata is generator-derived, so LWW is safe
+   * here; data-record sync uses OCC instead.
    */
   pullMetadata(): Promise<MetadataSyncResult>;
   /**
    * Push locally-updated syncable metadata to the remote adapter using
-   * HLC-based last-writer-wins conflict resolution.
+   * HLC-based last-writer-wins.
    */
   pushMetadata(): Promise<MetadataSyncResult>;
   fullSync(): Promise<{
     pulled: number;
     pushed: number;
-    conflicts: number;
+    rejected: number;
   }>;
+  getConflicts(): SyncConflict[];
+  clearConflict(recordId: StarkeepId): void;
   readonly changeLog: ChangeLog;
   readonly changeNotifier: ChangeNotifier;
 }
 
 export interface SyncEngineOptions {
   readonly localDatabaseAdapter: DatabaseAdapter;
-  readonly remoteDatabaseAdapter: DatabaseAdapter;
   readonly localObjectStorage: ObjectStorageAdapter;
   readonly remoteObjectStorage: ObjectStorageAdapter;
+  /** Transport to the remote data-record sync endpoints. */
+  readonly transport: SyncTransport;
+  /**
+   * Direct adapter for metadata sync. Optional — when absent,
+   * `pullMetadata` / `pushMetadata` are no-ops. Metadata sync has not yet
+   * been ported to the transport abstraction.
+   */
+  readonly remoteDatabaseAdapter?: DatabaseAdapter;
   readonly clock: import("@starkeep/core").HLCClock;
+  readonly changeLog?: ChangeLog;
+  readonly syncState?: SyncStateStore;
 }

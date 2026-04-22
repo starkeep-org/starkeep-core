@@ -1,0 +1,42 @@
+{
+  "name": "@starkeep/admin-desktop",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:user-data-artifact": "pnpm --filter @starkeep/infra-user-data build:artifact",
+    "build:admin-core": "pnpm --filter @starkeep/admin-core build",
+    "predev": "pnpm run build:admin-core && pnpm run build:user-data-artifact",
+    "prebuild": "pnpm run build:admin-core && pnpm run build:user-data-artifact",
+    "pretauri:build": "pnpm run build:admin-core && pnpm run build:user-data-artifact",
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-codebuild": "^3.700.0",
+    "@aws-sdk/client-cognito-identity": "^3.1030.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1031.0",
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@mantine/core": "^7.17.8",
+    "@mantine/hooks": "^7.17.8",
+    "@starkeep/admin-core": "workspace:*",
+    "@starkeep/admin-ui": "workspace:*",
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-shell": "^2.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.5.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.4.11"
+  }
+}

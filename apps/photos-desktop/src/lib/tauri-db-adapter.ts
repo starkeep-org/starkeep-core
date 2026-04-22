@@ -29,7 +29,8 @@ const CREATE_TABLE_SQL = `
     content_hash TEXT,
     object_storage_key TEXT,
     mime_type TEXT,
-    size_bytes INTEGER
+    size_bytes INTEGER,
+    original_filename TEXT
   )
 `;
 
@@ -77,6 +78,7 @@ interface SqliteRow {
   object_storage_key: string | null;
   mime_type: string | null;
   size_bytes: number | null;
+  original_filename: string | null;
 }
 
 function recordToRow(record: DataRecord): SqliteRow {
@@ -94,6 +96,7 @@ function recordToRow(record: DataRecord): SqliteRow {
     object_storage_key: record.objectStorageKey,
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
+    original_filename: record.originalFilename,
   };
 }
 
@@ -113,6 +116,7 @@ function rowToRecord(row: SqliteRow): DataRecord {
     objectStorageKey: row.object_storage_key,
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
+    originalFilename: row.original_filename,
   };
 }
 

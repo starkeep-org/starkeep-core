@@ -15,6 +15,7 @@ export interface PostgresRow {
   object_storage_key: string | null;
   mime_type: string | null;
   size_bytes: number | null;
+  original_filename: string | null;
 }
 
 export function recordToRow(record: DataRecord): PostgresRow {
@@ -32,6 +33,7 @@ export function recordToRow(record: DataRecord): PostgresRow {
     object_storage_key: record.objectStorageKey,
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
+    original_filename: record.originalFilename,
   };
 }
 
@@ -54,5 +56,6 @@ export function rowToRecord(row: PostgresRow): DataRecord {
     objectStorageKey: row.object_storage_key,
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
+    originalFilename: row.original_filename,
   };
 }

@@ -9,7 +9,7 @@
     "sql:allow-execute",
     "sql:allow-select",
     "sql:allow-close",
-    "fs:allow-read-file",
+    "fs:read-all",
     "fs:allow-write-file",
     "fs:allow-mkdir",
     "fs:allow-remove",

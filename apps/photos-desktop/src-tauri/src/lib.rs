@@ -1,3 +1,5 @@
+mod commands;
+
 use base64::Engine as _;
 
 #[derive(serde::Serialize)]
@@ -8,9 +10,6 @@ pub struct DownsizeResult {
     pub height: u32,
 }
 
-/// Resize an image to fit within `max_dimension × max_dimension` without
-/// enlarging it. Returns base64-encoded JPEG (quality 85) for opaque images
-/// and base64-encoded WebP (quality 76) for images with an alpha channel.
 #[tauri::command]
 fn downsize_image(file_path: String, max_dimension: u32) -> Result<DownsizeResult, String> {
     use image::GenericImageView as _;
@@ -20,7 +19,6 @@ fn downsize_image(file_path: String, max_dimension: u32) -> Result<DownsizeResul
 
     let (orig_w, orig_h) = img.dimensions();
 
-    // Fit-inside resize — CatmullRom, never enlarge
     let resized = if orig_w > max_dimension || orig_h > max_dimension {
         img.resize(max_dimension, max_dimension, image::imageops::FilterType::CatmullRom)
     } else {
@@ -28,7 +26,6 @@ fn downsize_image(file_path: String, max_dimension: u32) -> Result<DownsizeResul
     };
     let (new_w, new_h) = resized.dimensions();
 
-    // Detect alpha channel
     let has_alpha = matches!(
         resized.color(),
         image::ColorType::La8
@@ -38,7 +35,6 @@ fn downsize_image(file_path: String, max_dimension: u32) -> Result<DownsizeResul
     );
 
     if has_alpha {
-        // WebP quality 76 for images with alpha
         let encoder = webp::Encoder::from_image(&resized).map_err(|e| e.to_string())?;
         let webp_data = encoder.encode(76.0);
         let encoded = base64::engine::general_purpose::STANDARD.encode(&*webp_data);
@@ -49,7 +45,6 @@ fn downsize_image(file_path: String, max_dimension: u32) -> Result<DownsizeResul
             height: new_h,
         })
     } else {
-        // JPEG quality 85 for opaque images
         use image::ImageEncoder as _;
         let rgb = resized.to_rgb8();
         let (w, h) = (rgb.width(), rgb.height());
@@ -74,7 +69,15 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![downsize_image])
+        .invoke_handler(tauri::generate_handler![
+            downsize_image,
+            commands::get_cloud_setup_state,
+            commands::read_cloud_config,
+            commands::write_cloud_config,
+            commands::read_cloud_credentials,
+            commands::write_cloud_credentials,
+            commands::read_file_bytes,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

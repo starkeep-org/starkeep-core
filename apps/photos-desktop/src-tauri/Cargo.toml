@@ -25,6 +25,7 @@ serde_json = "1.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff", "bmp"] }
 webp = { version = "0.3", features = ["img"] }
 base64 = "0.22"
+dirs = "6"
 
 [profile.release]
 panic = "abort"

@@ -96,9 +96,12 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   async init(): Promise<void> {
-    const dir = dirname(this.options.path);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+    if (this.database) return;
+    if (this.options.path !== ":memory:") {
+      const dir = dirname(this.options.path);
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true });
+      }
     }
     this.database = new DatabaseSync(this.options.path);
     this.database.exec("PRAGMA journal_mode = WAL");
@@ -137,6 +140,15 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   private getDatabase(): DatabaseSync {
     if (!this.database) throw new StorageError("Database not initialized. Call init() first.");
     return this.database;
+  }
+
+  /**
+   * Returns the raw SQLite connection so sibling subsystems (e.g. the sync
+   * engine's change log + state store) can create side tables in the same
+   * database file. Callers must only use this after `init()`.
+   */
+  getRawDatabase(): DatabaseSync {
+    return this.getDatabase();
   }
 
   private runStmt(sql: string, ...params: unknown[]): void {

@@ -1,0 +1,59 @@
+[package]
+name = "starkeeper-gateway"
+version = "0.1.0"
+edition = "2021"
+authors = ["Starkeeper Team"]
+description = "OpenDAL-based data gateway with FUSE support and zero control plane data access"
+license = "Apache-2.0"
+
+[dependencies]
+# OpenDAL for unified data access
+opendal = { version = "0.47", features = ["services-s3", "services-fs", "layers-prometheus"] }
+
+# FUSE filesystem support
+# Pinned to 0.7 to match implemented API
+# TODO: Upgrade to 0.8 when time permits (requires API migration)
+fuse3 = { version = "=0.7.3", features = ["tokio-runtime"] }
+
+# Web framework for management API
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Configuration
+config = "0.14"
+envy = "0.4"
+
+# Logging and metrics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+prometheus = "0.13"
+
+# OpenDAL handles AWS credentials automatically via SDK credential chain
+# No need for explicit AWS SDK dependencies
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Utilities
+bytes = "1.5"
+chrono = { version = "0.4", features = ["serde"] }
+libc = "0.2"
+futures = "0.3"
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+

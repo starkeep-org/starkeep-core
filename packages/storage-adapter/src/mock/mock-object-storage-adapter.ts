@@ -34,6 +34,10 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
     };
   }
 
+  async has(key: string): Promise<boolean> {
+    return this.store.has(key);
+  }
+
   async delete(key: string): Promise<void> {
     this.store.delete(key);
   }

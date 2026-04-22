@@ -18,7 +18,7 @@ const FIELD_MAP: Record<string, string> = {
 function mapField(field: string, parameterIndex: { value: number }): string {
   if (field.startsWith("content.")) {
     const jsonKey = field.slice("content.".length);
-    return `content->>'${jsonKey}'`;
+    return `(content::json)->>'${jsonKey}'`;
   }
   return FIELD_MAP[field] ?? field;
 }
