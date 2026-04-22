@@ -14,15 +14,19 @@
     "@starkeep/storage-sqlite": "workspace:*",
     "@starkeep/storage-fs": "workspace:*",
     "@starkeep/storage-s3": "workspace:*",
+    "@starkeep/storage-aurora-dsql": "workspace:*",
     "@starkeep/sdk": "workspace:*",
     "@starkeep/access-control": "workspace:*",
     "@starkeep/metadata-engine": "workspace:*",
     "@starkeep/index": "workspace:*",
     "@starkeep/aggregations": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",
-    "@starkeep/shared-space-api": "workspace:*"
+    "@starkeep/shared-space-api": "workspace:*",
+    "@aws-sdk/dsql-signer": "^3.700.0",
+    "pg": "^8.13.0"
   },
   "devDependencies": {
-    "tsx": "^4.21.0"
+    "tsx": "^4.21.0",
+    "@types/pg": "^8.11.0"
   }
 }
