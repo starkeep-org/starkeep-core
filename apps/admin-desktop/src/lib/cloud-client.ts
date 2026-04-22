@@ -69,3 +69,23 @@ export async function cloudGetPlan(planId: string) {
   if (!res.ok) throw new Error(`Failed to get plan: ${res.status}`);
   return res.json();
 }
+
+export async function cloudCreatePlan(input: {
+  stack_name: string;
+  region: string;
+  environment: string;
+  template_type: string;
+  parameters: Record<string, unknown> | null;
+}) {
+  const res = await cloudFetch("/api/plans", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(`Failed to create plan: ${res.status}`);
+  return res.json();
+}
+
+export async function cloudDeletePlan(planId: string) {
+  const res = await cloudFetch(`/api/plans/${planId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Failed to delete plan: ${res.status}`);
+}

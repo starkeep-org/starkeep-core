@@ -17,7 +17,7 @@
     "@starkeep/admin-db": "workspace:*",
     "@starkeep/admin-providers": "workspace:*",
     "@starkeep/admin-shared": "workspace:*",
-    "sst": "^3.3.0"
+    "sst": "^4.0.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.134",

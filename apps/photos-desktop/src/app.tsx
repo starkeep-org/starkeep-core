@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readFile } from "@tauri-apps/plugin-fs";
+import { invoke } from "@tauri-apps/api/core";
 import type { AppImage } from "@photos/photos-lib";
 import {
   PhotoProvider,
@@ -16,6 +16,8 @@ import {
   postMetadata,
   type PhotoRecord,
 } from "./lib/data-server-client.js";
+import { DataSourceProvider, useDataSource } from "./lib/data-source-context.js";
+import type { DataSourceMode } from "./lib/data-client.js";
 
 // ---------------------------------------------------------------------------
 // Map a data-server PhotoRecord to the AppImage shape expected by the UI
@@ -29,13 +31,11 @@ function photoRecordToAppImage(record: PhotoRecord): AppImage {
     mimeType: record.mime_type ?? "image/jpeg",
     objectStorageKey: record.object_storage_key ?? "",
     sizeBytes: record.size_bytes ?? 0,
-    createdAt: record.created_at,
-    updatedAt: record.updated_at,
-    // Dimensions — populated after image-dimensions generator runs
+    createdAt: record.created_at ?? new Date().toISOString(),
+    updatedAt: record.updated_at ?? new Date().toISOString(),
     width: 0,
     height: 0,
     format: "unknown",
-    // EXIF — populated after EXIF generator runs
     exif: {
       dateTakenRaw: null,
       cameraMake: null,
@@ -48,32 +48,33 @@ function photoRecordToAppImage(record: PhotoRecord): AppImage {
       gpsLon: null,
       orientation: null,
     },
-    // Provenance — set from payload on upload
     originalFilename: String(record.payload?.fileName ?? record.id),
     googlePhotosId: null,
     sourceImageId: null,
     cropRect: null,
-    // User-authored — set from payload on upload
     caption: "",
     title: String(record.payload?.title ?? record.payload?.fileName ?? record.id),
     dateTakenOverride: null,
-    // Thumbnail — not generated in PoC; full image is used directly
     thumbnailKey: null,
     thumbnailWidth: 0,
     thumbnailHeight: 0,
-    // Effective date for sorting: fall back to record creation timestamp
-    effectiveDateTaken: record.created_at,
+    effectiveDateTaken: record.created_at ?? record.updated_at ?? new Date().toISOString(),
   };
 }
 
 // ---------------------------------------------------------------------------
-// File URL cache — fetches signed URLs from the data-server on demand and
-// caches them so repeated renders don't re-request.
+// File URL cache
 // ---------------------------------------------------------------------------
 
-function useFileUrlCache() {
+function useFileUrlCache(mode: DataSourceMode) {
   const [urlMap, setUrlMap] = useState<ReadonlyMap<string, string>>(new Map());
   const loadingRef = useRef<Set<string>>(new Set());
+
+  // Clear cache when mode changes — URLs from local server aren't valid for remote
+  useEffect(() => {
+    setUrlMap(new Map());
+    loadingRef.current.clear();
+  }, [mode]);
 
   const getFileSrc = useCallback(
     (imageId: string): string => {
@@ -82,7 +83,7 @@ function useFileUrlCache() {
       if (loadingRef.current.has(imageId)) return "";
 
       loadingRef.current.add(imageId);
-      getPhotoFileUrl(imageId)
+      getPhotoFileUrl(imageId, mode)
         .then((url) => {
           loadingRef.current.delete(imageId);
           setUrlMap((prev) => new Map(prev).set(imageId, url));
@@ -93,7 +94,7 @@ function useFileUrlCache() {
 
       return "";
     },
-    [urlMap],
+    [urlMap, mode],
   );
 
   return getFileSrc;
@@ -101,8 +102,6 @@ function useFileUrlCache() {
 
 // ---------------------------------------------------------------------------
 // Run app-side generators after a photo is added.
-// Results are pushed to the data-server's /data/metadata endpoint so they
-// land in the shared DB alongside the record.
 // ---------------------------------------------------------------------------
 
 async function runGenerators(
@@ -110,11 +109,11 @@ async function runGenerators(
   fileBytes: Uint8Array,
   fileName: string,
   title: string,
+  mode: DataSourceMode,
 ): Promise<void> {
   const targetId = record.id;
   const targetType = "@starkeep/image";
 
-  // Provenance — tracks original filename and source
   await postMetadata(targetId, targetType, "@photos/app:provenance", 1, {
     originalFilename: fileName,
     googlePhotosId: null,
@@ -123,16 +122,14 @@ async function runGenerators(
     cropY: null,
     cropWidth: null,
     cropHeight: null,
-  });
+  }, mode);
 
-  // User-authored — default title derived from filename; caption empty
   await postMetadata(targetId, targetType, "@photos/app:user-authored", 1, {
     title,
     caption: "",
     dateTakenOverride: null,
-  });
+  }, mode);
 
-  // EXIF — parse from raw bytes using exifr (no SDK context needed)
   try {
     const { default: Exifr } = await import("exifr");
     const exif = await Exifr.parse(fileBytes, {
@@ -155,15 +152,15 @@ async function runGenerators(
         gpsLat: (exif["GPSLatitude"] as number) ?? null,
         gpsLon: (exif["GPSLongitude"] as number) ?? null,
         orientation: (exif["Orientation"] as number) ?? null,
-      });
+      }, mode);
     }
   } catch {
-    // EXIF extraction is best-effort; skip if exifr fails or file has no EXIF
+    // EXIF extraction is best-effort
   }
 }
 
 // ---------------------------------------------------------------------------
-// Inner app (has access to PhotoProvider state)
+// Inner app (has access to PhotoProvider state and DataSourceContext)
 // ---------------------------------------------------------------------------
 
 const IMAGE_EXTENSIONS: Record<string, string> = {
@@ -174,6 +171,7 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
 
 function PhotosAppDesktopInner() {
   const { state, dispatch } = usePhotoContext();
+  const { mode, setMode, remoteAvailable } = useDataSource();
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -184,14 +182,14 @@ function PhotosAppDesktopInner() {
   const loadPhotos = useCallback(async () => {
     dispatch({ type: "SET_LOADING", loading: true });
     try {
-      const records = await listPhotos();
+      const records = await listPhotos(mode);
       dispatch({ type: "SET_IMAGES", images: records.map(photoRecordToAppImage) });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load photos");
     } finally {
       dispatch({ type: "SET_LOADING", loading: false });
     }
-  }, [dispatch]);
+  }, [dispatch, mode]);
 
   useEffect(() => {
     void loadPhotos();
@@ -213,23 +211,22 @@ function PhotosAppDesktopInner() {
       const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
       const mimeType = IMAGE_EXTENSIONS[ext] ?? "application/octet-stream";
 
-      const record = await addPhotoFromPath(filePath, mimeType, fileName, title);
+      // Always read bytes: needed for remote upload and for EXIF extraction.
+      const buf = await invoke<ArrayBuffer>("read_file_bytes", { path: filePath });
+      const fileBytes = new Uint8Array(buf);
+      const record = await addPhotoFromPath(filePath, fileBytes, mimeType, fileName, title, mode);
       dispatch({ type: "APPEND_IMAGES", images: [photoRecordToAppImage(record)] });
 
-      // Read bytes locally only for EXIF extraction (no bytes sent to server).
-      // Generators are best-effort — don't let a metadata failure surface as
-      // "Failed to add photo" when the record was already created successfully.
-      readFile(filePath)
-        .then((fileBytes) => runGenerators(record, fileBytes, fileName, title))
-        .catch(() => {});
+      runGenerators(record, fileBytes, fileName, title, mode).catch(() => {});
     } catch (err) {
+      console.error("[photos] Upload failed:", err);
       setError(err instanceof Error ? err.message : "Failed to add photo");
     } finally {
       setAdding(false);
     }
   };
 
-  const getFileSrc = useFileUrlCache();
+  const getFileSrc = useFileUrlCache(mode);
 
   return (
     <PhotoUrlProvider getThumbnailSrc={getFileSrc}>
@@ -256,12 +253,43 @@ function PhotosAppDesktopInner() {
           }}
         >
           <span style={{ fontWeight: 700, fontSize: 17, letterSpacing: "-0.02em" }}>Photos</span>
+
+          {/* Local / Remote toggle */}
+          <div
+            style={{
+              display: "flex",
+              background: "rgba(255,255,255,0.08)",
+              borderRadius: 4,
+              border: "1px solid rgba(255,255,255,0.15)",
+            }}
+          >
+            {(["local", "remote"] as DataSourceMode[]).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                disabled={m === "remote" && !remoteAvailable}
+                style={{
+                  ...toolbarButtonStyle,
+                  background: mode === m ? "rgba(255,255,255,0.2)" : "transparent",
+                  border: "none",
+                  borderRadius: m === "local" ? "3px 0 0 3px" : "0 3px 3px 0",
+                  opacity: m === "remote" && !remoteAvailable ? 0.4 : 1,
+                  cursor: m === "remote" && !remoteAvailable ? "not-allowed" : "pointer",
+                }}
+              >
+                {m.charAt(0).toUpperCase() + m.slice(1)}
+              </button>
+            ))}
+          </div>
+
           <button
             onClick={() => { void handleAddClick(); }}
             disabled={adding}
             style={{ ...toolbarButtonStyle, background: "rgba(255,255,255,0.15)" }}
           >
-            {adding ? "Adding…" : "Add Photo"}
+            {adding
+              ? (mode === "remote" ? "Uploading…" : "Adding…")
+              : (mode === "remote" ? "Upload Photo" : "Add Photo")}
           </button>
         </div>
 
@@ -307,9 +335,11 @@ function PhotosAppDesktopInner() {
 
 export function App() {
   return (
-    <PhotoProvider>
-      <PhotosAppDesktopInner />
-    </PhotoProvider>
+    <DataSourceProvider>
+      <PhotoProvider>
+        <PhotosAppDesktopInner />
+      </PhotoProvider>
+    </DataSourceProvider>
   );
 }
 

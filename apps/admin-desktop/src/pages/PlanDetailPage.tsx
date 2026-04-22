@@ -4,6 +4,7 @@ import {
 } from "@mantine/core";
 import { StatusBadge, StackDetails, ParametersTable } from "@starkeep/admin-ui";
 import { useInvoke } from "../hooks/use-invoke";
+import { getPlan } from "../lib/api";
 
 interface Plan {
   id: string;
@@ -20,9 +21,7 @@ interface Plan {
 export function PlanDetailPage() {
   const { planId } = useParams<{ planId: string }>();
   const navigate = useNavigate();
-  const { data: plan, loading, error } = useInvoke<Plan | null>("get_plan", {
-    planId: planId ?? "",
-  });
+  const { data: plan, loading, error } = useInvoke<Plan | null>(() => getPlan(planId ?? ""));
 
   if (loading) {
     return (

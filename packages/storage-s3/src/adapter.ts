@@ -33,9 +33,12 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
     if (!this.client) {
       this.client = new S3Client({
         region: this.options.region,
-        ...(this.options.credentials
-          ? { credentials: this.options.credentials }
-          : {}),
+        // When credentialProvider is set, pass it directly to the AWS SDK.
+        // The SDK calls it before each signed request, so STS credentials
+        // (e.g. from a Cognito Identity Pool) are always fresh.
+        credentials: this.options.credentialProvider
+          ? this.options.credentialProvider
+          : this.options.credentials,
       });
     }
     return this.client;

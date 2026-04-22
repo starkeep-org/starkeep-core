@@ -37,18 +37,19 @@ const CREATE_TABLE_SQL = `
     sync_status TEXT NOT NULL DEFAULT 'local',
     deleted_at TEXT,
     version INTEGER NOT NULL DEFAULT 1,
-    content JSONB NOT NULL DEFAULT '{}',
+    content TEXT NOT NULL DEFAULT '{}',
     content_hash TEXT,
     object_storage_key TEXT,
     mime_type TEXT,
-    size_bytes INTEGER
+    size_bytes INTEGER,
+    original_filename TEXT
   )
 `;
 
 const CREATE_INDEXES_SQL = [
-  "CREATE INDEX IF NOT EXISTS idx_records_type ON records(type)",
-  "CREATE INDEX IF NOT EXISTS idx_records_sync_status ON records(sync_status)",
-  "CREATE INDEX IF NOT EXISTS idx_records_updated_at ON records(updated_at)",
+  "CREATE INDEX ASYNC IF NOT EXISTS idx_records_type ON records(type)",
+  "CREATE INDEX ASYNC IF NOT EXISTS idx_records_sync_status ON records(sync_status)",
+  "CREATE INDEX ASYNC IF NOT EXISTS idx_records_updated_at ON records(updated_at)",
 ];
 
 const CREATE_MIGRATIONS_TABLE_SQL = `
@@ -73,7 +74,7 @@ const CREATE_METADATA_SYNC_TABLE_SQL = `
 `;
 
 const CREATE_METADATA_SYNC_INDEX_SQL =
-  "CREATE INDEX IF NOT EXISTS idx_metadata_sync_updated_at ON metadata_sync(updated_at)";
+  "CREATE INDEX ASYNC IF NOT EXISTS idx_metadata_sync_updated_at ON metadata_sync(updated_at)";
 
 /** Per-type registry of generator columns. */
 interface GeneratorColumnEntry {
@@ -98,6 +99,10 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async init(): Promise<void> {
     this.client = await this.clientFactory.createClient(this.options);
     await this.client.query(CREATE_TABLE_SQL);
+    // TODO(pre-prod): move original_filename into CREATE_TABLE_SQL above and remove this ALTER TABLE.
+    await this.client.query(
+      "ALTER TABLE records ADD COLUMN IF NOT EXISTS original_filename TEXT",
+    );
     for (const sql of CREATE_INDEXES_SQL) {
       await this.client.query(sql);
     }
@@ -308,7 +313,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       if (col.columnType !== "boolean") {
         try {
           await this.getClient().query(
-            `CREATE INDEX IF NOT EXISTS idx_${table}_${col.name} ON ${table}(${col.name})`,
+            `CREATE INDEX ASYNC IF NOT EXISTS idx_${table}_${col.name} ON ${table}(${col.name})`,
           );
         } catch {
           // Ignore.

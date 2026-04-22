@@ -9,7 +9,14 @@ import { createHmac, randomBytes } from "node:crypto";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
+import { AuroraDsqlDatabaseAdapter } from "../../packages/storage-aurora-dsql/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
+import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
+import type {
+  DatabaseClientFactory,
+  DatabaseClient,
+  AuroraDsqlDatabaseAdapterOptions,
+} from "../../packages/storage-aurora-dsql/src/types.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import {
   createHttpSyncTransport,
@@ -20,10 +27,12 @@ import { createTypeRegistry } from "../../packages/core/src/schema/index.js";
 import { createHLCClock } from "../../packages/core/src/hlc/index.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { stat as fsStat } from "node:fs/promises";
+import { stat as fsStat, readFile } from "node:fs/promises";
 import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import * as v from "valibot";
+import { DsqlSigner } from "@aws-sdk/dsql-signer";
+import pg from "pg";
 
 // Signing key for self-hosted file tokens — regenerated each startup so
 // all outstanding tokens are invalidated on restart (revocable by design).
@@ -37,6 +46,116 @@ const NODE_ID = process.env.STARKEEP_NODE_ID || "admin-desktop";
 const PULL_INTERVAL_MS = parseInt(process.env.STARKEEP_PULL_INTERVAL_MS || "30000", 10);
 const PUSH_DEBOUNCE_MS = parseInt(process.env.STARKEEP_PUSH_DEBOUNCE_MS || "500", 10);
 
+interface CloudConfig {
+  stackPrefix: string;
+  s3Bucket: string;
+  s3Region: string;
+  auroraEndpoint: string;
+}
+
+interface CloudCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
+interface LoadedCloudConfig {
+  config: CloudConfig;
+  credentials: CloudCredentials;
+}
+
+async function loadCloudConfig(): Promise<LoadedCloudConfig | null> {
+  try {
+    const config = JSON.parse(
+      await readFile(join(STARKEEP_DIR, "cloud-config.json"), "utf8"),
+    ) as CloudConfig;
+    const credentials = JSON.parse(
+      await readFile(join(STARKEEP_DIR, "cloud-credentials.json"), "utf8"),
+    ) as CloudCredentials;
+    return { config, credentials };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads STS credentials from ~/.starkeep/cloud-credentials.json on every call
+ * so that credentials rotated by admin-desktop are always picked up without
+ * restarting the data server.
+ */
+async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredentials>> {
+  const credentialsPath = join(STARKEEP_DIR, "cloud-credentials.json");
+  return async () => {
+    return JSON.parse(await readFile(credentialsPath, "utf8")) as CloudCredentials;
+  };
+}
+
+/**
+ * Aurora DSQL client factory that reads STS credentials from the cloud
+ * credentials file on each reconnect so rotating tokens are always fresh.
+ */
+class CloudCredentialsDsqlClientFactory implements DatabaseClientFactory {
+  private readonly credentialsPath: string;
+
+  constructor() {
+    this.credentialsPath = join(STARKEEP_DIR, "cloud-credentials.json");
+  }
+
+  async createClient(
+    options: AuroraDsqlDatabaseAdapterOptions,
+  ): Promise<DatabaseClient> {
+    const createPgClient = async (): Promise<pg.Client> => {
+      const rawCreds = JSON.parse(
+        await readFile(this.credentialsPath, "utf8"),
+      ) as CloudCredentials;
+      const signer = new DsqlSigner({
+        hostname: options.hostname,
+        region: options.region,
+        credentials: {
+          accessKeyId: rawCreds.accessKeyId,
+          secretAccessKey: rawCreds.secretAccessKey,
+          sessionToken: rawCreds.sessionToken,
+        },
+      });
+      const token = await signer.getDbConnectAdminAuthToken();
+      const client = new pg.Client({
+        host: options.hostname,
+        port: 5432,
+        database: options.database ?? "postgres",
+        user: "admin",
+        password: token,
+        ssl: { rejectUnauthorized: true },
+      });
+      await client.connect();
+      return client;
+    };
+
+    let inner = await createPgClient();
+
+    return {
+      async query(text, values) {
+        try {
+          const result = await inner.query(text, values);
+          return { rows: result.rows };
+        } catch (err: unknown) {
+          // IAM auth token expired (~15 min) — reconnect with fresh token and retry once
+          const code = (err as { code?: string })?.code;
+          if (code === "28000" || code === "28P01") {
+            await inner.end().catch(() => {});
+            inner = await createPgClient();
+            const result = await inner.query(text, values);
+            return { rows: result.rows };
+          }
+          throw err;
+        }
+      },
+      async end() {
+        await inner.end();
+      },
+    };
+  }
+}
+
 async function main() {
   const databaseAdapter = new SqliteDatabaseAdapter({
     path: join(STARKEEP_DIR, "data.db"),
@@ -47,10 +166,26 @@ async function main() {
     basePath: join(STARKEEP_DIR, "objects"),
   });
 
-  // S3 is the authoritative remote store when configured
-  const s3Bucket = process.env.STARKEEP_S3_BUCKET;
-  const remoteAdapter = s3Bucket
-    ? new S3ObjectStorageAdapter({
+  // Read cloud config from ~/.starkeep/ if present (written by admin-desktop after setup)
+  const cloudSetup = await loadCloudConfig();
+  if (cloudSetup) {
+    console.log(`Cloud config loaded: S3 bucket=${cloudSetup.config.s3Bucket}, DSQL=${cloudSetup.config.auroraEndpoint}`);
+  }
+
+  // S3: prefer cloud config file credentials (rotated by admin-desktop) over env vars
+  let remoteAdapter: ObjectStorageAdapter | null = null;
+  if (cloudSetup?.config.s3Bucket) {
+    const credentialProvider = await makeCloudCredentialProvider();
+    remoteAdapter = new S3ObjectStorageAdapter({
+      bucketName: cloudSetup.config.s3Bucket,
+      region: cloudSetup.config.s3Region,
+      credentialProvider,
+    });
+    console.log("Remote S3 adapter initialized from cloud config");
+  } else {
+    const s3Bucket = process.env.STARKEEP_S3_BUCKET;
+    if (s3Bucket) {
+      remoteAdapter = new S3ObjectStorageAdapter({
         bucketName: s3Bucket,
         region: process.env.STARKEEP_S3_REGION || "us-east-1",
         keyPrefix: process.env.STARKEEP_S3_KEY_PREFIX || undefined,
@@ -62,8 +197,25 @@ async function main() {
                 secretAccessKey: process.env.STARKEEP_S3_SECRET_ACCESS_KEY,
               }
             : undefined,
-      })
-    : null;
+      });
+    }
+  }
+
+  // Aurora DSQL remote database: initialized from cloud config when available
+  let remoteDatabaseAdapter: DatabaseAdapter | null = null;
+  if (cloudSetup?.config.auroraEndpoint) {
+    remoteDatabaseAdapter = new AuroraDsqlDatabaseAdapter(
+      {
+        hostname: cloudSetup.config.auroraEndpoint,
+        region: cloudSetup.config.s3Region,
+      },
+      new CloudCredentialsDsqlClientFactory(),
+    );
+    await remoteDatabaseAdapter.init().catch((err: Error) =>
+      console.error("Aurora DSQL init failed (non-fatal):", err.message),
+    );
+    console.log("Remote Aurora DSQL adapter initialized from cloud config");
+  }
 
   // Global type registry — the data-server is the authoritative validator for all registered types.
   // TODO: auto-discover and load type definitions from installed app packages as the ecosystem grows.
@@ -74,6 +226,14 @@ async function main() {
     schema: v.object({
       // File-backed record: substantive content lives in object storage, not payload.
       // Payload carries app-level display fields that apps may set on creation.
+      fileName: v.optional(v.string()),
+      title: v.optional(v.string()),
+    }),
+  });
+  typeRegistry.register({
+    namespace: "@starkeep",
+    name: "markdown",
+    schema: v.object({
       fileName: v.optional(v.string()),
       title: v.optional(v.string()),
     }),
@@ -509,6 +669,7 @@ async function main() {
         }
 
         let record;
+        let uploadedBuffer: Buffer | null = null;
         if (filePath) {
           const resolvedName = fileName ?? (filePath as string).split("/").pop() ?? filePath;
           record = await sdk.data.putWithLocalFile(
@@ -517,14 +678,33 @@ async function main() {
             contentType,
           );
         } else if (fileBase64) {
-          const fileBuffer = Buffer.from(fileBase64, "base64");
+          uploadedBuffer = Buffer.from(fileBase64, "base64");
           record = await sdk.data.putWithFile(
             { type, ownerId: OWNER_ID, content: { ...payload, ...(fileName ? { fileName } : {}) }, originalFilename: fileName ?? null },
-            fileBuffer,
+            uploadedBuffer,
             contentType,
           );
         } else {
           record = await sdk.data.put({ type, ownerId: OWNER_ID, content: payload || {} });
+        }
+
+        // Dual-write to remote S3 + Aurora DSQL when cloud config is present.
+        // S3 write is awaited so the file is available for presigned URLs immediately
+        // after the response is returned (avoids 404 on the first file-url request).
+        if (remoteAdapter && record.objectStorageKey) {
+          const fileData = uploadedBuffer
+            ?? (await localAdapter.get(record.objectStorageKey).catch(() => null))?.data
+            ?? null;
+          if (fileData) {
+            await remoteAdapter
+              .put(record.objectStorageKey, fileData, { contentType: record.mimeType ?? undefined })
+              .catch((err: Error) => console.error("S3 remote write failed (non-fatal):", err.message));
+          }
+        }
+        if (remoteDatabaseAdapter) {
+          remoteDatabaseAdapter
+            .put(record)
+            .catch((err: Error) => console.error("Aurora DSQL write failed (non-fatal):", err.message));
         }
 
         json(res, {
@@ -590,7 +770,20 @@ async function main() {
         const expiresIn = parseInt(url.searchParams.get("expiresIn") || "3600", 10);
         const mimeType = record.mimeType ?? "application/octet-stream";
 
-        // Try local cache first — faster and keeps traffic local
+        // When remoteAdapter (S3) is configured, prefer presigned URLs so that remote
+        // clients (e.g. API Gateway → Lambda) don't receive a http://127.0.0.1 token URL
+        // that only works on the local machine. For local-only deployments, fall back to
+        // the fast local file token.
+        if (remoteAdapter && remoteAdapter.getSignedUrl) {
+          const fileUrl = await remoteAdapter.getSignedUrl(
+            record.objectStorageKey,
+            { expiresIn },
+          );
+          json(res, { url: fileUrl, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
+          return;
+        }
+
+        // Local-only: serve directly from the FS adapter via a signed token
         const localHit = await localAdapter.get(record.objectStorageKey).catch(() => null);
         if (localHit) {
           const token = createFileToken(record.objectStorageKey, mimeType, expiresIn);
@@ -601,16 +794,6 @@ async function main() {
             sizeBytes: record.sizeBytes,
             expiresIn,
           });
-          return;
-        }
-
-        // Fall back to S3 presigned URL for files not synced locally
-        if (remoteAdapter) {
-          const fileUrl = await remoteAdapter.getSignedUrl(
-            record.objectStorageKey,
-            { expiresIn },
-          );
-          json(res, { url: fileUrl, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
           return;
         }
 

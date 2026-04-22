@@ -28,6 +28,14 @@ pub fn run() {
             commands::get_deployment,
             commands::list_directory,
             commands::get_parent_directory,
+            commands::get_cloud_setup_state,
+            commands::write_cloud_config,
+            commands::read_cloud_config,
+            commands::write_cloud_credentials,
+            commands::read_cloud_credentials,
+            commands::write_bootstrap_template,
+            commands::s3_put_object,
+            commands::s3_get_object_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
