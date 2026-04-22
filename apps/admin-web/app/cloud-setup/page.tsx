@@ -11,6 +11,7 @@ import {
   Stack,
   Alert,
   TextInput,
+  Textarea,
   PasswordInput,
   Group,
   Paper,
@@ -30,6 +31,7 @@ import {
 import {
   initiateAuth,
   respondNewPasswordChallenge,
+  refreshTokens,
   getIdentityPoolCredentials,
   type CognitoConfig,
   type STSCredentials,
@@ -473,6 +475,8 @@ function Step5DeployInfra({
   const [manualBucket, setManualBucket] = useState("");
   const [manualAurora, setManualAurora] = useState("");
   const [manualApi, setManualApi] = useState("");
+  const [sstPasteText, setSstPasteText] = useState("");
+  const [sstPasteError, setSstPasteError] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -605,6 +609,26 @@ function Step5DeployInfra({
     });
   };
 
+  const handleSstPasteSubmit = () => {
+    setSstPasteError(null);
+    const outputs = parseSstOutputs(sstPasteText);
+    const bucketName = outputs["bucketName"];
+    const auroraHostname = outputs["auroraHostname"];
+    const apiGatewayUrl = outputs["apiGatewayUrl"];
+    if (!bucketName || !auroraHostname) {
+      setSstPasteError(
+        `Could not find required values in output. Parsed: ${JSON.stringify(outputs)}`,
+      );
+      return;
+    }
+    onSuccess({
+      s3Bucket: bucketName,
+      s3Region: region,
+      auroraEndpoint: auroraHostname,
+      apiGatewayUrl,
+    });
+  };
+
   if (deployResult) {
     return (
       <Stack gap="md">
@@ -716,6 +740,25 @@ function Step5DeployInfra({
       >
         Download CLI config (.starkeep-config.json)
       </Button>
+      <Textarea
+        label="Paste SST deploy output"
+        description="After running pnpm run local:deploy, paste the full terminal output here."
+        placeholder="Stack starkeep&#10;  bucketName: starkeep-files-abc123&#10;  auroraHostname: abc123.dsql.us-east-1.on.aws&#10;  apiGatewayUrl: https://abc123.execute-api.us-east-1.amazonaws.com"
+        minRows={4}
+        value={sstPasteText}
+        onChange={(e) => { setSstPasteText(e.currentTarget.value); setSstPasteError(null); }}
+        disabled={deploying}
+      />
+      {sstPasteError && <Alert color="red" title="Parse error">{sstPasteError}</Alert>}
+      <Group justify="flex-end">
+        <Button
+          variant="light"
+          disabled={deploying || !sstPasteText.trim()}
+          onClick={handleSstPasteSubmit}
+        >
+          Configure from output
+        </Button>
+      </Group>
 
       <Divider label="Remote deployment" labelPosition="left" />
       <Text size="sm" c="dimmed">
@@ -768,16 +811,39 @@ function CloudSetupPage() {
     refreshToken: string;
   } | null>(null);
   const [credentials, setCredentials] = useState<STSCredentials | null>(null);
+  const [resuming, setResuming] = useState(false);
 
   useEffect(() => {
     const saved = localStorage.getItem(PARTIAL_SETUP_KEY);
     if (!saved) return;
     try {
-      const { region: r, stackPrefix: sp, ...cog } = JSON.parse(saved);
+      const { region: r, stackPrefix: sp, refreshToken: rt, ...cog } = JSON.parse(saved);
       if (r) setRegion(r);
       if (sp) setStackPrefix(sp);
-      if (cog.userPoolId || cog.userPoolClientId || cog.identityPoolId) {
-        setCognitoConfig(cog);
+      const hasCognitoConfig = !!(cog.userPoolId && cog.userPoolClientId && cog.identityPoolId);
+      if (hasCognitoConfig) setCognitoConfig(cog);
+
+      if (rt && hasCognitoConfig) {
+        const resumeConfig: CognitoConfig = {
+          userPoolId: cog.userPoolId,
+          userPoolClientId: cog.userPoolClientId,
+          identityPoolId: cog.identityPoolId,
+          region: r || "us-east-1",
+        };
+        setResuming(true);
+        refreshTokens(resumeConfig, rt)
+          .then(async (tokens) => {
+            const creds = await getIdentityPoolCredentials(resumeConfig, tokens.idToken);
+            setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
+            setCredentials(creds);
+            setMode("signin");
+            setSkipCreateAccount(true);
+            setActive(3);
+          })
+          .catch(() => {
+            // Token expired or invalid — fall through to ModeSelector
+          })
+          .finally(() => setResuming(false));
       }
     } catch {
       /* ignore malformed */
@@ -786,9 +852,14 @@ function CloudSetupPage() {
 
   useEffect(() => {
     if (mode === null) return;
+    // Preserve any stored refreshToken when updating other partial setup fields
+    const existing = (() => {
+      try { return JSON.parse(localStorage.getItem(PARTIAL_SETUP_KEY) ?? "{}"); }
+      catch { return {}; }
+    })();
     localStorage.setItem(
       PARTIAL_SETUP_KEY,
-      JSON.stringify({ region, stackPrefix, ...cognitoConfig }),
+      JSON.stringify({ ...existing, region, stackPrefix, ...cognitoConfig }),
     );
   }, [mode, region, stackPrefix, cognitoConfig]);
 
@@ -827,6 +898,11 @@ function CloudSetupPage() {
     try {
       const creds = await getIdentityPoolCredentials(fullCognitoConfig(), tokens.idToken);
       setCredentials(creds);
+      // Persist refresh token so the session can be resumed after a page reload
+      localStorage.setItem(
+        PARTIAL_SETUP_KEY,
+        JSON.stringify({ region, stackPrefix, ...cognitoConfig, refreshToken: tokens.refreshToken }),
+      );
       setActive(3);
     } catch (err) {
       setError(
@@ -861,6 +937,22 @@ function CloudSetupPage() {
       );
     }
   };
+
+  if (resuming) {
+    return (
+      <Container size="sm" py="xl">
+        <Group mb="lg" justify="space-between">
+          <Title order={2}>Starkeep Cloud Admin</Title>
+        </Group>
+        <Paper p="xl" withBorder>
+          <Group gap="sm">
+            <Loader size="sm" />
+            <Text size="sm" c="dimmed">Resuming session…</Text>
+          </Group>
+        </Paper>
+      </Container>
+    );
+  }
 
   if (mode === null) {
     return (

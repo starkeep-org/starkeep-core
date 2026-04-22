@@ -99,14 +99,14 @@ function ShellGate({ children }: { children: ReactNode }) {
               (err) => console.warn("Credential refresh failed:", err),
             );
           }
+          setLoading(false);
         } else {
           router.replace("/cloud-setup");
+          // Keep loading=true so children never flash before navigation completes
         }
       } catch (err) {
         console.error("Failed to check cloud setup state:", err);
         router.replace("/cloud-setup");
-      } finally {
-        setLoading(false);
       }
     }
 
