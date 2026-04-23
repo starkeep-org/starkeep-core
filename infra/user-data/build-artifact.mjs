@@ -39,6 +39,7 @@ const WS_PACKAGES = [
   { name: "@starkeep/storage-adapter", dir: "storage-adapter" },
   { name: "@starkeep/storage-s3", dir: "storage-s3" },
   { name: "@starkeep/storage-aurora-dsql", dir: "storage-aurora-dsql" },
+  { name: "@starkeep/sync-engine", dir: "sync-engine" },
 ];
 
 // Maps @starkeep/* → file: path as seen from infra/user-data/package.json

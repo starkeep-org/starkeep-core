@@ -75,6 +75,11 @@ export interface MetadataQueryResult {
  * route the record back to the correct per-type table when applying remote
  * changes. `inputHash` is nullable to accommodate user-authored entries where
  * the value is written directly rather than derived from a data record.
+ *
+ * File-backed metadata (e.g. image downsizes) stores the generated file in
+ * object storage. `objectStorageKey` references the file using the same flat
+ * content-addressed scheme as `DataRecord` (SHA-256 hex). The sync engine
+ * transfers these files alongside the metadata records.
  */
 export interface MetadataSyncRecord {
   readonly targetId: StarkeepId;
@@ -84,4 +89,8 @@ export interface MetadataSyncRecord {
   inputHash: string | null;
   updatedAt: HLCTimestamp;
   value: Record<string, unknown>;
+  objectStorageKey?: string | null;
+  contentHash?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
 }

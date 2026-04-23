@@ -1,13 +1,27 @@
+import { createHash } from "node:crypto";
 import type { StarkeepId, MetadataRecord } from "@starkeep/core";
 import type {
   MetadataEngine,
   MetadataEngineOptions,
   GenerationRequest,
   GenerationResult,
+  GeneratingFunctionOutput,
   MetadataSyncRecord,
 } from "./types.js";
 import { computeInputHash } from "./input-hasher.js";
 import { GeneratorNotFoundError, GenerationError } from "./errors.js";
+
+/** Stores a generated file in object storage. Returns file-backing fields. */
+async function storeGeneratedFile(
+  output: GeneratingFunctionOutput,
+  objectStorageAdapter: MetadataEngineOptions["objectStorageAdapter"],
+): Promise<{ objectStorageKey: string; contentHash: string; mimeType: string; sizeBytes: number } | null> {
+  if (!output.file) return null;
+  const { data, mimeType } = output.file;
+  const hex = createHash("sha256").update(data).digest("hex");
+  await objectStorageAdapter.put(hex, data, { contentType: mimeType });
+  return { objectStorageKey: hex, contentHash: hex, mimeType, sizeBytes: data.byteLength };
+}
 
 export function createMetadataEngine(
   options: MetadataEngineOptions,
@@ -108,12 +122,15 @@ export function createMetadataEngine(
         );
       }
 
+      const fileFields = await storeGeneratedFile(output, objectStorageAdapter);
+
       const metadataRecord: MetadataRecord = {
         targetId: request.targetId,
         generatorId: definition.generatorId,
         generatorVersion: definition.generatorVersion,
         inputHash,
         value: output.value,
+        ...fileFields,
       };
 
       if (definition.syncable) {
@@ -125,6 +142,7 @@ export function createMetadataEngine(
           inputHash,
           updatedAt: clock.now(),
           value: output.value,
+          ...fileFields,
         });
       } else {
         await databaseAdapter.putMetadata(request.targetType, metadataRecord);
@@ -193,6 +211,7 @@ export function createMetadataEngine(
       targetType: string,
       generatorId: string,
       value: Record<string, unknown>,
+      file?: { data: Uint8Array; mimeType: string },
     ): Promise<MetadataSyncRecord> {
       const definition = generatorRegistry.get(generatorId);
       if (!definition) {
@@ -209,6 +228,10 @@ export function createMetadataEngine(
       // generators can detect when this value has changed.
       const inputHash = await computeInputHash(targetId, [], { value });
 
+      const fileFields = file
+        ? await storeGeneratedFile({ value, file }, objectStorageAdapter)
+        : null;
+
       const syncRecord: MetadataSyncRecord = {
         targetId,
         targetType,
@@ -217,6 +240,7 @@ export function createMetadataEngine(
         inputHash,
         updatedAt: clock.now(),
         value,
+        ...fileFields,
       };
 
       await databaseAdapter.upsertSyncableMetadata(syncRecord);

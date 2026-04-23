@@ -75,6 +75,14 @@ that surfaces Starkeep data as a native filesystem location).
 | [Photos App](../apps/photos-desktop/) | Desktop photo library — reference for the thin-client (data-server) pattern |
 | [File Provider](../apps/file-provider/) | macOS File Provider + Finder Sync extension — thin client that exposes Starkeep data in Finder |
 
+## Common commands
+
+**Redeploy user-data infrastructure from local** (from `infra/user-data/`):
+```
+pnpm run local:deploy
+```
+Authenticates with Cognito using your `.starkeep-config.json` and runs `sst deploy`. Generate the config from admin-web via "Download CLI config" after cloud setup.
+
 ### Analysis
 
 | | |

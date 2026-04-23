@@ -5,7 +5,7 @@
  */
 
 import { createServer } from "node:http";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, createHash, randomBytes } from "node:crypto";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
@@ -27,12 +27,23 @@ import { createTypeRegistry } from "../../packages/core/src/schema/index.js";
 import { createHLCClock } from "../../packages/core/src/hlc/index.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { stat as fsStat, readFile } from "node:fs/promises";
+import { stat as fsStat, readFile, writeFile, mkdir } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
+import { STANDARD_DOWNSIZE_GENERATORS } from "../../packages/metadata-image/src/index.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import * as v from "valibot";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
+import {
+  type CognitoConfig,
+  type STSCredentials,
+  initiateAuth,
+  respondNewPasswordChallenge,
+  getIdentityPoolCredentials,
+  startCredentialRefreshTimer,
+} from "./cognito-auth.js";
 
 // Signing key for self-hosted file tokens — regenerated each startup so
 // all outstanding tokens are invalidated on restart (revocable by design).
@@ -41,52 +52,102 @@ const TOKEN_SECRET = randomBytes(32);
 const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
 const OWNER_ID = process.env.STARKEEP_OWNER_ID || "craig";
-const CLOUD_URL = process.env.STARKEEP_CLOUD_URL;
 const NODE_ID = process.env.STARKEEP_NODE_ID || "admin-desktop";
 const PULL_INTERVAL_MS = parseInt(process.env.STARKEEP_PULL_INTERVAL_MS || "30000", 10);
 const PUSH_DEBOUNCE_MS = parseInt(process.env.STARKEEP_PUSH_DEBOUNCE_MS || "500", 10);
 
-interface CloudConfig {
-  stackPrefix: string;
-  s3Bucket: string;
-  s3Region: string;
-  auroraEndpoint: string;
+// Path to .starkeep-config.json — resolved relative to this file so it works
+// regardless of cwd. Override via STARKEEP_CONFIG env var for non-standard layouts.
+const STARKEEP_CONFIG_PATH =
+  process.env.STARKEEP_CONFIG ??
+  fileURLToPath(new URL("../../.starkeep-config.json", import.meta.url));
+
+interface StarkeepConfig {
+  region: string;
+  stage: string;
+  userPoolId: string;
+  userPoolClientId: string;
+  identityPoolId: string;
+  s3Bucket?: string;
+  s3Region?: string;
+  auroraEndpoint?: string;
+  apiGatewayUrl?: string;
 }
 
 interface CloudCredentials {
   accessKeyId: string;
   secretAccessKey: string;
   sessionToken?: string;
+  expiration?: Date;
 }
 
-interface LoadedCloudConfig {
-  config: CloudConfig;
-  credentials: CloudCredentials;
+interface PersistedAuth {
+  refreshToken: string;
+  idToken?: string;
 }
 
-async function loadCloudConfig(): Promise<LoadedCloudConfig | null> {
+function restartProcess(): void {
+  console.log("[server] Restarting to apply config changes…");
+  const child = spawn(process.execPath, process.argv.slice(1), {
+    detached: true,
+    stdio: "inherit",
+    env: process.env,
+    cwd: process.cwd(),
+  });
+  child.unref();
+  process.exit(0);
+}
+
+async function loadStarkeepConfig(): Promise<StarkeepConfig | null> {
   try {
-    const config = JSON.parse(
-      await readFile(join(STARKEEP_DIR, "cloud-config.json"), "utf8"),
-    ) as CloudConfig;
-    const credentials = JSON.parse(
-      await readFile(join(STARKEEP_DIR, "cloud-credentials.json"), "utf8"),
-    ) as CloudCredentials;
-    return { config, credentials };
+    return JSON.parse(await readFile(STARKEEP_CONFIG_PATH, "utf8")) as StarkeepConfig;
+  } catch {
+    console.warn(`No .starkeep-config.json found at ${STARKEEP_CONFIG_PATH} — cloud features disabled`);
+    return null;
+  }
+}
+
+async function loadPersistedAuth(): Promise<PersistedAuth | null> {
+  try {
+    return JSON.parse(await readFile(join(STARKEEP_DIR, "auth.json"), "utf8")) as PersistedAuth;
   } catch {
     return null;
   }
 }
 
+async function savePersistedAuth(auth: PersistedAuth): Promise<void> {
+  await mkdir(STARKEEP_DIR, { recursive: true });
+  await writeFile(join(STARKEEP_DIR, "auth.json"), JSON.stringify(auth, null, 2), "utf8");
+}
+
+async function loadIdToken(): Promise<string | null> {
+  try {
+    const auth = JSON.parse(await readFile(join(STARKEEP_DIR, "auth.json"), "utf8")) as PersistedAuth;
+    return auth.idToken ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveCloudCredentials(creds: STSCredentials): Promise<void> {
+  await mkdir(STARKEEP_DIR, { recursive: true });
+  await writeFile(join(STARKEEP_DIR, "cloud-credentials.json"), JSON.stringify(creds, null, 2), "utf8");
+}
+
 /**
  * Reads STS credentials from ~/.starkeep/cloud-credentials.json on every call
- * so that credentials rotated by admin-desktop are always picked up without
- * restarting the data server.
+ * so that credentials rotated externally are always picked up without restarting.
  */
 async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredentials>> {
   const credentialsPath = join(STARKEEP_DIR, "cloud-credentials.json");
   return async () => {
-    return JSON.parse(await readFile(credentialsPath, "utf8")) as CloudCredentials;
+    const raw = JSON.parse(await readFile(credentialsPath, "utf8")) as STSCredentials;
+    return {
+      accessKeyId: raw.accessKeyId,
+      secretAccessKey: raw.secretAccessKey,
+      sessionToken: raw.sessionToken,
+      expiration: raw.expiration ? new Date(raw.expiration) : undefined,
+    };
   };
 }
 
@@ -166,19 +227,57 @@ async function main() {
     basePath: join(STARKEEP_DIR, "objects"),
   });
 
-  // Read cloud config from ~/.starkeep/ if present (written by admin-desktop after setup)
-  const cloudSetup = await loadCloudConfig();
-  if (cloudSetup) {
-    console.log(`Cloud config loaded: S3 bucket=${cloudSetup.config.s3Bucket}, DSQL=${cloudSetup.config.auroraEndpoint}`);
+  // Load cloud config from .starkeep-config.json at the repo root
+  const starkeepConfig = await loadStarkeepConfig();
+  if (starkeepConfig) {
+    console.log(`Cloud config loaded: stage=${starkeepConfig.stage}, region=${starkeepConfig.region}`);
+    if (starkeepConfig.s3Bucket) console.log(`  S3 bucket=${starkeepConfig.s3Bucket}`);
+    if (starkeepConfig.auroraEndpoint) console.log(`  DSQL=${starkeepConfig.auroraEndpoint}`);
+    if (starkeepConfig.apiGatewayUrl) console.log(`  API=${starkeepConfig.apiGatewayUrl}`);
   }
 
-  // S3: prefer cloud config file credentials (rotated by admin-desktop) over env vars
+  // CLOUD_URL: env var takes precedence, then fall back to apiGatewayUrl from config
+  const CLOUD_URL = process.env.STARKEEP_CLOUD_URL ?? starkeepConfig?.apiGatewayUrl ?? undefined;
+
+  // Persistent auth: if a stored refresh token exists, start credential rotation
+  const persistedAuth = await loadPersistedAuth();
+  let currentRefreshToken: string | null = persistedAuth?.refreshToken ?? null;
+  let currentIdToken: string | null = await loadIdToken();
+  let stopCredentialRefresh: (() => void) | null = null;
+
+  const cognitoConfig: CognitoConfig | null = starkeepConfig
+    ? {
+        region: starkeepConfig.region,
+        userPoolId: starkeepConfig.userPoolId,
+        userPoolClientId: starkeepConfig.userPoolClientId,
+        identityPoolId: starkeepConfig.identityPoolId,
+      }
+    : null;
+
+  if (cognitoConfig && currentRefreshToken) {
+    console.log("Stored auth found — starting credential refresh timer");
+    stopCredentialRefresh = startCredentialRefreshTimer(
+      cognitoConfig,
+      () => currentRefreshToken,
+      async (creds) => {
+        await saveCloudCredentials(creds);
+        console.log("Cloud credentials refreshed");
+      },
+      (err) => console.error("Credential refresh failed:", err.message),
+      async (idToken) => {
+        currentIdToken = idToken;
+        await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
+      },
+    );
+  }
+
+  // S3: use .starkeep-config.json values when available, otherwise fall back to env vars
   let remoteAdapter: ObjectStorageAdapter | null = null;
-  if (cloudSetup?.config.s3Bucket) {
+  if (starkeepConfig?.s3Bucket) {
     const credentialProvider = await makeCloudCredentialProvider();
     remoteAdapter = new S3ObjectStorageAdapter({
-      bucketName: cloudSetup.config.s3Bucket,
-      region: cloudSetup.config.s3Region,
+      bucketName: starkeepConfig.s3Bucket,
+      region: starkeepConfig.s3Region ?? starkeepConfig.region,
       credentialProvider,
     });
     console.log("Remote S3 adapter initialized from cloud config");
@@ -203,11 +302,11 @@ async function main() {
 
   // Aurora DSQL remote database: initialized from cloud config when available
   let remoteDatabaseAdapter: DatabaseAdapter | null = null;
-  if (cloudSetup?.config.auroraEndpoint) {
+  if (starkeepConfig?.auroraEndpoint) {
     remoteDatabaseAdapter = new AuroraDsqlDatabaseAdapter(
       {
-        hostname: cloudSetup.config.auroraEndpoint,
-        region: cloudSetup.config.s3Region,
+        hostname: starkeepConfig.auroraEndpoint,
+        region: starkeepConfig.s3Region ?? starkeepConfig.region,
       },
       new CloudCredentialsDsqlClientFactory(),
     );
@@ -246,7 +345,10 @@ async function main() {
   await databaseAdapter.init();
 
   const syncTransport = CLOUD_URL
-    ? createHttpSyncTransport({ baseUrl: CLOUD_URL })
+    ? createHttpSyncTransport({
+        baseUrl: CLOUD_URL,
+        getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
+      })
     : undefined;
   const syncRemoteStorage: ObjectStorageAdapter | undefined = CLOUD_URL
     ? new HttpObjectStorageAdapter({ baseUrl: `${CLOUD_URL}/files` })
@@ -263,6 +365,7 @@ async function main() {
     objectStorageAdapter: localAdapter,
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
+    generators: [...STANDARD_DOWNSIZE_GENERATORS],
     syncTransport,
     remoteObjectStorageAdapter: syncRemoteStorage,
     syncChangeLog,
@@ -274,11 +377,13 @@ async function main() {
     lastPushAt: null as string | null,
     lastError: null as string | null,
     pullBackoffMs: PULL_INTERVAL_MS,
+    syncPaused: false,
   };
 
   let pushTimer: NodeJS.Timeout | null = null;
   function schedulePush(): void {
     if (!sdk.sync) return;
+    if (syncRuntime.syncPaused) return;
     if (pushTimer) return;
     pushTimer = setTimeout(async () => {
       pushTimer = null;
@@ -315,7 +420,9 @@ async function main() {
       syncRuntime.pullBackoffMs = Math.min(syncRuntime.pullBackoffMs * 2, 5 * 60 * 1000);
       console.error("pull failed:", err);
     }
-    pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
+    if (!syncRuntime.syncPaused) {
+      pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
+    }
   }
   if (sdk.sync) {
     pullTimer = setTimeout(runPull, PULL_INTERVAL_MS);
@@ -349,7 +456,7 @@ async function main() {
 
   const server = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
     if (req.method === "OPTIONS") {
@@ -367,10 +474,156 @@ async function main() {
         return;
       }
 
+      if (path === "/config" && req.method === "GET") {
+        if (!starkeepConfig) {
+          res.writeHead(404);
+          json(res, { error: "No cloud config loaded" });
+          return;
+        }
+        json(res, {
+          stage: starkeepConfig.stage,
+          s3Bucket: starkeepConfig.s3Bucket ?? null,
+          s3Region: starkeepConfig.s3Region ?? starkeepConfig.region,
+          auroraEndpoint: starkeepConfig.auroraEndpoint ?? null,
+          apiGatewayUrl: starkeepConfig.apiGatewayUrl ?? null,
+          cognitoConfig: {
+            region: starkeepConfig.region,
+            userPoolId: starkeepConfig.userPoolId,
+            userPoolClientId: starkeepConfig.userPoolClientId,
+            identityPoolId: starkeepConfig.identityPoolId,
+          },
+        });
+        return;
+      }
+
+      if (path === "/config" && req.method === "PATCH") {
+        if (!starkeepConfig) {
+          res.writeHead(404);
+          json(res, { error: "No cloud config loaded" });
+          return;
+        }
+        const patch = JSON.parse(await readBody(req)) as Partial<StarkeepConfig>;
+        const updated: StarkeepConfig = { ...starkeepConfig, ...patch };
+        await writeFile(STARKEEP_CONFIG_PATH, JSON.stringify(updated, null, 2), "utf8");
+        Object.assign(starkeepConfig, patch);
+        json(res, { ok: true });
+        setTimeout(restartProcess, 200);
+        return;
+      }
+
+      if (path === "/auth/status" && req.method === "GET") {
+        json(res, {
+          configLoaded: cognitoConfig !== null,
+          authenticated: currentRefreshToken !== null,
+        });
+        return;
+      }
+
+      if (path === "/auth/login" && req.method === "POST") {
+        if (!cognitoConfig) {
+          res.writeHead(503);
+          json(res, { error: "No .starkeep-config.json found — cannot authenticate" });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as {
+          email: string;
+          password: string;
+          newPassword?: string;
+        };
+        if (!body.email || !body.password) {
+          res.writeHead(400);
+          json(res, { error: "email and password are required" });
+          return;
+        }
+
+        let authResult = await initiateAuth(cognitoConfig, body.email, body.password);
+
+        if (authResult.challengeName === "NEW_PASSWORD_REQUIRED") {
+          if (!body.newPassword) {
+            json(res, { challenge: "NEW_PASSWORD_REQUIRED" });
+            return;
+          }
+          const tokens = await respondNewPasswordChallenge(
+            cognitoConfig,
+            authResult.session!,
+            body.email,
+            body.newPassword,
+          );
+          authResult = { tokens };
+        }
+
+        if (!authResult.tokens) {
+          res.writeHead(400);
+          json(res, { error: `Unhandled auth challenge: ${authResult.challengeName}` });
+          return;
+        }
+
+        const creds = await getIdentityPoolCredentials(cognitoConfig, authResult.tokens.idToken);
+        currentRefreshToken = authResult.tokens.refreshToken;
+        currentIdToken = authResult.tokens.idToken;
+        await savePersistedAuth({ refreshToken: currentRefreshToken, idToken: currentIdToken });
+        await saveCloudCredentials(creds);
+
+        // (Re)start credential refresh timer
+        stopCredentialRefresh?.();
+        stopCredentialRefresh = startCredentialRefreshTimer(
+          cognitoConfig,
+          () => currentRefreshToken,
+          async (newCreds) => {
+            await saveCloudCredentials(newCreds);
+            console.log("Cloud credentials refreshed");
+          },
+          (err) => console.error("Credential refresh failed:", err.message),
+          async (idToken) => {
+            currentIdToken = idToken;
+            await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
+          },
+        );
+
+        json(res, { ok: true });
+        return;
+      }
+
+      if (path === "/auth/tokens" && req.method === "POST") {
+        if (!cognitoConfig) {
+          res.writeHead(503);
+          json(res, { error: "No cloud config loaded — cannot authenticate" });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as { idToken: string; refreshToken: string };
+        if (!body.idToken || !body.refreshToken) {
+          res.writeHead(400);
+          json(res, { error: "idToken and refreshToken are required" });
+          return;
+        }
+        const creds = await getIdentityPoolCredentials(cognitoConfig, body.idToken);
+        currentRefreshToken = body.refreshToken;
+        currentIdToken = body.idToken;
+        await savePersistedAuth({ refreshToken: currentRefreshToken, idToken: currentIdToken });
+        await saveCloudCredentials(creds);
+        stopCredentialRefresh?.();
+        stopCredentialRefresh = startCredentialRefreshTimer(
+          cognitoConfig,
+          () => currentRefreshToken,
+          async (newCreds) => {
+            await saveCloudCredentials(newCreds);
+            console.log("Cloud credentials refreshed");
+          },
+          (err) => console.error("Credential refresh failed:", err.message),
+          async (idToken) => {
+            currentIdToken = idToken;
+            await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
+          },
+        );
+        json(res, { ok: true });
+        return;
+      }
+
       // Sync observability + manual trigger
       if (path === "/sync/status" && req.method === "GET") {
         json(res, {
           enabled: sdk.sync !== null,
+          syncPaused: syncRuntime.syncPaused,
           cloudUrl: CLOUD_URL ?? null,
           lastPullAt: syncRuntime.lastPullAt,
           lastPushAt: syncRuntime.lastPushAt,
@@ -378,6 +631,40 @@ async function main() {
           pullBackoffMs: syncRuntime.pullBackoffMs,
           conflictCount: sdk.sync ? sdk.sync.getConflicts().length : 0,
         });
+        return;
+      }
+
+      if (path === "/sync/pause" && req.method === "POST") {
+        if (!sdk.sync) {
+          res.writeHead(400);
+          json(res, { error: "sync not configured" });
+          return;
+        }
+        syncRuntime.syncPaused = true;
+        if (pullTimer) { clearTimeout(pullTimer); pullTimer = null; }
+        if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+        json(res, { ok: true });
+        return;
+      }
+
+      if (path === "/sync/resume" && req.method === "POST") {
+        if (!sdk.sync) {
+          res.writeHead(400);
+          json(res, { error: "sync not configured" });
+          return;
+        }
+        syncRuntime.syncPaused = false;
+        sdk.sync.fullSync().then(() => {
+          syncRuntime.lastPullAt = new Date().toISOString();
+          syncRuntime.lastPushAt = new Date().toISOString();
+          syncRuntime.lastError = null;
+          syncRuntime.pullBackoffMs = PULL_INTERVAL_MS;
+        }).catch((err: Error) => {
+          syncRuntime.lastError = err.message;
+          console.error("resume fullSync failed:", err);
+        });
+        pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
+        json(res, { ok: true });
         return;
       }
 
@@ -727,17 +1014,56 @@ async function main() {
         return;
       }
 
-      // POST /data/metadata — accept app-generated metadata (app-side generator results)
-      // Body: { targetId, targetType, generatorId, generatorVersion, value }
+      // POST /data/files — store raw binary bytes in content-addressed local storage.
+      // General-purpose: used by thin-client apps to upload files (e.g. downsize thumbnails)
+      // before registering a metadata record that references the file.
+      // Body: raw bytes. Content-Type header is the mime type.
+      // Response: { key, contentHash, mimeType, sizeBytes }
+      if (path === "/data/files" && req.method === "POST") {
+        const fileBuffer = await readBodyBuffer(req);
+        if (fileBuffer.length === 0) {
+          res.writeHead(400);
+          json(res, { error: "Request body must not be empty" });
+          return;
+        }
+        if (fileBuffer.length > 20_000_000) {
+          res.writeHead(413);
+          json(res, { error: "File too large (20 MB limit)" });
+          return;
+        }
+        const mimeType = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0]!.trim();
+        const hex = createHash("sha256").update(fileBuffer).digest("hex");
+        const key = `metadata/${hex}`;
+        await localAdapter.put(key, fileBuffer, { contentType: mimeType });
+        json(res, { key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
+        return;
+      }
+
+      // POST /data/metadata — accept app-generated metadata (app-side generator results).
+      // Body: { targetId, targetType, generatorId, generatorVersion, value,
+      //         objectStorageKey?, contentHash?, mimeType?, sizeBytes? }
       // Apps run generators locally and push the results here so they are stored in the
       // shared metadata_sync table alongside other syncable metadata.
+      // When objectStorageKey is provided, the server validates the file exists locally
+      // before accepting the record (prevents dangling references).
       if (path === "/data/metadata" && req.method === "POST") {
         const body = await readBody(req);
-        const { targetId, targetType, generatorId, generatorVersion, value } = JSON.parse(body);
+        const {
+          targetId, targetType, generatorId, generatorVersion, value,
+          objectStorageKey, contentHash, mimeType: metaMimeType, sizeBytes,
+        } = JSON.parse(body);
         if (!targetId || !targetType || !generatorId) {
           res.writeHead(400);
           json(res, { error: "targetId, targetType, and generatorId are required" });
           return;
+        }
+        if (objectStorageKey) {
+          const exists = await localAdapter.get(objectStorageKey).catch(() => null);
+          if (!exists) {
+            res.writeHead(422);
+            json(res, { error: "objectStorageKey references a file not found in local storage" });
+            return;
+          }
         }
         const now = clock.now();
         await databaseAdapter.upsertSyncableMetadata({
@@ -748,6 +1074,10 @@ async function main() {
           inputHash: null,
           updatedAt: now,
           value: value ?? {},
+          objectStorageKey: objectStorageKey ?? null,
+          contentHash: contentHash ?? null,
+          mimeType: metaMimeType ?? null,
+          sizeBytes: sizeBytes ?? null,
         });
         json(res, { ok: true });
         return;
@@ -797,6 +1127,42 @@ async function main() {
           return;
         }
 
+        res.writeHead(404);
+        json(res, { error: "File not found locally and no remote storage configured" });
+        return;
+      }
+
+      // GET /data/metadata/:targetId/:generatorId/file-url — time-limited URL for a
+      // metadata-backed file (e.g. an image downsize thumbnail).
+      const metaFileUrlMatch = path.match(/^\/data\/metadata\/([^/]+)\/(.+)\/file-url$/);
+      if (metaFileUrlMatch && req.method === "GET") {
+        const [, metaTargetId, encodedGeneratorId] = metaFileUrlMatch;
+        const generatorId = decodeURIComponent(encodedGeneratorId!);
+        const entries = databaseAdapter.getMetadataForRecord(metaTargetId!);
+        const entry = entries.find((e) => e.generatorId === generatorId);
+        if (!entry?.objectStorageKey) {
+          res.writeHead(404);
+          json(res, { error: "No file-backed metadata found for this record and generator" });
+          return;
+        }
+        const expiresIn = parseInt(url.searchParams.get("expiresIn") || "3600", 10);
+        const mimeType = entry.mimeType ?? "application/octet-stream";
+        const localHit = await localAdapter.get(entry.objectStorageKey).catch(() => null);
+        if (localHit) {
+          const token = createFileToken(entry.objectStorageKey, mimeType, expiresIn);
+          json(res, {
+            url: `http://127.0.0.1:${PORT}/data/files/${token}`,
+            source: "local",
+            mimeType,
+            expiresIn,
+          });
+          return;
+        }
+        if (remoteAdapter) {
+          const fileUrl = await remoteAdapter.getSignedUrl(entry.objectStorageKey, { expiresIn });
+          json(res, { url: fileUrl, source: "remote", mimeType, expiresIn });
+          return;
+        }
         res.writeHead(404);
         json(res, { error: "File not found locally and no remote storage configured" });
         return;
@@ -1022,6 +1388,15 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
+  });
+}
+
+function readBodyBuffer(req: import("node:http").IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }

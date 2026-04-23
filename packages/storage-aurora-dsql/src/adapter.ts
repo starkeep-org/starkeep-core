@@ -62,13 +62,17 @@ const CREATE_MIGRATIONS_TABLE_SQL = `
 
 const CREATE_METADATA_SYNC_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS metadata_sync (
-    target_id         TEXT NOT NULL,
-    target_type       TEXT NOT NULL,
-    generator_id      TEXT NOT NULL,
-    generator_version INTEGER NOT NULL,
-    input_hash        TEXT,
-    updated_at        TEXT NOT NULL,
-    value             TEXT NOT NULL,
+    target_id          TEXT NOT NULL,
+    target_type        TEXT NOT NULL,
+    generator_id       TEXT NOT NULL,
+    generator_version  INTEGER NOT NULL,
+    input_hash         TEXT,
+    updated_at         TEXT NOT NULL,
+    value              TEXT NOT NULL,
+    object_storage_key TEXT,
+    content_hash       TEXT,
+    mime_type          TEXT,
+    size_bytes         BIGINT,
     PRIMARY KEY (target_id, generator_id)
   )
 `;
@@ -109,6 +113,15 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     await this.client.query(CREATE_MIGRATIONS_TABLE_SQL);
     await this.client.query(CREATE_METADATA_SYNC_TABLE_SQL);
     await this.client.query(CREATE_METADATA_SYNC_INDEX_SQL);
+    // Migrations for tables created before file-backing columns were added.
+    for (const sql of [
+      "ALTER TABLE metadata_sync ADD COLUMN IF NOT EXISTS object_storage_key TEXT",
+      "ALTER TABLE metadata_sync ADD COLUMN IF NOT EXISTS content_hash TEXT",
+      "ALTER TABLE metadata_sync ADD COLUMN IF NOT EXISTS mime_type TEXT",
+      "ALTER TABLE metadata_sync ADD COLUMN IF NOT EXISTS size_bytes BIGINT",
+    ]) {
+      await this.client.query(sql);
+    }
   }
 
   async close(): Promise<void> {
@@ -406,14 +419,19 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void> {
     await this.getClient().query(
       `INSERT INTO metadata_sync
-         (target_id, target_type, generator_id, generator_version, input_hash, updated_at, value)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (target_id, target_type, generator_id, generator_version, input_hash, updated_at, value,
+          object_storage_key, content_hash, mime_type, size_bytes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (target_id, generator_id) DO UPDATE SET
-         target_type       = EXCLUDED.target_type,
-         generator_version = EXCLUDED.generator_version,
-         input_hash        = EXCLUDED.input_hash,
-         updated_at        = EXCLUDED.updated_at,
-         value             = EXCLUDED.value`,
+         target_type        = EXCLUDED.target_type,
+         generator_version  = EXCLUDED.generator_version,
+         input_hash         = EXCLUDED.input_hash,
+         updated_at         = EXCLUDED.updated_at,
+         value              = EXCLUDED.value,
+         object_storage_key = EXCLUDED.object_storage_key,
+         content_hash       = EXCLUDED.content_hash,
+         mime_type          = EXCLUDED.mime_type,
+         size_bytes         = EXCLUDED.size_bytes`,
       [
         record.targetId,
         record.targetType,
@@ -422,6 +440,10 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         record.inputHash ?? null,
         serializeHLC(record.updatedAt),
         JSON.stringify(record.value),
+        record.objectStorageKey ?? null,
+        record.contentHash ?? null,
+        record.mimeType ?? null,
+        record.sizeBytes ?? null,
       ],
     );
 
@@ -437,6 +459,35 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         value: record.value,
       });
     }
+  }
+
+  async getMetadataForRecord(targetId: string): Promise<Array<{
+    generatorId: string;
+    generatorVersion: number;
+    value: Record<string, unknown>;
+    updatedAt: string;
+    objectStorageKey: string | null;
+    mimeType: string | null;
+  }>> {
+    const result = await this.getClient().query(
+      "SELECT generator_id, generator_version, value, updated_at, object_storage_key, mime_type FROM metadata_sync WHERE target_id = $1 ORDER BY updated_at DESC",
+      [targetId],
+    );
+    return (result.rows as unknown as Array<{
+      generator_id: string;
+      generator_version: number;
+      value: string;
+      updated_at: string;
+      object_storage_key: string | null;
+      mime_type: string | null;
+    }>).map((row) => ({
+      generatorId: row.generator_id,
+      generatorVersion: row.generator_version,
+      value: JSON.parse(row.value) as Record<string, unknown>,
+      updatedAt: row.updated_at,
+      objectStorageKey: row.object_storage_key ?? null,
+      mimeType: row.mime_type ?? null,
+    }));
   }
 
   async getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]> {

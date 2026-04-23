@@ -115,6 +115,11 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     this.database.exec(CREATE_METADATA_SYNC_INDEX_SQL);
     // Idempotent column additions for existing databases
     try { this.database.exec("ALTER TABLE records ADD COLUMN original_filename TEXT"); } catch {}
+    // File-backed metadata columns (added when this feature was introduced)
+    try { this.database.exec("ALTER TABLE metadata_sync ADD COLUMN object_storage_key TEXT"); } catch {}
+    try { this.database.exec("ALTER TABLE metadata_sync ADD COLUMN content_hash TEXT"); } catch {}
+    try { this.database.exec("ALTER TABLE metadata_sync ADD COLUMN mime_type TEXT"); } catch {}
+    try { this.database.exec("ALTER TABLE metadata_sync ADD COLUMN size_bytes INTEGER"); } catch {}
   }
 
   async close(): Promise<void> {
@@ -305,8 +310,12 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       }
     }
 
-    // Add per-generator staleness columns.
-    for (const colName of [`${prefix}_input_hash`, `${prefix}_generator_version`]) {
+    // Add per-generator staleness columns and file-key column.
+    for (const colName of [
+      `${prefix}_input_hash`,
+      `${prefix}_generator_version`,
+      `${prefix}_object_storage_key`,
+    ]) {
       try {
         const colType = colName.endsWith("_generator_version") ? "INTEGER" : "TEXT";
         this.getDatabase().exec(`ALTER TABLE ${table} ADD COLUMN ${colName} ${colType}`);
@@ -358,9 +367,9 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       values.push(entry.value[camelKey] ?? null);
     }
 
-    // Staleness tracking columns.
-    columnNames.push(`${prefix}_input_hash`, `${prefix}_generator_version`);
-    values.push(entry.inputHash, entry.generatorVersion);
+    // Staleness tracking columns + file key.
+    columnNames.push(`${prefix}_input_hash`, `${prefix}_generator_version`, `${prefix}_object_storage_key`);
+    values.push(entry.inputHash, entry.generatorVersion, entry.objectStorageKey ?? null);
 
     const placeholders = columnNames.map(() => "?").join(", ");
     // Only update columns belonging to this generator (not other generators' columns).
@@ -403,12 +412,15 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
           value[camelKey] = row[col.name] ?? null;
         }
 
+        const objectStorageKey = (row[`${prefix}_object_storage_key`] as string | null) ?? null;
+
         entries.push({
           targetId,
           generatorId: gen.generatorId,
           generatorVersion,
           inputHash: inputHash ?? "",
           value,
+          objectStorageKey,
         });
       }
     }
@@ -417,17 +429,22 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   async upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void> {
-    // Write to the metadata_sync table.
+    // Write to the metadata_sync table (including optional file-backing fields).
     this.runStmt(
       `INSERT INTO metadata_sync
-         (target_id, target_type, generator_id, generator_version, input_hash, updated_at, value)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+         (target_id, target_type, generator_id, generator_version, input_hash, updated_at, value,
+          object_storage_key, content_hash, mime_type, size_bytes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(target_id, generator_id) DO UPDATE SET
-         target_type       = excluded.target_type,
-         generator_version = excluded.generator_version,
-         input_hash        = excluded.input_hash,
-         updated_at        = excluded.updated_at,
-         value             = excluded.value`,
+         target_type        = excluded.target_type,
+         generator_version  = excluded.generator_version,
+         input_hash         = excluded.input_hash,
+         updated_at         = excluded.updated_at,
+         value              = excluded.value,
+         object_storage_key = excluded.object_storage_key,
+         content_hash       = excluded.content_hash,
+         mime_type          = excluded.mime_type,
+         size_bytes         = excluded.size_bytes`,
       record.targetId,
       record.targetType,
       record.generatorId,
@@ -435,6 +452,10 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       record.inputHash ?? null,
       serializeHLC(record.updatedAt),
       JSON.stringify(record.value),
+      record.objectStorageKey ?? null,
+      record.contentHash ?? null,
+      record.mimeType ?? null,
+      record.sizeBytes ?? null,
     );
 
     // Best-effort write to the per-type typed-column table (if the generator
@@ -448,6 +469,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
         generatorVersion: record.generatorVersion,
         inputHash: record.inputHash ?? "",
         value: record.value,
+        objectStorageKey: record.objectStorageKey ?? null,
       });
     }
   }
@@ -457,14 +479,18 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     generatorVersion: number;
     value: Record<string, unknown>;
     updatedAt: string;
+    objectStorageKey: string | null;
+    mimeType: string | null;
   }> {
     const rows = this.allRows<{
       generator_id: string;
       generator_version: number;
       value: string;
       updated_at: string;
+      object_storage_key: string | null;
+      mime_type: string | null;
     }>(
-      "SELECT generator_id, generator_version, value, updated_at FROM metadata_sync WHERE target_id = ? ORDER BY updated_at DESC",
+      "SELECT generator_id, generator_version, value, updated_at, object_storage_key, mime_type FROM metadata_sync WHERE target_id = ? ORDER BY updated_at DESC",
       targetId,
     );
     return rows.map((row) => ({
@@ -472,6 +498,8 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       generatorVersion: row.generator_version,
       value: JSON.parse(row.value) as Record<string, unknown>,
       updatedAt: row.updated_at,
+      objectStorageKey: row.object_storage_key ?? null,
+      mimeType: row.mime_type ?? null,
     }));
   }
 
@@ -485,6 +513,10 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       input_hash: string | null;
       updated_at: string;
       value: string;
+      object_storage_key: string | null;
+      content_hash: string | null;
+      mime_type: string | null;
+      size_bytes: number | null;
     }>(
       "SELECT * FROM metadata_sync WHERE updated_at > ? ORDER BY updated_at ASC",
       sinceStr,
@@ -498,6 +530,10 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       inputHash: row.input_hash,
       updatedAt: deserializeHLC(row.updated_at),
       value: JSON.parse(row.value) as Record<string, unknown>,
+      objectStorageKey: row.object_storage_key ?? null,
+      contentHash: row.content_hash ?? null,
+      mimeType: row.mime_type ?? null,
+      sizeBytes: row.size_bytes ?? null,
     }));
   }
 }

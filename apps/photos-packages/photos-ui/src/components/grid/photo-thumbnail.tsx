@@ -18,6 +18,7 @@ export function PhotoThumbnail({ image, onSelect }: PhotoThumbnailProps) {
   const transform = image.exif.orientation
     ? (ORIENTATION_TRANSFORMS[image.exif.orientation] ?? "none")
     : "none";
+  const src = getThumbnailSrc(image.id);
 
   return (
     <div
@@ -32,18 +33,20 @@ export function PhotoThumbnail({ image, onSelect }: PhotoThumbnailProps) {
         flexShrink: 0,
       }}
     >
-      <img
-        src={getThumbnailSrc(image.id)}
-        alt={image.title || image.originalFilename}
-        loading="lazy"
-        style={{
-          width: "100%",
-          height: "100%",
-          objectFit: "cover",
-          transform,
-          transition: "transform 0.1s ease",
-        }}
-      />
+      {src && (
+        <img
+          src={src}
+          alt={image.title || image.originalFilename}
+          loading="lazy"
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+            transform,
+            transition: "transform 0.1s ease",
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -1,7 +1,9 @@
 "use client";
 
-import { PhotosApp } from "@photos/photos-ui";
+import dynamic from "next/dynamic";
 
-export default function HomePage() {
-  return <PhotosApp />;
+const App = dynamic(() => import("../app").then((mod) => mod.App), { ssr: false });
+
+export default function Page() {
+  return <App />;
 }
