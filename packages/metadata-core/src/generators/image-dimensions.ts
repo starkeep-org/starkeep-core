@@ -38,7 +38,7 @@ function detectImageFormat(buffer: Buffer): "png" | "jpeg" | "unknown" {
 export const IMAGE_DIMENSIONS_GENERATOR: GeneratingFunctionDefinition = {
   generatorId: "@starkeep/metadata-core:image-dimensions",
   generatorVersion: 1,
-  inputTypes: ["@starkeep/photo", "@starkeep/image"],
+  inputTypes: ["@starkeep/image"],
   dependsOn: [],
   outputColumns: [
     { name: "width", columnType: "integer" },

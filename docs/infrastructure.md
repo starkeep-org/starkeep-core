@@ -107,3 +107,15 @@ Pulumi state.
 - Pulumi CLI installed and authenticated
 - AWS credentials with permissions to create IAM roles, Aurora DSQL, S3, and API Gateway
 - For the S3 state backend: a bucket pre-created for Pulumi state storage
+
+## Server apps and their roles
+
+Three apps participate in data serving. Only one is deployed to AWS.
+
+| App | Where it runs | Role |
+|-----|---------------|------|
+| `apps/data-server` | Local dev machine | Client-side sidecar for the desktop app. Stores data in local SQLite + filesystem. Exposes a REST API for apps and optionally syncs outward to the cloud endpoint. Handles Cognito auth and STS credential rotation. |
+| `apps/cloud-server` | Local dev machine | Simulates the cloud server locally. Runs the `AuroraDsqlDatabaseAdapter` + `FsObjectStorageAdapter` backed by a local Postgres instance (port 5434) so the production adapter code path can be validated without provisioning real AWS infrastructure. |
+| `infra/user-data/src/api-handler.ts` | AWS Lambda | The actual cloud server, deployed via SST. Uses the Lambda execution role for credentials (no credential management needed), real Aurora DSQL, and real S3. Fronted by API Gateway with a Cognito JWT authorizer. |
+
+`cloud-server` is purely a dev tool — it is not referenced by any other app and nothing in the SST config deploys it. In a local dev setup, `data-server` can be pointed at `cloud-server` (via `STARKEEP_CLOUD_URL=http://127.0.0.1:9920`) to exercise the full sync path without real AWS.

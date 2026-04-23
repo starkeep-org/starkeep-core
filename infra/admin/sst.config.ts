@@ -76,25 +76,47 @@ export default $config({
       },
     }) : undefined;
 
-    // TODO: Re-enable Remix app once AWS account is verified for CloudFront
-    // const remix = new sst.aws.Remix("RemixApp", {
-    //   path: "../admin-remix",
-    //   link: [artifactsBucket],
-    //   environment: {
-    //     DATABASE_URL: databaseUrl,
-    //     ARTIFACTS_BUCKET: artifactsBucket.name,
-    //     AWS_ACCOUNT_ID: awsAccountId.accountId,
-    //   },
-    //   domain: process.env.DOMAIN_NAME ? {
-    //     name: process.env.DOMAIN_NAME,
-    //     dns: sst.aws.dns({
-    //       zone: process.env.ROUTE53_ZONE_ID,
-    //     }),
-    //   } : undefined,
-    // });
+    const bootstrapWeb = new sst.aws.StaticSite("BootstrapWeb", {
+      path: "../../apps/bootstrap-web",
+      build: {
+        command: "pnpm build",
+        output: "dist",
+      },
+      environment: {
+        VITE_ADMIN_WEB_URL: process.env.ADMIN_WEB_URL ?? "",
+      },
+      ...(process.env.BOOTSTRAP_DOMAIN_NAME
+        ? {
+            domain: {
+              name: process.env.BOOTSTRAP_DOMAIN_NAME,
+              dns: sst.aws.dns({ zone: process.env.ROUTE53_ZONE_ID }),
+            },
+          }
+        : {}),
+    });
+
+    const adminWeb = new sst.aws.Nextjs("AdminWeb", {
+      path: "../../apps/admin-web",
+      link: [artifactsBucket],
+      environment: {
+        DATABASE_URL: databaseUrl,
+        ARTIFACTS_BUCKET: artifactsBucket.name,
+        AWS_ACCOUNT_ID: awsAccountId.accountId,
+        NEXT_PUBLIC_BOOTSTRAP_WEB_URL: process.env.BOOTSTRAP_WEB_URL ?? "",
+      },
+      ...(process.env.DOMAIN_NAME
+        ? {
+            domain: {
+              name: process.env.DOMAIN_NAME,
+              dns: sst.aws.dns({ zone: process.env.ROUTE53_ZONE_ID }),
+            },
+          }
+        : {}),
+    });
 
     return {
-      // remixUrl: remix.url,
+      adminWebUrl: adminWeb.url,
+      bootstrapWebUrl: bootstrapWeb.url,
       artifactsBucket: artifactsBucket.name,
       databaseUrl: databaseUrl,
       accountId: awsAccountId.accountId,
