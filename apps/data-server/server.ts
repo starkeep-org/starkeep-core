@@ -28,6 +28,7 @@ import { createHLCClock } from "../../packages/core/src/hlc/index.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
 import { STANDARD_DOWNSIZE_GENERATORS } from "../../packages/metadata-image/src/index.js";
@@ -77,10 +78,24 @@ interface CloudCredentials {
   accessKeyId: string;
   secretAccessKey: string;
   sessionToken?: string;
+  expiration?: Date;
 }
 
 interface PersistedAuth {
   refreshToken: string;
+  idToken?: string;
+}
+
+function restartProcess(): void {
+  console.log("[server] Restarting to apply config changes…");
+  const child = spawn(process.execPath, process.argv.slice(1), {
+    detached: true,
+    stdio: "inherit",
+    env: process.env,
+    cwd: process.cwd(),
+  });
+  child.unref();
+  process.exit(0);
 }
 
 async function loadStarkeepConfig(): Promise<StarkeepConfig | null> {
@@ -105,6 +120,15 @@ async function savePersistedAuth(auth: PersistedAuth): Promise<void> {
   await writeFile(join(STARKEEP_DIR, "auth.json"), JSON.stringify(auth, null, 2), "utf8");
 }
 
+async function loadIdToken(): Promise<string | null> {
+  try {
+    const auth = JSON.parse(await readFile(join(STARKEEP_DIR, "auth.json"), "utf8")) as PersistedAuth;
+    return auth.idToken ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function saveCloudCredentials(creds: STSCredentials): Promise<void> {
   await mkdir(STARKEEP_DIR, { recursive: true });
   await writeFile(join(STARKEEP_DIR, "cloud-credentials.json"), JSON.stringify(creds, null, 2), "utf8");
@@ -117,7 +141,13 @@ async function saveCloudCredentials(creds: STSCredentials): Promise<void> {
 async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredentials>> {
   const credentialsPath = join(STARKEEP_DIR, "cloud-credentials.json");
   return async () => {
-    return JSON.parse(await readFile(credentialsPath, "utf8")) as CloudCredentials;
+    const raw = JSON.parse(await readFile(credentialsPath, "utf8")) as STSCredentials;
+    return {
+      accessKeyId: raw.accessKeyId,
+      secretAccessKey: raw.secretAccessKey,
+      sessionToken: raw.sessionToken,
+      expiration: raw.expiration ? new Date(raw.expiration) : undefined,
+    };
   };
 }
 
@@ -212,6 +242,7 @@ async function main() {
   // Persistent auth: if a stored refresh token exists, start credential rotation
   const persistedAuth = await loadPersistedAuth();
   let currentRefreshToken: string | null = persistedAuth?.refreshToken ?? null;
+  let currentIdToken: string | null = await loadIdToken();
   let stopCredentialRefresh: (() => void) | null = null;
 
   const cognitoConfig: CognitoConfig | null = starkeepConfig
@@ -233,6 +264,10 @@ async function main() {
         console.log("Cloud credentials refreshed");
       },
       (err) => console.error("Credential refresh failed:", err.message),
+      async (idToken) => {
+        currentIdToken = idToken;
+        await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
+      },
     );
   }
 
@@ -310,7 +345,10 @@ async function main() {
   await databaseAdapter.init();
 
   const syncTransport = CLOUD_URL
-    ? createHttpSyncTransport({ baseUrl: CLOUD_URL })
+    ? createHttpSyncTransport({
+        baseUrl: CLOUD_URL,
+        getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
+      })
     : undefined;
   const syncRemoteStorage: ObjectStorageAdapter | undefined = CLOUD_URL
     ? new HttpObjectStorageAdapter({ baseUrl: `${CLOUD_URL}/files` })
@@ -339,11 +377,13 @@ async function main() {
     lastPushAt: null as string | null,
     lastError: null as string | null,
     pullBackoffMs: PULL_INTERVAL_MS,
+    syncPaused: false,
   };
 
   let pushTimer: NodeJS.Timeout | null = null;
   function schedulePush(): void {
     if (!sdk.sync) return;
+    if (syncRuntime.syncPaused) return;
     if (pushTimer) return;
     pushTimer = setTimeout(async () => {
       pushTimer = null;
@@ -380,7 +420,9 @@ async function main() {
       syncRuntime.pullBackoffMs = Math.min(syncRuntime.pullBackoffMs * 2, 5 * 60 * 1000);
       console.error("pull failed:", err);
     }
-    pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
+    if (!syncRuntime.syncPaused) {
+      pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
+    }
   }
   if (sdk.sync) {
     pullTimer = setTimeout(runPull, PULL_INTERVAL_MS);
@@ -414,7 +456,7 @@ async function main() {
 
   const server = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
     if (req.method === "OPTIONS") {
@@ -429,6 +471,43 @@ async function main() {
     try {
       if (path === "/health") {
         json(res, { status: "ok" });
+        return;
+      }
+
+      if (path === "/config" && req.method === "GET") {
+        if (!starkeepConfig) {
+          res.writeHead(404);
+          json(res, { error: "No cloud config loaded" });
+          return;
+        }
+        json(res, {
+          stage: starkeepConfig.stage,
+          s3Bucket: starkeepConfig.s3Bucket ?? null,
+          s3Region: starkeepConfig.s3Region ?? starkeepConfig.region,
+          auroraEndpoint: starkeepConfig.auroraEndpoint ?? null,
+          apiGatewayUrl: starkeepConfig.apiGatewayUrl ?? null,
+          cognitoConfig: {
+            region: starkeepConfig.region,
+            userPoolId: starkeepConfig.userPoolId,
+            userPoolClientId: starkeepConfig.userPoolClientId,
+            identityPoolId: starkeepConfig.identityPoolId,
+          },
+        });
+        return;
+      }
+
+      if (path === "/config" && req.method === "PATCH") {
+        if (!starkeepConfig) {
+          res.writeHead(404);
+          json(res, { error: "No cloud config loaded" });
+          return;
+        }
+        const patch = JSON.parse(await readBody(req)) as Partial<StarkeepConfig>;
+        const updated: StarkeepConfig = { ...starkeepConfig, ...patch };
+        await writeFile(STARKEEP_CONFIG_PATH, JSON.stringify(updated, null, 2), "utf8");
+        Object.assign(starkeepConfig, patch);
+        json(res, { ok: true });
+        setTimeout(restartProcess, 200);
         return;
       }
 
@@ -480,10 +559,10 @@ async function main() {
         }
 
         const creds = await getIdentityPoolCredentials(cognitoConfig, authResult.tokens.idToken);
-        await savePersistedAuth({ refreshToken: authResult.tokens.refreshToken });
-        await saveCloudCredentials(creds);
-
         currentRefreshToken = authResult.tokens.refreshToken;
+        currentIdToken = authResult.tokens.idToken;
+        await savePersistedAuth({ refreshToken: currentRefreshToken, idToken: currentIdToken });
+        await saveCloudCredentials(creds);
 
         // (Re)start credential refresh timer
         stopCredentialRefresh?.();
@@ -495,8 +574,47 @@ async function main() {
             console.log("Cloud credentials refreshed");
           },
           (err) => console.error("Credential refresh failed:", err.message),
+          async (idToken) => {
+            currentIdToken = idToken;
+            await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
+          },
         );
 
+        json(res, { ok: true });
+        return;
+      }
+
+      if (path === "/auth/tokens" && req.method === "POST") {
+        if (!cognitoConfig) {
+          res.writeHead(503);
+          json(res, { error: "No cloud config loaded — cannot authenticate" });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as { idToken: string; refreshToken: string };
+        if (!body.idToken || !body.refreshToken) {
+          res.writeHead(400);
+          json(res, { error: "idToken and refreshToken are required" });
+          return;
+        }
+        const creds = await getIdentityPoolCredentials(cognitoConfig, body.idToken);
+        currentRefreshToken = body.refreshToken;
+        currentIdToken = body.idToken;
+        await savePersistedAuth({ refreshToken: currentRefreshToken, idToken: currentIdToken });
+        await saveCloudCredentials(creds);
+        stopCredentialRefresh?.();
+        stopCredentialRefresh = startCredentialRefreshTimer(
+          cognitoConfig,
+          () => currentRefreshToken,
+          async (newCreds) => {
+            await saveCloudCredentials(newCreds);
+            console.log("Cloud credentials refreshed");
+          },
+          (err) => console.error("Credential refresh failed:", err.message),
+          async (idToken) => {
+            currentIdToken = idToken;
+            await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
+          },
+        );
         json(res, { ok: true });
         return;
       }
@@ -505,6 +623,7 @@ async function main() {
       if (path === "/sync/status" && req.method === "GET") {
         json(res, {
           enabled: sdk.sync !== null,
+          syncPaused: syncRuntime.syncPaused,
           cloudUrl: CLOUD_URL ?? null,
           lastPullAt: syncRuntime.lastPullAt,
           lastPushAt: syncRuntime.lastPushAt,
@@ -512,6 +631,40 @@ async function main() {
           pullBackoffMs: syncRuntime.pullBackoffMs,
           conflictCount: sdk.sync ? sdk.sync.getConflicts().length : 0,
         });
+        return;
+      }
+
+      if (path === "/sync/pause" && req.method === "POST") {
+        if (!sdk.sync) {
+          res.writeHead(400);
+          json(res, { error: "sync not configured" });
+          return;
+        }
+        syncRuntime.syncPaused = true;
+        if (pullTimer) { clearTimeout(pullTimer); pullTimer = null; }
+        if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+        json(res, { ok: true });
+        return;
+      }
+
+      if (path === "/sync/resume" && req.method === "POST") {
+        if (!sdk.sync) {
+          res.writeHead(400);
+          json(res, { error: "sync not configured" });
+          return;
+        }
+        syncRuntime.syncPaused = false;
+        sdk.sync.fullSync().then(() => {
+          syncRuntime.lastPullAt = new Date().toISOString();
+          syncRuntime.lastPushAt = new Date().toISOString();
+          syncRuntime.lastError = null;
+          syncRuntime.pullBackoffMs = PULL_INTERVAL_MS;
+        }).catch((err: Error) => {
+          syncRuntime.lastError = err.message;
+          console.error("resume fullSync failed:", err);
+        });
+        pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
+        json(res, { ok: true });
         return;
       }
 

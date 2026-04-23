@@ -18,6 +18,7 @@ import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import { generateId, createHLCClock, SyncStatus } from "@starkeep/core";
 import type { DataRecord, StarkeepId } from "@starkeep/core";
+import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import type {
   DatabaseClientFactory,
   DatabaseClient,
@@ -387,6 +388,28 @@ export async function handler(event: APIGatewayEvent) {
         await db.delete(id);
         return ok({ deleted: true });
       }
+    }
+
+    // POST /sync/pull — pull changes since a given HLC timestamp
+    if (method === "POST" && path === "/sync/pull") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody);
+      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
+      const response = await transport.pullChanges(body);
+      return ok(response);
+    }
+
+    // POST /sync/push — push local changes to the cloud
+    if (method === "POST" && path === "/sync/push") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody);
+      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
+      const response = await transport.pushChanges(body);
+      return ok(response);
     }
 
     return clientErr("Not found", 404);

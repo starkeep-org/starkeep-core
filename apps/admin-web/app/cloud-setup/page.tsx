@@ -937,6 +937,18 @@ function CloudSetupPage() {
       };
       await writeCloudConfig(config);
       await writeCloudCredentials(credentials);
+      // Push deploy outputs to the local data-server so .starkeep-config.json is updated on disk.
+      // Best-effort: if the local server isn't running this is a no-op.
+      await fetch("http://127.0.0.1:9820/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          s3Bucket: result.s3Bucket,
+          s3Region: result.s3Region,
+          auroraEndpoint: result.auroraEndpoint,
+          ...(result.apiGatewayUrl ? { apiGatewayUrl: result.apiGatewayUrl } : {}),
+        }),
+      }).catch(() => {});
       localStorage.removeItem(PARTIAL_SETUP_KEY);
       router.push("/");
     } catch (err) {

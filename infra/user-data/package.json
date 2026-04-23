@@ -16,6 +16,7 @@
     "@starkeep/storage-aurora-dsql": "workspace:*",
     "@starkeep/storage-s3": "workspace:*",
     "@starkeep/core": "workspace:*",
+    "@starkeep/sync-engine": "workspace:*",
     "@aws-sdk/dsql-signer": "^3.700.0",
     "pg": "^8.13.0",
     "sst": "^4.0.0"

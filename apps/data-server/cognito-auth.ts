@@ -146,6 +146,7 @@ export function startCredentialRefreshTimer(
   getRefreshToken: () => string | null,
   onNewCredentials: (creds: STSCredentials) => void,
   onError?: (err: Error) => void,
+  onNewIdToken?: (idToken: string) => void,
 ): () => void {
   const REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 
@@ -156,6 +157,7 @@ export function startCredentialRefreshTimer(
       const tokens = await refreshTokens(config, refreshToken);
       const creds = await getIdentityPoolCredentials(config, tokens.idToken);
       onNewCredentials(creds);
+      onNewIdToken?.(tokens.idToken);
     } catch (err) {
       onError?.(err instanceof Error ? err : new Error(String(err)));
     }

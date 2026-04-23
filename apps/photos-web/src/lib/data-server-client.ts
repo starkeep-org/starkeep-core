@@ -55,14 +55,8 @@ async function request<T>(
   return res.json() as Promise<T>;
 }
 
-/**
- * Register a @starkeep/image record.
- *
- * Local mode: sends filePath — server creates a symlink, no bytes transferred.
- * Remote mode: sends fileBase64 — server uploads bytes to S3.
- */
 export async function addPhotoFromPath(
-  filePath: string,
+  _filePath: string,
   fileBytes: Uint8Array,
   mimeType: string,
   fileName: string,
@@ -89,13 +83,21 @@ export async function addPhotoFromPath(
       fileBase64,
     };
   } else {
-    console.debug(`[data-server-client] Local upload via filePath: ${filePath}`);
+    // TODO: replace with filePath-based symlink once photos-web runs in a native shell
+    // (Tauri/Electron) that can provide the real OS path. Browsers don't expose filesystem
+    // paths, so we copy bytes for now — avoid this pattern for permanent local-mode code.
+    console.debug(`[data-server-client] Local upload via bytes (${fileBytes.length} bytes)`);
+    let binary = "";
+    const chunkSize = 8192;
+    for (let i = 0; i < fileBytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...fileBytes.subarray(i, i + chunkSize));
+    }
     body = {
       type: "@starkeep/image",
       payload: { fileName, title },
       fileName,
       contentType: mimeType,
-      filePath,
+      fileBase64: btoa(binary),
     };
   }
 
@@ -165,6 +167,31 @@ export async function postMetadata(
       }),
     }),
   });
+}
+
+const LOCAL_BASE = "http://127.0.0.1:9820";
+
+export interface SyncStatus {
+  enabled: boolean;
+  syncPaused: boolean;
+  cloudUrl: string | null;
+  lastPullAt: string | null;
+  lastPushAt: string | null;
+  lastError: string | null;
+  conflictCount: number;
+}
+
+export async function getSyncStatus(): Promise<SyncStatus> {
+  const res = await fetch(`${LOCAL_BASE}/sync/status`);
+  return res.json() as Promise<SyncStatus>;
+}
+
+export async function pauseSync(): Promise<void> {
+  await fetch(`${LOCAL_BASE}/sync/pause`, { method: "POST" });
+}
+
+export async function resumeSync(): Promise<void> {
+  await fetch(`${LOCAL_BASE}/sync/resume`, { method: "POST" });
 }
 
 export async function getMetadataFileUrl(

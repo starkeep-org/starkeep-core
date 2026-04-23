@@ -11,6 +11,8 @@ import {
   Button,
   Alert,
   Loader,
+  SegmentedControl,
+  Textarea,
 } from "@mantine/core";
 import {
   readCloudConfig,
@@ -36,12 +38,28 @@ export default function SettingsPage() {
   );
 }
 
+async function patchLocalServer(patch: Record<string, string | undefined>): Promise<boolean> {
+  try {
+    const res = await fetch("http://127.0.0.1:9820/config", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 function CloudConfigSection() {
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportSuccess, setExportSuccess] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccess, setImportSuccess] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importMode, setImportMode] = useState<"file" | "sst">("file");
+  const [serverPatched, setServerPatched] = useState(false);
+  const [sstText, setSstText] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   async function handleExport() {
@@ -70,12 +88,6 @@ function CloudConfigSection() {
     }
   }
 
-  function handleImportClick() {
-    setImportError(null);
-    setImportSuccess(false);
-    fileInputRef.current?.click();
-  }
-
   async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -94,9 +106,7 @@ function CloudConfigSection() {
         "cognitoConfig",
       ];
       for (const field of required) {
-        if (!parsed[field]) {
-          throw new Error(`Missing required field: ${field}`);
-        }
+        if (!parsed[field]) throw new Error(`Missing required field: ${field}`);
       }
 
       const existing = await readCloudConfig();
@@ -105,17 +115,66 @@ function CloudConfigSection() {
         s3Bucket: parsed.s3Bucket!,
         s3Region: parsed.s3Region!,
         auroraEndpoint: parsed.auroraEndpoint!,
+        apiGatewayUrl: parsed.apiGatewayUrl ?? existing?.apiGatewayUrl,
         cognitoConfig: parsed.cognitoConfig!,
         cognitoRefreshToken: existing?.cognitoRefreshToken ?? "",
       };
 
       await writeCloudConfig(merged);
+      const patched = await patchLocalServer({
+        s3Bucket: merged.s3Bucket,
+        s3Region: merged.s3Region,
+        auroraEndpoint: merged.auroraEndpoint,
+        apiGatewayUrl: merged.apiGatewayUrl,
+      });
+      setServerPatched(patched);
       setImportSuccess(true);
     } catch (err) {
       setImportError(err instanceof Error ? err.message : "Import failed");
     } finally {
       setImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  async function handleSstImport() {
+    setImporting(true);
+    setImportError(null);
+    setImportSuccess(false);
+    try {
+      const outputs = parseSstOutputs(sstText);
+      const bucketName = outputs["bucketName"];
+      const auroraHostname = outputs["auroraHostname"];
+      const apiGatewayUrl = outputs["apiGatewayUrl"];
+      if (!bucketName || !auroraHostname) {
+        throw new Error(
+          `Could not find required values in output. Parsed: ${JSON.stringify(outputs)}`,
+        );
+      }
+
+      const existing = await readCloudConfig();
+      if (!existing) throw new Error("No existing cloud config — complete the setup wizard first.");
+
+      const updated: CloudConfig = {
+        ...existing,
+        s3Bucket: bucketName,
+        auroraEndpoint: auroraHostname,
+        ...(apiGatewayUrl ? { apiGatewayUrl } : {}),
+      };
+
+      await writeCloudConfig(updated);
+      const patched = await patchLocalServer({
+        s3Bucket: bucketName,
+        auroraEndpoint: auroraHostname,
+        ...(apiGatewayUrl ? { apiGatewayUrl } : {}),
+      });
+      setServerPatched(patched);
+      setSstText("");
+      setImportSuccess(true);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -139,9 +198,18 @@ function CloudConfigSection() {
           </Alert>
         )}
         {importError && <Alert color="red" title="Import failed">{importError}</Alert>}
-        {importSuccess && (
+        {importSuccess && serverPatched && (
           <Alert color="green" title="Imported">
-            Cloud config imported. Sign in through the setup wizard to activate this device.
+            {importMode === "sst"
+              ? "Deploy outputs saved and local server config updated."
+              : "Cloud config imported. Sign in through the setup wizard to activate this device."}
+          </Alert>
+        )}
+        {importSuccess && !serverPatched && (
+          <Alert color="yellow" title="Saved locally — local server not updated">
+            Config saved to this browser, but the local data-server wasn&apos;t reachable so
+            .starkeep-config.json was not updated. Start the data-server and re-import to apply the
+            changes.
           </Alert>
         )}
 
@@ -149,10 +217,56 @@ function CloudConfigSection() {
           <Button variant="default" onClick={handleExport}>
             Export Cloud Config
           </Button>
-          <Button variant="default" onClick={handleImportClick} loading={importing}>
-            Import Cloud Config
-          </Button>
         </Group>
+
+        <Stack gap="xs">
+          <SegmentedControl
+            value={importMode}
+            onChange={(v) => {
+              setImportMode(v as "file" | "sst");
+              setImportError(null);
+              setImportSuccess(false);
+              setServerPatched(false);
+            }}
+            data={[
+              { label: "Upload config file", value: "file" },
+              { label: "Paste SST output", value: "sst" },
+            ]}
+          />
+
+          {importMode === "file" && (
+            <Button
+              variant="default"
+              onClick={() => { setImportError(null); setImportSuccess(false); fileInputRef.current?.click(); }}
+              loading={importing}
+            >
+              Import Cloud Config
+            </Button>
+          )}
+
+          {importMode === "sst" && (
+            <Stack gap="xs">
+              <Textarea
+                placeholder={"Stack starkeep\n  bucketName: starkeep-files-abc123\n  auroraHostname: abc123.dsql.us-east-1.on.aws\n  apiGatewayUrl: https://abc123.execute-api.us-east-1.amazonaws.com"}
+                description="Paste the full output from pnpm run local:deploy"
+                minRows={4}
+                value={sstText}
+                onChange={(e) => { setSstText(e.currentTarget.value); setImportError(null); setImportSuccess(false); }}
+                disabled={importing}
+              />
+              <Group justify="flex-end">
+                <Button
+                  variant="default"
+                  onClick={handleSstImport}
+                  loading={importing}
+                  disabled={!sstText.trim()}
+                >
+                  Import from output
+                </Button>
+              </Group>
+            </Stack>
+          )}
+        </Stack>
 
         <input
           ref={fileInputRef}

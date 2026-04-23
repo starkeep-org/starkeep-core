@@ -17,6 +17,7 @@ import {
   type PhotoRecord,
 } from "./src/lib/data-server-client";
 import { DataSourceProvider, useDataSource } from "./src/lib/data-source-context";
+import { CloudSetupModal } from "./src/lib/CloudSetupModal";
 import { downsizeImage } from "./src/lib/image-utils";
 import type { DataSourceMode } from "./src/lib/data-client";
 
@@ -204,6 +205,7 @@ function PhotosAppInner() {
   const { mode, setMode, remoteAvailable } = useDataSource();
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showCloudSetup, setShowCloudSetup] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedImage = state.selectedId
@@ -324,6 +326,14 @@ function PhotosAppInner() {
           </div>
 
           <button
+            onClick={() => setShowCloudSetup(true)}
+            title="Cloud setup"
+            style={toolbarButtonStyle}
+          >
+            ⚙
+          </button>
+
+          <button
             onClick={handleAddClick}
             disabled={adding}
             style={{ ...toolbarButtonStyle, background: "rgba(255,255,255,0.15)" }}
@@ -364,6 +374,10 @@ function PhotosAppInner() {
             onCrop={async () => {}}
             onShare={async () => null}
           />
+        )}
+
+        {showCloudSetup && (
+          <CloudSetupModal onClose={() => setShowCloudSetup(false)} />
         )}
       </div>
     </PhotoUrlProvider>
