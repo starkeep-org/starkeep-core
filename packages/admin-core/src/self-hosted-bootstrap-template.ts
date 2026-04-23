@@ -143,9 +143,83 @@ Resources:
             Version: '2012-10-17'
             Statement:
 
-              # CloudFormation — full stack lifecycle on {StackPrefix}-* stacks.
-              # Needed for: sst deploy (user-data infra)
-              - Sid: CloudFormationStackLifecycle
+              # ---------------------------------------------------------------
+              # SST deployment permissions — copied verbatim from
+              # CodeBuildServiceRole below. Keep these two in sync.
+              #
+              # Three intentional differences from the CodeBuild role:
+              #   1. CloudWatchLogsDeploy omits codebuild log group paths
+              #      (no CodeBuild process runs locally).
+              #   2. AuroraDsqlDeploy adds DbConnect + DbConnectAdmin so the
+              #      user can connect to the cluster directly (CodeBuild does
+              #      not need this).
+              #   3. CodeBuildTrigger + ArtifactsBucketWrite are appended
+              #      below for the remote-deploy path (CodeBuild has
+              #      ArtifactsBucketRead instead).
+              # ---------------------------------------------------------------
+
+              # CloudWatch Logs — describe/list actions require Resource: *
+              - Sid: CloudWatchLogsDescribe
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+
+              # CloudWatch Logs — delivery lifecycle for API Gateway v2 access logging.
+              # SST's ApiGatewayV2 unconditionally sets accessLogSettings on the $default stage,
+              # which triggers these Vended Logs APIs against a service-level delivery resource —
+              # they are NOT covered by the log-group-scoped statement below and require Resource: *.
+              - Sid: CloudWatchLogsDelivery
+                Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                Resource: '*'
+
+              # CloudWatch Logs — write/tag actions scoped to SST-created log groups
+              - Sid: CloudWatchLogsDeploy
+                Effect: Allow
+                Action: 'logs:*'
+                Resource:
+                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/lambda/\${StackPrefix}*'
+                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/lambda/\${StackPrefix}*:*'
+                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/vendedlogs/apis/\${StackPrefix}*'
+                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/vendedlogs/apis/\${StackPrefix}*:*'
+
+              # SSM — SST reads/writes its bootstrap config from Parameter Store
+              - Sid: SstBootstrapSSM
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                Resource: !Sub 'arn:aws:ssm:\${AWS::Region}:\${AWS::AccountId}:parameter/sst/*'
+
+              # S3 — full access to user-data and SST state/asset buckets
+              - Sid: S3DeployAccess
+                Effect: Allow
+                Action: 's3:*'
+                Resource:
+                  - !Sub 'arn:aws:s3:::\${StackPrefix}*'
+                  - !Sub 'arn:aws:s3:::\${StackPrefix}*/*'
+                  - 'arn:aws:s3:::sst-state-*'
+                  - 'arn:aws:s3:::sst-state-*/*'
+                  - 'arn:aws:s3:::sst-asset-*'
+                  - 'arn:aws:s3:::sst-asset-*/*'
+
+              - Sid: S3ListAllGlobal
+                Effect: Allow
+                Action: s3:ListAllMyBuckets
+                Resource: '*'
+
+              # CloudFormation — full stack lifecycle
+              - Sid: CloudFormationDeploy
                 Effect: Allow
                 Action:
                   - cloudformation:CreateStack
@@ -162,71 +236,15 @@ Resources:
                   - cloudformation:DeleteChangeSet
                   - cloudformation:ListChangeSets
                   - cloudformation:ListStackResources
+                  - cloudformation:ListStacks
                   - cloudformation:GetStackPolicy
                   - cloudformation:SetStackPolicy
-                Resource: !Sub 'arn:aws:cloudformation:*:\${AWS::AccountId}:stack/\${StackPrefix}*/*'
-
-              # CloudFormation global read (ListStacks requires wildcard resource)
-              - Sid: CloudFormationReadGlobal
-                Effect: Allow
-                Action:
-                  - cloudformation:ListStacks
-                  - cloudformation:DescribeStacks
-                Resource: '*'
-
-              # S3 — create and manage the data bucket, read/write objects.
-              # Needed for: SST state bucket + user-data files bucket.
-              - Sid: S3DataBucketAccess
-                Effect: Allow
-                Action:
-                  - s3:CreateBucket
-                  - s3:DeleteBucket
-                  - s3:PutBucketVersioning
-                  - s3:PutBucketPolicy
-                  - s3:GetBucketPolicy
-                  - s3:DeleteBucketPolicy
-                  - s3:PutBucketTagging
-                  - s3:GetBucketTagging
-                  - s3:PutBucketCORS
-                  - s3:GetBucketCORS
-                  - s3:GetBucketLocation
-                  - s3:ListBucket
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:DeleteObject
-                  - s3:GetObjectVersion
-                Resource:
-                  - !Sub 'arn:aws:s3:::\${StackPrefix}*'
-                  - !Sub 'arn:aws:s3:::\${StackPrefix}*/*'
-
-              # SST state bucket (created by SST on first deploy)
-              - Sid: S3SstStateBucket
-                Effect: Allow
-                Action:
-                  - s3:CreateBucket
-                  - s3:ListBucket
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:DeleteObject
-                  - s3:GetBucketLocation
-                  - s3:GetBucketVersioning
-                  - s3:PutBucketVersioning
-                Resource:
-                  - 'arn:aws:s3:::sst-state-*'
-                  - 'arn:aws:s3:::sst-state-*/*'
-                  - 'arn:aws:s3:::sst-asset-*'
-                  - 'arn:aws:s3:::sst-asset-*/*'
-
-              # S3 global list (needed for SST bootstrap checks)
-              - Sid: S3ListAllBuckets
-                Effect: Allow
-                Action:
-                  - s3:ListAllMyBuckets
                 Resource: '*'
 
               # Aurora DSQL — create and manage the remote metadata cluster.
-              # Needed for: sst deploy (user-data infra) + data-server connections.
-              - Sid: AuroraDsqlAccess
+              # Superset of CodeBuild role: adds DbConnect + DbConnectAdmin for
+              # direct cluster access from the desktop/server.
+              - Sid: AuroraDsqlDeploy
                 Effect: Allow
                 Action:
                   - dsql:CreateCluster
@@ -237,36 +255,40 @@ Resources:
                   - dsql:TagResource
                   - dsql:UntagResource
                   - dsql:ListTagsForResource
+                  - dsql:GetVpcEndpointServiceName
                   - dsql:DbConnect
                   - dsql:DbConnectAdmin
                 Resource: '*'
 
-              # Cognito user management — admin-desktop needs to create the
-              # initial user account and manage sessions.
-              - Sid: CognitoUserManagement
+              # Lambda — full access scoped to StackPrefix functions; list ops need Resource: *
+              - Sid: LambdaDeploy
                 Effect: Allow
-                Action:
-                  - cognito-idp:AdminCreateUser
-                  - cognito-idp:AdminSetUserPassword
-                  - cognito-idp:AdminGetUser
-                  - cognito-idp:AdminDeleteUser
-                  - cognito-idp:ListUsers
-                  - cognito-idp:DescribeUserPool
-                  - cognito-idp:DescribeUserPoolClient
-                Resource: !GetAtt UserPool.Arn
+                Action: 'lambda:*'
+                Resource: !Sub 'arn:aws:lambda:\${AWS::Region}:\${AWS::AccountId}:function:\${StackPrefix}*'
 
-              # IAM PassRole — needed by SST/CloudFormation to pass execution roles
-              - Sid: IAMPassRole
+              - Sid: LambdaListGlobal
                 Effect: Allow
                 Action:
-                  - iam:PassRole
+                  - lambda:ListFunctions
+                  - lambda:GetAccountSettings
                 Resource: '*'
-                Condition:
-                  StringEquals:
-                    iam:PassedToService: cloudformation.amazonaws.com
 
-              # IAM role management for SST-created resources
-              - Sid: IAMRoleManagement
+              # API Gateway v2 — create and manage the HTTP API
+              - Sid: ApiGatewayDeploy
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:POST
+                  - apigateway:PUT
+                  - apigateway:DELETE
+                  - apigateway:PATCH
+                  - apigateway:TagResource
+                  - apigateway:UntagResource
+                  - apigateway:ListTagsForResource
+                Resource: '*'
+
+              # IAM — create Lambda execution roles and pass them
+              - Sid: IAMDeployRoles
                 Effect: Allow
                 Action:
                   - iam:CreateRole
@@ -280,12 +302,47 @@ Resources:
                   - iam:GetRolePolicy
                   - iam:ListRolePolicies
                   - iam:ListAttachedRolePolicies
+                  - iam:ListInstanceProfilesForRole
                   - iam:TagRole
                   - iam:UntagRole
-                  - iam:ListRoles
                 Resource: !Sub 'arn:aws:iam::\${AWS::AccountId}:role/\${StackPrefix}*'
 
-              # CodeBuild — trigger deployments and poll build status
+              - Sid: IAMListGlobal
+                Effect: Allow
+                Action:
+                  - iam:ListRoles
+                Resource: '*'
+
+              - Sid: IAMPassRoleDeploy
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub 'arn:aws:iam::\${AWS::AccountId}:role/\${StackPrefix}*'
+                Condition:
+                  StringLike:
+                    iam:PassedToService:
+                      - cloudformation.amazonaws.com
+                      - lambda.amazonaws.com
+                      - apigateway.amazonaws.com
+
+              # ---------------------------------------------------------------
+              # Authenticated Role-only permissions (not in CodeBuild role)
+              # ---------------------------------------------------------------
+
+              # Cognito user management — create the initial user account and
+              # manage sessions from the desktop app.
+              - Sid: CognitoUserManagement
+                Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:ListUsers
+                  - cognito-idp:DescribeUserPool
+                  - cognito-idp:DescribeUserPoolClient
+                Resource: !GetAtt UserPool.Arn
+
+              # CodeBuild — trigger remote deployments and poll build status
               - Sid: CodeBuildTrigger
                 Effect: Allow
                 Action:
@@ -514,6 +571,7 @@ Resources:
                   - iam:GetRolePolicy
                   - iam:ListRolePolicies
                   - iam:ListAttachedRolePolicies
+                  - iam:ListInstanceProfilesForRole
                   - iam:TagRole
                   - iam:UntagRole
                 Resource: !Sub 'arn:aws:iam::\${AWS::AccountId}:role/\${StackPrefix}*'
