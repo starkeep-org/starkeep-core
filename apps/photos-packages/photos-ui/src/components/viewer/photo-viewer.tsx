@@ -20,7 +20,7 @@ interface PhotoViewerProps {
 }
 
 export function PhotoViewer({ image, onClose, onUpdateCaption, onCrop, onShare }: PhotoViewerProps) {
-  const { getThumbnailSrc } = usePhotoUrls();
+  const { getFullSizeSrc } = usePhotoUrls();
   const [infoVisible, setInfoVisible] = useState(false);
   const [cropMode, setCropMode] = useState(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
@@ -108,7 +108,7 @@ export function PhotoViewer({ image, onClose, onUpdateCaption, onCrop, onShare }
         <div style={{ position: "relative" }}>
           <img
             ref={imgRef}
-            src={getThumbnailSrc(image.id)}
+            src={getFullSizeSrc(image.id)}
             alt={image.title || image.originalFilename}
             onLoad={handleImgLoad}
             style={{

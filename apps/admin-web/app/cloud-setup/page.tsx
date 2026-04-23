@@ -441,6 +441,10 @@ function downloadCliConfig(config: {
   userPoolId: string;
   userPoolClientId: string;
   identityPoolId: string;
+  s3Bucket?: string;
+  s3Region?: string;
+  auroraEndpoint?: string;
+  apiGatewayUrl?: string;
 }) {
   const json = JSON.stringify(config, null, 2);
   const blob = new Blob([json], { type: "application/json" });
@@ -649,6 +653,10 @@ function Step5DeployInfra({
               userPoolId: cognitoConfig.userPoolId,
               userPoolClientId: cognitoConfig.userPoolClientId,
               identityPoolId: cognitoConfig.identityPoolId,
+              s3Bucket: deployResult.s3Bucket,
+              s3Region: deployResult.s3Region,
+              auroraEndpoint: deployResult.auroraEndpoint,
+              apiGatewayUrl: deployResult.apiGatewayUrl,
             })
           }
         >

@@ -134,7 +134,7 @@ export async function uploadFile(bytes: Uint8Array, mimeType: string, mode: Data
   return request<FileRef>("/data/files", source, {
     method: "POST",
     headers: { "Content-Type": mimeType },
-    body: bytes,
+    body: bytes as unknown as BodyInit,
   });
 }
 
@@ -184,4 +184,3 @@ export async function getMetadataFileUrl(
     return null;
   }
 }
-

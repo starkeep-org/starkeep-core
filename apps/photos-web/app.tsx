@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
 import type { AppImage } from "@photos/photos-lib";
 import {
   PhotoProvider,
@@ -17,31 +15,10 @@ import {
   uploadFile,
   getMetadataFileUrl,
   type PhotoRecord,
-} from "./lib/data-server-client.js";
-import { DataSourceProvider, useDataSource } from "./lib/data-source-context.js";
-import type { DataSourceMode } from "./lib/data-client.js";
-
-interface DownsizeResult {
-  data: string;       // base64-encoded image bytes
-  mime_type: string;
-  width: number;
-  height: number;
-}
-
-function base64ToUint8Array(b64: string): Uint8Array {
-  const binaryString = atob(b64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes;
-}
-
-// ---------------------------------------------------------------------------
-// Map a data-server PhotoRecord to the AppImage shape expected by the UI
-// components. Metadata fields are filled with safe defaults; they will be
-// enriched once the app-side generators run and their results are stored.
-// ---------------------------------------------------------------------------
+} from "./src/lib/data-server-client";
+import { DataSourceProvider, useDataSource } from "./src/lib/data-source-context";
+import { downsizeImage } from "./src/lib/image-utils";
+import type { DataSourceMode } from "./src/lib/data-client";
 
 function photoRecordToAppImage(record: PhotoRecord): AppImage {
   return {
@@ -80,15 +57,41 @@ function photoRecordToAppImage(record: PhotoRecord): AppImage {
   };
 }
 
-// ---------------------------------------------------------------------------
-// File URL cache
-// ---------------------------------------------------------------------------
+function useFullSizeUrlCache(mode: DataSourceMode) {
+  const [urlMap, setUrlMap] = useState<ReadonlyMap<string, string>>(new Map());
+  const loadingRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    setUrlMap(new Map());
+    loadingRef.current.clear();
+  }, [mode]);
+
+  return useCallback(
+    (imageId: string): string => {
+      const cached = urlMap.get(imageId);
+      if (cached) return cached;
+      if (loadingRef.current.has(imageId)) return "";
+
+      loadingRef.current.add(imageId);
+      getPhotoFileUrl(imageId, mode)
+        .then((url) => {
+          loadingRef.current.delete(imageId);
+          setUrlMap((prev) => new Map(prev).set(imageId, url));
+        })
+        .catch(() => {
+          loadingRef.current.delete(imageId);
+        });
+
+      return "";
+    },
+    [urlMap, mode],
+  );
+}
 
 function useFileUrlCache(mode: DataSourceMode) {
   const [urlMap, setUrlMap] = useState<ReadonlyMap<string, string>>(new Map());
   const loadingRef = useRef<Set<string>>(new Set());
 
-  // Clear cache when mode changes — URLs from local server aren't valid for remote
   useEffect(() => {
     setUrlMap(new Map());
     loadingRef.current.clear();
@@ -119,16 +122,12 @@ function useFileUrlCache(mode: DataSourceMode) {
   return getFileSrc;
 }
 
-// ---------------------------------------------------------------------------
-// Run app-side generators after a photo is added.
-// ---------------------------------------------------------------------------
-
 async function runGenerators(
   record: PhotoRecord,
+  file: File,
   fileBytes: Uint8Array,
   fileName: string,
   title: string,
-  filePath: string,
   mode: DataSourceMode,
 ): Promise<void> {
   const targetId = record.id;
@@ -178,29 +177,21 @@ async function runGenerators(
     // EXIF extraction is best-effort
   }
 
-  // Downsize thumbnail — 400px grid thumbnail, eager at ingest.
-  // 800px and 1600px are generated lazily when the photo is first viewed.
   for (const maxDimension of [400]) {
     try {
-      const result = await invoke<DownsizeResult>("downsize_image", { filePath, maxDimension });
-      const bytes = base64ToUint8Array(result.data);
-      const fileRef = await uploadFile(bytes, result.mime_type, mode);
+      const result = await downsizeImage(file, maxDimension);
+      const fileRef = await uploadFile(result.bytes, result.mimeType, mode);
       const generatorId = `@starkeep/image:downsize-${maxDimension}`;
-      const downsizeFormat = result.mime_type === "image/webp" ? "webp" : "jpeg";
       await postMetadata(targetId, targetType, generatorId, 1, {
         downsizeWidth: result.width,
         downsizeHeight: result.height,
-        downsizeFormat,
+        downsizeFormat: "webp",
       }, mode, fileRef);
     } catch {
-      // Downsize generation is best-effort; app sweep at launch handles retries
+      // Downsize generation is best-effort
     }
   }
 }
-
-// ---------------------------------------------------------------------------
-// Inner app (has access to PhotoProvider state and DataSourceContext)
-// ---------------------------------------------------------------------------
 
 const IMAGE_EXTENSIONS: Record<string, string> = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
@@ -208,11 +199,12 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
   heif: "image/heif", avif: "image/avif", tiff: "image/tiff",
 };
 
-function PhotosAppDesktopInner() {
+function PhotosAppInner() {
   const { state, dispatch } = usePhotoContext();
   const { mode, setMode, remoteAvailable } = useDataSource();
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedImage = state.selectedId
     ? state.images.find((img) => img.id === state.selectedId) ?? null
@@ -234,29 +226,21 @@ function PhotosAppDesktopInner() {
     void loadPhotos();
   }, [loadPhotos]);
 
-  const handleAddClick = async () => {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "Images", extensions: Object.keys(IMAGE_EXTENSIONS) }],
-    });
-    if (!selected || typeof selected !== "string") return;
-
+  const handleFileSelected = async (file: File) => {
     setAdding(true);
     setError(null);
     try {
-      const filePath = selected;
-      const fileName = filePath.split("/").pop() ?? filePath;
+      const fileName = file.name;
       const title = fileName.replace(/\.[^.]+$/, "");
       const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
-      const mimeType = IMAGE_EXTENSIONS[ext] ?? "application/octet-stream";
+      const mimeType = IMAGE_EXTENSIONS[ext] ?? file.type ?? "application/octet-stream";
 
-      // Always read bytes: needed for remote upload and for EXIF extraction.
-      const buf = await invoke<ArrayBuffer>("read_file_bytes", { path: filePath });
+      const buf = await file.arrayBuffer();
       const fileBytes = new Uint8Array(buf);
-      const record = await addPhotoFromPath(filePath, fileBytes, mimeType, fileName, title, mode);
+      const record = await addPhotoFromPath(fileName, fileBytes, mimeType, fileName, title, mode);
       dispatch({ type: "APPEND_IMAGES", images: [photoRecordToAppImage(record)] });
 
-      runGenerators(record, fileBytes, fileName, title, filePath, mode).catch(() => {});
+      runGenerators(record, file, fileBytes, fileName, title, mode).catch(() => {});
     } catch (err) {
       console.error("[photos] Upload failed:", err);
       setError(err instanceof Error ? err.message : "Failed to add photo");
@@ -265,10 +249,15 @@ function PhotosAppDesktopInner() {
     }
   };
 
+  const handleAddClick = () => {
+    fileInputRef.current?.click();
+  };
+
   const getFileSrc = useFileUrlCache(mode);
+  const getFullSizeSrc = useFullSizeUrlCache(mode);
 
   return (
-    <PhotoUrlProvider getThumbnailSrc={getFileSrc}>
+    <PhotoUrlProvider getThumbnailSrc={getFileSrc} getFullSizeSrc={getFullSizeSrc}>
       <div
         style={{
           minHeight: "100vh",
@@ -277,6 +266,19 @@ function PhotosAppDesktopInner() {
           fontFamily: "sans-serif",
         }}
       >
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={Object.keys(IMAGE_EXTENSIONS).map((e) => `.${e}`).join(",")}
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleFileSelected(file);
+            e.target.value = "";
+          }}
+        />
+
         {/* Toolbar */}
         <div
           style={{
@@ -322,7 +324,7 @@ function PhotosAppDesktopInner() {
           </div>
 
           <button
-            onClick={() => { void handleAddClick(); }}
+            onClick={handleAddClick}
             disabled={adding}
             style={{ ...toolbarButtonStyle, background: "rgba(255,255,255,0.15)" }}
           >
@@ -368,15 +370,11 @@ function PhotosAppDesktopInner() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Root
-// ---------------------------------------------------------------------------
-
 export function App() {
   return (
     <DataSourceProvider>
       <PhotoProvider>
-        <PhotosAppDesktopInner />
+        <PhotosAppInner />
       </PhotoProvider>
     </DataSourceProvider>
   );

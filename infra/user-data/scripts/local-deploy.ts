@@ -221,6 +221,18 @@ try {
   process.exit(1);
 }
 
+if (command === "deploy") {
+  console.log("Building workspace packages...");
+  const buildResult = spawnSync("pnpm", ["--filter", "@starkeep/storage-adapter", "--filter", "@starkeep/storage-aurora-dsql", "build"], {
+    stdio: "inherit",
+    cwd: resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
+  });
+  if (buildResult.status !== 0) {
+    console.error("Package build failed. Aborting deploy.");
+    process.exit(buildResult.status ?? 1);
+  }
+}
+
 console.log(`\nRunning: sst ${command} --stage ${config.stage}\n`);
 
 const result = spawnSync(

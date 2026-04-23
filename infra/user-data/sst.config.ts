@@ -45,7 +45,7 @@ export default $config({
       timeout: "30 seconds",
       memory: "256 MB",
       nodejs: {
-        install: ["pg", "@aws-sdk/dsql-signer"],
+        install: ["pg", "@aws-sdk/dsql-signer", "@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner", "@aws-sdk/lib-storage"],
       },
       environment: {
         AURORA_ENDPOINT: $interpolate`${cluster.identifier}.dsql.${region}.on.aws`,

@@ -168,6 +168,7 @@ interface APIGatewayEvent {
       jwt?: { claims?: Record<string, string> };
     };
   };
+  headers?: Record<string, string>;
   body?: string;
   isBase64Encoded?: boolean;
   queryStringParameters?: Record<string, string>;
@@ -279,15 +280,23 @@ export async function handler(event: APIGatewayEvent) {
     }
 
     // POST /data/metadata — store app-generated metadata
-    // Body: { targetId, targetType, generatorId, generatorVersion?, value? }
+    // Body: { targetId, targetType, generatorId, generatorVersion?, value?,
+    //         objectStorageKey?, contentHash?, mimeType?, sizeBytes? }
     if (method === "POST" && path === "/data/metadata") {
-      const body = event.body ? (JSON.parse(event.body) as {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as {
         targetId?: string;
         targetType?: string;
         generatorId?: string;
         generatorVersion?: number;
         value?: Record<string, unknown>;
-      }) : null;
+        objectStorageKey?: string;
+        contentHash?: string;
+        mimeType?: string;
+        sizeBytes?: number;
+      };
       if (!body?.targetId || !body.targetType || !body.generatorId) {
         return clientErr("targetId, targetType, and generatorId are required", 400);
       }
@@ -300,8 +309,44 @@ export async function handler(event: APIGatewayEvent) {
         inputHash: null,
         updatedAt: now,
         value: body.value ?? {},
+        objectStorageKey: body.objectStorageKey ?? null,
+        contentHash: body.contentHash ?? null,
+        mimeType: body.mimeType ?? null,
+        sizeBytes: body.sizeBytes ?? null,
       });
       return ok({ ok: true });
+    }
+
+    // POST /data/files — upload raw binary bytes to S3 (content-addressed)
+    // Body: raw bytes. Content-Type header is the MIME type.
+    // Returns: { key, contentHash, mimeType, sizeBytes }
+    if (method === "POST" && path === "/data/files") {
+      const headers = event.headers ?? {};
+      const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
+      const mimeType = contentTypeHeader.split(";")[0]!.trim();
+      const fileBuffer = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64")
+        : Buffer.from(event.body ?? "", "binary");
+      if (fileBuffer.length === 0) return clientErr("Request body must not be empty", 400);
+      if (fileBuffer.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
+      const hex = createHash("sha256").update(fileBuffer).digest("hex");
+      const key = `metadata/${hex}`;
+      await storage.put(key, fileBuffer, { contentType: mimeType });
+      return ok({ key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
+    }
+
+    // GET /data/metadata/:targetId/:generatorId/file-url — presigned S3 URL for a
+    // metadata-backed file (e.g. an image downsize thumbnail).
+    const metaFileUrlMatch = path.match(/^\/data\/metadata\/([^/]+)\/(.+)\/file-url$/);
+    if (metaFileUrlMatch && method === "GET") {
+      const [, metaTargetId, encodedGeneratorId] = metaFileUrlMatch;
+      const generatorId = decodeURIComponent(encodedGeneratorId!);
+      const entries = await db.getMetadataForRecord(metaTargetId!);
+      const entry = entries.find((e) => e.generatorId === generatorId);
+      if (!entry?.objectStorageKey) return clientErr("No file-backed metadata found for this record and generator", 404);
+      const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
+      const url = await storage.getSignedUrl!(entry.objectStorageKey, { expiresIn });
+      return ok({ url, source: "remote", mimeType: entry.mimeType, expiresIn });
     }
 
     // GET /data/records/:id/file-url — generate a presigned S3 URL

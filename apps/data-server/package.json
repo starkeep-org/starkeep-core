@@ -24,6 +24,8 @@
     "@starkeep/shared-space-api": "workspace:*",
     "sharp": "^0.33.0",
     "@aws-sdk/dsql-signer": "^3.700.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
+    "@aws-sdk/client-cognito-identity": "^3.700.0",
     "pg": "^8.13.0"
   },
   "devDependencies": {

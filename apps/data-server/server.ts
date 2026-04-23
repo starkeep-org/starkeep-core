@@ -27,13 +27,22 @@ import { createTypeRegistry } from "../../packages/core/src/schema/index.js";
 import { createHLCClock } from "../../packages/core/src/hlc/index.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { stat as fsStat, readFile } from "node:fs/promises";
+import { stat as fsStat, readFile, writeFile, mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
 import { STANDARD_DOWNSIZE_GENERATORS } from "../../packages/metadata-image/src/index.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import * as v from "valibot";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
+import {
+  type CognitoConfig,
+  type STSCredentials,
+  initiateAuth,
+  respondNewPasswordChallenge,
+  getIdentityPoolCredentials,
+  startCredentialRefreshTimer,
+} from "./cognito-auth.js";
 
 // Signing key for self-hosted file tokens — regenerated each startup so
 // all outstanding tokens are invalidated on restart (revocable by design).
@@ -42,16 +51,26 @@ const TOKEN_SECRET = randomBytes(32);
 const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
 const OWNER_ID = process.env.STARKEEP_OWNER_ID || "craig";
-const CLOUD_URL = process.env.STARKEEP_CLOUD_URL;
 const NODE_ID = process.env.STARKEEP_NODE_ID || "admin-desktop";
 const PULL_INTERVAL_MS = parseInt(process.env.STARKEEP_PULL_INTERVAL_MS || "30000", 10);
 const PUSH_DEBOUNCE_MS = parseInt(process.env.STARKEEP_PUSH_DEBOUNCE_MS || "500", 10);
 
-interface CloudConfig {
-  stackPrefix: string;
-  s3Bucket: string;
-  s3Region: string;
-  auroraEndpoint: string;
+// Path to .starkeep-config.json — resolved relative to this file so it works
+// regardless of cwd. Override via STARKEEP_CONFIG env var for non-standard layouts.
+const STARKEEP_CONFIG_PATH =
+  process.env.STARKEEP_CONFIG ??
+  fileURLToPath(new URL("../../.starkeep-config.json", import.meta.url));
+
+interface StarkeepConfig {
+  region: string;
+  stage: string;
+  userPoolId: string;
+  userPoolClientId: string;
+  identityPoolId: string;
+  s3Bucket?: string;
+  s3Region?: string;
+  auroraEndpoint?: string;
+  apiGatewayUrl?: string;
 }
 
 interface CloudCredentials {
@@ -60,29 +79,40 @@ interface CloudCredentials {
   sessionToken?: string;
 }
 
-interface LoadedCloudConfig {
-  config: CloudConfig;
-  credentials: CloudCredentials;
+interface PersistedAuth {
+  refreshToken: string;
 }
 
-async function loadCloudConfig(): Promise<LoadedCloudConfig | null> {
+async function loadStarkeepConfig(): Promise<StarkeepConfig | null> {
   try {
-    const config = JSON.parse(
-      await readFile(join(STARKEEP_DIR, "cloud-config.json"), "utf8"),
-    ) as CloudConfig;
-    const credentials = JSON.parse(
-      await readFile(join(STARKEEP_DIR, "cloud-credentials.json"), "utf8"),
-    ) as CloudCredentials;
-    return { config, credentials };
+    return JSON.parse(await readFile(STARKEEP_CONFIG_PATH, "utf8")) as StarkeepConfig;
+  } catch {
+    console.warn(`No .starkeep-config.json found at ${STARKEEP_CONFIG_PATH} — cloud features disabled`);
+    return null;
+  }
+}
+
+async function loadPersistedAuth(): Promise<PersistedAuth | null> {
+  try {
+    return JSON.parse(await readFile(join(STARKEEP_DIR, "auth.json"), "utf8")) as PersistedAuth;
   } catch {
     return null;
   }
 }
 
+async function savePersistedAuth(auth: PersistedAuth): Promise<void> {
+  await mkdir(STARKEEP_DIR, { recursive: true });
+  await writeFile(join(STARKEEP_DIR, "auth.json"), JSON.stringify(auth, null, 2), "utf8");
+}
+
+async function saveCloudCredentials(creds: STSCredentials): Promise<void> {
+  await mkdir(STARKEEP_DIR, { recursive: true });
+  await writeFile(join(STARKEEP_DIR, "cloud-credentials.json"), JSON.stringify(creds, null, 2), "utf8");
+}
+
 /**
  * Reads STS credentials from ~/.starkeep/cloud-credentials.json on every call
- * so that credentials rotated by admin-desktop are always picked up without
- * restarting the data server.
+ * so that credentials rotated externally are always picked up without restarting.
  */
 async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredentials>> {
   const credentialsPath = join(STARKEEP_DIR, "cloud-credentials.json");
@@ -167,19 +197,52 @@ async function main() {
     basePath: join(STARKEEP_DIR, "objects"),
   });
 
-  // Read cloud config from ~/.starkeep/ if present (written by admin-desktop after setup)
-  const cloudSetup = await loadCloudConfig();
-  if (cloudSetup) {
-    console.log(`Cloud config loaded: S3 bucket=${cloudSetup.config.s3Bucket}, DSQL=${cloudSetup.config.auroraEndpoint}`);
+  // Load cloud config from .starkeep-config.json at the repo root
+  const starkeepConfig = await loadStarkeepConfig();
+  if (starkeepConfig) {
+    console.log(`Cloud config loaded: stage=${starkeepConfig.stage}, region=${starkeepConfig.region}`);
+    if (starkeepConfig.s3Bucket) console.log(`  S3 bucket=${starkeepConfig.s3Bucket}`);
+    if (starkeepConfig.auroraEndpoint) console.log(`  DSQL=${starkeepConfig.auroraEndpoint}`);
+    if (starkeepConfig.apiGatewayUrl) console.log(`  API=${starkeepConfig.apiGatewayUrl}`);
   }
 
-  // S3: prefer cloud config file credentials (rotated by admin-desktop) over env vars
+  // CLOUD_URL: env var takes precedence, then fall back to apiGatewayUrl from config
+  const CLOUD_URL = process.env.STARKEEP_CLOUD_URL ?? starkeepConfig?.apiGatewayUrl ?? undefined;
+
+  // Persistent auth: if a stored refresh token exists, start credential rotation
+  const persistedAuth = await loadPersistedAuth();
+  let currentRefreshToken: string | null = persistedAuth?.refreshToken ?? null;
+  let stopCredentialRefresh: (() => void) | null = null;
+
+  const cognitoConfig: CognitoConfig | null = starkeepConfig
+    ? {
+        region: starkeepConfig.region,
+        userPoolId: starkeepConfig.userPoolId,
+        userPoolClientId: starkeepConfig.userPoolClientId,
+        identityPoolId: starkeepConfig.identityPoolId,
+      }
+    : null;
+
+  if (cognitoConfig && currentRefreshToken) {
+    console.log("Stored auth found — starting credential refresh timer");
+    stopCredentialRefresh = startCredentialRefreshTimer(
+      cognitoConfig,
+      () => currentRefreshToken,
+      async (creds) => {
+        await saveCloudCredentials(creds);
+        console.log("Cloud credentials refreshed");
+      },
+      (err) => console.error("Credential refresh failed:", err.message),
+    );
+  }
+
+  // S3: use .starkeep-config.json values when available, otherwise fall back to env vars
   let remoteAdapter: ObjectStorageAdapter | null = null;
-  if (cloudSetup?.config.s3Bucket) {
+  if (starkeepConfig?.s3Bucket) {
     const credentialProvider = await makeCloudCredentialProvider();
     remoteAdapter = new S3ObjectStorageAdapter({
-      bucketName: cloudSetup.config.s3Bucket,
-      region: cloudSetup.config.s3Region,
+      bucketName: starkeepConfig.s3Bucket,
+      region: starkeepConfig.s3Region ?? starkeepConfig.region,
       credentialProvider,
     });
     console.log("Remote S3 adapter initialized from cloud config");
@@ -204,11 +267,11 @@ async function main() {
 
   // Aurora DSQL remote database: initialized from cloud config when available
   let remoteDatabaseAdapter: DatabaseAdapter | null = null;
-  if (cloudSetup?.config.auroraEndpoint) {
+  if (starkeepConfig?.auroraEndpoint) {
     remoteDatabaseAdapter = new AuroraDsqlDatabaseAdapter(
       {
-        hostname: cloudSetup.config.auroraEndpoint,
-        region: cloudSetup.config.s3Region,
+        hostname: starkeepConfig.auroraEndpoint,
+        region: starkeepConfig.s3Region ?? starkeepConfig.region,
       },
       new CloudCredentialsDsqlClientFactory(),
     );
@@ -366,6 +429,75 @@ async function main() {
     try {
       if (path === "/health") {
         json(res, { status: "ok" });
+        return;
+      }
+
+      if (path === "/auth/status" && req.method === "GET") {
+        json(res, {
+          configLoaded: cognitoConfig !== null,
+          authenticated: currentRefreshToken !== null,
+        });
+        return;
+      }
+
+      if (path === "/auth/login" && req.method === "POST") {
+        if (!cognitoConfig) {
+          res.writeHead(503);
+          json(res, { error: "No .starkeep-config.json found — cannot authenticate" });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as {
+          email: string;
+          password: string;
+          newPassword?: string;
+        };
+        if (!body.email || !body.password) {
+          res.writeHead(400);
+          json(res, { error: "email and password are required" });
+          return;
+        }
+
+        let authResult = await initiateAuth(cognitoConfig, body.email, body.password);
+
+        if (authResult.challengeName === "NEW_PASSWORD_REQUIRED") {
+          if (!body.newPassword) {
+            json(res, { challenge: "NEW_PASSWORD_REQUIRED" });
+            return;
+          }
+          const tokens = await respondNewPasswordChallenge(
+            cognitoConfig,
+            authResult.session!,
+            body.email,
+            body.newPassword,
+          );
+          authResult = { tokens };
+        }
+
+        if (!authResult.tokens) {
+          res.writeHead(400);
+          json(res, { error: `Unhandled auth challenge: ${authResult.challengeName}` });
+          return;
+        }
+
+        const creds = await getIdentityPoolCredentials(cognitoConfig, authResult.tokens.idToken);
+        await savePersistedAuth({ refreshToken: authResult.tokens.refreshToken });
+        await saveCloudCredentials(creds);
+
+        currentRefreshToken = authResult.tokens.refreshToken;
+
+        // (Re)start credential refresh timer
+        stopCredentialRefresh?.();
+        stopCredentialRefresh = startCredentialRefreshTimer(
+          cognitoConfig,
+          () => currentRefreshToken,
+          async (newCreds) => {
+            await saveCloudCredentials(newCreds);
+            console.log("Cloud credentials refreshed");
+          },
+          (err) => console.error("Credential refresh failed:", err.message),
+        );
+
+        json(res, { ok: true });
         return;
       }
 
