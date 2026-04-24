@@ -371,6 +371,16 @@ export async function createStarkeepSdk(
             return { pulled: result.changes.length };
           },
 
+          async pushMetadata() {
+            const result = await syncEngine!.pushMetadata();
+            return { pushed: result.pushed };
+          },
+
+          async pullMetadata() {
+            const result = await syncEngine!.pullMetadata();
+            return { pulled: result.pulled };
+          },
+
           async fullSync() {
             return syncEngine!.fullSync();
           },

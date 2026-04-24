@@ -32,8 +32,10 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
   }
 
   private keyToPath(key: string): string {
-    const prefix = key.slice(0, 2);
-    return join(this.basePath, prefix, key);
+    if (key.includes("/")) {
+      return join(this.basePath, key);
+    }
+    return join(this.basePath, key.slice(0, 2), key);
   }
 
   async put(key: string, data: Buffer | Uint8Array, _options?: PutOptions): Promise<void> {

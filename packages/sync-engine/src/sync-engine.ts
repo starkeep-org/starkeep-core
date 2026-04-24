@@ -331,10 +331,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       if (!remoteDatabaseAdapter) {
         return { pulled: 0, pushed: 0, conflicts: 0 };
       }
+      // Always fetch from ZERO_HLC — metadata records have independent timestamps
+      // from regular data records, so using pullCursor (which advances based on
+      // regular data sync) can skip metadata records that predate the cursor.
       const remoteChanges =
-        await remoteDatabaseAdapter.getSyncableMetadataChangesSince(
-          pullCursor ?? ZERO_HLC,
-        );
+        await remoteDatabaseAdapter.getSyncableMetadataChangesSince(ZERO_HLC);
       const localAll =
         await localDatabaseAdapter.getSyncableMetadataChangesSince(ZERO_HLC);
       const localMap = new Map(
@@ -347,10 +348,18 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       for (const remote of remoteChanges) {
         const key = `${remote.targetId}:${remote.generatorId}`;
         const local = localMap.get(key);
-        if (!local || compareHLC(remote.updatedAt, local.updatedAt) > 0) {
+        const remoteNewer = !local || compareHLC(remote.updatedAt, local.updatedAt) > 0;
+        // Also update if timestamps are equal but remote has objectStorageKey that local is missing —
+        // this recovers records that were previously synced while the Aurora adapter had a bug
+        // where it omitted objectStorageKey from the SELECT result.
+        const localMissingFileKey = local != null &&
+          compareHLC(remote.updatedAt, local.updatedAt) === 0 &&
+          remote.objectStorageKey != null &&
+          (local.objectStorageKey ?? null) == null;
+        if (remoteNewer || localMissingFileKey) {
           await localDatabaseAdapter.upsertSyncableMetadata(remote);
           pulled++;
-        } else if (compareHLC(local.updatedAt, remote.updatedAt) !== 0) {
+        } else if (compareHLC(local!.updatedAt, remote.updatedAt) !== 0) {
           conflictCount++;
         }
       }

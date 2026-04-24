@@ -98,6 +98,8 @@ export interface AggregationOperations {
 export interface SyncOperations {
   push(): Promise<{ pushed: number; rejected: number }>;
   pull(): Promise<{ pulled: number }>;
+  pushMetadata(): Promise<{ pushed: number }>;
+  pullMetadata(): Promise<{ pulled: number }>;
   fullSync(): Promise<{ pulled: number; pushed: number; rejected: number }>;
   getConflicts(): SyncConflict[];
   onUpdate(listener: ChangeListener): () => void;

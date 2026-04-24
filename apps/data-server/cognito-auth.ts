@@ -163,6 +163,7 @@ export function startCredentialRefreshTimer(
     }
   };
 
+  refresh().catch(() => {});
   const handle = setInterval(refresh, REFRESH_INTERVAL_MS);
   return () => clearInterval(handle);
 }

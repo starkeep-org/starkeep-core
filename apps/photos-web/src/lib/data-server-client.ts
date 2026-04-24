@@ -194,6 +194,37 @@ export async function resumeSync(): Promise<void> {
   await fetch(`${LOCAL_BASE}/sync/resume`, { method: "POST" });
 }
 
+export async function triggerGeneration(
+  targetId: string,
+  generatorId: string,
+  mode: DataSourceMode,
+): Promise<void> {
+  if (mode === "local") {
+    // Handled by the photos-web Next.js API route, which runs sharp server-side
+    // and delegates persistence to data-server's storage HTTP APIs.
+    const res = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targetId, generatorId }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as { error?: string };
+      throw new Error(`Generate failed: ${body.error ?? res.statusText}`);
+    }
+    return;
+  }
+  const source = await resolveDataSource(mode);
+  await request<{ ok: true }>("/data/generate", source, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetId, generatorId }),
+  });
+}
+
+export async function triggerSyncNow(): Promise<void> {
+  await fetch(`${LOCAL_BASE}/sync/now`, { method: "POST" });
+}
+
 export async function getMetadataFileUrl(
   targetId: string,
   generatorId: string,
