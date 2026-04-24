@@ -14,6 +14,8 @@ import {
   postMetadata,
   uploadFile,
   getMetadataFileUrl,
+  triggerGeneration,
+  triggerSyncNow,
   type PhotoRecord,
 } from "./src/lib/data-server-client";
 import { DataSourceProvider, useDataSource } from "./src/lib/data-source-context";
@@ -123,6 +125,8 @@ function useFileUrlCache(mode: DataSourceMode) {
   return getFileSrc;
 }
 
+type ThumbnailStrategy = "browser" | "local-sharp" | "remote-sharp";
+
 async function runGenerators(
   record: PhotoRecord,
   file: File,
@@ -130,6 +134,7 @@ async function runGenerators(
   fileName: string,
   title: string,
   mode: DataSourceMode,
+  thumbnailStrategy: ThumbnailStrategy,
 ): Promise<void> {
   const targetId = record.id;
   const targetType = "@starkeep/image";
@@ -178,19 +183,33 @@ async function runGenerators(
     // EXIF extraction is best-effort
   }
 
-  for (const maxDimension of [400]) {
-    try {
-      const result = await downsizeImage(file, maxDimension);
+  const generatorId = "@starkeep/image:downsize-400";
+  try {
+    if (thumbnailStrategy === "browser") {
+      // Generate in-browser using Canvas API, upload to whichever endpoint the current
+      // mode points at, then kick a sync so the result propagates the other way.
+      const result = await downsizeImage(file, 400);
       const fileRef = await uploadFile(result.bytes, result.mimeType, mode);
-      const generatorId = `@starkeep/image:downsize-${maxDimension}`;
       await postMetadata(targetId, targetType, generatorId, 1, {
         downsizeWidth: result.width,
         downsizeHeight: result.height,
         downsizeFormat: "webp",
       }, mode, fileRef);
-    } catch {
-      // Downsize generation is best-effort
+      triggerSyncNow().catch(() => {});
+
+    } else if (thumbnailStrategy === "local-sharp") {
+      // Ask the local data-server to run sharp. Generation and storage happen
+      // server-side; a push is scheduled automatically after generate.
+      await triggerGeneration(record.id, generatorId, "local");
+
+    } else if (thumbnailStrategy === "remote-sharp") {
+      // Ask the remote Lambda to run sharp. The result lands in DSQL + S3.
+      // A pull cycle brings it to local storage.
+      await triggerGeneration(record.id, generatorId, "remote");
+      triggerSyncNow().catch(() => {});
     }
+  } catch {
+    // Thumbnail generation is best-effort
   }
 }
 
@@ -207,6 +226,16 @@ function PhotosAppInner() {
   const [error, setError] = useState<string | null>(null);
   const [showCloudSetup, setShowCloudSetup] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [thumbnailStrategy, setThumbnailStrategy] = useState<ThumbnailStrategy>(
+    () => (localStorage.getItem("thumbnail-strategy") as ThumbnailStrategy) ?? "browser",
+  );
+  const isLocalEnv = typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+
+  const handleStrategyChange = (s: ThumbnailStrategy) => {
+    setThumbnailStrategy(s);
+    localStorage.setItem("thumbnail-strategy", s);
+  };
 
   const selectedImage = state.selectedId
     ? state.images.find((img) => img.id === state.selectedId) ?? null
@@ -242,7 +271,7 @@ function PhotosAppInner() {
       const record = await addPhotoFromPath(fileName, fileBytes, mimeType, fileName, title, mode);
       dispatch({ type: "APPEND_IMAGES", images: [photoRecordToAppImage(record)] });
 
-      runGenerators(record, file, fileBytes, fileName, title, mode).catch(() => {});
+      runGenerators(record, file, fileBytes, fileName, title, mode, thumbnailStrategy).catch(() => {});
     } catch (err) {
       console.error("[photos] Upload failed:", err);
       setError(err instanceof Error ? err.message : "Failed to add photo");
@@ -322,6 +351,34 @@ function PhotosAppInner() {
               >
                 {m.charAt(0).toUpperCase() + m.slice(1)}
               </button>
+            ))}
+          </div>
+
+          {/* Thumbnail generation strategy */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "#aaa" }}>
+            <span style={{ whiteSpace: "nowrap" }}>Thumbnail:</span>
+            {(
+              [
+                { value: "browser", label: "Browser" },
+                { value: "local-sharp", label: "Local Sharp" },
+                { value: "remote-sharp", label: "Remote Sharp" },
+              ] as { value: ThumbnailStrategy; label: string }[]
+            ).map(({ value, label }) => (
+              <label
+                key={value}
+                style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", whiteSpace: "nowrap" }}
+              >
+                <input
+                  type="radio"
+                  name="thumbnail-strategy"
+                  value={value}
+                  checked={thumbnailStrategy === value}
+                  onChange={() => handleStrategyChange(value)}
+                  disabled={(value === "remote-sharp" && !remoteAvailable) || (value === "local-sharp" && !isLocalEnv)}
+                  style={{ accentColor: "#888" }}
+                />
+                {label}
+              </label>
             ))}
           </div>
 
