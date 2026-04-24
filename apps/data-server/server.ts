@@ -31,8 +31,8 @@ import { stat as fsStat, readFile, writeFile, mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
-import { STANDARD_DOWNSIZE_GENERATORS } from "../../packages/metadata-image/src/index.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
+import { HttpRemoteMetadataAdapter, asRemoteDatabaseAdapter } from "./http-remote-metadata-adapter.js";
 import * as v from "valibot";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
@@ -351,7 +351,10 @@ async function main() {
       })
     : undefined;
   const syncRemoteStorage: ObjectStorageAdapter | undefined = CLOUD_URL
-    ? new HttpObjectStorageAdapter({ baseUrl: `${CLOUD_URL}/files` })
+    ? new HttpObjectStorageAdapter({
+        baseUrl: `${CLOUD_URL}/files`,
+        getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
+      })
     : undefined;
   const syncChangeLog = CLOUD_URL
     ? createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() })
@@ -360,16 +363,28 @@ async function main() {
     ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
     : undefined;
 
+  // HTTP bridge to Lambda for metadata sync (pullMetadata / pushMetadata).
+  // The sync engine requires a direct DatabaseAdapter for metadata — this adapter
+  // satisfies just the two methods it calls.
+  const remoteMetadataAdapter = CLOUD_URL
+    ? new HttpRemoteMetadataAdapter(
+        CLOUD_URL,
+        () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
+      )
+    : undefined;
+
   const sdk = await createStarkeepSdk({
     databaseAdapter,
     objectStorageAdapter: localAdapter,
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
-    generators: [...STANDARD_DOWNSIZE_GENERATORS],
     syncTransport,
     remoteObjectStorageAdapter: syncRemoteStorage,
     syncChangeLog,
     syncStateStore,
+    remoteDatabaseAdapter: remoteMetadataAdapter
+      ? asRemoteDatabaseAdapter(remoteMetadataAdapter)
+      : undefined,
   });
 
   const syncRuntime = {
@@ -389,6 +404,7 @@ async function main() {
       pushTimer = null;
       try {
         await sdk.sync!.push();
+        await sdk.sync!.pushMetadata();
         syncRuntime.lastPushAt = new Date().toISOString();
         syncRuntime.lastError = null;
       } catch (err) {
@@ -412,6 +428,7 @@ async function main() {
     if (!sdk.sync) return;
     try {
       await sdk.sync.pull();
+      await sdk.sync.pullMetadata();
       syncRuntime.lastPullAt = new Date().toISOString();
       syncRuntime.lastError = null;
       syncRuntime.pullBackoffMs = PULL_INTERVAL_MS;
@@ -1079,6 +1096,7 @@ async function main() {
           mimeType: metaMimeType ?? null,
           sizeBytes: sizeBytes ?? null,
         });
+        schedulePush();
         json(res, { ok: true });
         return;
       }
@@ -1100,20 +1118,6 @@ async function main() {
         const expiresIn = parseInt(url.searchParams.get("expiresIn") || "3600", 10);
         const mimeType = record.mimeType ?? "application/octet-stream";
 
-        // When remoteAdapter (S3) is configured, prefer presigned URLs so that remote
-        // clients (e.g. API Gateway → Lambda) don't receive a http://127.0.0.1 token URL
-        // that only works on the local machine. For local-only deployments, fall back to
-        // the fast local file token.
-        if (remoteAdapter && remoteAdapter.getSignedUrl) {
-          const fileUrl = await remoteAdapter.getSignedUrl(
-            record.objectStorageKey,
-            { expiresIn },
-          );
-          json(res, { url: fileUrl, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
-          return;
-        }
-
-        // Local-only: serve directly from the FS adapter via a signed token
         const localHit = await localAdapter.get(record.objectStorageKey).catch(() => null);
         if (localHit) {
           const token = createFileToken(record.objectStorageKey, mimeType, expiresIn);
@@ -1124,6 +1128,12 @@ async function main() {
             sizeBytes: record.sizeBytes,
             expiresIn,
           });
+          return;
+        }
+
+        if (remoteAdapter?.getSignedUrl) {
+          const fileUrl = await remoteAdapter.getSignedUrl(record.objectStorageKey, { expiresIn });
+          json(res, { url: fileUrl, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
           return;
         }
 

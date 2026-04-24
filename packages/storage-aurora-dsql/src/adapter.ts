@@ -505,6 +505,10 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       input_hash: string | null;
       updated_at: string;
       value: string;
+      object_storage_key: string | null;
+      content_hash: string | null;
+      mime_type: string | null;
+      size_bytes: number | null;
     }>).map((row) => ({
       targetId: createStarkeepId(row.target_id),
       targetType: row.target_type,
@@ -513,6 +517,10 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       inputHash: row.input_hash,
       updatedAt: deserializeHLC(row.updated_at),
       value: JSON.parse(row.value) as Record<string, unknown>,
+      objectStorageKey: row.object_storage_key ?? null,
+      contentHash: row.content_hash ?? null,
+      mimeType: row.mime_type ?? null,
+      sizeBytes: row.size_bytes ?? null,
     }));
   }
 }

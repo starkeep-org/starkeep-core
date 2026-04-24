@@ -63,6 +63,32 @@ export default $config({
       ],
     });
 
+    // Photos Lambda — handles POST /data/generate for remote image thumbnail generation.
+    // Owns sharp as a dependency; the main api Lambda does not bundle sharp.
+    const photosFunction = new sst.aws.Function(`starkeep-photos-api-${stage}`, {
+      handler: "src/photos-handler.handler",
+      runtime: "nodejs22.x",
+      timeout: "30 seconds",
+      memory: "512 MB",
+      nodejs: {
+        install: ["pg", "sharp", "@aws-sdk/dsql-signer", "@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner", "@aws-sdk/lib-storage"],
+      },
+      environment: {
+        AURORA_ENDPOINT: $interpolate`${cluster.identifier}.dsql.${region}.on.aws`,
+        S3_BUCKET: bucket.name,
+      },
+      permissions: [
+        {
+          actions: ["dsql:DbConnectAdmin"],
+          resources: [cluster.arn],
+        },
+        {
+          actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+          resources: [$interpolate`${bucket.arn}`, $interpolate`${bucket.arn}/*`],
+        },
+      ],
+    });
+
     // HTTP API Gateway with Cognito JWT authorizer
     const gateway = new sst.aws.ApiGatewayV2(`starkeep-gateway-${stage}`, {
       cors: {
@@ -83,6 +109,11 @@ export default $config({
     // OPTIONS preflight must be unauthenticated — JWT authorizer blocks CORS preflights
     // if they go through the $default route. Specific routes take precedence over $default.
     gateway.route("OPTIONS /{proxy+}", apiFunction.arn);
+
+    // POST /data/generate routes to the photos Lambda (specific routes take precedence over $default).
+    gateway.route("POST /data/generate", photosFunction.arn, {
+      auth: { jwt: { authorizer: authorizer.id } },
+    });
 
     // All other routes require a valid Cognito JWT.
     gateway.route("$default", apiFunction.arn, {

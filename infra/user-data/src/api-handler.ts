@@ -17,13 +17,16 @@ import pg from "pg";
 import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import { generateId, createHLCClock, SyncStatus } from "@starkeep/core";
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import type {
   DatabaseClientFactory,
   DatabaseClient,
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
+import { ok, clientErr, type APIGatewayEvent } from "./handler-utils.js";
+
+const ZERO_HLC: HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
 
 // ---------------------------------------------------------------------------
 // DSQL client factory using the Lambda execution role credentials
@@ -123,22 +126,6 @@ async function getAdapters(): Promise<Adapters> {
 // Response helpers
 // ---------------------------------------------------------------------------
 
-function ok(body: unknown, status = 200) {
-  return {
-    statusCode: status,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
-
-function clientErr(message: string, status: number) {
-  return {
-    statusCode: status,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ error: message }),
-  };
-}
-
 function recordToResponse(record: DataRecord) {
   return {
     id: record.id,
@@ -155,24 +142,6 @@ function recordToResponse(record: DataRecord) {
     object_storage_key: record.objectStorageKey,
     original_filename: record.originalFilename,
   };
-}
-
-// ---------------------------------------------------------------------------
-// API Gateway HTTP proxy event (v2 / HTTP API format)
-// ---------------------------------------------------------------------------
-
-interface APIGatewayEvent {
-  rawPath: string;
-  requestContext: {
-    http: { method: string };
-    authorizer?: {
-      jwt?: { claims?: Record<string, string> };
-    };
-  };
-  headers?: Record<string, string>;
-  body?: string;
-  isBase64Encoded?: boolean;
-  queryStringParameters?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -410,6 +379,55 @@ export async function handler(event: APIGatewayEvent) {
       const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
       const response = await transport.pushChanges(body);
       return ok(response);
+    }
+
+    // GET /sync/metadata?since=<json-encoded-hlc> — list syncable metadata records changed since cursor.
+    // Used by the local data-server's HttpRemoteMetadataAdapter for pullMetadata / pushMetadata.
+    if (method === "GET" && path === "/sync/metadata") {
+      const sinceParam = query["since"];
+      const sinceHlc: HLCTimestamp = sinceParam
+        ? (JSON.parse(decodeURIComponent(sinceParam)) as HLCTimestamp)
+        : ZERO_HLC;
+      const records = await db.getSyncableMetadataChangesSince(sinceHlc);
+      return ok({ records });
+    }
+
+    // HEAD|GET|PUT /files/{+key} — S3 proxy for file-backed metadata sync.
+    // The local data-server's HttpObjectStorageAdapter calls these to transfer
+    // thumbnail files alongside metadata records during pullMetadata / pushMetadata.
+    const filesMatch = path.match(/^\/files\/(.+)$/);
+    if (filesMatch) {
+      const key = decodeURIComponent(filesMatch[1]!);
+
+      if (method === "HEAD") {
+        const result = await storage.get(key);
+        return { statusCode: result ? 200 : 404, headers: {}, body: "" };
+      }
+
+      if (method === "GET") {
+        const result = await storage.get(key);
+        if (!result) return clientErr("File not found", 404);
+        const data = result.data instanceof Uint8Array ? result.data : new Uint8Array(result.data as ArrayBuffer);
+        return {
+          statusCode: 200,
+          headers: {
+            "Content-Type": result.contentType ?? "application/octet-stream",
+            "Content-Length": String(data.byteLength),
+          },
+          body: Buffer.from(data).toString("base64"),
+          isBase64Encoded: true,
+        };
+      }
+
+      if (method === "PUT") {
+        const headers = event.headers ?? {};
+        const contentType = (headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream").split(";")[0]!.trim();
+        const fileBuffer = event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64")
+          : Buffer.from(event.body ?? "", "binary");
+        await storage.put(key, fileBuffer, { contentType });
+        return ok({ ok: true });
+      }
     }
 
     return clientErr("Not found", 404);
