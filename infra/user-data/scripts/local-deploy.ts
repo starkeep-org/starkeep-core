@@ -11,6 +11,8 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { cpSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { extname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
@@ -36,6 +38,8 @@ interface StarkeepConfig {
   userPoolId: string;
   userPoolClientId: string;
   identityPoolId: string;
+  // Added after first backend deploy — needed to build photos-web
+  apiGatewayUrl?: string;
 }
 
 function loadConfig(): StarkeepConfig {
@@ -188,8 +192,8 @@ async function getSTSCredentials(
 // ---------------------------------------------------------------------------
 
 const command = process.argv[2];
-if (command !== "deploy" && command !== "remove") {
-  console.error("Usage: local-deploy.ts <deploy|remove>");
+if (command !== "deploy" && command !== "remove" && command !== "deploy-photos") {
+  console.error("Usage: local-deploy.ts <deploy|remove|deploy-photos>");
   process.exit(1);
 }
 
@@ -233,11 +237,98 @@ if (command === "deploy") {
   }
 }
 
-console.log(`\nRunning: sst ${command} --stage ${config.stage}\n`);
+if (command === "deploy-photos" || command === "deploy") {
+  const apiGatewayUrl = config.apiGatewayUrl;
+  if (!apiGatewayUrl) {
+    if (command === "deploy-photos") {
+      console.error(
+        'Error: apiGatewayUrl is missing from .starkeep-config.json.\n' +
+        'Add it after your first backend deploy:\n' +
+        '  "apiGatewayUrl": "https://xxx.execute-api.us-east-1.amazonaws.com/"',
+      );
+      process.exit(1);
+    }
+    console.log("Skipping photos-web build — apiGatewayUrl not set in .starkeep-config.json");
+  } else {
+    console.log("\nBuilding photos-web static export...");
+    const photosWebDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "apps", "photos-web");
+    const photosResult = spawnSync("pnpm", ["build"], {
+      stdio: "inherit",
+      cwd: photosWebDir,
+      env: {
+        ...process.env,
+        NEXT_PUBLIC_FORCE_REMOTE: "true",
+        NEXT_PUBLIC_API_GATEWAY_URL: apiGatewayUrl,
+        NEXT_PUBLIC_COGNITO_REGION: config.region,
+        NEXT_PUBLIC_COGNITO_USER_POOL_ID: config.userPoolId,
+        NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID: config.userPoolClientId,
+      },
+    });
+    if (photosResult.status !== 0) {
+      console.error("photos-web build failed. Aborting deploy.");
+      process.exit(photosResult.status ?? 1);
+    }
+    console.log("photos-web build complete.");
+
+    // Embed all static files into src/web-assets.json so esbuild bundles them
+    // into the Lambda directly — avoids SST copyFiles directory issues.
+    const outDir = resolve(photosWebDir, "out");
+    const webAssetsPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "web-assets.json");
+
+    const MIME: Record<string, string> = {
+      ".html": "text/html; charset=utf-8",
+      ".js": "application/javascript; charset=utf-8",
+      ".css": "text/css; charset=utf-8",
+      ".json": "application/json; charset=utf-8",
+      ".map": "application/json; charset=utf-8",
+      ".svg": "image/svg+xml; charset=utf-8",
+      ".txt": "text/plain; charset=utf-8",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".gif": "image/gif",
+      ".webp": "image/webp",
+      ".ico": "image/x-icon",
+      ".woff": "font/woff",
+      ".woff2": "font/woff2",
+      ".ttf": "font/ttf",
+      ".eot": "application/vnd.ms-fontobject",
+    };
+    const TEXT_EXTS = new Set([".html", ".js", ".css", ".json", ".map", ".svg", ".txt"]);
+
+    function walkDir(dir: string): string[] {
+      const results: string[] = [];
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) results.push(...walkDir(full));
+        else results.push(full);
+      }
+      return results;
+    }
+
+    const assets: Record<string, { content: string; isBase64: boolean; contentType: string }> = {};
+    for (const absPath of walkDir(outDir)) {
+      const relPath = absPath.slice(outDir.length).replace(/\\/g, "/");
+      const ext = extname(absPath).toLowerCase();
+      const isText = TEXT_EXTS.has(ext);
+      const buf = readFileSync(absPath);
+      assets[relPath] = {
+        content: isText ? buf.toString("utf-8") : buf.toString("base64"),
+        isBase64: !isText,
+        contentType: MIME[ext] ?? "application/octet-stream",
+      };
+    }
+    writeFileSync(webAssetsPath, JSON.stringify(assets));
+    console.log(`Generated web-assets.json (${Object.keys(assets).length} files)`);
+  }
+}
+
+const sstCommand = command === "deploy-photos" ? "deploy" : command;
+console.log(`\nRunning: sst ${sstCommand} --stage ${config.stage}\n`);
 
 const result = spawnSync(
   "node",
-  ["./node_modules/sst/bin/sst.mjs", command, "--stage", config.stage],
+  ["./node_modules/sst/bin/sst.mjs", sstCommand, "--stage", config.stage],
   {
     stdio: "inherit",
     env: {

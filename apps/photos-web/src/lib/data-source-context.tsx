@@ -5,6 +5,8 @@ import type { DataSourceMode } from "./data-client";
 
 const STORAGE_KEY = "starkeep:dataSource";
 
+export const FORCE_REMOTE = process.env.NEXT_PUBLIC_FORCE_REMOTE === "true";
+
 interface DataSourceContextValue {
   mode: DataSourceMode;
   setMode: (m: DataSourceMode) => void;
@@ -23,7 +25,7 @@ export function useDataSource() {
 
 export function DataSourceProvider({ children }: { children: ReactNode }) {
   const [mode, setModeState] = useState<DataSourceMode>(
-    () => (localStorage.getItem(STORAGE_KEY) as DataSourceMode) ?? "local",
+    () => FORCE_REMOTE ? "remote" : (localStorage.getItem(STORAGE_KEY) as DataSourceMode) ?? "local",
   );
   const [remoteAvailable, setRemoteAvailable] = useState(false);
 
@@ -32,6 +34,7 @@ export function DataSourceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setMode = (m: DataSourceMode) => {
+    if (FORCE_REMOTE) return;
     localStorage.setItem(STORAGE_KEY, m);
     setModeState(m);
   };

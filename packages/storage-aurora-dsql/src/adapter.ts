@@ -103,25 +103,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async init(): Promise<void> {
     this.client = await this.clientFactory.createClient(this.options);
     await this.client.query(CREATE_TABLE_SQL);
-    // TODO(pre-prod): move original_filename into CREATE_TABLE_SQL above and remove this ALTER TABLE.
-    await this.client.query(
-      "ALTER TABLE records ADD COLUMN IF NOT EXISTS original_filename TEXT",
-    );
     for (const sql of CREATE_INDEXES_SQL) {
       await this.client.query(sql);
     }
     await this.client.query(CREATE_MIGRATIONS_TABLE_SQL);
     await this.client.query(CREATE_METADATA_SYNC_TABLE_SQL);
     await this.client.query(CREATE_METADATA_SYNC_INDEX_SQL);
-    // Migrations for tables created before file-backing columns were added.
-    for (const sql of [
-      "ALTER TABLE metadata_sync ADD COLUMN IF NOT EXISTS object_storage_key TEXT",
-      "ALTER TABLE metadata_sync ADD COLUMN IF NOT EXISTS content_hash TEXT",
-      "ALTER TABLE metadata_sync ADD COLUMN IF NOT EXISTS mime_type TEXT",
-      "ALTER TABLE metadata_sync ADD COLUMN IF NOT EXISTS size_bytes BIGINT",
-    ]) {
-      await this.client.query(sql);
-    }
   }
 
   async close(): Promise<void> {

@@ -21,6 +21,9 @@ DerivedData/
 apps/fuse-mount/lib/
 apps/fuse-mount/package-lock.json
 
+# Next.js build artifacts
+apps/photos-web/out/
+
 # Tauri build artifacts
 .next/
 apps/tasks-desktop/src-tauri/target/

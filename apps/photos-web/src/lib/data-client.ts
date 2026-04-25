@@ -35,12 +35,13 @@ export async function resolveDataSource(mode: DataSourceMode): Promise<{
 }> {
   if (mode === "remote") {
     const config = await readCloudConfig();
-    if (config?.apiGatewayUrl) {
-      console.debug("[data-client] Remote mode, apiGatewayUrl:", config.apiGatewayUrl);
+    const apiGatewayUrl = config?.apiGatewayUrl ?? process.env.NEXT_PUBLIC_API_GATEWAY_URL;
+    if (apiGatewayUrl) {
+      console.debug("[data-client] Remote mode, apiGatewayUrl:", apiGatewayUrl);
       const token = await getAccessToken();
       if (!token) console.warn("[data-client] No access token — request will be unauthenticated");
       return {
-        baseUrl: config.apiGatewayUrl.replace(/\/$/, ""),
+        baseUrl: apiGatewayUrl.replace(/\/$/, ""),
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       };
     }
