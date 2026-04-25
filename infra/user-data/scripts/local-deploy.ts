@@ -12,10 +12,8 @@
 
 import { spawnSync } from "node:child_process";
 import { cpSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
-import { extname, join } from "node:path";
+import { extname, join, resolve, dirname } from "node:path";
 import { createInterface } from "node:readline";
-import { readFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CognitoIdentityProviderClient,
@@ -42,11 +40,14 @@ interface StarkeepConfig {
   apiGatewayUrl?: string;
 }
 
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const INFRA_DIR = resolve(SCRIPT_DIR, "..");
+const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..", "..");
+const CONFIG_PATH = resolve(REPO_ROOT, ".starkeep-config.json");
+const SST_OUTPUTS_PATH = resolve(INFRA_DIR, ".sst", "outputs.json");
+
 function loadConfig(): StarkeepConfig {
-  const scriptDir = dirname(fileURLToPath(import.meta.url));
-  // scripts/ is two levels below the repo root (infra/user-data/scripts/)
-  const repoRoot = resolve(scriptDir, "..", "..", "..");
-  const configPath = resolve(repoRoot, ".starkeep-config.json");
+  const configPath = CONFIG_PATH;
 
   let raw: string;
   try {
@@ -229,7 +230,7 @@ if (command === "deploy") {
   console.log("Building workspace packages...");
   const buildResult = spawnSync("pnpm", ["--filter", "@starkeep/storage-adapter", "--filter", "@starkeep/storage-aurora-dsql", "build"], {
     stdio: "inherit",
-    cwd: resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
+    cwd: REPO_ROOT,
   });
   if (buildResult.status !== 0) {
     console.error("Package build failed. Aborting deploy.");
@@ -343,4 +344,29 @@ const result = spawnSync(
   },
 );
 
-process.exit(result.status ?? 1);
+if (result.status !== 0) {
+  process.exit(result.status ?? 1);
+}
+
+if (sstCommand === "deploy") {
+  try {
+    const outputs = JSON.parse(readFileSync(SST_OUTPUTS_PATH, "utf-8")) as Record<string, string>;
+    const existing = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as Record<string, unknown>;
+    const updated = { ...existing };
+    if (outputs.apiGatewayUrl) updated.apiGatewayUrl = outputs.apiGatewayUrl;
+    if (outputs.auroraHostname) updated.auroraEndpoint = outputs.auroraHostname;
+    if (outputs.photosWebUrl) updated.photosWebUrl = outputs.photosWebUrl;
+    writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
+    console.log("\nUpdated .starkeep-config.json with deploy outputs:");
+    if (outputs.apiGatewayUrl) console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
+    if (outputs.auroraHostname) console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);
+    if (outputs.photosWebUrl) console.log(`  photosWebUrl   : ${outputs.photosWebUrl}`);
+  } catch (err) {
+    console.warn(
+      "Warning: could not update .starkeep-config.json with deploy outputs:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+process.exit(0);

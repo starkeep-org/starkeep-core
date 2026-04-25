@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect, useCallback } from "react";
 import {
   Container,
   Title,
@@ -7,145 +8,793 @@ import {
   Paper,
   Stack,
   Group,
-  SimpleGrid,
   Badge,
   Code,
   Loader,
   Alert,
+  Button,
+  TextInput,
+  PasswordInput,
+  Collapse,
+  Modal,
+  Divider,
+  Anchor,
+  SimpleGrid,
 } from "@mantine/core";
-import Link from "next/link";
-import { StatusBadge } from "@starkeep/admin-ui";
-import { useInvoke } from "../../src/hooks/use-invoke";
-import { listPlans } from "../../src/lib/api";
-import { useState, useEffect } from "react";
+import {
+  readCloudConfig,
+  writeCloudConfig,
+  type CloudConfig,
+} from "../../src/lib/cloud-config";
+import {
+  initiateAuth,
+  respondNewPasswordChallenge,
+  refreshTokens,
+} from "../../src/lib/cognito-auth";
 
-interface PlanWithDeployment {
-  id: string;
-  stack_name: string;
-  status: string;
-  created_at: string;
-  latest_deployment: { status: string } | null;
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface TypeSummary {
+  record_type: string;
+  count: number;
 }
 
-interface DataServerTypes {
-  types: { record_type: string; count: number }[];
+interface DataTypesResponse {
+  types: TypeSummary[];
   total: number;
 }
 
-function useDataServerStats() {
-  const [data, setData] = useState<DataServerTypes | null>(null);
-  useEffect(() => {
-    fetch("http://127.0.0.1:9820/data/types")
-      .then((r) => r.json())
-      .then(setData)
-      .catch(() => setData(null));
-  }, []);
-  return data;
+interface Watch {
+  id: string;
+  directoryPath: string;
+  targetType: string;
+  state: string;
+  totalFiles: number;
+  syncedFiles: number;
 }
 
-export default function DashboardPage() {
-  const { data: plans, loading } = useInvoke<PlanWithDeployment[]>(listPlans);
-  const dataStats = useDataServerStats();
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-  if (loading) {
-    return (
-      <Container size="lg">
-        <Group justify="center" py="xl">
-          <Loader />
-        </Group>
-      </Container>
-    );
+async function checkUrl(url: string): Promise<boolean> {
+  try {
+    await fetch(url, { mode: "no-cors", signal: AbortSignal.timeout(2000) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function extractEmail(idToken: string): string | null {
+  try {
+    const payload = JSON.parse(atob(idToken.split(".")[1]));
+    return (payload.email as string) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+export default function DashboardPage() {
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // Local data server
+  const [localOnline, setLocalOnline] = useState<boolean | null>(null);
+  const [localTypes, setLocalTypes] = useState<DataTypesResponse | null>(null);
+  const [photosWebUrl, setPhotosWebUrl] = useState<string | null | undefined>(undefined);
+  const [watches, setWatches] = useState<Watch[] | null>(null);
+  const [typesExpanded, setTypesExpanded] = useState(false);
+
+  // Local apps
+  const [localPhotosWeb, setLocalPhotosWeb] = useState<boolean | null>(null);
+  const [localFileBrowser, setLocalFileBrowser] = useState<boolean | null>(null);
+
+  // Remote
+  const [cloudConfig, setCloudConfig] = useState<CloudConfig | null>(null);
+  const [remoteOnline, setRemoteOnline] = useState<boolean | null>(null);
+  const [remoteTypes, setRemoteTypes] = useState<DataTypesResponse | null>(null);
+  const [remoteTypesExpanded, setRemoteTypesExpanded] = useState(false);
+  const [remotePhotosWeb, setRemotePhotosWeb] = useState<boolean | null>(null);
+
+  // Add watch form
+  const [watchPath, setWatchPath] = useState("");
+  const [watchSubmitting, setWatchSubmitting] = useState(false);
+
+  // Clipboard feedback
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Sign-in modal
+  const [signInOpen, setSignInOpen] = useState(false);
+  const [signInEmail, setSignInEmail] = useState("");
+  const [signInPassword, setSignInPassword] = useState("");
+  const [signInNewPassword, setSignInNewPassword] = useState("");
+  const [signInConfirmPassword, setSignInConfirmPassword] = useState("");
+  const [signInChallenge, setSignInChallenge] = useState<{ session: string } | null>(null);
+  const [signInError, setSignInError] = useState<string | null>(null);
+  const [signInLoading, setSignInLoading] = useState(false);
+
+  const copy = useCallback((text: string, key: string) => {
+    navigator.clipboard.writeText(text).catch(console.error);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000);
+  }, []);
+
+  // Fetch local server data
+  useEffect(() => {
+    setLocalOnline(null);
+    setLocalTypes(null);
+    setPhotosWebUrl(undefined);
+    setWatches(null);
+
+    const controller = new AbortController();
+
+    async function fetchLocal() {
+      try {
+        const [typesResp, watchesResp, configResp] = await Promise.all([
+          fetch("http://127.0.0.1:9820/data/types", { signal: controller.signal }),
+          fetch("http://127.0.0.1:9820/watches", { signal: controller.signal }),
+          fetch("http://127.0.0.1:9820/config", { signal: controller.signal }),
+        ]);
+
+        if (typesResp.ok) {
+          setLocalTypes(await typesResp.json());
+          setLocalOnline(true);
+        } else {
+          setLocalOnline(false);
+        }
+        if (watchesResp.ok) setWatches(await watchesResp.json());
+        if (configResp.ok) {
+          const cfg = await configResp.json();
+          setPhotosWebUrl((cfg.photosWebUrl as string | null) ?? null);
+        } else {
+          setPhotosWebUrl(null);
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setLocalOnline(false);
+          setPhotosWebUrl(null);
+        }
+      }
+    }
+
+    fetchLocal();
+    return () => controller.abort();
+  }, [refreshKey]);
+
+  // Fetch local app status
+  useEffect(() => {
+    setLocalPhotosWeb(null);
+    setLocalFileBrowser(null);
+    checkUrl("http://localhost:3000").then(setLocalPhotosWeb);
+    checkUrl("http://localhost:5173").then(setLocalFileBrowser);
+  }, [refreshKey]);
+
+  // Read cloud config from localStorage
+  useEffect(() => {
+    readCloudConfig().then(setCloudConfig);
+  }, [refreshKey]);
+
+  // Fetch remote server data
+  useEffect(() => {
+    setRemoteOnline(null);
+    setRemoteTypes(null);
+
+    async function fetchRemote() {
+      const cfg = await readCloudConfig();
+      if (!cfg?.apiGatewayUrl || !cfg.cognitoRefreshToken) return;
+
+      try {
+        const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
+        const resp = await fetch(`${cfg.apiGatewayUrl}/data/types`, {
+          signal: AbortSignal.timeout(8000),
+          headers: { Authorization: `Bearer ${tokens.accessToken}` },
+        });
+        if (resp.ok) {
+          setRemoteTypes(await resp.json());
+          setRemoteOnline(true);
+        } else {
+          setRemoteOnline(false);
+        }
+      } catch {
+        setRemoteOnline(false);
+      }
+    }
+
+    fetchRemote();
+  }, [refreshKey]);
+
+  // Check remote photos-web once we have the URL
+  useEffect(() => {
+    setRemotePhotosWeb(null);
+    if (photosWebUrl === undefined || photosWebUrl === null) return;
+    checkUrl(photosWebUrl).then(setRemotePhotosWeb);
+  }, [photosWebUrl, refreshKey]);
+
+  // ---- Sign-in handlers ----
+
+  async function handleSignIn() {
+    if (!cloudConfig?.cognitoConfig) return;
+    setSignInLoading(true);
+    setSignInError(null);
+    try {
+      const result = await initiateAuth(cloudConfig.cognitoConfig, signInEmail, signInPassword);
+      if (result.tokens) {
+        const email = extractEmail(result.tokens.idToken);
+        await writeCloudConfig({
+          ...cloudConfig,
+          cognitoRefreshToken: result.tokens.refreshToken,
+          userEmail: email ?? undefined,
+        });
+        setSignInOpen(false);
+        setRefreshKey((k) => k + 1);
+      } else if (result.challengeName === "NEW_PASSWORD_REQUIRED" && result.session) {
+        setSignInChallenge({ session: result.session });
+      } else {
+        setSignInError("Unexpected response from Cognito");
+      }
+    } catch (err) {
+      setSignInError(err instanceof Error ? err.message : "Sign in failed");
+    } finally {
+      setSignInLoading(false);
+    }
   }
 
-  const deploymentCount = plans?.length ?? 0;
-  const recentPlans = (plans ?? []).slice(0, 5);
+  async function handleNewPassword() {
+    if (!cloudConfig?.cognitoConfig || !signInChallenge) return;
+    if (signInNewPassword !== signInConfirmPassword) {
+      setSignInError("Passwords do not match");
+      return;
+    }
+    setSignInLoading(true);
+    setSignInError(null);
+    try {
+      const tokens = await respondNewPasswordChallenge(
+        cloudConfig.cognitoConfig,
+        signInChallenge.session,
+        signInEmail,
+        signInNewPassword,
+      );
+      const email = extractEmail(tokens.idToken);
+      await writeCloudConfig({
+        ...cloudConfig,
+        cognitoRefreshToken: tokens.refreshToken,
+        userEmail: email ?? undefined,
+      });
+      setSignInOpen(false);
+      setRefreshKey((k) => k + 1);
+    } catch (err) {
+      setSignInError(err instanceof Error ? err.message : "Failed to set new password");
+    } finally {
+      setSignInLoading(false);
+    }
+  }
+
+  function openSignIn() {
+    setSignInEmail("");
+    setSignInPassword("");
+    setSignInNewPassword("");
+    setSignInConfirmPassword("");
+    setSignInChallenge(null);
+    setSignInError(null);
+    setSignInOpen(true);
+  }
+
+  // ---- Watch handlers ----
+
+  async function handleAddWatch() {
+    if (!watchPath.trim()) return;
+    setWatchSubmitting(true);
+    try {
+      const resp = await fetch("http://127.0.0.1:9820/watches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          directoryPath: watchPath.trim(),
+          targetType: "@starkeep/image",
+          recursive: true,
+        }),
+      });
+      if (resp.ok) {
+        setWatchPath("");
+        const wResp = await fetch("http://127.0.0.1:9820/watches");
+        if (wResp.ok) setWatches(await wResp.json());
+      }
+    } catch {
+      // server offline
+    } finally {
+      setWatchSubmitting(false);
+    }
+  }
+
+  async function handleRemoveWatch(id: string) {
+    try {
+      await fetch(`http://127.0.0.1:9820/watches/${id}`, { method: "DELETE" });
+      setWatches((ws) => ws?.filter((w) => w.id !== id) ?? null);
+    } catch {
+      // server offline
+    }
+  }
+
+  const signedIn = !!cloudConfig?.cognitoRefreshToken;
 
   return (
-    <Container size="lg">
-      <Title order={1} mb="xs">
-        Dashboard
-      </Title>
-      <Text c="dimmed" mb="xl">
-        Starkeep Admin
-      </Text>
+    <Container size="xl">
+      <Group justify="space-between" mb="xl">
+        <Title order={1}>Dashboard</Title>
+        <Button variant="light" onClick={() => setRefreshKey((k) => k + 1)}>
+          Refresh
+        </Button>
+      </Group>
 
-      <SimpleGrid cols={{ base: 2, sm: 4 }} mb="xl">
-        <StatCard label="Deployments" value={deploymentCount} />
-        <StatCard label="Data Types" value={dataStats?.types.length ?? 0} />
-        <StatCard label="Records" value={dataStats?.total ?? 0} />
-        <StatCard
-          label="Data Server"
-          value={dataStats ? "Online" : "Offline"}
-          color={dataStats ? "green" : "red"}
-        />
+      <SimpleGrid cols={{ base: 1, xl: 2 }} spacing="xl" style={{ alignItems: "start" }}>
+        {/* ── LOCAL ───────────────────────────────────────────────────── */}
+        <Stack gap="md">
+          <Title order={2}>Local</Title>
+
+          <Paper p="lg" withBorder>
+        <Group justify="space-between" mb="sm">
+          <Title order={3} size="h4">
+            Data Server
+          </Title>
+          <StatusBadge online={localOnline} />
+        </Group>
+
+        {localOnline === false && (
+          <Stack gap="xs">
+            <Text size="sm" c="dimmed">
+              Start the local data server to enable local features.
+            </Text>
+            <CopyCmd
+              cmd="pnpm --filter @starkeep/data-server start"
+              label="Start data server"
+              copyKey="start-data-server"
+              copiedKey={copiedKey}
+              onCopy={copy}
+            />
+          </Stack>
+        )}
+
+        {localOnline === true && localTypes && (
+          <Stack gap="sm">
+            <Text
+              size="sm"
+              style={{ cursor: "pointer", textDecoration: "underline dotted" }}
+              onClick={() => setTypesExpanded((e) => !e)}
+            >
+              {localTypes.types.length} type{localTypes.types.length !== 1 ? "s" : ""} registered
+              &nbsp;·&nbsp;
+              {localTypes.total} record{localTypes.total !== 1 ? "s" : ""} total
+            </Text>
+
+            <Collapse in={typesExpanded}>
+              <Stack gap={4} pl="sm" pt="xs">
+                {localTypes.types.length === 0 ? (
+                  <Text size="xs" c="dimmed">
+                    No records yet
+                  </Text>
+                ) : (
+                  localTypes.types.map((t) => (
+                    <Group key={t.record_type} justify="space-between">
+                      <Code fz="xs">{t.record_type}</Code>
+                      <Badge variant="light" size="sm">
+                        {t.count}
+                      </Badge>
+                    </Group>
+                  ))
+                )}
+              </Stack>
+            </Collapse>
+
+            <CopyCmd
+              cmd="bash scripts/reset-local-data.sh"
+              label="Clear all local data"
+              copyKey="clear-local"
+              copiedKey={copiedKey}
+              onCopy={copy}
+            />
+
+            <Divider my="xs" label="Watches" labelPosition="left" />
+
+            {watches && watches.length > 0 ? (
+              <Stack gap="xs">
+                {watches.map((w) => (
+                  <Group key={w.id} justify="space-between" wrap="nowrap">
+                    <Group gap="xs" style={{ minWidth: 0, flex: 1 }}>
+                      <Text
+                        size="sm"
+                        style={{
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          flex: 1,
+                        }}
+                      >
+                        {w.directoryPath}
+                      </Text>
+                      <Badge variant="outline" size="xs" color="gray">
+                        {w.targetType}
+                      </Badge>
+                    </Group>
+                    <Button
+                      size="xs"
+                      variant="subtle"
+                      color="red"
+                      onClick={() => handleRemoveWatch(w.id)}
+                    >
+                      Remove
+                    </Button>
+                  </Group>
+                ))}
+              </Stack>
+            ) : (
+              <Text size="sm" c="dimmed">
+                No watches configured
+              </Text>
+            )}
+
+            <Group gap="xs" mt="xs">
+              <TextInput
+                placeholder="/path/to/directory"
+                size="xs"
+                value={watchPath}
+                onChange={(e) => setWatchPath(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleAddWatch();
+                }}
+                style={{ flex: 1 }}
+              />
+              <Button
+                size="xs"
+                onClick={handleAddWatch}
+                loading={watchSubmitting}
+                disabled={!watchPath.trim()}
+              >
+                Add watch
+              </Button>
+            </Group>
+          </Stack>
+        )}
+      </Paper>
+
+          <Paper p="lg" withBorder>
+            <Title order={3} size="h4" mb="sm">
+              Apps
+            </Title>
+            <Stack gap="sm">
+              <LocalAppRow
+                name="Photos Web"
+                online={localPhotosWeb}
+                url="http://localhost:3000"
+                launchCmd="pnpm --filter photos-web dev"
+                copyKey="start-photos-web"
+                copiedKey={copiedKey}
+                onCopy={copy}
+              />
+              <LocalAppRow
+                name="File Browser"
+                online={localFileBrowser}
+                url="http://localhost:5173"
+                launchCmd="pnpm --filter @starkeep/file-browser dev"
+                copyKey="start-file-browser"
+                copiedKey={copiedKey}
+                onCopy={copy}
+              />
+            </Stack>
+          </Paper>
+        </Stack>
+
+        {/* ── REMOTE ──────────────────────────────────────────────────── */}
+        <Stack gap="md">
+          <Title order={2}>Remote</Title>
+
+          <Paper p="lg" withBorder>
+            <Group justify="space-between" mb="sm">
+              <Title order={3} size="h4">
+                Data Server
+              </Title>
+              {cloudConfig?.apiGatewayUrl ? (
+                <StatusBadge online={remoteOnline} />
+              ) : (
+                <Badge color="gray" variant="light">
+                  Not configured
+                </Badge>
+              )}
+            </Group>
+
+            {!cloudConfig?.apiGatewayUrl ? (
+              <Text size="sm" c="dimmed">
+                Complete cloud setup to enable remote features.
+              </Text>
+            ) : (
+              <Stack gap="sm">
+                {remoteOnline === true && remoteTypes && (
+                  <>
+                    <Text
+                      size="sm"
+                      style={{ cursor: "pointer", textDecoration: "underline dotted" }}
+                      onClick={() => setRemoteTypesExpanded((e) => !e)}
+                    >
+                      {remoteTypes.types.length} type{remoteTypes.types.length !== 1 ? "s" : ""} registered
+                      &nbsp;·&nbsp;
+                      {remoteTypes.total} record{remoteTypes.total !== 1 ? "s" : ""} total
+                    </Text>
+                    <Collapse in={remoteTypesExpanded}>
+                      <Stack gap={4} pl="sm" pt="xs">
+                        {remoteTypes.types.length === 0 ? (
+                          <Text size="xs" c="dimmed">
+                            No records yet
+                          </Text>
+                        ) : (
+                          remoteTypes.types.map((t) => (
+                            <Group key={t.record_type} justify="space-between">
+                              <Code fz="xs">{t.record_type}</Code>
+                              <Badge variant="light" size="sm">
+                                {t.count}
+                              </Badge>
+                            </Group>
+                          ))
+                        )}
+                      </Stack>
+                    </Collapse>
+                  </>
+                )}
+                <Group gap="md" wrap="wrap">
+                  <CopyCmd
+                    cmd="pnpm --filter @starkeep/infra-user-data local:deploy"
+                    label="Redeploy from local"
+                    copyKey="redeploy"
+                    copiedKey={copiedKey}
+                    onCopy={copy}
+                  />
+                  <CopyCmd
+                    cmd="pnpm --filter @starkeep/infra-user-data reset-cloud-data"
+                    label="Clear all cloud data"
+                    copyKey="clear-remote"
+                    copiedKey={copiedKey}
+                    onCopy={copy}
+                  />
+                </Group>
+              </Stack>
+            )}
+          </Paper>
+
+          <Paper p="lg" withBorder>
+            <Title order={3} size="h4" mb="sm">
+              Apps
+            </Title>
+            <Stack gap="sm">
+              <RemoteAppRow
+                name="Photos Web"
+                url={localOnline !== null ? (photosWebUrl ?? null) : undefined}
+                online={remotePhotosWeb}
+              />
+              <RemoteAppRow name="File Browser" url={null} online={null} />
+            </Stack>
+          </Paper>
+
+          <Paper p="lg" withBorder>
+            <Group justify="space-between">
+              <Title order={3} size="h4">
+                Authentication
+              </Title>
+              {signedIn ? (
+                <Group gap="xs">
+                  <Badge color="green" variant="light">
+                    Signed in
+                  </Badge>
+                  {cloudConfig?.userEmail && (
+                    <Text size="sm" c="dimmed">
+                      {cloudConfig.userEmail}
+                    </Text>
+                  )}
+                </Group>
+              ) : (
+                <Group gap="xs">
+                  <Badge color="gray" variant="light">
+                    Not signed in
+                  </Badge>
+                  {cloudConfig?.cognitoConfig && (
+                    <Button size="xs" onClick={openSignIn}>
+                      Sign in
+                    </Button>
+                  )}
+                </Group>
+              )}
+            </Group>
+          </Paper>
+        </Stack>
       </SimpleGrid>
 
-      <SimpleGrid cols={{ base: 1, md: 2 }}>
-        <Paper p="lg" withBorder>
-          <Title order={3} size="h4" mb="md">
-            Recent Deployments
-          </Title>
-          {recentPlans.length === 0 ? (
-            <Text c="dimmed" size="sm">
-              No deployments yet
-            </Text>
-          ) : (
-            <Stack gap="xs">
-              {recentPlans.map((p) => (
-                <Group key={p.id} justify="space-between">
-                  <Code fz="xs">{p.stack_name}</Code>
-                  <StatusBadge status={p.latest_deployment?.status || p.status} size="sm" />
-                </Group>
-              ))}
-            </Stack>
-          )}
-        </Paper>
-
-        <Paper p="lg" withBorder>
-          <Title order={3} size="h4" mb="md">
-            Data Store
-          </Title>
-          {!dataStats ? (
-            <Alert color="yellow" title="Data server offline">
-              Start it: cd ~/starkeep-protocol && pnpm --filter @starkeep/data-server start
-            </Alert>
-          ) : dataStats.types.length === 0 ? (
-            <Text c="dimmed" size="sm">
-              No data records yet
-            </Text>
-          ) : (
-            <Stack gap="xs">
-              {dataStats.types.map((t) => (
-                <Group key={t.record_type} justify="space-between">
-                  <Code fz="xs">{t.record_type}</Code>
-                  <Badge variant="light">{t.count}</Badge>
-                </Group>
-              ))}
-            </Stack>
-          )}
-        </Paper>
-      </SimpleGrid>
+      {/* ── Sign-in modal ─────────────────────────────────────────────── */}
+      <Modal
+        opened={signInOpen}
+        onClose={() => {
+          setSignInOpen(false);
+          setSignInChallenge(null);
+        }}
+        title="Sign in to cloud"
+        size="sm"
+      >
+        {!signInChallenge ? (
+          <Stack gap="sm">
+            <TextInput
+              label="Email"
+              value={signInEmail}
+              onChange={(e) => setSignInEmail(e.currentTarget.value)}
+              disabled={signInLoading}
+            />
+            <PasswordInput
+              label="Password"
+              value={signInPassword}
+              onChange={(e) => setSignInPassword(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSignIn();
+              }}
+              disabled={signInLoading}
+            />
+            {signInError && (
+              <Alert color="red" title="Error">
+                {signInError}
+              </Alert>
+            )}
+            <Button onClick={handleSignIn} loading={signInLoading} fullWidth>
+              Sign in
+            </Button>
+          </Stack>
+        ) : (
+          <Stack gap="sm">
+            <Text size="sm">This account requires a new permanent password.</Text>
+            <PasswordInput
+              label="New password"
+              value={signInNewPassword}
+              onChange={(e) => setSignInNewPassword(e.currentTarget.value)}
+              disabled={signInLoading}
+            />
+            <PasswordInput
+              label="Confirm new password"
+              value={signInConfirmPassword}
+              onChange={(e) => setSignInConfirmPassword(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleNewPassword();
+              }}
+              disabled={signInLoading}
+            />
+            {signInError && (
+              <Alert color="red" title="Error">
+                {signInError}
+              </Alert>
+            )}
+            <Button onClick={handleNewPassword} loading={signInLoading} fullWidth>
+              Set password & sign in
+            </Button>
+          </Stack>
+        )}
+      </Modal>
     </Container>
   );
 }
 
-function StatCard({
+// ---------------------------------------------------------------------------
+// Shared sub-components
+// ---------------------------------------------------------------------------
+
+function StatusBadge({ online }: { online: boolean | null }) {
+  if (online === null) return <Loader size="xs" />;
+  return (
+    <Badge color={online ? "green" : "red"} variant="light">
+      {online ? "Online" : "Offline"}
+    </Badge>
+  );
+}
+
+function CopyCmd({
+  cmd,
   label,
-  value,
-  color,
+  copyKey,
+  copiedKey,
+  onCopy,
 }: {
+  cmd: string;
   label: string;
-  value: number | string;
-  color?: string;
+  copyKey: string;
+  copiedKey: string | null;
+  onCopy: (text: string, key: string) => void;
 }) {
   return (
-    <Paper p="md" withBorder>
-      <Text size="xl" fw={700} c={color}>
-        {value}
-      </Text>
-      <Text size="sm" c="dimmed">
-        {label}
-      </Text>
-    </Paper>
+    <Group gap="xs" wrap="nowrap">
+      <Button size="xs" variant="light" onClick={() => onCopy(cmd, copyKey)}>
+        {copiedKey === copyKey ? "Copied!" : label}
+      </Button>
+      <Code fz="xs" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {cmd}
+      </Code>
+    </Group>
+  );
+}
+
+function LocalAppRow({
+  name,
+  online,
+  url,
+  launchCmd,
+  copyKey,
+  copiedKey,
+  onCopy,
+}: {
+  name: string;
+  online: boolean | null;
+  url: string;
+  launchCmd: string;
+  copyKey: string;
+  copiedKey: string | null;
+  onCopy: (text: string, key: string) => void;
+}) {
+  return (
+    <Group justify="space-between">
+      <Group gap="xs">
+        <Text size="sm" fw={500}>
+          {name}
+        </Text>
+        <StatusBadge online={online} />
+      </Group>
+      {online === true ? (
+        <Anchor href={url} target="_blank" size="sm">
+          Open ↗
+        </Anchor>
+      ) : online === false ? (
+        <Group gap="xs" wrap="nowrap">
+          <Button size="xs" variant="light" onClick={() => onCopy(launchCmd, copyKey)}>
+            {copiedKey === copyKey ? "Copied!" : "Copy launch command"}
+          </Button>
+          <Code fz="xs" style={{ whiteSpace: "nowrap" }}>
+            {launchCmd}
+          </Code>
+        </Group>
+      ) : null}
+    </Group>
+  );
+}
+
+function RemoteAppRow({
+  name,
+  url,
+  online,
+}: {
+  name: string;
+  url: string | null | undefined;
+  online: boolean | null;
+}) {
+  return (
+    <Group justify="space-between">
+      <Group gap="xs">
+        <Text size="sm" fw={500}>
+          {name}
+        </Text>
+        {url === undefined ? (
+          <Loader size="xs" />
+        ) : url === null ? (
+          <Badge color="gray" variant="light" size="sm">
+            Not deployed
+          </Badge>
+        ) : online === null ? (
+          <Loader size="xs" />
+        ) : (
+          <Badge color={online ? "green" : "red"} variant="light" size="sm">
+            {online ? "Online" : "Offline"}
+          </Badge>
+        )}
+      </Group>
+      {url !== null && url !== undefined && online === true && (
+        <Anchor href={url} target="_blank" size="sm">
+          Open ↗
+        </Anchor>
+      )}
+    </Group>
   );
 }
