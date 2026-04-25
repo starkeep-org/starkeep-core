@@ -10,6 +10,7 @@
     "remove": "sst remove",
     "build:artifact": "node build-artifact.mjs",
     "local:deploy": "tsx scripts/local-deploy.ts deploy",
+    "local:deploy-photos": "tsx scripts/local-deploy.ts deploy-photos",
     "local:remove": "tsx scripts/local-deploy.ts remove"
   },
   "dependencies": {

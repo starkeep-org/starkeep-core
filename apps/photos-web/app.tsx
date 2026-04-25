@@ -18,7 +18,7 @@ import {
   triggerSyncNow,
   type PhotoRecord,
 } from "./src/lib/data-server-client";
-import { DataSourceProvider, useDataSource } from "./src/lib/data-source-context";
+import { DataSourceProvider, useDataSource, FORCE_REMOTE } from "./src/lib/data-source-context";
 import { CloudSetupModal } from "./src/lib/CloudSetupModal";
 import { downsizeImage } from "./src/lib/image-utils";
 import type { DataSourceMode } from "./src/lib/data-client";
@@ -327,32 +327,34 @@ function PhotosAppInner() {
           <span style={{ fontWeight: 700, fontSize: 17, letterSpacing: "-0.02em" }}>Photos</span>
 
           {/* Local / Remote toggle */}
-          <div
-            style={{
-              display: "flex",
-              background: "rgba(255,255,255,0.08)",
-              borderRadius: 4,
-              border: "1px solid rgba(255,255,255,0.15)",
-            }}
-          >
-            {(["local", "remote"] as DataSourceMode[]).map((m) => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                disabled={m === "remote" && !remoteAvailable}
-                style={{
-                  ...toolbarButtonStyle,
-                  background: mode === m ? "rgba(255,255,255,0.2)" : "transparent",
-                  border: "none",
-                  borderRadius: m === "local" ? "3px 0 0 3px" : "0 3px 3px 0",
-                  opacity: m === "remote" && !remoteAvailable ? 0.4 : 1,
-                  cursor: m === "remote" && !remoteAvailable ? "not-allowed" : "pointer",
-                }}
-              >
-                {m.charAt(0).toUpperCase() + m.slice(1)}
-              </button>
-            ))}
-          </div>
+          {!FORCE_REMOTE && (
+            <div
+              style={{
+                display: "flex",
+                background: "rgba(255,255,255,0.08)",
+                borderRadius: 4,
+                border: "1px solid rgba(255,255,255,0.15)",
+              }}
+            >
+              {(["local", "remote"] as DataSourceMode[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  disabled={m === "remote" && !remoteAvailable}
+                  style={{
+                    ...toolbarButtonStyle,
+                    background: mode === m ? "rgba(255,255,255,0.2)" : "transparent",
+                    border: "none",
+                    borderRadius: m === "local" ? "3px 0 0 3px" : "0 3px 3px 0",
+                    opacity: m === "remote" && !remoteAvailable ? 0.4 : 1,
+                    cursor: m === "remote" && !remoteAvailable ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {m.charAt(0).toUpperCase() + m.slice(1)}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Thumbnail generation strategy */}
           <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "#aaa" }}>

@@ -4,6 +4,22 @@ import { readCloudConfig, writeCloudConfig, type CloudConfig } from "./cloud-con
 
 const LOCAL_BASE = "http://127.0.0.1:9820";
 
+const ENV_SERVER_CONFIG: ServerConfig | null = process.env.NEXT_PUBLIC_API_GATEWAY_URL
+  ? {
+      stage: "",
+      s3Bucket: null,
+      s3Region: process.env.NEXT_PUBLIC_COGNITO_REGION ?? "us-east-1",
+      auroraEndpoint: null,
+      apiGatewayUrl: process.env.NEXT_PUBLIC_API_GATEWAY_URL,
+      cognitoConfig: {
+        region: process.env.NEXT_PUBLIC_COGNITO_REGION ?? "us-east-1",
+        userPoolId: process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID ?? "",
+        userPoolClientId: process.env.NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID ?? "",
+        identityPoolId: "",
+      },
+    }
+  : null;
+
 interface ServerConfig {
   stage: string;
   s3Bucket: string | null;
@@ -36,6 +52,10 @@ export function CloudSetupModal({ onClose }: { onClose: () => void }) {
       setStoredConfig(c);
       if (!c) setShowSignIn(true);
     });
+    if (ENV_SERVER_CONFIG) {
+      setServerConfig(ENV_SERVER_CONFIG);
+      return;
+    }
     fetch(`${LOCAL_BASE}/config`)
       .then((r) => (r.ok ? (r.json() as Promise<ServerConfig>) : Promise.reject(r.statusText)))
       .then(setServerConfig)
