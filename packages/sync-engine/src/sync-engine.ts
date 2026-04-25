@@ -256,6 +256,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           mimeType: change.recordSnapshot.mimeType ?? undefined,
         }));
 
+      const failedKeys = new Set<string>();
+
       if (fileEntries.length > 0) {
         const filesToPush = await fileSyncEngine.getFilesToPush(
           localObjectStorage,
@@ -263,15 +265,27 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           fileEntries,
         );
         for (const manifest of filesToPush) {
-          await fileSyncEngine.transferFile(
-            manifest,
-            localObjectStorage,
-            remoteObjectStorage,
-          );
+          try {
+            await fileSyncEngine.transferFile(
+              manifest,
+              localObjectStorage,
+              remoteObjectStorage,
+            );
+          } catch (err) {
+            console.warn(`[sync] file transfer skipped: ${manifest.objectStorageKey} — ${(err as Error).message}`);
+            failedKeys.add(manifest.objectStorageKey);
+          }
         }
       }
 
-      const response = await transport.pushChanges({ changes: pushable });
+      // Exclude records whose file transfer failed — they'll be retried on the next push.
+      const pushableWithFiles = pushable.filter(
+        (change) =>
+          change.recordSnapshot.objectStorageKey === null ||
+          !failedKeys.has(change.recordSnapshot.objectStorageKey),
+      );
+
+      const response = await transport.pushChanges({ changes: pushableWithFiles });
 
       // Accepted: mark corresponding local records as Synced.
       const acceptedSet = new Set(response.accepted);

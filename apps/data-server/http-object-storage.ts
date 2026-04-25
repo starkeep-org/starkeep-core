@@ -15,6 +15,10 @@ export interface HttpObjectStorageAdapterOptions {
 /**
  * Adapter that speaks `/files/:key` HTTP to a remote Starkeep sync server
  * (see sync-engine's createHttpSyncHandler).
+ *
+ * put() and get() bypass API Gateway by requesting presigned S3 URLs from the
+ * server and transferring directly to/from S3. has() uses a lightweight HEAD
+ * request through the API (no body, well within limits).
  */
 export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
   private readonly baseUrl: string;
@@ -29,6 +33,11 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
 
   private url(key: string): string {
     return `${this.baseUrl}/${encodeURIComponent(key)}`;
+  }
+
+  // Base URL without the /files suffix, for presign endpoints.
+  private apiBase(): string {
+    return this.baseUrl.replace(/\/files$/, "");
   }
 
   private headers(extra?: Record<string, string>): Record<string, string> {
@@ -49,7 +58,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
   async healthCheck(): Promise<boolean> {
     try {
       const response = await this.fetchImpl(
-        `${this.baseUrl.replace(/\/files$/, "")}/health`,
+        `${this.apiBase()}/health`,
         { headers: this.headers() },
       );
       return response.ok;
@@ -59,29 +68,46 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
   }
 
   async put(key: string, data: Uint8Array, options?: PutOptions): Promise<void> {
-    const headers = this.headers({
-      "Content-Type": options?.contentType ?? "application/octet-stream",
+    // Request a presigned S3 PUT URL from the server to bypass API Gateway limits.
+    const presignRes = await this.fetchImpl(`${this.apiBase()}/files/presign`, {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ key, contentType: options?.contentType }),
     });
-    const response = await this.fetchImpl(this.url(key), {
+    if (!presignRes.ok) {
+      throw new Error(`presign PUT ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
+    }
+    const { url } = await presignRes.json() as { url: string };
+
+    // Upload directly to S3 — presigned URL carries credentials, no auth header needed.
+    const s3Res = await this.fetchImpl(url, {
       method: "PUT",
-      headers,
+      headers: options?.contentType ? { "Content-Type": options.contentType } : {},
       body: Buffer.from(data),
     });
-    if (!response.ok) {
-      throw new Error(`PUT ${key} failed: ${response.status} ${response.statusText}`);
+    if (!s3Res.ok) {
+      throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}`);
     }
   }
 
   async get(key: string): Promise<GetResult | null> {
-    const response = await this.fetchImpl(this.url(key), {
+    // Request a presigned S3 GET URL from the server to bypass API Gateway response limits.
+    const presignRes = await this.fetchImpl(`${this.url(key)}/presign`, {
       headers: this.headers(),
     });
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      throw new Error(`GET ${key} failed: ${response.status} ${response.statusText}`);
+    if (presignRes.status === 404) return null;
+    if (!presignRes.ok) {
+      throw new Error(`presign GET ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const contentType = response.headers.get("content-type") ?? undefined;
+    const { url } = await presignRes.json() as { url: string };
+
+    // Download directly from S3.
+    const s3Res = await this.fetchImpl(url);
+    if (!s3Res.ok) {
+      throw new Error(`S3 GET ${key} failed: ${s3Res.status} ${s3Res.statusText}`);
+    }
+    const buffer = Buffer.from(await s3Res.arrayBuffer());
+    const contentType = s3Res.headers.get("content-type") ?? undefined;
     return {
       data: buffer,
       contentType,
