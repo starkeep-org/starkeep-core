@@ -35,6 +35,7 @@ export async function POST(req: NextRequest) {
   const hasAlpha = meta.hasAlpha ?? false;
 
   const resized = await sharp(inputBuffer)
+    .rotate()
     .resize(maxDimension, maxDimension, { fit: "inside", kernel: "cubic", withoutEnlargement: true })
     [hasAlpha ? "webp" : "jpeg"](hasAlpha ? { quality: 76 } : { quality: 85 })
     .toBuffer();

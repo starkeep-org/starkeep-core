@@ -124,34 +124,6 @@ importers:
         specifier: ^5.0.0
         version: 5.4.21(@types/node@25.4.0)(terser@5.16.9)
 
-  apps/cloud-server:
-    dependencies:
-      '@starkeep/core':
-        specifier: workspace:*
-        version: link:../../packages/core
-      '@starkeep/storage-adapter':
-        specifier: workspace:*
-        version: link:../../packages/storage-adapter
-      '@starkeep/storage-aurora-dsql':
-        specifier: workspace:*
-        version: link:../../packages/storage-aurora-dsql
-      '@starkeep/storage-fs':
-        specifier: workspace:*
-        version: link:../../packages/storage-fs
-      '@starkeep/sync-engine':
-        specifier: workspace:*
-        version: link:../../packages/sync-engine
-      pg:
-        specifier: ^8.13.0
-        version: 8.20.0
-    devDependencies:
-      '@types/pg':
-        specifier: ^8.11.0
-        version: 8.20.0
-      tsx:
-        specifier: ^4.21.0
-        version: 4.21.0
-
   apps/data-server:
     dependencies:
       '@aws-sdk/client-cognito-identity':
@@ -400,6 +372,9 @@ importers:
 
   infra/user-data:
     dependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.700.0
+        version: 3.1009.0
       '@aws-sdk/dsql-signer':
         specifier: ^3.700.0
         version: 3.1029.0

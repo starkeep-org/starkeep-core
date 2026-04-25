@@ -61,13 +61,17 @@ const CREATE_MIGRATIONS_TABLE_SQL = `
 
 const CREATE_METADATA_SYNC_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS metadata_sync (
-    target_id         TEXT NOT NULL,
-    target_type       TEXT NOT NULL,
-    generator_id      TEXT NOT NULL,
-    generator_version INTEGER NOT NULL,
-    input_hash        TEXT,
-    updated_at        TEXT NOT NULL,
-    value             TEXT NOT NULL,
+    target_id          TEXT NOT NULL,
+    target_type        TEXT NOT NULL,
+    generator_id       TEXT NOT NULL,
+    generator_version  INTEGER NOT NULL,
+    input_hash         TEXT,
+    updated_at         TEXT NOT NULL,
+    value              TEXT NOT NULL,
+    object_storage_key TEXT,
+    content_hash       TEXT,
+    mime_type          TEXT,
+    size_bytes         INTEGER,
     PRIMARY KEY (target_id, generator_id)
   )
 `;
@@ -113,13 +117,6 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     this.database.exec(CREATE_MIGRATIONS_TABLE_SQL);
     this.database.exec(CREATE_METADATA_SYNC_TABLE_SQL);
     this.database.exec(CREATE_METADATA_SYNC_INDEX_SQL);
-    // Idempotent column additions for existing databases
-    try { this.database.exec("ALTER TABLE records ADD COLUMN original_filename TEXT"); } catch {}
-    // File-backed metadata columns (added when this feature was introduced)
-    try { this.database.exec("ALTER TABLE metadata_sync ADD COLUMN object_storage_key TEXT"); } catch {}
-    try { this.database.exec("ALTER TABLE metadata_sync ADD COLUMN content_hash TEXT"); } catch {}
-    try { this.database.exec("ALTER TABLE metadata_sync ADD COLUMN mime_type TEXT"); } catch {}
-    try { this.database.exec("ALTER TABLE metadata_sync ADD COLUMN size_bytes INTEGER"); } catch {}
   }
 
   async close(): Promise<void> {

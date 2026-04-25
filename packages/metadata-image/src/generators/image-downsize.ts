@@ -50,6 +50,7 @@ export function createImageDownsizeGenerator(
       const hasAlpha = meta.hasAlpha ?? false;
 
       const resized = await sharp(inputBuffer)
+        .rotate()
         .resize(maxDimension, maxDimension, {
           fit: "inside",
           kernel: "cubic",
