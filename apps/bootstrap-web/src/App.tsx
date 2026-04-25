@@ -10,11 +10,124 @@ import {
   Paper,
   Code,
   Group,
+  Table,
+  Divider,
 } from "@mantine/core";
 import {
   generateSelfHostedBootstrapTemplate,
   getCloudFormationCreateStackUrl,
 } from "@starkeep/admin-core";
+
+function LandingSection() {
+  return (
+    <Stack gap="xl" mb="xl">
+      <Stack gap="xs">
+        <Title order={1}>Starkeep</Title>
+        <Title order={3} c="dimmed" fw={400}>
+          Your data. Your apps. Your infra.
+        </Title>
+      </Stack>
+
+      <Stack gap="md">
+        <Text>
+          Starkeep is a free open-source SDK and app ecosystem that runs locally and on AWS
+          Serverless (S3, DSQL, Lambdas) with full two-way data sync.
+        </Text>
+        <Text>
+          Run apps with the full power and cost efficiency of AWS serverless cloud with your own AWS
+          account while your data never leaves your control.
+        </Text>
+        <Text>
+          Easily set up your own Starkeep service for free with no Starkeep account required, just
+          your own free AWS account you create yourself.
+        </Text>
+      </Stack>
+
+      <Stack gap="lg">
+        <Stack gap="xs">
+          <Title order={3}>Data Management</Title>
+          <Table striped withTableBorder withColumnBorders>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th></Table.Th>
+                <Table.Th>Starkeep</Table.Th>
+                <Table.Th>Traditional self-hosting</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {[
+                ["All your apps access a common shared data store", "Yes", "No, each app can only access its own data store"],
+                ["Built-in local-cloud data sync", "Yes", "Depends on the app"],
+                ["Built-in cross-device data sync", "Yes", "Depends on the app"],
+                ["Supports preserving local filesystem structure in-place", "Yes", "Depends on the app"],
+                ["Enterprise-grade backup built-in", "Yes", "No"],
+                ["Data versioning", "Yes, built-in", "No"],
+                ["Your data is decoupled from apps for maximum portability", "Yes", "Usually not"],
+              ].map(([feature, sk, trad]) => (
+                <Table.Tr key={feature}>
+                  <Table.Td>{feature}</Table.Td>
+                  <Table.Td>{sk}</Table.Td>
+                  <Table.Td>{trad}</Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Stack>
+
+        <Stack gap="xs">
+          <Title order={3}>Cost</Title>
+          <Table striped withTableBorder withColumnBorders>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th></Table.Th>
+                <Table.Th>Starkeep</Table.Th>
+                <Table.Th>Traditional self-hosting</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {[
+                ["Cost scales to zero with generous free tier", "Yes", "No, substantial cost floor"],
+                ["Pay for actual usage only", "Yes", "No, must pay for idle server time"],
+              ].map(([feature, sk, trad]) => (
+                <Table.Tr key={feature}>
+                  <Table.Td>{feature}</Table.Td>
+                  <Table.Td>{sk}</Table.Td>
+                  <Table.Td>{trad}</Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Stack>
+
+        <Stack gap="xs">
+          <Title order={3}>Developer Experience</Title>
+          <Table striped withTableBorder withColumnBorders>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th></Table.Th>
+                <Table.Th>Starkeep</Table.Th>
+                <Table.Th>Traditional self-hosting</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {[
+                ["Apps can reuse common resources like database and API endpoints", "Yes", "No"],
+                ["All apps share the same pattern for storing and accessing data", "Yes", "No"],
+                ["Easy to develop your own apps and services", "Yes", "Maybe"],
+              ].map(([feature, sk, trad]) => (
+                <Table.Tr key={feature}>
+                  <Table.Td>{feature}</Table.Td>
+                  <Table.Td>{sk}</Table.Td>
+                  <Table.Td>{trad}</Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Stack>
+      </Stack>
+    </Stack>
+  );
+}
 
 const ADMIN_WEB_URL = import.meta.env.VITE_ADMIN_WEB_URL ?? "http://localhost:3000";
 
@@ -61,7 +174,9 @@ export function App() {
   };
 
   return (
-    <Container size="sm" py="xl">
+    <Container size="md" py="xl">
+      <LandingSection />
+      <Divider my="xl" />
       <Title order={2} mb="xs">
         Set up Starkeep Cloud
       </Title>

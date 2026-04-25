@@ -12,12 +12,7 @@ import {
   Badge,
   Loader,
   Center,
-  SegmentedControl,
-  Stack,
 } from "@mantine/core";
-import { DataSourceProvider, DataSourceContext } from "../../src/lib/data-source-context";
-import { useContext } from "react";
-import type { DataSourceMode } from "../../src/lib/data-client";
 import {
   getCloudSetupState,
   readCloudConfig,
@@ -27,53 +22,22 @@ import { startCredentialRefreshTimer } from "../../src/lib/cognito-auth";
 
 function AppNavbar() {
   const pathname = usePathname();
-  const { mode, setMode, remoteAvailable } = useContext(DataSourceContext);
 
   return (
-    <Stack h="100%" justify="space-between">
-      <div>
-        <NavLink
-          component={Link}
-          href="/"
-          label="Dashboard"
-          active={pathname === "/"}
-        />
-        <NavLink
-          component={Link}
-          href="/deployments"
-          label="Deployments"
-          active={pathname.startsWith("/deployments")}
-        />
-        <NavLink
-          component={Link}
-          href="/files"
-          label="Data Browser"
-          active={pathname === "/files"}
-        />
-        <NavLink
-          component={Link}
-          href="/upload"
-          label="Upload File"
-          active={pathname === "/upload"}
-        />
-        <NavLink
-          component={Link}
-          href="/settings"
-          label="Settings"
-          active={pathname === "/settings"}
-        />
-      </div>
-      <SegmentedControl
-        value={mode}
-        onChange={(v) => setMode(v as DataSourceMode)}
-        data={[
-          { label: "Local", value: "local" },
-          { label: "Remote", value: "remote", disabled: !remoteAvailable },
-        ]}
-        size="xs"
-        fullWidth
+    <div>
+      <NavLink
+        component={Link}
+        href="/"
+        label="Dashboard"
+        active={pathname === "/"}
       />
-    </Stack>
+      <NavLink
+        component={Link}
+        href="/settings"
+        label="Settings"
+        active={pathname === "/settings"}
+      />
+    </div>
   );
 }
 
@@ -123,26 +87,24 @@ function ShellGate({ children }: { children: ReactNode }) {
   }
 
   return (
-    <DataSourceProvider>
-      <AppShell navbar={{ width: 220, breakpoint: "sm" }} header={{ height: 56 }} padding="md">
-        <AppShell.Header>
-          <Group h="100%" px="md" justify="space-between">
-            <Group gap="xs">
-              <Title order={4}>Starkeep Admin</Title>
-              <Badge variant="light" size="sm">
-                Web
-              </Badge>
-            </Group>
+    <AppShell navbar={{ width: 220, breakpoint: "sm" }} header={{ height: 56 }} padding="md">
+      <AppShell.Header>
+        <Group h="100%" px="md" justify="space-between">
+          <Group gap="xs">
+            <Title order={4}>Starkeep Admin</Title>
+            <Badge variant="light" size="sm">
+              Web
+            </Badge>
           </Group>
-        </AppShell.Header>
+        </Group>
+      </AppShell.Header>
 
-        <AppShell.Navbar p="sm">
-          <AppNavbar />
-        </AppShell.Navbar>
+      <AppShell.Navbar p="sm">
+        <AppNavbar />
+      </AppShell.Navbar>
 
-        <AppShell.Main>{children}</AppShell.Main>
-      </AppShell>
-    </DataSourceProvider>
+      <AppShell.Main>{children}</AppShell.Main>
+    </AppShell>
   );
 }
 
