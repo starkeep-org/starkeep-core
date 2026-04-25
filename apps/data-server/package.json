@@ -3,9 +3,13 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
+  "bin": {
+    "data-server-ctl": "./cli.ts"
+  },
   "scripts": {
     "start": "tsx server.ts",
-    "dev": "tsx --watch server.ts"
+    "dev": "tsx --watch server.ts",
+    "cli": "tsx cli.ts"
   },
   "dependencies": {
     "@starkeep/core": "workspace:*",

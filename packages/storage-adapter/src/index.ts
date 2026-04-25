@@ -21,6 +21,7 @@ export type {
   ListOptions,
   ListResult,
   SignedUrlOptions,
+  SignedPutUrlOptions,
 } from "./object-storage/types.js";
 
 export {
