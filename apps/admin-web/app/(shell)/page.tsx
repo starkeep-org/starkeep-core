@@ -105,6 +105,8 @@ export default function DashboardPage() {
   // Add watch form
   const [watchPath, setWatchPath] = useState("");
   const [watchSubmitting, setWatchSubmitting] = useState(false);
+  const [watchError, setWatchError] = useState<string | null>(null);
+  const [watchSuccess, setWatchSuccess] = useState<string | null>(null);
 
   // Clipboard feedback
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -148,7 +150,7 @@ export default function DashboardPage() {
         } else {
           setLocalOnline(false);
         }
-        if (watchesResp.ok) setWatches(await watchesResp.json());
+        if (watchesResp.ok) setWatches((await watchesResp.json()).watches);
         if (configResp.ok) {
           const cfg = await configResp.json();
           setPhotosWebUrl((cfg.photosWebUrl as string | null) ?? null);
@@ -288,25 +290,38 @@ export default function DashboardPage() {
   // ---- Watch handlers ----
 
   async function handleAddWatch() {
-    if (!watchPath.trim()) return;
+    const path = watchPath.trim();
+    if (!path) return;
+    setWatchError(null);
+    setWatchSuccess(null);
+
+    const expanded = path.startsWith("~/") ? path.replace("~", "") : path;
+    const duplicate = watches?.some(
+      (w) => w.directoryPath === path || w.directoryPath.endsWith(expanded)
+    );
+    if (duplicate) {
+      setWatchError("A watch for this directory already exists.");
+      return;
+    }
+
     setWatchSubmitting(true);
     try {
       const resp = await fetch("http://127.0.0.1:9820/watches", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          directoryPath: watchPath.trim(),
-          targetType: "@starkeep/image",
-          recursive: true,
-        }),
+        body: JSON.stringify({ directoryPath: path, targetType: "@starkeep/image", recursive: true }),
       });
+      const data = await resp.json();
       if (resp.ok) {
         setWatchPath("");
+        setWatchSuccess(`Watch started: ${data.watch?.directoryPath ?? path}`);
         const wResp = await fetch("http://127.0.0.1:9820/watches");
-        if (wResp.ok) setWatches(await wResp.json());
+        if (wResp.ok) setWatches((await wResp.json()).watches);
+      } else {
+        setWatchError(data.error ?? "Failed to add watch.");
       }
     } catch {
-      // server offline
+      setWatchError("Could not reach the data server.");
     } finally {
       setWatchSubmitting(false);
     }
@@ -440,14 +455,13 @@ export default function DashboardPage() {
 
             <Group gap="xs" mt="xs">
               <TextInput
-                placeholder="/path/to/directory"
+                placeholder="/path/to/directory or ~/Photos"
                 size="xs"
                 value={watchPath}
-                onChange={(e) => setWatchPath(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleAddWatch();
-                }}
+                onChange={(e) => { setWatchPath(e.currentTarget.value); setWatchError(null); setWatchSuccess(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") handleAddWatch(); }}
                 style={{ flex: 1 }}
+                error={!!watchError}
               />
               <Button
                 size="xs"
@@ -458,6 +472,8 @@ export default function DashboardPage() {
                 Add watch
               </Button>
             </Group>
+            {watchError && <Text size="xs" c="red">{watchError}</Text>}
+            {watchSuccess && <Text size="xs" c="green">{watchSuccess}</Text>}
           </Stack>
         )}
       </Paper>

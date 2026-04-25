@@ -45,6 +45,7 @@ export interface WatchFileInfo {
   relativePath: string;
   contentHash: string;
   dataRecordId: string;
+  mtime: number;
   status: "synced" | "pending" | "error";
 }
 
@@ -169,6 +170,7 @@ export function createFileWatchManager(opts: {
           relativePath: p.relativePath,
           contentHash: p.contentHash,
           dataRecordId: p.dataRecordId,
+          mtime: p.mtime ?? 0,
           status: "synced",
         });
       }
@@ -194,10 +196,10 @@ export function createFileWatchManager(opts: {
 
       // Check if already tracked
       const existing = active.files.get(filePath);
-      if (existing && existing.status === "synced") return;
+      if (existing?.status === "synced" && existing.mtime === fileStat.mtimeMs) return;
 
       // Mark pending immediately so duplicate FS events skip this file while it's in-flight
-      active.files.set(filePath, { filePath, relativePath, contentHash: "", dataRecordId: "", status: "pending" });
+      active.files.set(filePath, { filePath, relativePath, contentHash: "", dataRecordId: "", mtime: 0, status: "pending" });
 
       // Hash the file (streaming, no full buffer)
       const contentHash = await hashFile(filePath);
@@ -246,6 +248,7 @@ export function createFileWatchManager(opts: {
         relativePath,
         contentHash,
         dataRecordId,
+        mtime: fileStat.mtimeMs,
         status: "synced",
       });
     } catch (err) {
@@ -255,6 +258,7 @@ export function createFileWatchManager(opts: {
         relativePath,
         contentHash: "",
         dataRecordId: "",
+        mtime: 0,
         status: "error",
       });
     }
