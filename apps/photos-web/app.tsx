@@ -107,11 +107,22 @@ function useFileUrlCache(mode: DataSourceMode) {
       if (loadingRef.current.has(imageId)) return "";
 
       loadingRef.current.add(imageId);
-      getMetadataFileUrl(imageId, "@starkeep/image:downsize-400", mode)
-        .then((thumbnailUrl) => thumbnailUrl ?? getPhotoFileUrl(imageId, mode))
+
+      const generatorId = "@starkeep/image:downsize-400";
+      const isLocal =
+        typeof window !== "undefined" &&
+        (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+      const generationMode: DataSourceMode = isLocal ? "local" : "remote";
+
+      getMetadataFileUrl(imageId, generatorId, mode)
+        .then(async (thumbnailUrl) => {
+          if (thumbnailUrl) return thumbnailUrl;
+          await triggerGeneration(imageId, generatorId, generationMode);
+          return getMetadataFileUrl(imageId, generatorId, mode);
+        })
         .then((url) => {
           loadingRef.current.delete(imageId);
-          setUrlMap((prev) => new Map(prev).set(imageId, url));
+          if (url) setUrlMap((prev) => new Map(prev).set(imageId, url));
         })
         .catch(() => {
           loadingRef.current.delete(imageId);
