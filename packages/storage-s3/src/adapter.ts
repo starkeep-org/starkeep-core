@@ -16,6 +16,7 @@ import type {
   ListOptions,
   ListResult,
   SignedUrlOptions,
+  SignedPutUrlOptions,
 } from "@starkeep/storage-adapter";
 import type { S3ObjectStorageAdapterOptions } from "./types.js";
 
@@ -194,6 +195,22 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
     const command = new GetObjectCommand({
       Bucket: this.options.bucketName,
       Key: this.resolveKey(key),
+    });
+
+    return awsGetSignedUrl(this.getClient(), command, {
+      expiresIn: expiresInSeconds,
+    });
+  }
+
+  async getSignedPutUrl(
+    key: string,
+    options?: SignedPutUrlOptions,
+  ): Promise<string> {
+    const expiresInSeconds = options?.expiresIn ?? 3600;
+    const command = new PutObjectCommand({
+      Bucket: this.options.bucketName,
+      Key: this.resolveKey(key),
+      ...(options?.contentType ? { ContentType: options.contentType } : {}),
     });
 
     return awsGetSignedUrl(this.getClient(), command, {

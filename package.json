@@ -32,7 +32,8 @@
     ],
     "overrides": {
       "@types/react": "^19.0.0",
-      "@types/react-dom": "^19.0.0"
+      "@types/react-dom": "^19.0.0",
+      "@smithy/smithy-client": "4.12.12"
     }
   }
 }

@@ -392,6 +392,31 @@ export async function handler(event: APIGatewayEvent) {
       return ok({ records });
     }
 
+    // POST /files/presign — generate a presigned S3 PUT URL for direct upload.
+    // Used by the local data-server to bypass API Gateway for large file uploads.
+    if (method === "POST" && path === "/files/presign") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as { key?: string; contentType?: string; expiresIn?: number };
+      if (!body.key) return clientErr("key is required", 400);
+      const expiresIn = body.expiresIn ?? 3600;
+      const url = await storage.getSignedPutUrl!(body.key, { contentType: body.contentType, expiresIn });
+      return ok({ url, key: body.key, expiresIn });
+    }
+
+    // GET /files/{+key}/presign — generate a presigned S3 GET URL for direct download.
+    // Must be matched before the general filesMatch block.
+    const filesPresignMatch = path.match(/^\/files\/(.+)\/presign$/);
+    if (filesPresignMatch && method === "GET") {
+      const key = decodeURIComponent(filesPresignMatch[1]!);
+      const exists = await storage.has(key);
+      if (!exists) return clientErr("File not found", 404);
+      const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
+      const url = await storage.getSignedUrl!(key, { expiresIn });
+      return ok({ url, expiresIn });
+    }
+
     // HEAD|GET|PUT /files/{+key} — S3 proxy for file-backed metadata sync.
     // The local data-server's HttpObjectStorageAdapter calls these to transfer
     // thumbnail files alongside metadata records during pullMetadata / pushMetadata.
