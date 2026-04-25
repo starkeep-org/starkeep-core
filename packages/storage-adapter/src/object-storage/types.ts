@@ -22,3 +22,8 @@ export interface ListResult {
 export interface SignedUrlOptions {
   expiresIn?: number;
 }
+
+export interface SignedPutUrlOptions {
+  contentType?: string;
+  expiresIn?: number;
+}

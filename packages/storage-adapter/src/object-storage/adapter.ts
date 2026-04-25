@@ -1,4 +1,4 @@
-import type { PutOptions, GetResult, ListOptions, ListResult, SignedUrlOptions } from "./types.js";
+import type { PutOptions, GetResult, ListOptions, ListResult, SignedUrlOptions, SignedPutUrlOptions } from "./types.js";
 
 export interface ObjectStorageAdapter {
   init(): Promise<void>;
@@ -12,5 +12,6 @@ export interface ObjectStorageAdapter {
   delete(key: string): Promise<void>;
   list(prefix: string, options?: ListOptions): Promise<ListResult>;
   getSignedUrl?(key: string, options?: SignedUrlOptions): Promise<string>;
+  getSignedPutUrl?(key: string, options?: SignedPutUrlOptions): Promise<string>;
   putSymlink?(key: string, targetPath: string, options?: PutOptions): Promise<void>;
 }
