@@ -72,6 +72,7 @@ interface StarkeepConfig {
   s3Region?: string;
   auroraEndpoint?: string;
   apiGatewayUrl?: string;
+  photosWebUrl?: string;
 }
 
 interface CloudCredentials {
@@ -492,22 +493,24 @@ async function main() {
       }
 
       if (path === "/config" && req.method === "GET") {
-        if (!starkeepConfig) {
+        const freshConfig = await loadStarkeepConfig();
+        if (!freshConfig) {
           res.writeHead(404);
           json(res, { error: "No cloud config loaded" });
           return;
         }
         json(res, {
-          stage: starkeepConfig.stage,
-          s3Bucket: starkeepConfig.s3Bucket ?? null,
-          s3Region: starkeepConfig.s3Region ?? starkeepConfig.region,
-          auroraEndpoint: starkeepConfig.auroraEndpoint ?? null,
-          apiGatewayUrl: starkeepConfig.apiGatewayUrl ?? null,
+          stage: freshConfig.stage,
+          s3Bucket: freshConfig.s3Bucket ?? null,
+          s3Region: freshConfig.s3Region ?? freshConfig.region,
+          auroraEndpoint: freshConfig.auroraEndpoint ?? null,
+          apiGatewayUrl: freshConfig.apiGatewayUrl ?? null,
+          photosWebUrl: freshConfig.photosWebUrl ?? null,
           cognitoConfig: {
-            region: starkeepConfig.region,
-            userPoolId: starkeepConfig.userPoolId,
-            userPoolClientId: starkeepConfig.userPoolClientId,
-            identityPoolId: starkeepConfig.identityPoolId,
+            region: freshConfig.region,
+            userPoolId: freshConfig.userPoolId,
+            userPoolClientId: freshConfig.userPoolClientId,
+            identityPoolId: freshConfig.identityPoolId,
           },
         });
         return;

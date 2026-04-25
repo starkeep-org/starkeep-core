@@ -11,6 +11,7 @@ export interface CloudConfig {
   apiGatewayUrl?: string;
   cognitoConfig: CognitoConfig;
   cognitoRefreshToken: string;
+  userEmail?: string;
 }
 
 export type CloudConfigExport = Omit<CloudConfig, "cognitoRefreshToken">;
