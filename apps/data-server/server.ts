@@ -99,6 +99,21 @@ function restartProcess(): void {
   process.exit(0);
 }
 
+const WATCHES_CONFIG_PATH = join(STARKEEP_DIR, "watches.json");
+
+async function loadWatchConfigs(): Promise<import("./watcher.js").WatchConfig[]> {
+  try {
+    return JSON.parse(await readFile(WATCHES_CONFIG_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+async function saveWatchConfigs(configs: import("./watcher.js").WatchConfig[]): Promise<void> {
+  await mkdir(STARKEEP_DIR, { recursive: true });
+  await writeFile(WATCHES_CONFIG_PATH, JSON.stringify(configs, null, 2), "utf8");
+}
+
 async function loadStarkeepConfig(): Promise<StarkeepConfig | null> {
   try {
     return JSON.parse(await readFile(STARKEEP_CONFIG_PATH, "utf8")) as StarkeepConfig;
@@ -449,27 +464,12 @@ async function main() {
   // File watch manager — monitors local directories and syncs to Starkeep
   const watchManager = createFileWatchManager({ sdk, databaseAdapter, ownerId: OWNER_ID });
 
-  // Restore persisted watches
-  const existingWatches = await databaseAdapter.query({
-    kind: "data",
-    filters: [{ field: "type" as const, operator: "eq" as const, value: "system:watch" }],
-    limit: 1000,
-  });
-  for (const record of existingWatches.records) {
-    if (record.deletedAt) continue;
-    const p = (record as any).payload;
-    if (!p?.directoryPath || !p?.targetType) {
-      await sdk.data.delete(record.id as any);
-      continue;
-    }
-    watchManager.startWatch({
-      id: record.id,
-      directoryPath: p.directoryPath,
-      targetType: p.targetType,
-      recursive: p.recursive ?? true,
-      includePatterns: p.includePatterns,
-      excludePatterns: p.excludePatterns,
-    }).catch((err: Error) => console.error(`Failed to restore watch ${record.id}:`, err.message));
+  // Restore persisted watches from local config file
+  const persistedWatches = await loadWatchConfigs();
+  for (const config of persistedWatches) {
+    watchManager.startWatch(config).catch((err: Error) =>
+      console.error(`Failed to restore watch ${config.id}:`, err.message)
+    );
   }
 
   const server = createServer(async (req, res) => {
@@ -1253,7 +1253,10 @@ async function main() {
       // POST /watches — register a new directory watch
       if (path === "/watches" && req.method === "POST") {
         const body = await readBody(req);
-        const { directoryPath, targetType, recursive, includePatterns, excludePatterns } = JSON.parse(body);
+        const { directoryPath: rawDirectoryPath, targetType, recursive, includePatterns, excludePatterns } = JSON.parse(body);
+        const directoryPath = typeof rawDirectoryPath === "string"
+          ? rawDirectoryPath.replace(/^~/, homedir())
+          : rawDirectoryPath;
         if (!directoryPath || !targetType) {
           res.writeHead(400);
           json(res, { error: "directoryPath and targetType are required" });
@@ -1272,24 +1275,28 @@ async function main() {
           json(res, { error: "Directory does not exist" });
           return;
         }
-        // Create system:watch record
-        const record = await sdk.data.put({
-          type: "system:watch",
-          ownerId: OWNER_ID,
-          payload: { directoryPath, targetType, recursive: recursive ?? true, includePatterns, excludePatterns },
-        });
-        // Start watching
-        await watchManager.startWatch({
-          id: record.id,
+        // Check for duplicates
+        const existing = await loadWatchConfigs();
+        if (existing.some((c) => c.directoryPath === directoryPath)) {
+          res.writeHead(409);
+          json(res, { error: "A watch for this directory already exists." });
+          return;
+        }
+        // Persist config locally and start watching
+        const watchId = randomBytes(16).toString("hex");
+        const watchConfig = {
+          id: watchId,
           directoryPath,
           targetType,
           recursive: recursive ?? true,
           includePatterns,
           excludePatterns,
-        });
-        const status = watchManager.getStatus(record.id);
+        };
+        await saveWatchConfigs([...existing, watchConfig]);
+        await watchManager.startWatch(watchConfig);
+        const status = watchManager.getStatus(watchId);
         if (status?.state === "error") {
-          await sdk.data.delete(record.id as any);
+          await saveWatchConfigs(existing);
           res.writeHead(500);
           json(res, { error: status.error ?? "Failed to watch directory" });
           return;
@@ -1352,8 +1359,21 @@ async function main() {
       // DELETE /watches/:id — stop and remove a watch
       const watchDeleteMatch = path.match(/^\/watches\/([^/]+)$/);
       if (watchDeleteMatch && req.method === "DELETE") {
-        await watchManager.stopWatch(watchDeleteMatch[1]!);
-        await sdk.data.delete(watchDeleteMatch[1]! as any);
+        const deleteId = watchDeleteMatch[1]!;
+        await watchManager.stopWatch(deleteId);
+        // Remove from local config
+        const configs = await loadWatchConfigs();
+        await saveWatchConfigs(configs.filter((c) => c.id !== deleteId));
+        // Clean up tracking records
+        const trackingRecords = await databaseAdapter.query({
+          filters: [{ field: "type", operator: "eq" as const, value: "system:watch-file" }],
+          limit: 100_000,
+        });
+        await Promise.all(
+          trackingRecords.records
+            .filter((r) => !r.deletedAt && (r as any).payload?.watchId === deleteId)
+            .map((r) => sdk.data.delete(r.id as any))
+        );
         json(res, { ok: true });
         return;
       }
