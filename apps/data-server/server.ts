@@ -24,7 +24,7 @@ import {
   createSqliteSyncStateStore,
 } from "../../packages/sync-engine/src/index.js";
 import { createTypeRegistry } from "../../packages/core/src/schema/index.js";
-import { createHLCClock } from "../../packages/core/src/hlc/index.js";
+import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir } from "node:fs/promises";
@@ -430,12 +430,19 @@ async function main() {
     }, PUSH_DEBOUNCE_MS);
   }
 
+  const sseClients = new Set<import("node:http").ServerResponse>();
+  setInterval(() => {
+    for (const client of sseClients) client.write(": ping\n\n");
+  }, 25_000);
+
   if (sdk.sync) {
     sdk.sync.onUpdate((event) => {
       console.log(`[sync] ${event.eventType} records=${event.recordIds.length}`);
       if (event.eventType === "local-change-recorded") {
         schedulePush();
       }
+      const payload = JSON.stringify(event);
+      for (const client of sseClients) client.write(`data: ${payload}\n\n`);
     });
   }
 
@@ -920,14 +927,26 @@ async function main() {
         return;
       }
 
-      // GET /data/records?type=xxx&limit=100
+      // GET /data/records?type=xxx&limit=100&updated_after=<iso>
       if (path === "/data/records" && req.method === "GET") {
         const recordType = url.searchParams.get("type");
         const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+        const updatedAfter = url.searchParams.get("updated_after");
 
-        const filters = recordType
-          ? [{ field: "type" as const, operator: "eq" as const, value: recordType }]
+        const filters: { field: string; operator: "eq" | "gt"; value: string }[] = recordType
+          ? [{ field: "type", operator: "eq", value: recordType }]
           : [];
+
+        if (updatedAfter) {
+          const ms = new Date(updatedAfter).getTime();
+          if (!isNaN(ms)) {
+            filters.push({
+              field: "updatedAt",
+              operator: "gt",
+              value: serializeHLC({ wallTime: ms, counter: 0, nodeId: "" }),
+            });
+          }
+        }
 
         const result = await databaseAdapter.query({
           kind: "data",
@@ -1378,6 +1397,20 @@ async function main() {
         return;
       }
 
+      // GET /events — SSE stream for real-time change notifications
+      if (path === "/events" && req.method === "GET") {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        });
+        res.flushHeaders();
+        res.write(": connected\n\n");
+        sseClients.add(res);
+        req.on("close", () => sseClients.delete(res));
+        return;
+      }
+
       res.writeHead(404);
       json(res, { error: "Not found" });
     } catch (err) {
@@ -1392,6 +1425,7 @@ async function main() {
   });
 
   const shutdown = async () => {
+    sseClients.forEach(c => c.end());
     server.close();
     if (pullTimer) clearTimeout(pullTimer);
     if (pushTimer) clearTimeout(pushTimer);
