@@ -37,6 +37,7 @@ import {
   type STSCredentials,
 } from "../../src/lib/cognito-auth";
 import { s3PutObject, s3GetObjectText } from "../../src/lib/s3";
+import { ModeSelector, type SetupMode } from "../../src/components/mode-selector";
 
 function parseSstOutputs(raw: string): Record<string, string> {
   const clean = raw.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
@@ -57,119 +58,6 @@ function parseSstOutputs(raw: string): Record<string, string> {
 
 function openUrl(url: string) {
   window.open(url, "_blank", "noopener,noreferrer");
-}
-
-
-type SetupMode = "fresh" | "resume" | "signin";
-
-function ModeSelector({ onSelect }: { onSelect: (mode: SetupMode) => void }) {
-  const [showClearPanel, setShowClearPanel] = useState(false);
-  const [clearRegion, setClearRegion] = useState("us-east-1");
-  const [clearPrefix, setClearPrefix] = useState("starkeep");
-
-  return (
-    <Stack gap="lg">
-      <Text>
-        Your Starkeep Cloud bootstrap stack is already deployed. Choose an option below to continue.
-      </Text>
-
-      <Stack gap="sm">
-        <Paper p="md" withBorder style={{ cursor: "pointer" }} onClick={() => onSelect("resume")}>
-          <Stack gap="xs">
-            <Text fw={600}>Create Starkeep Cloud Admin Account</Text>
-            <Text size="sm" c="dimmed">
-              First time here? Enter your CloudFormation stack outputs and create your admin account.
-            </Text>
-          </Stack>
-        </Paper>
-
-        <Paper p="md" withBorder style={{ cursor: "pointer" }} onClick={() => onSelect("signin")}>
-          <Stack gap="xs">
-            <Text fw={600}>Sign In to Starkeep Cloud Admin</Text>
-            <Text size="sm" c="dimmed">
-              You already have an admin account. Sign in and finish setting up, or connect a new
-              device.
-            </Text>
-          </Stack>
-        </Paper>
-      </Stack>
-
-      <Divider />
-
-      <Anchor
-        size="sm"
-        c="dimmed"
-        onClick={() => setShowClearPanel((v) => !v)}
-        style={{ cursor: "pointer" }}
-      >
-        Start over — clear existing bootstrap
-      </Anchor>
-
-      <Collapse in={showClearPanel}>
-        <Paper p="md" withBorder>
-          <Stack gap="sm">
-            <Text fw={500} c="red">
-              Clear your existing bootstrap stack
-            </Text>
-            <Text size="sm" c="dimmed">
-              Use this if you want to wipe your existing Starkeep bootstrap and start fresh. This
-              must be done manually in the AWS console — follow the steps below.
-            </Text>
-
-            <Group grow>
-              <TextInput
-                label="AWS Region"
-                value={clearRegion}
-                onChange={(e) => setClearRegion(e.currentTarget.value)}
-                placeholder="us-east-1"
-                size="sm"
-              />
-              <TextInput
-                label="Stack prefix"
-                value={clearPrefix}
-                onChange={(e) => setClearPrefix(e.currentTarget.value.toLowerCase())}
-                placeholder="starkeep"
-                size="sm"
-              />
-            </Group>
-
-            <Text size="sm">
-              <strong>Steps to delete your bootstrap:</strong>
-            </Text>
-            <Stack gap={4} pl="md">
-              <Text size="sm">1. Open the AWS CloudFormation console (button below).</Text>
-              <Text size="sm">
-                2. Find the stack named <Code>{clearPrefix}-bootstrap</Code>, select it, and choose{" "}
-                <strong>Delete</strong>. Wait for deletion to complete (1–2 minutes).
-              </Text>
-              <Text size="sm">
-                3. Delete the S3 bucket named <Code>{clearPrefix}-deploy-artifacts</Code> —
-                CloudFormation cannot delete non-empty buckets, so empty and delete it manually
-                from the S3 console.
-              </Text>
-              <Text size="sm">
-                4. Return to the bootstrap app to re-deploy the bootstrap stack, then come back here.
-              </Text>
-            </Stack>
-
-            <Button
-              variant="light"
-              color="red"
-              size="sm"
-              onClick={() =>
-                openUrl(
-                  `https://${clearRegion}.console.aws.amazon.com/cloudformation/home?region=${clearRegion}#/stacks`,
-                )
-              }
-              disabled={!clearRegion}
-            >
-              Open CloudFormation console ({clearRegion || "select region"})
-            </Button>
-          </Stack>
-        </Paper>
-      </Collapse>
-    </Stack>
-  );
 }
 
 
@@ -820,6 +708,29 @@ function CloudSetupPage() {
   } | null>(null);
   const [credentials, setCredentials] = useState<STSCredentials | null>(null);
   const [resuming, setResuming] = useState(false);
+  const [localConfigPrefilled, setLocalConfigPrefilled] = useState(false);
+
+  // Best-effort: pre-fill Cognito config from the local data-server if it's running
+  useEffect(() => {
+    fetch("http://127.0.0.1:9820/config", { signal: AbortSignal.timeout(2000) })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { cognitoConfig?: { userPoolId?: string; userPoolClientId?: string; identityPoolId?: string; region?: string } } | null) => {
+        const c = data?.cognitoConfig;
+        if (c?.userPoolId && c.userPoolClientId && c.identityPoolId) {
+          if (c.region) setRegion(c.region);
+          setCognitoConfig({ userPoolId: c.userPoolId, userPoolClientId: c.userPoolClientId, identityPoolId: c.identityPoolId });
+          setLocalConfigPrefilled(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Auto-advance past the outputs step once prefill resolves (handles URL-params navigation
+  // where mode is set before the fetch above completes)
+  useEffect(() => {
+    if (!localConfigPrefilled || mode === null || active !== 0) return;
+    setActive(skipCreateAccount ? 2 : 1);
+  }, [localConfigPrefilled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const saved = localStorage.getItem(PARTIAL_SETUP_KEY);
@@ -842,6 +753,36 @@ function CloudSetupPage() {
         refreshTokens(resumeConfig, rt)
           .then(async (tokens) => {
             const creds = await getIdentityPoolCredentials(resumeConfig, tokens.idToken);
+
+            // If the local data-server has the full deployment outputs, reconstruct
+            // CloudConfig and complete setup without manual input.
+            try {
+              const serverResp = await fetch("http://127.0.0.1:9820/config", {
+                signal: AbortSignal.timeout(2000),
+              });
+              if (serverResp.ok) {
+                const serverData = await serverResp.json();
+                if (serverData.s3Bucket && serverData.s3Region && serverData.auroraEndpoint) {
+                  const config: CloudConfig = {
+                    stackPrefix: sp || "starkeep",
+                    s3Bucket: serverData.s3Bucket,
+                    s3Region: serverData.s3Region,
+                    auroraEndpoint: serverData.auroraEndpoint,
+                    apiGatewayUrl: serverData.apiGatewayUrl ?? undefined,
+                    cognitoConfig: resumeConfig,
+                    cognitoRefreshToken: tokens.refreshToken,
+                  };
+                  await writeCloudConfig(config);
+                  await writeCloudCredentials(creds);
+                  localStorage.removeItem(PARTIAL_SETUP_KEY);
+                  router.push("/");
+                  return;
+                }
+              }
+            } catch {
+              // Local server unavailable — fall through to deploy step
+            }
+
             setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
             setCredentials(creds);
             setMode("signin");
@@ -892,10 +833,10 @@ function CloudSetupPage() {
   const handleSelectMode = (selectedMode: SetupMode) => {
     setMode(selectedMode);
     if (selectedMode === "resume") {
-      setActive(0);
+      setActive(localConfigPrefilled ? 1 : 0);
       setSkipCreateAccount(false);
     } else if (selectedMode === "signin") {
-      setActive(0);
+      setActive(localConfigPrefilled ? 2 : 0);
       setSkipCreateAccount(true);
     }
   };
