@@ -379,6 +379,32 @@ async function main() {
     ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
     : undefined;
 
+  // One-time cleanup: remove any "system:*" rows that older builds wrote
+  // into the user data layer. Watch tracking now lives in the private
+  // `watch_files` table — nothing should ever land in `records` (or its
+  // changelog) with a `system:` type. Idempotent on a clean DB.
+  {
+    const rawDb = databaseAdapter.getRawDatabase();
+    const recordsResult = rawDb
+      .prepare("DELETE FROM records WHERE type LIKE 'system:%'")
+      .run();
+    let changelogChanges = 0;
+    if (syncChangeLog) {
+      const changelogResult = rawDb
+        .prepare(
+          "DELETE FROM sync_change_log WHERE json_extract(record_snapshot_json, '$.type') LIKE 'system:%'",
+        )
+        .run();
+      changelogChanges = Number(changelogResult.changes ?? 0);
+    }
+    const recordsChanges = Number(recordsResult.changes ?? 0);
+    if (recordsChanges + changelogChanges > 0) {
+      console.log(
+        `Cleaned up ${recordsChanges} legacy system:* record(s) and ${changelogChanges} changelog entry/entries from local SQLite.`,
+      );
+    }
+  }
+
   // HTTP bridge to Lambda for metadata sync (pullMetadata / pushMetadata).
   // The sync engine requires a direct DatabaseAdapter for metadata — this adapter
   // satisfies just the two methods it calls.
@@ -469,7 +495,7 @@ async function main() {
   }
 
   // File watch manager — monitors local directories and syncs to Starkeep
-  const watchManager = createFileWatchManager({ sdk, databaseAdapter, ownerId: OWNER_ID });
+  const watchManager = createFileWatchManager({ sdk, db: databaseAdapter.getRawDatabase(), databaseAdapter, ownerId: OWNER_ID });
 
   // Restore persisted watches from local config file
   const persistedWatches = await loadWatchConfigs();
@@ -760,9 +786,7 @@ async function main() {
           const watchFileIds = new Set<string>();
           const unwatchedRecords: typeof allData.records = [];
           for (const r of allData.records) {
-            if (r.deletedAt || r.type.startsWith("system:")) continue;
-            const payload = (r as any).payload;
-            if (payload?.watchId || r.type === "system:watch-file" || r.type === "system:watch") continue;
+            if (r.deletedAt) continue;
             // Check if this record is referenced by a watch-file
             const isWatched = watchManager.getAllStatuses().some(w => {
               const files = watchManager.getWatchFiles(w.id);
@@ -844,7 +868,7 @@ async function main() {
           const typeCounts = new Map<string, number>();
 
           for (const r of allData.records) {
-            if (r.deletedAt || r.type.startsWith("system:")) continue;
+            if (r.deletedAt) continue;
             const isWatched = watchManager.getAllStatuses().some(w => {
               return watchManager.getWatchFiles(w.id).some(f => f.dataRecordId === r.id);
             });
@@ -1380,19 +1404,9 @@ async function main() {
       if (watchDeleteMatch && req.method === "DELETE") {
         const deleteId = watchDeleteMatch[1]!;
         await watchManager.stopWatch(deleteId);
-        // Remove from local config
+        // Remove from local config (stopWatch already cleaned up watch_files tracking rows)
         const configs = await loadWatchConfigs();
         await saveWatchConfigs(configs.filter((c) => c.id !== deleteId));
-        // Clean up tracking records
-        const trackingRecords = await databaseAdapter.query({
-          filters: [{ field: "type", operator: "eq" as const, value: "system:watch-file" }],
-          limit: 100_000,
-        });
-        await Promise.all(
-          trackingRecords.records
-            .filter((r) => !r.deletedAt && (r as any).payload?.watchId === deleteId)
-            .map((r) => sdk.data.delete(r.id as any))
-        );
         json(res, { ok: true });
         return;
       }
