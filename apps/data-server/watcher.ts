@@ -2,9 +2,10 @@
  * FileWatchManager — monitors local directories and syncs files to Starkeep.
  *
  * Each watched directory gets:
- * - A `system:watch` record storing the config
- * - A `system:watch-file` record per file (tracks path ↔ record ID mapping)
  * - A real data record per file (e.g., media:photo) with the file stored in object storage
+ *
+ * File tracking state (path ↔ record ID mapping) is stored in a private `watch_files`
+ * SQLite table managed here — it never touches the user data layer.
  */
 
 import { createHash } from "node:crypto";
@@ -13,6 +14,7 @@ import { readdir, stat } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join, relative, extname, basename } from "node:path";
 import { pipeline } from "node:stream/promises";
+import type { DatabaseSync } from "node:sqlite";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
 
@@ -132,11 +134,27 @@ const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
 export function createFileWatchManager(opts: {
   sdk: StarkeepSdk;
+  db: DatabaseSync;
   databaseAdapter: DatabaseAdapter;
   ownerId: string;
 }): FileWatchManager {
-  const { sdk, databaseAdapter, ownerId } = opts;
+  const { sdk, db, databaseAdapter, ownerId } = opts;
   const watches = new Map<string, ActiveWatch>();
+
+  // Create the private watch_files table if it doesn't exist.
+  // This table is owned entirely by the data-server and is never part of
+  // the user data layer — no SDK, no records table, no sync engine.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS watch_files (
+      file_path TEXT PRIMARY KEY,
+      watch_id TEXT NOT NULL,
+      relative_path TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      data_record_id TEXT NOT NULL,
+      mtime REAL NOT NULL,
+      size_bytes INTEGER NOT NULL
+    )
+  `);
 
   // -- Helpers --
 
@@ -152,30 +170,55 @@ export function createFileWatchManager(opts: {
     return record ? record.id : null;
   }
 
-  async function loadTrackingRecords(watchId: string): Promise<Map<string, WatchFileInfo>> {
-    const result = await databaseAdapter.query({
-      kind: "data",
-      filters: [
-        { field: "type" as any, operator: "eq" as any, value: "system:watch-file" },
-      ],
-      limit: 100_000,
-    });
+  function loadTrackingRecords(watchId: string): Map<string, WatchFileInfo> {
+    const rows = db.prepare(
+      "SELECT file_path, relative_path, content_hash, data_record_id, mtime FROM watch_files WHERE watch_id = ?",
+    ).all(watchId) as {
+      file_path: string;
+      relative_path: string;
+      content_hash: string;
+      data_record_id: string;
+      mtime: number;
+    }[];
+
     const map = new Map<string, WatchFileInfo>();
-    for (const r of result.records) {
-      if (r.deletedAt) continue;
-      const p = (r as any).payload;
-      if (p?.watchId === watchId) {
-        map.set(p.filePath, {
-          filePath: p.filePath,
-          relativePath: p.relativePath,
-          contentHash: p.contentHash,
-          dataRecordId: p.dataRecordId,
-          mtime: p.mtime ?? 0,
-          status: "synced",
-        });
-      }
+    for (const r of rows) {
+      map.set(r.file_path, {
+        filePath: r.file_path,
+        relativePath: r.relative_path,
+        contentHash: r.content_hash,
+        dataRecordId: r.data_record_id,
+        mtime: r.mtime,
+        status: "synced",
+      });
     }
     return map;
+  }
+
+  function upsertTrackingRecord(
+    watchId: string,
+    filePath: string,
+    relativePath: string,
+    contentHash: string,
+    dataRecordId: string,
+    mtime: number,
+    sizeBytes: number,
+  ): void {
+    db.prepare(`
+      INSERT INTO watch_files (file_path, watch_id, relative_path, content_hash, data_record_id, mtime, size_bytes)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(file_path) DO UPDATE SET
+        watch_id = excluded.watch_id,
+        relative_path = excluded.relative_path,
+        content_hash = excluded.content_hash,
+        data_record_id = excluded.data_record_id,
+        mtime = excluded.mtime,
+        size_bytes = excluded.size_bytes
+    `).run(watchId, filePath, relativePath, contentHash, dataRecordId, mtime, sizeBytes);
+  }
+
+  function deleteTrackingRecords(watchId: string): void {
+    db.prepare("DELETE FROM watch_files WHERE watch_id = ?").run(watchId);
   }
 
   async function ingestFile(active: ActiveWatch, filePath: string): Promise<void> {
@@ -228,20 +271,16 @@ export function createFileWatchManager(opts: {
         dataRecordId = record.id;
       }
 
-      // Create or update tracking record
-      await sdk.data.put({
-        type: "system:watch-file",
-        ownerId,
-        content: {
-          watchId: active.config.id,
-          filePath,
-          relativePath,
-          contentHash,
-          dataRecordId,
-          mtime: fileStat.mtimeMs,
-          sizeBytes: fileStat.size,
-        },
-      });
+      // Persist tracking state in the private watch_files table
+      upsertTrackingRecord(
+        active.config.id,
+        filePath,
+        relativePath,
+        contentHash,
+        dataRecordId,
+        fileStat.mtimeMs,
+        fileStat.size,
+      );
 
       active.files.set(filePath, {
         filePath,
@@ -330,7 +369,7 @@ export function createFileWatchManager(opts: {
       watches.set(config.id, active);
 
       // Load existing tracking records for delta scan
-      active.files = await loadTrackingRecords(config.id);
+      active.files = loadTrackingRecords(config.id);
 
       // Scan and ingest new/changed files
       console.log(`Watch started: ${config.directoryPath} → ${config.targetType}`);
@@ -354,6 +393,7 @@ export function createFileWatchManager(opts: {
       active.fsWatcher?.close();
       active.state = "stopped";
       watches.delete(watchId);
+      deleteTrackingRecords(watchId);
     },
 
     getStatus(watchId) {

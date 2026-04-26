@@ -95,8 +95,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       record: AnyRecord,
       changeOptions: RecordChangeOptions = {},
     ): Promise<void> {
-      if (record.type.startsWith("system:")) return;
-
       const baseVersion =
         operation === "create"
           ? null
