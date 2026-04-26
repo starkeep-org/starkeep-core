@@ -4,6 +4,7 @@ import type { AppImage } from "@photos/photos-lib";
 type PhotoAction =
   | { type: "SET_IMAGES"; images: AppImage[] }
   | { type: "APPEND_IMAGES"; images: AppImage[] }
+  | { type: "UPSERT_IMAGES"; images: AppImage[] }
   | { type: "OPTIMISTIC_UPDATE"; image: AppImage }
   | { type: "OPTIMISTIC_DELETE"; id: string }
   | { type: "SET_SELECTED_ID"; id: string | null }
@@ -23,6 +24,13 @@ function photoReducer(state: PhotoState, action: PhotoAction): PhotoState {
       return { ...state, images: action.images };
     case "APPEND_IMAGES":
       return { ...state, images: [...state.images, ...action.images] };
+    case "UPSERT_IMAGES": {
+      const incoming = new Map(action.images.map(img => [img.id, img]));
+      const merged = state.images.map(img => incoming.get(img.id) ?? img);
+      const existingIds = new Set(state.images.map(img => img.id));
+      const added = action.images.filter(img => !existingIds.has(img.id));
+      return { ...state, images: [...merged, ...added] };
+    }
     case "OPTIMISTIC_UPDATE":
       return {
         ...state,

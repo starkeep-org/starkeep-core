@@ -118,6 +118,15 @@ export async function listPhotos(mode: DataSourceMode): Promise<PhotoRecord[]> {
   return result.records;
 }
 
+export async function listPhotosSince(updatedAfter: string, mode: DataSourceMode): Promise<PhotoRecord[]> {
+  const source = await resolveDataSource(mode);
+  const result = await request<{ records: PhotoRecord[] }>(
+    `/data/records?type=%40starkeep%2Fimage&limit=500&updated_after=${encodeURIComponent(updatedAfter)}`,
+    source,
+  );
+  return result.records;
+}
+
 export async function getPhotoFileUrl(id: string, mode: DataSourceMode): Promise<string> {
   const source = await resolveDataSource(mode);
   const result = await request<{ url: string }>(`/data/records/${id}/file-url`, source);
