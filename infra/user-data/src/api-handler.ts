@@ -16,7 +16,7 @@ import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
-import { generateId, createHLCClock, SyncStatus } from "@starkeep/core";
+import { generateId, createHLCClock, SyncStatus, serializeHLC } from "@starkeep/core";
 import type { DataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import type {
@@ -183,12 +183,26 @@ export async function handler(event: APIGatewayEvent) {
       return ok({ types, total: result.records.length });
     }
 
-    // GET /data/records — list records with optional type filter and pagination
+    // GET /data/records — list records with optional type filter, cursor pagination, and updated_after cursor
     if (method === "GET" && path === "/data/records") {
       const type = query["type"];
       const limit = Math.min(parseInt(query["limit"] ?? "50", 10), 500);
       const cursor = query["cursor"];
-      const result = await db.query({ type, limit: limit + 1, cursor });
+      const updatedAfter = query["updated_after"];
+
+      const filters: { field: string; operator: "gt"; value: string }[] = [];
+      if (updatedAfter) {
+        const ms = new Date(updatedAfter).getTime();
+        if (!isNaN(ms)) {
+          filters.push({
+            field: "updatedAt",
+            operator: "gt",
+            value: serializeHLC({ wallTime: ms, counter: 0, nodeId: "" }),
+          });
+        }
+      }
+
+      const result = await db.query({ type, filters: filters.length > 0 ? filters : undefined, limit: limit + 1, cursor });
       const hasMore = result.records.length > limit;
       const records = hasMore ? result.records.slice(0, limit) : result.records;
       return ok({ records: records.map(recordToResponse), hasMore, nextCursor: hasMore ? records[records.length - 1].id : null });

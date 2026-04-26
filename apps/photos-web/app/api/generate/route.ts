@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
   const uploadRes = await fetch(`${DATA_SERVER}/data/files`, {
     method: "POST",
     headers: { "Content-Type": mimeType },
-    body: resized,
+    body: new Uint8Array(resized),
   });
   if (!uploadRes.ok) {
     return NextResponse.json({ error: "Failed to upload thumbnail to data-server" }, { status: 502 });
