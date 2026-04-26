@@ -14,6 +14,7 @@
     "@starkeep/admin-ui": "workspace:*",
     "@mantine/core": "^7.17.8",
     "@mantine/hooks": "^7.17.8",
+    "@aws-sdk/client-cloudformation": "^3.700.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1031.0",
     "@aws-sdk/client-cognito-identity": "^3.1030.0",
     "@aws-sdk/client-codebuild": "^3.700.0",

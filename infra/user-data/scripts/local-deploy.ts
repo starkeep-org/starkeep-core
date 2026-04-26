@@ -25,6 +25,10 @@ import {
   GetIdCommand,
   GetCredentialsForIdentityCommand,
 } from "@aws-sdk/client-cognito-identity";
+import {
+  CloudFormationClient,
+  DescribeStacksCommand,
+} from "@aws-sdk/client-cloudformation";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -224,6 +228,54 @@ try {
 } catch (err) {
   console.error(`Failed to get AWS credentials: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
+}
+
+// Preflight: verify the deploy-permissions stack exists. The bootstrap stack
+// only grants the role permission to manage the permissions stack itself —
+// without the permissions stack, sst deploy fails with cryptic AccessDenied
+// errors (ecr:CreateRepository, dsql:CreateCluster, etc.). The fix is one
+// click in admin-web; we surface that here so it's not a debugging mystery.
+if (command === "deploy" || command === "deploy-photos") {
+  const permissionsStackName = `${config.stage}-deploy-permissions`;
+  console.log(`Checking deploy-permissions stack (${permissionsStackName})...`);
+  const cfn = new CloudFormationClient({ region: config.region, credentials: creds });
+  try {
+    const resp = await cfn.send(
+      new DescribeStacksCommand({ StackName: permissionsStackName }),
+    );
+    const phase = resp.Stacks?.[0]?.StackStatus ?? "UNKNOWN";
+    if (
+      phase !== "CREATE_COMPLETE" &&
+      phase !== "UPDATE_COMPLETE" &&
+      phase !== "UPDATE_ROLLBACK_COMPLETE"
+    ) {
+      console.error(
+        `Error: deploy-permissions stack is in state ${phase}. Open admin-web -> Deploy permissions to fix.`,
+      );
+      process.exit(1);
+    }
+  } catch (err) {
+    const e = err as { name?: string; message?: string };
+    if (e.name === "ValidationError" && e.message?.includes("does not exist")) {
+      console.error(
+        `Error: the deploy-permissions stack "${permissionsStackName}" does not exist.\n` +
+          `\n` +
+          `The bootstrap stack only grants enough permission to manage the deploy-permissions\n` +
+          `stack — the actual SST deploy permissions live there. Create it from admin-web:\n` +
+          `\n` +
+          `  1. Open admin-web (pnpm --filter admin-web dev)\n` +
+          `  2. Navigate to "Deploy permissions" in the sidebar\n` +
+          `  3. Click "Create permissions stack"\n` +
+          `\n` +
+          `Then re-run this command.`,
+      );
+      process.exit(1);
+    }
+    console.error(
+      `Failed to check deploy-permissions stack: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(1);
+  }
 }
 
 if (command === "deploy") {
