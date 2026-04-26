@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { usePathname } from "next/navigation";
 import Link from "next/link";
 import {
   AppShell,
@@ -14,7 +14,6 @@ import {
   Center,
 } from "@mantine/core";
 import {
-  getCloudSetupState,
   readCloudConfig,
   writeCloudCredentials,
 } from "../../src/lib/cloud-config";
@@ -42,41 +41,29 @@ function AppNavbar() {
 }
 
 function ShellGate({ children }: { children: ReactNode }) {
-  const router = useRouter();
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cleanupTimer: (() => void) | undefined;
 
     async function init() {
-      try {
-        const state = await getCloudSetupState();
-        if (state.state === "configured") {
-          const config = await readCloudConfig();
-          if (config?.cognitoRefreshToken && config.cognitoConfig) {
-            cleanupTimer = startCredentialRefreshTimer(
-              config.cognitoConfig,
-              () => config.cognitoRefreshToken,
-              async (newCreds) => {
-                await writeCloudCredentials(newCreds).catch(console.error);
-              },
-              (err) => console.warn("Credential refresh failed:", err),
-            );
-          }
-          setLoading(false);
-        } else {
-          router.replace("/cloud-setup");
-          // Keep loading=true so children never flash before navigation completes
-        }
-      } catch (err) {
-        console.error("Failed to check cloud setup state:", err);
-        router.replace("/cloud-setup");
+      const config = await readCloudConfig();
+      if (config?.cognitoRefreshToken && config.cognitoConfig) {
+        cleanupTimer = startCredentialRefreshTimer(
+          config.cognitoConfig,
+          () => config.cognitoRefreshToken,
+          async (newCreds) => {
+            await writeCloudCredentials(newCreds).catch(console.error);
+          },
+          (err) => console.warn("Credential refresh failed:", err),
+        );
       }
+      setLoading(false);
     }
 
     init();
     return () => cleanupTimer?.();
-  }, [router]);
+  }, []);
 
   if (loading) {
     return (

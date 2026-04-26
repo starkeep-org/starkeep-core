@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import {
   Container,
   Title,
@@ -20,16 +21,21 @@ import {
   Divider,
   Anchor,
   SimpleGrid,
+  Center,
 } from "@mantine/core";
 import {
   readCloudConfig,
   writeCloudConfig,
+  writeCloudCredentials,
   type CloudConfig,
 } from "../../src/lib/cloud-config";
+import { ModeSelector } from "../../src/components/mode-selector";
 import {
   initiateAuth,
   respondNewPasswordChallenge,
   refreshTokens,
+  getIdentityPoolCredentials,
+  type CognitoConfig,
 } from "../../src/lib/cognito-auth";
 
 // ---------------------------------------------------------------------------
@@ -82,6 +88,7 @@ function extractEmail(idToken: string): string | null {
 // ---------------------------------------------------------------------------
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [refreshKey, setRefreshKey] = useState(0);
 
   // Local data server
@@ -96,7 +103,7 @@ export default function DashboardPage() {
   const [localFileBrowser, setLocalFileBrowser] = useState<boolean | null>(null);
 
   // Remote
-  const [cloudConfig, setCloudConfig] = useState<CloudConfig | null>(null);
+  const [cloudConfig, setCloudConfig] = useState<CloudConfig | null | undefined>(undefined);
   const [remoteOnline, setRemoteOnline] = useState<boolean | null>(null);
   const [remoteTypes, setRemoteTypes] = useState<DataTypesResponse | null>(null);
   const [remoteTypesExpanded, setRemoteTypesExpanded] = useState(false);
@@ -181,6 +188,58 @@ export default function DashboardPage() {
   useEffect(() => {
     readCloudConfig().then(setCloudConfig);
   }, [refreshKey]);
+
+  // If cloudConfig is absent, try to reconstruct it from PARTIAL_SETUP_KEY + local data-server
+  useEffect(() => {
+    if (cloudConfig !== null) return;
+
+    async function tryRecover() {
+      const saved = localStorage.getItem("starkeep-partial-setup");
+      if (!saved) return;
+      let partial: {
+        userPoolId?: string; userPoolClientId?: string; identityPoolId?: string;
+        region?: string; refreshToken?: string; stackPrefix?: string;
+      };
+      try { partial = JSON.parse(saved); } catch { return; }
+
+      const { userPoolId, userPoolClientId, identityPoolId, region: r, refreshToken: rt, stackPrefix: sp } = partial;
+      if (!userPoolId || !userPoolClientId || !identityPoolId || !rt) return;
+
+      const cognitoConfig: CognitoConfig = {
+        userPoolId, userPoolClientId, identityPoolId, region: r || "us-east-1",
+      };
+
+      try {
+        const [tokens, serverData] = await Promise.all([
+          refreshTokens(cognitoConfig, rt),
+          fetch("http://127.0.0.1:9820/config", { signal: AbortSignal.timeout(2000) })
+            .then((res) => (res.ok ? res.json() : null))
+            .catch(() => null),
+        ]);
+
+        if (!serverData?.s3Bucket || !serverData.s3Region || !serverData.auroraEndpoint) return;
+
+        const creds = await getIdentityPoolCredentials(cognitoConfig, tokens.idToken);
+        const config: CloudConfig = {
+          stackPrefix: sp || "starkeep",
+          s3Bucket: serverData.s3Bucket,
+          s3Region: serverData.s3Region,
+          auroraEndpoint: serverData.auroraEndpoint,
+          apiGatewayUrl: serverData.apiGatewayUrl ?? undefined,
+          cognitoConfig,
+          cognitoRefreshToken: tokens.refreshToken,
+        };
+        await writeCloudConfig(config);
+        await writeCloudCredentials(creds);
+        localStorage.removeItem("starkeep-partial-setup");
+        setCloudConfig(config);
+      } catch {
+        // Recovery failed — ModeSelector stays visible
+      }
+    }
+
+    tryRecover();
+  }, [cloudConfig]);
 
   // Fetch remote server data
   useEffect(() => {
@@ -509,121 +568,131 @@ export default function DashboardPage() {
         <Stack gap="md">
           <Title order={2}>Remote</Title>
 
-          <Paper p="lg" withBorder>
-            <Group justify="space-between" mb="sm">
-              <Title order={3} size="h4">
-                Data Server
-              </Title>
-              {cloudConfig?.apiGatewayUrl ? (
-                <StatusBadge online={remoteOnline} />
-              ) : (
-                <Badge color="gray" variant="light">
-                  Not configured
-                </Badge>
-              )}
-            </Group>
+          {cloudConfig === undefined ? (
+            <Center><Loader size="sm" /></Center>
+          ) : cloudConfig === null ? (
+            <Paper p="xl" withBorder>
+              <ModeSelector onSelect={(mode) => router.push(`/cloud-setup?mode=${mode}`)} />
+            </Paper>
+          ) : (
+            <>
+              <Paper p="lg" withBorder>
+                <Group justify="space-between" mb="sm">
+                  <Title order={3} size="h4">
+                    Data Server
+                  </Title>
+                  {cloudConfig.apiGatewayUrl ? (
+                    <StatusBadge online={remoteOnline} />
+                  ) : (
+                    <Badge color="gray" variant="light">
+                      Not configured
+                    </Badge>
+                  )}
+                </Group>
 
-            {!cloudConfig?.apiGatewayUrl ? (
-              <Text size="sm" c="dimmed">
-                Complete cloud setup to enable remote features.
-              </Text>
-            ) : (
-              <Stack gap="sm">
-                {remoteOnline === true && remoteTypes && (
-                  <>
-                    <Text
-                      size="sm"
-                      style={{ cursor: "pointer", textDecoration: "underline dotted" }}
-                      onClick={() => setRemoteTypesExpanded((e) => !e)}
-                    >
-                      {remoteTypes.types.length} type{remoteTypes.types.length !== 1 ? "s" : ""} registered
-                      &nbsp;·&nbsp;
-                      {remoteTypes.total} record{remoteTypes.total !== 1 ? "s" : ""} total
-                    </Text>
-                    <Collapse in={remoteTypesExpanded}>
-                      <Stack gap={4} pl="sm" pt="xs">
-                        {remoteTypes.types.length === 0 ? (
-                          <Text size="xs" c="dimmed">
-                            No records yet
-                          </Text>
-                        ) : (
-                          remoteTypes.types.map((t) => (
-                            <Group key={t.record_type} justify="space-between">
-                              <Code fz="xs">{t.record_type}</Code>
-                              <Badge variant="light" size="sm">
-                                {t.count}
-                              </Badge>
-                            </Group>
-                          ))
-                        )}
-                      </Stack>
-                    </Collapse>
-                  </>
+                {!cloudConfig.apiGatewayUrl ? (
+                  <Text size="sm" c="dimmed">
+                    Complete cloud setup to enable remote features.
+                  </Text>
+                ) : (
+                  <Stack gap="sm">
+                    {remoteOnline === true && remoteTypes && (
+                      <>
+                        <Text
+                          size="sm"
+                          style={{ cursor: "pointer", textDecoration: "underline dotted" }}
+                          onClick={() => setRemoteTypesExpanded((e) => !e)}
+                        >
+                          {remoteTypes.types.length} type{remoteTypes.types.length !== 1 ? "s" : ""} registered
+                          &nbsp;·&nbsp;
+                          {remoteTypes.total} record{remoteTypes.total !== 1 ? "s" : ""} total
+                        </Text>
+                        <Collapse in={remoteTypesExpanded}>
+                          <Stack gap={4} pl="sm" pt="xs">
+                            {remoteTypes.types.length === 0 ? (
+                              <Text size="xs" c="dimmed">
+                                No records yet
+                              </Text>
+                            ) : (
+                              remoteTypes.types.map((t) => (
+                                <Group key={t.record_type} justify="space-between">
+                                  <Code fz="xs">{t.record_type}</Code>
+                                  <Badge variant="light" size="sm">
+                                    {t.count}
+                                  </Badge>
+                                </Group>
+                              ))
+                            )}
+                          </Stack>
+                        </Collapse>
+                      </>
+                    )}
+                    <Group gap="md" wrap="wrap">
+                      <CopyCmd
+                        cmd="pnpm --filter @starkeep/infra-user-data local:deploy"
+                        label="Redeploy from local"
+                        copyKey="redeploy"
+                        copiedKey={copiedKey}
+                        onCopy={copy}
+                      />
+                      <CopyCmd
+                        cmd="pnpm --filter @starkeep/infra-user-data reset-cloud-data"
+                        label="Clear all cloud data"
+                        copyKey="clear-remote"
+                        copiedKey={copiedKey}
+                        onCopy={copy}
+                      />
+                    </Group>
+                  </Stack>
                 )}
-                <Group gap="md" wrap="wrap">
-                  <CopyCmd
-                    cmd="pnpm --filter @starkeep/infra-user-data local:deploy"
-                    label="Redeploy from local"
-                    copyKey="redeploy"
-                    copiedKey={copiedKey}
-                    onCopy={copy}
-                  />
-                  <CopyCmd
-                    cmd="pnpm --filter @starkeep/infra-user-data reset-cloud-data"
-                    label="Clear all cloud data"
-                    copyKey="clear-remote"
-                    copiedKey={copiedKey}
-                    onCopy={copy}
-                  />
-                </Group>
-              </Stack>
-            )}
-          </Paper>
+              </Paper>
 
-          <Paper p="lg" withBorder>
-            <Title order={3} size="h4" mb="sm">
-              Apps
-            </Title>
-            <Stack gap="sm">
-              <RemoteAppRow
-                name="Photos Web"
-                url={localOnline !== null ? (photosWebUrl ?? null) : undefined}
-                online={remotePhotosWeb}
-              />
-              <RemoteAppRow name="File Browser" url={null} online={null} />
-            </Stack>
-          </Paper>
+              <Paper p="lg" withBorder>
+                <Title order={3} size="h4" mb="sm">
+                  Apps
+                </Title>
+                <Stack gap="sm">
+                  <RemoteAppRow
+                    name="Photos Web"
+                    url={localOnline !== null ? (photosWebUrl ?? null) : undefined}
+                    online={remotePhotosWeb}
+                  />
+                  <RemoteAppRow name="File Browser" url={null} online={null} />
+                </Stack>
+              </Paper>
 
-          <Paper p="lg" withBorder>
-            <Group justify="space-between">
-              <Title order={3} size="h4">
-                Authentication
-              </Title>
-              {signedIn ? (
-                <Group gap="xs">
-                  <Badge color="green" variant="light">
-                    Signed in
-                  </Badge>
-                  {cloudConfig?.userEmail && (
-                    <Text size="sm" c="dimmed">
-                      {cloudConfig.userEmail}
-                    </Text>
+              <Paper p="lg" withBorder>
+                <Group justify="space-between">
+                  <Title order={3} size="h4">
+                    Authentication
+                  </Title>
+                  {signedIn ? (
+                    <Group gap="xs">
+                      <Badge color="green" variant="light">
+                        Signed in
+                      </Badge>
+                      {cloudConfig.userEmail && (
+                        <Text size="sm" c="dimmed">
+                          {cloudConfig.userEmail}
+                        </Text>
+                      )}
+                    </Group>
+                  ) : (
+                    <Group gap="xs">
+                      <Badge color="gray" variant="light">
+                        Not signed in
+                      </Badge>
+                      {cloudConfig.cognitoConfig && (
+                        <Button size="xs" onClick={openSignIn}>
+                          Sign in
+                        </Button>
+                      )}
+                    </Group>
                   )}
                 </Group>
-              ) : (
-                <Group gap="xs">
-                  <Badge color="gray" variant="light">
-                    Not signed in
-                  </Badge>
-                  {cloudConfig?.cognitoConfig && (
-                    <Button size="xs" onClick={openSignIn}>
-                      Sign in
-                    </Button>
-                  )}
-                </Group>
-              )}
-            </Group>
-          </Paper>
+              </Paper>
+            </>
+          )}
         </Stack>
       </SimpleGrid>
 
