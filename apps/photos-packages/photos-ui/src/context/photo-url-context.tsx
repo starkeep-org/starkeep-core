@@ -1,8 +1,8 @@
 import React, { createContext, useContext } from "react";
 
 interface PhotoUrlContextValue {
-  getThumbnailSrc: (imageId: string) => string;
-  getFullSizeSrc: (imageId: string) => string;
+  getThumbnailSrc: (imageId: string) => string | null;
+  getFullSizeSrc: (imageId: string) => string | null;
 }
 
 const PhotoUrlContext = createContext<PhotoUrlContextValue>({
@@ -15,8 +15,8 @@ export function PhotoUrlProvider({
   getFullSizeSrc,
   children,
 }: {
-  getThumbnailSrc?: (imageId: string) => string;
-  getFullSizeSrc?: (imageId: string) => string;
+  getThumbnailSrc?: (imageId: string) => string | null;
+  getFullSizeSrc?: (imageId: string) => string | null;
   children: React.ReactNode;
 }) {
   const value: PhotoUrlContextValue = {

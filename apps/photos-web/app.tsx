@@ -35,10 +35,10 @@ function useFullSizeUrlCache(mode: DataSourceMode) {
   }, [mode]);
 
   return useCallback(
-    (imageId: string): string => {
+    (imageId: string): string | null => {
       const cached = urlMap.get(imageId);
       if (cached) return cached;
-      if (loadingRef.current.has(imageId)) return "";
+      if (loadingRef.current.has(imageId)) return null;
 
       loadingRef.current.add(imageId);
       getPhotoFileUrl(imageId, mode)
@@ -50,7 +50,7 @@ function useFullSizeUrlCache(mode: DataSourceMode) {
           loadingRef.current.delete(imageId);
         });
 
-      return "";
+      return null;
     },
     [urlMap, mode],
   );
@@ -66,10 +66,10 @@ function useFileUrlCache(mode: DataSourceMode) {
   }, [mode]);
 
   const getFileSrc = useCallback(
-    (imageId: string): string => {
+    (imageId: string): string | null => {
       const cached = urlMap.get(imageId);
       if (cached) return cached;
-      if (loadingRef.current.has(imageId)) return "";
+      if (loadingRef.current.has(imageId)) return null;
 
       loadingRef.current.add(imageId);
 
@@ -93,7 +93,7 @@ function useFileUrlCache(mode: DataSourceMode) {
           loadingRef.current.delete(imageId);
         });
 
-      return "";
+      return null;
     },
     [urlMap, mode],
   );
