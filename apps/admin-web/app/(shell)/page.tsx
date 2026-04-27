@@ -94,6 +94,8 @@ export default function DashboardPage() {
   // Local data server
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
   const [localTypes, setLocalTypes] = useState<DataTypesResponse | null>(null);
+  const [localCognitoConfig, setLocalCognitoConfig] = useState<CognitoConfig | null>(null);
+  const [localAuthAuthenticated, setLocalAuthAuthenticated] = useState<boolean | null>(null);
   const [photosWebUrl, setPhotosWebUrl] = useState<string | null | undefined>(undefined);
   const [watches, setWatches] = useState<Watch[] | null>(null);
   const [typesExpanded, setTypesExpanded] = useState(false);
@@ -145,10 +147,11 @@ export default function DashboardPage() {
 
     async function fetchLocal() {
       try {
-        const [typesResp, watchesResp, configResp] = await Promise.all([
+        const [typesResp, watchesResp, configResp, authStatusResp] = await Promise.all([
           fetch("http://127.0.0.1:9820/data/types", { signal: controller.signal }),
           fetch("http://127.0.0.1:9820/watches", { signal: controller.signal }),
           fetch("http://127.0.0.1:9820/config", { signal: controller.signal }),
+          fetch("http://127.0.0.1:9820/auth/status", { signal: controller.signal }),
         ]);
 
         if (typesResp.ok) {
@@ -161,8 +164,13 @@ export default function DashboardPage() {
         if (configResp.ok) {
           const cfg = await configResp.json();
           setPhotosWebUrl((cfg.photosWebUrl as string | null) ?? null);
+          if (cfg.cognitoConfig) setLocalCognitoConfig(cfg.cognitoConfig as CognitoConfig);
         } else {
           setPhotosWebUrl(null);
+        }
+        if (authStatusResp.ok) {
+          const status = await authStatusResp.json();
+          setLocalAuthAuthenticated(status.authenticated as boolean);
         }
       } catch {
         if (!controller.signal.aborted) {
@@ -280,18 +288,27 @@ export default function DashboardPage() {
   // ---- Sign-in handlers ----
 
   async function handleSignIn() {
-    if (!cloudConfig?.cognitoConfig) return;
+    const cognitoConfig = localCognitoConfig ?? cloudConfig?.cognitoConfig;
+    if (!cognitoConfig) return;
     setSignInLoading(true);
     setSignInError(null);
     try {
-      const result = await initiateAuth(cloudConfig.cognitoConfig, signInEmail, signInPassword);
+      const result = await initiateAuth(cognitoConfig, signInEmail, signInPassword);
       if (result.tokens) {
         const email = extractEmail(result.tokens.idToken);
-        await writeCloudConfig({
-          ...cloudConfig,
-          cognitoRefreshToken: result.tokens.refreshToken,
-          userEmail: email ?? undefined,
+        await fetch("http://127.0.0.1:9820/auth/tokens", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ idToken: result.tokens.idToken, refreshToken: result.tokens.refreshToken }),
         });
+        if (cloudConfig) {
+          await writeCloudConfig({
+            ...cloudConfig,
+            cognitoConfig,
+            cognitoRefreshToken: result.tokens.refreshToken,
+            userEmail: email ?? undefined,
+          });
+        }
         setSignInOpen(false);
         setRefreshKey((k) => k + 1);
       } else if (result.challengeName === "NEW_PASSWORD_REQUIRED" && result.session) {
@@ -307,7 +324,8 @@ export default function DashboardPage() {
   }
 
   async function handleNewPassword() {
-    if (!cloudConfig?.cognitoConfig || !signInChallenge) return;
+    const cognitoConfig = localCognitoConfig ?? cloudConfig?.cognitoConfig;
+    if (!cognitoConfig || !signInChallenge) return;
     if (signInNewPassword !== signInConfirmPassword) {
       setSignInError("Passwords do not match");
       return;
@@ -316,17 +334,25 @@ export default function DashboardPage() {
     setSignInError(null);
     try {
       const tokens = await respondNewPasswordChallenge(
-        cloudConfig.cognitoConfig,
+        cognitoConfig,
         signInChallenge.session,
         signInEmail,
         signInNewPassword,
       );
       const email = extractEmail(tokens.idToken);
-      await writeCloudConfig({
-        ...cloudConfig,
-        cognitoRefreshToken: tokens.refreshToken,
-        userEmail: email ?? undefined,
+      await fetch("http://127.0.0.1:9820/auth/tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }),
       });
+      if (cloudConfig) {
+        await writeCloudConfig({
+          ...cloudConfig,
+          cognitoConfig,
+          cognitoRefreshToken: tokens.refreshToken,
+          userEmail: email ?? undefined,
+        });
+      }
       setSignInOpen(false);
       setRefreshKey((k) => k + 1);
     } catch (err) {
@@ -395,7 +421,7 @@ export default function DashboardPage() {
     }
   }
 
-  const signedIn = !!cloudConfig?.cognitoRefreshToken;
+  const signedIn = localAuthAuthenticated ?? false;
 
   return (
     <Container size="xl">
@@ -682,7 +708,7 @@ export default function DashboardPage() {
                       <Badge color="gray" variant="light">
                         Not signed in
                       </Badge>
-                      {cloudConfig.cognitoConfig && (
+                      {(localCognitoConfig ?? cloudConfig.cognitoConfig) && (
                         <Button size="xs" onClick={openSignIn}>
                           Sign in
                         </Button>

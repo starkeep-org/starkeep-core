@@ -278,6 +278,79 @@ if (command === "deploy" || command === "deploy-photos") {
   }
 }
 
+const PHOTOS_WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "apps", "photos-web");
+const WEB_ASSETS_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "web-assets.json");
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".eot": "application/vnd.ms-fontobject",
+};
+const TEXT_EXTS = new Set([".html", ".js", ".css", ".json", ".map", ".svg", ".txt"]);
+
+function walkDir(dir: string): string[] {
+  const results: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) results.push(...walkDir(full));
+    else results.push(full);
+  }
+  return results;
+}
+
+function buildPhotosWeb(apiGatewayUrl: string): void {
+  console.log("\nBuilding photos-web static export...");
+  const photosResult = spawnSync("pnpm", ["build"], {
+    stdio: "inherit",
+    cwd: PHOTOS_WEB_DIR,
+    env: {
+      ...process.env,
+      NEXT_PUBLIC_FORCE_REMOTE: "true",
+      NEXT_PUBLIC_API_GATEWAY_URL: apiGatewayUrl,
+      NEXT_PUBLIC_COGNITO_REGION: config.region,
+      NEXT_PUBLIC_COGNITO_USER_POOL_ID: config.userPoolId,
+      NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID: config.userPoolClientId,
+    },
+  });
+  if (photosResult.status !== 0) {
+    console.error("photos-web build failed. Aborting deploy.");
+    process.exit(photosResult.status ?? 1);
+  }
+  console.log("photos-web build complete.");
+
+  // Embed all static files into src/web-assets.json so esbuild bundles them
+  // into the Lambda directly — avoids SST copyFiles directory issues.
+  const outDir = resolve(PHOTOS_WEB_DIR, "out");
+  const assets: Record<string, { content: string; isBase64: boolean; contentType: string }> = {};
+  for (const absPath of walkDir(outDir)) {
+    const relPath = absPath.slice(outDir.length).replace(/\\/g, "/");
+    const ext = extname(absPath).toLowerCase();
+    const isText = TEXT_EXTS.has(ext);
+    const buf = readFileSync(absPath);
+    assets[relPath] = {
+      content: isText ? buf.toString("utf-8") : buf.toString("base64"),
+      isBase64: !isText,
+      contentType: MIME[ext] ?? "application/octet-stream",
+    };
+  }
+  writeFileSync(WEB_ASSETS_PATH, JSON.stringify(assets));
+  console.log(`Generated web-assets.json (${Object.keys(assets).length} files)`);
+}
+
 if (command === "deploy") {
   console.log("Building workspace packages...");
   const buildResult = spawnSync("pnpm", ["--filter", "@starkeep/storage-adapter", "--filter", "@starkeep/storage-aurora-dsql", "build"], {
@@ -303,76 +376,7 @@ if (command === "deploy-photos" || command === "deploy") {
     }
     console.log("Skipping photos-web build — apiGatewayUrl not set in .starkeep-config.json");
   } else {
-    console.log("\nBuilding photos-web static export...");
-    const photosWebDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "apps", "photos-web");
-    const photosResult = spawnSync("pnpm", ["build"], {
-      stdio: "inherit",
-      cwd: photosWebDir,
-      env: {
-        ...process.env,
-        NEXT_PUBLIC_FORCE_REMOTE: "true",
-        NEXT_PUBLIC_API_GATEWAY_URL: apiGatewayUrl,
-        NEXT_PUBLIC_COGNITO_REGION: config.region,
-        NEXT_PUBLIC_COGNITO_USER_POOL_ID: config.userPoolId,
-        NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID: config.userPoolClientId,
-      },
-    });
-    if (photosResult.status !== 0) {
-      console.error("photos-web build failed. Aborting deploy.");
-      process.exit(photosResult.status ?? 1);
-    }
-    console.log("photos-web build complete.");
-
-    // Embed all static files into src/web-assets.json so esbuild bundles them
-    // into the Lambda directly — avoids SST copyFiles directory issues.
-    const outDir = resolve(photosWebDir, "out");
-    const webAssetsPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "web-assets.json");
-
-    const MIME: Record<string, string> = {
-      ".html": "text/html; charset=utf-8",
-      ".js": "application/javascript; charset=utf-8",
-      ".css": "text/css; charset=utf-8",
-      ".json": "application/json; charset=utf-8",
-      ".map": "application/json; charset=utf-8",
-      ".svg": "image/svg+xml; charset=utf-8",
-      ".txt": "text/plain; charset=utf-8",
-      ".png": "image/png",
-      ".jpg": "image/jpeg",
-      ".jpeg": "image/jpeg",
-      ".gif": "image/gif",
-      ".webp": "image/webp",
-      ".ico": "image/x-icon",
-      ".woff": "font/woff",
-      ".woff2": "font/woff2",
-      ".ttf": "font/ttf",
-      ".eot": "application/vnd.ms-fontobject",
-    };
-    const TEXT_EXTS = new Set([".html", ".js", ".css", ".json", ".map", ".svg", ".txt"]);
-
-    function walkDir(dir: string): string[] {
-      const results: string[] = [];
-      for (const entry of readdirSync(dir)) {
-        const full = join(dir, entry);
-        if (statSync(full).isDirectory()) results.push(...walkDir(full));
-        else results.push(full);
-      }
-      return results;
-    }
-
-    const assets: Record<string, { content: string; isBase64: boolean; contentType: string }> = {};
-    for (const absPath of walkDir(outDir)) {
-      const relPath = absPath.slice(outDir.length).replace(/\\/g, "/");
-      const ext = extname(absPath).toLowerCase();
-      const isText = TEXT_EXTS.has(ext);
-      const buf = readFileSync(absPath);
-      assets[relPath] = {
-        content: isText ? buf.toString("utf-8") : buf.toString("base64"),
-        isBase64: !isText,
-        contentType: MIME[ext] ?? "application/octet-stream",
-      };
-    }
-    writeFileSync(webAssetsPath, JSON.stringify(assets));
-    console.log(`Generated web-assets.json (${Object.keys(assets).length} files)`);
+    buildPhotosWeb(apiGatewayUrl);
   }
 }
 
@@ -401,6 +405,7 @@ if (result.status !== 0) {
 }
 
 if (sstCommand === "deploy") {
+  let freshApiGatewayUrl: string | undefined;
   try {
     const outputs = JSON.parse(readFileSync(SST_OUTPUTS_PATH, "utf-8")) as Record<string, string>;
     const existing = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as Record<string, unknown>;
@@ -413,11 +418,43 @@ if (sstCommand === "deploy") {
     if (outputs.apiGatewayUrl) console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
     if (outputs.auroraHostname) console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);
     if (outputs.photosWebUrl) console.log(`  photosWebUrl   : ${outputs.photosWebUrl}`);
+    // If apiGatewayUrl was missing before this deploy, we now have it for the first time.
+    if (!config.apiGatewayUrl && outputs.apiGatewayUrl) {
+      freshApiGatewayUrl = outputs.apiGatewayUrl;
+    }
   } catch (err) {
     console.warn(
       "Warning: could not update .starkeep-config.json with deploy outputs:",
       err instanceof Error ? err.message : String(err),
     );
+  }
+
+  // On first deploy apiGatewayUrl wasn't available yet, so photos-web was skipped.
+  // Now that we have it, build photos-web and re-deploy to upload the assets.
+  if (freshApiGatewayUrl) {
+    console.log("\napiGatewayUrl is now available — building photos-web and re-deploying...");
+    buildPhotosWeb(freshApiGatewayUrl);
+
+    console.log(`\nRe-deploying with photos-web assets: sst deploy --stage ${config.stage}\n`);
+    const redeployResult = spawnSync(
+      "node",
+      ["./node_modules/sst/bin/sst.mjs", "deploy", "--stage", config.stage],
+      {
+        stdio: "inherit",
+        env: {
+          ...process.env,
+          AWS_ACCESS_KEY_ID: creds.accessKeyId,
+          AWS_SECRET_ACCESS_KEY: creds.secretAccessKey,
+          AWS_SESSION_TOKEN: creds.sessionToken,
+          AWS_REGION: config.region,
+          USER_POOL_ID: config.userPoolId,
+          USER_POOL_CLIENT_ID: config.userPoolClientId,
+        },
+      },
+    );
+    if (redeployResult.status !== 0) {
+      process.exit(redeployResult.status ?? 1);
+    }
   }
 }
 

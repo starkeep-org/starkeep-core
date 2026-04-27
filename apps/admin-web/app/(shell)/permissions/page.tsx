@@ -26,13 +26,11 @@ import { readCloudConfig, readCloudCredentials, type CloudConfig } from "../../.
 import type { STSCredentials } from "../../../src/lib/cognito-auth";
 import {
   getPermissionsStackStatus,
-  getCurrentTemplate,
   createPermissionsStack,
   updatePermissionsStack,
   deletePermissionsStack,
   pollUntilTerminal,
   isSuccess,
-  templatesAreEquivalent,
   type PermissionsStackStatus,
 } from "../../../src/lib/permissions-stack-client";
 
@@ -46,9 +44,7 @@ interface ReadyData {
   creds: STSCredentials;
   stackName: string;
   status: PermissionsStackStatus;
-  currentTemplate: string | null;
   desiredTemplate: string;
-  needsUpdate: boolean;
 }
 
 function groupStatementsByApp(statements: IamStatement[]): Map<string, IamStatement[]> {
@@ -98,18 +94,10 @@ export default function PermissionsPage() {
     });
 
     const status = await getPermissionsStackStatus(creds, region, stackName);
-    let currentTemplate: string | null = null;
-    if (status.phase !== "NOT_FOUND") {
-      currentTemplate = await getCurrentTemplate(creds, region, stackName);
-    }
-
-    const needsUpdate =
-      status.phase === "NOT_FOUND" ||
-      (currentTemplate !== null && !templatesAreEquivalent(currentTemplate, desiredTemplate));
 
     setState({
       kind: "ready",
-      data: { config, creds, stackName, status, currentTemplate, desiredTemplate, needsUpdate },
+      data: { config, creds, stackName, status, desiredTemplate },
     });
   }, []);
 
@@ -163,7 +151,7 @@ export default function PermissionsPage() {
         data.desiredTemplate,
       );
       if (result.noChanges) {
-        setPhase("No changes to apply.");
+        setPhase("Permissions are already up to date — no changes applied.");
         await refresh();
         return;
       }
@@ -292,19 +280,6 @@ export default function PermissionsPage() {
           </Alert>
         )}
 
-        {data.status.phase !== "NOT_FOUND" && data.needsUpdate && (
-          <Alert color="orange" title="Update available">
-            The deployed managed policy differs from the latest spec bundled with this admin-web
-            build. Click <strong>Update</strong> to apply the latest permissions.
-          </Alert>
-        )}
-
-        {data.status.phase !== "NOT_FOUND" && !data.needsUpdate && (
-          <Alert color="green" title="Up to date">
-            Deployed managed policy matches the latest spec.
-          </Alert>
-        )}
-
         <Group>
           {data.status.phase === "NOT_FOUND" ? (
             <Button loading={busy} onClick={() => handleCreate(data)}>
@@ -313,7 +288,6 @@ export default function PermissionsPage() {
           ) : (
             <Button
               loading={busy}
-              disabled={!data.needsUpdate}
               onClick={() => handleUpdate(data)}
             >
               Update permissions stack

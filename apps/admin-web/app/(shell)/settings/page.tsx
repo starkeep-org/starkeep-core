@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import {
   Container,
   Title,
@@ -18,11 +19,13 @@ import {
   readCloudConfig,
   writeCloudConfig,
   readCloudCredentials,
+  clearCloudConfig,
   type CloudConfig,
   type CloudConfigExport,
 } from "../../../src/lib/cloud-config";
 import { refreshTokens, getIdentityPoolCredentials } from "../../../src/lib/cognito-auth";
 import { s3PutObject, s3GetObjectText } from "../../../src/lib/s3";
+import { LOCAL_URL } from "../../../src/lib/data-client";
 
 export default function SettingsPage() {
   return (
@@ -33,6 +36,7 @@ export default function SettingsPage() {
       <Stack gap="md">
         <CloudConfigSection />
         <RedeploySection />
+        <ResetSection />
       </Stack>
     </Container>
   );
@@ -275,6 +279,54 @@ function CloudConfigSection() {
           style={{ display: "none" }}
           onChange={handleFileSelected}
         />
+      </Stack>
+    </Paper>
+  );
+}
+
+function ResetSection() {
+  const [confirming, setConfirming] = useState(false);
+  const router = useRouter();
+
+  async function handleReset() {
+    await fetch(`${LOCAL_URL}/auth/logout`, { method: "POST" }).catch(() => {});
+    await clearCloudConfig();
+    router.push("/cloud-setup");
+  }
+
+  return (
+    <Paper p="xl" withBorder>
+      <Title order={3} mb="xs">
+        Reset Cloud Configuration
+      </Title>
+      <Text c="dimmed" size="sm" mb="md">
+        Clears all stored cloud config and credentials from this browser so you can run the setup
+        wizard from scratch. Use this after recreating a CloudFormation bootstrap stack.
+      </Text>
+
+      <Stack gap="sm">
+        {confirming ? (
+          <>
+            <Alert color="red" title="Are you sure?">
+              This will remove all saved cloud config, credentials, and setup state from this
+              browser. You will need to complete the setup wizard again.
+            </Alert>
+            <Group>
+              <Button color="red" onClick={handleReset}>
+                Yes, reset everything
+              </Button>
+              <Button variant="default" onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+            </Group>
+          </>
+        ) : (
+          <Group>
+            <Button color="red" variant="light" onClick={() => setConfirming(true)}>
+              Reset Cloud Config
+            </Button>
+          </Group>
+        )}
       </Stack>
     </Paper>
   );

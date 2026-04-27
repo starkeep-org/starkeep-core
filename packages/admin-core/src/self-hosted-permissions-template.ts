@@ -52,7 +52,7 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: !Sub '\${StackPrefix}-deploy-permissions'
-      Description: >
+      Description: >-
         Permissions required to deploy and operate the Starkeep user-data SST
         stack. Source of truth: @starkeep/admin-core deployPermissionStatements().
       Roles:

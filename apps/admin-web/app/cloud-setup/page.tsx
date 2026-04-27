@@ -11,7 +11,6 @@ import {
   Stack,
   Alert,
   TextInput,
-  Textarea,
   PasswordInput,
   Group,
   Paper,
@@ -497,8 +496,8 @@ function Step5DeployInfra({
   const [manualBucket, setManualBucket] = useState("");
   const [manualAurora, setManualAurora] = useState("");
   const [manualApi, setManualApi] = useState("");
-  const [sstPasteText, setSstPasteText] = useState("");
-  const [sstPasteError, setSstPasteError] = useState<string | null>(null);
+  const [readConfigError, setReadConfigError] = useState<string | null>(null);
+  const [readingConfig, setReadingConfig] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -631,24 +630,36 @@ function Step5DeployInfra({
     });
   };
 
-  const handleSstPasteSubmit = () => {
-    setSstPasteError(null);
-    const outputs = parseSstOutputs(sstPasteText);
-    const bucketName = outputs["bucketName"];
-    const auroraHostname = outputs["auroraHostname"];
-    const apiGatewayUrl = outputs["apiGatewayUrl"];
-    if (!bucketName || !auroraHostname) {
-      setSstPasteError(
-        `Could not find required values in output. Parsed: ${JSON.stringify(outputs)}`,
-      );
-      return;
+  const handleReadFromConfig = async () => {
+    setReadingConfig(true);
+    setReadConfigError(null);
+    try {
+      const res = await fetch("http://127.0.0.1:9820/config", {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) throw new Error("Local server returned an error");
+      const data = (await res.json()) as {
+        s3Bucket?: string;
+        s3Region?: string;
+        auroraEndpoint?: string;
+        apiGatewayUrl?: string;
+      };
+      if (!data.s3Bucket || !data.auroraEndpoint) {
+        throw new Error(
+          "Config is missing s3Bucket or auroraEndpoint — has local:deploy completed successfully?",
+        );
+      }
+      onSuccess({
+        s3Bucket: data.s3Bucket,
+        s3Region: data.s3Region ?? region,
+        auroraEndpoint: data.auroraEndpoint,
+        apiGatewayUrl: data.apiGatewayUrl,
+      });
+    } catch (err) {
+      setReadConfigError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReadingConfig(false);
     }
-    onSuccess({
-      s3Bucket: bucketName,
-      s3Region: region,
-      auroraEndpoint: auroraHostname,
-      apiGatewayUrl,
-    });
   };
 
   if (deployResult) {
@@ -766,23 +777,23 @@ function Step5DeployInfra({
       >
         Download CLI config (.starkeep-config.json)
       </Button>
-      <Textarea
-        label="Paste SST deploy output"
-        description="After running pnpm run local:deploy, paste the full terminal output here."
-        placeholder="Stack starkeep&#10;  bucketName: starkeep-files-abc123&#10;  auroraHostname: abc123.dsql.us-east-1.on.aws&#10;  apiGatewayUrl: https://abc123.execute-api.us-east-1.amazonaws.com"
-        minRows={4}
-        value={sstPasteText}
-        onChange={(e) => { setSstPasteText(e.currentTarget.value); setSstPasteError(null); }}
-        disabled={deploying}
-      />
-      {sstPasteError && <Alert color="red" title="Parse error">{sstPasteError}</Alert>}
+      <Text size="sm" c="dimmed">
+        Once the deploy finishes, click below — the admin reads the updated{" "}
+        <Code>.starkeep-config.json</Code> automatically from the local server.
+      </Text>
+      {readConfigError && (
+        <Alert color="red" title="Could not read config">
+          {readConfigError}
+        </Alert>
+      )}
       <Group justify="flex-end">
         <Button
           variant="light"
-          disabled={deploying || !sstPasteText.trim()}
-          onClick={handleSstPasteSubmit}
+          loading={readingConfig}
+          disabled={deploying}
+          onClick={handleReadFromConfig}
         >
-          Configure from output
+          Deployment completed successfully
         </Button>
       </Group>
 
