@@ -32,6 +32,12 @@ function AppNavbar() {
       />
       <NavLink
         component={Link}
+        href="/permissions"
+        label="Deploy permissions"
+        active={pathname === "/permissions"}
+      />
+      <NavLink
+        component={Link}
         href="/settings"
         label="Settings"
         active={pathname === "/settings"}

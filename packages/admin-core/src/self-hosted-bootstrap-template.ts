@@ -1,41 +1,176 @@
 /**
- * Generate CloudFormation template for self-hosted Starkeep bootstrap.
+ * Generate the CloudFormation bootstrap template for self-hosted Starkeep.
  *
- * Unlike the SaaS bootstrap template (bootstrap-template.ts), which sets up
- * cross-account IAM roles so a separate Starkeep control-plane AWS account can
- * manage the customer's infrastructure, this template is for self-hosted mode:
- * the user's own machine (running admin-desktop) IS the control plane.
+ * This is a one-time setup stack that creates Cognito auth, the desktop and
+ * CodeBuild IAM roles, and the CodeBuild deploy project. It does NOT contain
+ * the SST-deploy permissions — those live in a separate "deploy permissions"
+ * stack ({stackPrefix}-deploy-permissions) created and updated by admin-web.
  *
- * No cross-account roles are needed. Instead, this template creates:
- *   - A Cognito User Pool for authenticating the user
- *   - A Cognito Identity Pool to exchange Cognito tokens for temporary AWS
- *     credentials (STS), scoped via an IAM role
- *   - An IAM role for authenticated Cognito users with the permissions needed
- *     to deploy data infrastructure (S3, Aurora DSQL) and manage Cognito users
+ * Why two stacks: iterating on permissions is a frequent need (new SST
+ * versions, new app capabilities), and CloudFormation updates to a stack
+ * that owns Cognito + IAM + S3 + CodeBuild often fail with rollback errors
+ * that leave the user re-bootstrapping from scratch. Splitting the policy
+ * into its own tiny stack lets admin-web update permissions safely.
  *
- * The resulting AWS credentials let admin-desktop trigger a CodeBuild job to
- * provision the user's Starkeep data infrastructure via SST deploy.
- *
- * In addition to Cognito and IAM, this template now creates:
- *   - An S3 artifacts bucket for the versioned deployment source zip
- *   - A CodeBuild service role with the permissions needed to run sst deploy
- *   - A CodeBuild project that pulls the source zip and runs sst deploy
+ * The desktop role's bootstrap inline policy grants only what's needed to:
+ *   - Use admin-web (Cognito user mgmt, sts:GetCallerIdentity)
+ *   - Trigger remote CodeBuild deploys + upload source artifacts
+ *   - Manage the {stackPrefix}-deploy-permissions stack itself, with an
+ *     iam:AttachRolePolicy condition that restricts attachable policies to
+ *     ones whose name starts with "{stackPrefix}-deploy-permissions". This
+ *     is the security boundary: a compromised admin-web cannot attach
+ *     AdministratorAccess to its own role.
  */
+
+import { renderStatementsYaml, type IamStatement } from "./self-hosted-deploy-policy.js";
 
 export interface GenerateSelfHostedBootstrapTemplateInput {
   stackPrefix?: string;
 }
 
+const SUB = (s: string) => ({ Sub: s }) as const;
+
+function authRoleBootstrapStatements(): IamStatement[] {
+  return [
+    {
+      Sid: "BootstrapStsIdentity",
+      Effect: "Allow",
+      Action: "sts:GetCallerIdentity",
+      Resource: "*",
+    },
+    {
+      Sid: "BootstrapCognitoUserMgmt",
+      Effect: "Allow",
+      Action: [
+        "cognito-idp:AdminCreateUser",
+        "cognito-idp:AdminSetUserPassword",
+        "cognito-idp:AdminGetUser",
+        "cognito-idp:AdminDeleteUser",
+        "cognito-idp:ListUsers",
+        "cognito-idp:DescribeUserPool",
+        "cognito-idp:DescribeUserPoolClient",
+      ],
+      Resource: { GetAtt: "UserPool.Arn" },
+    },
+    {
+      Sid: "BootstrapCodeBuildTrigger",
+      Effect: "Allow",
+      Action: ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
+      Resource: { GetAtt: "DeployProject.Arn" },
+    },
+    {
+      Sid: "BootstrapArtifactsWrite",
+      Effect: "Allow",
+      Action: ["s3:PutObject", "s3:GetObject"],
+      Resource: SUB("arn:aws:s3:::${StackPrefix}-deploy-artifacts/*"),
+    },
+    {
+      Sid: "PermissionsStackManage",
+      Effect: "Allow",
+      Action: [
+        "cloudformation:CreateStack",
+        "cloudformation:UpdateStack",
+        "cloudformation:DeleteStack",
+        "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStackResources",
+        "cloudformation:GetTemplate",
+        "cloudformation:ValidateTemplate",
+        "cloudformation:CreateChangeSet",
+        "cloudformation:DescribeChangeSet",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:DeleteChangeSet",
+        "cloudformation:ListChangeSets",
+        "cloudformation:ListStackResources",
+        "cloudformation:DetectStackDrift",
+        "cloudformation:DescribeStackDriftDetectionStatus",
+        "cloudformation:DescribeStackResourceDrifts",
+      ],
+      Resource: SUB(
+        "arn:aws:cloudformation:*:${AWS::AccountId}:stack/${StackPrefix}-deploy-permissions/*",
+      ),
+    },
+    {
+      Sid: "PermissionsManagedPolicyMutate",
+      Effect: "Allow",
+      Action: [
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:GetPolicy",
+        "iam:ListPolicyVersions",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:GetPolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy",
+      ],
+      Resource: SUB(
+        "arn:aws:iam::${AWS::AccountId}:policy/${StackPrefix}-deploy-permissions*",
+      ),
+    },
+    {
+      // Security boundary: the desktop role can attach/detach policies on the
+      // bootstrap-created roles, but only policies whose name starts with
+      // "{StackPrefix}-deploy-permissions". A compromised admin-web cannot
+      // attach AdministratorAccess or any other arbitrary policy.
+      Sid: "PermissionsAttachConstrained",
+      Effect: "Allow",
+      Action: ["iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:ListAttachedRolePolicies"],
+      Resource: [
+        SUB("arn:aws:iam::${AWS::AccountId}:role/${StackPrefix}-admin-desktop-role"),
+        SUB("arn:aws:iam::${AWS::AccountId}:role/${StackPrefix}-codebuild-deploy-role"),
+      ],
+      Condition: {
+        ArnLike: {
+          "iam:PolicyARN": SUB(
+            "arn:aws:iam::${AWS::AccountId}:policy/${StackPrefix}-deploy-permissions*",
+          ),
+        },
+      },
+    },
+  ];
+}
+
+function codeBuildRoleBootstrapStatements(): IamStatement[] {
+  return [
+    {
+      Sid: "ArtifactsBucketRead",
+      Effect: "Allow",
+      Action: ["s3:GetObject", "s3:GetObjectVersion"],
+      Resource: SUB("arn:aws:s3:::${StackPrefix}-deploy-artifacts/*"),
+    },
+    {
+      Sid: "OwnLogGroup",
+      Effect: "Allow",
+      Action: [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams",
+      ],
+      Resource: [
+        SUB("arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${StackPrefix}*"),
+        SUB("arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${StackPrefix}*:*"),
+      ],
+    },
+  ];
+}
+
 export function generateSelfHostedBootstrapTemplate(
-  input: GenerateSelfHostedBootstrapTemplateInput = {}
+  input: GenerateSelfHostedBootstrapTemplateInput = {},
 ): string {
   const stackPrefix = input.stackPrefix ?? "starkeep";
 
+  const authPolicyYaml = renderStatementsYaml(authRoleBootstrapStatements(), 14);
+  const codeBuildPolicyYaml = renderStatementsYaml(codeBuildRoleBootstrapStatements(), 14);
+
   return `AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Starkeep Self-Hosted Bootstrap — creates Cognito auth and IAM permissions
-  for admin-desktop to manage this account's Starkeep data infrastructure.
-  No cross-account roles are required; admin-desktop runs locally as the control plane.
+  Starkeep Self-Hosted Bootstrap — creates Cognito auth, the desktop and
+  CodeBuild IAM roles (with only enough permissions to manage the deploy
+  permissions stack), the artifacts S3 bucket, and the CodeBuild deploy
+  project. The actual SST-deploy permissions live in a separate stack
+  ({StackPrefix}-deploy-permissions) created and updated by admin-web.
 
 Parameters:
   StackPrefix:
@@ -118,9 +253,13 @@ Resources:
           ProviderName: !Sub 'cognito-idp.\${AWS::Region}.amazonaws.com/\${UserPool}'
           ServerSideTokenCheck: false
 
-  # IAM role assumed by authenticated Cognito users via the Identity Pool.
-  # Scoped to resources prefixed with {StackPrefix}- to prevent accidental
-  # access to unrelated account resources.
+  # ---------------------------------------------------------------------------
+  # Desktop role — assumed by Cognito-authenticated users via the Identity
+  # Pool. Bootstrap-only inline policy: enough to use admin-web, trigger
+  # remote builds, and manage the deploy-permissions stack. The actual
+  # SST-deploy permissions are attached as a managed policy by the
+  # {StackPrefix}-deploy-permissions stack.
+  # ---------------------------------------------------------------------------
   AuthenticatedRole:
     Type: AWS::IAM::Role
     Properties:
@@ -138,226 +277,11 @@ Resources:
               ForAnyValue:StringLike:
                 'cognito-identity.amazonaws.com:amr': authenticated
       Policies:
-        - PolicyName: StarkeepAdminDesktopPolicy
+        - PolicyName: StarkeepBootstrapPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-
-              # ---------------------------------------------------------------
-              # SST deployment permissions — copied verbatim from
-              # CodeBuildServiceRole below. Keep these two in sync.
-              #
-              # Three intentional differences from the CodeBuild role:
-              #   1. CloudWatchLogsDeploy omits codebuild log group paths
-              #      (no CodeBuild process runs locally).
-              #   2. AuroraDsqlDeploy adds DbConnect + DbConnectAdmin so the
-              #      user can connect to the cluster directly (CodeBuild does
-              #      not need this).
-              #   3. CodeBuildTrigger + ArtifactsBucketWrite are appended
-              #      below for the remote-deploy path (CodeBuild has
-              #      ArtifactsBucketRead instead).
-              # ---------------------------------------------------------------
-
-              # CloudWatch Logs — describe/list actions require Resource: *
-              - Sid: CloudWatchLogsDescribe
-                Effect: Allow
-                Action:
-                  - logs:DescribeLogGroups
-                  - logs:DescribeLogStreams
-                Resource: '*'
-
-              # CloudWatch Logs — delivery lifecycle for API Gateway v2 access logging.
-              # SST's ApiGatewayV2 unconditionally sets accessLogSettings on the $default stage,
-              # which triggers these Vended Logs APIs against a service-level delivery resource —
-              # they are NOT covered by the log-group-scoped statement below and require Resource: *.
-              - Sid: CloudWatchLogsDelivery
-                Effect: Allow
-                Action:
-                  - logs:CreateLogDelivery
-                  - logs:GetLogDelivery
-                  - logs:UpdateLogDelivery
-                  - logs:DeleteLogDelivery
-                  - logs:ListLogDeliveries
-                  - logs:PutResourcePolicy
-                  - logs:DescribeResourcePolicies
-                Resource: '*'
-
-              # CloudWatch Logs — write/tag actions scoped to SST-created log groups
-              - Sid: CloudWatchLogsDeploy
-                Effect: Allow
-                Action: 'logs:*'
-                Resource:
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/lambda/\${StackPrefix}*'
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/lambda/\${StackPrefix}*:*'
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/vendedlogs/apis/\${StackPrefix}*'
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/vendedlogs/apis/\${StackPrefix}*:*'
-
-              # SSM — SST reads/writes its bootstrap config from Parameter Store
-              - Sid: SstBootstrapSSM
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:PutParameter
-                  - ssm:DeleteParameter
-                Resource: !Sub 'arn:aws:ssm:\${AWS::Region}:\${AWS::AccountId}:parameter/sst/*'
-
-              # S3 — full access to user-data and SST state/asset buckets
-              - Sid: S3DeployAccess
-                Effect: Allow
-                Action: 's3:*'
-                Resource:
-                  - !Sub 'arn:aws:s3:::\${StackPrefix}*'
-                  - !Sub 'arn:aws:s3:::\${StackPrefix}*/*'
-                  - 'arn:aws:s3:::sst-state-*'
-                  - 'arn:aws:s3:::sst-state-*/*'
-                  - 'arn:aws:s3:::sst-asset-*'
-                  - 'arn:aws:s3:::sst-asset-*/*'
-
-              - Sid: S3ListAllGlobal
-                Effect: Allow
-                Action: s3:ListAllMyBuckets
-                Resource: '*'
-
-              # CloudFormation — full stack lifecycle
-              - Sid: CloudFormationDeploy
-                Effect: Allow
-                Action:
-                  - cloudformation:CreateStack
-                  - cloudformation:UpdateStack
-                  - cloudformation:DeleteStack
-                  - cloudformation:DescribeStacks
-                  - cloudformation:DescribeStackEvents
-                  - cloudformation:DescribeStackResources
-                  - cloudformation:GetTemplate
-                  - cloudformation:ValidateTemplate
-                  - cloudformation:CreateChangeSet
-                  - cloudformation:DescribeChangeSet
-                  - cloudformation:ExecuteChangeSet
-                  - cloudformation:DeleteChangeSet
-                  - cloudformation:ListChangeSets
-                  - cloudformation:ListStackResources
-                  - cloudformation:ListStacks
-                  - cloudformation:GetStackPolicy
-                  - cloudformation:SetStackPolicy
-                Resource: '*'
-
-              # Aurora DSQL — create and manage the remote metadata cluster.
-              # Superset of CodeBuild role: adds DbConnect + DbConnectAdmin for
-              # direct cluster access from the desktop/server.
-              - Sid: AuroraDsqlDeploy
-                Effect: Allow
-                Action:
-                  - dsql:CreateCluster
-                  - dsql:UpdateCluster
-                  - dsql:DeleteCluster
-                  - dsql:GetCluster
-                  - dsql:ListClusters
-                  - dsql:TagResource
-                  - dsql:UntagResource
-                  - dsql:ListTagsForResource
-                  - dsql:GetVpcEndpointServiceName
-                  - dsql:DbConnect
-                  - dsql:DbConnectAdmin
-                Resource: '*'
-
-              # Lambda — full access scoped to StackPrefix functions; list ops need Resource: *
-              - Sid: LambdaDeploy
-                Effect: Allow
-                Action: 'lambda:*'
-                Resource: !Sub 'arn:aws:lambda:\${AWS::Region}:\${AWS::AccountId}:function:\${StackPrefix}*'
-
-              - Sid: LambdaListGlobal
-                Effect: Allow
-                Action:
-                  - lambda:ListFunctions
-                  - lambda:GetAccountSettings
-                Resource: '*'
-
-              # API Gateway v2 — create and manage the HTTP API
-              - Sid: ApiGatewayDeploy
-                Effect: Allow
-                Action:
-                  - apigateway:GET
-                  - apigateway:POST
-                  - apigateway:PUT
-                  - apigateway:DELETE
-                  - apigateway:PATCH
-                  - apigateway:TagResource
-                  - apigateway:UntagResource
-                  - apigateway:ListTagsForResource
-                Resource: '*'
-
-              # IAM — create Lambda execution roles and pass them
-              - Sid: IAMDeployRoles
-                Effect: Allow
-                Action:
-                  - iam:CreateRole
-                  - iam:DeleteRole
-                  - iam:GetRole
-                  - iam:UpdateRole
-                  - iam:PutRolePolicy
-                  - iam:DeleteRolePolicy
-                  - iam:AttachRolePolicy
-                  - iam:DetachRolePolicy
-                  - iam:GetRolePolicy
-                  - iam:ListRolePolicies
-                  - iam:ListAttachedRolePolicies
-                  - iam:ListInstanceProfilesForRole
-                  - iam:TagRole
-                  - iam:UntagRole
-                Resource: !Sub 'arn:aws:iam::\${AWS::AccountId}:role/\${StackPrefix}*'
-
-              - Sid: IAMListGlobal
-                Effect: Allow
-                Action:
-                  - iam:ListRoles
-                Resource: '*'
-
-              - Sid: IAMPassRoleDeploy
-                Effect: Allow
-                Action: iam:PassRole
-                Resource: !Sub 'arn:aws:iam::\${AWS::AccountId}:role/\${StackPrefix}*'
-                Condition:
-                  StringLike:
-                    iam:PassedToService:
-                      - cloudformation.amazonaws.com
-                      - lambda.amazonaws.com
-                      - apigateway.amazonaws.com
-
-              # ---------------------------------------------------------------
-              # Authenticated Role-only permissions (not in CodeBuild role)
-              # ---------------------------------------------------------------
-
-              # Cognito user management — create the initial user account and
-              # manage sessions from the desktop app.
-              - Sid: CognitoUserManagement
-                Effect: Allow
-                Action:
-                  - cognito-idp:AdminCreateUser
-                  - cognito-idp:AdminSetUserPassword
-                  - cognito-idp:AdminGetUser
-                  - cognito-idp:AdminDeleteUser
-                  - cognito-idp:ListUsers
-                  - cognito-idp:DescribeUserPool
-                  - cognito-idp:DescribeUserPoolClient
-                Resource: !GetAtt UserPool.Arn
-
-              # CodeBuild — trigger remote deployments and poll build status
-              - Sid: CodeBuildTrigger
-                Effect: Allow
-                Action:
-                  - codebuild:StartBuild
-                  - codebuild:BatchGetBuilds
-                Resource: !GetAtt DeployProject.Arn
-
-              # S3 — upload deployment source zip to the artifacts bucket
-              - Sid: ArtifactsBucketWrite
-                Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:GetObject
-                Resource: !Sub 'arn:aws:s3:::\${StackPrefix}-deploy-artifacts/*'
-
+${authPolicyYaml}
       Tags:
         - Key: starkeep:managed
           Value: 'true'
@@ -377,7 +301,6 @@ Resources:
   #
   # admin-desktop uploads a versioned source zip to ArtifactsBucket, then
   # calls codebuild:StartBuild to deploy the user-data SST stack remotely.
-  # This replaces the previous approach of running npx sst deploy locally.
   # ---------------------------------------------------------------------------
 
   # S3 bucket for the versioned deployment source zip (infra/user-data + handlers)
@@ -405,9 +328,10 @@ Resources:
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
-  # IAM service role for the CodeBuild project.
-  # Needs all permissions required by sst deploy: CloudFormation, S3, DSQL,
-  # Lambda, API Gateway, IAM (to create Lambda execution roles).
+  # CodeBuild service role — bootstrap-only inline policy: enough to read the
+  # source zip and write its own log group. The actual SST-deploy permissions
+  # are attached as a managed policy by the {StackPrefix}-deploy-permissions
+  # stack.
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -420,177 +344,11 @@ Resources:
               Service: codebuild.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: StarkeepCodeBuildDeployPolicy
+        - PolicyName: StarkeepCodeBuildBootstrapPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-
-              # CloudWatch Logs — describe/list actions require Resource: * (AWS evaluates them against a bare ARN)
-              - Sid: CloudWatchLogsDescribe
-                Effect: Allow
-                Action:
-                  - logs:DescribeLogGroups
-                  - logs:DescribeLogStreams
-                Resource: '*'
-              # CloudWatch Logs — delivery lifecycle for API Gateway v2 access logging.
-              # SST's ApiGatewayV2 unconditionally sets accessLogSettings on the $default stage,
-              # which triggers these Vended Logs APIs against a service-level delivery resource —
-              # they are NOT covered by the log-group-scoped statement below and require Resource: *.
-              - Sid: CloudWatchLogsDelivery
-                Effect: Allow
-                Action:
-                  - logs:CreateLogDelivery
-                  - logs:GetLogDelivery
-                  - logs:UpdateLogDelivery
-                  - logs:DeleteLogDelivery
-                  - logs:ListLogDeliveries
-                  - logs:PutResourcePolicy
-                  - logs:DescribeResourcePolicies
-                Resource: '*'
-              # CloudWatch Logs — write/tag actions scoped to SST-created log groups
-              - Sid: CloudWatchLogsDeploy
-                Effect: Allow
-                Action: 'logs:*'
-                Resource:
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/codebuild/\${StackPrefix}*'
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/codebuild/\${StackPrefix}*:*'
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/lambda/\${StackPrefix}*'
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/lambda/\${StackPrefix}*:*'
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/vendedlogs/apis/\${StackPrefix}*'
-                  - !Sub 'arn:aws:logs:\${AWS::Region}:\${AWS::AccountId}:log-group:/aws/vendedlogs/apis/\${StackPrefix}*:*'
-
-              # SSM — SST reads/writes its bootstrap config from Parameter Store
-              - Sid: SstBootstrapSSM
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:PutParameter
-                  - ssm:DeleteParameter
-                Resource: !Sub 'arn:aws:ssm:\${AWS::Region}:\${AWS::AccountId}:parameter/sst/*'
-
-              # S3 — read deployment source zip from artifacts bucket
-              - Sid: ArtifactsBucketRead
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:GetObjectVersion
-                Resource: !Sub 'arn:aws:s3:::\${StackPrefix}-deploy-artifacts/*'
-
-              # S3 — full access to user-data and SST state/asset buckets
-              - Sid: S3DeployAccess
-                Effect: Allow
-                Action: 's3:*'
-                Resource:
-                  - !Sub 'arn:aws:s3:::\${StackPrefix}*'
-                  - !Sub 'arn:aws:s3:::\${StackPrefix}*/*'
-                  - 'arn:aws:s3:::sst-state-*'
-                  - 'arn:aws:s3:::sst-state-*/*'
-                  - 'arn:aws:s3:::sst-asset-*'
-                  - 'arn:aws:s3:::sst-asset-*/*'
-              - Sid: S3ListAllGlobal
-                Effect: Allow
-                Action: s3:ListAllMyBuckets
-                Resource: '*'
-
-              # CloudFormation — full stack lifecycle
-              - Sid: CloudFormationDeploy
-                Effect: Allow
-                Action:
-                  - cloudformation:CreateStack
-                  - cloudformation:UpdateStack
-                  - cloudformation:DeleteStack
-                  - cloudformation:DescribeStacks
-                  - cloudformation:DescribeStackEvents
-                  - cloudformation:DescribeStackResources
-                  - cloudformation:GetTemplate
-                  - cloudformation:ValidateTemplate
-                  - cloudformation:CreateChangeSet
-                  - cloudformation:DescribeChangeSet
-                  - cloudformation:ExecuteChangeSet
-                  - cloudformation:DeleteChangeSet
-                  - cloudformation:ListChangeSets
-                  - cloudformation:ListStackResources
-                  - cloudformation:ListStacks
-                  - cloudformation:GetStackPolicy
-                  - cloudformation:SetStackPolicy
-                Resource: '*'
-
-              # Aurora DSQL — create and manage the remote metadata cluster
-              - Sid: AuroraDsqlDeploy
-                Effect: Allow
-                Action:
-                  - dsql:CreateCluster
-                  - dsql:UpdateCluster
-                  - dsql:DeleteCluster
-                  - dsql:GetCluster
-                  - dsql:ListClusters
-                  - dsql:TagResource
-                  - dsql:UntagResource
-                  - dsql:ListTagsForResource
-                  - dsql:GetVpcEndpointServiceName
-                Resource: '*'
-
-              # Lambda — full access scoped to StackPrefix functions; list ops need Resource: *
-              - Sid: LambdaDeploy
-                Effect: Allow
-                Action: 'lambda:*'
-                Resource: !Sub 'arn:aws:lambda:\${AWS::Region}:\${AWS::AccountId}:function:\${StackPrefix}*'
-              - Sid: LambdaListGlobal
-                Effect: Allow
-                Action:
-                  - lambda:ListFunctions
-                  - lambda:GetAccountSettings
-                Resource: '*'
-
-              # API Gateway v2 — create and manage the HTTP API
-              - Sid: ApiGatewayDeploy
-                Effect: Allow
-                Action:
-                  - apigateway:GET
-                  - apigateway:POST
-                  - apigateway:PUT
-                  - apigateway:DELETE
-                  - apigateway:PATCH
-                  - apigateway:TagResource
-                  - apigateway:UntagResource
-                  - apigateway:ListTagsForResource
-                Resource: '*'
-
-              # IAM — create Lambda execution roles and pass them
-              - Sid: IAMDeployRoles
-                Effect: Allow
-                Action:
-                  - iam:CreateRole
-                  - iam:DeleteRole
-                  - iam:GetRole
-                  - iam:UpdateRole
-                  - iam:PutRolePolicy
-                  - iam:DeleteRolePolicy
-                  - iam:AttachRolePolicy
-                  - iam:DetachRolePolicy
-                  - iam:GetRolePolicy
-                  - iam:ListRolePolicies
-                  - iam:ListAttachedRolePolicies
-                  - iam:ListInstanceProfilesForRole
-                  - iam:TagRole
-                  - iam:UntagRole
-                Resource: !Sub 'arn:aws:iam::\${AWS::AccountId}:role/\${StackPrefix}*'
-              - Sid: IAMListGlobal
-                Effect: Allow
-                Action:
-                  - iam:ListRoles
-                Resource: '*'
-              - Sid: IAMPassRoleDeploy
-                Effect: Allow
-                Action: iam:PassRole
-                Resource: !Sub 'arn:aws:iam::\${AWS::AccountId}:role/\${StackPrefix}*'
-                Condition:
-                  StringLike:
-                    iam:PassedToService:
-                      - cloudformation.amazonaws.com
-                      - lambda.amazonaws.com
-                      - apigateway.amazonaws.com
-
+${codeBuildPolicyYaml}
       Tags:
         - Key: starkeep:managed
           Value: 'true'
@@ -693,6 +451,21 @@ Outputs:
       CodeBuild project that runs sst deploy. Triggered by admin-desktop via
       codebuild:StartBuild with STAGE and Cognito env var overrides.
     Value: !Ref DeployProject
+
+  PermissionsStackName:
+    Description: >
+      Name of the deploy-permissions CloudFormation stack that admin-web
+      creates and updates to grant the SST-deploy permissions to the desktop
+      and CodeBuild roles.
+    Value: !Sub '\${StackPrefix}-deploy-permissions'
+
+  AuthenticatedRoleName:
+    Description: Name of the desktop IAM role
+    Value: !Ref AuthenticatedRole
+
+  CodeBuildServiceRoleName:
+    Description: Name of the CodeBuild service IAM role
+    Value: !Ref CodeBuildServiceRole
 `;
 }
 
