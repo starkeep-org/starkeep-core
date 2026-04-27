@@ -50,6 +50,12 @@ export async function writeCloudCredentials(creds: STSCredentials): Promise<void
   localStorage.setItem(CLOUD_CREDENTIALS_KEY, JSON.stringify(creds));
 }
 
+export async function clearCloudConfig(): Promise<void> {
+  localStorage.removeItem(CLOUD_CONFIG_KEY);
+  localStorage.removeItem(CLOUD_CREDENTIALS_KEY);
+  localStorage.removeItem("starkeep-partial-setup");
+}
+
 export function credentialsNearExpiry(creds: STSCredentials): boolean {
   const expiry = new Date(creds.expiration).getTime();
   return Date.now() > expiry - 5 * 60 * 1000;

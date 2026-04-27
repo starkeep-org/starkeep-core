@@ -27,7 +27,7 @@ import { createTypeRegistry } from "../../packages/core/src/schema/index.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { stat as fsStat, readFile, writeFile, mkdir } from "node:fs/promises";
+import { stat as fsStat, readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
@@ -157,7 +157,12 @@ async function saveCloudCredentials(creds: STSCredentials): Promise<void> {
 async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredentials>> {
   const credentialsPath = join(STARKEEP_DIR, "cloud-credentials.json");
   return async () => {
-    const raw = JSON.parse(await readFile(credentialsPath, "utf8")) as STSCredentials;
+    let raw: STSCredentials;
+    try {
+      raw = JSON.parse(await readFile(credentialsPath, "utf8")) as STSCredentials;
+    } catch {
+      throw new Error("No cloud credentials — sign in to continue");
+    }
     return {
       accessKeyId: raw.accessKeyId,
       secretAccessKey: raw.secretAccessKey,
@@ -182,9 +187,12 @@ class CloudCredentialsDsqlClientFactory implements DatabaseClientFactory {
     options: AuroraDsqlDatabaseAdapterOptions,
   ): Promise<DatabaseClient> {
     const createPgClient = async (): Promise<pg.Client> => {
-      const rawCreds = JSON.parse(
-        await readFile(this.credentialsPath, "utf8"),
-      ) as CloudCredentials;
+      let rawCreds: CloudCredentials;
+      try {
+        rawCreds = JSON.parse(await readFile(this.credentialsPath, "utf8")) as CloudCredentials;
+      } catch {
+        throw new Error("No cloud credentials — sign in to continue");
+      }
       const signer = new DsqlSigner({
         hostname: options.hostname,
         region: options.region,
@@ -668,6 +676,19 @@ async function main() {
             await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
           },
         );
+        json(res, { ok: true });
+        return;
+      }
+
+      if (path === "/auth/logout" && req.method === "POST") {
+        stopCredentialRefresh?.();
+        stopCredentialRefresh = null;
+        currentRefreshToken = null;
+        currentIdToken = null;
+        for (const file of ["auth.json", "cloud-credentials.json", "cloud-config.json"]) {
+          await unlink(join(STARKEEP_DIR, file)).catch(() => {});
+        }
+        console.log("Auth cleared");
         json(res, { ok: true });
         return;
       }

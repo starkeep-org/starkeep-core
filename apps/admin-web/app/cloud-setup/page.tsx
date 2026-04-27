@@ -11,7 +11,6 @@ import {
   Stack,
   Alert,
   TextInput,
-  Textarea,
   PasswordInput,
   Group,
   Paper,
@@ -22,7 +21,10 @@ import {
   Badge,
   Collapse,
 } from "@mantine/core";
-import { getBootstrapStackOutputsUrl } from "@starkeep/admin-core";
+import {
+  getBootstrapStackOutputsUrl,
+  generateSelfHostedPermissionsTemplate,
+} from "@starkeep/admin-core";
 import {
   writeCloudConfig,
   writeCloudCredentials,
@@ -37,6 +39,12 @@ import {
   type STSCredentials,
 } from "../../src/lib/cognito-auth";
 import { s3PutObject, s3GetObjectText } from "../../src/lib/s3";
+import {
+  getPermissionsStackStatus,
+  createPermissionsStack,
+  pollUntilTerminal,
+  isSuccess,
+} from "../../src/lib/permissions-stack-client";
 import { ModeSelector, type SetupMode } from "../../src/components/mode-selector";
 
 function parseSstOutputs(raw: string): Record<string, string> {
@@ -314,6 +322,127 @@ function Step4SignIn({
   );
 }
 
+function StepPermissions({
+  onNext,
+  onBack,
+  stackPrefix,
+  region,
+  credentials,
+}: {
+  onNext: () => void;
+  onBack: () => void;
+  stackPrefix: string;
+  region: string;
+  credentials: STSCredentials;
+}) {
+  const [phase, setPhase] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [skipChecked, setSkipChecked] = useState(false);
+  const stackName = `${stackPrefix}-deploy-permissions`;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await getPermissionsStackStatus(credentials, region, stackName);
+        if (cancelled) return;
+        setStatus(s.phase);
+        if (s.phase === "CREATE_COMPLETE" || s.phase === "UPDATE_COMPLETE") {
+          setSkipChecked(true);
+        }
+      } catch (err) {
+        if (!cancelled) setError(String(err instanceof Error ? err.message : err));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [credentials, region, stackName]);
+
+  const handleCreate = async () => {
+    setBusy(true);
+    setError(null);
+    setPhase("Creating permissions stack…");
+    try {
+      const template = generateSelfHostedPermissionsTemplate({ stackPrefix });
+      await createPermissionsStack(credentials, region, stackName, template);
+      const finalStatus = await pollUntilTerminal(credentials, region, stackName, {
+        onUpdate: (s) => setPhase(`Stack status: ${s.phase}`),
+      });
+      if (!isSuccess(finalStatus)) {
+        throw new Error(
+          `Stack create finished with ${finalStatus.phase}${finalStatus.reason ? `: ${finalStatus.reason}` : ""}`,
+        );
+      }
+      setStatus(finalStatus.phase);
+      setPhase("Permissions stack ready.");
+      onNext();
+    } catch (err) {
+      setError(String(err instanceof Error ? err.message : err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const alreadyExists = status === "CREATE_COMPLETE" || status === "UPDATE_COMPLETE";
+
+  return (
+    <Stack gap="md">
+      <Text>
+        Before we can deploy your data infrastructure, we need to grant the desktop and CodeBuild
+        roles permission to do so. These permissions live in a separate CloudFormation stack
+        (<Code>{stackName}</Code>) so you can iterate on them later without re-bootstrapping.
+      </Text>
+
+      <Text size="sm" c="dimmed">
+        Click <strong>Create permissions stack</strong> below. The deploy permissions are bundled
+        with this admin-web build and applied as a managed policy attached to both roles. You can
+        review or update them later from the <strong>Deploy permissions</strong> page.
+      </Text>
+
+      {error && (
+        <Alert color="red" title="Failed to create permissions stack">
+          {error}
+        </Alert>
+      )}
+
+      {alreadyExists && (
+        <Alert color="green" title="Permissions stack already exists">
+          Status: <Code>{status}</Code>. You can continue.
+        </Alert>
+      )}
+
+      {phase && busy && (
+        <Paper withBorder p="sm">
+          <Group gap="sm">
+            <Loader size="xs" />
+            <Text size="sm" c="dimmed">
+              {phase}
+            </Text>
+          </Group>
+        </Paper>
+      )}
+
+      <Group justify="space-between" mt="md">
+        <Button variant="subtle" onClick={onBack} disabled={busy}>
+          Back
+        </Button>
+        {alreadyExists || skipChecked ? (
+          <Button onClick={onNext} disabled={busy}>
+            Continue
+          </Button>
+        ) : (
+          <Button loading={busy} onClick={handleCreate}>
+            Create permissions stack
+          </Button>
+        )}
+      </Group>
+    </Stack>
+  );
+}
+
 interface DeployOutputs {
   s3Bucket: string;
   s3Region: string;
@@ -367,8 +496,8 @@ function Step5DeployInfra({
   const [manualBucket, setManualBucket] = useState("");
   const [manualAurora, setManualAurora] = useState("");
   const [manualApi, setManualApi] = useState("");
-  const [sstPasteText, setSstPasteText] = useState("");
-  const [sstPasteError, setSstPasteError] = useState<string | null>(null);
+  const [readConfigError, setReadConfigError] = useState<string | null>(null);
+  const [readingConfig, setReadingConfig] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -501,24 +630,36 @@ function Step5DeployInfra({
     });
   };
 
-  const handleSstPasteSubmit = () => {
-    setSstPasteError(null);
-    const outputs = parseSstOutputs(sstPasteText);
-    const bucketName = outputs["bucketName"];
-    const auroraHostname = outputs["auroraHostname"];
-    const apiGatewayUrl = outputs["apiGatewayUrl"];
-    if (!bucketName || !auroraHostname) {
-      setSstPasteError(
-        `Could not find required values in output. Parsed: ${JSON.stringify(outputs)}`,
-      );
-      return;
+  const handleReadFromConfig = async () => {
+    setReadingConfig(true);
+    setReadConfigError(null);
+    try {
+      const res = await fetch("http://127.0.0.1:9820/config", {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) throw new Error("Local server returned an error");
+      const data = (await res.json()) as {
+        s3Bucket?: string;
+        s3Region?: string;
+        auroraEndpoint?: string;
+        apiGatewayUrl?: string;
+      };
+      if (!data.s3Bucket || !data.auroraEndpoint) {
+        throw new Error(
+          "Config is missing s3Bucket or auroraEndpoint — has local:deploy completed successfully?",
+        );
+      }
+      onSuccess({
+        s3Bucket: data.s3Bucket,
+        s3Region: data.s3Region ?? region,
+        auroraEndpoint: data.auroraEndpoint,
+        apiGatewayUrl: data.apiGatewayUrl,
+      });
+    } catch (err) {
+      setReadConfigError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReadingConfig(false);
     }
-    onSuccess({
-      s3Bucket: bucketName,
-      s3Region: region,
-      auroraEndpoint: auroraHostname,
-      apiGatewayUrl,
-    });
   };
 
   if (deployResult) {
@@ -636,23 +777,23 @@ function Step5DeployInfra({
       >
         Download CLI config (.starkeep-config.json)
       </Button>
-      <Textarea
-        label="Paste SST deploy output"
-        description="After running pnpm run local:deploy, paste the full terminal output here."
-        placeholder="Stack starkeep&#10;  bucketName: starkeep-files-abc123&#10;  auroraHostname: abc123.dsql.us-east-1.on.aws&#10;  apiGatewayUrl: https://abc123.execute-api.us-east-1.amazonaws.com"
-        minRows={4}
-        value={sstPasteText}
-        onChange={(e) => { setSstPasteText(e.currentTarget.value); setSstPasteError(null); }}
-        disabled={deploying}
-      />
-      {sstPasteError && <Alert color="red" title="Parse error">{sstPasteError}</Alert>}
+      <Text size="sm" c="dimmed">
+        Once the deploy finishes, click below — the admin reads the updated{" "}
+        <Code>.starkeep-config.json</Code> automatically from the local server.
+      </Text>
+      {readConfigError && (
+        <Alert color="red" title="Could not read config">
+          {readConfigError}
+        </Alert>
+      )}
       <Group justify="flex-end">
         <Button
           variant="light"
-          disabled={deploying || !sstPasteText.trim()}
-          onClick={handleSstPasteSubmit}
+          loading={readingConfig}
+          disabled={deploying}
+          onClick={handleReadFromConfig}
         >
-          Configure from output
+          Deployment completed successfully
         </Button>
       </Group>
 
@@ -932,6 +1073,7 @@ function CloudSetupPage() {
     "Stack outputs",
     "Create account",
     "Sign in",
+    "Deploy permissions",
     "Deploy infrastructure",
   ];
 
@@ -981,10 +1123,19 @@ function CloudSetupPage() {
             cognitoConfig={fullCognitoConfig()}
           />
         )}
-        {active === 3 && credentials && signInResult && (
+        {active === 3 && credentials && (
+          <StepPermissions
+            onNext={() => setActive(4)}
+            onBack={() => setActive(2)}
+            stackPrefix={stackPrefix}
+            region={region}
+            credentials={credentials}
+          />
+        )}
+        {active === 4 && credentials && signInResult && (
           <Step5DeployInfra
             onSuccess={handleDeploySuccess}
-            onBack={() => setActive(2)}
+            onBack={() => setActive(3)}
             cognitoConfig={fullCognitoConfig()}
             stackPrefix={stackPrefix}
             region={region}
