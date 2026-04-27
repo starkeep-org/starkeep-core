@@ -108,7 +108,7 @@ export function PhotoViewer({ image, onClose, onUpdateCaption, onCrop, onShare }
         <div style={{ position: "relative" }}>
           <img
             ref={imgRef}
-            src={getFullSizeSrc(image.id)}
+            src={getFullSizeSrc(image.id) ?? undefined}
             alt={image.title || image.originalFilename}
             onLoad={handleImgLoad}
             style={{
