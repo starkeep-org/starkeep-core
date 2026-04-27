@@ -25,7 +25,6 @@ import type { DatabaseAdapter } from "../../packages/storage-adapter/src/databas
 export interface WatchConfig {
   id: string;
   directoryPath: string;
-  targetType: string;
   recursive: boolean;
   includePatterns?: string[];
   excludePatterns?: string[];
@@ -34,7 +33,6 @@ export interface WatchConfig {
 export interface WatchStatus {
   id: string;
   directoryPath: string;
-  targetType: string;
   state: "scanning" | "watching" | "error" | "stopped";
   totalFiles: number;
   syncedFiles: number;
@@ -58,7 +56,7 @@ export interface FileWatchManager {
   getAllStatuses(): WatchStatus[];
   getWatchFiles(watchId: string): WatchFileInfo[];
   getFileStatus(filePath: string): { watched: boolean; synced: boolean; watchId?: string; recordId?: string };
-  getDirectoryStatus(dirPath: string): { watched: boolean; watchId?: string; directoryPath?: string; targetType?: string };
+  getDirectoryStatus(dirPath: string): { watched: boolean; watchId?: string; directoryPath?: string };
   shutdown(): Promise<void>;
 }
 
@@ -78,6 +76,12 @@ const EXT_MIME: Record<string, string> = {
 
 function mimeFromPath(filePath: string): string {
   return EXT_MIME[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+}
+
+function typeFromMime(mime: string): string {
+  if (mime.startsWith("image/")) return "@starkeep/image";
+  if (mime === "text/markdown") return "@starkeep/markdown";
+  return "@starkeep/unknown";
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +221,10 @@ export function createFileWatchManager(opts: {
     `).run(watchId, filePath, relativePath, contentHash, dataRecordId, mtime, sizeBytes);
   }
 
+  function deleteTrackingRecord(filePath: string): void {
+    db.prepare("DELETE FROM watch_files WHERE file_path = ?").run(filePath);
+  }
+
   function deleteTrackingRecords(watchId: string): void {
     db.prepare("DELETE FROM watch_files WHERE watch_id = ?").run(watchId);
   }
@@ -229,7 +237,21 @@ export function createFileWatchManager(opts: {
     if (!matchesPatterns(filename, active.config.includePatterns)) return;
 
     try {
-      const fileStat = await stat(filePath);
+      let fileStat;
+      try {
+        fileStat = await stat(filePath);
+      } catch (err: any) {
+        if (err.code === "ENOENT") {
+          const tracked = active.files.get(filePath);
+          if (tracked?.dataRecordId) {
+            await sdk.data.delete(tracked.dataRecordId as any);
+          }
+          deleteTrackingRecord(filePath);
+          active.files.delete(filePath);
+          return;
+        }
+        throw err;
+      }
       if (!fileStat.isFile()) return;
       if (fileStat.size > MAX_FILE_SIZE) {
         console.warn(`Skipping large file (${(fileStat.size / 1024 / 1024).toFixed(0)}MB): ${filePath}`);
@@ -261,7 +283,7 @@ export function createFileWatchManager(opts: {
 
         const record = await sdk.data.putWithLocalFile(
           {
-            type: active.config.targetType,
+            type: typeFromMime(contentType),
             ownerId,
             content: { title, fileName: filename, sourcePath: relativePath },
           },
@@ -372,7 +394,7 @@ export function createFileWatchManager(opts: {
       active.files = loadTrackingRecords(config.id);
 
       // Scan and ingest new/changed files
-      console.log(`Watch started: ${config.directoryPath} → ${config.targetType}`);
+      console.log(`Watch started: ${config.directoryPath}`);
       const files = await scanDirectory(active);
       await processInBatches(active, files);
 
@@ -403,7 +425,6 @@ export function createFileWatchManager(opts: {
       return {
         id: active.config.id,
         directoryPath: active.config.directoryPath,
-        targetType: active.config.targetType,
         state: active.state,
         totalFiles: files.length,
         syncedFiles: files.filter(f => f.status === "synced").length,
@@ -418,7 +439,6 @@ export function createFileWatchManager(opts: {
         return {
           id: a.config.id,
           directoryPath: a.config.directoryPath,
-          targetType: a.config.targetType,
           state: a.state,
           totalFiles: files.length,
           syncedFiles: files.filter(f => f.status === "synced").length,
@@ -456,7 +476,6 @@ export function createFileWatchManager(opts: {
             watched: true,
             watchId: active.config.id,
             directoryPath: active.config.directoryPath,
-            targetType: active.config.targetType,
           };
         }
       }

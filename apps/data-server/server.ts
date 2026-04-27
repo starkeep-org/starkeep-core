@@ -361,6 +361,14 @@ async function main() {
       title: v.optional(v.string()),
     }),
   });
+  typeRegistry.register({
+    namespace: "@starkeep",
+    name: "unknown",
+    schema: v.object({
+      fileName: v.optional(v.string()),
+      title: v.optional(v.string()),
+    }),
+  });
 
   const clock = createHLCClock({ nodeId: NODE_ID, wallClockFunction: Date.now });
 
@@ -1310,6 +1318,10 @@ async function main() {
         return;
       }
 
+      // TODO: add POST /data/records/:id/report-failure endpoint — accepts { appId, reason }, stores
+      // a flag against the record for admin review. Apps must not update the record type directly;
+      // downgrading to @starkeep/unknown should be a human action via admin-web after reviewing flags.
+
       // ---------------------------------------------------------------
       // Watch endpoints
       // ---------------------------------------------------------------
@@ -1317,13 +1329,13 @@ async function main() {
       // POST /watches — register a new directory watch
       if (path === "/watches" && req.method === "POST") {
         const body = await readBody(req);
-        const { directoryPath: rawDirectoryPath, targetType, recursive, includePatterns, excludePatterns } = JSON.parse(body);
+        const { directoryPath: rawDirectoryPath, recursive, includePatterns, excludePatterns } = JSON.parse(body);
         const directoryPath = typeof rawDirectoryPath === "string"
           ? rawDirectoryPath.replace(/^~/, homedir())
           : rawDirectoryPath;
-        if (!directoryPath || !targetType) {
+        if (!directoryPath) {
           res.writeHead(400);
-          json(res, { error: "directoryPath and targetType are required" });
+          json(res, { error: "directoryPath is required" });
           return;
         }
         // Validate directory exists
@@ -1351,7 +1363,6 @@ async function main() {
         const watchConfig = {
           id: watchId,
           directoryPath,
-          targetType,
           recursive: recursive ?? true,
           includePatterns,
           excludePatterns,

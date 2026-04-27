@@ -446,17 +446,23 @@ export default function DashboardPage() {
         </Group>
 
         {localOnline === false && (
-          <Stack gap="xs">
-            <Text size="sm" c="dimmed">
-              Start the local data server to enable local features.
-            </Text>
+          <Stack gap="md">
+            <Alert color="yellow" variant="light" title="Data server not running">
+              The local data server must be running for local features to work. Paste the command
+              below into your terminal to start it.
+            </Alert>
             <CopyCmd
               cmd="pnpm --filter @starkeep/data-server start"
-              label="Start data server"
+              label="Copy start command"
               copyKey="start-data-server"
               copiedKey={copiedKey}
               onCopy={copy}
             />
+            <Group justify="flex-end">
+              <Button variant="light" color="green" onClick={() => setRefreshKey((k) => k + 1)}>
+                Data server started
+              </Button>
+            </Group>
           </Stack>
         )}
 
@@ -490,14 +496,6 @@ export default function DashboardPage() {
                 )}
               </Stack>
             </Collapse>
-
-            <CopyCmd
-              cmd="bash scripts/reset-local-data.sh"
-              label="Clear all local data"
-              copyKey="clear-local"
-              copiedKey={copiedKey}
-              onCopy={copy}
-            />
 
             <Divider my="xs" label="Watches" labelPosition="left" />
 
@@ -561,8 +559,18 @@ export default function DashboardPage() {
             {watchSuccess && <Text size="xs" c="green">{watchSuccess}</Text>}
           </Stack>
         )}
+
       </Paper>
 
+        <CopyCmd
+          cmd="bash scripts/reset-local-data.sh"
+          label="Clear all local data"
+          copyKey="clear-local"
+          copiedKey={copiedKey}
+          onCopy={copy}
+        />
+
+          {localOnline !== false && (
           <Paper p="lg" withBorder>
             <Title order={3} size="h4" mb="sm">
               Apps
@@ -588,6 +596,7 @@ export default function DashboardPage() {
               />
             </Stack>
           </Paper>
+          )}
         </Stack>
 
         {/* ── REMOTE ──────────────────────────────────────────────────── */}
