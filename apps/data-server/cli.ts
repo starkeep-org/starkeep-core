@@ -3,7 +3,7 @@
  * data-server-ctl — CLI for managing the running data-server.
  *
  * Usage:
- *   data-server-ctl watch add <dirPath> [--type <targetType>] [--no-recursive]
+ *   data-server-ctl watch add <dirPath> [--no-recursive]
  *   data-server-ctl watch remove <watchId>
  *   data-server-ctl watch list
  */
@@ -85,19 +85,17 @@ async function request(method: string, path: string, body?: unknown): Promise<un
 // Commands
 // ---------------------------------------------------------------------------
 
-async function watchAdd(dirPath: string, targetType: string, recursive: boolean): Promise<void> {
+async function watchAdd(dirPath: string, recursive: boolean): Promise<void> {
   const watch = await request("POST", "/watches", {
     directoryPath: dirPath,
-    targetType,
     recursive,
-  }) as { id: string; content?: { directoryPath?: string; targetType?: string; recursive?: boolean } };
+  }) as { id: string; content?: { directoryPath?: string; recursive?: boolean } };
 
   const id = watch.id ?? "?";
   const content = (watch as any).content ?? {};
   console.log("Watch added:");
   console.log(`  id:        ${id}`);
   console.log(`  path:      ${content.directoryPath ?? dirPath}`);
-  console.log(`  type:      ${content.targetType ?? targetType}`);
   console.log(`  recursive: ${content.recursive ?? recursive}`);
 }
 
@@ -124,7 +122,6 @@ async function watchList(): Promise<void> {
   const watches = await request("GET", "/watches") as Array<{
     id: string;
     directoryPath: string;
-    targetType: string;
     state: string;
     totalFiles: number;
     syncedFiles: number;
@@ -139,9 +136,8 @@ async function watchList(): Promise<void> {
   for (const w of watches) {
     const id = w.id.padEnd(26);
     const path = (w.directoryPath ?? "").padEnd(40);
-    const type = (w.targetType ?? "").padEnd(24);
     const state = (w.state ?? "").padEnd(10);
-    console.log(`  ${id}  ${path}  ${type}  ${state}  ${w.syncedFiles ?? 0}/${w.totalFiles ?? 0} files`);
+    console.log(`  ${id}  ${path}  ${state}  ${w.syncedFiles ?? 0}/${w.totalFiles ?? 0} files`);
   }
 }
 
@@ -151,12 +147,11 @@ async function watchList(): Promise<void> {
 
 function printUsage(): void {
   console.log(`Usage:
-  data-server-ctl watch add <dirPath> [--type <targetType>] [--no-recursive]
+  data-server-ctl watch add <dirPath> [--no-recursive]
   data-server-ctl watch remove <watchId>
   data-server-ctl watch list
 
 Options:
-  --type        Record type for ingested files (default: @starkeep/image)
   --no-recursive  Do not watch subdirectories (default: recursive)
 
 Environment:
@@ -178,9 +173,8 @@ async function main(): Promise<void> {
         printUsage();
         process.exit(1);
       }
-      const targetType = (flags["type"] as string | undefined) ?? "@starkeep/image";
       const recursive = (flags["recursive"] as boolean | undefined) ?? true;
-      await watchAdd(dirPath, targetType, recursive);
+      await watchAdd(dirPath, recursive);
     } else if (subcommand === "remove") {
       const watchId = positional[0];
       if (!watchId) {

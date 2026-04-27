@@ -410,11 +410,14 @@ if (sstCommand === "deploy") {
     const outputs = JSON.parse(readFileSync(SST_OUTPUTS_PATH, "utf-8")) as Record<string, string>;
     const existing = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as Record<string, unknown>;
     const updated = { ...existing };
+    if (outputs.bucketName) updated.s3Bucket = outputs.bucketName;
+    if (outputs.region) updated.s3Region = outputs.region;
     if (outputs.apiGatewayUrl) updated.apiGatewayUrl = outputs.apiGatewayUrl;
     if (outputs.auroraHostname) updated.auroraEndpoint = outputs.auroraHostname;
     if (outputs.photosWebUrl) updated.photosWebUrl = outputs.photosWebUrl;
     writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
     console.log("\nUpdated .starkeep-config.json with deploy outputs:");
+    if (outputs.bucketName) console.log(`  s3Bucket       : ${outputs.bucketName}`);
     if (outputs.apiGatewayUrl) console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
     if (outputs.auroraHostname) console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);
     if (outputs.photosWebUrl) console.log(`  photosWebUrl   : ${outputs.photosWebUrl}`);

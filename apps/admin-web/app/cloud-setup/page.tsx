@@ -492,6 +492,7 @@ function Step5DeployInfra({
   const [phase, setPhase] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [showManualEntry, setShowManualEntry] = useState(false);
+  const [showCodeBuild, setShowCodeBuild] = useState(false);
   const [deployResult, setDeployResult] = useState<DeployOutputs | null>(null);
   const [manualBucket, setManualBucket] = useState("");
   const [manualAurora, setManualAurora] = useState("");
@@ -743,27 +744,24 @@ function Step5DeployInfra({
   return (
     <Stack gap="md">
       <Text>
-        We will now deploy your Starkeep data infrastructure via AWS CodeBuild. This creates:
+        Deploy your Starkeep data infrastructure. This creates:
       </Text>
       <Stack gap="xs" pl="md">
         <Text size="sm">• S3 bucket for file storage</Text>
         <Text size="sm">• Aurora DSQL cluster for remote metadata index</Text>
         <Text size="sm">• Lambda function + API Gateway for data access</Text>
       </Stack>
-      <Text size="sm" c="dimmed">
-        The deployment runs in your AWS account via CodeBuild and takes 5–10 minutes. Aurora DSQL
-        clusters take 2–5 minutes to become active.
-      </Text>
 
       {error && <Alert color="red" title="Deployment failed">{error}</Alert>}
 
-      <Divider label="Local deployment" labelPosition="left" />
-      <Text size="sm" c="dimmed">
-        To deploy from your local machine instead of CodeBuild, download the CLI config and run{" "}
-        <Code>pnpm run local:deploy</Code> from <Code>infra/user-data/</Code>.
-      </Text>
+      <Divider label="Deploy from local CLI (recommended)" labelPosition="left" />
+      <Alert color="blue" variant="light">
+        Deploying from your local machine using SST is the recommended approach. Download the CLI
+        config, then run <Code>pnpm run local:deploy</Code> from <Code>infra/user-data/</Code> in
+        your terminal. The deploy takes 5–10 minutes.
+      </Alert>
       <Button
-        variant="light"
+        variant="filled"
         disabled={deploying}
         onClick={() =>
           downloadCliConfig({
@@ -797,33 +795,49 @@ function Step5DeployInfra({
         </Button>
       </Group>
 
-      <Divider label="Remote deployment" labelPosition="left" />
-      <Text size="sm" c="dimmed">
-        If you already deployed successfully or want to enter values from the AWS console,{" "}
-        <Anchor size="sm" onClick={() => setShowManualEntry(true)}>
-          enter the outputs manually
-        </Anchor>
-        .
-      </Text>
-
-      {deploying && phase && (
-        <Paper withBorder p="sm">
-          <Group gap="sm">
-            <Loader size="xs" />
-            <Text size="sm" c="dimmed">
-              {phase}
-            </Text>
+      <Divider
+        label={
+          <Anchor size="sm" onClick={() => setShowCodeBuild((v) => !v)}>
+            {showCodeBuild ? "Hide remote deployment (CodeBuild) ▲" : "Deploy via CodeBuild instead ▼"}
+          </Anchor>
+        }
+        labelPosition="left"
+      />
+      <Collapse in={showCodeBuild}>
+        <Stack gap="md">
+          <Text size="sm" c="dimmed">
+            The deployment runs in your AWS account via CodeBuild and takes 5–10 minutes. Aurora
+            DSQL clusters take 2–5 minutes to become active.
+          </Text>
+          <Text size="sm" c="dimmed">
+            If you already deployed successfully or want to enter values from the AWS console,{" "}
+            <Anchor size="sm" onClick={() => setShowManualEntry(true)}>
+              enter the outputs manually
+            </Anchor>
+            .
+          </Text>
+          {deploying && phase && (
+            <Paper withBorder p="sm">
+              <Group gap="sm">
+                <Loader size="xs" />
+                <Text size="sm" c="dimmed">
+                  {phase}
+                </Text>
+              </Group>
+              <div ref={logsEndRef} />
+            </Paper>
+          )}
+          <Group justify="flex-end">
+            <Button loading={deploying} onClick={handleDeploy} disabled={deploying}>
+              {deploying ? "Deploying…" : "Deploy via CodeBuild"}
+            </Button>
           </Group>
-          <div ref={logsEndRef} />
-        </Paper>
-      )}
+        </Stack>
+      </Collapse>
 
       <Group justify="space-between" mt="md">
         <Button variant="subtle" onClick={onBack} disabled={deploying}>
           Back
-        </Button>
-        <Button loading={deploying} onClick={handleDeploy} disabled={deploying}>
-          {deploying ? "Deploying…" : "Deploy data infrastructure"}
         </Button>
       </Group>
     </Stack>
