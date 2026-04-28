@@ -6,7 +6,7 @@ export interface ApiEndpointDefinition {
   readonly namespace: string;
   readonly version: string;
   readonly path: string;
-  readonly method: "GET" | "POST" | "PUT" | "DELETE";
+  readonly method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   readonly handler: ApiHandler;
   readonly description?: string;
 }

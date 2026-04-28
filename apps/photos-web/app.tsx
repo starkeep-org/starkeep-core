@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import type { AppImage } from "@photos/photos-lib";
+import type { AppImage } from "@/photos-lib";
 import {
   PhotoProvider,
   PhotoUrlProvider,
   PhotoGrid,
   PhotoViewer,
   usePhotoContext,
-} from "@photos/photos-ui";
+} from "@/photos-ui";
 import {
   addPhotoFromPath,
   getPhotoFileUrl,

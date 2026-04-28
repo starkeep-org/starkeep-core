@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
-import type { AppImage } from "@photos/photos-lib";
+import type { AppImage } from "@/photos-lib";
 import type { DataSourceMode } from "./data-client";
 import { LOCAL_URL } from "./data-client";
 import { listPhotos, listPhotosSince } from "./data-server-client";

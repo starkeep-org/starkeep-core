@@ -62,7 +62,7 @@ function authRoleBootstrapStatements(): IamStatement[] {
       Sid: "BootstrapArtifactsWrite",
       Effect: "Allow",
       Action: ["s3:PutObject", "s3:GetObject"],
-      Resource: SUB("arn:aws:s3:::${StackPrefix}-deploy-artifacts/*"),
+      Resource: SUB("arn:aws:s3:::${StackPrefix}-deploy-artifacts-${AWS::AccountId}/*"),
     },
     {
       Sid: "PermissionsStackManage",
@@ -137,7 +137,7 @@ function codeBuildRoleBootstrapStatements(): IamStatement[] {
       Sid: "ArtifactsBucketRead",
       Effect: "Allow",
       Action: ["s3:GetObject", "s3:GetObjectVersion"],
-      Resource: SUB("arn:aws:s3:::${StackPrefix}-deploy-artifacts/*"),
+      Resource: SUB("arn:aws:s3:::${StackPrefix}-deploy-artifacts-${AWS::AccountId}/*"),
     },
     {
       Sid: "OwnLogGroup",
@@ -307,21 +307,9 @@ ${authPolicyYaml}
   ArtifactsBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '\${StackPrefix}-deploy-artifacts'
+      BucketName: !Sub '\${StackPrefix}-deploy-artifacts-\${AWS::AccountId}'
       VersioningConfiguration:
         Status: Enabled
-      CorsConfiguration:
-        CorsRules:
-          - AllowedOrigins:
-              - 'tauri://localhost'
-              - 'https://tauri.localhost'
-            AllowedMethods:
-              - GET
-              - PUT
-              - HEAD
-            AllowedHeaders:
-              - '*'
-            MaxAge: 3000
       Tags:
         - Key: starkeep:managed
           Value: 'true'
@@ -366,7 +354,7 @@ ${codeBuildPolicyYaml}
       ServiceRole: !GetAtt CodeBuildServiceRole.Arn
       Source:
         Type: S3
-        Location: !Sub '\${StackPrefix}-deploy-artifacts/\${StackPrefix}-user-data-source.zip'
+        Location: !Sub '\${StackPrefix}-deploy-artifacts-\${AWS::AccountId}/\${StackPrefix}-user-data-source.zip'
         BuildSpec: |
           version: 0.2
           phases:
@@ -389,7 +377,7 @@ ${codeBuildPolicyYaml}
                 - bash -c 'set -o pipefail && node ./node_modules/sst/bin/sst.mjs deploy --stage $STAGE 2>&1 | tee /tmp/deploy-output.txt'
             post_build:
               commands:
-                - aws s3 cp /tmp/deploy-output.txt s3://\${STACK_PREFIX}-deploy-artifacts/\${STAGE}-raw-output.txt || true
+                - aws s3 cp /tmp/deploy-output.txt s3://\${STACK_PREFIX}-deploy-artifacts-\${AWS_ACCOUNT_ID}/\${STAGE}-raw-output.txt || true
       Artifacts:
         Type: NO_ARTIFACTS
       Environment:
@@ -444,7 +432,7 @@ Outputs:
     Description: >
       S3 bucket for deployment source zips. admin-desktop uploads the user-data
       source package here before triggering the CodeBuild deploy job.
-    Value: !Sub '\${StackPrefix}-deploy-artifacts'
+    Value: !Sub '\${StackPrefix}-deploy-artifacts-\${AWS::AccountId}'
 
   CodeBuildProjectName:
     Description: >
