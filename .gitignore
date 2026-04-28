@@ -17,22 +17,10 @@ DerivedData/
 # Starkeep local data
 .starkeep/
 
-# FUSE mount lib (vendored native binary)
-apps/fuse-mount/lib/
-apps/fuse-mount/package-lock.json
 
 # Next.js build artifacts
-apps/photos-web/out/
-
-# Tauri build artifacts
 .next/
-apps/tasks-desktop/src-tauri/target/
-apps/tasks-desktop/src-tauri/gen/schemas/
-apps/tasks-desktop/src-tauri/binaries/
-apps/photos-desktop/src-tauri/target/
-apps/photos-desktop/src-tauri/gen/schemas/
-apps/admin-desktop/src-tauri/target/
-apps/admin-desktop/public/user-data-source.zip
+apps/photos-web/out/
 
 # SST local state
 infra/user-data/.sst/
@@ -40,4 +28,4 @@ infra/user-data/.ws/
 infra/user-data/sst-env.d.ts
 
 # Starkeep local CLI config (contains Cognito IDs — do not commit)
-.starkeep-config.json
+starkeep-config.json

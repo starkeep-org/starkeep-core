@@ -50,24 +50,24 @@ interface StarkeepConfig {
 function loadConfig(): StarkeepConfig {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const repoRoot = resolve(scriptDir, "..", "..", "..");
-  const configPath = resolve(repoRoot, ".starkeep-config.json");
+  const configPath = resolve(repoRoot, "starkeep-config.json");
 
   let raw: string;
   try {
     raw = readFileSync(configPath, "utf-8");
   } catch {
-    console.error(`Error: .starkeep-config.json not found at ${configPath}`);
+    console.error(`Error: starkeep-config.json not found at ${configPath}`);
     console.error('Generate it from admin-web using the "Download CLI config" button.');
     process.exit(1);
   }
 
   const cfg = JSON.parse(raw) as StarkeepConfig;
   if (!cfg.s3Bucket) {
-    console.error("Error: s3Bucket missing from .starkeep-config.json");
+    console.error("Error: s3Bucket missing from starkeep-config.json");
     process.exit(1);
   }
   if (!cfg.auroraEndpoint) {
-    console.error("Error: auroraEndpoint missing from .starkeep-config.json");
+    console.error("Error: auroraEndpoint missing from starkeep-config.json");
     process.exit(1);
   }
   return cfg;

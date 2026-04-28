@@ -468,7 +468,7 @@ function downloadCliConfig(config: {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = ".starkeep-config.json";
+  a.download = "starkeep-config.json";
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -690,7 +690,7 @@ function Step5DeployInfra({
             })
           }
         >
-          Download CLI config (.starkeep-config.json)
+          Download CLI config (starkeep-config.json)
         </Button>
         <Group justify="flex-end" mt="md">
           <Button onClick={() => onSuccess(deployResult)}>Continue</Button>
@@ -756,9 +756,9 @@ function Step5DeployInfra({
 
       <Divider label="Deploy from local CLI (recommended)" labelPosition="left" />
       <Alert color="blue" variant="light">
-        Deploying from your local machine using SST is the recommended approach. Download the CLI
-        config, then run <Code>pnpm run local:deploy</Code> from <Code>infra/user-data/</Code> in
-        your terminal. The deploy takes 5–10 minutes.
+        Deploying from your local machine using SST is recommended. Download the CLI
+        config and move it into the root of the starkeep repo, then run <Code>pnpm run local:deploy</Code> from <Code>infra/user-data/</Code> in
+        your terminal.
       </Alert>
       <Button
         variant="filled"
@@ -773,11 +773,11 @@ function Step5DeployInfra({
           })
         }
       >
-        Download CLI config (.starkeep-config.json)
+        Download CLI config (starkeep-config.json)
       </Button>
       <Text size="sm" c="dimmed">
         Once the deploy finishes, click below — the admin reads the updated{" "}
-        <Code>.starkeep-config.json</Code> automatically from the local server.
+        <Code>starkeep-config.json</Code> automatically from the local server.
       </Text>
       {readConfigError && (
         <Alert color="red" title="Could not read config">
@@ -1033,7 +1033,7 @@ function CloudSetupPage() {
       };
       await writeCloudConfig(config);
       await writeCloudCredentials(credentials);
-      // Push deploy outputs to the local data-server so .starkeep-config.json is updated on disk.
+      // Push deploy outputs to the local data-server so starkeep-config.json is updated on disk.
       // Best-effort: if the local server isn't running this is a no-op.
       await fetch("http://127.0.0.1:9820/config", {
         method: "PATCH",

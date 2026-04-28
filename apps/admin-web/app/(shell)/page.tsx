@@ -22,9 +22,11 @@ import {
   Anchor,
   SimpleGrid,
   Center,
+  Table,
 } from "@mantine/core";
 import {
   readCloudConfig,
+  readCloudCredentials,
   writeCloudConfig,
   writeCloudCredentials,
   type CloudConfig,
@@ -36,7 +38,13 @@ import {
   refreshTokens,
   getIdentityPoolCredentials,
   type CognitoConfig,
+  type STSCredentials,
 } from "../../src/lib/cognito-auth";
+import {
+  fetchMtdCostsByService,
+  projectFullMonth,
+  type ServiceCost,
+} from "../../src/lib/cost-explorer";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -110,6 +118,10 @@ export default function DashboardPage() {
   const [remoteTypes, setRemoteTypes] = useState<DataTypesResponse | null>(null);
   const [remoteTypesExpanded, setRemoteTypesExpanded] = useState(false);
   const [remotePhotosWeb, setRemotePhotosWeb] = useState<boolean | null>(null);
+
+  // Costs
+  const [costs, setCosts] = useState<ServiceCost[] | "loading" | "error">("loading");
+  const [costProjection, setCostProjection] = useState<ServiceCost[] | null>(null);
 
   // Add watch form
   const [watchPath, setWatchPath] = useState("");
@@ -285,6 +297,38 @@ export default function DashboardPage() {
     checkUrl(photosWebUrl).then(setRemotePhotosWeb);
   }, [photosWebUrl, refreshKey]);
 
+  // Fetch cost data and budget status
+  useEffect(() => {
+    setCosts("loading");
+    setCostProjection(null);
+
+    async function fetchCosts() {
+      const cfg = await readCloudConfig();
+      if (!cfg) { setCosts("error"); return; }
+
+      let creds: STSCredentials | null = await readCloudCredentials();
+      if (!creds) {
+        try {
+          const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
+          creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
+        } catch {
+          setCosts("error");
+          return;
+        }
+      }
+
+      try {
+        const mtd = await fetchMtdCostsByService(creds);
+        setCosts(mtd);
+        setCostProjection(projectFullMonth(mtd));
+      } catch {
+        setCosts("error");
+      }
+    }
+
+    fetchCosts();
+  }, [refreshKey]);
+
   // ---- Sign-in handlers ----
 
   async function handleSignIn() {
@@ -422,6 +466,12 @@ export default function DashboardPage() {
   }
 
   const signedIn = localAuthAuthenticated ?? false;
+  const authStale = signedIn && cloudConfig != null && !cloudConfig.userEmail;
+
+  async function handleSignOut() {
+    await fetch("http://127.0.0.1:9820/auth/logout", { method: "POST" }).catch(() => {});
+    setRefreshKey((k) => k + 1);
+  }
 
   return (
     <Container size="xl">
@@ -697,34 +747,83 @@ export default function DashboardPage() {
               </Paper>
 
               <Paper p="lg" withBorder>
-                <Group justify="space-between">
-                  <Title order={3} size="h4">
-                    Authentication
-                  </Title>
-                  {signedIn ? (
-                    <Group gap="xs">
-                      <Badge color="green" variant="light">
-                        Signed in
-                      </Badge>
-                      {cloudConfig.userEmail && (
-                        <Text size="sm" c="dimmed">
-                          {cloudConfig.userEmail}
-                        </Text>
-                      )}
-                    </Group>
-                  ) : (
-                    <Group gap="xs">
-                      <Badge color="gray" variant="light">
-                        Not signed in
-                      </Badge>
-                      {(localCognitoConfig ?? cloudConfig.cognitoConfig) && (
-                        <Button size="xs" onClick={openSignIn}>
-                          Sign in
+                <Stack gap="sm">
+                  <Group justify="space-between">
+                    <Title order={3} size="h4">
+                      Authentication
+                    </Title>
+                    {signedIn ? (
+                      <Group gap="xs">
+                        <Badge color={authStale ? "yellow" : "green"} variant="light">
+                          {authStale ? "Stale session" : "Signed in"}
+                        </Badge>
+                        {cloudConfig.userEmail && (
+                          <Text size="sm" c="dimmed">
+                            {cloudConfig.userEmail}
+                          </Text>
+                        )}
+                        <Button size="xs" variant="subtle" color="red" onClick={handleSignOut}>
+                          Sign out
                         </Button>
-                      )}
-                    </Group>
+                      </Group>
+                    ) : (
+                      <Group gap="xs">
+                        <Badge color="gray" variant="light">
+                          Not signed in
+                        </Badge>
+                        {(localCognitoConfig ?? cloudConfig.cognitoConfig) && (
+                          <Button size="xs" onClick={openSignIn}>
+                            Sign in
+                          </Button>
+                        )}
+                      </Group>
+                    )}
+                  </Group>
+                  {authStale && (
+                    <Alert color="yellow" title="Auth config may be invalid">
+                      The local data server has a stored session but no confirmed username — this
+                      can happen after recreating the bootstrap stack. Sign out to clear the stale
+                      session, then sign in again.
+                    </Alert>
                   )}
-                </Group>
+                </Stack>
+              </Paper>
+
+              <Paper p="lg" withBorder>
+                <Title order={3} size="h4" mb="sm">Costs</Title>
+
+                {costs === "loading" ? (
+                  <Center py="sm"><Loader size="sm" /></Center>
+                ) : costs === "error" ? (
+                  <Text size="sm" c="dimmed">Could not load cost data.</Text>
+                ) : (
+                  <Table fz="sm">
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th>Service</Table.Th>
+                        <Table.Th style={{ textAlign: "right" }}>Month-to-date</Table.Th>
+                        <Table.Th style={{ textAlign: "right" }}>Projected</Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {costs.map((row) => {
+                        const proj = costProjection?.find((p) => p.service === row.service);
+                        return (
+                          <Table.Tr key={row.service}>
+                            <Table.Td>{row.service}</Table.Td>
+                            <Table.Td style={{ textAlign: "right" }}>${row.amount.toFixed(2)}</Table.Td>
+                            <Table.Td style={{ textAlign: "right" }} c="dimmed">${(proj?.amount ?? 0).toFixed(2)}</Table.Td>
+                          </Table.Tr>
+                        );
+                      })}
+                      <Table.Tr fw={600}>
+                        <Table.Td>Total</Table.Td>
+                        <Table.Td style={{ textAlign: "right" }}>${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}</Table.Td>
+                        <Table.Td style={{ textAlign: "right" }} c="dimmed">${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}</Table.Td>
+                      </Table.Tr>
+                    </Table.Tbody>
+                  </Table>
+                )}
               </Paper>
             </>
           )}

@@ -81,7 +81,7 @@ that surfaces Starkeep data as a native filesystem location).
 ```
 pnpm run local:deploy
 ```
-Authenticates with Cognito using your `.starkeep-config.json` and runs `sst deploy`. Generate the config from admin-web via "Download CLI config" after cloud setup.
+Authenticates with Cognito using your `starkeep-config.json` and runs `sst deploy`. Generate the config from admin-web via "Download CLI config" after cloud setup.
 
 ### Analysis
 

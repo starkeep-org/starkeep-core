@@ -71,5 +71,6 @@ Outputs:
   StackPrefix:
     Description: Stack prefix this permissions stack belongs to
     Value: !Ref StackPrefix
+
 `;
 }
