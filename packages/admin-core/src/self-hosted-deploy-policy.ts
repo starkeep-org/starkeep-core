@@ -240,6 +240,28 @@ export function deployPermissionStatements(): IamStatement[] {
         },
       },
     },
+    {
+      Sid: "CostExplorerRead",
+      Effect: "Allow",
+      Action: "ce:GetCostAndUsage",
+      Resource: "*",
+    },
+    {
+      Sid: "BudgetsManage",
+      Effect: "Allow",
+      Action: [
+        "budgets:ViewBudget",
+        "budgets:CreateBudget",
+        "budgets:ModifyBudget",
+        "budgets:DeleteBudget",
+        "budgets:ViewBudgetAction",
+        "budgets:CreateBudgetAction",
+        "budgets:UpdateBudgetAction",
+        "budgets:DeleteBudgetAction",
+        "budgets:ExecuteBudgetAction",
+      ],
+      Resource: "arn:aws:budgets::*:budget/starkeep-*",
+    },
   ];
 }
 
@@ -323,6 +345,16 @@ export const statementMetadata: Record<string, StatementMeta> = {
     label: "Pass execution roles to AWS services",
     reason: "Hand the per-function execution role to Lambda, API Gateway, and CloudFormation when creating those resources.",
     requiredBy: ["user-data:lambda", "user-data:api-gateway"],
+  },
+  CostExplorerRead: {
+    label: "Read AWS Cost Explorer data",
+    reason: "Fetch month-to-date costs grouped by service so admin-web can display cost transparency and project full-month spend.",
+    requiredBy: ["admin-web:costs"],
+  },
+  BudgetsManage: {
+    label: "Create and manage AWS Budgets",
+    reason: "Create, update, and delete a monthly budget with a Budget Action that automatically shuts off Lambda access to DSQL and S3 when the limit is breached.",
+    requiredBy: ["admin-web:costs"],
   },
 };
 

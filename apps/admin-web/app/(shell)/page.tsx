@@ -15,6 +15,7 @@ import {
   Alert,
   Button,
   TextInput,
+  NumberInput,
   PasswordInput,
   Collapse,
   Modal,
@@ -22,9 +23,11 @@ import {
   Anchor,
   SimpleGrid,
   Center,
+  Table,
 } from "@mantine/core";
 import {
   readCloudConfig,
+  readCloudCredentials,
   writeCloudConfig,
   writeCloudCredentials,
   type CloudConfig,
@@ -36,7 +39,25 @@ import {
   refreshTokens,
   getIdentityPoolCredentials,
   type CognitoConfig,
+  type STSCredentials,
 } from "../../src/lib/cognito-auth";
+import {
+  fetchMtdCostsByService,
+  projectFullMonth,
+  type ServiceCost,
+} from "../../src/lib/cost-explorer";
+import {
+  getAccountId,
+  getBudgetStatus,
+  setBudgetLimit,
+  removeBudget,
+  type BudgetStatus,
+} from "../../src/lib/budgets";
+import {
+  isShutOff,
+  shutOffLambdas,
+  restoreLambdas,
+} from "../../src/lib/lambda-control";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -110,6 +131,17 @@ export default function DashboardPage() {
   const [remoteTypes, setRemoteTypes] = useState<DataTypesResponse | null>(null);
   const [remoteTypesExpanded, setRemoteTypesExpanded] = useState(false);
   const [remotePhotosWeb, setRemotePhotosWeb] = useState<boolean | null>(null);
+
+  // Costs
+  const [costs, setCosts] = useState<ServiceCost[] | "loading" | "error">("loading");
+  const [costProjection, setCostProjection] = useState<ServiceCost[] | null>(null);
+  const [budgetStatus, setBudgetStatus] = useState<BudgetStatus | null | "loading">("loading");
+  const [budgetInput, setBudgetInput] = useState<number | string>("");
+  const [savingBudget, setSavingBudget] = useState(false);
+  const [removingBudget, setRemovingBudget] = useState(false);
+  const [accountId, setAccountId] = useState<string | null>(null);
+  const [lambdaShutOff, setLambdaShutOff] = useState<boolean | null>(null);
+  const [togglingShutOff, setTogglingShutOff] = useState(false);
 
   // Add watch form
   const [watchPath, setWatchPath] = useState("");
@@ -285,6 +317,141 @@ export default function DashboardPage() {
     checkUrl(photosWebUrl).then(setRemotePhotosWeb);
   }, [photosWebUrl, refreshKey]);
 
+  // Fetch cost data and budget status
+  useEffect(() => {
+    setCosts("loading");
+    setCostProjection(null);
+    setBudgetStatus("loading");
+    setAccountId(null);
+    setLambdaShutOff(null);
+
+    async function fetchCosts() {
+      const cfg = await readCloudConfig();
+      if (!cfg) {
+        setCosts("error");
+        setBudgetStatus(null);
+        return;
+      }
+
+      let creds: STSCredentials | null = await readCloudCredentials();
+      if (!creds) {
+        try {
+          const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
+          creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
+        } catch {
+          setCosts("error");
+          setBudgetStatus(null);
+          return;
+        }
+      }
+
+      const region = cfg.cognitoConfig.region;
+
+      const [acctId] = await Promise.allSettled([getAccountId(creds, region)]);
+      const resolvedAccountId = acctId.status === "fulfilled" ? acctId.value : null;
+      setAccountId(resolvedAccountId);
+
+      // Fetch costs, Lambda shut-off status, and budget status in parallel
+      const [costsResult, shutOffResult, budgetResult] = await Promise.allSettled([
+        fetchMtdCostsByService(creds),
+        isShutOff(creds, region, cfg.stackPrefix, cfg.s3Bucket),
+        resolvedAccountId
+          ? getBudgetStatus(creds, region, resolvedAccountId, cfg.stackPrefix)
+          : Promise.resolve(null),
+      ]);
+
+      if (costsResult.status === "fulfilled") {
+        setCosts(costsResult.value);
+        setCostProjection(projectFullMonth(costsResult.value));
+      } else {
+        setCosts("error");
+      }
+
+      setLambdaShutOff(shutOffResult.status === "fulfilled" ? shutOffResult.value : false);
+
+      if (budgetResult.status === "fulfilled") {
+        setBudgetStatus(budgetResult.value);
+        if (budgetResult.value) setBudgetInput(budgetResult.value.limitUsd);
+      } else {
+        setBudgetStatus(null);
+      }
+    }
+
+    fetchCosts();
+  }, [refreshKey]);
+
+  // ---- Cost / budget handlers ----
+
+  async function getActiveCreds() {
+    if (!cloudConfig) throw new Error("No cloud config");
+    const stored = await readCloudCredentials();
+    if (stored) return stored;
+    const tokens = await refreshTokens(cloudConfig.cognitoConfig, cloudConfig.cognitoRefreshToken);
+    return getIdentityPoolCredentials(cloudConfig.cognitoConfig, tokens.idToken);
+  }
+
+  async function handleSaveBudget() {
+    if (!cloudConfig || !accountId || typeof budgetInput !== "number" || budgetInput <= 0) return;
+    setSavingBudget(true);
+    try {
+      const creds = await getActiveCreds();
+      await setBudgetLimit(
+        creds,
+        cloudConfig.cognitoConfig.region,
+        accountId,
+        cloudConfig.stackPrefix,
+        budgetInput,
+        cloudConfig.userEmail ?? "",
+      );
+      const status = await getBudgetStatus(
+        creds,
+        cloudConfig.cognitoConfig.region,
+        accountId,
+        cloudConfig.stackPrefix,
+      );
+      setBudgetStatus(status);
+    } catch (err) {
+      console.error("Failed to save budget", err);
+    } finally {
+      setSavingBudget(false);
+    }
+  }
+
+  async function handleRemoveBudget() {
+    if (!cloudConfig || !accountId) return;
+    setRemovingBudget(true);
+    try {
+      const creds = await getActiveCreds();
+      await removeBudget(creds, cloudConfig.cognitoConfig.region, accountId, cloudConfig.stackPrefix);
+      setBudgetStatus(null);
+      setBudgetInput("");
+    } catch (err) {
+      console.error("Failed to remove budget", err);
+    } finally {
+      setRemovingBudget(false);
+    }
+  }
+
+  async function handleToggleShutOff() {
+    if (!cloudConfig) return;
+    setTogglingShutOff(true);
+    try {
+      const creds = await getActiveCreds();
+      const region = cloudConfig.cognitoConfig.region;
+      if (lambdaShutOff) {
+        await restoreLambdas(creds, region, cloudConfig.stackPrefix, cloudConfig.s3Bucket);
+        setLambdaShutOff(false);
+      } else {
+        await shutOffLambdas(creds, region, cloudConfig.stackPrefix, cloudConfig.s3Bucket);
+        setLambdaShutOff(true);
+      }
+    } catch (err) {
+      console.error("Failed to toggle Lambda shut-off", err);
+    } finally {
+      setTogglingShutOff(false);
+    }
+  }
+
   // ---- Sign-in handlers ----
 
   async function handleSignIn() {
@@ -422,6 +589,12 @@ export default function DashboardPage() {
   }
 
   const signedIn = localAuthAuthenticated ?? false;
+  const authStale = signedIn && cloudConfig != null && !cloudConfig.userEmail;
+
+  async function handleSignOut() {
+    await fetch("http://127.0.0.1:9820/auth/logout", { method: "POST" }).catch(() => {});
+    setRefreshKey((k) => k + 1);
+  }
 
   return (
     <Container size="xl">
@@ -683,6 +856,111 @@ export default function DashboardPage() {
               </Paper>
 
               <Paper p="lg" withBorder>
+                <Group justify="space-between" mb="sm">
+                  <Title order={3} size="h4">Costs</Title>
+                  {budgetStatus === "loading" ? (
+                    <Loader size="xs" />
+                  ) : budgetStatus?.state === "breached" ? (
+                    <Badge color="red" variant="light">Limit breached</Badge>
+                  ) : budgetStatus?.state === "warning" ? (
+                    <Badge color="yellow" variant="light">Warning</Badge>
+                  ) : budgetStatus?.state === "ok" ? (
+                    <Badge color="green" variant="light">On track</Badge>
+                  ) : null}
+                </Group>
+
+                {costs === "loading" ? (
+                  <Center py="sm"><Loader size="sm" /></Center>
+                ) : costs === "error" ? (
+                  <Text size="sm" c="dimmed">Could not load cost data.</Text>
+                ) : (
+                  <Table fz="sm" mb="md">
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th>Service</Table.Th>
+                        <Table.Th style={{ textAlign: "right" }}>Month-to-date</Table.Th>
+                        <Table.Th style={{ textAlign: "right" }}>Projected</Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {costs.map((row) => {
+                        const proj = costProjection?.find((p) => p.service === row.service);
+                        return (
+                          <Table.Tr key={row.service}>
+                            <Table.Td>{row.service}</Table.Td>
+                            <Table.Td style={{ textAlign: "right" }}>
+                              ${row.amount.toFixed(2)}
+                            </Table.Td>
+                            <Table.Td style={{ textAlign: "right" }} c="dimmed">
+                              ${(proj?.amount ?? 0).toFixed(2)}
+                            </Table.Td>
+                          </Table.Tr>
+                        );
+                      })}
+                      <Table.Tr fw={600}>
+                        <Table.Td>Total</Table.Td>
+                        <Table.Td style={{ textAlign: "right" }}>
+                          ${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}
+                        </Table.Td>
+                        <Table.Td style={{ textAlign: "right" }} c="dimmed">
+                          ${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}
+                        </Table.Td>
+                      </Table.Tr>
+                    </Table.Tbody>
+                  </Table>
+                )}
+
+                <Stack gap="xs">
+                  <Group gap="sm" align="flex-end">
+                    <NumberInput
+                      label="Monthly limit (USD)"
+                      placeholder="e.g. 20"
+                      prefix="$"
+                      min={0}
+                      decimalScale={2}
+                      style={{ width: 160 }}
+                      value={budgetInput}
+                      onChange={setBudgetInput}
+                    />
+                    <Button
+                      size="sm"
+                      onClick={handleSaveBudget}
+                      loading={savingBudget}
+                      disabled={typeof budgetInput !== "number" || budgetInput <= 0 || !accountId}
+                    >
+                      Save
+                    </Button>
+                    {budgetStatus && budgetStatus !== "loading" && (
+                      <Button
+                        size="sm"
+                        variant="subtle"
+                        color="red"
+                        onClick={handleRemoveBudget}
+                        loading={removingBudget}
+                      >
+                        Remove limit
+                      </Button>
+                    )}
+                  </Group>
+                  <Group gap="sm">
+                    <Button
+                      size="xs"
+                      color={lambdaShutOff ? "green" : "red"}
+                      variant="light"
+                      loading={togglingShutOff}
+                      disabled={lambdaShutOff === null}
+                      onClick={handleToggleShutOff}
+                    >
+                      {lambdaShutOff ? "Restore services" : "Shut off services"}
+                    </Button>
+                    {lambdaShutOff && (
+                      <Text size="xs" c="dimmed">Remote API is disabled — Lambda concurrency set to 0.</Text>
+                    )}
+                  </Group>
+                </Stack>
+              </Paper>
+
+              <Paper p="lg" withBorder>
                 <Title order={3} size="h4" mb="sm">
                   Apps
                 </Title>
@@ -697,34 +975,46 @@ export default function DashboardPage() {
               </Paper>
 
               <Paper p="lg" withBorder>
-                <Group justify="space-between">
-                  <Title order={3} size="h4">
-                    Authentication
-                  </Title>
-                  {signedIn ? (
-                    <Group gap="xs">
-                      <Badge color="green" variant="light">
-                        Signed in
-                      </Badge>
-                      {cloudConfig.userEmail && (
-                        <Text size="sm" c="dimmed">
-                          {cloudConfig.userEmail}
-                        </Text>
-                      )}
-                    </Group>
-                  ) : (
-                    <Group gap="xs">
-                      <Badge color="gray" variant="light">
-                        Not signed in
-                      </Badge>
-                      {(localCognitoConfig ?? cloudConfig.cognitoConfig) && (
-                        <Button size="xs" onClick={openSignIn}>
-                          Sign in
+                <Stack gap="sm">
+                  <Group justify="space-between">
+                    <Title order={3} size="h4">
+                      Authentication
+                    </Title>
+                    {signedIn ? (
+                      <Group gap="xs">
+                        <Badge color={authStale ? "yellow" : "green"} variant="light">
+                          {authStale ? "Stale session" : "Signed in"}
+                        </Badge>
+                        {cloudConfig.userEmail && (
+                          <Text size="sm" c="dimmed">
+                            {cloudConfig.userEmail}
+                          </Text>
+                        )}
+                        <Button size="xs" variant="subtle" color="red" onClick={handleSignOut}>
+                          Sign out
                         </Button>
-                      )}
-                    </Group>
+                      </Group>
+                    ) : (
+                      <Group gap="xs">
+                        <Badge color="gray" variant="light">
+                          Not signed in
+                        </Badge>
+                        {(localCognitoConfig ?? cloudConfig.cognitoConfig) && (
+                          <Button size="xs" onClick={openSignIn}>
+                            Sign in
+                          </Button>
+                        )}
+                      </Group>
+                    )}
+                  </Group>
+                  {authStale && (
+                    <Alert color="yellow" title="Auth config may be invalid">
+                      The local data server has a stored session but no confirmed username — this
+                      can happen after recreating the bootstrap stack. Sign out to clear the stale
+                      session, then sign in again.
+                    </Alert>
                   )}
-                </Group>
+                </Stack>
               </Paper>
             </>
           )}

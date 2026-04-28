@@ -756,9 +756,9 @@ function Step5DeployInfra({
 
       <Divider label="Deploy from local CLI (recommended)" labelPosition="left" />
       <Alert color="blue" variant="light">
-        Deploying from your local machine using SST is the recommended approach. Download the CLI
-        config, then run <Code>pnpm run local:deploy</Code> from <Code>infra/user-data/</Code> in
-        your terminal. The deploy takes 5–10 minutes.
+        Deploying from your local machine using SST is recommended. Download the CLI
+        config and move it into the root of the starkeep repo, then run <Code>pnpm run local:deploy</Code> from <Code>infra/user-data/</Code> in
+        your terminal.
       </Alert>
       <Button
         variant="filled"
