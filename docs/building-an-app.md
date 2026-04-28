@@ -113,3 +113,11 @@ For thin clients:
 - Use auth tokens (Cognito JWTs) for all requests to the data server
 - The data server enforces access control on every request
 - Custom API routes registered on the data server are available to thin clients too
+
+## AWS Permissions Management
+
+If your app requires additional AWS resources or permissions:
+
+1. Edit the template in packages/admin-core/src/self-hosted-permissions-template.ts
+2. Run `pnpm build` from packages/admin-core to render the new template file
+3. In the admin-web app, go to the Deploy permissions tab and click Update permissions stack

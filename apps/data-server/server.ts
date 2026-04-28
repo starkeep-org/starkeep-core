@@ -56,11 +56,11 @@ const NODE_ID = process.env.STARKEEP_NODE_ID || "admin-desktop";
 const PULL_INTERVAL_MS = parseInt(process.env.STARKEEP_PULL_INTERVAL_MS || "30000", 10);
 const PUSH_DEBOUNCE_MS = parseInt(process.env.STARKEEP_PUSH_DEBOUNCE_MS || "500", 10);
 
-// Path to .starkeep-config.json — resolved relative to this file so it works
+// Path to starkeep-config.json — resolved relative to this file so it works
 // regardless of cwd. Override via STARKEEP_CONFIG env var for non-standard layouts.
 const STARKEEP_CONFIG_PATH =
   process.env.STARKEEP_CONFIG ??
-  fileURLToPath(new URL("../../.starkeep-config.json", import.meta.url));
+  fileURLToPath(new URL("../../starkeep-config.json", import.meta.url));
 
 interface StarkeepConfig {
   region: string;
@@ -118,7 +118,7 @@ async function loadStarkeepConfig(): Promise<StarkeepConfig | null> {
   try {
     return JSON.parse(await readFile(STARKEEP_CONFIG_PATH, "utf8")) as StarkeepConfig;
   } catch {
-    console.warn(`No .starkeep-config.json found at ${STARKEEP_CONFIG_PATH} — cloud features disabled`);
+    console.warn(`No starkeep-config.json found at ${STARKEEP_CONFIG_PATH} — cloud features disabled`);
     return null;
   }
 }
@@ -251,7 +251,7 @@ async function main() {
     basePath: join(STARKEEP_DIR, "objects"),
   });
 
-  // Load cloud config from .starkeep-config.json at the repo root
+  // Load cloud config from starkeep-config.json at the repo root
   const starkeepConfig = await loadStarkeepConfig();
   if (starkeepConfig) {
     console.log(`Cloud config loaded: stage=${starkeepConfig.stage}, region=${starkeepConfig.region}`);
@@ -295,7 +295,7 @@ async function main() {
     );
   }
 
-  // S3: use .starkeep-config.json values when available, otherwise fall back to env vars
+  // S3: use starkeep-config.json values when available, otherwise fall back to env vars
   let remoteAdapter: ObjectStorageAdapter | null = null;
   if (starkeepConfig?.s3Bucket) {
     const credentialProvider = await makeCloudCredentialProvider();
@@ -591,7 +591,7 @@ async function main() {
       if (path === "/auth/login" && req.method === "POST") {
         if (!cognitoConfig) {
           res.writeHead(503);
-          json(res, { error: "No .starkeep-config.json found — cannot authenticate" });
+          json(res, { error: "No starkeep-config.json found — cannot authenticate" });
           return;
         }
         const body = JSON.parse(await readBody(req)) as {

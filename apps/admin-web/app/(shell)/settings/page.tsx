@@ -212,7 +212,7 @@ function CloudConfigSection() {
         {importSuccess && !serverPatched && (
           <Alert color="yellow" title="Saved locally — local server not updated">
             Config saved to this browser, but the local data-server wasn&apos;t reachable so
-            .starkeep-config.json was not updated. Start the data-server and re-import to apply the
+            starkeep-config.json was not updated. Start the data-server and re-import to apply the
             changes.
           </Alert>
         )}
