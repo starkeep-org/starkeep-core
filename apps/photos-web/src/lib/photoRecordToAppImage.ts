@@ -1,4 +1,4 @@
-import type { AppImage } from "@photos/photos-lib";
+import type { AppImage } from "@/photos-lib";
 import type { PhotoRecord } from "./data-server-client";
 
 export function photoRecordToAppImage(record: PhotoRecord): AppImage {
