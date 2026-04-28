@@ -83,9 +83,6 @@ export async function addPhotoFromPath(
       fileBase64,
     };
   } else {
-    // TODO: replace with filePath-based symlink once photos-web runs in a native shell
-    // (Tauri/Electron) that can provide the real OS path. Browsers don't expose filesystem
-    // paths, so we copy bytes for now — avoid this pattern for permanent local-mode code.
     console.debug(`[data-server-client] Local upload via bytes (${fileBytes.length} bytes)`);
     let binary = "";
     const chunkSize = 8192;
