@@ -1,158 +1,51 @@
-# Core Concepts
+# Concepts
 
-## User-owned infrastructure
+## User-Owned Infrastructure
 
-In most apps, all users share a single database managed by the developer. Starkeep flips
-this: each user gets their own isolated cloud infrastructure — a dedicated database, file
-storage bucket, and API endpoint. The developer's code runs against each user's stack, but
-no user's data is co-mingled with another's.
+In Starkeep, each user has their own isolated cloud resources: a database, a file storage bucket, and an API endpoint. App developers access user data only through the SDK — they never have direct credentials to any user's infrastructure.
 
-This architecture means users can take their data with them, grant access on their own terms,
-and trust that their data isn't accessible to other app users by default.
+This means users can revoke an app's access, export their data, or move to a different app without losing anything. Data portability is a property of the system, not an afterthought.
 
-## Data records
+## Records
 
-A **data record** is the fundamental unit of user content. It represents anything a user
-creates or stores: a task, a photo, a document, a message. Every data record has:
+A record is the atomic unit of data in Starkeep. It is a typed payload with a unique identifier, an owner, and timestamps. Records may also have a file attachment (for photos, documents, audio, etc.).
 
-- A globally unique, time-sortable identifier
-- A **type** that declares what kind of data it contains (e.g., `tasks:task`, `photos:photo`)
-- A **content** object containing any inline structured data for the record
-- Ownership and timestamp information
-- A **sync status** tracking whether the record exists only locally, only in the cloud,
-  or has been reconciled between the two
-
-Records can optionally be **file-backed**: a photo or document record carries a reference
-to a file in object storage, identified by its content hash. For file-backed records,
-the substantive data lives in the file; `content` carries only indexed fields (e.g.,
-`groupId`) that the database needs for querying.
-
-All data records are stored in a single unified `records` table, regardless of their type.
-This keeps cross-type pagination simple and lets the sync engine operate on a single table.
+Every record is ontologically independent — it stands alone and doesn't require other records to have meaning. See [Data vs. Metadata App Architecture](data-vs-metadata-app-architecture.md) for guidance on when something should be a record vs. metadata.
 
 ## Metadata
 
-**Metadata** is associated with a data record and produced by **generators** — functions
-whose inputs may include the data record itself, user-provided parameters, or both. Because
-generators can call remote services (e.g. AI models) or incorporate user input, they are
-not assumed to be deterministic.
+Metadata is derived information about a record, computed by generator functions registered at SDK initialization. Examples: image dimensions, file size, word count, a text preview.
 
-Two generator behaviours are distinguished by the `syncable` flag:
+Metadata depends on data, but data never depends on metadata. A record is complete without its metadata; metadata is incomplete without the record it references.
 
-- **Non-syncable** (default) — the generator always produces the same output for the same
-  input on any device, so metadata can be recomputed locally on demand. Examples: extracting
-  image dimensions, parsing file properties.
-- **Syncable** (`syncable: true`) — two devices may independently produce different outputs,
-  so the metadata must be synced and conflict-resolved. Examples: AI summaries (non-
-  deterministic), user-authored values such as photo captions (differ across devices by
-  definition), hybrid computations that combine a data record with user-supplied parameters.
+Generators declare what inputs they consume and what they produce. The metadata engine handles ordering, cache invalidation (via input hashing), and re-generation when a record changes.
 
-Metadata is stored in **per-type tables** (e.g., `metadata_todo_task`,
-`metadata_tasks_group`). Each type gets one table; within that table, each generator
-occupies its own set of typed columns. This means metadata queries use indexed SQL columns
-rather than JSON extraction.
+Some generators produce deterministic outputs (e.g., image dimensions) and don't need to be synced — they can be recomputed on any device. Others produce non-deterministic outputs (e.g., an AI-generated caption) and must be synced from the device that first produced them.
 
-Syncable generators additionally write a JSON snapshot to the **`metadata_sync` table**,
-which the sync engine uses for HLC-based conflict resolution and pull/push operations.
+## Types
 
-Metadata references its source data record (`target_id`) but data records have no
-knowledge of their metadata. This separation means generators can be added, removed, or
-updated without touching existing data.
+Every record has a type in `namespace:name` format — for example, `tasks:task` or `@starkeep/image`. Types have schemas that are validated at write time, so bad data never enters storage.
 
-Each metadata row tracks per-generator `input_hash` and `generator_version` columns. These
-allow the system to detect when metadata is stale and needs to be regenerated without
-re-running the generator when nothing has changed.
-
-### Generators in the thin-client pattern
-
-In the SDK-embedded pattern, generators run in-process: the SDK calls `generateAll()` after
-storing a record, which invokes each registered generator using the SDK's storage context.
-
-In the **thin-client (data-server) pattern**, generators are app-specific and may need
-platform capabilities (browser APIs, native codecs) that the data-server doesn't have.
-The responsibility split is:
-
-- **App**: runs generators locally on the raw file bytes it already holds, produces the
-  metadata `value` objects
-- **Data-server**: stores the results via `POST /data/metadata`, writing them into the
-  shared `metadata_sync` table with an HLC `updatedAt` timestamp
-
-This means generator *logic* lives in the app package; generator *storage* happens in the
-data-server. Apps that are thin clients do not need the SDK in-process — `exifr.parse()`,
-Canvas-based dimension extraction, and similar tools work directly on bytes.
-
-## Types and the type registry
-
-Every data record has a **type**, written as `namespace:name` (e.g., `tasks:task`,
-`@starkeep/access-policy`). Namespacing prevents collisions between types defined by
-different developers or packages.
-
-Types are registered in a **type registry** with an optional schema for validating payload
-content. The registry is the single source of truth for what types exist in a deployment.
-
-**Data types are global.** A type like `@starkeep/image` has a fixed, shared meaning across
-all apps. Any app that understands the type can read, display, or act on records of that
-type — this is what enables cross-app interoperability (e.g., the file-provider showing
-photos added by the photos app).
-
-**In a multi-app local deployment, the data-server owns the registry.** App packages export
-their type definitions; the data-server imports and registers them as the authoritative
-validator for all writes to the shared database. Apps do not maintain their own registries.
-
-**Metadata types are per-app.** Generator IDs and their output schemas are namespaced to
-the app that defines them (e.g., `@photos/app:exif`). Other apps are not expected to
-understand or use another app's metadata types.
-
-## Search and querying
-
-The **unified index** lets you query across data records and their metadata simultaneously.
-A query can filter by record type, date range, full-text content, or values in metadata
-fields — for example, all photos wider than 3000 pixels, or all tasks assigned to a
-specific person.
-
-**Aggregations** compute summaries over a collection: total counts, total storage used,
-breakdowns by type or MIME type, and histograms by date. These are cached and can be
-updated incrementally as records change.
+A type registry is the single source of truth for the types an app understands. Registering a type also associates its schema and any metadata generators that apply to it.
 
 ## Sync
 
-**Sync** reconciles local and remote state. Starkeep uses a pull-then-push model:
+Sync moves data between a user's local storage and their cloud. It is bidirectional: the local device pulls remote changes first, then pushes local changes. This pull-then-push order minimizes conflicts.
 
-1. **Pull** — fetch changes from the cloud that aren't yet on this device
-2. **Merge** — apply conflict resolution to any records modified both locally and remotely
-3. **Push** — send local changes to the cloud
+When two versions of a record exist — one local, one remote — the conflict is resolved deterministically using Hybrid Logical Clock (HLC) timestamps. HLCs combine a physical clock with a logical counter so that causal order is preserved even without coordination between devices. The record with the higher HLC timestamp wins.
 
-Conflicts are resolved by **last-writer-wins**: when two versions of the same record exist,
-the one with the later timestamp is kept. Timestamps use Hybrid Logical Clocks (see below),
-which provide a reliable total ordering across devices without coordination. This applies to
-both data records and **syncable metadata records**. Non-syncable metadata is excluded from
-conflict resolution — it is recomputed from the source data record as needed.
+Records can be marked as sync-eligible or kept local-only. Local-only records are never sent to the cloud and never appear on other devices.
 
-File sync is content-addressed: files are identified by their SHA-256 hash, so a file that
-already exists in the cloud is never transferred again even if it was re-created locally.
+## Access Control
 
-## Access control
+Access control governs who can do what with which data. Subjects (a user, an app, or a sharing token) are granted specific permissions (read, write, delete, admin) on specific resources (a single record, all records of a type, or a collection).
 
-**Access policies** define who can do what. A policy names a subject (a user, app, API key,
-or sharing token), a resource (a specific record, a type, a collection, or everything), and
-a set of permitted operations (read, write, delete, admin). Policies support expiration.
+Policies are enforced at the storage layer, not at the application layer. There is no way for app code to bypass them.
 
-Access is enforced at the storage layer — every database operation goes through a policy
-check before it executes, regardless of which code path initiated it.
+Sharing tokens are time-limited, optionally usage-limited credentials that grant a specific set of permissions. They are the mechanism for giving external users or services scoped access to a subset of data.
 
-**Sharing tokens** are cryptographic tokens tied to a policy. A user can share a token
-externally; the recipient presents it to gain the access the policy grants. Tokens can be
-revoked by deleting the policy.
+## Storage Adapters
 
-## Identifiers and ordering
+All data operations go through abstract adapter interfaces — one for the database, one for file (object) storage. The local implementations use SQLite and the filesystem. The cloud implementations use Aurora DSQL and S3.
 
-Every record is identified by a **ULID** — a 26-character string that encodes a millisecond
-timestamp followed by random bits. ULIDs are globally unique without coordination and
-lexicographically sort in creation order.
-
-Every mutation is timestamped with a **Hybrid Logical Clock (HLC)** timestamp. An HLC
-combines a physical wall-clock time, a logical counter, and a node identifier. The counter
-advances when multiple events occur within the same millisecond; the node identifier
-breaks ties deterministically across devices. Together, these three components provide a
-total ordering over all events across all devices — the foundation for conflict resolution
-in sync.
+Because the interfaces are the same in both environments, application code doesn't change between local and cloud. Swapping adapters is a configuration decision, not a code change.

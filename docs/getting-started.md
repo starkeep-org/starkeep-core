@@ -2,294 +2,82 @@
 
 ## Prerequisites
 
-- Node.js 22 or later (required for built-in `node:sqlite`)
-- pnpm 10.20 or later
+- Node.js 22 or later (required for the built-in `node:sqlite` module)
+- pnpm 10.20.0 or later
+- An AWS account (required for cloud deployment)
 
-## Installation
+## Local Development
 
-Clone the repository and install dependencies:
+### 1. Clone and Install
 
 ```bash
-git clone <repo-url>
+git clone <repo>
 cd data-protocol
-pnpm install
-pnpm build
+pnpm install && pnpm build
 ```
 
-## Your first app
+### 2. Start the Admin Panel
 
-### 1. Initialize the SDK
+Open the admin panel first — it is the command center and will guide you through the remaining setup steps.
 
-The SDK needs a database adapter and an object storage adapter. For local development,
-use SQLite and the local filesystem — no cloud account required.
-
-```typescript
-import { createStarkeepSdk } from "@starkeep/sdk"
-import { SqliteDatabaseAdapter } from "@starkeep/storage-sqlite"
-import { FsObjectStorageAdapter } from "@starkeep/storage-fs"
-import {
-  IMAGE_DIMENSIONS_GENERATOR,
-  FILE_PROPERTIES_GENERATOR,
-  TEXT_PREVIEW_GENERATOR,
-} from "@starkeep/metadata-core"
-
-const sdk = await createStarkeepSdk({
-  databaseAdapter: new SqliteDatabaseAdapter({ path: "./my-app.db" }),
-  objectStorageAdapter: new FsObjectStorageAdapter({ basePath: "./storage" }),
-  ownerId: "user-123",
-  nodeId: "my-device",
-  generators: [
-    IMAGE_DIMENSIONS_GENERATOR,
-    FILE_PROPERTIES_GENERATOR,
-    TEXT_PREVIEW_GENERATOR,
-  ],
-})
+```bash
+pnpm --filter admin-web dev
 ```
 
-### 2. Store a record
+The admin panel walks you through bootstrapping your user identity, provisioning cloud infrastructure, and configuring the data server. Follow the in-app prompts and return to the terminal steps below when directed.
 
-Records that are purely structured data (no attached file):
+### 3. Start the Data Server
 
-```typescript
-const task = await sdk.data.put({
-  type: "tasks:task",
-  ownerId: "user-123",
-  payload: {
-    title: "Write documentation",
-    status: "todo",
-  },
-})
+The data server is a local HTTP hub that exposes the full SDK over REST. All apps on the same machine talk to it rather than embedding the SDK themselves.
 
-console.log(task.id)         // ULID like "01HXYZ..."
-console.log(task.createdAt)  // HLC timestamp
+```bash
+pnpm --filter @starkeep/data-server dev
 ```
 
-Records with an attached file:
+Once running, the data server stores records in a SQLite database at `~/.starkeep/data/starkeep.db` and files at `~/.starkeep/objects/`.
 
-```typescript
-import { readFile } from "node:fs/promises"
+### 4. Run an Example App
 
-const photoBytes = await readFile("./photo.jpg")
+With the data server running, you can start any example app:
 
-const photo = await sdk.data.putWithFile(
-  {
-    type: "photos:photo",
-    ownerId: "user-123",
-    payload: { album: "vacation", caption: "Beach sunset" },
-  },
-  photoBytes,
-  "image/jpeg",
-)
-
-console.log(photo.contentHash)       // SHA-256 of file content
-console.log(photo.objectStorageKey)  // path in object storage
-console.log(photo.sizeBytes)         // file size
+```bash
+pnpm --filter photos-web dev
 ```
 
-### 3. Retrieve records
+### What You Get Locally
 
-```typescript
-// By ID
-const record = await sdk.data.get(photo.id)
+- Full record storage, metadata generation, search, and aggregations via SQLite and the local filesystem
+- The data server's HTTP API available to any local app
+- Sync is available locally but has nothing to sync to until cloud infrastructure is provisioned
 
-// Search — returns data records joined with their metadata
-const results = await sdk.index.search({
-  types: ["photos:photo"],
-  limit: 20,
-})
+## Cloud Deployment
 
-for (const item of results.items) {
-  console.log(item.dataRecord.payload.caption)
-  console.log(item.metadata)  // keyed by generatorId
-}
+The admin panel guides you through each step. Open it and follow the prompts.
 
-// Next page
-const page2 = await sdk.index.search({
-  types: ["photos:photo"],
-  limit: 20,
-  cursor: results.nextCursor,
-})
-```
+### 1. Bootstrap Your User Account
 
-### 4. Generate metadata
+The admin panel walks you through creating or connecting a user account and registering your identity with the control plane. This is a one-time step per user.
 
-If you registered generators, call `generateAll` after storing a record:
+### 2. Provision Your Cloud Infrastructure
 
-```typescript
-const results = await sdk.metadata.generateAll(photo.id, "photos:photo")
+From the admin panel, initiate deployment for your user. The provisioning process creates:
 
-for (const result of results) {
-  console.log(result.metadataRecord.generatorId)
-  // "image-dimensions" → { width: 4032, height: 3024, format: "jpeg" }
-  // "file-properties"  → { extension: ".jpg", mimeType: "image/jpeg", sizeBytes: 2048 }
-  console.log(result.metadataRecord.value)
-}
-```
+- **Aurora DSQL cluster** — your cloud database
+- **S3 bucket** — your file storage
+- **API Gateway + Lambda** — the HTTP layer apps use to reach your cloud data
 
-### 5. Search with metadata filters
+Provisioning is fully automated. No manual AWS steps are required.
 
-```typescript
-const largePhotos = await sdk.index.search({
-  types: ["photos:photo"],
-  metadataFilters: [
-    {
-      generatorId: "image-dimensions",
-      field: "width",
-      operator: "gte",
-      value: 3000,
-    },
-  ],
-  limit: 50,
-})
-```
+### 3. Connect Local to Cloud
 
-### 6. Aggregations
+After provisioning completes, the admin panel displays your cloud endpoint and the credentials the data server needs to reach it. Configure the data server with these values. From that point forward, local writes sync to your cloud stack automatically.
 
-```typescript
-const stats = await sdk.aggregations.compute({
-  types: ["photos:photo"],
-  dateGranularity: "month",
-})
+### 4. Verify
 
-console.log(`${stats.totalCount} photos, ${stats.totalSizeBytes} bytes`)
-console.log(stats.countsByMimeType)
-// { "image/jpeg": 42, "image/png": 7 }
-console.log(stats.dateHistogram)
-// [{ period: "2025-01", count: 12, sizeBytes: 3_000_000 }, ...]
-```
+Upload a photo or create a record locally, trigger a sync, and confirm the record appears in the cloud view in the admin panel.
 
-### 7. Cleanup
+## Next Steps
 
-```typescript
-await sdk.close()
-```
-
-## Adding sync
-
-To sync local data to the cloud, pass remote adapters when initializing:
-
-```typescript
-import { S3ObjectStorageAdapter } from "@starkeep/storage-s3"
-
-const sdk = await createStarkeepSdk({
-  // local (required)
-  databaseAdapter: new SqliteDatabaseAdapter({ path: "./local.db" }),
-  objectStorageAdapter: new FsObjectStorageAdapter({ basePath: "./local-files" }),
-  ownerId: "user-123",
-  nodeId: "my-laptop",
-
-  // remote (enables sdk.sync)
-  remoteDatabaseAdapter: auroraDsqlAdapter,
-  remoteObjectStorageAdapter: new S3ObjectStorageAdapter({
-    bucketName: "starkeep-user-123-data",
-    region: "us-east-1",
-  }),
-})
-
-// Bidirectional sync
-const result = await sdk.sync.fullSync()
-console.log(`pulled: ${result.pulled}, pushed: ${result.pushed}, conflicts: ${result.conflicts}`)
-
-// Subscribe to sync events
-const unsubscribe = sdk.sync.onUpdate((event) => {
-  if (event.eventType === "remote-update-available") {
-    console.log("New data from cloud:", event.recordIds)
-  }
-})
-```
-
-## Access control
-
-```typescript
-// Grant read access to another user
-const policy = await sdk.accessControl.createPolicy({
-  subjectType: "user",
-  subjectId: "user-456",
-  resourceType: "collection",
-  resourceId: "vacation-album",
-  permissions: ["read"],
-})
-
-// Check access
-const check = await sdk.accessControl.checkAccess({
-  subjectType: "user",
-  subjectId: "user-456",
-  resourceId: photo.id,
-  permission: "read",
-})
-console.log(check.allowed)  // true or false
-console.log(check.reason)   // explanation
-
-// Create a shareable token
-const { token } = await sdk.accessControl.createSharingToken(policy.policyId, {
-  maxUses: 10,
-})
-// Share `token` externally — recipient validates it to get access
-```
-
-## Writing a custom metadata generator
-
-```typescript
-import type { GeneratingFunctionDefinition } from "@starkeep/metadata-engine"
-
-const wordCountGenerator: GeneratingFunctionDefinition = {
-  generatorId: "my-app:word-count",
-  generatorVersion: 1,
-  inputTypes: ["docs:document"],
-  dependsOn: [],
-
-  async generate(input, context) {
-    const record = await context.databaseAdapter.get(input.dataRecordId)
-    const text = record?.payload?.content as string ?? ""
-    const words = text.trim().split(/\s+/).filter(Boolean).length
-    return { value: { wordCount: words } }
-  },
-}
-
-const sdk = await createStarkeepSdk({
-  // ...
-  generators: [wordCountGenerator],
-})
-```
-
-## Registering Shared Space API endpoints
-
-```typescript
-import { createSharedSpaceApi } from "@starkeep/shared-space-api"
-
-const api = createSharedSpaceApi({
-  databaseAdapter,
-  objectStorageAdapter,
-  clock,
-  ownerId: "user-123",
-})
-
-api.router.register({
-  namespace: "photos",
-  version: "v1",
-  path: "/albums",
-  method: "GET",
-  description: "List all photo albums",
-  handler: async (request, context) => {
-    const results = await context.databaseAdapter.query({
-      type: "photos:album",
-      sort: [{ field: "createdAt", direction: "desc" }],
-      limit: 50,
-    })
-    return { status: 200, body: results }
-  },
-})
-
-// Handle an incoming request
-const response = await api.handleRequest({
-  path: "/photos/v1/albums",
-  method: "GET",
-  subject: { subjectType: "user", subjectId: "user-123" },
-})
-```
-
-## Next steps
-
-- [Building an App](building-an-app.md) — a full walkthrough using the Tasks app
-- [Core Concepts](concepts.md) — deeper explanation of records, sync, and access control
-- [Architecture](architecture.md) — how the packages fit together
+- [Concepts](concepts.md) — Understand records, metadata, sync, and access control
+- [Building an App](building-an-app.md) — Define types, store data, add metadata generators, and expose an API
+- [Deployment](deployment.md) — Details on what gets provisioned and how

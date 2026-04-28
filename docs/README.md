@@ -1,90 +1,46 @@
-# Starkeep Documentation
+# Starkeep Data Protocol
 
-Starkeep is a protocol for building apps where each user controls their own data. Users get
-isolated cloud infrastructure (database, file storage, API) that belongs to them — not to the
-app developer. Developers build on a shared, governed data layer that handles storage, search,
-metadata generation, sync, and access control.
+Starkeep is a platform for building apps where users own their data. Each user gets isolated cloud infrastructure — their own database, file storage, and API — that belongs to them, not the app developer. App developers build on a shared, governed data layer through an SDK, without ever having direct access to user data.
 
-## What you can build
+Apps built on Starkeep run offline-first: all data operations happen locally, and the local state syncs to the user's cloud on demand.
 
-- **Offline-first apps** that work locally on any device and sync to the cloud on demand
-- **Multi-device apps** where changes made on one device appear on others without manual
-  conflict resolution
-- **Data-portable apps** where users own and can export everything they create
-- **Collaborative apps** where users share subsets of their data with others via policies
-  and revocable tokens
+## What You Can Build
 
-## How it works
+Any app that stores structured user data:
 
-Every app user gets their own cloud stack — an Aurora DSQL database, an S3 bucket, and an
-API Gateway — provisioned automatically. App code stores data through abstract adapters,
-so the same code runs against local SQLite in development and Aurora DSQL in production.
-The SDK wires everything together: data operations, metadata generation, search, aggregations,
-sync, and access control through a single entry point.
+- Photo and media management
+- Document editors and note-taking
+- Task managers and to-do lists
+- AI assistants and conversation history
+- File browsers and storage managers
+- Any multi-device app where users control their own storage
 
-On the local machine, the **data-server** is the hub for all local apps. Rather than each
-app embedding the SDK with its own private database, local apps are thin HTTP clients that
-route all reads and writes through the data-server. This gives every local app a consistent,
-shared view of the data without coordination. See [Architecture](architecture.md) for the
-full local multi-app deployment model.
+## Key Capabilities
 
-Reference apps include the [Tasks app](tasks-app.md) (web + Tauri desktop), the
-[data-server](../apps/data-server/) (the local data hub — embeds the SDK and exposes it
-over a REST API at `127.0.0.1:9820`), the [Photos app](../apps/photos-desktop/) (a Tauri
-desktop app and reference implementation of the thin-client pattern), and the
-[File Provider](../apps/file-provider/) (a macOS File Provider and Finder Sync extension
-that surfaces Starkeep data as a native filesystem location).
+| Capability | Description |
+|---|---|
+| **Records** | Typed, schematized data units with unique IDs and optional file attachments |
+| **Metadata** | Derived properties computed from records by a pluggable generator system |
+| **Search** | Full-text and metadata-aware querying across all records |
+| **Aggregations** | Counts, storage totals, and date histograms |
+| **Sync** | Bidirectional local-to-cloud sync with deterministic conflict resolution |
+| **Access control** | Fine-grained policies controlling who can read, write, or share data |
 
 ## Documentation
 
-| | |
-|--|--|
-| [Core Concepts](concepts.md) | Data records, metadata, sync, access control, identifiers |
-| [Architecture](architecture.md) | Layer diagram, package graph, design principles |
-| [Getting Started](getting-started.md) | Install, initialize the SDK, store and query data |
-| [Building an App](building-an-app.md) | SDK-embedded pattern (Tasks app) and thin-client pattern (Photos app) |
-| [Infrastructure](infrastructure.md) | Per-user AWS provisioning with Pulumi |
-| [Reference](reference.md) | Record fields, error types, type naming conventions |
-
-### Package docs
-
-| Package | What it does |
-|---------|-------------|
-| [@starkeep/core](packages/core.md) | Identifiers, HLC timestamps, record types, type registry, validation |
-| [@starkeep/storage-adapter](packages/storage-adapter.md) | Storage interfaces and mock implementations |
-| [@starkeep/storage-sqlite](packages/storage-sqlite.md) | Local SQLite database adapter |
-| [@starkeep/storage-fs](packages/storage-fs.md) | Local filesystem object storage adapter |
-| [@starkeep/storage-aurora-dsql](packages/storage-aurora-dsql.md) | Cloud Aurora DSQL database adapter |
-| [@starkeep/storage-s3](packages/storage-s3.md) | Cloud S3 object storage adapter |
-| [@starkeep/metadata-engine](packages/metadata-engine.md) | Metadata generation orchestration |
-| [@starkeep/metadata-core](packages/metadata-core.md) | Built-in metadata generators |
-| [@starkeep/index](packages/index.md) | Unified search across data and metadata |
-| [@starkeep/aggregations](packages/aggregations.md) | Counts, sizes, and histograms |
-| [@starkeep/sync-engine](packages/sync-engine.md) | Bidirectional local-cloud sync |
-| [@starkeep/access-control](packages/access-control.md) | Policies, permissions, sharing tokens |
-| [@starkeep/shared-space-api](packages/shared-space-api.md) | Versioned HTTP API framework |
-| [@starkeep/sdk](packages/sdk.md) | Unified facade — start here |
-| [@starkeep/aws-provider](packages/aws-provider.md) | Per-user AWS infrastructure provisioning |
+- [Concepts](concepts.md) — The core ideas: records, metadata, types, sync, access control, and storage adapters
+- [Getting Started](getting-started.md) — Local setup and cloud deployment walkthrough
+- [Building an App](building-an-app.md) — How to define types, store data, generate metadata, search, sync, and control access
+- [Architecture](architecture.md) — System layers, local and cloud topology, package overview, and design principles
+- [Deployment](deployment.md) — What gets provisioned per user, how provisioning works, and costs
 
 ### Apps
 
-| | |
-|--|--|
-| [Tasks App](tasks-app.md) | Task management — web and desktop; reference for the SDK-embedded pattern |
-| [Data Server](../apps/data-server/) | Local data hub — embeds the SDK, owns the type registry, serves all local apps over HTTP |
-| [Photos App](../apps/photos-desktop/) | Desktop photo library — reference for the thin-client (data-server) pattern |
-| [File Provider](../apps/file-provider/) | macOS File Provider + Finder Sync extension — thin client that exposes Starkeep data in Finder |
+- [Admin](../apps/admin-web/README.md) — Command center: cloud setup wizard, dashboard, permissions management
+- [Data Server](../apps/data-server/README.md) — Local HTTP hub: configuration, file watching, sync, and the HTTP API
+- [Photos](../apps/photos-web/README.md) — Photo management app (thin-client pattern example)
+- [File Browser](../apps/file-browser/README.md) — Read-only record and metadata inspector
 
-## Common commands
+### Reference
 
-**Redeploy user-data infrastructure from local** (from `infra/user-data/`):
-```
-pnpm run local:deploy
-```
-Authenticates with Cognito using your `.starkeep-config.json` and runs `sst deploy`. Generate the config from admin-web via "Download CLI config" after cloud setup.
-
-### Analysis
-
-| | |
-|--|--|
-| [Authentication](auth-analysis.md) | Auth options for owner access, sharing, app-to-API, and sync |
+- [Data vs. Metadata App Architecture](data-vs-metadata-app-architecture.md) — Design heuristics for deciding what is data and what is metadata
