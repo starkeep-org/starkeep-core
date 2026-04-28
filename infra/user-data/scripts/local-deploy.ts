@@ -6,7 +6,7 @@
  *   pnpm run local:deploy   — authenticates with Cognito and runs sst deploy
  *   pnpm run local:remove   — authenticates with Cognito and runs sst remove
  *
- * Reads .starkeep-config.json from the repo root. Generate it from admin-web
+ * Reads starkeep-config.json from the repo root. Generate it from admin-web
  * using the "Download CLI config" button after a successful cloud setup.
  */
 
@@ -47,7 +47,7 @@ interface StarkeepConfig {
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const INFRA_DIR = resolve(SCRIPT_DIR, "..");
 const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..", "..");
-const CONFIG_PATH = resolve(REPO_ROOT, ".starkeep-config.json");
+const CONFIG_PATH = resolve(REPO_ROOT, "starkeep-config.json");
 const SST_OUTPUTS_PATH = resolve(INFRA_DIR, ".sst", "outputs.json");
 
 function loadConfig(): StarkeepConfig {
@@ -57,7 +57,7 @@ function loadConfig(): StarkeepConfig {
   try {
     raw = readFileSync(configPath, "utf-8");
   } catch {
-    console.error(`Error: .starkeep-config.json not found at ${configPath}`);
+    console.error(`Error: starkeep-config.json not found at ${configPath}`);
     console.error(
       "Generate it from admin-web using the \"Download CLI config\" button after cloud setup.",
     );
@@ -67,7 +67,7 @@ function loadConfig(): StarkeepConfig {
   try {
     return JSON.parse(raw) as StarkeepConfig;
   } catch {
-    console.error("Error: .starkeep-config.json is not valid JSON");
+    console.error("Error: starkeep-config.json is not valid JSON");
     process.exit(1);
   }
 }
@@ -368,13 +368,13 @@ if (command === "deploy-photos" || command === "deploy") {
   if (!apiGatewayUrl) {
     if (command === "deploy-photos") {
       console.error(
-        'Error: apiGatewayUrl is missing from .starkeep-config.json.\n' +
+        'Error: apiGatewayUrl is missing from starkeep-config.json.\n' +
         'Add it after your first backend deploy:\n' +
         '  "apiGatewayUrl": "https://xxx.execute-api.us-east-1.amazonaws.com/"',
       );
       process.exit(1);
     }
-    console.log("Skipping photos-web build — apiGatewayUrl not set in .starkeep-config.json");
+    console.log("Skipping photos-web build — apiGatewayUrl not set in starkeep-config.json");
   } else {
     buildPhotosWeb(apiGatewayUrl);
   }
@@ -416,7 +416,7 @@ if (sstCommand === "deploy") {
     if (outputs.auroraHostname) updated.auroraEndpoint = outputs.auroraHostname;
     if (outputs.photosWebUrl) updated.photosWebUrl = outputs.photosWebUrl;
     writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
-    console.log("\nUpdated .starkeep-config.json with deploy outputs:");
+    console.log("\nUpdated starkeep-config.json with deploy outputs:");
     if (outputs.bucketName) console.log(`  s3Bucket       : ${outputs.bucketName}`);
     if (outputs.apiGatewayUrl) console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
     if (outputs.auroraHostname) console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);
@@ -427,7 +427,7 @@ if (sstCommand === "deploy") {
     }
   } catch (err) {
     console.warn(
-      "Warning: could not update .starkeep-config.json with deploy outputs:",
+      "Warning: could not update starkeep-config.json with deploy outputs:",
       err instanceof Error ? err.message : String(err),
     );
   }
