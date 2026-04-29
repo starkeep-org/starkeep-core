@@ -41,10 +41,9 @@ import {
   type STSCredentials,
 } from "../../src/lib/cognito-auth";
 import {
-  fetchMtdCostsByService,
   projectFullMonth,
   type ServiceCost,
-} from "../../src/lib/cost-explorer";
+} from "../../src/lib/cost-usage-report";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -120,7 +119,7 @@ export default function DashboardPage() {
   const [remotePhotosWeb, setRemotePhotosWeb] = useState<boolean | null>(null);
 
   // Costs
-  const [costs, setCosts] = useState<ServiceCost[] | "loading" | "error">("loading");
+  const [costs, setCosts] = useState<ServiceCost[] | "loading" | "error" | "no-data">("loading");
   const [costProjection, setCostProjection] = useState<ServiceCost[] | null>(null);
 
   // Add watch form
@@ -318,10 +317,30 @@ export default function DashboardPage() {
       }
 
       try {
-        const mtd = await fetchMtdCostsByService(creds);
-        setCosts(mtd);
-        setCostProjection(projectFullMonth(mtd));
-      } catch {
+        const resp = await fetch("/api/costs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            credentials: creds,
+            s3Region: cfg.s3Region,
+            stackPrefix: cfg.stackPrefix,
+          }),
+        });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({})) as { error?: string };
+          console.error("[costs] API error", resp.status, body.error);
+          setCosts("error");
+          return;
+        }
+        const { costs: mtd } = await resp.json() as { costs: ServiceCost[] | null };
+        if (mtd === null) {
+          setCosts("no-data");
+        } else {
+          setCosts(mtd);
+          setCostProjection(projectFullMonth(mtd));
+        }
+      } catch (err) {
+        console.error("[costs] fetch error", err);
         setCosts("error");
       }
     }
@@ -796,6 +815,8 @@ export default function DashboardPage() {
                   <Center py="sm"><Loader size="sm" /></Center>
                 ) : costs === "error" ? (
                   <Text size="sm" c="dimmed">Could not load cost data.</Text>
+                ) : costs === "no-data" ? (
+                  <Text size="sm" c="dimmed">Cost report configured — data arrives within 24 hours.</Text>
                 ) : (
                   <Table fz="sm">
                     <Table.Thead>
