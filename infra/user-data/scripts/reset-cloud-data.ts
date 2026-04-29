@@ -262,6 +262,10 @@ async function truncateDsqlTables(
 // Main
 // ---------------------------------------------------------------------------
 
+const args = process.argv.slice(2);
+const nonInteractive = args.includes("--non-interactive");
+const yes = args.includes("--yes");
+
 const config = loadConfig();
 
 console.log("\n⚠  STARKEEP CLOUD DATA RESET ⚠");
@@ -272,28 +276,40 @@ console.log(`  S3 Bucket: ${config.s3Bucket}`);
 console.log(`  DSQL     : ${config.auroraEndpoint}`);
 console.log("─".repeat(40));
 console.log("\nThis will PERMANENTLY delete all files and records from cloud storage.");
-console.log("Sign in with your Starkeep account to proceed.\n");
 
-const email = await prompt("Email: ");
-const password = await prompt("Password: ", true);
-
-console.log("\nAuthenticating...");
-let idToken: string;
 let credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
-try {
-  idToken = await authenticate(config, email, password);
-  credentials = await getSTSCredentials(config, idToken);
-} catch (err) {
-  console.error(`\nAuthentication failed: ${(err as Error).message}`);
-  process.exit(1);
-}
-console.log("Authenticated.\n");
 
-console.log("This action cannot be undone.");
-const confirmation = await prompt('Type "reset cloud data" to confirm: ');
-if (confirmation !== "reset cloud data") {
-  console.log("Aborted — confirmation did not match.");
-  process.exit(0);
+if (nonInteractive) {
+  const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
+  if (!AWS_ACCESS_KEY_ID || !AWS_SECRET_ACCESS_KEY || !AWS_SESSION_TOKEN) {
+    console.error("--non-interactive requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN env vars");
+    process.exit(1);
+  }
+  credentials = { accessKeyId: AWS_ACCESS_KEY_ID, secretAccessKey: AWS_SECRET_ACCESS_KEY, sessionToken: AWS_SESSION_TOKEN };
+} else {
+  console.log("Sign in with your Starkeep account to proceed.\n");
+  const email = await prompt("Email: ");
+  const password = await prompt("Password: ", true);
+
+  console.log("\nAuthenticating...");
+  let idToken: string;
+  try {
+    idToken = await authenticate(config, email, password);
+    credentials = await getSTSCredentials(config, idToken);
+  } catch (err) {
+    console.error(`\nAuthentication failed: ${(err as Error).message}`);
+    process.exit(1);
+  }
+  console.log("Authenticated.\n");
+}
+
+if (!yes) {
+  console.log("This action cannot be undone.");
+  const confirmation = await prompt('Type "reset cloud data" to confirm: ');
+  if (confirmation !== "reset cloud data") {
+    console.log("Aborted — confirmation did not match.");
+    process.exit(0);
+  }
 }
 
 console.log("\nResetting cloud data...\n");

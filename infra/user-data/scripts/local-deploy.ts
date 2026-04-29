@@ -196,9 +196,12 @@ async function getSTSCredentials(
 // Main
 // ---------------------------------------------------------------------------
 
-const command = process.argv[2];
+const flags = process.argv.slice(2);
+const command = flags.find((a) => !a.startsWith("--"));
+const nonInteractive = flags.includes("--non-interactive");
+
 if (command !== "deploy" && command !== "remove" && command !== "deploy-photos") {
-  console.error("Usage: local-deploy.ts <deploy|remove|deploy-photos>");
+  console.error("Usage: local-deploy.ts <deploy|remove|deploy-photos> [--non-interactive]");
   process.exit(1);
 }
 
@@ -209,25 +212,35 @@ console.log(`  Region : ${config.region}`);
 console.log(`  Stage  : ${config.stage}`);
 console.log("");
 
-const email = await prompt("Email: ");
-const password = await prompt("Password: ", true);
-
-console.log("\nAuthenticating...");
-let idToken: string;
-try {
-  idToken = await authenticate(config, email, password);
-} catch (err) {
-  console.error(`Authentication failed: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-}
-
-console.log("Getting temporary AWS credentials...");
 let creds: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
-try {
-  creds = await getSTSCredentials(config, idToken);
-} catch (err) {
-  console.error(`Failed to get AWS credentials: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
+
+if (nonInteractive) {
+  const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
+  if (!AWS_ACCESS_KEY_ID || !AWS_SECRET_ACCESS_KEY || !AWS_SESSION_TOKEN) {
+    console.error("--non-interactive requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN env vars");
+    process.exit(1);
+  }
+  creds = { accessKeyId: AWS_ACCESS_KEY_ID, secretAccessKey: AWS_SECRET_ACCESS_KEY, sessionToken: AWS_SESSION_TOKEN };
+} else {
+  const email = await prompt("Email: ");
+  const password = await prompt("Password: ", true);
+
+  console.log("\nAuthenticating...");
+  let idToken: string;
+  try {
+    idToken = await authenticate(config, email, password);
+  } catch (err) {
+    console.error(`Authentication failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
+  console.log("Getting temporary AWS credentials...");
+  try {
+    creds = await getSTSCredentials(config, idToken);
+  } catch (err) {
+    console.error(`Failed to get AWS credentials: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 }
 
 // Preflight: verify the deploy-permissions stack exists. The bootstrap stack

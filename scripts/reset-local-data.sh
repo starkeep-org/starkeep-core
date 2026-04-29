@@ -16,10 +16,18 @@ echo "  $OBJECTS_DIR  (all object files)"
 echo "  $DB_FILE (and WAL/SHM journal files)"
 echo "  $WATCHES_FILE"
 echo ""
-read -r -p "Continue? [y/N] " confirm
-if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-  echo "Aborted."
-  exit 0
+
+YES=false
+for arg in "$@"; do
+  if [[ "$arg" == "--yes" || "$arg" == "-y" ]]; then YES=true; fi
+done
+
+if [[ "$YES" != "true" ]]; then
+  read -r -p "Continue? [y/N] " confirm
+  if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+    echo "Aborted."
+    exit 0
+  fi
 fi
 
 if [[ -d "$OBJECTS_DIR" ]]; then
