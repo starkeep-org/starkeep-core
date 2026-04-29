@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   Container,
@@ -29,9 +29,11 @@ import {
   readCloudCredentials,
   writeCloudConfig,
   writeCloudCredentials,
+  credentialsNearExpiry,
   type CloudConfig,
 } from "../../src/lib/cloud-config";
 import { ModeSelector } from "../../src/components/mode-selector";
+import { CommandOutputModal } from "../../src/components/CommandOutputModal";
 import {
   initiateAuth,
   respondNewPasswordChallenge,
@@ -128,8 +130,24 @@ export default function DashboardPage() {
   const [watchError, setWatchError] = useState<string | null>(null);
   const [watchSuccess, setWatchSuccess] = useState<string | null>(null);
 
-  // Clipboard feedback
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  // Daemon start/stop loading
+  const [daemonLoading, setDaemonLoading] = useState<Record<string, boolean>>({});
+
+  // Command output modal
+  const [outputModal, setOutputModal] = useState<{
+    commandId: string;
+    title: string;
+    credentials?: STSCredentials & { region: string };
+  } | null>(null);
+  const [outputOpen, setOutputOpen] = useState(false);
+
+  // Confirm modal (for destructive commands)
+  const [confirmModal, setConfirmModal] = useState<{
+    commandId: string;
+    title: string;
+    message: string;
+    requiresCreds: boolean;
+  } | null>(null);
 
   // Sign-in modal
   const [signInOpen, setSignInOpen] = useState(false);
@@ -141,11 +159,88 @@ export default function DashboardPage() {
   const [signInError, setSignInError] = useState<string | null>(null);
   const [signInLoading, setSignInLoading] = useState(false);
 
-  const copy = useCallback((text: string, key: string) => {
-    navigator.clipboard.writeText(text).catch(console.error);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000);
-  }, []);
+  // Poll every 2s while any daemon is starting
+  const anyDaemonLoading = Object.values(daemonLoading).some(Boolean);
+  useEffect(() => {
+    if (!anyDaemonLoading) return;
+    const timer = setInterval(() => setRefreshKey((k) => k + 1), 2000);
+    return () => clearInterval(timer);
+  }, [anyDaemonLoading]);
+
+  // Clear loading state once each daemon is confirmed online
+  useEffect(() => {
+    if (daemonLoading["data-server"] && localOnline === true) {
+      setDaemonLoading((l) => ({ ...l, "data-server": false }));
+    }
+  }, [localOnline]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (daemonLoading["photos-web"] && localPhotosWeb === true) {
+      setDaemonLoading((l) => ({ ...l, "photos-web": false }));
+    }
+  }, [localPhotosWeb]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (daemonLoading["file-browser"] && localFileBrowser === true) {
+      setDaemonLoading((l) => ({ ...l, "file-browser": false }));
+    }
+  }, [localFileBrowser]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function startDaemon(id: string) {
+    setDaemonLoading((l) => ({ ...l, [id]: true }));
+    try {
+      await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "start", id }),
+      });
+    } catch {
+      setDaemonLoading((l) => ({ ...l, [id]: false }));
+      return;
+    }
+    // Safety timeout: clear loading after 90s regardless
+    setTimeout(() => {
+      setDaemonLoading((l) => ({ ...l, [id]: false }));
+      setRefreshKey((k) => k + 1);
+    }, 90_000);
+  }
+
+  async function stopDaemon(id: string) {
+    setDaemonLoading((l) => ({ ...l, [id]: true }));
+    try {
+      await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop", id }),
+      });
+      setRefreshKey((k) => k + 1);
+    } finally {
+      setDaemonLoading((l) => ({ ...l, [id]: false }));
+    }
+  }
+
+  async function runStream(commandId: string, title: string, requiresCreds: boolean) {
+    let credentials: (STSCredentials & { region: string }) | undefined;
+    if (requiresCreds) {
+      const cfg = await readCloudConfig();
+      if (!cfg) return;
+      let stored = await readCloudCredentials();
+      if (!stored) {
+        try {
+          const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
+          stored = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
+          await writeCloudCredentials(stored);
+        } catch {
+          return;
+        }
+      }
+      credentials = { ...stored, region: cfg.cognitoConfig.region };
+    }
+    setOutputModal({ commandId, title, credentials });
+    setOutputOpen(true);
+  }
+
+  function openConfirm(commandId: string, title: string, message: string, requiresCreds: boolean) {
+    setConfirmModal({ commandId, title, message, requiresCreds });
+  }
 
   // Fetch local server data
   useEffect(() => {
@@ -306,10 +401,11 @@ export default function DashboardPage() {
       if (!cfg) { setCosts("error"); return; }
 
       let creds: STSCredentials | null = await readCloudCredentials();
-      if (!creds) {
+      if (!creds || credentialsNearExpiry(creds)) {
         try {
           const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
           creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
+          await writeCloudCredentials(creds);
         } catch {
           setCosts("error");
           return;
@@ -517,19 +613,16 @@ export default function DashboardPage() {
         {localOnline === false && (
           <Stack gap="md">
             <Alert color="yellow" variant="light" title="Data server not running">
-              The local data server must be running for local features to work. Paste the command
-              below into your terminal to start it.
+              The local data server must be running for local features to work.
             </Alert>
-            <CopyCmd
-              cmd="pnpm --filter @starkeep/data-server start"
-              label="Copy start command"
-              copyKey="start-data-server"
-              copiedKey={copiedKey}
-              onCopy={copy}
-            />
             <Group justify="flex-end">
-              <Button variant="light" color="green" onClick={() => setRefreshKey((k) => k + 1)}>
-                Data server started
+              <Button
+                variant="light"
+                color="green"
+                loading={!!daemonLoading["data-server"]}
+                onClick={() => startDaemon("data-server")}
+              >
+                Start
               </Button>
             </Group>
           </Stack>
@@ -631,13 +724,16 @@ export default function DashboardPage() {
 
       </Paper>
 
-        <CopyCmd
-          cmd="bash scripts/reset-local-data.sh"
-          label="Clear all local data"
-          copyKey="clear-local"
-          copiedKey={copiedKey}
-          onCopy={copy}
-        />
+        <Group justify="flex-end">
+          <Button
+            size="xs"
+            variant="light"
+            color="red"
+            onClick={() => openConfirm("reset-local-data", "Clear local data", "This will permanently delete all local object files, the SQLite database, and watch configs.", false)}
+          >
+            Clear local data
+          </Button>
+        </Group>
 
           {localOnline !== false && (
           <Paper p="lg" withBorder>
@@ -649,19 +745,17 @@ export default function DashboardPage() {
                 name="Photos Web"
                 online={localPhotosWeb}
                 url="http://localhost:3000"
-                launchCmd="pnpm --filter photos-web dev"
-                copyKey="start-photos-web"
-                copiedKey={copiedKey}
-                onCopy={copy}
+                loading={!!daemonLoading["photos-web"]}
+                onStart={() => startDaemon("photos-web")}
+                onStop={() => stopDaemon("photos-web")}
               />
               <LocalAppRow
                 name="File Browser"
                 online={localFileBrowser}
                 url="http://localhost:5173"
-                launchCmd="pnpm --filter @starkeep/file-browser dev"
-                copyKey="start-file-browser"
-                copiedKey={copiedKey}
-                onCopy={copy}
+                loading={!!daemonLoading["file-browser"]}
+                onStart={() => startDaemon("file-browser")}
+                onStop={() => stopDaemon("file-browser")}
               />
             </Stack>
           </Paper>
@@ -732,20 +826,21 @@ export default function DashboardPage() {
                       </>
                     )}
                     <Group gap="md" wrap="wrap">
-                      <CopyCmd
-                        cmd="pnpm --filter @starkeep/infra-user-data local:deploy"
-                        label="Redeploy from local"
-                        copyKey="redeploy"
-                        copiedKey={copiedKey}
-                        onCopy={copy}
-                      />
-                      <CopyCmd
-                        cmd="pnpm --filter @starkeep/infra-user-data reset-cloud-data"
-                        label="Clear all cloud data"
-                        copyKey="clear-remote"
-                        copiedKey={copiedKey}
-                        onCopy={copy}
-                      />
+                      <Button
+                        size="xs"
+                        variant="light"
+                        onClick={() => openConfirm("local-deploy", "Redeploy from local", "This will run sst deploy using your current local code. The process may take several minutes.", true)}
+                      >
+                        Redeploy from local
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="light"
+                        color="red"
+                        onClick={() => openConfirm("reset-cloud-data", "Clear all cloud data", "This will permanently delete all files from S3 and all records from the Aurora DSQL database.", true)}
+                      >
+                        Clear all cloud data
+                      </Button>
                     </Group>
                   </Stack>
                 )}
@@ -916,6 +1011,40 @@ export default function DashboardPage() {
           </Stack>
         )}
       </Modal>
+
+      {/* ── Command output modal ──────────────────────────────────────── */}
+      <CommandOutputModal
+        opened={outputOpen}
+        onClose={() => { setOutputOpen(false); setOutputModal(null); }}
+        commandId={outputModal?.commandId ?? null}
+        credentials={outputModal?.credentials}
+        title={outputModal?.title ?? ""}
+      />
+
+      {/* ── Confirm modal ─────────────────────────────────────────────── */}
+      <Modal
+        opened={confirmModal !== null}
+        onClose={() => setConfirmModal(null)}
+        title={confirmModal?.title ?? ""}
+        size="sm"
+      >
+        <Stack gap="md">
+          <Text size="sm">{confirmModal?.message}</Text>
+          <Group justify="flex-end">
+            <Button variant="light" onClick={() => setConfirmModal(null)}>Cancel</Button>
+            <Button
+              color="red"
+              onClick={() => {
+                const m = confirmModal;
+                setConfirmModal(null);
+                if (m) runStream(m.commandId, m.title, m.requiresCreds);
+              }}
+            >
+              Confirm
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
     </Container>
   );
 }
@@ -933,47 +1062,20 @@ function StatusBadge({ online }: { online: boolean | null }) {
   );
 }
 
-function CopyCmd({
-  cmd,
-  label,
-  copyKey,
-  copiedKey,
-  onCopy,
-}: {
-  cmd: string;
-  label: string;
-  copyKey: string;
-  copiedKey: string | null;
-  onCopy: (text: string, key: string) => void;
-}) {
-  return (
-    <Group gap="xs" wrap="nowrap">
-      <Button size="xs" variant="light" onClick={() => onCopy(cmd, copyKey)}>
-        {copiedKey === copyKey ? "Copied!" : label}
-      </Button>
-      <Code fz="xs" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {cmd}
-      </Code>
-    </Group>
-  );
-}
-
 function LocalAppRow({
   name,
   online,
   url,
-  launchCmd,
-  copyKey,
-  copiedKey,
-  onCopy,
+  loading,
+  onStart,
+  onStop,
 }: {
   name: string;
   online: boolean | null;
   url: string;
-  launchCmd: string;
-  copyKey: string;
-  copiedKey: string | null;
-  onCopy: (text: string, key: string) => void;
+  loading: boolean;
+  onStart: () => void;
+  onStop: () => void;
 }) {
   return (
     <Group justify="space-between">
@@ -983,20 +1085,23 @@ function LocalAppRow({
         </Text>
         <StatusBadge online={online} />
       </Group>
-      {online === true ? (
-        <Anchor href={url} target="_blank" size="sm">
-          Open ↗
-        </Anchor>
-      ) : online === false ? (
-        <Group gap="xs" wrap="nowrap">
-          <Button size="xs" variant="light" onClick={() => onCopy(launchCmd, copyKey)}>
-            {copiedKey === copyKey ? "Copied!" : "Copy launch command"}
+      <Group gap="xs">
+        {online === true && (
+          <Anchor href={url} target="_blank" size="sm">
+            Open ↗
+          </Anchor>
+        )}
+        {online === true && (
+          <Button size="xs" variant="subtle" color="red" loading={loading} onClick={onStop}>
+            Stop
           </Button>
-          <Code fz="xs" style={{ whiteSpace: "nowrap" }}>
-            {launchCmd}
-          </Code>
-        </Group>
-      ) : null}
+        )}
+        {online === false && (
+          <Button size="xs" variant="light" color="green" loading={loading} onClick={onStart}>
+            Start
+          </Button>
+        )}
+      </Group>
     </Group>
   );
 }

@@ -21,6 +21,7 @@ DerivedData/
 # Next.js build artifacts
 .next/
 apps/photos-web/out/
+apps/photos-web/next-env.d.ts
 
 # SST local state
 infra/user-data/.sst/
@@ -29,3 +30,6 @@ infra/user-data/sst-env.d.ts
 
 # Starkeep local CLI config (contains Cognito IDs — do not commit)
 starkeep-config.json
+
+# Daemon PID files written by admin-web exec routes
+.pids/
