@@ -241,9 +241,9 @@ export function deployPermissionStatements(): IamStatement[] {
       },
     },
     {
-      Sid: "CostExplorerRead",
+      Sid: "CurSetup",
       Effect: "Allow",
-      Action: "ce:GetCostAndUsage",
+      Action: ["cur:DescribeReportDefinitions", "cur:PutReportDefinition"],
       Resource: "*",
     },
     {
@@ -346,9 +346,9 @@ export const statementMetadata: Record<string, StatementMeta> = {
     reason: "Hand the per-function execution role to Lambda, API Gateway, and CloudFormation when creating those resources.",
     requiredBy: ["user-data:lambda", "user-data:api-gateway"],
   },
-  CostExplorerRead: {
-    label: "Read AWS Cost Explorer data",
-    reason: "Fetch month-to-date costs grouped by service so admin-web can display cost transparency and project full-month spend.",
+  CurSetup: {
+    label: "Create and read AWS Cost and Usage Report",
+    reason: "Set up a CUR report delivering to the billing S3 bucket so admin-web can display MTD costs without the per-request Cost Explorer fee.",
     requiredBy: ["admin-web:costs"],
   },
   BudgetsManage: {
