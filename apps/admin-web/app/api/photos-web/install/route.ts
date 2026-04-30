@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
@@ -10,8 +10,9 @@ const PID_FILE = resolve(PIDS_DIR, "photos-web.pid");
 const META_FILE = resolve(PIDS_DIR, "photos-web.meta.json");
 const LOG_FILE = resolve(PIDS_DIR, "photos-web.log");
 
-// Next.js 16 logs: "- Local:         http://localhost:3001"
-const PORT_RE = /localhost:(\d+)/;
+// Turbopack logs "✓ Ready in 305ms" — simpler to match than localhost:PORT which
+// has ANSI escape codes interspersed between characters in the raw log file.
+const READY_RE = /Ready in \d/;
 
 function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -60,41 +61,9 @@ function runStreamed(
   });
 }
 
-function waitUntilReady(
-  logPath: string,
-  emit: (line: string) => void,
-  timeoutMs = 30_000,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let offset = 0;
-    const deadline = Date.now() + timeoutMs;
-    const interval = setInterval(() => {
-      try {
-        if (!existsSync(logPath)) return;
-        const content = readFileSync(logPath, "utf-8");
-        const newChunk = content.slice(offset);
-        if (newChunk) {
-          for (const line of newChunk.split("\n")) {
-            if (line.trim()) emit(line);
-          }
-          offset = content.length;
-          if (PORT_RE.test(content)) {
-            clearInterval(interval);
-            resolve();
-            return;
-          }
-        }
-        if (Date.now() > deadline) {
-          clearInterval(interval);
-          reject(new Error("Timed out waiting for dev server to start — check .pids/photos-web.log"));
-        }
-      } catch (err) {
-        clearInterval(interval);
-        reject(err);
-      }
-    }, 300);
-  });
-}
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1B\[[0-9;?]*[A-Za-z]|\x1B\][^\x07]*\x07/g;
+function stripAnsi(s: string): string { return s.replace(ANSI_RE, ""); }
 
 export async function POST(req: NextRequest) {
   const body = await req.json() as { photosWebPath: string };
@@ -169,18 +138,51 @@ export async function POST(req: NextRequest) {
 
         emit("Starting dev server...");
         const port = await findFreePort();
-        const logFd = openSync(LOG_FILE, "w");
+
+        // Spawn with piped stdio so data events fire directly — this is the only
+        // reliable way to get real-time output through the SSE stream. setInterval
+        // + log file polling doesn't trigger HTTP response flushes.
         const child = spawn("pnpm", ["dev", "--port", String(port)], {
           cwd: expandedPath,
           detached: true,
-          stdio: ["ignore", logFd, logFd],
+          stdio: ["ignore", "pipe", "pipe"],
           env: { ...process.env },
         });
-        child.unref();
         writeFileSync(PID_FILE, String(child.pid));
 
-        // tail log until Next.js confirms it's listening, then we know the port is live
-        await waitUntilReady(LOG_FILE, emit);
+        const startLog: string[] = [];
+        await new Promise<void>((resolveReady, rejectReady) => {
+          const timer = setTimeout(() => {
+            rejectReady(new Error(`Dev server did not start within 120s. Last output:\n${startLog.slice(-20).join("\n")}`));
+          }, 120_000);
+
+          function handleChunk(chunk: Buffer) {
+            for (const raw of chunk.toString().split(/\r?\n/)) {
+              const line = stripAnsi(raw).trim();
+              if (!line) continue;
+              startLog.push(line);
+              emit(line);
+              if (READY_RE.test(line)) {
+                clearTimeout(timer);
+                resolveReady();
+              }
+            }
+          }
+
+          child.stdout!.on("data", handleChunk);
+          child.stderr!.on("data", handleChunk);
+          child.on("error", (err) => { clearTimeout(timer); rejectReady(err); });
+          child.on("close", (code) => {
+            clearTimeout(timer);
+            rejectReady(new Error(`Dev server exited with code ${code}. Output:\n${startLog.join("\n")}`));
+          });
+        });
+
+        // Drain pipes so the process isn't blocked on writes, then detach.
+        child.stdout!.resume();
+        child.stderr!.resume();
+        child.unref();
+        writeFileSync(LOG_FILE, startLog.join("\n") + "\n");
         writeFileSync(META_FILE, JSON.stringify({ pid: child.pid, port }));
 
         controller.enqueue(
