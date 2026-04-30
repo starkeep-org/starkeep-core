@@ -60,3 +60,26 @@ export function credentialsNearExpiry(creds: STSCredentials): boolean {
   const expiry = new Date(creds.expiration).getTime();
   return Date.now() > expiry - 5 * 60 * 1000;
 }
+
+const PHOTOS_WEB_PATH_KEY = "starkeep:photos-web-path";
+
+export async function readPhotosWebPath(): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(PHOTOS_WEB_PATH_KEY);
+}
+
+export async function writePhotosWebPath(path: string): Promise<void> {
+  localStorage.setItem(PHOTOS_WEB_PATH_KEY, path);
+}
+
+const FILE_BROWSER_PATH_KEY = "starkeep:file-browser-path";
+
+export async function readFileBrowserPath(): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(FILE_BROWSER_PATH_KEY);
+}
+
+export async function writeFileBrowserPath(path: string): Promise<void> {
+  localStorage.setItem(FILE_BROWSER_PATH_KEY, path);
+}
+

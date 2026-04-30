@@ -105,12 +105,10 @@ export default function DashboardPage() {
   const [localTypes, setLocalTypes] = useState<DataTypesResponse | null>(null);
   const [localCognitoConfig, setLocalCognitoConfig] = useState<CognitoConfig | null>(null);
   const [localAuthAuthenticated, setLocalAuthAuthenticated] = useState<boolean | null>(null);
-  const [photosWebUrl, setPhotosWebUrl] = useState<string | null | undefined>(undefined);
   const [watches, setWatches] = useState<Watch[] | null>(null);
   const [typesExpanded, setTypesExpanded] = useState(false);
 
   // Local apps
-  const [localPhotosWeb, setLocalPhotosWeb] = useState<boolean | null>(null);
   const [localFileBrowser, setLocalFileBrowser] = useState<boolean | null>(null);
 
   // Remote
@@ -118,7 +116,6 @@ export default function DashboardPage() {
   const [remoteOnline, setRemoteOnline] = useState<boolean | null>(null);
   const [remoteTypes, setRemoteTypes] = useState<DataTypesResponse | null>(null);
   const [remoteTypesExpanded, setRemoteTypesExpanded] = useState(false);
-  const [remotePhotosWeb, setRemotePhotosWeb] = useState<boolean | null>(null);
 
   // Costs
   const [costs, setCosts] = useState<ServiceCost[] | "loading" | "error" | "no-data">("loading");
@@ -173,11 +170,6 @@ export default function DashboardPage() {
       setDaemonLoading((l) => ({ ...l, "data-server": false }));
     }
   }, [localOnline]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (daemonLoading["photos-web"] && localPhotosWeb === true) {
-      setDaemonLoading((l) => ({ ...l, "photos-web": false }));
-    }
-  }, [localPhotosWeb]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (daemonLoading["file-browser"] && localFileBrowser === true) {
       setDaemonLoading((l) => ({ ...l, "file-browser": false }));
@@ -246,7 +238,6 @@ export default function DashboardPage() {
   useEffect(() => {
     setLocalOnline(null);
     setLocalTypes(null);
-    setPhotosWebUrl(undefined);
     setWatches(null);
 
     const controller = new AbortController();
@@ -269,10 +260,7 @@ export default function DashboardPage() {
         if (watchesResp.ok) setWatches((await watchesResp.json()).watches);
         if (configResp.ok) {
           const cfg = await configResp.json();
-          setPhotosWebUrl((cfg.photosWebUrl as string | null) ?? null);
           if (cfg.cognitoConfig) setLocalCognitoConfig(cfg.cognitoConfig as CognitoConfig);
-        } else {
-          setPhotosWebUrl(null);
         }
         if (authStatusResp.ok) {
           const status = await authStatusResp.json();
@@ -281,7 +269,6 @@ export default function DashboardPage() {
       } catch {
         if (!controller.signal.aborted) {
           setLocalOnline(false);
-          setPhotosWebUrl(null);
         }
       }
     }
@@ -292,9 +279,7 @@ export default function DashboardPage() {
 
   // Fetch local app status
   useEffect(() => {
-    setLocalPhotosWeb(null);
     setLocalFileBrowser(null);
-    checkUrl("http://localhost:3000").then(setLocalPhotosWeb);
     checkUrl("http://localhost:5173").then(setLocalFileBrowser);
   }, [refreshKey]);
 
@@ -383,13 +368,6 @@ export default function DashboardPage() {
 
     fetchRemote();
   }, [refreshKey]);
-
-  // Check remote photos-web once we have the URL
-  useEffect(() => {
-    setRemotePhotosWeb(null);
-    if (photosWebUrl === undefined || photosWebUrl === null) return;
-    checkUrl(photosWebUrl).then(setRemotePhotosWeb);
-  }, [photosWebUrl, refreshKey]);
 
   // Fetch cost data and budget status
   useEffect(() => {
@@ -742,14 +720,6 @@ export default function DashboardPage() {
             </Title>
             <Stack gap="sm">
               <LocalAppRow
-                name="Photos Web"
-                online={localPhotosWeb}
-                url="http://localhost:3000"
-                loading={!!daemonLoading["photos-web"]}
-                onStart={() => startDaemon("photos-web")}
-                onStop={() => stopDaemon("photos-web")}
-              />
-              <LocalAppRow
                 name="File Browser"
                 online={localFileBrowser}
                 url="http://localhost:5173"
@@ -851,11 +821,6 @@ export default function DashboardPage() {
                   Apps
                 </Title>
                 <Stack gap="sm">
-                  <RemoteAppRow
-                    name="Photos Web"
-                    url={localOnline !== null ? (photosWebUrl ?? null) : undefined}
-                    online={remotePhotosWeb}
-                  />
                   <RemoteAppRow name="File Browser" url={null} online={null} />
                 </Stack>
               </Paper>
