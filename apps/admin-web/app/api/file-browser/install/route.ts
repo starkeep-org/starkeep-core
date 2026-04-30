@@ -1,16 +1,16 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 
 const PIDS_DIR = resolve(REPO_ROOT, ".pids");
-const PID_FILE = resolve(PIDS_DIR, "photos-web.pid");
-const META_FILE = resolve(PIDS_DIR, "photos-web.meta.json");
-const LOG_FILE = resolve(PIDS_DIR, "photos-web.log");
+const PID_FILE = resolve(PIDS_DIR, "file-browser.pid");
+const META_FILE = resolve(PIDS_DIR, "file-browser.meta.json");
+const LOG_FILE = resolve(PIDS_DIR, "file-browser.log");
 
-// Next.js 16 logs: "- Local:         http://localhost:3001"
+// Vite logs: "  ➜  Local:   http://localhost:5173/"
 const PORT_RE = /localhost:(\d+)/;
 
 function findFreePort(): Promise<number> {
@@ -86,7 +86,7 @@ function waitUntilReady(
         }
         if (Date.now() > deadline) {
           clearInterval(interval);
-          reject(new Error("Timed out waiting for dev server to start — check .pids/photos-web.log"));
+          reject(new Error("Timed out waiting for dev server to start — check .pids/file-browser.log"));
         }
       } catch (err) {
         clearInterval(interval);
@@ -97,43 +97,18 @@ function waitUntilReady(
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json() as { photosWebPath: string };
-  const { photosWebPath } = body;
+  const body = await req.json() as { fileBrowserPath: string };
+  const { fileBrowserPath } = body;
 
-  if (!photosWebPath) {
-    return NextResponse.json({ error: "photosWebPath is required" }, { status: 400 });
+  if (!fileBrowserPath) {
+    return NextResponse.json({ error: "fileBrowserPath is required" }, { status: 400 });
   }
 
-  const expandedPath = photosWebPath.replace(/^~/, process.env.HOME ?? "");
-  // Workspace root = parent of the photos app so Turbopack can resolve source files inside it
-  const expandedWorkspace = dirname(expandedPath);
+  const expandedPath = fileBrowserPath.replace(/^~/, process.env.HOME ?? "");
 
   if (!existsSync(expandedPath)) {
     return NextResponse.json({ error: `Directory not found: ${expandedPath}` }, { status: 400 });
   }
-
-  // Read starkeep-config.json from the data-protocol repo
-  const starkeepConfigPath = resolve(REPO_ROOT, "starkeep-config.json");
-  let starkeepConfig: Record<string, unknown> = {};
-  if (existsSync(starkeepConfigPath)) {
-    starkeepConfig = JSON.parse(readFileSync(starkeepConfigPath, "utf-8")) as Record<string, unknown>;
-  }
-
-  // Merge with photos-specific cloud config if it exists in the photos repo
-  const photosCloudConfigPath = resolve(expandedPath, "infra/photos-cloud-config.json");
-  let photosCloudConfig: Record<string, unknown> = {};
-  if (existsSync(photosCloudConfigPath)) {
-    photosCloudConfig = JSON.parse(readFileSync(photosCloudConfigPath, "utf-8")) as Record<string, unknown>;
-  }
-
-  const runtimeConfig = {
-    localDataServerUrl: "http://127.0.0.1:9820",
-    ...starkeepConfig,
-    ...photosCloudConfig,
-  };
-
-  const runtimeConfigPath = resolve(expandedPath, "public/starkeep-runtime-config.json");
-  writeFileSync(runtimeConfigPath, JSON.stringify(runtimeConfig, null, 2));
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -142,26 +117,8 @@ export async function POST(req: NextRequest) {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`));
 
       try {
-        // Generate pnpm-workspace.yaml (and a minimal package.json root marker if absent)
-        // in the user-configured workspace directory so that workspace:* refs in photos
-        // resolve to local @starkeep packages.
-        mkdirSync(expandedWorkspace, { recursive: true });
-        const relPackages = relative(expandedWorkspace, resolve(REPO_ROOT, "packages"));
-        const relPhotos = relative(expandedWorkspace, expandedPath);
-        const workspaceYaml = [
-          "packages:",
-          `  - "${relPackages}/*"`,
-          `  - "${relPhotos}"`,
-          `  - "${relPhotos}/infra"`,
-        ].join("\n") + "\n";
-        writeFileSync(resolve(expandedWorkspace, "pnpm-workspace.yaml"), workspaceYaml);
-        const pkgJsonPath = resolve(expandedWorkspace, "package.json");
-        if (!existsSync(pkgJsonPath)) {
-          writeFileSync(pkgJsonPath, JSON.stringify({ private: true, name: "starkeep-workspace" }, null, 2) + "\n");
-        }
-
         emit("Installing dependencies...");
-        await runStreamed("pnpm", ["install"], expandedWorkspace, emit);
+        await runStreamed("pnpm", ["install", "--ignore-workspace"], expandedPath, emit);
         emit("Dependencies installed.");
 
         stopExisting();
@@ -179,7 +136,6 @@ export async function POST(req: NextRequest) {
         child.unref();
         writeFileSync(PID_FILE, String(child.pid));
 
-        // tail log until Next.js confirms it's listening, then we know the port is live
         await waitUntilReady(LOG_FILE, emit);
         writeFileSync(META_FILE, JSON.stringify({ pid: child.pid, port }));
 

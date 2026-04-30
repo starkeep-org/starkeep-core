@@ -7,7 +7,7 @@ import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "../../../../src/lib/e
 const PIDS_DIR = resolve(REPO_ROOT, ".pids");
 
 // IDs managed outside DAEMON_COMMANDS (custom spawn, own cwd, etc.)
-const EXTERNAL_DAEMON_IDS = ["photos-web"] as const;
+const EXTERNAL_DAEMON_IDS = ["photos-web", "file-browser"] as const;
 type ExternalDaemonId = typeof EXTERNAL_DAEMON_IDS[number];
 
 function pidFile(id: DaemonId | ExternalDaemonId) {

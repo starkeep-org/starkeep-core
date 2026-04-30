@@ -1,9 +1,20 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 import type { STSCredentials } from "../../../../src/lib/cognito-auth";
+
+export async function GET(req: NextRequest) {
+  const photosWebPath = req.nextUrl.searchParams.get("path");
+  if (!photosWebPath) {
+    return NextResponse.json({ error: "path is required" }, { status: 400 });
+  }
+  const expandedPath = photosWebPath.replace(/^~/, process.env.HOME ?? "");
+  const configPath = resolve(expandedPath, "infra/.sst/platform/photos-cloud-config.json");
+  const deployed = existsSync(configPath);
+  return NextResponse.json({ deployed });
+}
 
 export async function POST(req: NextRequest) {
   const body = await req.json() as {
@@ -20,6 +31,8 @@ export async function POST(req: NextRequest) {
   }
 
   const expandedPath = photosWebPath.replace(/^~/, process.env.HOME ?? "");
+  // Workspace root = parent of the photos app so Turbopack can resolve source files inside it
+  const expandedWorkspace = dirname(expandedPath);
   const infraPath = resolve(expandedPath, "infra");
 
   if (!existsSync(infraPath)) {
@@ -51,7 +64,6 @@ export async function POST(req: NextRequest) {
     AWS_REGION: credentials.region,
   };
 
-  const workspaceRoot = resolve(expandedPath, "..");
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -59,12 +71,29 @@ export async function POST(req: NextRequest) {
         if (line) controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`));
       }
 
+      // Regenerate pnpm-workspace.yaml (and a minimal package.json root marker if absent)
+      // in the user-configured workspace directory.
+      mkdirSync(expandedWorkspace, { recursive: true });
+      const relPackages = relative(expandedWorkspace, resolve(REPO_ROOT, "packages"));
+      const relPhotos = relative(expandedWorkspace, expandedPath);
+      const workspaceYaml = [
+        "packages:",
+        `  - "${relPackages}/*"`,
+        `  - "${relPhotos}"`,
+        `  - "${relPhotos}/infra"`,
+      ].join("\n") + "\n";
+      writeFileSync(resolve(expandedWorkspace, "pnpm-workspace.yaml"), workspaceYaml);
+      const pkgJsonPath = resolve(expandedWorkspace, "package.json");
+      if (!existsSync(pkgJsonPath)) {
+        writeFileSync(pkgJsonPath, JSON.stringify({ private: true, name: "starkeep-workspace" }, null, 2) + "\n");
+      }
+
       // Install infra deps via workspace root if needed
       if (!existsSync(resolve(infraPath, "node_modules"))) {
         emitLine("Installing infra dependencies...");
         await new Promise<void>((resolve, reject) => {
           const install = spawn("pnpm", ["install"], {
-            cwd: workspaceRoot,
+            cwd: expandedWorkspace,
             env,
             stdio: ["ignore", "pipe", "pipe"],
           });

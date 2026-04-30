@@ -1,7 +1,7 @@
 import "server-only";
 import { resolve } from "node:path";
 
-export type DaemonId = "data-server" | "file-browser";
+export type DaemonId = "data-server";
 export type StreamCommandId = "reset-local-data" | "local-deploy" | "reset-cloud-data";
 
 // Next.js runs from apps/admin-web; ../../ is the repo root
@@ -9,7 +9,6 @@ export const REPO_ROOT = resolve(process.cwd(), "../..");
 
 export const DAEMON_COMMANDS: Record<DaemonId, { args: string[] }> = {
   "data-server": { args: ["pnpm", "--filter", "@starkeep/data-server", "start"] },
-  "file-browser": { args: ["pnpm", "--filter", "@starkeep/file-browser", "dev"] },
 };
 
 export const STREAM_COMMANDS: Record<StreamCommandId, { args: string[]; requiresCreds: boolean }> = {

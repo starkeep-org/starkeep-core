@@ -21,6 +21,8 @@ import {
 import {
   readPhotosWebPath,
   writePhotosWebPath,
+  readFileBrowserPath,
+  writeFileBrowserPath,
   readCloudConfig,
   readCloudCredentials,
   writeCloudCredentials,
@@ -35,9 +37,55 @@ export default function AppsPage() {
       </Title>
       <Stack gap="md">
         <PhotosWebSection />
+        <FileBrowserSection />
       </Stack>
     </Container>
   );
+}
+
+async function readFileBrowserInstallStream(
+  fileBrowserPath: string,
+  onLine: (line: string) => void,
+): Promise<{ port: number; pid: number }> {
+  const res = await fetch("/api/file-browser/install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fileBrowserPath }),
+  });
+
+  if (!res.ok || !res.body) {
+    const data = await res.json() as { error?: string };
+    throw new Error(data.error ?? "Install failed");
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+
+    for (const event of events) {
+      const lines = event.split("\n");
+      const eventType = lines.find((l) => l.startsWith("event:"))?.slice(7).trim();
+      const dataLine = lines.find((l) => l.startsWith("data:"))?.slice(5).trim();
+      if (!dataLine) continue;
+
+      if (eventType === "done") {
+        return JSON.parse(dataLine) as { port: number; pid: number };
+      } else if (eventType === "error") {
+        throw new Error(JSON.parse(dataLine) as string);
+      } else {
+        onLine(JSON.parse(dataLine) as string);
+      }
+    }
+  }
+
+  throw new Error("Install stream ended without a done event");
 }
 
 async function readInstallStream(
@@ -85,6 +133,135 @@ async function readInstallStream(
   throw new Error("Install stream ended without a done event");
 }
 
+function FileBrowserSection() {
+  const [path, setPath] = useState("");
+  const [installing, setInstalling] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [running, setRunning] = useState<boolean | null>(null);
+  const [port, setPort] = useState<number | null>(null);
+  const [installLog, setInstallLog] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
+
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    readFileBrowserPath().then((saved) => { if (saved) setPath(saved); });
+    checkStatus();
+  }, []);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [installLog]);
+
+  const checkStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/exec/daemon/status?id=file-browser");
+      if (res.ok) {
+        const data = await res.json() as { running: boolean; port?: number };
+        setRunning(data.running);
+        setPort(data.port ?? null);
+      }
+    } catch {
+      setRunning(false);
+      setPort(null);
+    }
+  }, []);
+
+  const handleInstall = async () => {
+    if (!path.trim()) return;
+    setInstalling(true);
+    setError(null);
+    setSuccess(false);
+    setInstallLog([]);
+    try {
+      await writeFileBrowserPath(path.trim());
+      const result = await readFileBrowserInstallStream(path.trim(), (line) =>
+        setInstallLog((prev) => [...prev, line]),
+      );
+      setSuccess(true);
+      setRunning(true);
+      setPort(result.port);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  const handleStop = async () => {
+    setStopping(true);
+    setError(null);
+    try {
+      await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop", id: "file-browser" }),
+      });
+      setRunning(false);
+      setPort(null);
+      setSuccess(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStopping(false);
+    }
+  };
+
+  return (
+    <Paper p="xl" withBorder>
+      <Group justify="space-between" mb="xs">
+        <Title order={3}>File Browser</Title>
+        {running === true && <Badge color="green" variant="light">Running</Badge>}
+        {running === false && <Badge color="gray" variant="light">Stopped</Badge>}
+      </Group>
+
+      <Text c="dimmed" size="sm" mb="md">
+        Manage the file-browser app from your local checkout.
+      </Text>
+
+      <TextInput
+        label="File Browser repo path"
+        placeholder="~/projects/starkeep/starkeep-apps/file-browser"
+        value={path}
+        onChange={(e) => { setPath(e.currentTarget.value); }}
+        disabled={installing}
+        mb="sm"
+      />
+
+      <Stack gap="sm">
+        {error && <Alert color="red" title="Error">{error}</Alert>}
+        {success && port && (
+          <Alert color="green" title="Running">
+            file-browser is running at{" "}
+            <Anchor href={`http://localhost:${port}`} target="_blank">{`http://localhost:${port}`}</Anchor>
+          </Alert>
+        )}
+        <Group>
+          <Button onClick={handleInstall} loading={installing} disabled={!path.trim()}>
+            {running ? "Reinstall & Restart" : "Install & Start"}
+          </Button>
+          {running && (
+            <Button variant="default" onClick={handleStop} loading={stopping}>Stop</Button>
+          )}
+          {running && port && (
+            <Anchor href={`http://localhost:${port}`} target="_blank" size="sm">Open file-browser ↗</Anchor>
+          )}
+        </Group>
+
+        {(installing || installLog.length > 0) && (
+          <ScrollArea h={200} type="auto">
+            <Code block style={{ fontSize: 11, whiteSpace: "pre-wrap" }}>
+              {installLog.join("\n")}
+            </Code>
+            <div ref={logEndRef} />
+          </ScrollArea>
+        )}
+      </Stack>
+    </Paper>
+  );
+}
+
 function PhotosWebSection() {
   const [path, setPath] = useState("");
   const [installing, setInstalling] = useState(false);
@@ -99,12 +276,31 @@ function PhotosWebSection() {
   const [deployLog, setDeployLog] = useState<string[]>([]);
   const [deployError, setDeployError] = useState<string | null>(null);
   const [deploySuccess, setDeploySuccess] = useState(false);
+  const [cloudDeployed, setCloudDeployed] = useState<boolean | null>(null);
 
   const installLogEndRef = useRef<HTMLDivElement>(null);
   const deployLogEndRef = useRef<HTMLDivElement>(null);
 
+  const checkCloudStatus = useCallback(async (p: string) => {
+    if (!p.trim()) { setCloudDeployed(null); return; }
+    try {
+      const res = await fetch(`/api/photos-web/deploy?path=${encodeURIComponent(p.trim())}`);
+      if (res.ok) {
+        const data = await res.json() as { deployed: boolean };
+        setCloudDeployed(data.deployed);
+      }
+    } catch {
+      setCloudDeployed(null);
+    }
+  }, []);
+
   useEffect(() => {
-    readPhotosWebPath().then((saved) => { if (saved) setPath(saved); });
+    readPhotosWebPath().then((saved) => {
+      if (saved) {
+        setPath(saved);
+        checkCloudStatus(saved);
+      }
+    });
     checkStatus();
   }, []);
 
@@ -224,6 +420,7 @@ function PhotosWebSection() {
               throw new Error(`Deploy exited with code ${result.exitCode}`);
             }
             setDeploySuccess(true);
+            setCloudDeployed(true);
             if (result.photosCloudConfig) {
               // Re-install to update runtime config with new cloud URLs
               setDeployLog((prev) => [...prev, "Re-installing with updated cloud config..."]);
@@ -265,7 +462,7 @@ function PhotosWebSection() {
         value={path}
         onChange={(e) => { setPath(e.currentTarget.value); }}
         disabled={installing || deploying}
-        mb="md"
+        mb="sm"
       />
 
       {/* ── LOCAL ── */}
@@ -303,7 +500,10 @@ function PhotosWebSection() {
       <Divider mb="md" />
 
       {/* ── CLOUD ── */}
-      <Text fw={500} size="sm" mb="xs">Cloud</Text>
+      <Group gap="xs" mb="xs">
+        <Text fw={500} size="sm">Cloud</Text>
+        {cloudDeployed === true && <Badge color="teal" variant="light" size="sm">Deployed</Badge>}
+      </Group>
       <Text c="dimmed" size="sm" mb="sm">
         Deploy photos-web infrastructure to AWS (thumbnail Lambda, static server Lambda,
         API Gateway). Requires cloud setup to be complete.

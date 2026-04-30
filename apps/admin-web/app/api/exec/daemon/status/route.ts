@@ -10,7 +10,7 @@ const PIDS_DIR = resolve(REPO_ROOT, ".pids");
 
 // Daemon IDs that are managed via PID file but not in DAEMON_COMMANDS
 // (e.g. photos-web, which is spawned by the install route with a custom cwd).
-const EXTERNAL_DAEMON_IDS = ["photos-web"] as const;
+const EXTERNAL_DAEMON_IDS = ["photos-web", "file-browser"] as const;
 type ExternalDaemonId = typeof EXTERNAL_DAEMON_IDS[number];
 
 function pidFile(id: DaemonId | ExternalDaemonId) {
@@ -26,14 +26,18 @@ function isAlive(pid: number): boolean {
   }
 }
 
-function isPortBound(port: number): Promise<boolean> {
+function tryHost(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = createConnection({ host: "127.0.0.1", port });
+    const socket = createConnection({ host, port });
     socket.setTimeout(300);
     socket.once("connect", () => { socket.destroy(); resolve(true); });
     socket.once("error", () => { socket.destroy(); resolve(false); });
     socket.once("timeout", () => { socket.destroy(); resolve(false); });
   });
+}
+
+function isPortBound(port: number): Promise<boolean> {
+  return tryHost("127.0.0.1", port).then((ok) => ok || tryHost("::1", port));
 }
 
 export async function GET(req: NextRequest) {
