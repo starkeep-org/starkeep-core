@@ -277,6 +277,7 @@ function PhotosWebSection() {
   const [deployError, setDeployError] = useState<string | null>(null);
   const [deploySuccess, setDeploySuccess] = useState(false);
   const [cloudDeployed, setCloudDeployed] = useState<boolean | null>(null);
+  const [cloudConfig, setCloudConfig] = useState<Record<string, unknown> | null>(null);
 
   const installLogEndRef = useRef<HTMLDivElement>(null);
   const deployLogEndRef = useRef<HTMLDivElement>(null);
@@ -286,8 +287,9 @@ function PhotosWebSection() {
     try {
       const res = await fetch(`/api/photos-web/deploy?path=${encodeURIComponent(p.trim())}`);
       if (res.ok) {
-        const data = await res.json() as { deployed: boolean };
+        const data = await res.json() as { deployed: boolean; photosCloudConfig: Record<string, unknown> | null };
         setCloudDeployed(data.deployed);
+        setCloudConfig(data.photosCloudConfig ?? null);
       }
     } catch {
       setCloudDeployed(null);
@@ -422,6 +424,11 @@ function PhotosWebSection() {
             setDeploySuccess(true);
             setCloudDeployed(true);
             if (result.photosCloudConfig) {
+              setCloudConfig(result.photosCloudConfig);
+              const webUrl = result.photosCloudConfig.photosWebUrl;
+              if (typeof webUrl === "string") {
+                setDeployLog((prev) => [...prev, `Remote app URL: ${webUrl}`]);
+              }
               // Re-install to update runtime config with new cloud URLs
               setDeployLog((prev) => [...prev, "Re-installing with updated cloud config..."]);
               const reinstall = await readInstallStream(path.trim(), (line) =>
@@ -429,6 +436,7 @@ function PhotosWebSection() {
               );
               setPort(reinstall.port);
               setRunning(true);
+              setDeployLog((prev) => [...prev, `Local dev server: http://localhost:${reinstall.port}`]);
             }
           } else if (eventType === "error") {
             throw new Error(JSON.parse(dataLine) as string);
@@ -503,6 +511,11 @@ function PhotosWebSection() {
       <Group gap="xs" mb="xs">
         <Text fw={500} size="sm">Cloud</Text>
         {cloudDeployed === true && <Badge color="teal" variant="light" size="sm">Deployed</Badge>}
+        {cloudDeployed === true && cloudConfig && typeof cloudConfig.photosWebUrl === "string" && (
+          <Anchor href={cloudConfig.photosWebUrl} target="_blank" size="sm">
+            {cloudConfig.photosWebUrl} ↗
+          </Anchor>
+        )}
       </Group>
       <Text c="dimmed" size="sm" mb="sm">
         Deploy photos-web infrastructure to AWS (thumbnail Lambda, static server Lambda,
