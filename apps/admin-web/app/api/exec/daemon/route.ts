@@ -6,8 +6,16 @@ import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "../../../../src/lib/e
 
 const PIDS_DIR = resolve(REPO_ROOT, ".pids");
 
-function pidFile(id: DaemonId) {
+// IDs managed outside DAEMON_COMMANDS (custom spawn, own cwd, etc.)
+const EXTERNAL_DAEMON_IDS = ["photos-web"] as const;
+type ExternalDaemonId = typeof EXTERNAL_DAEMON_IDS[number];
+
+function pidFile(id: DaemonId | ExternalDaemonId) {
   return resolve(PIDS_DIR, `${id}.pid`);
+}
+
+function metaFile(id: DaemonId | ExternalDaemonId) {
+  return resolve(PIDS_DIR, `${id}.meta.json`);
 }
 
 function isAlive(pid: number): boolean {
@@ -19,16 +27,43 @@ function isAlive(pid: number): boolean {
   }
 }
 
+function stopById(id: DaemonId | ExternalDaemonId): { stopped: boolean; error?: string } {
+  const pf = pidFile(id);
+  if (!existsSync(pf)) {
+    return { stopped: false, error: "Not running (no PID file)" };
+  }
+  const pid = parseInt(readFileSync(pf, "utf-8"), 10);
+  if (isAlive(pid)) process.kill(pid, "SIGTERM");
+  unlinkSync(pf);
+  const mf = metaFile(id);
+  if (existsSync(mf)) unlinkSync(mf);
+  return { stopped: true };
+}
+
 export async function POST(req: NextRequest) {
-  const body = await req.json() as { action: "start" | "stop"; id: DaemonId };
+  const body = await req.json() as { action: "start" | "stop"; id: DaemonId | ExternalDaemonId };
   const { action, id } = body;
 
-  if (!DAEMON_COMMANDS[id]) {
+  const isExternal = (EXTERNAL_DAEMON_IDS as readonly string[]).includes(id);
+  const isKnown = isExternal || !!DAEMON_COMMANDS[id as DaemonId];
+
+  if (!isKnown) {
     return NextResponse.json({ error: "Unknown daemon ID" }, { status: 400 });
   }
 
+  if (action === "stop") {
+    const result = stopById(id);
+    if (!result.stopped && result.error) {
+      return NextResponse.json({ error: result.error }, { status: 404 });
+    }
+    return NextResponse.json({ stopped: true });
+  }
+
   if (action === "start") {
-    const [cmd, ...args] = DAEMON_COMMANDS[id].args;
+    if (isExternal) {
+      return NextResponse.json({ error: "External daemons must be started via their own install route" }, { status: 400 });
+    }
+    const [cmd, ...args] = DAEMON_COMMANDS[id as DaemonId].args;
     const child = spawn(cmd, args, {
       detached: true,
       stdio: "ignore",
@@ -38,19 +73,6 @@ export async function POST(req: NextRequest) {
     mkdirSync(PIDS_DIR, { recursive: true });
     writeFileSync(pidFile(id), String(child.pid));
     return NextResponse.json({ pid: child.pid });
-  }
-
-  if (action === "stop") {
-    const pf = pidFile(id);
-    if (!existsSync(pf)) {
-      return NextResponse.json({ error: "Not running (no PID file)" }, { status: 404 });
-    }
-    const pid = parseInt(readFileSync(pf, "utf-8"), 10);
-    if (isAlive(pid)) {
-      process.kill(pid, "SIGTERM");
-    }
-    unlinkSync(pf);
-    return NextResponse.json({ stopped: true });
   }
 
   return NextResponse.json({ error: "Invalid action" }, { status: 400 });

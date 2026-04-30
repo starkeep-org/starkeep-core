@@ -38,6 +38,12 @@ function AppNavbar() {
       />
       <NavLink
         component={Link}
+        href="/apps"
+        label="Apps"
+        active={pathname === "/apps"}
+      />
+      <NavLink
+        component={Link}
         href="/settings"
         label="Settings"
         active={pathname === "/settings"}
