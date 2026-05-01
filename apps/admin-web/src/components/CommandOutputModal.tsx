@@ -10,9 +10,10 @@ interface Props {
   commandId: string | null;
   credentials?: STSCredentials & { region: string };
   title: string;
+  onSuccess?: () => void;
 }
 
-export function CommandOutputModal({ opened, onClose, commandId, credentials, title }: Props) {
+export function CommandOutputModal({ opened, onClose, commandId, credentials, title, onSuccess }: Props) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -60,7 +61,12 @@ export function CommandOutputModal({ opened, onClose, commandId, credentials, ti
             }
             if (eventType === "done") {
               const exitCode = parseInt(data, 10);
-              setStatus(exitCode === 0 ? "success" : "failure");
+              if (exitCode === 0) {
+                setStatus("success");
+                onSuccess?.();
+              } else {
+                setStatus("failure");
+              }
             } else if (eventType === "error") {
               try { setLines((l) => [...l, `Error: ${JSON.parse(data) as string}`]); } catch { setLines((l) => [...l, `Error: ${data}`]); }
               setStatus("failure");

@@ -76,25 +76,6 @@ export default $config({
       },
     }) : undefined;
 
-    const bootstrapWeb = new sst.aws.StaticSite("BootstrapWeb", {
-      path: "../../apps/bootstrap-web",
-      build: {
-        command: "pnpm build",
-        output: "dist",
-      },
-      environment: {
-        VITE_ADMIN_WEB_URL: process.env.ADMIN_WEB_URL ?? "",
-      },
-      ...(process.env.BOOTSTRAP_DOMAIN_NAME
-        ? {
-            domain: {
-              name: process.env.BOOTSTRAP_DOMAIN_NAME,
-              dns: sst.aws.dns({ zone: process.env.ROUTE53_ZONE_ID }),
-            },
-          }
-        : {}),
-    });
-
     const adminWeb = new sst.aws.Nextjs("AdminWeb", {
       path: "../../apps/admin-web",
       link: [artifactsBucket],
@@ -116,7 +97,6 @@ export default $config({
 
     return {
       adminWebUrl: adminWeb.url,
-      bootstrapWebUrl: bootstrapWeb.url,
       artifactsBucket: artifactsBucket.name,
       databaseUrl: databaseUrl,
       accountId: awsAccountId.accountId,

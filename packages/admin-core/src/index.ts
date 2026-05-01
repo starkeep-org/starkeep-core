@@ -5,7 +5,6 @@ export * from "./plans.js";
 export * from "./template-generator.js";
 export * from "./bootstrap-template.js";
 export * from "./quick-create.js";
-export * from "./self-hosted-bootstrap-template.js";
 export {
   generateSelfHostedPermissionsTemplate,
   type GenerateSelfHostedPermissionsTemplateInput,
@@ -17,3 +16,9 @@ export {
   type CfnValue,
   type StatementMeta,
 } from "./self-hosted-deploy-policy.js";
+export {
+  generateSelfHostedBootstrapTemplate,
+  getCloudFormationCreateStackUrl,
+  getBootstrapStackOutputsUrl,
+  type GenerateSelfHostedBootstrapTemplateInput,
+} from "./self-hosted-bootstrap-template.js";
