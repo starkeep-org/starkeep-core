@@ -23,6 +23,8 @@ import {
 } from "@mantine/core";
 import {
   getBootstrapStackOutputsUrl,
+  generateSelfHostedBootstrapTemplate,
+  getCloudFormationCreateStackUrl,
   generateSelfHostedPermissionsTemplate,
 } from "@starkeep/admin-core";
 import {
@@ -46,6 +48,7 @@ import {
   isSuccess,
 } from "../../src/lib/permissions-stack-client";
 import { ModeSelector, type SetupMode } from "../../src/components/mode-selector";
+import { CommandOutputModal } from "../../src/components/CommandOutputModal";
 
 function parseSstOutputs(raw: string): Record<string, string> {
   const clean = raw.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
@@ -499,6 +502,7 @@ function Step5DeployInfra({
   const [manualApi, setManualApi] = useState("");
   const [readConfigError, setReadConfigError] = useState<string | null>(null);
   const [readingConfig, setReadingConfig] = useState(false);
+  const [localDeployOpen, setLocalDeployOpen] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -635,25 +639,19 @@ function Step5DeployInfra({
     setReadingConfig(true);
     setReadConfigError(null);
     try {
-      const res = await fetch("http://127.0.0.1:9820/config", {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (!res.ok) throw new Error("Local server returned an error");
+      const res = await fetch("/api/exec/deploy-outputs");
       const data = (await res.json()) as {
         s3Bucket?: string;
         s3Region?: string;
         auroraEndpoint?: string;
         apiGatewayUrl?: string;
+        error?: string;
       };
-      if (!data.s3Bucket || !data.auroraEndpoint) {
-        throw new Error(
-          "Config is missing s3Bucket or auroraEndpoint — has local:deploy completed successfully?",
-        );
-      }
+      if (!res.ok) throw new Error(data.error ?? "Failed to read deploy outputs");
       onSuccess({
-        s3Bucket: data.s3Bucket,
+        s3Bucket: data.s3Bucket!,
         s3Region: data.s3Region ?? region,
-        auroraEndpoint: data.auroraEndpoint,
+        auroraEndpoint: data.auroraEndpoint!,
         apiGatewayUrl: data.apiGatewayUrl,
       });
     } catch (err) {
@@ -754,30 +752,16 @@ function Step5DeployInfra({
 
       {error && <Alert color="red" title="Deployment failed">{error}</Alert>}
 
-      <Divider label="Deploy from local CLI (recommended)" labelPosition="left" />
-      <Alert color="blue" variant="light">
-        Deploying from your local machine using SST is recommended. Download the CLI
-        config and move it into the root of the starkeep repo, then run <Code>pnpm run local:deploy</Code> from <Code>infra/user-data/</Code> in
-        your terminal.
-      </Alert>
+      <Divider label="Deploy from local (recommended)" labelPosition="left" />
       <Button
         variant="filled"
         disabled={deploying}
-        onClick={() =>
-          downloadCliConfig({
-            region,
-            stage: stackPrefix,
-            userPoolId: cognitoConfig.userPoolId,
-            userPoolClientId: cognitoConfig.userPoolClientId,
-            identityPoolId: cognitoConfig.identityPoolId,
-          })
-        }
+        onClick={() => setLocalDeployOpen(true)}
       >
-        Download CLI config (starkeep-config.json)
+        Deploy from local
       </Button>
       <Text size="sm" c="dimmed">
-        Once the deploy finishes, click below — the admin reads the updated{" "}
-        <Code>starkeep-config.json</Code> automatically from the local server.
+        The deploy runs on this machine — output streams here. The wizard advances automatically on success.
       </Text>
       {readConfigError && (
         <Alert color="red" title="Could not read config">
@@ -786,14 +770,22 @@ function Step5DeployInfra({
       )}
       <Group justify="flex-end">
         <Button
-          variant="light"
+          variant="subtle"
           loading={readingConfig}
           disabled={deploying}
           onClick={handleReadFromConfig}
         >
-          Deployment completed successfully
+          Already deployed
         </Button>
       </Group>
+      <CommandOutputModal
+        opened={localDeployOpen}
+        onClose={() => setLocalDeployOpen(false)}
+        commandId="local-deploy"
+        credentials={{ ...credentials, region }}
+        title="Deploy from local"
+        onSuccess={handleReadFromConfig}
+      />
 
       <Divider
         label={
@@ -838,6 +830,118 @@ function Step5DeployInfra({
       <Group justify="space-between" mt="md">
         <Button variant="subtle" onClick={onBack} disabled={deploying}>
           Back
+        </Button>
+      </Group>
+    </Stack>
+  );
+}
+
+function BootstrapStep({
+  region,
+  onRegionChange,
+  stackPrefix,
+  onStackPrefixChange,
+  onContinue,
+  onBack,
+}: {
+  region: string;
+  onRegionChange: (v: string) => void;
+  stackPrefix: string;
+  onStackPrefixChange: (v: string) => void;
+  onContinue: () => void;
+  onBack: () => void;
+}) {
+  const [downloaded, setDownloaded] = useState(false);
+
+  const handleDownload = () => {
+    const yaml = generateSelfHostedBootstrapTemplate({ stackPrefix });
+    const blob = new Blob([yaml], { type: "text/yaml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "starkeep-bootstrap-template.yaml";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setDownloaded(true);
+  };
+
+  return (
+    <Stack gap="md">
+      <Text>
+        Deploy the Starkeep bootstrap CloudFormation stack. This creates Cognito authentication,
+        IAM roles, an S3 artifacts bucket, and a CodeBuild deploy project in your AWS account.
+      </Text>
+
+      <TextInput
+        label="AWS Region"
+        description="The AWS region where your Starkeep infrastructure will be deployed."
+        placeholder="us-east-1"
+        value={region}
+        onChange={(e) => onRegionChange(e.currentTarget.value)}
+      />
+
+      <TextInput
+        label="Stack prefix"
+        description="A short name used to prefix all Starkeep resources. Lowercase letters, numbers, and hyphens only."
+        placeholder="starkeep"
+        value={stackPrefix}
+        onChange={(e) => onStackPrefixChange(e.currentTarget.value.toLowerCase())}
+      />
+
+      <Paper p="md" withBorder>
+        <Stack gap="sm">
+          <Text fw={500}>Step 1 — Download the bootstrap template</Text>
+          <Text size="sm" c="dimmed">
+            This generates a CloudFormation YAML template and downloads it to your browser.
+          </Text>
+          <Button
+            variant="light"
+            onClick={handleDownload}
+            disabled={!stackPrefix || !region}
+          >
+            Download bootstrap template
+          </Button>
+          {downloaded && (
+            <Text size="sm" c="green">
+              Downloaded: <Code>starkeep-bootstrap-template.yaml</Code>
+            </Text>
+          )}
+        </Stack>
+      </Paper>
+
+      <Paper p="md" withBorder>
+        <Stack gap="sm">
+          <Text fw={500}>Step 2 — Deploy the stack in AWS CloudFormation</Text>
+          <Text size="sm" c="dimmed">
+            In the CloudFormation console, choose <strong>Upload a template file</strong> and upload
+            the file above. Name the stack{" "}
+            <Code>{stackPrefix ? `${stackPrefix}-bootstrap` : "starkeep-bootstrap"}</Code> and leave{" "}
+            <strong>StackPrefix</strong> as <Code>{stackPrefix || "starkeep"}</Code>. Wait for the
+            stack to reach <strong>CREATE_COMPLETE</strong> status.
+          </Text>
+          <Button
+            variant="light"
+            onClick={() => openUrl(getCloudFormationCreateStackUrl(region))}
+            disabled={!region}
+          >
+            Open CloudFormation console ({region || "select region first"})
+          </Button>
+        </Stack>
+      </Paper>
+
+      <Alert color="blue" variant="light">
+        Once the stack reaches <strong>CREATE_COMPLETE</strong>, click Continue to enter the stack
+        outputs and finish setting up your account.
+      </Alert>
+
+      <Group justify="space-between" mt="md">
+        <Button variant="subtle" onClick={onBack}>
+          Back
+        </Button>
+        <Button onClick={onContinue} disabled={!region || !stackPrefix}>
+          Stack is deployed — Continue
         </Button>
       </Group>
     </Stack>
@@ -987,7 +1091,10 @@ function CloudSetupPage() {
 
   const handleSelectMode = (selectedMode: SetupMode) => {
     setMode(selectedMode);
-    if (selectedMode === "resume") {
+    if (selectedMode === "fresh") {
+      setActive(0);
+      setSkipCreateAccount(false);
+    } else if (selectedMode === "resume") {
       setActive(localConfigPrefilled ? 1 : 0);
       setSkipCreateAccount(false);
     } else if (selectedMode === "signin") {
@@ -1078,6 +1185,31 @@ function CloudSetupPage() {
         </Group>
         <Paper p="xl" withBorder>
           <ModeSelector onSelect={handleSelectMode} />
+        </Paper>
+      </Container>
+    );
+  }
+
+  if (mode === "fresh") {
+    return (
+      <Container size="sm" py="xl">
+        <Group mb="lg" justify="space-between">
+          <Title order={2}>Starkeep Cloud Admin</Title>
+          <Badge variant="light" color="teal">Deploy bootstrap</Badge>
+        </Group>
+        <Paper p="xl" withBorder>
+          <BootstrapStep
+            region={region}
+            onRegionChange={setRegion}
+            stackPrefix={stackPrefix}
+            onStackPrefixChange={setStackPrefix}
+            onContinue={() => {
+              setMode("resume");
+              setActive(0);
+              setSkipCreateAccount(false);
+            }}
+            onBack={() => setMode(null)}
+          />
         </Paper>
       </Container>
     );

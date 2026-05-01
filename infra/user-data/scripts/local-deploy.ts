@@ -199,6 +199,7 @@ async function getSTSCredentials(
 const flags = process.argv.slice(2);
 const command = flags.find((a) => !a.startsWith("--"));
 const nonInteractive = flags.includes("--non-interactive");
+const noPhotos = flags.includes("--no-photos");
 
 if (command !== "deploy" && command !== "remove" && command !== "deploy-photos") {
   console.error("Usage: local-deploy.ts <deploy|remove|deploy-photos> [--non-interactive]");
@@ -388,6 +389,8 @@ if (command === "deploy-photos" || command === "deploy") {
       process.exit(1);
     }
     console.log("Skipping photos-web build — apiGatewayUrl not set in starkeep-config.json");
+  } else if (noPhotos) {
+    console.log("Skipping photos-web build (--no-photos)");
   } else {
     buildPhotosWeb(apiGatewayUrl);
   }
@@ -447,7 +450,7 @@ if (sstCommand === "deploy") {
 
   // On first deploy apiGatewayUrl wasn't available yet, so photos-web was skipped.
   // Now that we have it, build photos-web and re-deploy to upload the assets.
-  if (freshApiGatewayUrl) {
+  if (freshApiGatewayUrl && !noPhotos) {
     console.log("\napiGatewayUrl is now available — building photos-web and re-deploying...");
     buildPhotosWeb(freshApiGatewayUrl);
 

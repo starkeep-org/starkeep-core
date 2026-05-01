@@ -17,7 +17,7 @@ export const STREAM_COMMANDS: Record<StreamCommandId, { args: string[]; requires
     requiresCreds: false,
   },
   "local-deploy": {
-    args: ["pnpm", "--filter", "@starkeep/infra-user-data", "local:deploy", "--", "--non-interactive"],
+    args: ["pnpm", "--filter", "@starkeep/infra-user-data", "local:deploy", "--", "--non-interactive", "--no-photos"],
     requiresCreds: true,
   },
   "reset-cloud-data": {

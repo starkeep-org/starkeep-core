@@ -28,10 +28,22 @@ export function ModeSelector({ onSelect }: { onSelect: (mode: SetupMode) => void
   return (
     <Stack gap="lg">
       <Text>
-        Your Starkeep Cloud bootstrap stack is already deployed. Choose an option below to continue.
+        Set up Starkeep Cloud on your AWS account. Choose an option below.
       </Text>
 
       <Stack gap="sm">
+        <Paper p="md" withBorder style={{ cursor: "pointer" }} onClick={() => onSelect("fresh")}>
+          <Stack gap="xs">
+            <Text fw={600}>Deploy Bootstrap Stack</Text>
+            <Text size="sm" c="dimmed">
+              New here? Generate and deploy the CloudFormation bootstrap stack to your AWS account,
+              then continue with setup.
+            </Text>
+          </Stack>
+        </Paper>
+
+        <Divider label="Bootstrap stack already deployed" labelPosition="center" />
+
         <Paper p="md" withBorder style={{ cursor: "pointer" }} onClick={() => onSelect("resume")}>
           <Stack gap="xs">
             <Text fw={600}>Create Starkeep Cloud Admin Account</Text>
@@ -106,7 +118,7 @@ export function ModeSelector({ onSelect }: { onSelect: (mode: SetupMode) => void
                 from the S3 console.
               </Text>
               <Text size="sm">
-                4. Return to the bootstrap app to re-deploy the bootstrap stack, then come back here.
+                4. Return here and choose <strong>Deploy Bootstrap Stack</strong> to re-deploy, then continue.
               </Text>
             </Stack>
 
