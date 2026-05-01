@@ -11,9 +11,6 @@
 //   USER_POOL_CLIENT_ID — Cognito App Client ID for JWT authorizer
 //
 // Outputs: auroraHostname, bucketName, apiGatewayUrl, region
-//
-// Photos-specific infrastructure (thumbnail Lambda, static server) lives in
-// ~/projects/starkeep/photos/infra.
 export default $config({
   app(input) {
     return {

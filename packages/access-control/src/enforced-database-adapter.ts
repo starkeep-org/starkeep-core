@@ -15,7 +15,7 @@ import type { AccessControlEngine, EnforcedDatabaseAdapter, SubjectType } from "
 import { AccessDeniedError } from "./errors.js";
 
 /** Normalize an app ID to its private-type prefix form.
- *  "@starkeep/photos" → "starkeep-photos" */
+ *  "@starkeep/notes" → "starkeep-notes" */
 function normalizeAppId(appId: string): string {
   return appId.replace(/^@/, "").replace(/\//g, "-");
 }

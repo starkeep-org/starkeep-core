@@ -317,7 +317,7 @@ describe("AccessControl", () => {
         databaseAdapter,
         accessControlEngine: engine,
         subjectType: "app",
-        subjectId: "@starkeep/photos",
+        subjectId: "@starkeep/notes",
       });
 
       await expect(enforcedAdapter.put(record)).rejects.toThrow(AccessDeniedError);
@@ -328,10 +328,10 @@ describe("AccessControl", () => {
       const record = createDataRecord({ type: "starkeep-tasks:private:settings", ownerId }, clock);
       await databaseAdapter.put(record);
 
-      // Grant a wildcard policy to @starkeep/photos — structural rule must still block.
+      // Grant a wildcard policy to @starkeep/notes — structural rule must still block.
       await engine.createPolicy({
         subjectType: "app",
-        subjectId: "@starkeep/photos",
+        subjectId: "@starkeep/notes",
         resourceType: "wildcard",
         resourceId: "*",
         permissions: ["read", "write", "delete"],
@@ -341,15 +341,15 @@ describe("AccessControl", () => {
         databaseAdapter,
         accessControlEngine: engine,
         subjectType: "app",
-        subjectId: "@starkeep/photos",
+        subjectId: "@starkeep/notes",
       });
 
       await expect(enforcedAdapter.get(record.id)).rejects.toThrow(AccessDeniedError);
     });
 
     it("should allow access to own private types without any policy", async () => {
-      // "starkeep-photos" is the normalized form of "@starkeep/photos".
-      const record = createDataRecord({ type: "starkeep-photos:private:settings", ownerId }, clock);
+      // "starkeep-notes" is the normalized form of "@starkeep/notes".
+      const record = createDataRecord({ type: "starkeep-notes:private:settings", ownerId }, clock);
       await databaseAdapter.put(record);
 
       // No policies created — structural rule alone should permit access.
@@ -357,7 +357,7 @@ describe("AccessControl", () => {
         databaseAdapter,
         accessControlEngine: engine,
         subjectType: "app",
-        subjectId: "@starkeep/photos",
+        subjectId: "@starkeep/notes",
       });
 
       const retrieved = await enforcedAdapter.get(record.id);
