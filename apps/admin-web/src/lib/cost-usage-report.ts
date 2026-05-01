@@ -176,11 +176,45 @@ async function decompressGzip(compressed: Uint8Array): Promise<string> {
   return new TextDecoder().decode(merged);
 }
 
+// RFC 4180 CSV field parser — handles quoted fields containing commas and escaped quotes.
+function parseRow(line: string): string[] {
+  const fields: string[] = [];
+  let i = 0;
+  while (i <= line.length) {
+    if (line[i] === '"') {
+      i++;
+      let value = "";
+      while (i < line.length) {
+        if (line[i] === '"' && line[i + 1] === '"') {
+          value += '"';
+          i += 2;
+        } else if (line[i] === '"') {
+          i++;
+          break;
+        } else {
+          value += line[i++];
+        }
+      }
+      fields.push(value);
+      if (line[i] === ",") i++;
+    } else {
+      const end = line.indexOf(",", i);
+      if (end === -1) {
+        fields.push(line.slice(i).trim());
+        break;
+      }
+      fields.push(line.slice(i, end).trim());
+      i = end + 1;
+    }
+  }
+  return fields;
+}
+
 function parseCsvCosts(csv: string): Record<string, number> {
   const lines = csv.split("\n");
   if (lines.length < 2) return {};
 
-  const headers = lines[0]!.split(",").map((h) => h.replace(/"/g, "").trim());
+  const headers = parseRow(lines[0]!);
   const productCodeIdx = headers.indexOf("lineItem/ProductCode");
   const costIdx = headers.indexOf("lineItem/UnblendedCost");
   const typeIdx = headers.indexOf("lineItem/LineItemType");
@@ -191,7 +225,7 @@ function parseCsvCosts(csv: string): Record<string, number> {
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line?.trim()) continue;
-    const cols = line.split(",").map((c) => c.replace(/"/g, "").trim());
+    const cols = parseRow(line);
     if (typeIdx !== -1 && SKIP_LINE_ITEM_TYPES.has(cols[typeIdx] ?? "")) continue;
     const service = cols[productCodeIdx] ?? "";
     const amount = parseFloat(cols[costIdx] ?? "0");
