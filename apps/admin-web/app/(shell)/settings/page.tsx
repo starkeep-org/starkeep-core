@@ -11,7 +11,6 @@ import {
   Group,
   Button,
   Alert,
-  Loader,
   SegmentedControl,
   Textarea,
 } from "@mantine/core";
@@ -23,9 +22,9 @@ import {
   type CloudConfig,
   type CloudConfigExport,
 } from "../../../src/lib/cloud-config";
-import { refreshTokens, getIdentityPoolCredentials } from "../../../src/lib/cognito-auth";
-import { s3PutObject, s3GetObjectText } from "../../../src/lib/s3";
+import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "../../../src/lib/cognito-auth";
 import { LOCAL_URL } from "../../../src/lib/data-client";
+import { CommandOutputModal } from "../../../src/components/CommandOutputModal";
 
 export default function SettingsPage() {
   return (
@@ -332,8 +331,6 @@ function ResetSection() {
   );
 }
 
-const POLL_INTERVAL_MS = 5000;
-
 function parseSstOutputs(raw: string): Record<string, string> {
   const clean = raw.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
   const result: Record<string, string> = {};
@@ -349,118 +346,44 @@ function parseSstOutputs(raw: string): Record<string, string> {
 }
 
 function RedeploySection() {
-  const [deploying, setDeploying] = useState(false);
-  const [phase, setPhase] = useState<string | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [credentials, setCredentials] = useState<(STSCredentials & { region: string }) | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
-  const handleRedeploy = useCallback(async () => {
-    setDeploying(true);
+  const handleOpen = useCallback(async () => {
     setError(null);
     setSuccess(false);
-    setPhase("Reading configuration…");
-
     try {
       const config = await readCloudConfig();
       if (!config) throw new Error("No cloud configuration found. Complete the setup wizard first.");
-
-      const { stackPrefix, cognitoConfig, s3Region: region } = config;
-
-      setPhase("Refreshing credentials…");
-      const tokens = await refreshTokens(cognitoConfig, config.cognitoRefreshToken);
-      const creds = await getIdentityPoolCredentials(cognitoConfig, tokens.idToken);
-
-      const awsCreds = {
-        accessKeyId: creds.accessKeyId,
-        secretAccessKey: creds.secretAccessKey,
-        sessionToken: creds.sessionToken,
-      };
-
-      const { CodeBuildClient, StartBuildCommand, BatchGetBuildsCommand } =
-        await import("@aws-sdk/client-codebuild");
-      const cb = new CodeBuildClient({ region, credentials: awsCreds });
-
-      const artifactsBucket = `${stackPrefix}-deploy-artifacts`;
-      const sourceKey = `${stackPrefix}-user-data-source.zip`;
-
-      setPhase("Uploading deployment source to S3…");
-      const zipResponse = await fetch("/user-data-source.zip");
-      if (!zipResponse.ok)
-        throw new Error(
-          "Could not load user-data-source.zip — run pnpm build:artifact first",
-        );
-      const zipBytes = await zipResponse.arrayBuffer();
-      const zipArray = new Uint8Array(zipBytes);
-      let binary = "";
-      const chunkSize = 8192;
-      for (let i = 0; i < zipArray.length; i += chunkSize) {
-        binary += String.fromCharCode(...zipArray.subarray(i, i + chunkSize));
-      }
-      const bodyBase64 = btoa(binary);
-      await s3PutObject(artifactsBucket, sourceKey, bodyBase64, "application/zip", creds, region);
-
-      setPhase("Starting CodeBuild deployment…");
-      const startResult = await cb.send(
-        new StartBuildCommand({
-          projectName: `${stackPrefix}-deploy`,
-          environmentVariablesOverride: [
-            { name: "STAGE", value: stackPrefix, type: "PLAINTEXT" },
-            { name: "USER_POOL_ID", value: cognitoConfig.userPoolId, type: "PLAINTEXT" },
-            { name: "USER_POOL_CLIENT_ID", value: cognitoConfig.userPoolClientId, type: "PLAINTEXT" },
-          ],
-        }),
-      );
-
-      const buildId = startResult.build?.id;
-      if (!buildId) throw new Error("CodeBuild did not return a build ID");
-
-      let buildStatus = "IN_PROGRESS";
-      while (buildStatus === "IN_PROGRESS") {
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-        const pollResult = await cb.send(new BatchGetBuildsCommand({ ids: [buildId] }));
-        const build = pollResult.builds?.[0];
-        if (!build) throw new Error("Could not retrieve build status");
-        buildStatus = build.buildStatus ?? "IN_PROGRESS";
-        const currentPhase = build.currentPhase ?? "";
-        setPhase(
-          `CodeBuild: ${currentPhase} (${buildStatus === "IN_PROGRESS" ? "running" : buildStatus})`,
-        );
-      }
-
-      if (buildStatus !== "SUCCEEDED") {
-        throw new Error(
-          `CodeBuild deployment ${buildStatus.toLowerCase()}. Check the AWS CodeBuild console for details.`,
-        );
-      }
-
-      setPhase("Reading deployment outputs…");
-      const rawOutput = await s3GetObjectText(
-        artifactsBucket,
-        `${stackPrefix}-raw-output.txt`,
-        creds,
-        region,
-      );
-
-      const outputs = parseSstOutputs(rawOutput);
-      if (!outputs["bucketName"] || !outputs["auroraHostname"]) {
-        throw new Error(
-          `Deployment outputs missing expected values. Parsed: ${JSON.stringify(outputs)}`,
-        );
-      }
-
-      await writeCloudConfig({
-        ...config,
-        s3Bucket: outputs["bucketName"],
-        auroraEndpoint: outputs["auroraHostname"],
-        apiGatewayUrl: outputs["apiGatewayUrl"] ?? config.apiGatewayUrl,
-      });
-
-      setSuccess(true);
-      setPhase(null);
+      const tokens = await refreshTokens(config.cognitoConfig, config.cognitoRefreshToken);
+      const creds = await getIdentityPoolCredentials(config.cognitoConfig, tokens.idToken);
+      setCredentials({ ...creds, region: config.s3Region });
+      setModalOpen(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDeploying(false);
+    }
+  }, []);
+
+  const handleSuccess = useCallback(async () => {
+    setModalOpen(false);
+    try {
+      const config = await readCloudConfig();
+      if (!config) return;
+      const res = await fetch("/api/exec/deploy-outputs");
+      const data = await res.json() as { s3Bucket?: string; s3Region?: string; auroraEndpoint?: string; apiGatewayUrl?: string; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Failed to read deploy outputs");
+      await writeCloudConfig({
+        ...config,
+        s3Bucket: data.s3Bucket ?? config.s3Bucket,
+        s3Region: data.s3Region ?? config.s3Region,
+        auroraEndpoint: data.auroraEndpoint ?? config.auroraEndpoint,
+        apiGatewayUrl: data.apiGatewayUrl ?? config.apiGatewayUrl,
+      });
+      setSuccess(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   }, []);
 
@@ -481,21 +404,21 @@ function RedeploySection() {
             Infrastructure redeployed and cloud config updated.
           </Alert>
         )}
-        {deploying && phase && (
-          <Group gap="sm">
-            <Loader size="xs" />
-            <Text size="sm" c="dimmed">
-              {phase}
-            </Text>
-          </Group>
-        )}
-
         <Group>
-          <Button onClick={handleRedeploy} loading={deploying} color="blue">
+          <Button onClick={handleOpen} color="blue">
             Redeploy Infrastructure
           </Button>
         </Group>
       </Stack>
+
+      <CommandOutputModal
+        opened={modalOpen}
+        onClose={() => setModalOpen(false)}
+        commandId="local-deploy"
+        credentials={credentials ?? undefined}
+        title="Redeploy Infrastructure"
+        onSuccess={handleSuccess}
+      />
     </Paper>
   );
 }

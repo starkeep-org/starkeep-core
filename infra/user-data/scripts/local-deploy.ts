@@ -11,8 +11,8 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { cpSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
-import { extname, join, resolve, dirname } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
@@ -40,7 +40,6 @@ interface StarkeepConfig {
   userPoolId: string;
   userPoolClientId: string;
   identityPoolId: string;
-  // Added after first backend deploy — needed to build photos-web
   apiGatewayUrl?: string;
 }
 
@@ -51,13 +50,11 @@ const CONFIG_PATH = resolve(REPO_ROOT, "starkeep-config.json");
 const SST_OUTPUTS_PATH = resolve(INFRA_DIR, ".sst", "outputs.json");
 
 function loadConfig(): StarkeepConfig {
-  const configPath = CONFIG_PATH;
-
   let raw: string;
   try {
-    raw = readFileSync(configPath, "utf-8");
+    raw = readFileSync(CONFIG_PATH, "utf-8");
   } catch {
-    console.error(`Error: starkeep-config.json not found at ${configPath}`);
+    console.error(`Error: starkeep-config.json not found at ${CONFIG_PATH}`);
     console.error(
       "Generate it from admin-web using the \"Download CLI config\" button after cloud setup.",
     );
@@ -81,7 +78,6 @@ function prompt(question: string, hidden = false): Promise<string> {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
 
     if (hidden) {
-      // Write the question directly; suppress echoing by not using rl.question
       process.stdout.write(question);
       process.stdin.setRawMode?.(true);
       let value = "";
@@ -89,14 +85,14 @@ function prompt(question: string, hidden = false): Promise<string> {
       process.stdin.setEncoding("utf8");
 
       const onData = (char: string) => {
-        if (char === "\n" || char === "\r" || char === "") {
+        if (char === "\n" || char === "\r" || char === "") {
           process.stdin.setRawMode?.(false);
           process.stdin.pause();
           process.stdin.removeListener("data", onData);
           process.stdout.write("\n");
           rl.close();
           resolve(value);
-        } else if (char === "" || char === "\b") {
+        } else if (char === "" || char === "\b") {
           value = value.slice(0, -1);
         } else {
           value += char;
@@ -113,7 +109,7 @@ function prompt(question: string, hidden = false): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Cognito auth (mirrors apps/admin-web/src/lib/cognito-auth.ts)
+// Cognito auth
 // ---------------------------------------------------------------------------
 
 async function authenticate(
@@ -199,10 +195,9 @@ async function getSTSCredentials(
 const flags = process.argv.slice(2);
 const command = flags.find((a) => !a.startsWith("--"));
 const nonInteractive = flags.includes("--non-interactive");
-const noPhotos = flags.includes("--no-photos");
 
-if (command !== "deploy" && command !== "remove" && command !== "deploy-photos") {
-  console.error("Usage: local-deploy.ts <deploy|remove|deploy-photos> [--non-interactive]");
+if (command !== "deploy" && command !== "remove") {
+  console.error("Usage: local-deploy.ts <deploy|remove> [--non-interactive]");
   process.exit(1);
 }
 
@@ -244,12 +239,8 @@ if (nonInteractive) {
   }
 }
 
-// Preflight: verify the deploy-permissions stack exists. The bootstrap stack
-// only grants the role permission to manage the permissions stack itself —
-// without the permissions stack, sst deploy fails with cryptic AccessDenied
-// errors (ecr:CreateRepository, dsql:CreateCluster, etc.). The fix is one
-// click in admin-web; we surface that here so it's not a debugging mystery.
-if (command === "deploy" || command === "deploy-photos") {
+// Preflight: verify the deploy-permissions stack exists.
+if (command === "deploy") {
   const permissionsStackName = `${config.stage}-deploy-permissions`;
   console.log(`Checking deploy-permissions stack (${permissionsStackName})...`);
   const cfn = new CloudFormationClient({ region: config.region, credentials: creds });
@@ -290,82 +281,7 @@ if (command === "deploy" || command === "deploy-photos") {
     );
     process.exit(1);
   }
-}
 
-const PHOTOS_WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "apps", "photos-web");
-const WEB_ASSETS_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "web-assets.json");
-
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".map": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml; charset=utf-8",
-  ".txt": "text/plain; charset=utf-8",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".ico": "image/x-icon",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-  ".eot": "application/vnd.ms-fontobject",
-};
-const TEXT_EXTS = new Set([".html", ".js", ".css", ".json", ".map", ".svg", ".txt"]);
-
-function walkDir(dir: string): string[] {
-  const results: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) results.push(...walkDir(full));
-    else results.push(full);
-  }
-  return results;
-}
-
-function buildPhotosWeb(apiGatewayUrl: string): void {
-  console.log("\nBuilding photos-web static export...");
-  const photosResult = spawnSync("pnpm", ["build"], {
-    stdio: "inherit",
-    cwd: PHOTOS_WEB_DIR,
-    env: {
-      ...process.env,
-      NEXT_PUBLIC_FORCE_REMOTE: "true",
-      NEXT_PUBLIC_API_GATEWAY_URL: apiGatewayUrl,
-      NEXT_PUBLIC_COGNITO_REGION: config.region,
-      NEXT_PUBLIC_COGNITO_USER_POOL_ID: config.userPoolId,
-      NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID: config.userPoolClientId,
-    },
-  });
-  if (photosResult.status !== 0) {
-    console.error("photos-web build failed. Aborting deploy.");
-    process.exit(photosResult.status ?? 1);
-  }
-  console.log("photos-web build complete.");
-
-  // Embed all static files into src/web-assets.json so esbuild bundles them
-  // into the Lambda directly — avoids SST copyFiles directory issues.
-  const outDir = resolve(PHOTOS_WEB_DIR, "out");
-  const assets: Record<string, { content: string; isBase64: boolean; contentType: string }> = {};
-  for (const absPath of walkDir(outDir)) {
-    const relPath = absPath.slice(outDir.length).replace(/\\/g, "/");
-    const ext = extname(absPath).toLowerCase();
-    const isText = TEXT_EXTS.has(ext);
-    const buf = readFileSync(absPath);
-    assets[relPath] = {
-      content: isText ? buf.toString("utf-8") : buf.toString("base64"),
-      isBase64: !isText,
-      contentType: MIME[ext] ?? "application/octet-stream",
-    };
-  }
-  writeFileSync(WEB_ASSETS_PATH, JSON.stringify(assets));
-  console.log(`Generated web-assets.json (${Object.keys(assets).length} files)`);
-}
-
-if (command === "deploy") {
   console.log("Building workspace packages...");
   const buildResult = spawnSync("pnpm", ["--filter", "@starkeep/storage-adapter", "--filter", "@starkeep/storage-aurora-dsql", "build"], {
     stdio: "inherit",
@@ -377,31 +293,11 @@ if (command === "deploy") {
   }
 }
 
-if (command === "deploy-photos" || command === "deploy") {
-  const apiGatewayUrl = config.apiGatewayUrl;
-  if (!apiGatewayUrl) {
-    if (command === "deploy-photos") {
-      console.error(
-        'Error: apiGatewayUrl is missing from starkeep-config.json.\n' +
-        'Add it after your first backend deploy:\n' +
-        '  "apiGatewayUrl": "https://xxx.execute-api.us-east-1.amazonaws.com/"',
-      );
-      process.exit(1);
-    }
-    console.log("Skipping photos-web build — apiGatewayUrl not set in starkeep-config.json");
-  } else if (noPhotos) {
-    console.log("Skipping photos-web build (--no-photos)");
-  } else {
-    buildPhotosWeb(apiGatewayUrl);
-  }
-}
-
-const sstCommand = command === "deploy-photos" ? "deploy" : command;
-console.log(`\nRunning: sst ${sstCommand} --stage ${config.stage}\n`);
+console.log(`\nRunning: sst ${command} --stage ${config.stage}\n`);
 
 const result = spawnSync(
   "node",
-  ["./node_modules/sst/bin/sst.mjs", sstCommand, "--stage", config.stage],
+  ["./node_modules/sst/bin/sst.mjs", command, "--stage", config.stage],
   {
     stdio: "inherit",
     env: {
@@ -420,8 +316,7 @@ if (result.status !== 0) {
   process.exit(result.status ?? 1);
 }
 
-if (sstCommand === "deploy") {
-  let freshApiGatewayUrl: string | undefined;
+if (command === "deploy") {
   try {
     const outputs = JSON.parse(readFileSync(SST_OUTPUTS_PATH, "utf-8")) as Record<string, string>;
     const existing = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as Record<string, unknown>;
@@ -430,50 +325,16 @@ if (sstCommand === "deploy") {
     if (outputs.region) updated.s3Region = outputs.region;
     if (outputs.apiGatewayUrl) updated.apiGatewayUrl = outputs.apiGatewayUrl;
     if (outputs.auroraHostname) updated.auroraEndpoint = outputs.auroraHostname;
-    if (outputs.photosWebUrl) updated.photosWebUrl = outputs.photosWebUrl;
     writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
     console.log("\nUpdated starkeep-config.json with deploy outputs:");
     if (outputs.bucketName) console.log(`  s3Bucket       : ${outputs.bucketName}`);
     if (outputs.apiGatewayUrl) console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
     if (outputs.auroraHostname) console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);
-    if (outputs.photosWebUrl) console.log(`  photosWebUrl   : ${outputs.photosWebUrl}`);
-    // If apiGatewayUrl was missing before this deploy, we now have it for the first time.
-    if (!config.apiGatewayUrl && outputs.apiGatewayUrl) {
-      freshApiGatewayUrl = outputs.apiGatewayUrl;
-    }
   } catch (err) {
     console.warn(
       "Warning: could not update starkeep-config.json with deploy outputs:",
       err instanceof Error ? err.message : String(err),
     );
-  }
-
-  // On first deploy apiGatewayUrl wasn't available yet, so photos-web was skipped.
-  // Now that we have it, build photos-web and re-deploy to upload the assets.
-  if (freshApiGatewayUrl && !noPhotos) {
-    console.log("\napiGatewayUrl is now available — building photos-web and re-deploying...");
-    buildPhotosWeb(freshApiGatewayUrl);
-
-    console.log(`\nRe-deploying with photos-web assets: sst deploy --stage ${config.stage}\n`);
-    const redeployResult = spawnSync(
-      "node",
-      ["./node_modules/sst/bin/sst.mjs", "deploy", "--stage", config.stage],
-      {
-        stdio: "inherit",
-        env: {
-          ...process.env,
-          AWS_ACCESS_KEY_ID: creds.accessKeyId,
-          AWS_SECRET_ACCESS_KEY: creds.secretAccessKey,
-          AWS_SESSION_TOKEN: creds.sessionToken,
-          AWS_REGION: config.region,
-          USER_POOL_ID: config.userPoolId,
-          USER_POOL_CLIENT_ID: config.userPoolClientId,
-        },
-      },
-    );
-    if (redeployResult.status !== 0) {
-      process.exit(redeployResult.status ?? 1);
-    }
   }
 }
 
