@@ -318,7 +318,7 @@ export const statementMetadata: Record<string, StatementMeta> = {
   },
   LambdaDeploy: {
     label: "Lambda function lifecycle",
-    reason: "Create, update, and delete user-data Lambda functions (including function URL config for the photos-web static server).",
+    reason: "Create, update, and delete user-data Lambda functions (including function URL config for app static servers).",
     requiredBy: ["user-data:lambda"],
   },
   LambdaListGlobal: {

@@ -15,7 +15,7 @@ describe("createApiRouter", () => {
   it("should register and resolve endpoints", () => {
     const router = createApiRouter();
     const endpoint: ApiEndpointDefinition = {
-      namespace: "@starkeep/photos",
+      namespace: "@starkeep/notes",
       version: "v1",
       path: "albums/list",
       method: "GET",
@@ -25,7 +25,7 @@ describe("createApiRouter", () => {
     router.register(endpoint);
 
     const resolved = router.resolve(
-      "@starkeep/photos",
+      "@starkeep/notes",
       "v1",
       "albums/list",
       "GET",
@@ -37,7 +37,7 @@ describe("createApiRouter", () => {
     const router = createApiRouter();
 
     const resolved = router.resolve(
-      "@starkeep/photos",
+      "@starkeep/notes",
       "v1",
       "nonexistent",
       "GET",
@@ -48,7 +48,7 @@ describe("createApiRouter", () => {
   it("should throw on duplicate registration", () => {
     const router = createApiRouter();
     const endpoint: ApiEndpointDefinition = {
-      namespace: "@starkeep/photos",
+      namespace: "@starkeep/notes",
       version: "v1",
       path: "albums/list",
       method: "GET",
@@ -127,7 +127,7 @@ describe("createSharedSpaceApi", () => {
     const { api } = createTestApi();
 
     api.router.register({
-      namespace: "@test/photos",
+      namespace: "@test/notes",
       version: "v1",
       path: "albums",
       method: "GET",
@@ -138,7 +138,7 @@ describe("createSharedSpaceApi", () => {
     });
 
     const request: ApiRequest = {
-      path: "@test/photos:v1/albums",
+      path: "@test/notes:v1/albums",
       method: "GET",
       subject: { subjectType: "user", subjectId: "u1" },
     };
@@ -152,7 +152,7 @@ describe("createSharedSpaceApi", () => {
     const { api } = createTestApi();
 
     const request: ApiRequest = {
-      path: "@test/photos:v1/nonexistent",
+      path: "@test/notes:v1/nonexistent",
       method: "GET",
       subject: { subjectType: "user", subjectId: "u1" },
     };
@@ -179,7 +179,7 @@ describe("createSharedSpaceApi", () => {
     const { api } = createTestApi();
 
     api.router.register({
-      namespace: "@test/photos",
+      namespace: "@test/notes",
       version: "v1",
       path: "error",
       method: "GET",
@@ -189,7 +189,7 @@ describe("createSharedSpaceApi", () => {
     });
 
     const request: ApiRequest = {
-      path: "@test/photos:v1/error",
+      path: "@test/notes:v1/error",
       method: "GET",
       subject: { subjectType: "user", subjectId: "u1" },
     };

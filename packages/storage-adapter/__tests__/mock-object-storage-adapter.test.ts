@@ -73,12 +73,12 @@ describe("MockObjectStorageAdapter", () => {
 
   describe("list", () => {
     it("should list keys with prefix", async () => {
-      await adapter.put("photos/a.jpg", Buffer.from(""));
-      await adapter.put("photos/b.jpg", Buffer.from(""));
+      await adapter.put("notes/a.jpg", Buffer.from(""));
+      await adapter.put("notes/b.jpg", Buffer.from(""));
       await adapter.put("docs/c.txt", Buffer.from(""));
 
-      const result = await adapter.list("photos/");
-      expect(result.keys).toEqual(["photos/a.jpg", "photos/b.jpg"]);
+      const result = await adapter.list("notes/");
+      expect(result.keys).toEqual(["notes/a.jpg", "notes/b.jpg"]);
       expect(result.hasMore).toBe(false);
     });
 
