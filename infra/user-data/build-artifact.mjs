@@ -30,7 +30,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const infraDir = __dirname;
 const repoRoot = resolve(infraDir, "../..");
 const wsDir = join(infraDir, ".ws");
-const outputZip = join(repoRoot, "apps/admin-desktop/public/user-data-source.zip");
+const outputZip = join(repoRoot, "apps/admin-web/public/user-data-source.zip");
 
 // Workspace packages needed by infra/user-data, in dependency order.
 // dir = folder name under packages/ and .ws/
@@ -142,6 +142,7 @@ try {
 writeFileSync(join(infraDir, "package.json"), artifactPkgJsonText);
 
 console.log("Creating zip…");
+mkdirSync(dirname(outputZip), { recursive: true });
 if (existsSync(outputZip)) rmSync(outputZip);
 
 try {

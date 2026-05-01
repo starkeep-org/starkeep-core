@@ -133,7 +133,17 @@ export async function GET(req: NextRequest) {
   const expandedPath = photosWebPath.replace(/^~/, process.env.HOME ?? "");
   const infraPath = resolve(expandedPath, "infra");
   const photosCloudConfig = readPhotosCloudConfig(infraPath);
-  return NextResponse.json({ deployed: photosCloudConfig !== null, photosCloudConfig });
+
+  const starkeepConfigPath = resolve(REPO_ROOT, "starkeep-config.json");
+  let coreDeployed = false;
+  if (existsSync(starkeepConfigPath)) {
+    try {
+      const cfg = JSON.parse(readFileSync(starkeepConfigPath, "utf-8")) as Record<string, unknown>;
+      coreDeployed = Boolean(cfg.apiGatewayUrl && cfg.auroraEndpoint && cfg.s3Bucket);
+    } catch { /* leave coreDeployed false */ }
+  }
+
+  return NextResponse.json({ deployed: photosCloudConfig !== null, photosCloudConfig, coreDeployed });
 }
 
 export async function POST(req: NextRequest) {
@@ -213,10 +223,25 @@ export async function POST(req: NextRequest) {
           writeFileSync(pkgJsonPath, JSON.stringify({ private: true, name: "starkeep-workspace" }, null, 2) + "\n");
         }
 
-        if (!existsSync(resolve(infraPath, "node_modules"))) {
-          emitLine("Installing dependencies...");
-          await runCmd("pnpm", ["install"], expandedWorkspace, env, emitLine);
-        }
+        emitLine("Installing dependencies...");
+        await runCmd("pnpm", ["install"], expandedWorkspace, env, emitLine);
+
+        emitLine("Building workspace packages...");
+        await runCmd("pnpm", [
+          "--filter", "@starkeep/core",
+          "--filter", "@starkeep/storage-adapter",
+          "--filter", "@starkeep/storage-aurora-dsql",
+          "--filter", "@starkeep/storage-s3",
+          "--filter", "@starkeep/sync-engine",
+          "--filter", "@starkeep/access-control",
+          "--filter", "@starkeep/aggregations",
+          "--filter", "@starkeep/index",
+          "--filter", "@starkeep/metadata-engine",
+          "--filter", "@starkeep/metadata-core",
+          "--filter", "@starkeep/shared-space-api",
+          "--filter", "@starkeep/sdk",
+          "build",
+        ], expandedWorkspace, env, emitLine);
 
         // If the API gateway URL is already known from a prior deploy, build the
         // frontend assets now so the static-server Lambda gets included this deploy.

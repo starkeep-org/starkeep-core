@@ -278,6 +278,7 @@ function PhotosWebSection() {
   const [deploySuccess, setDeploySuccess] = useState(false);
   const [cloudDeployed, setCloudDeployed] = useState<boolean | null>(null);
   const [cloudConfig, setCloudConfig] = useState<Record<string, unknown> | null>(null);
+  const [coreDeployed, setCoreDeployed] = useState<boolean | null>(null);
 
   const installLogEndRef = useRef<HTMLDivElement>(null);
   const deployLogEndRef = useRef<HTMLDivElement>(null);
@@ -287,9 +288,10 @@ function PhotosWebSection() {
     try {
       const res = await fetch(`/api/photos-web/deploy?path=${encodeURIComponent(p.trim())}`);
       if (res.ok) {
-        const data = await res.json() as { deployed: boolean; photosCloudConfig: Record<string, unknown> | null };
+        const data = await res.json() as { deployed: boolean; photosCloudConfig: Record<string, unknown> | null; coreDeployed: boolean };
         setCloudDeployed(data.deployed);
         setCloudConfig(data.photosCloudConfig ?? null);
+        setCoreDeployed(data.coreDeployed ?? null);
       }
     } catch {
       setCloudDeployed(null);
@@ -530,11 +532,14 @@ function PhotosWebSection() {
         )}
 
         <Group>
-          <Button onClick={handleDeploy} loading={deploying} disabled={!path.trim()} color="blue">
+          <Button onClick={handleDeploy} loading={deploying} disabled={!path.trim() || coreDeployed === false} color="blue">
             Deploy to cloud
           </Button>
           {deploying && <Loader size="xs" />}
         </Group>
+        {coreDeployed === false && (
+          <Text c="dimmed" size="xs">Core infrastructure must be deployed first.</Text>
+        )}
 
         {(deploying || deployLog.length > 0) && (
           <ScrollArea h={240} type="auto">
