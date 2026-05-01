@@ -3,16 +3,16 @@
  *
  * Private records use the type pattern `<normalizedAppId>:private:<subtype>`.
  * Examples:
- *   makePrivateType("@starkeep/photos", "settings") → "starkeep-photos:private:settings"
- *   makePrivateType("starkeep-photos", "settings")  → "starkeep-photos:private:settings"
+ *   makePrivateType("@starkeep/notes", "settings") → "starkeep-notes:private:settings"
+ *   makePrivateType("starkeep-notes", "settings")  → "starkeep-notes:private:settings"
  */
 
 const PRIVATE_SEGMENT = ":private:";
 
 /**
  * Normalize an app ID to the prefix used in private type strings.
- * "@starkeep/photos" → "starkeep-photos"
- * "starkeep-photos"  → "starkeep-photos"  (idempotent)
+ * "@starkeep/notes" → "starkeep-notes"
+ * "starkeep-notes"  → "starkeep-notes"  (idempotent)
  */
 export function normalizeAppId(appId: string): string {
   return appId.replace(/^@/, "").replace(/\//g, "-");
@@ -20,7 +20,7 @@ export function normalizeAppId(appId: string): string {
 
 /**
  * Build a private type string for the given app and subtype.
- * makePrivateType("@starkeep/photos", "settings") → "starkeep-photos:private:settings"
+ * makePrivateType("@starkeep/notes", "settings") → "starkeep-notes:private:settings"
  */
 export function makePrivateType(appId: string, subtype: string): string {
   return `${normalizeAppId(appId)}${PRIVATE_SEGMENT}${subtype}`;
@@ -34,7 +34,7 @@ export function isPrivateType(type: string): boolean {
 /**
  * Extract the normalized app-ID prefix from a private type string.
  * Returns `null` if the string is not a private type.
- * "starkeep-photos:private:settings" → "starkeep-photos"
+ * "starkeep-notes:private:settings" → "starkeep-notes"
  */
 export function getPrivateTypeOwner(type: string): string | null {
   const idx = type.indexOf(PRIVATE_SEGMENT);

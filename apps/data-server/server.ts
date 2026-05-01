@@ -72,7 +72,6 @@ interface StarkeepConfig {
   s3Region?: string;
   auroraEndpoint?: string;
   apiGatewayUrl?: string;
-  photosWebUrl?: string;
 }
 
 interface CloudCredentials {
@@ -554,7 +553,6 @@ async function main() {
           s3Region: freshConfig.s3Region ?? freshConfig.region,
           auroraEndpoint: freshConfig.auroraEndpoint ?? null,
           apiGatewayUrl: freshConfig.apiGatewayUrl ?? null,
-          photosWebUrl: freshConfig.photosWebUrl ?? null,
           cognitoConfig: {
             region: freshConfig.region,
             userPoolId: freshConfig.userPoolId,

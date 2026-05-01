@@ -1,4 +1,4 @@
-// Shared types and response helpers used by both api-handler and photos-handler.
+// Shared types and response helpers for Lambda handlers.
 
 export interface APIGatewayEvent {
   rawPath: string;

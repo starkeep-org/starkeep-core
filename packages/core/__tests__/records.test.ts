@@ -34,7 +34,7 @@ describe("record builders", () => {
           type: "@test/photo",
           ownerId: "user-1",
           contentHash: "sha256:abc123",
-          objectStorageKey: "photos/abc123",
+          objectStorageKey: "notes/abc123",
           mimeType: "image/jpeg",
           sizeBytes: 1024,
           content: { name: "sunset.jpg" },
@@ -43,7 +43,7 @@ describe("record builders", () => {
       );
 
       expect(record.contentHash).toBe("sha256:abc123");
-      expect(record.objectStorageKey).toBe("photos/abc123");
+      expect(record.objectStorageKey).toBe("notes/abc123");
       expect(record.mimeType).toBe("image/jpeg");
       expect(record.sizeBytes).toBe(1024);
       expect(record.content).toEqual({ name: "sunset.jpg" });

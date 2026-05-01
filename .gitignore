@@ -20,8 +20,6 @@ DerivedData/
 
 # Next.js build artifacts
 .next/
-apps/photos-web/out/
-apps/photos-web/next-env.d.ts
 
 # SST local state
 infra/user-data/.sst/
