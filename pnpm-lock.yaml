@@ -197,15 +197,6 @@ importers:
         specifier: ^5.3.3
         version: 5.9.3
 
-  infra/core:
-    devDependencies:
-      sst:
-        specifier: ^4.0.0
-        version: 4.10.0
-      typescript:
-        specifier: ^5.7.0
-        version: 5.9.3
-
   infra/user-data:
     dependencies:
       '@aws-sdk/client-s3':
@@ -520,18 +511,6 @@ importers:
       vitest:
         specifier: ^3.0.0
         version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
-
-  packages/infra-core:
-    devDependencies:
-      '@types/node':
-        specifier: ^25.4.0
-        version: 25.4.0
-      tsup:
-        specifier: ^8.0.0
-        version: 8.5.1(postcss@8.5.8)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
-      typescript:
-        specifier: ^5.7.0
-        version: 5.9.3
 
   packages/metadata-core:
     dependencies:
