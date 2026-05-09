@@ -236,8 +236,6 @@ export async function POST(req: NextRequest) {
           "--filter", "@starkeep/access-control",
           "--filter", "@starkeep/aggregations",
           "--filter", "@starkeep/index",
-          "--filter", "@starkeep/metadata-engine",
-          "--filter", "@starkeep/metadata-core",
           "--filter", "@starkeep/shared-space-api",
           "--filter", "@starkeep/sdk",
           "build",

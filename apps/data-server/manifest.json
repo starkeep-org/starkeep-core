@@ -1,0 +1,20 @@
+{
+  "name": "data-server",
+  "version": "1.0.0",
+  "description": "Protocol-core broker app. Manages shared data plane on behalf of other apps via per-request role assumption.",
+  "infraRequirements": {
+    "sharedTypeAccess": [],
+    "appPrivate": {
+      "database": false,
+      "objectStorage": false,
+      "compute": {
+        "enabled": false,
+        "handlers": []
+      },
+      "brokerPower": true,
+      "canIngestUnknown": false,
+      "canPromoteFromUnknown": false
+    },
+    "sharedResources": []
+  }
+}

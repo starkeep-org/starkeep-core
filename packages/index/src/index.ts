@@ -1,5 +1,4 @@
 export type {
-  MetadataFilter,
   SyncBoundaryFilter,
   IndexQuery,
   IndexItem,

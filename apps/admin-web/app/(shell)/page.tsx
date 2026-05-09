@@ -118,7 +118,7 @@ export default function DashboardPage() {
   const [remoteTypesExpanded, setRemoteTypesExpanded] = useState(false);
 
   // Costs
-  const [costs, setCosts] = useState<ServiceCost[] | "loading" | "error" | "no-data">("loading");
+  const [costs, setCosts] = useState<ServiceCost[] | "loading" | "error" | "no-data" | "not-signed-in">("loading");
   const [costProjection, setCostProjection] = useState<ServiceCost[] | null>(null);
 
   // Add watch form
@@ -385,7 +385,7 @@ export default function DashboardPage() {
           creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
           await writeCloudCredentials(creds);
         } catch {
-          setCosts("error");
+          setCosts("not-signed-in");
           return;
         }
       }
@@ -401,9 +401,14 @@ export default function DashboardPage() {
           }),
         });
         if (!resp.ok) {
-          const body = await resp.json().catch(() => ({})) as { error?: string };
-          console.error("[costs] API error", resp.status, body.error);
-          setCosts("error");
+          const body = await resp.json().catch(() => ({})) as { error?: string; code?: string };
+          const isAuthError = body.code === "InvalidClientTokenId" || body.code === "ExpiredTokenException";
+          if (isAuthError) {
+            console.info("[costs] not signed in");
+          } else {
+            console.error("[costs] API error", resp.status, body.error);
+          }
+          setCosts(isAuthError ? "not-signed-in" : "error");
           return;
         }
         const { costs: mtd } = await resp.json() as { costs: ServiceCost[] | null };
@@ -585,7 +590,20 @@ export default function DashboardPage() {
           <Title order={3} size="h4">
             Data Server
           </Title>
-          <StatusBadge online={localOnline} />
+          <Group gap="xs">
+            <StatusBadge online={localOnline} />
+            {localOnline === true && (
+              <Button
+                size="xs"
+                variant="subtle"
+                color="red"
+                loading={!!daemonLoading["data-server"]}
+                onClick={() => stopDaemon("data-server")}
+              >
+                Stop
+              </Button>
+            )}
+          </Group>
         </Group>
 
         {localOnline === false && (
@@ -873,6 +891,8 @@ export default function DashboardPage() {
 
                 {costs === "loading" ? (
                   <Center py="sm"><Loader size="sm" /></Center>
+                ) : costs === "not-signed-in" ? (
+                  <Text size="sm" c="dimmed">Sign in to view cost data.</Text>
                 ) : costs === "error" ? (
                   <Text size="sm" c="dimmed">Could not load cost data.</Text>
                 ) : costs === "no-data" ? (

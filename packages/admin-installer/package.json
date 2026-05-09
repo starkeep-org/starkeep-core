@@ -1,0 +1,29 @@
+{
+  "name": "@starkeep/admin-installer",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "kysely": "^0.27.0",
+    "@aws-sdk/client-iam": "^3.0.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-ssm": "^3.0.0",
+    "@aws-sdk/client-sts": "^3.0.0",
+    "@aws-sdk/dsql-signer": "^3.0.0",
+    "@pulumi/pulumi": "^3.0.0",
+    "@pulumi/aws": "^6.0.0",
+    "pg": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "@starkeep/admin-manifest": "workspace:*",
+    "@starkeep/admin-db": "workspace:*"
+  }
+}

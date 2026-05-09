@@ -134,12 +134,6 @@ export interface RecordChangeOptions {
   readonly baseVersion?: number | null;
 }
 
-export interface MetadataSyncResult {
-  readonly pulled: number;
-  readonly pushed: number;
-  readonly conflicts: number;
-}
-
 export interface SyncEngine {
   recordChange(
     operation: "create" | "update" | "delete",
@@ -148,17 +142,6 @@ export interface SyncEngine {
   ): Promise<void>;
   pull(): Promise<SyncPullResponse>;
   push(): Promise<SyncPushResponse>;
-  /**
-   * Pull syncable metadata from the remote adapter and apply it locally using
-   * HLC-based last-writer-wins. Metadata is generator-derived, so LWW is safe
-   * here; data-record sync uses OCC instead.
-   */
-  pullMetadata(): Promise<MetadataSyncResult>;
-  /**
-   * Push locally-updated syncable metadata to the remote adapter using
-   * HLC-based last-writer-wins.
-   */
-  pushMetadata(): Promise<MetadataSyncResult>;
   fullSync(): Promise<{
     pulled: number;
     pushed: number;
@@ -174,14 +157,7 @@ export interface SyncEngineOptions {
   readonly localDatabaseAdapter: DatabaseAdapter;
   readonly localObjectStorage: ObjectStorageAdapter;
   readonly remoteObjectStorage: ObjectStorageAdapter;
-  /** Transport to the remote data-record sync endpoints. */
   readonly transport: SyncTransport;
-  /**
-   * Direct adapter for metadata sync. Optional — when absent,
-   * `pullMetadata` / `pushMetadata` are no-ops. Metadata sync has not yet
-   * been ported to the transport abstraction.
-   */
-  readonly remoteDatabaseAdapter?: DatabaseAdapter;
   readonly clock: import("@starkeep/core").HLCClock;
   readonly changeLog?: ChangeLog;
   readonly syncState?: SyncStateStore;

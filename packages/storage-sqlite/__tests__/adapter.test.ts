@@ -161,47 +161,6 @@ describe("SqliteDatabaseAdapter", () => {
     });
   });
 
-  describe("ensureMetadataTable / putMetadata / queryMetadata", () => {
-    it("should store and retrieve metadata", async () => {
-      const targetType = "todo:task";
-      const generatorId = "tasks:properties";
-      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-
-      await adapter.ensureMetadataTable(targetType, generatorId, [
-        { name: "status", columnType: "text" },
-        { name: "comment_count", columnType: "integer" },
-      ]);
-
-      await adapter.putMetadata(targetType, {
-        targetId,
-        generatorId,
-        generatorVersion: 1,
-        inputHash: "hash-abc",
-        value: { status: "todo", commentCount: 3 },
-      });
-
-      const result = await adapter.queryMetadata(targetType, { targetId });
-      expect(result.entries).toHaveLength(1);
-      expect(result.entries[0].generatorId).toBe(generatorId);
-      expect(result.entries[0].value).toMatchObject({ status: "todo", commentCount: 3 });
-    });
-
-    it("should filter by generatorId", async () => {
-      const targetType = "todo:task";
-      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-
-      await adapter.ensureMetadataTable(targetType, "gen-a", [{ name: "x", columnType: "integer" }]);
-      await adapter.ensureMetadataTable(targetType, "gen-b", [{ name: "y", columnType: "text" }]);
-
-      await adapter.putMetadata(targetType, { targetId, generatorId: "gen-a", generatorVersion: 1, inputHash: "h1", value: { x: 1 } });
-      await adapter.putMetadata(targetType, { targetId, generatorId: "gen-b", generatorVersion: 1, inputHash: "h2", value: { y: "hello" } });
-
-      const result = await adapter.queryMetadata(targetType, { targetId, generatorId: "gen-a" });
-      expect(result.entries).toHaveLength(1);
-      expect(result.entries[0].generatorId).toBe("gen-a");
-    });
-  });
-
   describe("batch", () => {
     it("should apply multiple operations atomically", async () => {
       const record1 = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);

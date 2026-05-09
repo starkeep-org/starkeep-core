@@ -21,34 +21,17 @@ describe("UnifiedIndex", () => {
   });
 
   describe("search", () => {
-    it("should return data records with their metadata", async () => {
+    it("should return data records", async () => {
       const dataRecord = createDataRecord(
         { type: "@test/photo", ownerId: "user1", content: { title: "sunset" } },
         clock,
       );
       await databaseAdapter.put(dataRecord);
 
-      await databaseAdapter.ensureMetadataTable("@test/photo", "dimension-extractor", [
-        { name: "width", columnType: "integer" },
-        { name: "height", columnType: "integer" },
-      ]);
-      await databaseAdapter.putMetadata("@test/photo", {
-        targetId: dataRecord.id,
-        generatorId: "dimension-extractor",
-        generatorVersion: 1,
-        inputHash: "hash1",
-        value: { width: 1920, height: 1080 },
-      });
-
       const result = await index.search({});
 
       expect(result.items).toHaveLength(1);
       expect(result.items[0].dataRecord.id).toBe(dataRecord.id);
-      expect(result.items[0].metadata["dimension-extractor"]).toBeDefined();
-      expect(result.items[0].metadata["dimension-extractor"].value).toEqual({
-        width: 1920,
-        height: 1080,
-      });
     });
 
     it("should filter by type", async () => {
@@ -119,44 +102,17 @@ describe("UnifiedIndex", () => {
   });
 
   describe("getWithMetadata", () => {
-    it("should return data record with all metadata", async () => {
+    it("should return data record by id", async () => {
       const dataRecord = createDataRecord(
         { type: "@test/photo", ownerId: "user1", content: { title: "beach" } },
         clock,
       );
       await databaseAdapter.put(dataRecord);
 
-      await databaseAdapter.ensureMetadataTable("@test/photo", "dimension-extractor", [
-        { name: "width", columnType: "integer" },
-        { name: "height", columnType: "integer" },
-      ]);
-      await databaseAdapter.ensureMetadataTable("@test/photo", "tag-generator", [
-        { name: "tags", columnType: "text" },
-      ]);
-
-      await databaseAdapter.putMetadata("@test/photo", {
-        targetId: dataRecord.id,
-        generatorId: "dimension-extractor",
-        generatorVersion: 1,
-        inputHash: "hash1",
-        value: { width: 800, height: 600 },
-      });
-      await databaseAdapter.putMetadata("@test/photo", {
-        targetId: dataRecord.id,
-        generatorId: "tag-generator",
-        generatorVersion: 1,
-        inputHash: "hash2",
-        value: { tags: ["beach", "ocean"] },
-      });
-
       const result = await index.getWithMetadata(dataRecord.id);
 
       expect(result).not.toBeNull();
       expect(result!.dataRecord.id).toBe(dataRecord.id);
-      expect(result!.metadata["dimension-extractor"]).toBeDefined();
-      expect(result!.metadata["dimension-extractor"].value).toEqual({ width: 800, height: 600 });
-      expect(result!.metadata["tag-generator"]).toBeDefined();
-      expect(result!.metadata["tag-generator"].value).toEqual({ tags: ["beach", "ocean"] });
     });
 
     it("should return null for nonexistent record", async () => {

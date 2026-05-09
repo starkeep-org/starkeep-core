@@ -25,10 +25,9 @@ import type {
 } from "../index.js";
 
 export interface AwsProviderConfig {
-  roleArn: string; // IAM role to assume in customer/target account
-  externalId: string; // External ID for AssumeRole security
-  executionRoleArn?: string; // CloudFormation execution role ARN
-  permissionBoundaryArn?: string; // Permission boundary for IAM roles created by templates
+  roleArn: string;
+  externalId: string;
+  permissionBoundaryArn?: string;
 }
 
 /**
@@ -81,8 +80,6 @@ export class AwsProvider implements Provider {
           }))
         : undefined,
       Capabilities: ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"],
-      // Use execution role if provided (for SaaS mode with tighter security)
-      RoleARN: this.config?.executionRoleArn,
     });
 
     const createResponse = await cfnClient.send(createChangeSetCommand);

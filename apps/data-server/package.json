@@ -21,7 +21,6 @@
     "@starkeep/storage-aurora-dsql": "workspace:*",
     "@starkeep/sdk": "workspace:*",
     "@starkeep/access-control": "workspace:*",
-    "@starkeep/metadata-engine": "workspace:*",
     "@starkeep/index": "workspace:*",
     "@starkeep/aggregations": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",
