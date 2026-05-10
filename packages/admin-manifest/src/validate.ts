@@ -71,9 +71,9 @@ export function validateManifest(raw: unknown): ValidationResult {
     );
   }
 
-  if (manifest.infraRequirements.appPrivate.brokerPower && manifest.id !== "data-server") {
+  if (manifest.infraRequirements.appPrivate.brokerPower && manifest.id !== "cloud-data-server") {
     errors.push(
-      `infraRequirements.appPrivate.brokerPower may only be true for the "data-server" app (got "${manifest.id}")`,
+      `infraRequirements.appPrivate.brokerPower may only be true for the "cloud-data-server" app (got "${manifest.id}")`,
     );
   }
 

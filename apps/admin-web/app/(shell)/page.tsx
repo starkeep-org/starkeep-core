@@ -166,8 +166,8 @@ export default function DashboardPage() {
 
   // Clear loading state once each daemon is confirmed online
   useEffect(() => {
-    if (daemonLoading["data-server"] && localOnline === true) {
-      setDaemonLoading((l) => ({ ...l, "data-server": false }));
+    if (daemonLoading["local-data-server"] && localOnline === true) {
+      setDaemonLoading((l) => ({ ...l, "local-data-server": false }));
     }
   }, [localOnline]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -597,8 +597,8 @@ export default function DashboardPage() {
                 size="xs"
                 variant="subtle"
                 color="red"
-                loading={!!daemonLoading["data-server"]}
-                onClick={() => stopDaemon("data-server")}
+                loading={!!daemonLoading["local-data-server"]}
+                onClick={() => stopDaemon("local-data-server")}
               >
                 Stop
               </Button>
@@ -615,8 +615,8 @@ export default function DashboardPage() {
               <Button
                 variant="light"
                 color="green"
-                loading={!!daemonLoading["data-server"]}
-                onClick={() => startDaemon("data-server")}
+                loading={!!daemonLoading["local-data-server"]}
+                onClick={() => startDaemon("local-data-server")}
               >
                 Start
               </Button>

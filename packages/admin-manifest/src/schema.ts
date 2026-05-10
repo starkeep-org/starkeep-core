@@ -43,7 +43,7 @@ export const appPrivateResourceSchema = z.object({
     })
     .default({}),
   additionalResources: z.array(sharedResourceRequirementSchema).default([]),
-  // sts:AssumeRole on ${StackPrefix}-app-* roles — only allowed for the data-server app.
+  // sts:AssumeRole on ${StackPrefix}-app-* roles — only allowed for the cloud-data-server built-in app.
   brokerPower: z.boolean().default(false),
   // Write access to the built-in `unknown` holding-pen type.
   canIngestUnknown: z.boolean().default(false),
@@ -74,6 +74,10 @@ export const appManifestSchema = z.object({
   requiredPermissions: z.array(permissionEntrySchema).default([]),
   optionalPermissions: z.array(permissionEntrySchema).default([]),
   infraRequirements: infraRequirementsSchema.default({}),
+  // Ordered ids of shared-schema migrations that belong to this release.
+  // Resolved by the installer to .sql files alongside the manifest. Empty for
+  // user apps that don't ship shared-schema migrations (the typical case).
+  migrations: z.array(z.string()).default([]),
   homepage: z.string().url().optional(),
   author: z.string().optional(),
   license: z.string().optional(),

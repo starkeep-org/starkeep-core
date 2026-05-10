@@ -1,0 +1,23 @@
+{
+  "id": "local-data-server",
+  "name": "Local Data Server",
+  "version": "1.0.0",
+  "tier": "official",
+  "description": "Local-side broker. Mediates SDK access to local SQLite + filesystem. Sync with cloud-data-server is its only path to cloud-resident data — this app holds no AWS credentials and never directly operates on cloud DSQL or cloud S3.",
+  "infraRequirements": {
+    "sharedTypeAccess": [],
+    "appPrivate": {
+      "database": false,
+      "objectStorage": false,
+      "compute": {
+        "enabled": false,
+        "handlers": []
+      },
+      "brokerPower": false,
+      "canIngestUnknown": false,
+      "canPromoteFromUnknown": false
+    },
+    "sharedResources": []
+  },
+  "migrations": []
+}

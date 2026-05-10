@@ -1,5 +1,5 @@
 {
-  "name": "@starkeep/data-server",
+  "name": "@starkeep/local-data-server",
   "version": "0.0.1",
   "private": true,
   "type": "module",

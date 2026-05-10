@@ -7,11 +7,17 @@ import {
   IAMClient,
   CreateRoleCommand,
   DeleteRoleCommand,
+  GetRoleCommand,
   PutRolePolicyCommand,
   DeleteRolePolicyCommand,
 } from "@aws-sdk/client-iam";
 import type { AwsCredentials } from "./session.js";
-import { buildRuntimePolicy, buildTempInstallPolicy, buildTempUninstallPolicy } from "./temp-policies.js";
+import {
+  buildRuntimePolicy,
+  buildTempInstallPolicy,
+  buildTempUninstallPolicy,
+  buildTempInstallCloudDataServerPolicy,
+} from "./temp-policies.js";
 import type { SharedTypeAccess } from "@starkeep/admin-manifest";
 import { CORE_TYPE_REGISTRY } from "@starkeep/admin-manifest";
 
@@ -190,4 +196,53 @@ export async function deleteAppRole(
   await iam.send(
     new DeleteRoleCommand({ RoleName: `${stackPrefix}-app-${appId}-role` }),
   );
+}
+
+/**
+ * Attach the wider temp-install policy used only by the cloud-data-server
+ * built-in app's install/update — covers DSQL cluster management, S3 bucket
+ * creation, API Gateway management, and the foundational Lambda + log group.
+ */
+export async function attachTempInstallCloudDataServerPolicy(
+  stackPrefix: string,
+  accountId: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  await iam.send(
+    new PutRolePolicyCommand({
+      RoleName: `${stackPrefix}-app-cloud-data-server-role`,
+      PolicyName: "temp-install-cloud-data-server",
+      PolicyDocument: buildTempInstallCloudDataServerPolicy(stackPrefix, accountId),
+    }),
+  );
+}
+
+export async function detachTempInstallCloudDataServerPolicy(
+  stackPrefix: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  await iam.send(
+    new DeleteRolePolicyCommand({
+      RoleName: `${stackPrefix}-app-cloud-data-server-role`,
+      PolicyName: "temp-install-cloud-data-server",
+    }),
+  );
+}
+
+/** True if the app role exists in IAM. */
+export async function appRoleExists(
+  stackPrefix: string,
+  appId: string,
+  managerCreds: AwsCredentials,
+): Promise<boolean> {
+  const iam = makeIamClient(managerCreds);
+  try {
+    await iam.send(new GetRoleCommand({ RoleName: `${stackPrefix}-app-${appId}-role` }));
+    return true;
+  } catch (err) {
+    if ((err as { name?: string }).name === "NoSuchEntityException") return false;
+    throw err;
+  }
 }

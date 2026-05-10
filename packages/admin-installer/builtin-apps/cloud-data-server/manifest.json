@@ -1,0 +1,27 @@
+{
+  "id": "cloud-data-server",
+  "name": "Cloud Data Server",
+  "version": "0.1.0",
+  "tier": "official",
+  "infraRequirements": {
+    "sharedTypeAccess": [],
+    "appPrivate": {
+      "database": true,
+      "objectStorage": true,
+      "compute": {
+        "enabled": true,
+        "handlers": [
+          {
+            "name": "api",
+            "handler": "api-handler.handler",
+            "memoryMb": 256,
+            "timeoutSeconds": 30,
+            "routes": ["$default"]
+          }
+        ]
+      },
+      "brokerPower": true
+    }
+  },
+  "migrations": ["0001_init"]
+}

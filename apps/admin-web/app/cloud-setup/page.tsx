@@ -37,7 +37,10 @@ import {
   type STSCredentials,
 } from "../../src/lib/cognito-auth";
 import { ModeSelector, type SetupMode } from "../../src/components/mode-selector";
-import { CommandOutputModal } from "../../src/components/CommandOutputModal";
+import {
+  CloudDataServerInstallModal,
+  type CloudDataServerInstallOutputs,
+} from "../../src/components/CloudDataServerInstallModal";
 
 function openUrl(url: string) {
   window.open(url, "_blank", "noopener,noreferrer");
@@ -347,7 +350,7 @@ function Step5DeployInfra({
   const [manualApi, setManualApi] = useState("");
   const [readConfigError, setReadConfigError] = useState<string | null>(null);
   const [readingConfig, setReadingConfig] = useState(false);
-  const [localDeployOpen, setLocalDeployOpen] = useState(false);
+  const [installModalOpen, setInstallModalOpen] = useState(false);
 
   const handleManualSubmit = () => {
     if (!manualBucket || !manualAurora) return;
@@ -385,16 +388,30 @@ function Step5DeployInfra({
     }
   };
 
+  const handleInstallSuccess = (outputs: CloudDataServerInstallOutputs) => {
+    // Don't auto-close: keep the modal open so the user can scroll the
+    // install log. Stash the outputs and let them click Continue on the
+    // success card that renders when deployResult is set.
+    setInstallModalOpen(false);
+    setDeployResult({
+      s3Bucket: outputs.bucketName,
+      s3Region: outputs.region,
+      auroraEndpoint: outputs.auroraHostname,
+      apiGatewayUrl: outputs.apiGatewayUrl,
+    });
+  };
+
   if (deployResult) {
     return (
       <Stack gap="md">
-        <Alert color="green" title="Deployment complete">
-          Your Starkeep data infrastructure is ready.
+        <Alert color="green" title="Install complete">
+          cloud-data-server is installed in your AWS account.
         </Alert>
         <Text size="sm">
-          To deploy or remove infrastructure from your local machine using{" "}
-          <Code>pnpm run local:deploy</Code> / <Code>pnpm run local:remove</Code>, download your
-          CLI config and place it in the repo root.
+          To re-run the install (or future updates) from your local machine, download your CLI
+          config and place it in the repo root, then run{" "}
+          <Code>pnpm --filter @starkeep/admin-installer cli:install-cloud-data-server</Code>. The
+          install is idempotent — safe to re-run.
         </Text>
         <Button
           variant="light"
@@ -466,19 +483,24 @@ function Step5DeployInfra({
   return (
     <Stack gap="md">
       <Text>
-        Deploy your Starkeep data infrastructure by running SST locally. This creates:
+        Install the <strong>cloud-data-server</strong> built-in app. This is the cloud-side
+        broker — Manager mints its IAM role, attaches a temporary install policy, runs Pulumi to
+        provision the resources, applies any new shared-schema migrations, and detaches the
+        temporary policy. Resources created:
       </Text>
       <Stack gap="xs" pl="md">
+        <Text size="sm">• Aurora DSQL cluster for shared metadata</Text>
         <Text size="sm">• S3 bucket for file storage</Text>
-        <Text size="sm">• Aurora DSQL cluster for remote metadata index</Text>
-        <Text size="sm">• Lambda function + API Gateway for data access</Text>
+        <Text size="sm">• Lambda function (the protocol-core broker) + API Gateway with Cognito JWT authorizer</Text>
+        <Text size="sm">• Shared-schema migrations applied under the installer PG role</Text>
       </Stack>
 
-      <Button variant="filled" onClick={() => setLocalDeployOpen(true)}>
-        Run SST deploy
+      <Button variant="filled" onClick={() => setInstallModalOpen(true)}>
+        Install cloud-data-server
       </Button>
       <Text size="sm" c="dimmed">
-        The deploy runs on this machine — output streams here. The wizard advances automatically on success.
+        The install runs in this Next.js process — output streams here. Re-running is safe; existence
+        checks and Pulumi handle idempotency, and previously-applied migrations are skipped.
       </Text>
 
       {readConfigError && (
@@ -489,20 +511,18 @@ function Step5DeployInfra({
 
       <Group justify="flex-end">
         <Button variant="subtle" loading={readingConfig} onClick={handleReadFromConfig}>
-          Already deployed
+          Already installed
         </Button>
         <Button variant="subtle" onClick={() => setShowManualEntry(true)}>
           Enter outputs manually
         </Button>
       </Group>
 
-      <CommandOutputModal
-        opened={localDeployOpen}
-        onClose={() => setLocalDeployOpen(false)}
-        commandId="local-deploy"
-        credentials={{ ...credentials, region }}
-        title="Run SST deploy"
-        onSuccess={handleReadFromConfig}
+      <CloudDataServerInstallModal
+        opened={installModalOpen}
+        onClose={() => setInstallModalOpen(false)}
+        credentials={installModalOpen ? credentials : null}
+        onSuccess={handleInstallSuccess}
       />
 
       <Group justify="space-between" mt="md">
@@ -897,7 +917,7 @@ function CloudSetupPage() {
     "Stack outputs",
     "Create account",
     "Sign in",
-    "Deploy infrastructure",
+    "Install cloud-data-server",
   ];
 
   return (
