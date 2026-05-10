@@ -14,7 +14,6 @@ import type {
   ChangeLogEntry,
   SyncConflict,
   RecordChangeOptions,
-  MetadataSyncResult,
 } from "./types.js";
 import { createChangeLog } from "./change-log.js";
 import { createChangeNotifier } from "./change-notifier.js";
@@ -29,7 +28,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     localObjectStorage,
     remoteObjectStorage,
     transport,
-    remoteDatabaseAdapter,
     clock,
     changeLog = createChangeLog(),
     syncState,
@@ -341,116 +339,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       return response;
     },
 
-    async pullMetadata(): Promise<MetadataSyncResult> {
-      if (!remoteDatabaseAdapter) {
-        return { pulled: 0, pushed: 0, conflicts: 0 };
-      }
-      // Always fetch from ZERO_HLC — metadata records have independent timestamps
-      // from regular data records, so using pullCursor (which advances based on
-      // regular data sync) can skip metadata records that predate the cursor.
-      const remoteChanges =
-        await remoteDatabaseAdapter.getSyncableMetadataChangesSince(ZERO_HLC);
-      const localAll =
-        await localDatabaseAdapter.getSyncableMetadataChangesSince(ZERO_HLC);
-      const localMap = new Map(
-        localAll.map((r) => [`${r.targetId}:${r.generatorId}`, r]),
-      );
-
-      let pulled = 0;
-      let conflictCount = 0;
-
-      for (const remote of remoteChanges) {
-        const key = `${remote.targetId}:${remote.generatorId}`;
-        const local = localMap.get(key);
-        const remoteNewer = !local || compareHLC(remote.updatedAt, local.updatedAt) > 0;
-        // Also update if timestamps are equal but remote has objectStorageKey that local is missing —
-        // this recovers records that were previously synced while the Aurora adapter had a bug
-        // where it omitted objectStorageKey from the SELECT result.
-        const localMissingFileKey = local != null &&
-          compareHLC(remote.updatedAt, local.updatedAt) === 0 &&
-          remote.objectStorageKey != null &&
-          (local.objectStorageKey ?? null) == null;
-        if (remoteNewer || localMissingFileKey) {
-          await localDatabaseAdapter.upsertSyncableMetadata(remote);
-          pulled++;
-        } else if (compareHLC(local!.updatedAt, remote.updatedAt) !== 0) {
-          conflictCount++;
-        }
-      }
-
-      // Pull files for remote metadata records that have file backing.
-      const metaFileEntries = remoteChanges
-        .filter((r) => r.objectStorageKey != null)
-        .map((r) => ({
-          key: r.objectStorageKey as string,
-          mimeType: r.mimeType ?? undefined,
-        }));
-
-      if (metaFileEntries.length > 0) {
-        const filesToPull = await fileSyncEngine.getFilesToPull(
-          localObjectStorage,
-          remoteObjectStorage,
-          metaFileEntries,
-        );
-        for (const manifest of filesToPull) {
-          await fileSyncEngine.transferFile(manifest, remoteObjectStorage, localObjectStorage);
-        }
-      }
-
-      return { pulled, pushed: 0, conflicts: conflictCount };
-    },
-
-    async pushMetadata(): Promise<MetadataSyncResult> {
-      if (!remoteDatabaseAdapter) {
-        return { pulled: 0, pushed: 0, conflicts: 0 };
-      }
-      const localChanges =
-        await localDatabaseAdapter.getSyncableMetadataChangesSince(
-          pushCursor ?? ZERO_HLC,
-        );
-      const remoteAll =
-        await remoteDatabaseAdapter.getSyncableMetadataChangesSince(ZERO_HLC);
-      const remoteMap = new Map(
-        remoteAll.map((r) => [`${r.targetId}:${r.generatorId}`, r]),
-      );
-
-      let pushed = 0;
-      let conflictCount = 0;
-
-      for (const local of localChanges) {
-        const key = `${local.targetId}:${local.generatorId}`;
-        const remote = remoteMap.get(key);
-        if (!remote || compareHLC(local.updatedAt, remote.updatedAt) >= 0) {
-          await remoteDatabaseAdapter.upsertSyncableMetadata(local);
-          pushed++;
-        } else {
-          await localDatabaseAdapter.upsertSyncableMetadata(remote);
-          conflictCount++;
-        }
-      }
-
-      // Sync files for pushed metadata records that have file backing.
-      const metaFileEntries = localChanges
-        .filter((r) => r.objectStorageKey != null)
-        .map((r) => ({
-          key: r.objectStorageKey as string,
-          mimeType: r.mimeType ?? undefined,
-        }));
-
-      if (metaFileEntries.length > 0) {
-        const filesToPush = await fileSyncEngine.getFilesToPush(
-          localObjectStorage,
-          remoteObjectStorage,
-          metaFileEntries,
-        );
-        for (const manifest of filesToPush) {
-          await fileSyncEngine.transferFile(manifest, localObjectStorage, remoteObjectStorage);
-        }
-      }
-
-      return { pulled: 0, pushed, conflicts: conflictCount };
-    },
-
     async fullSync(): Promise<{
       pulled: number;
       pushed: number;
@@ -458,12 +346,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     }> {
       const pullResult = await this.pull();
       const pushResult = await this.push();
-      const metadataPull = await this.pullMetadata();
-      const metadataPush = await this.pushMetadata();
 
       return {
-        pulled: pullResult.changes.length + metadataPull.pulled,
-        pushed: pushResult.accepted.length + metadataPush.pushed,
+        pulled: pullResult.changes.length,
+        pushed: pushResult.accepted.length,
         rejected: pushResult.rejected.length,
       };
     },

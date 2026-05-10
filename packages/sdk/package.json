@@ -21,7 +21,6 @@
   "dependencies": {
     "@starkeep/core": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
-    "@starkeep/metadata-engine": "workspace:*",
     "@starkeep/index": "workspace:*",
     "@starkeep/aggregations": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",

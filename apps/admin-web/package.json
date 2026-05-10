@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@starkeep/admin-core": "workspace:*",
+    "@starkeep/admin-installer": "workspace:*",
     "@starkeep/admin-ui": "workspace:*",
     "@mantine/core": "^7.17.8",
     "@mantine/hooks": "^7.17.8",

@@ -1,0 +1,38 @@
+{
+  "name": "@starkeep/local-data-server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "data-server-ctl": "./cli.ts"
+  },
+  "scripts": {
+    "start": "tsx server.ts",
+    "dev": "tsx --watch server.ts",
+    "cli": "tsx cli.ts"
+  },
+  "dependencies": {
+    "@starkeep/core": "workspace:*",
+    "valibot": "^1.2.0",
+    "@starkeep/storage-adapter": "workspace:*",
+    "@starkeep/storage-sqlite": "workspace:*",
+    "@starkeep/storage-fs": "workspace:*",
+    "@starkeep/storage-s3": "workspace:*",
+    "@starkeep/storage-aurora-dsql": "workspace:*",
+    "@starkeep/sdk": "workspace:*",
+    "@starkeep/access-control": "workspace:*",
+    "@starkeep/index": "workspace:*",
+    "@starkeep/aggregations": "workspace:*",
+    "@starkeep/sync-engine": "workspace:*",
+    "@starkeep/shared-space-api": "workspace:*",
+    "sharp": "^0.33.0",
+    "@aws-sdk/dsql-signer": "^3.700.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
+    "@aws-sdk/client-cognito-identity": "^3.700.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "@types/pg": "^8.11.0"
+  }
+}

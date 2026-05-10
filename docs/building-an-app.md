@@ -1,123 +1,133 @@
 # Building an App
 
+## The Manifest
+
+Every Starkeep app starts with a `manifest.json`. The manifest is the spec — it declares what infrastructure your app needs, and the admin-installer provisions exactly that. You can't request capabilities outside the manifest schema.
+
+```json
+{
+  "name": "my-app",
+  "version": "1.0.0",
+  "description": "What this app does",
+  "infraRequirements": {
+    "sharedTypeAccess": [
+      {
+        "typeId": "image",
+        "access": "read",
+        "metadataWrite": false,
+        "rationale": "Display the user's photos"
+      }
+    ],
+    "appPrivate": {
+      "database": true,
+      "objectStorage": true,
+      "compute": {
+        "enabled": false,
+        "handlers": []
+      },
+      "brokerPower": false,
+      "canIngestUnknown": false,
+      "canPromoteFromUnknown": false
+    }
+  }
+}
+```
+
+When an admin installs your app, the installer reads this manifest and:
+- Creates an IAM role scoped exactly to what you declared
+- Creates a PostgreSQL role and private schema for your app
+- Grants your PG role read or readwrite access to the shared type tables you declared
+- Writes `shared.access_grants` rows so the protocol-core knows what to include in your sync responses
+- Optionally provisions Lambda functions and API Gateway routes (if `compute.enabled: true`)
+
+## Shared Type Access
+
+Starkeep has a fixed set of core types: `image`, `markdown` (and others defined in the core type registry). Apps access these shared types by declaring them in `sharedTypeAccess`.
+
+- `access: "read"` — read records and their metadata for this type
+- `access: "readwrite"` — also create, update, and delete records
+- `metadataWrite: true` — also write to the per-type metadata table (e.g., to attach thumbnail dimensions)
+
+You cannot define new types. If your data doesn't fit a core type, use `unknown` (see below) or store it in your app-private schema.
+
+### The Unknown Type
+
+Apps that receive files of an unknown format can ingest them as type `unknown` by requesting `canIngestUnknown: true` in the manifest. Unknown records sit in a holding pen until an authorized app promotes them to a typed record (`canPromoteFromUnknown: true`). Promotion is audited in `shared.reclassifications`.
+
+## App-Private Resources
+
+Your app always gets:
+- A private PostgreSQL schema (`app_${appId}`) in the shared DSQL cluster — use it for app-specific state
+- An S3 prefix (`apps/${appId}/`) in the shared files bucket — use it for app-private files
+
+These are isolated from other apps by IAM (the app role can only access its own prefix) and by PG role grants.
+
+## Compute (Lambda + API Gateway)
+
+If your app needs server-side compute, declare `compute.enabled: true` and list your handlers:
+
+```json
+"compute": {
+  "enabled": true,
+  "handlers": [
+    {
+      "name": "api",
+      "handler": "dist/handler.api",
+      "memoryMb": 256,
+      "timeoutSeconds": 30,
+      "routes": ["GET /items", "POST /items"],
+      "env": {}
+    }
+  ]
+}
+```
+
+The installer provisions each handler as a Lambda function (`${stackPrefix}-app-${appId}-${name}`) and attaches routes to the shared API Gateway under `/apps/${appId}/`. Your Lambda's execution role is the app's IAM role — it has the same S3 and DSQL access as any other request from your app.
+
+Your dist.zip must be uploaded to `apps/${appId}/latest/dist.zip` in the artifacts bucket before install (the installer reads it from there).
+
+## Broker Power
+
+Apps that need to access other apps' data on behalf of a request — like the data-server acting as a protocol broker — can request `brokerPower: true`. A broker app's role can assume other per-app roles. This is a privileged capability; normal apps don't need it.
+
 ## Choose an App Pattern
 
-There are two ways to build on Starkeep:
+**Web app using the protocol-core Lambda:** Most apps. Make authenticated requests to `${apiGatewayUrl}/apps/${appId}/data/...` with a Cognito JWT. The Lambda handles per-app role assumption and routes you to your scoped data.
 
-**SDK-embedded** — Your app bundles the SDK directly and manages its own local and cloud adapters. Best for standalone apps (like a task manager) that don't need to share data with other local apps.
+**App with Lambda compute:** Apps that need server-side processing (thumbnail generation, AI inference, webhooks). Declare compute handlers in the manifest; they are provisioned at install time.
 
-**Thin-client to data-server** — Your app is an HTTP client that talks to a running data-server instance. The data server owns the type registry and storage. Best for apps that share data with other local apps, or for web/mobile clients that can't embed a Node.js SDK (like the photos web app).
-
-## Define Your Record Types
-
-Every record belongs to a type. Types are declared in `namespace:name` format (e.g., `my-app:note`, `my-app:tag`) and registered at initialization time.
-
-When defining a type, you supply a schema that describes the shape of the record's payload. The schema is validated on every write, so invalid data is rejected before it enters storage.
-
-Best practices:
-- Use a new type for each distinct kind of data (notes are not tags, even if they look similar)
-- Keep payloads small — computed or derived fields belong in metadata, not in the record payload
-- See [Data vs. Metadata App Architecture](data-vs-metadata-app-architecture.md) for guidance on the boundary
+**Thin-client to local data-server:** For local development. Make HTTP requests to the data-server (port 9820) instead of the cloud Lambda.
 
 ## Store and Retrieve Records
 
-Once types are registered, you can create records with or without file attachments. For example, a photo record would be created with the image file attached; a note record would have no attachment.
+Once installed, your app's data access goes through the protocol-core Lambda (cloud) or data-server (local). The API surface is consistent:
 
-Records can be:
-- **Read by ID** — fetch a single known record
-- **Queried** — filter by type, date range, payload fields, or metadata fields; sort and paginate results
-- **Updated** — replace the payload (and optionally the file) of an existing record
-- **Deleted** — remove a record and its associated metadata and file
+- `POST /apps/${appId}/data/records` — create a record
+- `GET /apps/${appId}/data/records` — list records (filter by type, date, cursor)
+- `GET /apps/${appId}/data/records/:id` — fetch one record
+- `PUT /apps/${appId}/data/records/:id` — update a record
+- `DELETE /apps/${appId}/data/records/:id` — delete a record
+- `GET /apps/${appId}/data/records/:id/file-url` — presigned S3 GET URL
 
-## Add Metadata Generators
-
-Generators compute derived properties from records. They run after a record is created or updated, and their output is stored as metadata records that reference the source record.
-
-**Built-in generators** cover common cases:
-- Image dimensions (width, height, orientation)
-- File properties (MIME type, file size)
-- Text preview (first N characters of a text field)
-
-**Custom generators** let you add any derived property your app needs. A generator declares:
-- Which record types it applies to
-- Which payload fields it reads (used for cache invalidation via input hashing)
-- What metadata fields it produces
-- Whether it is **syncable** — meaning its output is non-deterministic (e.g., an AI-generated caption) and must be synced rather than recomputed on each device
-
-The metadata engine resolves generator dependencies, runs them in the correct order, and skips generation when inputs haven't changed.
-
-Generators run either on-demand (immediately after a record is written) or queued (processed in the background). Choose queued for expensive operations like AI inference.
-
-## Search and Query
-
-Starkeep provides a unified query interface that joins data and metadata records, so you can filter on both in the same query.
-
-You can:
-- Filter records by type, owner, date range, or payload fields
-- Filter by metadata fields (e.g., only photos with width ≥ 1920)
-- Run full-text search across payload fields
-- Paginate results using cursors
-- Filter to only sync-eligible records (useful for sync status UIs)
-
-## Aggregations
-
-Aggregations give you summary statistics over a set of records without fetching individual records:
-
-- **Counts** — total records, broken down by type or MIME type
-- **Storage totals** — total bytes stored, with per-type breakdowns
-- **Date histograms** — record counts grouped by day, week, month, or year
-
-Aggregation results are cached and updated incrementally as records change, so they're fast even over large datasets.
+Records are typed payloads. Your app can only create/update records of the types it declared `readwrite` access to in the manifest.
 
 ## Sync
 
-Sync is enabled by providing both local and remote adapters when initializing the SDK. If only local adapters are provided, the SDK operates in local-only mode.
+Sync moves records between local (SQLite) and cloud (DSQL). When cloud sync is enabled on the data-server:
 
-When sync is enabled:
-- Call a full sync to pull remote changes and push local changes
-- Listen for change events to update the UI in real time when records are added, updated, or deleted locally or remotely
-- Records marked as local-only are never included in sync
+- Records you can access appear in sync responses
+- Records from other apps appear if you have read access to their type
+- The `origin_app_id` field on each record tells you which app created it
 
-Conflicts — records modified both locally and remotely since the last sync — are resolved automatically using HLC timestamps. The record with the higher timestamp wins. Apps don't need to implement conflict resolution logic.
+Conflicts are resolved automatically using HLC timestamps. The record with the higher timestamp wins.
 
-## Access Control
+## Development Workflow
 
-Access control is configured by creating policies. A policy specifies:
-- **Subject** — who is being granted access: a user (by ID), an app, or a sharing token
-- **Resource** — what they can access: a specific record, all records of a type, or a named collection
-- **Permissions** — what they can do: read, write, delete, or admin
+1. Write `manifest.json`
+2. Implement your app (web UI, Lambda handlers, or both)
+3. Build a `dist.zip` with your Lambda handlers (if compute enabled)
+4. Upload the zip to the artifacts bucket: `apps/${appId}/latest/dist.zip`
+5. Install through admin-web — the installer runs the state machine and provisions all declared resources
+6. Test against the live cloud resources
 
-Policies are enforced at the storage layer on every operation, regardless of how the operation was initiated.
-
-**Sharing tokens** are credentials that encode a specific set of permissions and can be shared with external users or services. You can set an expiration date and a maximum number of uses. Once a token is used or expired, it is no longer accepted.
-
-## Expose an HTTP API
-
-If your app needs to serve data over HTTP (for web clients, mobile clients, or inter-app communication), you can register API routes using the shared-space API framework.
-
-Routes are namespaced and versioned (e.g., `GET /my-app/v1/notes`). You register handlers for each route, and the framework handles:
-- Routing by namespace, path, and HTTP method
-- Subject resolution from the incoming request (mapping auth credentials to a subject)
-- Query parameter parsing
-- Paginated response formatting
-
-The data server uses this same framework for its own routes, so your custom routes integrate cleanly alongside the built-in ones.
-
-## Thin-Client Pattern
-
-In the thin-client pattern, your app talks to a data-server instance over HTTP instead of embedding the SDK. The app sends authenticated requests, and the data server applies access control and returns results.
-
-This is how the photos web app works: the Next.js server makes requests to the local data server, which holds the type registry and storage. The web client never touches the SDK directly.
-
-For thin clients:
-- Use auth tokens (Cognito JWTs) for all requests to the data server
-- The data server enforces access control on every request
-- Custom API routes registered on the data server are available to thin clients too
-
-## AWS Permissions Management
-
-If your app requires additional AWS resources or permissions:
-
-1. Edit the template in packages/admin-core/src/self-hosted-permissions-template.ts
-2. Run `pnpm build` from packages/admin-core to render the new template file
-3. In the admin-web app, go to the Deploy permissions tab and click Update permissions stack
+On uninstall, all provisioned resources are cleaned up: IAM role, PG role, private schema, S3 objects, Lambda functions, and API Gateway routes.

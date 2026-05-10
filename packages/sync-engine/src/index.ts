@@ -19,7 +19,6 @@ export type {
   SyncEngineOptions,
   SyncStateStore,
   RecordChangeOptions,
-  MetadataSyncResult,
 } from "./types.js";
 
 export { createChangeLog } from "./change-log.js";

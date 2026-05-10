@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef, Suspense } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Container,
@@ -15,17 +15,13 @@ import {
   Group,
   Paper,
   Code,
-  Anchor,
-  Divider,
   Loader,
   Badge,
-  Collapse,
 } from "@mantine/core";
 import {
   getBootstrapStackOutputsUrl,
-  generateSelfHostedBootstrapTemplate,
+  generateBootstrapTemplate,
   getCloudFormationCreateStackUrl,
-  generateSelfHostedPermissionsTemplate,
 } from "@starkeep/admin-core";
 import {
   writeCloudConfig,
@@ -40,32 +36,11 @@ import {
   type CognitoConfig,
   type STSCredentials,
 } from "../../src/lib/cognito-auth";
-import { s3PutObject, s3GetObjectText } from "../../src/lib/s3";
-import {
-  getPermissionsStackStatus,
-  createPermissionsStack,
-  pollUntilTerminal,
-  isSuccess,
-} from "../../src/lib/permissions-stack-client";
 import { ModeSelector, type SetupMode } from "../../src/components/mode-selector";
-import { CommandOutputModal } from "../../src/components/CommandOutputModal";
-
-function parseSstOutputs(raw: string): Record<string, string> {
-  const clean = raw.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
-  const result: Record<string, string> = {};
-
-  for (const m of clean.matchAll(/^\s+(\w+):\s+(.+?)\s*$/gm)) {
-    if (m[1] && m[2]) result[m[1]] = m[2].trim();
-  }
-
-  if (!result["bucketName"] && !result["auroraHostname"]) {
-    for (const m of clean.matchAll(/^\s+(\w+)\s{2,}(.+?)\s*$/gm)) {
-      if (m[1] && m[2]) result[m[1]] = m[2].trim();
-    }
-  }
-
-  return result;
-}
+import {
+  CloudDataServerInstallModal,
+  type CloudDataServerInstallOutputs,
+} from "../../src/components/CloudDataServerInstallModal";
 
 function openUrl(url: string) {
   window.open(url, "_blank", "noopener,noreferrer");
@@ -325,135 +300,12 @@ function Step4SignIn({
   );
 }
 
-function StepPermissions({
-  onNext,
-  onBack,
-  stackPrefix,
-  region,
-  credentials,
-}: {
-  onNext: () => void;
-  onBack: () => void;
-  stackPrefix: string;
-  region: string;
-  credentials: STSCredentials;
-}) {
-  const [phase, setPhase] = useState<string | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [skipChecked, setSkipChecked] = useState(false);
-  const stackName = `${stackPrefix}-deploy-permissions`;
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const s = await getPermissionsStackStatus(credentials, region, stackName);
-        if (cancelled) return;
-        setStatus(s.phase);
-        if (s.phase === "CREATE_COMPLETE" || s.phase === "UPDATE_COMPLETE") {
-          setSkipChecked(true);
-        }
-      } catch (err) {
-        if (!cancelled) setError(String(err instanceof Error ? err.message : err));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [credentials, region, stackName]);
-
-  const handleCreate = async () => {
-    setBusy(true);
-    setError(null);
-    setPhase("Creating permissions stack…");
-    try {
-      const template = generateSelfHostedPermissionsTemplate({ stackPrefix });
-      await createPermissionsStack(credentials, region, stackName, template);
-      const finalStatus = await pollUntilTerminal(credentials, region, stackName, {
-        onUpdate: (s) => setPhase(`Stack status: ${s.phase}`),
-      });
-      if (!isSuccess(finalStatus)) {
-        throw new Error(
-          `Stack create finished with ${finalStatus.phase}${finalStatus.reason ? `: ${finalStatus.reason}` : ""}`,
-        );
-      }
-      setStatus(finalStatus.phase);
-      setPhase("Permissions stack ready.");
-      onNext();
-    } catch (err) {
-      setError(String(err instanceof Error ? err.message : err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const alreadyExists = status === "CREATE_COMPLETE" || status === "UPDATE_COMPLETE";
-
-  return (
-    <Stack gap="md">
-      <Text>
-        Before we can deploy your data infrastructure, we need to grant the desktop and CodeBuild
-        roles permission to do so. These permissions live in a separate CloudFormation stack
-        (<Code>{stackName}</Code>) so you can iterate on them later without re-bootstrapping.
-      </Text>
-
-      <Text size="sm" c="dimmed">
-        Click <strong>Create permissions stack</strong> below. The deploy permissions are bundled
-        with this admin-web build and applied as a managed policy attached to both roles. You can
-        review or update them later from the <strong>Deploy permissions</strong> page.
-      </Text>
-
-      {error && (
-        <Alert color="red" title="Failed to create permissions stack">
-          {error}
-        </Alert>
-      )}
-
-      {alreadyExists && (
-        <Alert color="green" title="Permissions stack already exists">
-          Status: <Code>{status}</Code>. You can continue.
-        </Alert>
-      )}
-
-      {phase && busy && (
-        <Paper withBorder p="sm">
-          <Group gap="sm">
-            <Loader size="xs" />
-            <Text size="sm" c="dimmed">
-              {phase}
-            </Text>
-          </Group>
-        </Paper>
-      )}
-
-      <Group justify="space-between" mt="md">
-        <Button variant="subtle" onClick={onBack} disabled={busy}>
-          Back
-        </Button>
-        {alreadyExists || skipChecked ? (
-          <Button onClick={onNext} disabled={busy}>
-            Continue
-          </Button>
-        ) : (
-          <Button loading={busy} onClick={handleCreate}>
-            Create permissions stack
-          </Button>
-        )}
-      </Group>
-    </Stack>
-  );
-}
-
 interface DeployOutputs {
   s3Bucket: string;
   s3Region: string;
   auroraEndpoint: string;
   apiGatewayUrl?: string;
 }
-
-const POLL_INTERVAL_MS = 5000;
 
 function downloadCliConfig(config: {
   region: string;
@@ -491,139 +343,14 @@ function Step5DeployInfra({
   region: string;
   credentials: STSCredentials;
 }) {
-  const [deploying, setDeploying] = useState(false);
-  const [phase, setPhase] = useState<string>("");
-  const [error, setError] = useState<string | null>(null);
   const [showManualEntry, setShowManualEntry] = useState(false);
-  const [showCodeBuild, setShowCodeBuild] = useState(false);
   const [deployResult, setDeployResult] = useState<DeployOutputs | null>(null);
   const [manualBucket, setManualBucket] = useState("");
   const [manualAurora, setManualAurora] = useState("");
   const [manualApi, setManualApi] = useState("");
   const [readConfigError, setReadConfigError] = useState<string | null>(null);
   const [readingConfig, setReadingConfig] = useState(false);
-  const [localDeployOpen, setLocalDeployOpen] = useState(false);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [phase]);
-
-  const handleDeploy = useCallback(async () => {
-    setDeploying(true);
-    setError(null);
-    setPhase("Preparing deployment…");
-
-    try {
-      const awsCreds = {
-        accessKeyId: credentials.accessKeyId,
-        secretAccessKey: credentials.secretAccessKey,
-        sessionToken: credentials.sessionToken,
-      };
-
-      const { CodeBuildClient, StartBuildCommand, BatchGetBuildsCommand } =
-        await import("@aws-sdk/client-codebuild");
-
-      const cb = new CodeBuildClient({ region, credentials: awsCreds });
-
-      const artifactsBucket = `${stackPrefix}-deploy-artifacts`;
-      const sourceKey = `${stackPrefix}-user-data-source.zip`;
-
-      setPhase("Uploading deployment source to S3…");
-      const zipResponse = await fetch("/user-data-source.zip");
-      if (!zipResponse.ok)
-        throw new Error(
-          "Could not load user-data-source.zip — run pnpm build:artifact first",
-        );
-      const zipBytes = await zipResponse.arrayBuffer();
-      const zipArray = new Uint8Array(zipBytes);
-      let binary = "";
-      const chunkSize = 8192;
-      for (let i = 0; i < zipArray.length; i += chunkSize) {
-        binary += String.fromCharCode(...zipArray.subarray(i, i + chunkSize));
-      }
-      const bodyBase64 = btoa(binary);
-      await s3PutObject(
-        artifactsBucket,
-        sourceKey,
-        bodyBase64,
-        "application/zip",
-        credentials,
-        region,
-      );
-
-      setPhase("Starting CodeBuild deployment…");
-      const startResult = await cb.send(
-        new StartBuildCommand({
-          projectName: `${stackPrefix}-deploy`,
-          environmentVariablesOverride: [
-            { name: "STAGE", value: stackPrefix, type: "PLAINTEXT" },
-            { name: "USER_POOL_ID", value: cognitoConfig.userPoolId, type: "PLAINTEXT" },
-            {
-              name: "USER_POOL_CLIENT_ID",
-              value: cognitoConfig.userPoolClientId,
-              type: "PLAINTEXT",
-            },
-          ],
-        }),
-      );
-
-      const buildId = startResult.build?.id;
-      if (!buildId) throw new Error("CodeBuild did not return a build ID");
-
-      let buildStatus = "IN_PROGRESS";
-      while (buildStatus === "IN_PROGRESS") {
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-        const pollResult = await cb.send(new BatchGetBuildsCommand({ ids: [buildId] }));
-        const build = pollResult.builds?.[0];
-        if (!build) throw new Error("Could not retrieve build status");
-
-        buildStatus = build.buildStatus ?? "IN_PROGRESS";
-        const currentPhase = build.currentPhase ?? "";
-        setPhase(
-          `CodeBuild: ${currentPhase} (${buildStatus === "IN_PROGRESS" ? "running" : buildStatus})`,
-        );
-      }
-
-      if (buildStatus !== "SUCCEEDED") {
-        throw new Error(
-          `CodeBuild deployment ${buildStatus.toLowerCase()}. Check the AWS CodeBuild console for details.`,
-        );
-      }
-
-      setPhase("Reading deployment outputs…");
-      const rawOutput = await s3GetObjectText(
-        artifactsBucket,
-        `${stackPrefix}-raw-output.txt`,
-        credentials,
-        region,
-      );
-
-      const outputs = parseSstOutputs(rawOutput);
-      const bucketName = outputs["bucketName"];
-      const auroraHostname = outputs["auroraHostname"];
-      const apiGatewayUrl = outputs["apiGatewayUrl"];
-
-      if (!bucketName || !auroraHostname) {
-        throw new Error(
-          "Deployment outputs missing expected values.\n\n" +
-            `Parsed: ${JSON.stringify(outputs)}\n\n` +
-            `Raw output (last 2000 chars):\n${rawOutput.slice(-2000)}`,
-        );
-      }
-
-      setDeployResult({
-        s3Bucket: bucketName,
-        s3Region: region,
-        auroraEndpoint: auroraHostname,
-        apiGatewayUrl,
-      });
-    } catch (err) {
-      setError(String(err instanceof Error ? err.message : err));
-    } finally {
-      setDeploying(false);
-    }
-  }, [credentials, region, stackPrefix, cognitoConfig]);
+  const [installModalOpen, setInstallModalOpen] = useState(false);
 
   const handleManualSubmit = () => {
     if (!manualBucket || !manualAurora) return;
@@ -661,16 +388,30 @@ function Step5DeployInfra({
     }
   };
 
+  const handleInstallSuccess = (outputs: CloudDataServerInstallOutputs) => {
+    // Don't auto-close: keep the modal open so the user can scroll the
+    // install log. Stash the outputs and let them click Continue on the
+    // success card that renders when deployResult is set.
+    setInstallModalOpen(false);
+    setDeployResult({
+      s3Bucket: outputs.bucketName,
+      s3Region: outputs.region,
+      auroraEndpoint: outputs.auroraHostname,
+      apiGatewayUrl: outputs.apiGatewayUrl,
+    });
+  };
+
   if (deployResult) {
     return (
       <Stack gap="md">
-        <Alert color="green" title="Deployment complete">
-          Your Starkeep data infrastructure is ready.
+        <Alert color="green" title="Install complete">
+          cloud-data-server is installed in your AWS account.
         </Alert>
         <Text size="sm">
-          To deploy or remove infrastructure from your local machine using{" "}
-          <Code>pnpm run local:deploy</Code> / <Code>pnpm run local:remove</Code>, download your
-          CLI config and place it in the repo root.
+          To re-run the install (or future updates) from your local machine, download your CLI
+          config and place it in the repo root, then run{" "}
+          <Code>pnpm --filter @starkeep/admin-installer cli:install-cloud-data-server</Code>. The
+          install is idempotent — safe to re-run.
         </Text>
         <Button
           variant="light"
@@ -742,93 +483,50 @@ function Step5DeployInfra({
   return (
     <Stack gap="md">
       <Text>
-        Deploy your Starkeep data infrastructure. This creates:
+        Install the <strong>cloud-data-server</strong> built-in app. This is the cloud-side
+        broker — Manager mints its IAM role, attaches a temporary install policy, runs Pulumi to
+        provision the resources, applies any new shared-schema migrations, and detaches the
+        temporary policy. Resources created:
       </Text>
       <Stack gap="xs" pl="md">
+        <Text size="sm">• Aurora DSQL cluster for shared metadata</Text>
         <Text size="sm">• S3 bucket for file storage</Text>
-        <Text size="sm">• Aurora DSQL cluster for remote metadata index</Text>
-        <Text size="sm">• Lambda function + API Gateway for data access</Text>
+        <Text size="sm">• Lambda function (the protocol-core broker) + API Gateway with Cognito JWT authorizer</Text>
+        <Text size="sm">• Shared-schema migrations applied under the installer PG role</Text>
       </Stack>
 
-      {error && <Alert color="red" title="Deployment failed">{error}</Alert>}
-
-      <Divider label="Deploy from local (recommended)" labelPosition="left" />
-      <Button
-        variant="filled"
-        disabled={deploying}
-        onClick={() => setLocalDeployOpen(true)}
-      >
-        Deploy from local
+      <Button variant="filled" onClick={() => setInstallModalOpen(true)}>
+        Install cloud-data-server
       </Button>
       <Text size="sm" c="dimmed">
-        The deploy runs on this machine — output streams here. The wizard advances automatically on success.
+        The install runs in this Next.js process — output streams here. Re-running is safe; existence
+        checks and Pulumi handle idempotency, and previously-applied migrations are skipped.
       </Text>
+
       {readConfigError && (
         <Alert color="red" title="Could not read config">
           {readConfigError}
         </Alert>
       )}
+
       <Group justify="flex-end">
-        <Button
-          variant="subtle"
-          loading={readingConfig}
-          disabled={deploying}
-          onClick={handleReadFromConfig}
-        >
-          Already deployed
+        <Button variant="subtle" loading={readingConfig} onClick={handleReadFromConfig}>
+          Already installed
+        </Button>
+        <Button variant="subtle" onClick={() => setShowManualEntry(true)}>
+          Enter outputs manually
         </Button>
       </Group>
-      <CommandOutputModal
-        opened={localDeployOpen}
-        onClose={() => setLocalDeployOpen(false)}
-        commandId="local-deploy"
-        credentials={{ ...credentials, region }}
-        title="Deploy from local"
-        onSuccess={handleReadFromConfig}
-      />
 
-      <Divider
-        label={
-          <Anchor size="sm" onClick={() => setShowCodeBuild((v) => !v)}>
-            {showCodeBuild ? "Hide remote deployment (CodeBuild) ▲" : "Deploy via CodeBuild instead ▼"}
-          </Anchor>
-        }
-        labelPosition="left"
+      <CloudDataServerInstallModal
+        opened={installModalOpen}
+        onClose={() => setInstallModalOpen(false)}
+        credentials={installModalOpen ? credentials : null}
+        onSuccess={handleInstallSuccess}
       />
-      <Collapse in={showCodeBuild}>
-        <Stack gap="md">
-          <Text size="sm" c="dimmed">
-            The deployment runs in your AWS account via CodeBuild and takes 5–10 minutes. Aurora
-            DSQL clusters take 2–5 minutes to become active.
-          </Text>
-          <Text size="sm" c="dimmed">
-            If you already deployed successfully or want to enter values from the AWS console,{" "}
-            <Anchor size="sm" onClick={() => setShowManualEntry(true)}>
-              enter the outputs manually
-            </Anchor>
-            .
-          </Text>
-          {deploying && phase && (
-            <Paper withBorder p="sm">
-              <Group gap="sm">
-                <Loader size="xs" />
-                <Text size="sm" c="dimmed">
-                  {phase}
-                </Text>
-              </Group>
-              <div ref={logsEndRef} />
-            </Paper>
-          )}
-          <Group justify="flex-end">
-            <Button loading={deploying} onClick={handleDeploy} disabled={deploying}>
-              {deploying ? "Deploying…" : "Deploy via CodeBuild"}
-            </Button>
-          </Group>
-        </Stack>
-      </Collapse>
 
       <Group justify="space-between" mt="md">
-        <Button variant="subtle" onClick={onBack} disabled={deploying}>
+        <Button variant="subtle" onClick={onBack}>
           Back
         </Button>
       </Group>
@@ -854,7 +552,7 @@ function BootstrapStep({
   const [downloaded, setDownloaded] = useState(false);
 
   const handleDownload = () => {
-    const yaml = generateSelfHostedBootstrapTemplate({ stackPrefix });
+    const yaml = generateBootstrapTemplate({ stackPrefix });
     const blob = new Blob([yaml], { type: "text/yaml" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -871,7 +569,7 @@ function BootstrapStep({
     <Stack gap="md">
       <Text>
         Deploy the Starkeep bootstrap CloudFormation stack. This creates Cognito authentication,
-        IAM roles, an S3 artifacts bucket, and a CodeBuild deploy project in your AWS account.
+        IAM roles, and S3/Pulumi infrastructure in your AWS account.
       </Text>
 
       <TextInput
@@ -1219,8 +917,7 @@ function CloudSetupPage() {
     "Stack outputs",
     "Create account",
     "Sign in",
-    "Deploy permissions",
-    "Deploy infrastructure",
+    "Install cloud-data-server",
   ];
 
   return (
@@ -1269,19 +966,10 @@ function CloudSetupPage() {
             cognitoConfig={fullCognitoConfig()}
           />
         )}
-        {active === 3 && credentials && (
-          <StepPermissions
-            onNext={() => setActive(4)}
-            onBack={() => setActive(2)}
-            stackPrefix={stackPrefix}
-            region={region}
-            credentials={credentials}
-          />
-        )}
-        {active === 4 && credentials && signInResult && (
+        {active === 3 && credentials && signInResult && (
           <Step5DeployInfra
             onSuccess={handleDeploySuccess}
-            onBack={() => setActive(3)}
+            onBack={() => setActive(2)}
             cognitoConfig={fullCognitoConfig()}
             stackPrefix={stackPrefix}
             region={region}

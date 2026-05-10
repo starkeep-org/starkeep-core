@@ -1,14 +1,10 @@
-import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
+import type { DataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
 import type {
   Query,
   QueryResult,
   BatchOperation,
   Migration,
   Transaction,
-  MetadataColumnDefinition,
-  MetadataQuery,
-  MetadataQueryResult,
-  MetadataSyncRecord,
 } from "./types.js";
 
 export interface DatabaseAdapter {
@@ -24,43 +20,4 @@ export interface DatabaseAdapter {
   transaction<T>(callback: (transaction: Transaction) => Promise<T>): Promise<T>;
 
   runMigrations(migrations: Migration[]): Promise<void>;
-
-  /**
-   * Ensure a per-type metadata table exists with columns for the given generator.
-   * Called at SDK init for each registered generator and its input types.
-   * Safe to call multiple times (idempotent).
-   */
-  ensureMetadataTable(
-    targetType: string,
-    generatorId: string,
-    columns: MetadataColumnDefinition[],
-  ): Promise<void>;
-
-  /**
-   * Upsert a metadata entry for a data record into the appropriate per-type
-   * metadata table. Only the columns belonging to `entry.generatorId` are
-   * written; other generators' columns in the same row are left untouched.
-   */
-  putMetadata(targetType: string, entry: MetadataRecord): Promise<void>;
-
-  /**
-   * Query entries from the per-type metadata table for `targetType`.
-   * Returns one MetadataRecord per (target, generator) pair that matches.
-   */
-  queryMetadata(targetType: string, query: MetadataQuery): Promise<MetadataQueryResult>;
-
-  /**
-   * Upsert a syncable metadata record into the `metadata_sync` table and,
-   * if the generator is registered locally, into the per-type typed-column
-   * table as well. Called by the metadata engine for `syncable` generators
-   * and by the sync engine when applying remote metadata changes.
-   */
-  upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void>;
-
-  /**
-   * Return all syncable metadata records whose `updatedAt` is strictly after
-   * `since`. Used by the sync engine to find local changes to push and remote
-   * changes to pull.
-   */
-  getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]>;
 }

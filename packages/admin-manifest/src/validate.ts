@@ -1,4 +1,4 @@
-import type { AppManifest, TypeDefinition } from "./schema.js";
+import type { AppManifest } from "./schema.js";
 import { appManifestSchema } from "./schema.js";
 
 export interface ValidationResult {
@@ -10,6 +10,14 @@ export interface ValidationResult {
 
 const RESERVED_PREFIX = "@starkeep/";
 
+// Core shared-type registry — fixed at the core system version.
+// Apps cannot register new types; adding a type requires a core version bump + DDL migration.
+export const CORE_TYPE_REGISTRY = new Set(["image", "markdown"]);
+
+// Types that cannot appear directly in sharedTypeAccess.
+// Access is gated via canIngestUnknown / canPromoteFromUnknown instead.
+const BUILTIN_RESTRICTED_TYPES = new Set(["unknown"]);
+
 export function validateManifest(raw: unknown): ValidationResult {
   const result = appManifestSchema.safeParse(raw);
   const errors: string[] = [];
@@ -19,42 +27,54 @@ export function validateManifest(raw: unknown): ValidationResult {
     return {
       valid: false,
       manifest: null,
-      errors: result.error.issues.map(
-        (i) => `${i.path.join(".")}: ${i.message}`,
-      ),
+      errors: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
       warnings: [],
     };
   }
 
   const manifest = result.data;
 
-  // Community apps cannot use the @starkeep/ prefix for their ID
   if (manifest.tier === "community" && manifest.id.startsWith(RESERVED_PREFIX)) {
+    errors.push(`Community apps cannot use the "${RESERVED_PREFIX}" ID prefix`);
+  }
+
+  for (const entry of manifest.infraRequirements.sharedTypeAccess) {
+    if (BUILTIN_RESTRICTED_TYPES.has(entry.typeId)) {
+      errors.push(
+        `sharedTypeAccess: typeId "${entry.typeId}" is restricted. Use canIngestUnknown or canPromoteFromUnknown instead.`,
+      );
+      continue;
+    }
+
+    // Wildcard is valid — installer expands it, always excluding "unknown"
+    if (entry.typeId === "*") continue;
+
+    if (!CORE_TYPE_REGISTRY.has(entry.typeId)) {
+      errors.push(
+        `sharedTypeAccess: typeId "${entry.typeId}" is not in the core type registry. Valid types: ${[...CORE_TYPE_REGISTRY].join(", ")}`,
+      );
+    }
+
+    if (entry.metadataWrite && entry.access === "readwrite") {
+      warnings.push(
+        `sharedTypeAccess[${entry.typeId}]: metadataWrite is redundant when access is "readwrite"`,
+      );
+    }
+  }
+
+  if (
+    manifest.infraRequirements.appPrivate.compute.enabled &&
+    manifest.infraRequirements.appPrivate.compute.handlers.length === 0
+  ) {
     errors.push(
-      `Community apps cannot use the "${RESERVED_PREFIX}" ID prefix`,
+      "infraRequirements.appPrivate.compute.enabled is true but no handlers are declared",
     );
   }
 
-  // Community apps cannot register types with @starkeep/ prefix
-  for (const td of manifest.typeDefinitions) {
-    if (
-      manifest.tier === "community" &&
-      td.typeId.startsWith(RESERVED_PREFIX)
-    ) {
-      errors.push(
-        `Community apps cannot register types with the "${RESERVED_PREFIX}" prefix: ${td.typeId}`,
-      );
-    }
-  }
-
-  // Warn about optional permissions for types not defined in this manifest
-  const definedTypeIds = new Set(manifest.typeDefinitions.map((t) => t.typeId));
-  for (const perm of manifest.optionalPermissions) {
-    if (!definedTypeIds.has(perm.resourceId)) {
-      warnings.push(
-        `Optional permission references type "${perm.resourceId}" not defined in this manifest — it must already be registered`,
-      );
-    }
+  if (manifest.infraRequirements.appPrivate.brokerPower && manifest.id !== "cloud-data-server") {
+    errors.push(
+      `infraRequirements.appPrivate.brokerPower may only be true for the "cloud-data-server" app (got "${manifest.id}")`,
+    );
   }
 
   return {
@@ -67,34 +87,11 @@ export function validateManifest(raw: unknown): ValidationResult {
 
 export interface TypeConflict {
   typeId: string;
-  existingSchemaVersion: string;
-  newSchemaVersion: string;
   reason: string;
 }
 
-export function checkTypeConflicts(
-  newTypes: TypeDefinition[],
-  existingTypes: { typeId: string; schemaVersion: string }[],
-): TypeConflict[] {
-  const existingMap = new Map(
-    existingTypes.map((t) => [t.typeId, t]),
-  );
-
-  const conflicts: TypeConflict[] = [];
-  for (const newType of newTypes) {
-    const existing = existingMap.get(newType.typeId);
-    if (!existing) continue;
-
-    // Same schema version = compatible, no conflict
-    if (existing.schemaVersion === newType.schemaVersion) continue;
-
-    conflicts.push({
-      typeId: newType.typeId,
-      existingSchemaVersion: existing.schemaVersion,
-      newSchemaVersion: newType.schemaVersion,
-      reason: `Type "${newType.typeId}" already registered at version ${existing.schemaVersion}, manifest declares version ${newType.schemaVersion}`,
-    });
-  }
-
-  return conflicts;
+// Apps no longer define shared types — all types are declared in core system code.
+// This function is kept for API compatibility but always returns an empty array.
+export function checkTypeConflicts(): TypeConflict[] {
+  return [];
 }
