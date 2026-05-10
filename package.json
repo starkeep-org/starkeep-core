@@ -8,8 +8,7 @@
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "reset-cloud-data": "pnpm --filter @starkeep/infra-user-data reset-cloud-data"
+    "format:check": "prettier --check ."
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.0.0",

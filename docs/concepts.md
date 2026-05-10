@@ -24,9 +24,15 @@ Some generators produce deterministic outputs (e.g., image dimensions) and don't
 
 ## Types
 
-Every record has a type in `namespace:name` format — for example, `tasks:task` or `@starkeep/image`. Types have schemas that are validated at write time, so bad data never enters storage.
+Every record has a type that determines its schema and which apps can access it. Starkeep maintains a fixed **core type registry** — a closed set of well-known types such as `image` and `markdown`. Apps cannot define new types.
 
-A type registry is the single source of truth for the types an app understands. Registering a type also associates its schema and any metadata generators that apply to it.
+This constraint is intentional. A fixed type set means the system can provide consistent per-type metadata tables, schema enforcement, and access grants without needing a dynamic registry. It also prevents type proliferation across a multi-app ecosystem.
+
+### The Unknown Holding Pen
+
+Apps that receive files of an unrecognized format can ingest them as type `unknown`. Unknown records sit in a holding pen until an authorized app **promotes** them to a typed record. Promotion is a one-way, audited operation logged in `shared.reclassifications`.
+
+Only apps granted `canIngestUnknown` or `canPromoteFromUnknown` can interact with the unknown type. These are explicit flags in the app manifest, not derived from type access declarations.
 
 ## Sync
 
@@ -38,14 +44,18 @@ Records can be marked as sync-eligible or kept local-only. Local-only records ar
 
 ## Access Control
 
-Access control governs who can do what with which data. Subjects (a user, an app, or a sharing token) are granted specific permissions (read, write, delete, admin) on specific resources (a single record, all records of a type, or a collection).
+Access control operates at two layers.
 
-Policies are enforced at the storage layer, not at the application layer. There is no way for app code to bypass them.
+**IAM layer (hard enforcement):** Every app has its own IAM role, minted by the Manager at install time and bounded by the app permissions boundary. The role's inline policy is derived directly from the app's manifest — if the manifest doesn't declare `image: readwrite`, the IAM policy won't allow S3 writes to the image prefix, and DSQL won't grant INSERT on the image metadata table. No code path can bypass this.
 
-Sharing tokens are time-limited, optionally usage-limited credentials that grant a specific set of permissions. They are the mechanism for giving external users or services scoped access to a subset of data.
+**Application layer (audit trail):** The `shared.access_grants` table mirrors the IAM grants. The protocol-core Lambda reads this table to decide which records to include in sync responses and to tag records with `origin_app_id`. It is not a second enforcement gate — IAM enforces — but it provides a human-readable, queryable audit record of what each app is permitted to do.
+
+Apps that need to access other apps' data (e.g., the data-server acting as a broker) are granted `brokerPower`. A broker app's role can assume other per-app roles, allowing it to act on behalf of other apps in a single request. Brokers still run within per-app role sessions — they never access data with their own base credentials.
 
 ## Storage Adapters
 
 All data operations go through abstract adapter interfaces — one for the database, one for file (object) storage. The local implementations use SQLite and the filesystem. The cloud implementations use Aurora DSQL and S3.
 
 Because the interfaces are the same in both environments, application code doesn't change between local and cloud. Swapping adapters is a configuration decision, not a code change.
+
+In cloud deployments, the protocol-core Lambda uses per-app STS-assumed credentials for every adapter. The Lambda execution role itself has no data-plane access — it only holds `sts:AssumeRole` on per-app roles.

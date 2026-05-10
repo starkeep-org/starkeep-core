@@ -1,4 +1,4 @@
-import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
+import type { DataRecord, StarkeepId } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -6,10 +6,6 @@ import type {
   BatchOperation,
   Migration,
   Transaction,
-  MetadataColumnDefinition,
-  MetadataQuery,
-  MetadataQueryResult,
-  MetadataSyncRecord,
 } from "@starkeep/storage-adapter";
 import type { AccessControlEngine, EnforcedDatabaseAdapter, SubjectType } from "./types.js";
 import { AccessDeniedError } from "./errors.js";
@@ -153,30 +149,6 @@ export function createEnforcedDatabaseAdapter(options: {
     return databaseAdapter.runMigrations(migrations);
   }
 
-  async function ensureMetadataTable(
-    targetType: string,
-    generatorId: string,
-    columns: MetadataColumnDefinition[],
-  ): Promise<void> {
-    return databaseAdapter.ensureMetadataTable(targetType, generatorId, columns);
-  }
-
-  async function putMetadata(targetType: string, entry: MetadataRecord): Promise<void> {
-    return databaseAdapter.putMetadata(targetType, entry);
-  }
-
-  async function queryMetadata(targetType: string, query: MetadataQuery): Promise<MetadataQueryResult> {
-    return databaseAdapter.queryMetadata(targetType, query);
-  }
-
-  async function upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void> {
-    return databaseAdapter.upsertSyncableMetadata(record);
-  }
-
-  async function getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]> {
-    return databaseAdapter.getSyncableMetadataChangesSince(since);
-  }
-
   return {
     init,
     close,
@@ -188,10 +160,5 @@ export function createEnforcedDatabaseAdapter(options: {
     batch,
     transaction,
     runMigrations,
-    ensureMetadataTable,
-    putMetadata,
-    queryMetadata,
-    upsertSyncableMetadata,
-    getSyncableMetadataChangesSince,
   };
 }

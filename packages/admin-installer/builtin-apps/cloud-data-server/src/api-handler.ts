@@ -1,0 +1,540 @@
+/**
+ * Cloud API Lambda handler — per-app isolated access to DSQL and S3.
+ *
+ * The Lambda execution role has NO data-plane access. For every request:
+ *   1. Extract appId from the path prefix /apps/{appId}/
+ *   2. STS-assume the app's IAM role (${STACK_PREFIX}-app-{appId}-role), cached ~14 min
+ *   3. Connect to DSQL as the app's PG role using DbConnect (not Admin)
+ *   4. Scope all S3 access to apps/{appId}/ prefix under the app role
+ *
+ * Environment variables:
+ *   AURORA_ENDPOINT  — Aurora DSQL cluster hostname
+ *   S3_BUCKET        — S3 bucket for object storage (files)
+ *   STACK_PREFIX     — e.g. "starkeep"
+ *   MANAGER_ROLE_ARN — ARN of the Manager role to hop through for app role assumption
+ *   AWS_REGION       — set automatically by Lambda runtime
+ */
+
+import { createHash } from "node:crypto";
+import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
+import { DsqlSigner } from "@aws-sdk/dsql-signer";
+import pg from "pg";
+import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
+import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
+import { generateId, createHLCClock, SyncStatus, serializeHLC } from "@starkeep/core";
+import type { DataRecord, StarkeepId } from "@starkeep/core";
+import { createInProcessSyncTransport } from "@starkeep/sync-engine";
+import type {
+  DatabaseClientFactory,
+  DatabaseClient,
+  AuroraDsqlDatabaseAdapterOptions,
+} from "@starkeep/storage-aurora-dsql";
+import { ok, clientErr, type APIGatewayEvent } from "./handler-utils.js";
+
+// ---------------------------------------------------------------------------
+// Per-app credential cache (STS sessions ~15 min, refreshed at 14 min)
+// ---------------------------------------------------------------------------
+
+interface CachedCreds {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken: string;
+  expiresAt: number; // ms epoch
+}
+
+const credentialCache = new Map<string, CachedCreds>();
+const CRED_REFRESH_BUFFER_MS = 60_000; // refresh 60s before expiry
+
+async function getAppCreds(appId: string): Promise<CachedCreds> {
+  const cached = credentialCache.get(appId);
+  if (cached && cached.expiresAt - Date.now() > CRED_REFRESH_BUFFER_MS) {
+    return cached;
+  }
+
+  const stackPrefix = process.env.STACK_PREFIX;
+  const managerRoleArn = process.env.MANAGER_ROLE_ARN;
+  const region = process.env.AWS_REGION ?? "us-east-1";
+  if (!stackPrefix || !managerRoleArn) {
+    throw new Error("STACK_PREFIX and MANAGER_ROLE_ARN env vars are required");
+  }
+
+  const appRoleArn = `arn:aws:iam::${getAccountId()}:role/${stackPrefix}-app-${appId}-role`;
+
+  // Hop through Manager role first (Lambda exec role → Manager → app role)
+  const sts = new STSClient({ region });
+  const managerResult = await sts.send(new AssumeRoleCommand({
+    RoleArn: managerRoleArn,
+    RoleSessionName: `lambda-mgr-${Date.now()}`,
+    DurationSeconds: 900,
+  }));
+  const mc = managerResult.Credentials;
+  if (!mc?.AccessKeyId || !mc.SecretAccessKey || !mc.SessionToken) {
+    throw new Error("Failed to assume Manager role");
+  }
+
+  const managerSts = new STSClient({
+    region,
+    credentials: {
+      accessKeyId: mc.AccessKeyId,
+      secretAccessKey: mc.SecretAccessKey,
+      sessionToken: mc.SessionToken,
+    },
+  });
+  const appResult = await managerSts.send(new AssumeRoleCommand({
+    RoleArn: appRoleArn,
+    RoleSessionName: `lambda-app-${appId}-${Date.now()}`,
+    DurationSeconds: 900,
+  }));
+  const ac = appResult.Credentials;
+  if (!ac?.AccessKeyId || !ac.SecretAccessKey || !ac.SessionToken || !ac.Expiration) {
+    throw new Error(`Failed to assume app role for ${appId}`);
+  }
+
+  const creds: CachedCreds = {
+    accessKeyId: ac.AccessKeyId,
+    secretAccessKey: ac.SecretAccessKey,
+    sessionToken: ac.SessionToken,
+    expiresAt: ac.Expiration.getTime(),
+  };
+  credentialCache.set(appId, creds);
+  return creds;
+}
+
+// Account ID parsed from Lambda ARN (available in every Lambda invocation)
+function getAccountId(): string {
+  const arnParts = (process.env.AWS_LAMBDA_FUNCTION_ARN ?? "").split(":");
+  return arnParts[4] ?? "unknown";
+}
+
+// ---------------------------------------------------------------------------
+// Per-app DSQL client factory
+// ---------------------------------------------------------------------------
+
+class AppDsqlClientFactory implements DatabaseClientFactory {
+  constructor(
+    private readonly appId: string,
+    private readonly creds: CachedCreds,
+    private readonly stackPrefix: string,
+  ) {}
+
+  async createClient(options: AuroraDsqlDatabaseAdapterOptions): Promise<DatabaseClient> {
+    const { hostname, region } = options;
+    const pgUser = `${this.stackPrefix}_app_${this.appId}`.toLowerCase().replace(/-/g, "_");
+    const appId = this.appId;
+    const creds = this.creds;
+
+    const createPgClient = async (): Promise<pg.Client> => {
+      const signer = new DsqlSigner({
+        hostname,
+        region,
+        credentials: {
+          accessKeyId: creds.accessKeyId,
+          secretAccessKey: creds.secretAccessKey,
+          sessionToken: creds.sessionToken,
+        },
+      });
+      const token = await signer.getDbConnectAuthToken();
+      const client = new pg.Client({
+        host: hostname,
+        port: 5432,
+        database: options.database ?? "postgres",
+        user: pgUser,
+        password: token,
+        ssl: { rejectUnauthorized: true },
+      });
+      await client.connect();
+      await client.query("SET starkeep.app_id = $1", [appId]);
+      return client;
+    };
+
+    let inner = await createPgClient();
+
+    return {
+      async query(text, values) {
+        try {
+          const result = await inner.query(text, values);
+          return { rows: result.rows };
+        } catch (err: unknown) {
+          const code = (err as { code?: string })?.code;
+          if (code === "28000" || code === "28P01") {
+            await inner.end().catch(() => {});
+            inner = await createPgClient();
+            const result = await inner.query(text, values);
+            return { rows: result.rows };
+          }
+          throw err;
+        }
+      },
+      async end() {
+        await inner.end();
+      },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-request adapter creation (not cached — creds are cached separately)
+// ---------------------------------------------------------------------------
+
+function makeAdapters(appId: string, creds: CachedCreds) {
+  const region = process.env.AWS_REGION ?? "us-east-1";
+  const auroraEndpoint = process.env.AURORA_ENDPOINT;
+  const s3Bucket = process.env.S3_BUCKET;
+  const stackPrefix = process.env.STACK_PREFIX ?? "starkeep";
+
+  if (!auroraEndpoint) throw new Error("AURORA_ENDPOINT env var is required");
+  if (!s3Bucket) throw new Error("S3_BUCKET env var is required");
+
+  const db = new AuroraDsqlDatabaseAdapter(
+    { hostname: auroraEndpoint, region },
+    new AppDsqlClientFactory(appId, creds, stackPrefix),
+  );
+
+  const storage = new S3ObjectStorageAdapter({
+    bucketName: s3Bucket,
+    region,
+    credentials: {
+      accessKeyId: creds.accessKeyId,
+      secretAccessKey: creds.secretAccessKey,
+      sessionToken: creds.sessionToken,
+    },
+  });
+
+  const clock = createHLCClock({ nodeId: appId, wallClockFunction: Date.now });
+
+  return { db, storage, clock };
+}
+
+// ---------------------------------------------------------------------------
+// Path parsing
+// ---------------------------------------------------------------------------
+
+function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
+  const match = rawPath.match(/^\/apps\/([^/]+)(\/.*)?$/);
+  if (!match) return null;
+  return { appId: match[1]!, subPath: match[2] ?? "/" };
+}
+
+// ---------------------------------------------------------------------------
+// Response helpers
+// ---------------------------------------------------------------------------
+
+function recordToResponse(record: DataRecord) {
+  return {
+    id: record.id,
+    type: record.type,
+    created_at: new Date(record.createdAt.wallTime).toISOString(),
+    updated_at: new Date(record.updatedAt.wallTime).toISOString(),
+    owner_id: record.ownerId,
+    sync_status: record.syncStatus,
+    version: record.version,
+    payload: record.content,
+    mime_type: record.mimeType,
+    size_bytes: record.sizeBytes,
+    content_hash: record.contentHash,
+    object_storage_key: record.objectStorageKey,
+    original_filename: record.originalFilename,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
+
+export async function handler(event: APIGatewayEvent) {
+  try {
+    const method = event.requestContext.http.method.toUpperCase();
+    const rawPath = event.rawPath;
+
+    if (method === "OPTIONS") {
+      return { statusCode: 200, body: "" };
+    }
+
+    // Unauthenticated health check — no app role needed
+    if (method === "GET" && rawPath === "/health") {
+      return ok({ status: "ok" });
+    }
+
+    // All other routes require /apps/{appId}/...
+    const parsed = parseAppPath(rawPath);
+    if (!parsed) return clientErr("Not found", 404);
+    const { appId, subPath } = parsed;
+
+    const creds = await getAppCreds(appId);
+    const { db, storage, clock } = makeAdapters(appId, creds);
+
+    await db.init();
+
+    const query = event.queryStringParameters ?? {};
+    const claims = event.requestContext.authorizer?.jwt?.claims;
+    const ownerId = claims?.sub ?? "unknown";
+
+    // GET /apps/{appId}/health — app-scoped health check
+    if (method === "GET" && subPath === "/health") {
+      const dbHealthy = await db.healthCheck();
+      const storageHealthy = await storage.healthCheck();
+      return ok({ status: dbHealthy && storageHealthy ? "ok" : "degraded", db: dbHealthy, storage: storageHealthy });
+    }
+
+    // GET /apps/{appId}/data/types
+    if (method === "GET" && subPath === "/data/types") {
+      const result = await db.query({ limit: 10000 });
+      const counts = new Map<string, number>();
+      for (const record of result.records) {
+        counts.set(record.type, (counts.get(record.type) ?? 0) + 1);
+      }
+      const types = Array.from(counts.entries()).map(([record_type, count]) => ({ record_type, count }));
+      return ok({ types, total: result.records.length });
+    }
+
+    // GET /apps/{appId}/data/records
+    if (method === "GET" && subPath === "/data/records") {
+      const type = query["type"];
+      const limit = Math.min(parseInt(query["limit"] ?? "50", 10), 500);
+      const cursor = query["cursor"];
+      const updatedAfter = query["updated_after"];
+
+      const filters: { field: string; operator: "gt"; value: string }[] = [];
+      if (updatedAfter) {
+        const ms = new Date(updatedAfter).getTime();
+        if (!isNaN(ms)) {
+          filters.push({
+            field: "updatedAt",
+            operator: "gt",
+            value: serializeHLC({ wallTime: ms, counter: 0, nodeId: "" }),
+          });
+        }
+      }
+
+      const result = await db.query({ type, filters: filters.length > 0 ? filters : undefined, limit: limit + 1, cursor });
+      const hasMore = result.records.length > limit;
+      const records = hasMore ? result.records.slice(0, limit) : result.records;
+      return ok({ records: records.map(recordToResponse), hasMore, nextCursor: hasMore ? records[records.length - 1].id : null });
+    }
+
+    // POST /apps/{appId}/data/records
+    if (method === "POST" && subPath === "/data/records") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as {
+        type?: string;
+        payload?: Record<string, unknown>;
+        content?: Record<string, unknown>;
+        fileName?: string;
+        contentType?: string;
+        fileBase64?: string;
+      };
+      if (!body.type) return clientErr("type is required", 400);
+
+      const now = clock.now();
+      const recordContent = body.payload ?? body.content ?? {};
+      const originalFilename = body.fileName ?? null;
+      const mimeType = body.contentType ?? null;
+
+      let objectStorageKey: string | null = null;
+      let contentHash: string | null = null;
+      let sizeBytes: number | null = null;
+
+      if (body.fileBase64) {
+        const fileBuffer = Buffer.from(body.fileBase64, "base64");
+        const hash = createHash("sha256").update(fileBuffer).digest("hex");
+        contentHash = hash;
+        objectStorageKey = `apps/${appId}/${hash.slice(0, 2)}/${hash}`;
+        sizeBytes = fileBuffer.length;
+        await storage.put(objectStorageKey, fileBuffer, { contentType: mimeType ?? undefined });
+      }
+
+      const record: DataRecord = {
+        id: generateId(),
+        kind: "data",
+        type: body.type,
+        content: { ...recordContent, ...(originalFilename ? { fileName: originalFilename } : {}), originAppId: appId },
+        ownerId,
+        createdAt: now,
+        updatedAt: now,
+        syncStatus: SyncStatus.Synced,
+        deletedAt: null,
+        version: 1,
+        contentHash,
+        objectStorageKey,
+        mimeType,
+        sizeBytes,
+        originalFilename,
+      };
+      await db.put(record);
+      return ok({ record: recordToResponse(record) }, 201);
+    }
+
+    // POST /apps/{appId}/data/files
+    if (method === "POST" && subPath === "/data/files") {
+      const headers = event.headers ?? {};
+      const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
+      const mimeType = contentTypeHeader.split(";")[0]!.trim();
+      const fileBuffer = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64")
+        : Buffer.from(event.body ?? "", "binary");
+      if (fileBuffer.length === 0) return clientErr("Request body must not be empty", 400);
+      if (fileBuffer.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
+      const hex = createHash("sha256").update(fileBuffer).digest("hex");
+      const key = `apps/${appId}/metadata/${hex}`;
+      await storage.put(key, fileBuffer, { contentType: mimeType });
+      return ok({ key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
+    }
+
+    // POST /apps/{appId}/data/records/:id/promote — promote an 'unknown' record to a typed record
+    const promoteMatch = subPath.match(/^\/data\/records\/([^/]+)\/promote$/);
+    if (promoteMatch && method === "POST") {
+      const recordId = decodeURIComponent(promoteMatch[1]!);
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as { targetType?: string };
+      if (!body.targetType) return clientErr("targetType is required", 400);
+
+      const record = await db.get(recordId as StarkeepId);
+      if (!record) return clientErr("Record not found", 404);
+      if (record.type !== "unknown") return clientErr("Only 'unknown' records can be promoted", 409);
+
+      const now = clock.now();
+      const promoted: DataRecord = { ...record, type: body.targetType, updatedAt: now, version: record.version + 1 };
+      await db.put(promoted);
+
+      return ok({ record: recordToResponse(promoted) });
+    }
+
+    // GET /apps/{appId}/data/records/:id/file-url
+    const fileUrlMatch = subPath.match(/^\/data\/records\/([^/]+)\/file-url$/);
+    if (fileUrlMatch && method === "GET") {
+      const id = decodeURIComponent(fileUrlMatch[1]!) as StarkeepId;
+      const record = await db.get(id);
+      if (!record) return clientErr("Record not found", 404);
+      if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
+      const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
+      const url = await storage.getSignedUrl!(record.objectStorageKey, { expiresIn });
+      return ok({ url, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
+    }
+
+    // GET|PUT|DELETE /apps/{appId}/data/records/:id
+    const recordIdMatch = subPath.match(/^\/data\/records\/([^/]+)$/);
+    if (recordIdMatch) {
+      const id = decodeURIComponent(recordIdMatch[1]!) as StarkeepId;
+
+      if (method === "GET") {
+        const record = await db.get(id);
+        if (!record) return clientErr("Record not found", 404);
+        return ok({ record: recordToResponse(record) });
+      }
+
+      if (method === "PUT") {
+        const existing = await db.get(id);
+        if (!existing) return clientErr("Record not found", 404);
+        const body = event.body ? (JSON.parse(event.body) as { content?: Record<string, unknown> }) : null;
+        if (!body?.content) return clientErr("content is required", 400);
+        const now = clock.now();
+        const updated: DataRecord = { ...existing, content: body.content, updatedAt: now, version: existing.version + 1 };
+        await db.put(updated);
+        return ok({ record: recordToResponse(updated) });
+      }
+
+      if (method === "DELETE") {
+        await db.delete(id);
+        return ok({ deleted: true });
+      }
+    }
+
+    // POST /apps/{appId}/sync/pull
+    if (method === "POST" && subPath === "/sync/pull") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody);
+      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
+      const response = await transport.pullChanges(body);
+      return ok(response);
+    }
+
+    // POST /apps/{appId}/sync/push
+    if (method === "POST" && subPath === "/sync/push") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody);
+      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
+      const response = await transport.pushChanges(body);
+      return ok(response);
+    }
+
+    // POST /apps/{appId}/files/presign
+    if (method === "POST" && subPath === "/files/presign") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as { key?: string; contentType?: string; expiresIn?: number };
+      if (!body.key) return clientErr("key is required", 400);
+      // Enforce app prefix on the S3 key
+      const safeKey = body.key.startsWith(`apps/${appId}/`) ? body.key : `apps/${appId}/${body.key}`;
+      const expiresIn = body.expiresIn ?? 3600;
+      const url = await storage.getSignedPutUrl!(safeKey, { contentType: body.contentType, expiresIn });
+      return ok({ url, key: safeKey, expiresIn });
+    }
+
+    // GET /apps/{appId}/files/{+key}/presign
+    const filesPresignMatch = subPath.match(/^\/files\/(.+)\/presign$/);
+    if (filesPresignMatch && method === "GET") {
+      const key = decodeURIComponent(filesPresignMatch[1]!);
+      const safeKey = key.startsWith(`apps/${appId}/`) ? key : `apps/${appId}/${key}`;
+      const exists = await storage.has(safeKey);
+      if (!exists) return clientErr("File not found", 404);
+      const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
+      const url = await storage.getSignedUrl!(safeKey, { expiresIn });
+      return ok({ url, expiresIn });
+    }
+
+    // HEAD|GET|PUT /apps/{appId}/files/{+key}
+    const filesMatch = subPath.match(/^\/files\/(.+)$/);
+    if (filesMatch) {
+      const key = decodeURIComponent(filesMatch[1]!);
+      const safeKey = key.startsWith(`apps/${appId}/`) ? key : `apps/${appId}/${key}`;
+
+      if (method === "HEAD") {
+        const result = await storage.get(safeKey);
+        return { statusCode: result ? 200 : 404, headers: {}, body: "" };
+      }
+
+      if (method === "GET") {
+        const result = await storage.get(safeKey);
+        if (!result) return clientErr("File not found", 404);
+        const data = result.data instanceof Uint8Array ? result.data : new Uint8Array(result.data as ArrayBuffer);
+        return {
+          statusCode: 200,
+          headers: {
+            "Content-Type": result.contentType ?? "application/octet-stream",
+            "Content-Length": String(data.byteLength),
+          },
+          body: Buffer.from(data).toString("base64"),
+          isBase64Encoded: true,
+        };
+      }
+
+      if (method === "PUT") {
+        const headers = event.headers ?? {};
+        const contentType = (headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream").split(";")[0]!.trim();
+        const fileBuffer = event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64")
+          : Buffer.from(event.body ?? "", "binary");
+        await storage.put(safeKey, fileBuffer, { contentType });
+        return ok({ ok: true });
+      }
+    }
+
+    return clientErr("Not found", 404);
+  } catch (e) {
+    console.error("Handler error:", e);
+    return {
+      statusCode: 500,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ error: "Internal server error" }),
+    };
+  }
+}

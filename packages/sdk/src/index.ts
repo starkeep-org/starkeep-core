@@ -2,7 +2,6 @@ export type {
   StarkeepSdk,
   StarkeepSdkOptions,
   DataOperations,
-  MetadataOperations,
   IndexOperations,
   AggregationOperations,
   SyncOperations,
@@ -16,8 +15,6 @@ export { createStarkeepSdk } from "./sdk.js";
 export type {
   StarkeepId,
   DataRecord,
-  MetadataRecord,
   HLCTimestamp,
   CreateDataRecordInput,
-  CreateMetadataRecordInput,
 } from "@starkeep/core";

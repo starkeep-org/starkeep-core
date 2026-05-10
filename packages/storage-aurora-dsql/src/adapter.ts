@@ -1,5 +1,4 @@
-import type { DataRecord, MetadataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
-import { createStarkeepId, serializeHLC, deserializeHLC } from "@starkeep/core";
+import type { DataRecord, StarkeepId } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -7,10 +6,6 @@ import type {
   BatchOperation,
   Migration,
   Transaction,
-  MetadataColumnDefinition,
-  MetadataQuery,
-  MetadataQueryResult,
-  MetadataSyncRecord,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
 import type {
@@ -19,13 +14,7 @@ import type {
   DatabaseClientFactory,
 } from "./types.js";
 import { recordToRow, rowToRecord, type PostgresRow } from "./serialization.js";
-import {
-  buildPostgresQuery,
-  buildPostgresMetadataQuery,
-  metadataTableName,
-  generatorIdToPrefix,
-  snakeToCamel,
-} from "./query-builder.js";
+import { buildPostgresQuery } from "./query-builder.js";
 
 const CREATE_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS records (
@@ -60,37 +49,10 @@ const CREATE_MIGRATIONS_TABLE_SQL = `
   )
 `;
 
-const CREATE_METADATA_SYNC_TABLE_SQL = `
-  CREATE TABLE IF NOT EXISTS metadata_sync (
-    target_id          TEXT NOT NULL,
-    target_type        TEXT NOT NULL,
-    generator_id       TEXT NOT NULL,
-    generator_version  INTEGER NOT NULL,
-    input_hash         TEXT,
-    updated_at         TEXT NOT NULL,
-    value              TEXT NOT NULL,
-    object_storage_key TEXT,
-    content_hash       TEXT,
-    mime_type          TEXT,
-    size_bytes         BIGINT,
-    PRIMARY KEY (target_id, generator_id)
-  )
-`;
-
-const CREATE_METADATA_SYNC_INDEX_SQL =
-  "CREATE INDEX ASYNC IF NOT EXISTS idx_metadata_sync_updated_at ON metadata_sync(updated_at)";
-
-/** Per-type registry of generator columns. */
-interface GeneratorColumnEntry {
-  generatorId: string;
-  columns: MetadataColumnDefinition[];
-}
-
 export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private client: DatabaseClient | null = null;
   private readonly options: AuroraDsqlDatabaseAdapterOptions;
   private readonly clientFactory: DatabaseClientFactory;
-  private readonly metadataRegistry = new Map<string, GeneratorColumnEntry[]>();
 
   constructor(
     options: AuroraDsqlDatabaseAdapterOptions,
@@ -107,8 +69,6 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       await this.client.query(sql);
     }
     await this.client.query(CREATE_MIGRATIONS_TABLE_SQL);
-    await this.client.query(CREATE_METADATA_SYNC_TABLE_SQL);
-    await this.client.query(CREATE_METADATA_SYNC_INDEX_SQL);
   }
 
   async close(): Promise<void> {
@@ -259,255 +219,4 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Per-type metadata table methods
-  // ---------------------------------------------------------------------------
-
-  async ensureMetadataTable(
-    targetType: string,
-    generatorId: string,
-    columns: MetadataColumnDefinition[],
-  ): Promise<void> {
-    const table = metadataTableName(targetType);
-    const prefix = generatorIdToPrefix(generatorId);
-
-    await this.getClient().query(`
-      CREATE TABLE IF NOT EXISTS ${table} (
-        target_id TEXT PRIMARY KEY
-      )
-    `);
-
-    const postgresColumnType = (col: MetadataColumnDefinition): string => {
-      switch (col.columnType) {
-        case "integer": return "INTEGER";
-        case "real": return "DOUBLE PRECISION";
-        case "boolean": return "BOOLEAN";
-        default: return "TEXT";
-      }
-    };
-
-    for (const col of columns) {
-      try {
-        await this.getClient().query(
-          `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col.name} ${postgresColumnType(col)}`,
-        );
-      } catch {
-        // Ignore.
-      }
-    }
-
-    for (const [colName, colType] of [
-      [`${prefix}_input_hash`, "TEXT"],
-      [`${prefix}_generator_version`, "INTEGER"],
-    ] as const) {
-      try {
-        await this.getClient().query(
-          `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${colName} ${colType}`,
-        );
-      } catch {
-        // Ignore.
-      }
-    }
-
-    for (const col of columns) {
-      if (col.columnType !== "boolean") {
-        try {
-          await this.getClient().query(
-            `CREATE INDEX ASYNC IF NOT EXISTS idx_${table}_${col.name} ON ${table}(${col.name})`,
-          );
-        } catch {
-          // Ignore.
-        }
-      }
-    }
-
-    const existing = this.metadataRegistry.get(targetType) ?? [];
-    if (!existing.some((e) => e.generatorId === generatorId)) {
-      existing.push({ generatorId, columns });
-      this.metadataRegistry.set(targetType, existing);
-    }
-  }
-
-  async putMetadata(targetType: string, entry: MetadataRecord): Promise<void> {
-    const table = metadataTableName(targetType);
-    const prefix = generatorIdToPrefix(entry.generatorId);
-    const registered = this.metadataRegistry.get(targetType);
-    const generatorEntry = registered?.find((e) => e.generatorId === entry.generatorId);
-
-    if (!generatorEntry) {
-      throw new StorageError(
-        `Metadata table for type "${targetType}" / generator "${entry.generatorId}" not registered. Call ensureMetadataTable first.`,
-      );
-    }
-
-    const columnNames: string[] = ["target_id"];
-    const values: unknown[] = [entry.targetId];
-    let idx = 2;
-
-    for (const col of generatorEntry.columns) {
-      columnNames.push(col.name);
-      const camelKey = snakeToCamel(col.name);
-      values.push(entry.value[camelKey] ?? null);
-      idx++;
-    }
-
-    columnNames.push(`${prefix}_input_hash`, `${prefix}_generator_version`);
-    values.push(entry.inputHash, entry.generatorVersion);
-
-    const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
-    const updateCols = columnNames.filter((c) => c !== "target_id");
-    const updates = updateCols.map((c) => `${c} = EXCLUDED.${c}`).join(", ");
-
-    const text = `INSERT INTO ${table} (${columnNames.join(", ")}) VALUES (${placeholders}) ON CONFLICT(target_id) DO UPDATE SET ${updates}`;
-    await this.getClient().query(text, values);
-  }
-
-  async queryMetadata(targetType: string, query: MetadataQuery): Promise<MetadataQueryResult> {
-    const registered = this.metadataRegistry.get(targetType) ?? [];
-    const { text, values } = buildPostgresMetadataQuery(targetType, query);
-
-    const result = await this.getClient().query(text, values);
-    const rows = result.rows as unknown as Record<string, unknown>[];
-    const entries: MetadataRecord[] = [];
-
-    for (const row of rows) {
-      const targetId = createStarkeepId(row["target_id"] as string);
-
-      const generatorsToReturn = query.generatorId
-        ? registered.filter((g) => g.generatorId === query.generatorId)
-        : registered;
-
-      for (const gen of generatorsToReturn) {
-        const prefix = generatorIdToPrefix(gen.generatorId);
-        const inputHash = row[`${prefix}_input_hash`] as string | null;
-        const generatorVersion = row[`${prefix}_generator_version`] as number | null;
-
-        if (generatorVersion === null) continue;
-
-        const value: Record<string, unknown> = {};
-        for (const col of gen.columns) {
-          const camelKey = snakeToCamel(col.name);
-          value[camelKey] = row[col.name] ?? null;
-        }
-
-        entries.push({
-          targetId,
-          generatorId: gen.generatorId,
-          generatorVersion,
-          inputHash: inputHash ?? "",
-          value,
-        });
-      }
-    }
-
-    return { entries };
-  }
-
-  async upsertSyncableMetadata(record: MetadataSyncRecord): Promise<void> {
-    await this.getClient().query(
-      `INSERT INTO metadata_sync
-         (target_id, target_type, generator_id, generator_version, input_hash, updated_at, value,
-          object_storage_key, content_hash, mime_type, size_bytes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       ON CONFLICT (target_id, generator_id) DO UPDATE SET
-         target_type        = EXCLUDED.target_type,
-         generator_version  = EXCLUDED.generator_version,
-         input_hash         = EXCLUDED.input_hash,
-         updated_at         = EXCLUDED.updated_at,
-         value              = EXCLUDED.value,
-         object_storage_key = EXCLUDED.object_storage_key,
-         content_hash       = EXCLUDED.content_hash,
-         mime_type          = EXCLUDED.mime_type,
-         size_bytes         = EXCLUDED.size_bytes`,
-      [
-        record.targetId,
-        record.targetType,
-        record.generatorId,
-        record.generatorVersion,
-        record.inputHash ?? null,
-        serializeHLC(record.updatedAt),
-        JSON.stringify(record.value),
-        record.objectStorageKey ?? null,
-        record.contentHash ?? null,
-        record.mimeType ?? null,
-        record.sizeBytes ?? null,
-      ],
-    );
-
-    // Best-effort write to the per-type typed-column table.
-    const registered = this.metadataRegistry.get(record.targetType);
-    const generatorEntry = registered?.find((e) => e.generatorId === record.generatorId);
-    if (generatorEntry) {
-      await this.putMetadata(record.targetType, {
-        targetId: record.targetId,
-        generatorId: record.generatorId,
-        generatorVersion: record.generatorVersion,
-        inputHash: record.inputHash ?? "",
-        value: record.value,
-      });
-    }
-  }
-
-  async getMetadataForRecord(targetId: string): Promise<Array<{
-    generatorId: string;
-    generatorVersion: number;
-    value: Record<string, unknown>;
-    updatedAt: string;
-    objectStorageKey: string | null;
-    mimeType: string | null;
-  }>> {
-    const result = await this.getClient().query(
-      "SELECT generator_id, generator_version, value, updated_at, object_storage_key, mime_type FROM metadata_sync WHERE target_id = $1 ORDER BY updated_at DESC",
-      [targetId],
-    );
-    return (result.rows as unknown as Array<{
-      generator_id: string;
-      generator_version: number;
-      value: string;
-      updated_at: string;
-      object_storage_key: string | null;
-      mime_type: string | null;
-    }>).map((row) => ({
-      generatorId: row.generator_id,
-      generatorVersion: row.generator_version,
-      value: JSON.parse(row.value) as Record<string, unknown>,
-      updatedAt: row.updated_at,
-      objectStorageKey: row.object_storage_key ?? null,
-      mimeType: row.mime_type ?? null,
-    }));
-  }
-
-  async getSyncableMetadataChangesSince(since: HLCTimestamp): Promise<MetadataSyncRecord[]> {
-    const sinceStr = serializeHLC(since);
-    const result = await this.getClient().query(
-      "SELECT * FROM metadata_sync WHERE updated_at > $1 ORDER BY updated_at ASC",
-      [sinceStr],
-    );
-
-    return (result.rows as unknown as Array<{
-      target_id: string;
-      target_type: string;
-      generator_id: string;
-      generator_version: number;
-      input_hash: string | null;
-      updated_at: string;
-      value: string;
-      object_storage_key: string | null;
-      content_hash: string | null;
-      mime_type: string | null;
-      size_bytes: number | null;
-    }>).map((row) => ({
-      targetId: createStarkeepId(row.target_id),
-      targetType: row.target_type,
-      generatorId: row.generator_id,
-      generatorVersion: row.generator_version,
-      inputHash: row.input_hash,
-      updatedAt: deserializeHLC(row.updated_at),
-      value: JSON.parse(row.value) as Record<string, unknown>,
-      objectStorageKey: row.object_storage_key ?? null,
-      contentHash: row.content_hash ?? null,
-      mimeType: row.mime_type ?? null,
-      sizeBytes: row.size_bytes ?? null,
-    }));
-  }
 }

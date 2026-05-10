@@ -15,11 +15,6 @@ async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
-import {
-  createGeneratorRegistry,
-  createDependencyGraph,
-  createMetadataEngine,
-} from "@starkeep/metadata-engine";
 import { createUnifiedIndex } from "@starkeep/index";
 import { createAggregationEngine } from "@starkeep/aggregations";
 import { createSyncEngine, type SyncEngine } from "@starkeep/sync-engine";
@@ -37,10 +32,8 @@ export async function createStarkeepSdk(
     nodeId,
     syncTransport,
     remoteObjectStorageAdapter,
-    remoteDatabaseAdapter,
     syncChangeLog,
     syncStateStore,
-    generators = [],
     subject,
   } = options;
 
@@ -91,30 +84,6 @@ export async function createStarkeepSdk(
       })
     : rawDatabaseAdapter;
 
-  const generatorRegistry = createGeneratorRegistry();
-  const dependencyGraph = createDependencyGraph();
-
-  for (const generator of generators) {
-    generatorRegistry.register(generator);
-    dependencyGraph.addGenerator(generator);
-    for (const inputType of generator.inputTypes) {
-      await databaseAdapter.ensureMetadataTable(
-        inputType,
-        generator.generatorId,
-        generator.outputColumns,
-      );
-    }
-  }
-
-  const metadataEngine = createMetadataEngine({
-    databaseAdapter,
-    objectStorageAdapter,
-    clock,
-    ownerId,
-    generatorRegistry,
-    dependencyGraph,
-  });
-
   const unifiedIndex = createUnifiedIndex({ databaseAdapter });
   const aggregationEngine = createAggregationEngine({ databaseAdapter });
 
@@ -126,7 +95,6 @@ export async function createStarkeepSdk(
       localObjectStorage: objectStorageAdapter,
       remoteObjectStorage: remoteObjectStorageAdapter,
       transport: syncTransport,
-      remoteDatabaseAdapter,
       clock,
       changeLog: syncChangeLog,
       syncState: syncStateStore,
@@ -314,36 +282,6 @@ export async function createStarkeepSdk(
       resolveConflict: resolveConflictImpl,
     },
 
-    metadata: {
-      async generate(generatorId, targetId) {
-        const record = await databaseAdapter.get(targetId);
-        if (!record) {
-          throw new Error(`Target record not found: ${targetId}`);
-        }
-        return metadataEngine.generate({
-          generatorId,
-          targetId,
-          targetType: record.type,
-          mode: "on-demand",
-        });
-      },
-
-      async generateAll(targetId, dataType) {
-        return metadataEngine.generateAll(targetId, dataType);
-      },
-
-      async getForRecord(targetId) {
-        const record = await databaseAdapter.get(targetId);
-        if (!record) return [];
-        const result = await databaseAdapter.queryMetadata(record.type, { targetId });
-        return result.entries;
-      },
-
-      async putDirect(targetId, targetType, generatorId, value) {
-        return metadataEngine.writeDirect(targetId, targetType, generatorId, value);
-      },
-    },
-
     index: {
       async search(query) {
         return unifiedIndex.search(query);
@@ -369,16 +307,6 @@ export async function createStarkeepSdk(
           async pull() {
             const result = await syncEngine!.pull();
             return { pulled: result.changes.length };
-          },
-
-          async pushMetadata() {
-            const result = await syncEngine!.pushMetadata();
-            return { pushed: result.pushed };
-          },
-
-          async pullMetadata() {
-            const result = await syncEngine!.pullMetadata();
-            return { pulled: result.pulled };
           },
 
           async fullSync() {
@@ -467,9 +395,6 @@ export async function createStarkeepSdk(
       }
       await databaseAdapter.close();
       await objectStorageAdapter.close();
-      if (remoteDatabaseAdapter) {
-        await remoteDatabaseAdapter.close();
-      }
       if (remoteObjectStorageAdapter) {
         await remoteObjectStorageAdapter.close();
       }

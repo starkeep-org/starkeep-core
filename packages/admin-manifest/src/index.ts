@@ -1,21 +1,26 @@
 export {
   appManifestSchema,
   appTierSchema,
-  typeDefinitionSchema,
-  permissionEntrySchema,
+  sharedTypeAccessSchema,
+  sharedResourceRequirementSchema,
+  appComputeHandlerSchema,
+  appPrivateResourceSchema,
   infraRequirementsSchema,
-  infraRequirementSchema,
+  permissionEntrySchema,
   type AppManifest,
   type AppTier,
-  type TypeDefinition,
-  type PermissionEntry,
-  type InfraRequirement,
+  type SharedTypeAccess,
+  type SharedResourceRequirement,
+  type AppComputeHandler,
+  type AppPrivateResource,
   type InfraRequirements,
+  type PermissionEntry,
 } from "./schema.js";
 
 export {
   validateManifest,
   checkTypeConflicts,
+  CORE_TYPE_REGISTRY,
   type ValidationResult,
   type TypeConflict,
 } from "./validate.js";
