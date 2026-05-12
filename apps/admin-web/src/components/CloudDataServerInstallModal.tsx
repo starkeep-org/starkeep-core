@@ -1,17 +1,14 @@
 "use client";
 
-/**
- * Modal that drives /api/cloud-data-server/install via SSE and surfaces
- * progress lines + the final outputs (apiGatewayUrl, bucketName, etc.).
- *
- * Distinct from CommandOutputModal — that one wraps /api/exec/stream which
- * expects shelled-out subprocess commands keyed by id, with a numeric exit
- * code in the `done` event. The cloud-data-server install runs in-process
- * inside the Next.js server and returns a JSON outputs object on `done`.
- */
-
-import { useEffect, useRef, useState } from "react";
-import { Badge, Box, Button, Group, Loader, Modal, ScrollArea, Text } from "@mantine/core";
+import { useEffect, useState } from "react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { CommandOutput } from "./CommandOutput";
 import type { STSCredentials } from "../lib/cognito-auth";
 
 export interface CloudDataServerInstallOutputs {
@@ -30,20 +27,13 @@ export interface CloudDataServerInstallOutputs {
 interface Props {
   opened: boolean;
   onClose: () => void;
-  /** When non-null, the modal triggers the install on open. */
   credentials: STSCredentials | null;
   onSuccess?: (outputs: CloudDataServerInstallOutputs) => void;
 }
 
-export function CloudDataServerInstallModal({
-  opened,
-  onClose,
-  credentials,
-  onSuccess,
-}: Props) {
+export function CloudDataServerInstallModal({ opened, onClose, credentials, onSuccess }: Props) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
-  const viewportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!opened || !credentials) return;
@@ -69,7 +59,7 @@ export function CloudDataServerInstallModal({
           try {
             const j = (await resp.json()) as { error?: string };
             if (j.error) errMsg = j.error;
-          } catch { /* response might not be JSON if SSE start failed */ }
+          } catch { /* not JSON */ }
           setLines((l) => [...l, `Error: ${errMsg}`]);
           setStatus("failure");
           return;
@@ -125,51 +115,19 @@ export function CloudDataServerInstallModal({
     return () => { aborted = true; };
   }, [opened, credentials]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    if (viewportRef.current) {
-      viewportRef.current.scrollTop = viewportRef.current.scrollHeight;
-    }
-  }, [lines]);
-
   return (
-    <Modal
-      opened={opened}
-      onClose={onClose}
-      title={
-        <Group gap="sm">
-          <Text fw={600}>Install cloud-data-server</Text>
-          {status === "running" && <Loader size="xs" />}
-          {status === "success" && <Badge color="green">Success</Badge>}
-          {status === "failure" && <Badge color="red">Failed</Badge>}
-        </Group>
-      }
-      size="xl"
-      closeOnClickOutside={status !== "running"}
-      closeOnEscape={status !== "running"}
-    >
-      <ScrollArea h={420} viewportRef={viewportRef}>
-        <Box
-          style={{
-            fontFamily: "monospace",
-            fontSize: 12,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-all",
-            padding: "4px 0",
-          }}
-        >
-          {lines.map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-          {lines.length === 0 && status === "running" && (
-            <Text size="xs" c="dimmed">Starting…</Text>
-          )}
-        </Box>
-      </ScrollArea>
-      {status !== "running" && (
-        <Group justify="flex-end" mt="md">
-          <Button variant="light" onClick={onClose}>Close</Button>
-        </Group>
-      )}
-    </Modal>
+    <Dialog open={opened} onOpenChange={(open) => { if (!open && status !== "running") onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Install cloud-data-server</DialogTitle>
+        </DialogHeader>
+        <CommandOutput lines={lines} status={status} />
+        {status !== "running" && (
+          <div className="flex justify-end">
+            <Button variant="outline" onClick={onClose}>Close</Button>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }

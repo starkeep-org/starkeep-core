@@ -8,14 +8,15 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import type { AppManifest } from "@starkeep/admin-manifest";
-import type { ComputeContext } from "./compute-stack.js";
+import type { ComputeContext } from "./compute-stack";
 
 export function buildPulumiProgram(
   manifest: AppManifest,
   ctx: ComputeContext,
-): () => Promise<void> {
+): () => Promise<Record<string, unknown>> {
   return async () => {
     const handlers = manifest.infraRequirements.appPrivate.compute.handlers;
+    const outputs: Record<string, unknown> = {};
 
     for (const handler of handlers) {
       const fnName = `${ctx.stackPrefix}-app-${ctx.appId}-${handler.name}`;
@@ -70,10 +71,12 @@ export function buildPulumiProgram(
           authorizationType: "JWT",
         });
 
-        pulumi.export(`routeId:${handler.name}-${i}`, route.id);
+        outputs[`routeId:${handler.name}-${i}`] = route.id;
       }
 
-      pulumi.export(`functionArn:${handler.name}`, fn.arn);
+      outputs[`functionArn:${handler.name}`] = fn.arn;
     }
+
+    return outputs;
   };
 }

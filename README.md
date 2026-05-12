@@ -97,6 +97,7 @@ pnpm typecheck      # Type-check all packages
 pnpm lint           # Lint all packages
 pnpm format         # Format with Prettier
 pnpm format:check   # Check formatting
+pnpm --filter @starkeep/admin-core build  # Rebuild the bootstrap CloudFormation template
 ```
 
 ## Tooling

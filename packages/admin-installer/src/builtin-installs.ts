@@ -19,16 +19,16 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { roleChain, type AwsCredentials } from "./session.js";
+import { roleChain, type AwsCredentials } from "./session";
 import {
   appRoleExists,
   attachTempInstallCloudDataServerPolicy,
   createAppRole,
   detachTempInstallCloudDataServerPolicy,
-} from "./iam.js";
-import { pulumiUpInline } from "./compute-stack.js";
-import { runMigrations } from "./dsql-migrations.js";
-import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program.js";
+} from "./iam";
+import { pulumiUpInline } from "./compute-stack";
+import { runMigrations } from "./dsql-migrations";
+import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -60,6 +60,7 @@ export interface CloudDataServerInstallConfig {
   region: string;
   accountId: string;
   permissionsBoundaryArn: string;
+  foundationalPermissionsBoundaryArn: string;
   managerRoleArn: string;
   pulumiStateBucket: string;
   /** Cognito user-pool resources from the bootstrap CFN stack. */
@@ -110,6 +111,7 @@ export async function installCloudDataServer(
       appId,
       accountId: config.accountId,
       permissionsBoundaryArn: config.permissionsBoundaryArn,
+      foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
       sharedTypeAccess: [],
       canIngestUnknown: false,
       canPromoteFromUnknown: false,
@@ -125,6 +127,7 @@ export async function installCloudDataServer(
   await attachTempInstallCloudDataServerPolicy(
     config.stackPrefix,
     config.accountId,
+    config.region,
     managerCreds,
   );
 

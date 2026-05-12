@@ -13,6 +13,9 @@ export async function POST(req: NextRequest) {
     const name = err instanceof Error ? err.name : "unknown";
     const message = err instanceof Error ? err.message : String(err);
     const code = (err as Record<string, unknown>)?.Code ?? (err as Record<string, unknown>)?.code;
+    if (code === "NoSuchBucket") {
+      return NextResponse.json({ costs: null });
+    }
     console.error("[api/costs] error", { name, code, message });
     return NextResponse.json({ error: `${name}: ${message}`, code }, { status: 500 });
   }

@@ -10,7 +10,7 @@
  */
 
 import type { AppManifest } from "@starkeep/admin-manifest";
-import { roleChain, type AwsCredentials } from "./session.js";
+import { roleChain, type AwsCredentials } from "./session";
 import {
   createAppRole,
   attachTempInstallPolicy,
@@ -18,15 +18,15 @@ import {
   attachTempUninstallPolicy,
   detachTempUninstallPolicy,
   deleteAppRole,
-} from "./iam.js";
-import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl.js";
-import { putAppKeepFile, uploadAppBundle, deleteAppObjects } from "./s3.js";
+} from "./iam";
+import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
+import { putAppKeepFile, uploadAppBundle, deleteAppObjects } from "./s3";
 import {
   installComputeStack,
   uninstallComputeStack,
   type ComputeContext,
   type InstallReceipt,
-} from "./compute-stack.js";
+} from "./compute-stack";
 import {
   recordStep,
   getCompletedSteps,
@@ -34,7 +34,7 @@ import {
   createAccessPolicies,
   revokeAccessPolicies,
   deleteAppRegistryEntry,
-} from "./registry.js";
+} from "./registry";
 
 export interface InstallerConfig {
   stackPrefix: string;
@@ -47,6 +47,7 @@ export interface InstallerConfig {
   apiGatewayId: string;
   authorizerId: string;
   permissionsBoundaryArn: string;
+  foundationalPermissionsBoundaryArn: string;
   managerRoleArn: string;
 }
 
@@ -104,6 +105,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
       appId,
       accountId: config.accountId,
       permissionsBoundaryArn: config.permissionsBoundaryArn,
+      foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
       sharedTypeAccess: ir.sharedTypeAccess,
       canIngestUnknown: ir.appPrivate.canIngestUnknown,
       canPromoteFromUnknown: ir.appPrivate.canPromoteFromUnknown,
@@ -113,7 +115,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
   });
 
   await runStep(appId, "install", "attach_temp_install_policy", done, () =>
-    attachTempInstallPolicy(config.stackPrefix, appId, config.accountId, managerCreds),
+    attachTempInstallPolicy(config.stackPrefix, appId, config.accountId, config.region, managerCreds),
   );
 
   // App creds: derived fresh (not persisted) — always re-assume on resume
@@ -185,7 +187,7 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
 
   await runStep(appId, "uninstall", "attach_temp_uninstall_policy", done, () =>
-    attachTempUninstallPolicy(config.stackPrefix, appId, config.accountId, managerCreds),
+    attachTempUninstallPolicy(config.stackPrefix, appId, config.accountId, config.region, managerCreds),
   );
 
   const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);

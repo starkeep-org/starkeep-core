@@ -36,7 +36,7 @@ export interface CloudDataServerProgramContext {
 
 export function buildCloudDataServerProgram(
   ctx: CloudDataServerProgramContext,
-): () => Promise<void> {
+): () => Promise<Record<string, unknown>> {
   return async () => {
     // -----------------------------------------------------------------------
     // DSQL cluster
@@ -55,7 +55,7 @@ export function buildCloudDataServerProgram(
     // Files bucket + bucket policy
     // -----------------------------------------------------------------------
     const bucket = new aws.s3.BucketV2(`${ctx.stackPrefix}-files`, {
-      bucket: `${ctx.stackPrefix}-files-${ctx.accountId}`,
+      bucket: `${ctx.stackPrefix}-files-${ctx.accountId}-${ctx.region}-an`,
       tags: {
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",
@@ -206,15 +206,81 @@ export function buildCloudDataServerProgram(
     });
 
     // -----------------------------------------------------------------------
+    // Billing bucket + CUR report definition
+    //
+    // CUR is a global service (us-east-1 only), so we need a dedicated
+    // provider for those resources regardless of the deployment region.
+    // -----------------------------------------------------------------------
+    const usEast1Provider = new aws.Provider("us-east-1-provider", { region: "us-east-1" });
+
+    const billingBucket = new aws.s3.BucketV2(`${ctx.stackPrefix}-billing`, {
+      bucket: `${ctx.stackPrefix}-billing-${ctx.accountId}-${ctx.region}-an`,
+      tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
+    });
+
+    const curSourceArn = `arn:aws:cur:us-east-1:${ctx.accountId}:definition/*`;
+    new aws.s3.BucketPolicy(`${ctx.stackPrefix}-billing-policy`, {
+      bucket: billingBucket.id,
+      policy: pulumi.jsonStringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Sid: "AllowCurServiceCheck",
+            Effect: "Allow",
+            Principal: { Service: "billingreports.amazonaws.com" },
+            Action: ["s3:GetBucketAcl", "s3:GetBucketPolicy"],
+            Resource: billingBucket.arn,
+            Condition: {
+              StringEquals: {
+                "aws:SourceArn": curSourceArn,
+                "aws:SourceAccount": ctx.accountId,
+              },
+            },
+          },
+          {
+            Sid: "AllowCurDelivery",
+            Effect: "Allow",
+            Principal: { Service: "billingreports.amazonaws.com" },
+            Action: "s3:PutObject",
+            Resource: pulumi.interpolate`${billingBucket.arn}/*`,
+            Condition: {
+              StringEquals: {
+                "aws:SourceArn": curSourceArn,
+                "aws:SourceAccount": ctx.accountId,
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    const reportName = `${ctx.stackPrefix}-billing`;
+    new aws.cur.ReportDefinition(reportName, {
+      reportName,
+      timeUnit: "DAILY",
+      format: "textORcsv",
+      compression: "GZIP",
+      additionalSchemaElements: [],
+      s3Bucket: billingBucket.bucket,
+      s3Prefix: "reports",
+      s3Region: ctx.region,
+      refreshClosedReports: true,
+      reportVersioning: "OVERWRITE_REPORT",
+    }, { provider: usEast1Provider, dependsOn: [billingBucket] });
+
+    // -----------------------------------------------------------------------
     // Stack outputs — matches what per-app installs read to attach their
     // own routes to this gateway.
     // -----------------------------------------------------------------------
-    pulumi.export("auroraHostname", auroraHostname);
-    pulumi.export("bucketName", bucket.bucket);
-    pulumi.export("apiGatewayId", api.id);
-    pulumi.export("apiGatewayUrl", pulumi.interpolate`${api.apiEndpoint}/${stage.name}`);
-    pulumi.export("authorizerId", authorizer.id);
-    pulumi.export("functionArn", fn.arn);
-    pulumi.export("region", ctx.region);
+    return {
+      auroraHostname,
+      bucketName: bucket.bucket,
+      billingBucketName: billingBucket.bucket,
+      apiGatewayId: api.id,
+      apiGatewayUrl: pulumi.interpolate`${api.apiEndpoint}/${stage.name}`,
+      authorizerId: authorizer.id,
+      functionArn: fn.arn,
+      region: ctx.region,
+    };
   };
 }

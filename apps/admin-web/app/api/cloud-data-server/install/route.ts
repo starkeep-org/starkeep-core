@@ -1,55 +1,37 @@
 /**
  * Install (or re-install / update) the cloud-data-server built-in app.
  *
- * Triggered by admin-web after the user has signed in with Cognito and the
- * bootstrap CFN stack outputs are loaded into starkeep-config.json. The flow
- * mirrors `packages/admin-installer/scripts/cli-install-cloud-data-server.ts`,
- * but runs server-side inside the local Next.js process and streams progress
- * back to the browser via SSE.
+ * Spawns `packages/admin-installer/scripts/cli-install-cloud-data-server.ts`
+ * as a child process and streams its stdout/stderr to the browser via SSE.
+ * Running Pulumi out-of-process keeps `@pulumi/*` (and the rest of the
+ * installer source tree) out of admin-web's dev bundle — the dev server was
+ * OOMing because the bundler kept those module graphs hot.
  *
- * Request body:
- *   {
- *     accessKeyId: string,
- *     secretAccessKey: string,
- *     sessionToken: string,
- *   }
+ * Request body: { accessKeyId, secretAccessKey, sessionToken }
  *
  * Response: text/event-stream
- *   Each line emitted via console.log inside installCloudDataServer is
- *   forwarded as `data: <json-encoded line>\n\n`.
- *   Completion: `event: done\ndata: <json outputs>\n\n` then close.
- *   Failure:    `event: error\ndata: <json msg>\n\n` then close.
+ *   data:  <stdout/stderr line>
+ *   event: done   data: { apiGatewayUrl, apiGatewayId, authorizerId,
+ *                         bucketName, region, auroraHostname }
+ *   event: error  data: <message>
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { NextRequest } from "next/server";
-import { installCloudDataServer } from "@starkeep/admin-installer";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 
 const CONFIG_PATH = resolve(REPO_ROOT, "starkeep-config.json");
 
 interface StarkeepConfig {
   region: string;
-  stage: string;
-  accountId?: string;
-  userPoolId: string;
-  userPoolClientId: string;
-  identityPoolId: string;
-  permissionsBoundaryArn?: string;
-  managerRoleArn?: string;
-  pulumiStateBucket?: string;
   apiGatewayUrl?: string;
   apiGatewayId?: string;
   authorizerId?: string;
   s3Bucket?: string;
   s3Region?: string;
   auroraEndpoint?: string;
-}
-
-function loadConfig(): StarkeepConfig | null {
-  if (!existsSync(CONFIG_PATH)) return null;
-  return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
 }
 
 export async function POST(req: NextRequest) {
@@ -66,106 +48,101 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const config = loadConfig();
-  if (!config) {
+  if (!existsSync(CONFIG_PATH)) {
     return new Response(
       JSON.stringify({ error: `starkeep-config.json not found at ${CONFIG_PATH}` }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
-  if (!config.accountId) {
-    return new Response(
-      JSON.stringify({ error: "starkeep-config.json missing accountId" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
-  }
-
-  const stackPrefix = config.stage;
-  const accountId = config.accountId;
-  const managerRoleArn =
-    config.managerRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
-  const permissionsBoundaryArn =
-    config.permissionsBoundaryArn
-    ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
-  const pulumiStateBucket =
-    config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}`;
+  const preConfig = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
 
   const encoder = new TextEncoder();
+
   const stream = new ReadableStream({
-    async start(controller) {
+    start(controller) {
       const emit = (line: string) =>
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`));
 
-      // installCloudDataServer streams progress via console.log. Hijack the
-      // global console for the duration of this request to forward those
-      // lines as SSE events. This is OK because Next.js API routes run in
-      // their own request scope; the patch is reverted in finally.
-      const originalLog = console.log;
-      const originalWarn = console.warn;
-      console.log = (...args: unknown[]) => {
-        emit(args.map(String).join(" "));
-        originalLog(...args);
+      const child = spawn(
+        "pnpm",
+        [
+          "--filter",
+          "@starkeep/admin-installer",
+          "cli:install-cloud-data-server",
+          "--non-interactive",
+        ],
+        {
+          cwd: REPO_ROOT,
+          env: {
+            ...process.env,
+            AWS_ACCESS_KEY_ID: body.accessKeyId,
+            AWS_SECRET_ACCESS_KEY: body.secretAccessKey,
+            AWS_SESSION_TOKEN: body.sessionToken,
+            AWS_REGION: preConfig.region,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+
+      let buffer = "";
+      const onChunk = (chunk: Buffer) => {
+        buffer += chunk.toString();
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (line.length > 0) emit(line);
+        }
       };
-      console.warn = (...args: unknown[]) => {
-        emit("[warn] " + args.map(String).join(" "));
-        originalWarn(...args);
-      };
+      child.stdout.on("data", onChunk);
+      child.stderr.on("data", onChunk);
 
-      // Surface the install creds via the env vars consulted by the AWS SDK
-      // default credential provider chain. installCloudDataServer's first call
-      // is `roleChain([managerRoleArn])` which uses the default chain to
-      // assume Manager from these creds.
-      const prevAk = process.env.AWS_ACCESS_KEY_ID;
-      const prevSk = process.env.AWS_SECRET_ACCESS_KEY;
-      const prevSt = process.env.AWS_SESSION_TOKEN;
-      const prevRg = process.env.AWS_REGION;
-      process.env.AWS_ACCESS_KEY_ID = body.accessKeyId;
-      process.env.AWS_SECRET_ACCESS_KEY = body.secretAccessKey;
-      process.env.AWS_SESSION_TOKEN = body.sessionToken;
-      process.env.AWS_REGION = config.region;
-
-      try {
-        const outputs = await installCloudDataServer({
-          stackPrefix,
-          region: config.region,
-          accountId,
-          permissionsBoundaryArn,
-          managerRoleArn,
-          pulumiStateBucket,
-          userPoolId: config.userPoolId,
-          userPoolClientId: config.userPoolClientId,
-        });
-
-        const updated: StarkeepConfig = {
-          ...config,
-          permissionsBoundaryArn,
-          managerRoleArn,
-          pulumiStateBucket,
-          apiGatewayUrl: outputs.apiGatewayUrl,
-          apiGatewayId: outputs.apiGatewayId,
-          authorizerId: outputs.authorizerId,
-          s3Bucket: outputs.bucketName,
-          s3Region: outputs.region,
-          auroraEndpoint: outputs.auroraHostname,
-        };
-        writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
-
+      child.on("error", (err) => {
         controller.enqueue(
-          encoder.encode(`event: done\ndata: ${JSON.stringify(outputs)}\n\n`),
+          encoder.encode(`event: error\ndata: ${JSON.stringify(err.message)}\n\n`),
         );
         controller.close();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify(msg)}\n\n`));
+      });
+
+      child.on("close", (code) => {
+        if (buffer.length > 0) emit(buffer);
+        if (code === 0) {
+          try {
+            const post = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
+            const outputs = {
+              apiGatewayUrl: post.apiGatewayUrl,
+              apiGatewayId: post.apiGatewayId,
+              authorizerId: post.authorizerId,
+              bucketName: post.s3Bucket,
+              region: post.s3Region,
+              auroraHostname: post.auroraEndpoint,
+            };
+            controller.enqueue(
+              encoder.encode(`event: done\ndata: ${JSON.stringify(outputs)}\n\n`),
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            controller.enqueue(
+              encoder.encode(
+                `event: error\ndata: ${JSON.stringify(`Install completed but reading outputs failed: ${msg}`)}\n\n`,
+              ),
+            );
+          }
+        } else {
+          controller.enqueue(
+            encoder.encode(
+              `event: error\ndata: ${JSON.stringify(`Installer exited with code ${code}`)}\n\n`,
+            ),
+          );
+        }
         controller.close();
-      } finally {
-        console.log = originalLog;
-        console.warn = originalWarn;
-        process.env.AWS_ACCESS_KEY_ID = prevAk;
-        process.env.AWS_SECRET_ACCESS_KEY = prevSk;
-        process.env.AWS_SESSION_TOKEN = prevSt;
-        process.env.AWS_REGION = prevRg;
-      }
+      });
+    },
+    cancel() {
+      // Client disconnected — best-effort: the child is in its own process
+      // group via pnpm, so we'd need to track and SIGTERM it. For now leave
+      // it running so an aborted browser tab doesn't kill a Pulumi up mid-
+      // way through provisioning AWS resources.
     },
   });
 

@@ -10,8 +10,8 @@
 
 import * as pulumi from "@pulumi/pulumi/automation/index.js";
 import type { AppManifest } from "@starkeep/admin-manifest";
-import type { AwsCredentials } from "./session.js";
-import { buildPulumiProgram } from "./pulumi-program.js";
+import type { AwsCredentials } from "./session";
+import { buildPulumiProgram } from "./pulumi-program";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 export interface ComputeContext {
@@ -51,15 +51,35 @@ async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
       sessionToken: ctx.appCreds.sessionToken,
     },
   });
-  const result = await ssm.send(
-    new GetParameterCommand({
-      Name: `/${ctx.stackPrefix}/pulumi/passphrase`,
-      WithDecryption: true,
-    }),
-  );
-  const value = result.Parameter?.Value;
-  if (!value) throw new Error("Pulumi passphrase not found in SSM");
-  return value;
+
+  // This is the first AWS call after Manager attaches the temp-install
+  // policy, so it hits IAM's PutRolePolicy propagation window. Retry on
+  // AccessDenied with bounded backoff (~30s worst case). Once this call
+  // succeeds, propagation has caught up for all subsequent Pulumi calls.
+  const maxAttempts = 8;
+  const maxDelayMs = 5000;
+  let delay = 1000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = await ssm.send(
+        new GetParameterCommand({
+          Name: `/${ctx.stackPrefix}/pulumi/passphrase`,
+          WithDecryption: true,
+        }),
+      );
+      const value = result.Parameter?.Value;
+      if (!value) throw new Error("Pulumi passphrase not found in SSM");
+      return value;
+    } catch (err) {
+      const name = (err as { name?: string })?.name;
+      const isAccessDenied = name === "AccessDeniedException" || name === "AccessDenied";
+      if (!isAccessDenied || attempt === maxAttempts) throw err;
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, maxDelayMs);
+    }
+  }
+  throw new Error("unreachable");
 }
 
 /**
@@ -74,7 +94,7 @@ async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
 export async function pulumiUpInline(opts: {
   stackName: string;
   projectName: string;
-  program: () => Promise<void>;
+  program: () => Promise<Record<string, unknown> | void>;
   pulumiStateBucket: string;
   region: string;
   stackPrefix: string;

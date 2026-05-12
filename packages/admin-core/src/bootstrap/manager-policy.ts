@@ -12,10 +12,37 @@ const SUB = (s: string): CfnValue => ({ Sub: s });
 export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
   return [
     {
-      Sid: "ManagerCreateDeleteAppRoles",
+      // CreateRole is the only action where AWS evaluates the
+      // iam:PermissionsBoundary condition key — the rest of the
+      // role-management verbs don't populate it, so gating them with this
+      // condition would always deny. CreateRole alone is the actual security
+      // bar: it ensures every Manager-minted role is born with one of the
+      // two known boundaries (regular per-app or foundational). The choice
+      // between them is centralized in createAppRole — IAM accepts either,
+      // but only one code path (the magic-string check on appId) can pick
+      // the foundational one.
+      Sid: "ManagerCreateAppRoleWithBoundary",
+      Effect: "Allow",
+      Action: "iam:CreateRole",
+      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-app-*`),
+      Condition: {
+        // ArnLike (not StringEquals) — the policy ARNs contain a wildcard
+        // for the account-id segment, and StringEquals would treat that '*'
+        // as a literal character and never match a real ARN. ArnLike does
+        // ARN-aware glob matching, so 'arn:aws:iam::*:policy/...' matches
+        // 'arn:aws:iam::026090522855:policy/...' as intended.
+        ArnLike: {
+          "iam:PermissionsBoundary": [
+            SUB(`arn:aws:iam::*:policy/${stackPrefix}-app-permissions-boundary`),
+            SUB(`arn:aws:iam::*:policy/${stackPrefix}-foundational-permissions-boundary`),
+          ],
+        },
+      },
+    },
+    {
+      Sid: "ManagerManageAppRoles",
       Effect: "Allow",
       Action: [
-        "iam:CreateRole",
         "iam:DeleteRole",
         "iam:GetRole",
         "iam:UpdateRole",
@@ -24,33 +51,13 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
         "iam:ListRolePolicies",
         "iam:ListAttachedRolePolicies",
       ],
-      Resource: SUB(
-        `arn:aws:iam::*:role/${stackPrefix}-app-*`,
-      ),
-      Condition: {
-        StringEquals: {
-          "iam:PermissionsBoundary": SUB(
-            `arn:aws:iam::*:policy/${stackPrefix}-app-permissions-boundary`,
-          ),
-        },
-      },
+      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-app-*`),
     },
     {
       Sid: "ManagerPutDeleteAppRolePolicies",
       Effect: "Allow",
       Action: ["iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy"],
       Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-app-*`),
-    },
-    {
-      Sid: "ManagerPassRoleToLambda",
-      Effect: "Allow",
-      Action: "iam:PassRole",
-      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-app-*`),
-      Condition: {
-        StringEquals: {
-          "iam:PassedToService": "lambda.amazonaws.com",
-        },
-      },
     },
     {
       Sid: "ManagerAssumeAppRoles",

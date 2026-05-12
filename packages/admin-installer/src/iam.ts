@@ -11,13 +11,13 @@ import {
   PutRolePolicyCommand,
   DeleteRolePolicyCommand,
 } from "@aws-sdk/client-iam";
-import type { AwsCredentials } from "./session.js";
+import type { AwsCredentials } from "./session";
 import {
   buildRuntimePolicy,
   buildTempInstallPolicy,
   buildTempUninstallPolicy,
   buildTempInstallCloudDataServerPolicy,
-} from "./temp-policies.js";
+} from "./temp-policies";
 import type { SharedTypeAccess } from "@starkeep/admin-manifest";
 import { CORE_TYPE_REGISTRY } from "@starkeep/admin-manifest";
 
@@ -49,7 +49,14 @@ export interface CreateAppRoleInput {
   stackPrefix: string;
   appId: string;
   accountId: string;
+  /** Boundary ARN for ordinary per-app roles. */
   permissionsBoundaryArn: string;
+  /**
+   * Boundary ARN for the foundational app (cloud-data-server). Routed via
+   * the magic-string check below so that no caller — third-party manifest or
+   * future code path — can request this wider ceiling for any other app.
+   */
+  foundationalPermissionsBoundaryArn: string;
   sharedTypeAccess: SharedTypeAccess[];
   canIngestUnknown: boolean;
   canPromoteFromUnknown: boolean;
@@ -57,14 +64,29 @@ export interface CreateAppRoleInput {
   managerCreds: AwsCredentials;
 }
 
+/**
+ * The single app id permitted to use the foundational permissions boundary.
+ * Cloud-data-server provisions the DSQL cluster, files bucket, and shared
+ * API Gateway; it is always installed before any other app. Centralizing the
+ * choice here (rather than letting callers pass the boundary they want) is
+ * what guarantees a third-party app cannot escape the regular per-app
+ * boundary even if a future code path forgets to enforce it.
+ */
+const FOUNDATIONAL_APP_ID = "cloud-data-server";
+
 export async function createAppRole(input: CreateAppRoleInput): Promise<string> {
   const {
-    stackPrefix, appId, accountId, permissionsBoundaryArn,
+    stackPrefix, appId, accountId,
+    permissionsBoundaryArn, foundationalPermissionsBoundaryArn,
     sharedTypeAccess, canIngestUnknown, canPromoteFromUnknown,
     brokerPower, managerCreds,
   } = input;
   const iam = makeIamClient(managerCreds);
   const roleName = `${stackPrefix}-app-${appId}-role`;
+
+  const boundaryArn = appId === FOUNDATIONAL_APP_ID
+    ? foundationalPermissionsBoundaryArn
+    : permissionsBoundaryArn;
 
   const expanded = expandWildcard(sharedTypeAccess);
   const typeIds = expanded.map((e) => e.typeId);
@@ -88,7 +110,7 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
           },
         ],
       }),
-      PermissionsBoundary: permissionsBoundaryArn,
+      PermissionsBoundary: boundaryArn,
       Tags: [{ Key: "starkeep:appId", Value: appId }, { Key: "starkeep:managed", Value: "true" }],
     }),
   );
@@ -131,6 +153,7 @@ export async function attachTempInstallPolicy(
   stackPrefix: string,
   appId: string,
   accountId: string,
+  region: string,
   managerCreds: AwsCredentials,
 ): Promise<void> {
   const iam = makeIamClient(managerCreds);
@@ -138,7 +161,7 @@ export async function attachTempInstallPolicy(
     new PutRolePolicyCommand({
       RoleName: `${stackPrefix}-app-${appId}-role`,
       PolicyName: "temp-install",
-      PolicyDocument: buildTempInstallPolicy(stackPrefix, appId, accountId),
+      PolicyDocument: buildTempInstallPolicy(stackPrefix, appId, accountId, region),
     }),
   );
 }
@@ -161,6 +184,7 @@ export async function attachTempUninstallPolicy(
   stackPrefix: string,
   appId: string,
   accountId: string,
+  region: string,
   managerCreds: AwsCredentials,
 ): Promise<void> {
   const iam = makeIamClient(managerCreds);
@@ -168,7 +192,7 @@ export async function attachTempUninstallPolicy(
     new PutRolePolicyCommand({
       RoleName: `${stackPrefix}-app-${appId}-role`,
       PolicyName: "temp-uninstall",
-      PolicyDocument: buildTempUninstallPolicy(stackPrefix, appId, accountId),
+      PolicyDocument: buildTempUninstallPolicy(stackPrefix, appId, accountId, region),
     }),
   );
 }
@@ -206,6 +230,7 @@ export async function deleteAppRole(
 export async function attachTempInstallCloudDataServerPolicy(
   stackPrefix: string,
   accountId: string,
+  region: string,
   managerCreds: AwsCredentials,
 ): Promise<void> {
   const iam = makeIamClient(managerCreds);
@@ -213,7 +238,7 @@ export async function attachTempInstallCloudDataServerPolicy(
     new PutRolePolicyCommand({
       RoleName: `${stackPrefix}-app-cloud-data-server-role`,
       PolicyName: "temp-install-cloud-data-server",
-      PolicyDocument: buildTempInstallCloudDataServerPolicy(stackPrefix, accountId),
+      PolicyDocument: buildTempInstallCloudDataServerPolicy(stackPrefix, accountId, region),
     }),
   );
 }

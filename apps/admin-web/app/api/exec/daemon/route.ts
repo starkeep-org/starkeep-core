@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
@@ -27,17 +27,36 @@ function isAlive(pid: number): boolean {
   }
 }
 
+function pidByPort(port: number): number | null {
+  const result = spawnSync("lsof", ["-ti", `tcp:${port}`], { encoding: "utf-8" });
+  const pid = parseInt(result.stdout?.trim(), 10);
+  return isNaN(pid) ? null : pid;
+}
+
 function stopById(id: DaemonId | ExternalDaemonId): { stopped: boolean; error?: string } {
   const pf = pidFile(id);
-  if (!existsSync(pf)) {
-    return { stopped: false, error: "Not running (no PID file)" };
+  if (existsSync(pf)) {
+    const pid = parseInt(readFileSync(pf, "utf-8"), 10);
+    if (isAlive(pid)) process.kill(-pid, "SIGTERM");
+    unlinkSync(pf);
+    const mf = metaFile(id);
+    if (existsSync(mf)) unlinkSync(mf);
+    return { stopped: true };
   }
-  const pid = parseInt(readFileSync(pf, "utf-8"), 10);
-  if (isAlive(pid)) process.kill(pid, "SIGTERM");
-  unlinkSync(pf);
-  const mf = metaFile(id);
-  if (existsSync(mf)) unlinkSync(mf);
-  return { stopped: true };
+
+  // No PID file — fall back to finding the process by port if one is configured.
+  const port = !((EXTERNAL_DAEMON_IDS as readonly string[]).includes(id))
+    ? DAEMON_COMMANDS[id as DaemonId]?.port
+    : undefined;
+  if (port) {
+    const pid = pidByPort(port);
+    if (pid) {
+      process.kill(pid, "SIGTERM");
+      return { stopped: true };
+    }
+  }
+
+  return { stopped: false, error: "Not running (no PID file)" };
 }
 
 export async function POST(req: NextRequest) {

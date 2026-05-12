@@ -1,29 +1,28 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Input } from "@/components/ui/input";
 import {
-  Container,
-  Title,
-  Text,
-  Paper,
-  Stack,
-  Group,
-  Badge,
-  Code,
-  Loader,
-  Alert,
-  Button,
-  TextInput,
-  PasswordInput,
-  Collapse,
-  Modal,
-  Divider,
-  Anchor,
-  SimpleGrid,
-  Center,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Table,
-} from "@mantine/core";
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 import {
   readCloudConfig,
   readCloudCredentials,
@@ -32,7 +31,6 @@ import {
   credentialsNearExpiry,
   type CloudConfig,
 } from "../../src/lib/cloud-config";
-import { ModeSelector } from "../../src/components/mode-selector";
 import { CommandOutputModal } from "../../src/components/CommandOutputModal";
 import {
   initiateAuth,
@@ -97,7 +95,6 @@ function extractEmail(idToken: string): string | null {
 // ---------------------------------------------------------------------------
 
 export default function DashboardPage() {
-  const router = useRouter();
   const [refreshKey, setRefreshKey] = useState(0);
 
   // Local data server
@@ -138,7 +135,7 @@ export default function DashboardPage() {
   } | null>(null);
   const [outputOpen, setOutputOpen] = useState(false);
 
-  // Confirm modal (for destructive commands)
+  // Confirm modal
   const [confirmModal, setConfirmModal] = useState<{
     commandId: string;
     title: string;
@@ -164,7 +161,6 @@ export default function DashboardPage() {
     return () => clearInterval(timer);
   }, [anyDaemonLoading]);
 
-  // Clear loading state once each daemon is confirmed online
   useEffect(() => {
     if (daemonLoading["local-data-server"] && localOnline === true) {
       setDaemonLoading((l) => ({ ...l, "local-data-server": false }));
@@ -188,7 +184,6 @@ export default function DashboardPage() {
       setDaemonLoading((l) => ({ ...l, [id]: false }));
       return;
     }
-    // Safety timeout: clear loading after 90s regardless
     setTimeout(() => {
       setDaemonLoading((l) => ({ ...l, [id]: false }));
       setRefreshKey((k) => k + 1);
@@ -239,7 +234,6 @@ export default function DashboardPage() {
     setLocalOnline(null);
     setLocalTypes(null);
     setWatches(null);
-
     const controller = new AbortController();
 
     async function fetchLocal() {
@@ -250,13 +244,8 @@ export default function DashboardPage() {
           fetch("http://127.0.0.1:9820/config", { signal: controller.signal }),
           fetch("http://127.0.0.1:9820/auth/status", { signal: controller.signal }),
         ]);
-
-        if (typesResp.ok) {
-          setLocalTypes(await typesResp.json());
-          setLocalOnline(true);
-        } else {
-          setLocalOnline(false);
-        }
+        if (typesResp.ok) { setLocalTypes(await typesResp.json()); setLocalOnline(true); }
+        else setLocalOnline(false);
         if (watchesResp.ok) setWatches((await watchesResp.json()).watches);
         if (configResp.ok) {
           const cfg = await configResp.json();
@@ -267,9 +256,7 @@ export default function DashboardPage() {
           setLocalAuthAuthenticated(status.authenticated as boolean);
         }
       } catch {
-        if (!controller.signal.aborted) {
-          setLocalOnline(false);
-        }
+        if (!controller.signal.aborted) setLocalOnline(false);
       }
     }
 
@@ -283,31 +270,26 @@ export default function DashboardPage() {
     checkUrl("http://localhost:5173").then(setLocalFileBrowser);
   }, [refreshKey]);
 
-  // Read cloud config from localStorage
+  // Read cloud config
   useEffect(() => {
     readCloudConfig().then(setCloudConfig);
   }, [refreshKey]);
 
-  // If cloudConfig is absent, try to reconstruct it from PARTIAL_SETUP_KEY + local data-server
+  // Recovery: try to reconstruct cloud config from partial setup + local data-server
   useEffect(() => {
     if (cloudConfig !== null) return;
-
     async function tryRecover() {
-      const saved = localStorage.getItem("starkeep-partial-setup");
+      const saved = localStorage.getItem("starkeep-cloud-setup");
       if (!saved) return;
       let partial: {
         userPoolId?: string; userPoolClientId?: string; identityPoolId?: string;
-        region?: string; refreshToken?: string; stackPrefix?: string;
+        refreshToken?: string; stackPrefix?: string;
       };
       try { partial = JSON.parse(saved); } catch { return; }
-
-      const { userPoolId, userPoolClientId, identityPoolId, region: r, refreshToken: rt, stackPrefix: sp } = partial;
+      const { userPoolId, userPoolClientId, identityPoolId, refreshToken: rt, stackPrefix: sp } = partial;
       if (!userPoolId || !userPoolClientId || !identityPoolId || !rt) return;
-
-      const cognitoConfig: CognitoConfig = {
-        userPoolId, userPoolClientId, identityPoolId, region: r || "us-east-1",
-      };
-
+      const region = userPoolId.split("_")[0] ?? "us-east-1";
+      const cognitoConfig: CognitoConfig = { userPoolId, userPoolClientId, identityPoolId, region };
       try {
         const [tokens, serverData] = await Promise.all([
           refreshTokens(cognitoConfig, rt),
@@ -315,9 +297,7 @@ export default function DashboardPage() {
             .then((res) => (res.ok ? res.json() : null))
             .catch(() => null),
         ]);
-
         if (!serverData?.s3Bucket || !serverData.s3Region || !serverData.auroraEndpoint) return;
-
         const creds = await getIdentityPoolCredentials(cognitoConfig, tokens.idToken);
         const config: CloudConfig = {
           stackPrefix: sp || "starkeep",
@@ -330,105 +310,69 @@ export default function DashboardPage() {
         };
         await writeCloudConfig(config);
         await writeCloudCredentials(creds);
-        localStorage.removeItem("starkeep-partial-setup");
+        localStorage.removeItem("starkeep-cloud-setup");
         setCloudConfig(config);
-      } catch {
-        // Recovery failed — ModeSelector stays visible
-      }
+      } catch { /* recovery failed */ }
     }
-
     tryRecover();
   }, [cloudConfig]);
 
-  // Fetch remote server data
+  // Fetch remote data
   useEffect(() => {
     setRemoteOnline(null);
     setRemoteTypes(null);
-
     async function fetchRemote() {
       const cfg = await readCloudConfig();
       if (!cfg?.apiGatewayUrl || !cfg.cognitoRefreshToken) return;
-
       try {
         const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
         const resp = await fetch(`${cfg.apiGatewayUrl}/data/types`, {
           signal: AbortSignal.timeout(8000),
           headers: { Authorization: `Bearer ${tokens.accessToken}` },
         });
-        if (resp.ok) {
-          setRemoteTypes(await resp.json());
-          setRemoteOnline(true);
-        } else {
-          setRemoteOnline(false);
-        }
-      } catch {
-        setRemoteOnline(false);
-      }
+        if (resp.ok) { setRemoteTypes(await resp.json()); setRemoteOnline(true); }
+        else setRemoteOnline(false);
+      } catch { setRemoteOnline(false); }
     }
-
     fetchRemote();
   }, [refreshKey]);
 
-  // Fetch cost data and budget status
+  // Fetch costs
   useEffect(() => {
     setCosts("loading");
     setCostProjection(null);
-
     async function fetchCosts() {
       const cfg = await readCloudConfig();
-      if (!cfg) { setCosts("error"); return; }
-
+      if (!cfg || !cfg.apiGatewayUrl) { setCosts("no-data"); return; }
       let creds: STSCredentials | null = await readCloudCredentials();
       if (!creds || credentialsNearExpiry(creds)) {
         try {
           const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
           creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
           await writeCloudCredentials(creds);
-        } catch {
-          setCosts("not-signed-in");
-          return;
-        }
+        } catch { setCosts("not-signed-in"); return; }
       }
-
       try {
         const resp = await fetch("/api/costs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            credentials: creds,
-            s3Region: cfg.s3Region,
-            stackPrefix: cfg.stackPrefix,
-          }),
+          body: JSON.stringify({ credentials: creds, s3Region: cfg.s3Region, stackPrefix: cfg.stackPrefix }),
         });
         if (!resp.ok) {
           const body = await resp.json().catch(() => ({})) as { error?: string; code?: string };
           const isAuthError = body.code === "InvalidClientTokenId" || body.code === "ExpiredTokenException";
-          if (isAuthError) {
-            console.info("[costs] not signed in");
-          } else {
-            console.error("[costs] API error", resp.status, body.error);
-          }
           setCosts(isAuthError ? "not-signed-in" : "error");
           return;
         }
         const { costs: mtd } = await resp.json() as { costs: ServiceCost[] | null };
-        if (mtd === null) {
-          setCosts("no-data");
-        } else {
-          setCosts(mtd);
-          setCostProjection(projectFullMonth(mtd));
-        }
-      } catch (err) {
-        console.error("[costs] fetch error", err);
-        setCosts("error");
-      }
+        if (mtd === null) { setCosts("no-data"); }
+        else { setCosts(mtd); setCostProjection(projectFullMonth(mtd)); }
+      } catch { setCosts("error"); }
     }
-
     fetchCosts();
   }, [refreshKey]);
 
-  // ---- Sign-in handlers ----
-
+  // Sign-in handlers
   async function handleSignIn() {
     const cognitoConfig = localCognitoConfig ?? cloudConfig?.cognitoConfig;
     if (!cognitoConfig) return;
@@ -444,12 +388,7 @@ export default function DashboardPage() {
           body: JSON.stringify({ idToken: result.tokens.idToken, refreshToken: result.tokens.refreshToken }),
         });
         if (cloudConfig) {
-          await writeCloudConfig({
-            ...cloudConfig,
-            cognitoConfig,
-            cognitoRefreshToken: result.tokens.refreshToken,
-            userEmail: email ?? undefined,
-          });
+          await writeCloudConfig({ ...cloudConfig, cognitoConfig, cognitoRefreshToken: result.tokens.refreshToken, userEmail: email ?? undefined });
         }
         setSignInOpen(false);
         setRefreshKey((k) => k + 1);
@@ -468,19 +407,11 @@ export default function DashboardPage() {
   async function handleNewPassword() {
     const cognitoConfig = localCognitoConfig ?? cloudConfig?.cognitoConfig;
     if (!cognitoConfig || !signInChallenge) return;
-    if (signInNewPassword !== signInConfirmPassword) {
-      setSignInError("Passwords do not match");
-      return;
-    }
+    if (signInNewPassword !== signInConfirmPassword) { setSignInError("Passwords do not match"); return; }
     setSignInLoading(true);
     setSignInError(null);
     try {
-      const tokens = await respondNewPasswordChallenge(
-        cognitoConfig,
-        signInChallenge.session,
-        signInEmail,
-        signInNewPassword,
-      );
+      const tokens = await respondNewPasswordChallenge(cognitoConfig, signInChallenge.session, signInEmail, signInNewPassword);
       const email = extractEmail(tokens.idToken);
       await fetch("http://127.0.0.1:9820/auth/tokens", {
         method: "POST",
@@ -488,12 +419,7 @@ export default function DashboardPage() {
         body: JSON.stringify({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }),
       });
       if (cloudConfig) {
-        await writeCloudConfig({
-          ...cloudConfig,
-          cognitoConfig,
-          cognitoRefreshToken: tokens.refreshToken,
-          userEmail: email ?? undefined,
-        });
+        await writeCloudConfig({ ...cloudConfig, cognitoConfig, cognitoRefreshToken: tokens.refreshToken, userEmail: email ?? undefined });
       }
       setSignInOpen(false);
       setRefreshKey((k) => k + 1);
@@ -505,32 +431,18 @@ export default function DashboardPage() {
   }
 
   function openSignIn() {
-    setSignInEmail("");
-    setSignInPassword("");
-    setSignInNewPassword("");
-    setSignInConfirmPassword("");
-    setSignInChallenge(null);
-    setSignInError(null);
-    setSignInOpen(true);
+    setSignInEmail(""); setSignInPassword(""); setSignInNewPassword(""); setSignInConfirmPassword("");
+    setSignInChallenge(null); setSignInError(null); setSignInOpen(true);
   }
 
-  // ---- Watch handlers ----
-
+  // Watch handlers
   async function handleAddWatch() {
     const path = watchPath.trim();
     if (!path) return;
-    setWatchError(null);
-    setWatchSuccess(null);
-
+    setWatchError(null); setWatchSuccess(null);
     const expanded = path.startsWith("~/") ? path.replace("~", "") : path;
-    const duplicate = watches?.some(
-      (w) => w.directoryPath === path || w.directoryPath.endsWith(expanded)
-    );
-    if (duplicate) {
-      setWatchError("A watch for this directory already exists.");
-      return;
-    }
-
+    const duplicate = watches?.some((w) => w.directoryPath === path || w.directoryPath.endsWith(expanded));
+    if (duplicate) { setWatchError("A watch for this directory already exists."); return; }
     setWatchSubmitting(true);
     try {
       const resp = await fetch("http://127.0.0.1:9820/watches", {
@@ -540,27 +452,21 @@ export default function DashboardPage() {
       });
       const data = await resp.json();
       if (resp.ok) {
-        setWatchPath("");
-        setWatchSuccess(`Watch started: ${data.watch?.directoryPath ?? path}`);
+        setWatchPath(""); setWatchSuccess(`Watch started: ${data.watch?.directoryPath ?? path}`);
         const wResp = await fetch("http://127.0.0.1:9820/watches");
         if (wResp.ok) setWatches((await wResp.json()).watches);
       } else {
         setWatchError(data.error ?? "Failed to add watch.");
       }
-    } catch {
-      setWatchError("Could not reach the data server.");
-    } finally {
-      setWatchSubmitting(false);
-    }
+    } catch { setWatchError("Could not reach the data server."); }
+    finally { setWatchSubmitting(false); }
   }
 
   async function handleRemoveWatch(id: string) {
     try {
       await fetch(`http://127.0.0.1:9820/watches/${id}`, { method: "DELETE" });
       setWatches((ws) => ws?.filter((w) => w.id !== id) ?? null);
-    } catch {
-      // server offline
-    }
+    } catch { /* server offline */ }
   }
 
   const signedIn = localAuthAuthenticated ?? false;
@@ -572,171 +478,132 @@ export default function DashboardPage() {
   }
 
   return (
-    <Container size="xl">
-      <Group justify="space-between" mb="xl">
-        <Title order={1}>Dashboard</Title>
-        <Button variant="light" onClick={() => setRefreshKey((k) => k + 1)}>
-          Refresh
-        </Button>
-      </Group>
+    <div className="max-w-7xl">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <Button variant="outline" size="sm" onClick={() => setRefreshKey((k) => k + 1)}>Refresh</Button>
+      </div>
 
-      <SimpleGrid cols={{ base: 1, xl: 2 }} spacing="xl" style={{ alignItems: "start" }}>
-        {/* ── LOCAL ───────────────────────────────────────────────────── */}
-        <Stack gap="md">
-          <Title order={2}>Local</Title>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+        {/* ── LOCAL ── */}
+        <div className="flex flex-col gap-4">
+          <h2 className="text-lg font-medium">Local</h2>
 
-          <Paper p="lg" withBorder>
-        <Group justify="space-between" mb="sm">
-          <Title order={3} size="h4">
-            Data Server
-          </Title>
-          <Group gap="xs">
-            <StatusBadge online={localOnline} />
-            {localOnline === true && (
-              <Button
-                size="xs"
-                variant="subtle"
-                color="red"
-                loading={!!daemonLoading["local-data-server"]}
-                onClick={() => stopDaemon("local-data-server")}
-              >
-                Stop
-              </Button>
-            )}
-          </Group>
-        </Group>
-
-        {localOnline === false && (
-          <Stack gap="md">
-            <Alert color="yellow" variant="light" title="Data server not running">
-              The local data server must be running for local features to work.
-            </Alert>
-            <Group justify="flex-end">
-              <Button
-                variant="light"
-                color="green"
-                loading={!!daemonLoading["local-data-server"]}
-                onClick={() => startDaemon("local-data-server")}
-              >
-                Start
-              </Button>
-            </Group>
-          </Stack>
-        )}
-
-        {localOnline === true && localTypes && (
-          <Stack gap="sm">
-            <Text
-              size="sm"
-              style={{ cursor: "pointer", textDecoration: "underline dotted" }}
-              onClick={() => setTypesExpanded((e) => !e)}
-            >
-              {localTypes.types.length} type{localTypes.types.length !== 1 ? "s" : ""} registered
-              &nbsp;·&nbsp;
-              {localTypes.total} record{localTypes.total !== 1 ? "s" : ""} total
-            </Text>
-
-            <Collapse in={typesExpanded}>
-              <Stack gap={4} pl="sm" pt="xs">
-                {localTypes.types.length === 0 ? (
-                  <Text size="xs" c="dimmed">
-                    No records yet
-                  </Text>
-                ) : (
-                  localTypes.types.map((t) => (
-                    <Group key={t.record_type} justify="space-between">
-                      <Code fz="xs">{t.record_type}</Code>
-                      <Badge variant="light" size="sm">
-                        {t.count}
-                      </Badge>
-                    </Group>
-                  ))
+          <div className="rounded-lg border p-4 flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-medium">Data Server</h3>
+              <div className="flex items-center gap-2">
+                <StatusBadge online={localOnline} />
+                {localOnline === true && (
+                  <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
+                    disabled={!!daemonLoading["local-data-server"]}
+                    onClick={() => stopDaemon("local-data-server")}
+                  >
+                    {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                    Stop
+                  </Button>
                 )}
-              </Stack>
-            </Collapse>
+              </div>
+            </div>
 
-            <Divider my="xs" label="Watches" labelPosition="left" />
-
-            {watches && watches.length > 0 ? (
-              <Stack gap="xs">
-                {watches.map((w) => (
-                  <Group key={w.id} justify="space-between" wrap="nowrap">
-                    <Group gap="xs" style={{ minWidth: 0, flex: 1 }}>
-                      <Text
-                        size="sm"
-                        style={{
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          flex: 1,
-                        }}
-                      >
-                        {w.directoryPath}
-                      </Text>
-                      <Badge variant="outline" size="xs" color="gray">
-                        {w.targetType}
-                      </Badge>
-                    </Group>
-                    <Button
-                      size="xs"
-                      variant="subtle"
-                      color="red"
-                      onClick={() => handleRemoveWatch(w.id)}
-                    >
-                      Remove
-                    </Button>
-                  </Group>
-                ))}
-              </Stack>
-            ) : (
-              <Text size="sm" c="dimmed">
-                No watches configured
-              </Text>
+            {localOnline === false && (
+              <div className="flex flex-col gap-3">
+                <Alert>
+                  <AlertTitle>Data server not running</AlertTitle>
+                  <AlertDescription>The local data server must be running for local features to work.</AlertDescription>
+                </Alert>
+                <div className="flex justify-end">
+                  <Button size="sm" variant="outline"
+                    disabled={!!daemonLoading["local-data-server"]}
+                    onClick={() => startDaemon("local-data-server")}
+                  >
+                    {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                    Start
+                  </Button>
+                </div>
+              </div>
             )}
 
-            <Group gap="xs" mt="xs">
-              <TextInput
-                placeholder="/path/to/directory or ~/Photos"
-                size="xs"
-                value={watchPath}
-                onChange={(e) => { setWatchPath(e.currentTarget.value); setWatchError(null); setWatchSuccess(null); }}
-                onKeyDown={(e) => { if (e.key === "Enter") handleAddWatch(); }}
-                style={{ flex: 1 }}
-                error={!!watchError}
-              />
-              <Button
-                size="xs"
-                onClick={handleAddWatch}
-                loading={watchSubmitting}
-                disabled={!watchPath.trim()}
-              >
-                Add watch
-              </Button>
-            </Group>
-            {watchError && <Text size="xs" c="red">{watchError}</Text>}
-            {watchSuccess && <Text size="xs" c="green">{watchSuccess}</Text>}
-          </Stack>
-        )}
+            {localOnline === true && localTypes && (
+              <div className="flex flex-col gap-3">
+                <button
+                  className="text-sm text-left underline decoration-dotted underline-offset-2"
+                  onClick={() => setTypesExpanded((e) => !e)}
+                >
+                  {localTypes.types.length} type{localTypes.types.length !== 1 ? "s" : ""} registered
+                  &nbsp;·&nbsp;
+                  {localTypes.total} record{localTypes.total !== 1 ? "s" : ""} total
+                </button>
 
-      </Paper>
+                {typesExpanded && (
+                  <div className="flex flex-col gap-1 pl-2">
+                    {localTypes.types.length === 0 ? (
+                      <span className="text-xs text-muted-foreground">No records yet</span>
+                    ) : (
+                      localTypes.types.map((t) => (
+                        <div key={t.record_type} className="flex items-center justify-between">
+                          <code className="font-mono text-xs">{t.record_type}</code>
+                          <Badge variant="secondary" className="text-xs">{t.count}</Badge>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
 
-        <Group justify="flex-end">
-          <Button
-            size="xs"
-            variant="light"
-            color="red"
-            onClick={() => openConfirm("reset-local-data", "Clear local data", "This will permanently delete all local object files, the SQLite database, and watch configs.", false)}
-          >
-            Clear local data
-          </Button>
-        </Group>
+                <Separator />
+
+                <p className="text-xs font-medium text-muted-foreground">Watches</p>
+
+                {watches && watches.length > 0 ? (
+                  <div className="flex flex-col gap-1.5">
+                    {watches.map((w) => (
+                      <div key={w.id} className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <span className="text-sm truncate flex-1">{w.directoryPath}</span>
+                          <Badge variant="outline" className="text-xs shrink-0">{w.targetType}</Badge>
+                        </div>
+                        <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive shrink-0"
+                          onClick={() => handleRemoveWatch(w.id)}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-sm text-muted-foreground">No watches configured</span>
+                )}
+
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="/path/to/directory or ~/Photos"
+                    className="text-sm h-8"
+                    value={watchPath}
+                    onChange={(e) => { setWatchPath(e.currentTarget.value); setWatchError(null); setWatchSuccess(null); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleAddWatch(); }}
+                  />
+                  <Button size="sm" onClick={handleAddWatch} disabled={watchSubmitting || !watchPath.trim()}>
+                    {watchSubmitting && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                    Add
+                  </Button>
+                </div>
+                {watchError && <p className="text-xs text-destructive">{watchError}</p>}
+                {watchSuccess && <p className="text-xs text-green-600 dark:text-green-400">{watchSuccess}</p>}
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end">
+            <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
+              onClick={() => openConfirm("reset-local-data", "Clear local data", "This will permanently delete all local object files, the SQLite database, and watch configs.", false)}
+            >
+              Clear local data
+            </Button>
+          </div>
 
           {localOnline !== false && (
-          <Paper p="lg" withBorder>
-            <Title order={3} size="h4" mb="sm">
-              Apps
-            </Title>
-            <Stack gap="sm">
+            <div className="rounded-lg border p-4">
+              <h3 className="font-medium mb-3">Apps</h3>
               <LocalAppRow
                 name="File Browser"
                 online={localFileBrowser}
@@ -745,259 +612,224 @@ export default function DashboardPage() {
                 onStart={() => startDaemon("file-browser")}
                 onStop={() => stopDaemon("file-browser")}
               />
-            </Stack>
-          </Paper>
+            </div>
           )}
-        </Stack>
+        </div>
 
-        {/* ── REMOTE ──────────────────────────────────────────────────── */}
-        <Stack gap="md">
-          <Title order={2}>Remote</Title>
+        {/* ── REMOTE ── */}
+        <div className="flex flex-col gap-4">
+          <h2 className="text-lg font-medium">Remote</h2>
 
           {cloudConfig === undefined ? (
-            <Center><Loader size="sm" /></Center>
+            <div className="rounded-lg border p-4 flex flex-col gap-2">
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-4 w-48" />
+            </div>
           ) : cloudConfig === null ? (
-            <Paper p="xl" withBorder>
-              <ModeSelector onSelect={(mode) => router.push(`/cloud-setup?mode=${mode}`)} />
-            </Paper>
+            <div className="rounded-lg border p-6 flex flex-col gap-4">
+              <p className="text-sm text-muted-foreground">Cloud is not set up yet.</p>
+              <Button asChild variant="outline" size="sm" className="w-fit">
+                <Link href="/cloud-setup">Set up cloud →</Link>
+              </Button>
+            </div>
           ) : (
             <>
-              <Paper p="lg" withBorder>
-                <Group justify="space-between" mb="sm">
-                  <Title order={3} size="h4">
-                    Data Server
-                  </Title>
+              <div className="rounded-lg border p-4 flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-medium">Data Server</h3>
                   {cloudConfig.apiGatewayUrl ? (
                     <StatusBadge online={remoteOnline} />
                   ) : (
-                    <Badge color="gray" variant="light">
-                      Not configured
-                    </Badge>
+                    <Badge variant="secondary" className="text-xs">Not configured</Badge>
                   )}
-                </Group>
+                </div>
 
                 {!cloudConfig.apiGatewayUrl ? (
-                  <Text size="sm" c="dimmed">
-                    Complete cloud setup to enable remote features.
-                  </Text>
+                  <p className="text-sm text-muted-foreground">Complete cloud setup to enable remote features.</p>
                 ) : (
-                  <Stack gap="sm">
+                  <div className="flex flex-col gap-3">
                     {remoteOnline === true && remoteTypes && (
                       <>
-                        <Text
-                          size="sm"
-                          style={{ cursor: "pointer", textDecoration: "underline dotted" }}
+                        <button
+                          className="text-sm text-left underline decoration-dotted underline-offset-2"
                           onClick={() => setRemoteTypesExpanded((e) => !e)}
                         >
                           {remoteTypes.types.length} type{remoteTypes.types.length !== 1 ? "s" : ""} registered
                           &nbsp;·&nbsp;
                           {remoteTypes.total} record{remoteTypes.total !== 1 ? "s" : ""} total
-                        </Text>
-                        <Collapse in={remoteTypesExpanded}>
-                          <Stack gap={4} pl="sm" pt="xs">
-                            {remoteTypes.types.length === 0 ? (
-                              <Text size="xs" c="dimmed">
-                                No records yet
-                              </Text>
-                            ) : (
-                              remoteTypes.types.map((t) => (
-                                <Group key={t.record_type} justify="space-between">
-                                  <Code fz="xs">{t.record_type}</Code>
-                                  <Badge variant="light" size="sm">
-                                    {t.count}
-                                  </Badge>
-                                </Group>
-                              ))
-                            )}
-                          </Stack>
-                        </Collapse>
+                        </button>
+                        {remoteTypesExpanded && (
+                          <div className="flex flex-col gap-1 pl-2">
+                            {remoteTypes.types.map((t) => (
+                              <div key={t.record_type} className="flex items-center justify-between">
+                                <code className="font-mono text-xs">{t.record_type}</code>
+                                <Badge variant="secondary" className="text-xs">{t.count}</Badge>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </>
                     )}
-                    <Group gap="md" wrap="wrap">
-                      <Button
-                        size="xs"
-                        variant="light"
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline"
                         onClick={() => openConfirm("local-deploy", "Redeploy from local", "This will run sst deploy using your current local code. The process may take several minutes.", true)}
                       >
                         Redeploy from local
                       </Button>
-                      <Button
-                        size="xs"
-                        variant="light"
-                        color="red"
+                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
                         onClick={() => openConfirm("reset-cloud-data", "Clear all cloud data", "This will permanently delete all files from S3 and all records from the Aurora DSQL database.", true)}
                       >
                         Clear all cloud data
                       </Button>
-                    </Group>
-                  </Stack>
+                    </div>
+                  </div>
                 )}
-              </Paper>
+              </div>
 
-              <Paper p="lg" withBorder>
-                <Title order={3} size="h4" mb="sm">
-                  Apps
-                </Title>
-                <Stack gap="sm">
-                  <RemoteAppRow name="File Browser" url={null} online={null} />
-                </Stack>
-              </Paper>
+              <div className="rounded-lg border p-4">
+                <h3 className="font-medium mb-3">Apps</h3>
+                <RemoteAppRow name="File Browser" url={null} online={null} />
+              </div>
 
-              <Paper p="lg" withBorder>
-                <Stack gap="sm">
-                  <Group justify="space-between">
-                    <Title order={3} size="h4">
-                      Authentication
-                    </Title>
-                    {signedIn ? (
-                      <Group gap="xs">
-                        <Badge color={authStale ? "yellow" : "green"} variant="light">
-                          {authStale ? "Stale session" : "Signed in"}
-                        </Badge>
-                        {cloudConfig.userEmail && (
-                          <Text size="sm" c="dimmed">
-                            {cloudConfig.userEmail}
-                          </Text>
-                        )}
-                        <Button size="xs" variant="subtle" color="red" onClick={handleSignOut}>
-                          Sign out
-                        </Button>
-                      </Group>
-                    ) : (
-                      <Group gap="xs">
-                        <Badge color="gray" variant="light">
-                          Not signed in
-                        </Badge>
-                        {(localCognitoConfig ?? cloudConfig.cognitoConfig) && (
-                          <Button size="xs" onClick={openSignIn}>
-                            Sign in
-                          </Button>
-                        )}
-                      </Group>
-                    )}
-                  </Group>
-                  {authStale && (
-                    <Alert color="yellow" title="Auth config may be invalid">
-                      The local data server has a stored session but no confirmed username — this
-                      can happen after recreating the bootstrap stack. Sign out to clear the stale
-                      session, then sign in again.
-                    </Alert>
+              <div className="rounded-lg border p-4 flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-medium">Authentication</h3>
+                  {signedIn ? (
+                    <div className="flex items-center gap-2">
+                      <Badge
+                        variant="secondary"
+                        className={cn("text-xs", authStale
+                          ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+                          : "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200")}
+                      >
+                        {authStale ? "Stale session" : "Signed in"}
+                      </Badge>
+                      {cloudConfig.userEmail && (
+                        <span className="text-sm text-muted-foreground">{cloudConfig.userEmail}</span>
+                      )}
+                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={handleSignOut}>
+                        Sign out
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-xs">Not signed in</Badge>
+                      {(localCognitoConfig ?? cloudConfig.cognitoConfig) && (
+                        <Button size="sm" variant="outline" onClick={openSignIn}>Sign in</Button>
+                      )}
+                    </div>
                   )}
-                </Stack>
-              </Paper>
+                </div>
+                {authStale && (
+                  <Alert>
+                    <AlertTitle>Auth config may be invalid</AlertTitle>
+                    <AlertDescription>
+                      The local data server has a stored session but no confirmed username — this can happen after recreating the bootstrap stack.
+                      Sign out to clear the stale session, then sign in again.
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
 
-              <Paper p="lg" withBorder>
-                <Title order={3} size="h4" mb="sm">Costs</Title>
-
+              <div className="rounded-lg border p-4">
+                <h3 className="font-medium mb-3">Costs</h3>
                 {costs === "loading" ? (
-                  <Center py="sm"><Loader size="sm" /></Center>
+                  <div className="flex flex-col gap-2">
+                    <Skeleton className="h-4 w-full" />
+                    <Skeleton className="h-4 w-3/4" />
+                  </div>
                 ) : costs === "not-signed-in" ? (
-                  <Text size="sm" c="dimmed">Sign in to view cost data.</Text>
+                  <p className="text-sm text-muted-foreground">Sign in to view cost data.</p>
                 ) : costs === "error" ? (
-                  <Text size="sm" c="dimmed">Could not load cost data.</Text>
+                  <p className="text-sm text-muted-foreground">Could not load cost data.</p>
                 ) : costs === "no-data" ? (
-                  <Text size="sm" c="dimmed">Cost report configured — data arrives within 24 hours.</Text>
+                  <p className="text-sm text-muted-foreground">Cost report configured — data arrives within 24 hours.</p>
                 ) : (
-                  <Table fz="sm">
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th>Service</Table.Th>
-                        <Table.Th style={{ textAlign: "right" }}>Month-to-date</Table.Th>
-                        <Table.Th style={{ textAlign: "right" }}>Projected</Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Service</TableHead>
+                        <TableHead className="text-right">Month-to-date</TableHead>
+                        <TableHead className="text-right">Projected</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
                       {costs.map((row) => {
                         const proj = costProjection?.find((p) => p.service === row.service);
                         return (
-                          <Table.Tr key={row.service}>
-                            <Table.Td>{row.service}</Table.Td>
-                            <Table.Td style={{ textAlign: "right" }}>${row.amount.toFixed(2)}</Table.Td>
-                            <Table.Td style={{ textAlign: "right" }} c="dimmed">${(proj?.amount ?? 0).toFixed(2)}</Table.Td>
-                          </Table.Tr>
+                          <TableRow key={row.service}>
+                            <TableCell>{row.service}</TableCell>
+                            <TableCell className="text-right">${row.amount.toFixed(2)}</TableCell>
+                            <TableCell className="text-right text-muted-foreground">${(proj?.amount ?? 0).toFixed(2)}</TableCell>
+                          </TableRow>
                         );
                       })}
-                      <Table.Tr fw={600}>
-                        <Table.Td>Total</Table.Td>
-                        <Table.Td style={{ textAlign: "right" }}>${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}</Table.Td>
-                        <Table.Td style={{ textAlign: "right" }} c="dimmed">${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}</Table.Td>
-                      </Table.Tr>
-                    </Table.Tbody>
+                      <TableRow className="font-medium">
+                        <TableCell>Total</TableCell>
+                        <TableCell className="text-right">${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
+                        <TableCell className="text-right text-muted-foreground">${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
+                      </TableRow>
+                    </TableBody>
                   </Table>
                 )}
-              </Paper>
+              </div>
             </>
           )}
-        </Stack>
-      </SimpleGrid>
+        </div>
+      </div>
 
-      {/* ── Sign-in modal ─────────────────────────────────────────────── */}
-      <Modal
-        opened={signInOpen}
-        onClose={() => {
-          setSignInOpen(false);
-          setSignInChallenge(null);
-        }}
-        title="Sign in to cloud"
-        size="sm"
-      >
-        {!signInChallenge ? (
-          <Stack gap="sm">
-            <TextInput
-              label="Email"
-              value={signInEmail}
-              onChange={(e) => setSignInEmail(e.currentTarget.value)}
-              disabled={signInLoading}
-            />
-            <PasswordInput
-              label="Password"
-              value={signInPassword}
-              onChange={(e) => setSignInPassword(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSignIn();
-              }}
-              disabled={signInLoading}
-            />
-            {signInError && (
-              <Alert color="red" title="Error">
-                {signInError}
-              </Alert>
-            )}
-            <Button onClick={handleSignIn} loading={signInLoading} fullWidth>
-              Sign in
-            </Button>
-          </Stack>
-        ) : (
-          <Stack gap="sm">
-            <Text size="sm">This account requires a new permanent password.</Text>
-            <PasswordInput
-              label="New password"
-              value={signInNewPassword}
-              onChange={(e) => setSignInNewPassword(e.currentTarget.value)}
-              disabled={signInLoading}
-            />
-            <PasswordInput
-              label="Confirm new password"
-              value={signInConfirmPassword}
-              onChange={(e) => setSignInConfirmPassword(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleNewPassword();
-              }}
-              disabled={signInLoading}
-            />
-            {signInError && (
-              <Alert color="red" title="Error">
-                {signInError}
-              </Alert>
-            )}
-            <Button onClick={handleNewPassword} loading={signInLoading} fullWidth>
-              Set password & sign in
-            </Button>
-          </Stack>
-        )}
-      </Modal>
+      {/* Sign-in dialog */}
+      <Dialog open={signInOpen} onOpenChange={(open) => { setSignInOpen(open); if (!open) setSignInChallenge(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Sign in to cloud</DialogTitle>
+          </DialogHeader>
+          {!signInChallenge ? (
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium">Email</label>
+                <Input value={signInEmail} onChange={(e) => setSignInEmail(e.currentTarget.value)} disabled={signInLoading} />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium">Password</label>
+                <Input type="password" value={signInPassword}
+                  onChange={(e) => setSignInPassword(e.currentTarget.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleSignIn(); }}
+                  disabled={signInLoading}
+                />
+              </div>
+              {signInError && <Alert variant="destructive"><AlertDescription>{signInError}</AlertDescription></Alert>}
+              <Button onClick={handleSignIn} disabled={signInLoading} className="w-full">
+                {signInLoading && <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                Sign in
+              </Button>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-4">
+              <p className="text-sm text-muted-foreground">This account requires a new permanent password.</p>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium">New password</label>
+                <Input type="password" value={signInNewPassword} onChange={(e) => setSignInNewPassword(e.currentTarget.value)} disabled={signInLoading} />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium">Confirm new password</label>
+                <Input type="password" value={signInConfirmPassword}
+                  onChange={(e) => setSignInConfirmPassword(e.currentTarget.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleNewPassword(); }}
+                  disabled={signInLoading}
+                />
+              </div>
+              {signInError && <Alert variant="destructive"><AlertDescription>{signInError}</AlertDescription></Alert>}
+              <Button onClick={handleNewPassword} disabled={signInLoading} className="w-full">
+                {signInLoading && <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                Set password &amp; sign in
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
-      {/* ── Command output modal ──────────────────────────────────────── */}
+      {/* Command output modal */}
       <CommandOutputModal
         opened={outputOpen}
         onClose={() => { setOutputOpen(false); setOutputModal(null); }}
@@ -1006,19 +838,16 @@ export default function DashboardPage() {
         title={outputModal?.title ?? ""}
       />
 
-      {/* ── Confirm modal ─────────────────────────────────────────────── */}
-      <Modal
-        opened={confirmModal !== null}
-        onClose={() => setConfirmModal(null)}
-        title={confirmModal?.title ?? ""}
-        size="sm"
-      >
-        <Stack gap="md">
-          <Text size="sm">{confirmModal?.message}</Text>
-          <Group justify="flex-end">
-            <Button variant="light" onClick={() => setConfirmModal(null)}>Cancel</Button>
-            <Button
-              color="red"
+      {/* Confirm dialog */}
+      <Dialog open={confirmModal !== null} onOpenChange={(open) => { if (!open) setConfirmModal(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{confirmModal?.title ?? ""}</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">{confirmModal?.message}</p>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setConfirmModal(null)}>Cancel</Button>
+            <Button variant="destructive"
               onClick={() => {
                 const m = confirmModal;
                 setConfirmModal(null);
@@ -1027,33 +856,33 @@ export default function DashboardPage() {
             >
               Confirm
             </Button>
-          </Group>
-        </Stack>
-      </Modal>
-    </Container>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Shared sub-components
+// Sub-components
 // ---------------------------------------------------------------------------
 
 function StatusBadge({ online }: { online: boolean | null }) {
-  if (online === null) return <Loader size="xs" />;
+  if (online === null) return <span className="size-4 animate-spin rounded-full border-2 border-border border-t-foreground" />;
   return (
-    <Badge color={online ? "green" : "red"} variant="light">
+    <Badge
+      variant="secondary"
+      className={cn("text-xs", online
+        ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+        : "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200")}
+    >
       {online ? "Online" : "Offline"}
     </Badge>
   );
 }
 
 function LocalAppRow({
-  name,
-  online,
-  url,
-  loading,
-  onStart,
-  onStop,
+  name, online, url, loading, onStart, onStop,
 }: {
   name: string;
   online: boolean | null;
@@ -1063,68 +892,50 @@ function LocalAppRow({
   onStop: () => void;
 }) {
   return (
-    <Group justify="space-between">
-      <Group gap="xs">
-        <Text size="sm" fw={500}>
-          {name}
-        </Text>
+    <div className="flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">{name}</span>
         <StatusBadge online={online} />
-      </Group>
-      <Group gap="xs">
+      </div>
+      <div className="flex items-center gap-2">
         {online === true && (
-          <Anchor href={url} target="_blank" size="sm">
-            Open ↗
-          </Anchor>
+          <a href={url} target="_blank" rel="noopener noreferrer" className="text-sm underline">Open ↗</a>
         )}
         {online === true && (
-          <Button size="xs" variant="subtle" color="red" loading={loading} onClick={onStop}>
+          <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" disabled={loading} onClick={onStop}>
+            {loading && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
             Stop
           </Button>
         )}
         {online === false && (
-          <Button size="xs" variant="light" color="green" loading={loading} onClick={onStart}>
+          <Button size="sm" variant="outline" disabled={loading} onClick={onStart}>
+            {loading && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
             Start
           </Button>
         )}
-      </Group>
-    </Group>
+      </div>
+    </div>
   );
 }
 
-function RemoteAppRow({
-  name,
-  url,
-  online,
-}: {
-  name: string;
-  url: string | null | undefined;
-  online: boolean | null;
-}) {
+function RemoteAppRow({ name, url, online }: { name: string; url: string | null | undefined; online: boolean | null }) {
   return (
-    <Group justify="space-between">
-      <Group gap="xs">
-        <Text size="sm" fw={500}>
-          {name}
-        </Text>
+    <div className="flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">{name}</span>
         {url === undefined ? (
-          <Loader size="xs" />
+          <span className="size-4 animate-spin rounded-full border-2 border-border border-t-foreground" />
         ) : url === null ? (
-          <Badge color="gray" variant="light" size="sm">
-            Not deployed
-          </Badge>
+          <Badge variant="secondary" className="text-xs">Not deployed</Badge>
         ) : online === null ? (
-          <Loader size="xs" />
+          <span className="size-4 animate-spin rounded-full border-2 border-border border-t-foreground" />
         ) : (
-          <Badge color={online ? "green" : "red"} variant="light" size="sm">
-            {online ? "Online" : "Offline"}
-          </Badge>
+          <StatusBadge online={online} />
         )}
-      </Group>
+      </div>
       {url !== null && url !== undefined && online === true && (
-        <Anchor href={url} target="_blank" size="sm">
-          Open ↗
-        </Anchor>
+        <a href={url} target="_blank" rel="noopener noreferrer" className="text-sm underline">Open ↗</a>
       )}
-    </Group>
+    </div>
   );
 }

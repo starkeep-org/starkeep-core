@@ -2,6 +2,7 @@ import { renderStatementsYaml } from "../iam-utils.js";
 import { managerPolicyStatements } from "./manager-policy.js";
 import { adminAppPolicyStatements } from "./admin-app-policy.js";
 import { appPermissionsBoundaryStatements } from "./permissions-boundary.js";
+import { foundationalPermissionsBoundaryStatements } from "./foundational-permissions-boundary.js";
 
 export interface GenerateBootstrapTemplateInput {
   stackPrefix?: string;
@@ -34,6 +35,10 @@ export function generateBootstrapTemplate(
   );
   const boundaryPolicyYaml = renderStatementsYaml(
     appPermissionsBoundaryStatements(stackPrefix),
+    10,
+  );
+  const foundationalBoundaryPolicyYaml = renderStatementsYaml(
+    foundationalPermissionsBoundaryStatements(stackPrefix),
     10,
   );
   return `AWSTemplateFormatVersion: '2010-09-09'
@@ -132,6 +137,26 @@ Resources:
 ${boundaryPolicyYaml}
 
   # ---------------------------------------------------------------------------
+  # Foundational Permissions Boundary — attached only to the cloud-data-server
+  # role, which provisions the foundational cloud resources (DSQL cluster, files
+  # bucket, API Gateway). Wider than the regular boundary but tightly scoped
+  # to \${StackPrefix}-app-cloud-data-server-* resource names.
+  # ---------------------------------------------------------------------------
+  AppFoundationalPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '\${StackPrefix}-foundational-permissions-boundary'
+      Description: >-
+        Maximum permissions for foundational app roles (currently just
+        cloud-data-server). Permits DSQL cluster admin, S3 bucket admin on
+        ${stackPrefix}-{files,billing}-*, Lambda + log-group + apigatewayv2
+        + CUR scoped to cloud-data-server, and iam:PassRole own-role-to-lambda.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+${foundationalBoundaryPolicyYaml}
+
+  # ---------------------------------------------------------------------------
   # Admin App Role — federated entry point + admin-app runtime identity
   # NOT under the permissions boundary (it's bootstrap-created).
   # ---------------------------------------------------------------------------
@@ -207,7 +232,7 @@ ${managerPolicyYaml}
   PulumiStateBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '\${StackPrefix}-pulumi-state-\${AWS::AccountId}'
+      BucketName: !Sub '\${StackPrefix}-pulumi-state-\${AWS::AccountId}-\${AWS::Region}'
       VersioningConfiguration:
         Status: Enabled
       Tags:
@@ -252,6 +277,10 @@ Outputs:
   AppPermissionsBoundaryArn:
     Description: ARN of the permissions boundary for Manager-minted per-app roles
     Value: !Ref AppPermissionsBoundary
+
+  AppFoundationalPermissionsBoundaryArn:
+    Description: ARN of the wider permissions boundary for foundational app roles (cloud-data-server)
+    Value: !Ref AppFoundationalPermissionsBoundary
 
   PulumiStateBucketName:
     Description: S3 bucket for Pulumi per-app stack state

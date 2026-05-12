@@ -32,7 +32,8 @@ import {
   GetIdCommand,
   GetCredentialsForIdentityCommand,
 } from "@aws-sdk/client-cognito-identity";
-import { installCloudDataServer } from "../src/builtin-installs.js";
+import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
+import { installCloudDataServer } from "../src/builtin-installs";
 
 interface StarkeepConfig {
   region: string;
@@ -42,6 +43,7 @@ interface StarkeepConfig {
   userPoolClientId: string;
   identityPoolId: string;
   permissionsBoundaryArn?: string;
+  foundationalPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   pulumiStateBucket?: string;
   // populated by this script after a successful install:
@@ -187,26 +189,7 @@ const flags = process.argv.slice(2);
 const nonInteractive = flags.includes("--non-interactive");
 
 const config = loadConfig();
-
-if (!config.accountId) {
-  console.error("Error: starkeep-config.json missing accountId");
-  process.exit(1);
-}
-
 const stackPrefix = config.stage;
-const managerRoleArn =
-  config.managerRoleArn ?? `arn:aws:iam::${config.accountId}:role/${stackPrefix}-manager-role`;
-const permissionsBoundaryArn =
-  config.permissionsBoundaryArn
-  ?? `arn:aws:iam::${config.accountId}:policy/${stackPrefix}-app-permissions-boundary`;
-const pulumiStateBucket =
-  config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${config.accountId}`;
-
-console.log("\nStarkeep cloud-data-server install");
-console.log(`  Region : ${config.region}`);
-console.log(`  Stage  : ${config.stage}`);
-console.log(`  Account: ${config.accountId}`);
-console.log("");
 
 if (nonInteractive) {
   const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
@@ -216,8 +199,6 @@ if (nonInteractive) {
     );
     process.exit(1);
   }
-  // Existing env-derived creds will be picked up by the SDK clients used inside
-  // installCloudDataServer via the default credential chain.
 } else {
   const email = await prompt("Email: ");
   const password = await prompt("Password: ", true);
@@ -234,12 +215,44 @@ if (nonInteractive) {
   process.env.AWS_REGION = config.region;
 }
 
+// Derive account ID from STS if not already in config.
+let accountId: string;
+if (config.accountId) {
+  accountId = config.accountId;
+} else {
+  const sts = new STSClient({ region: config.region });
+  const identity = await sts.send(new GetCallerIdentityCommand({}));
+  if (!identity.Account) {
+    console.error("Error: could not determine AWS account ID from credentials");
+    process.exit(1);
+  }
+  accountId = identity.Account;
+}
+
+const managerRoleArn =
+  config.managerRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
+const permissionsBoundaryArn =
+  config.permissionsBoundaryArn
+  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
+const foundationalPermissionsBoundaryArn =
+  config.foundationalPermissionsBoundaryArn
+  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
+const pulumiStateBucket =
+  config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${config.region}`;
+
+console.log("\nStarkeep cloud-data-server install");
+console.log(`  Region : ${config.region}`);
+console.log(`  Stage  : ${config.stage}`);
+console.log(`  Account: ${accountId}`);
+console.log("");
+
 console.log("\nInstalling cloud-data-server…\n");
 const outputs = await installCloudDataServer({
   stackPrefix,
   region: config.region,
-  accountId: config.accountId,
+  accountId,
   permissionsBoundaryArn,
+  foundationalPermissionsBoundaryArn,
   managerRoleArn,
   pulumiStateBucket,
   userPoolId: config.userPoolId,
@@ -248,7 +261,9 @@ const outputs = await installCloudDataServer({
 
 const updated: StarkeepConfig = {
   ...config,
+  accountId,
   permissionsBoundaryArn,
+  foundationalPermissionsBoundaryArn,
   managerRoleArn,
   pulumiStateBucket,
   apiGatewayUrl: outputs.apiGatewayUrl,
