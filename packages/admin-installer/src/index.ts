@@ -5,11 +5,10 @@ export { runAppInstallDdl, runAppUninstallDdl } from "./dsql-ddl";
 export type { DsqlDdlOptions } from "./dsql-ddl";
 
 export {
-  runMigrations,
-  getAppliedMigrations,
+  initializeSharedSchema,
   installerPgUser,
-} from "./dsql-migrations";
-export type { MigrationRunnerOptions } from "./dsql-migrations";
+} from "./dsql-schema-init";
+export type { SchemaInitOptions } from "./dsql-schema-init";
 
 export { installCloudDataServer } from "./builtin-installs";
 export type {

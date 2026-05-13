@@ -26,8 +26,9 @@ import { cn } from "@/lib/utils";
 import {
   readCloudConfig,
   readCloudCredentials,
-  writeCloudConfig,
   writeCloudCredentials,
+  readCognitoSession,
+  writeCognitoSession,
   credentialsNearExpiry,
   type CloudConfig,
 } from "../../src/lib/cloud-config";
@@ -110,6 +111,7 @@ export default function DashboardPage() {
 
   // Remote
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null | undefined>(undefined);
+  const [cognitoSession, setCognitoSession] = useState<{ refreshToken: string; userEmail?: string } | null>(null);
   const [remoteOnline, setRemoteOnline] = useState<boolean | null>(null);
   const [remoteTypes, setRemoteTypes] = useState<DataTypesResponse | null>(null);
   const [remoteTypesExpanded, setRemoteTypesExpanded] = useState(false);
@@ -209,17 +211,20 @@ export default function DashboardPage() {
     if (requiresCreds) {
       const cfg = await readCloudConfig();
       if (!cfg) return;
+      const session = await readCognitoSession();
+      if (!session?.refreshToken) return;
       let stored = await readCloudCredentials();
       if (!stored) {
         try {
-          const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
+          const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
           stored = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
           await writeCloudCredentials(stored);
+          await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
         } catch {
           return;
         }
       }
-      credentials = { ...stored, region: cfg.cognitoConfig.region };
+      credentials = { ...stored, region: cfg.region };
     }
     setOutputModal({ commandId, title, credentials });
     setOutputOpen(true);
@@ -270,52 +275,11 @@ export default function DashboardPage() {
     checkUrl("http://localhost:5173").then(setLocalFileBrowser);
   }, [refreshKey]);
 
-  // Read cloud config
+  // Read cloud config + cognito session
   useEffect(() => {
     readCloudConfig().then(setCloudConfig);
+    readCognitoSession().then(setCognitoSession);
   }, [refreshKey]);
-
-  // Recovery: try to reconstruct cloud config from partial setup + local data-server
-  useEffect(() => {
-    if (cloudConfig !== null) return;
-    async function tryRecover() {
-      const saved = localStorage.getItem("starkeep-cloud-setup");
-      if (!saved) return;
-      let partial: {
-        userPoolId?: string; userPoolClientId?: string; identityPoolId?: string;
-        refreshToken?: string; stackPrefix?: string;
-      };
-      try { partial = JSON.parse(saved); } catch { return; }
-      const { userPoolId, userPoolClientId, identityPoolId, refreshToken: rt, stackPrefix: sp } = partial;
-      if (!userPoolId || !userPoolClientId || !identityPoolId || !rt) return;
-      const region = userPoolId.split("_")[0] ?? "us-east-1";
-      const cognitoConfig: CognitoConfig = { userPoolId, userPoolClientId, identityPoolId, region };
-      try {
-        const [tokens, serverData] = await Promise.all([
-          refreshTokens(cognitoConfig, rt),
-          fetch("http://127.0.0.1:9820/config", { signal: AbortSignal.timeout(2000) })
-            .then((res) => (res.ok ? res.json() : null))
-            .catch(() => null),
-        ]);
-        if (!serverData?.s3Bucket || !serverData.s3Region || !serverData.auroraEndpoint) return;
-        const creds = await getIdentityPoolCredentials(cognitoConfig, tokens.idToken);
-        const config: CloudConfig = {
-          stackPrefix: sp || "starkeep",
-          s3Bucket: serverData.s3Bucket,
-          s3Region: serverData.s3Region,
-          auroraEndpoint: serverData.auroraEndpoint,
-          apiGatewayUrl: serverData.apiGatewayUrl ?? undefined,
-          cognitoConfig,
-          cognitoRefreshToken: tokens.refreshToken,
-        };
-        await writeCloudConfig(config);
-        await writeCloudCredentials(creds);
-        localStorage.removeItem("starkeep-cloud-setup");
-        setCloudConfig(config);
-      } catch { /* recovery failed */ }
-    }
-    tryRecover();
-  }, [cloudConfig]);
 
   // Fetch remote data
   useEffect(() => {
@@ -323,9 +287,10 @@ export default function DashboardPage() {
     setRemoteTypes(null);
     async function fetchRemote() {
       const cfg = await readCloudConfig();
-      if (!cfg?.apiGatewayUrl || !cfg.cognitoRefreshToken) return;
+      const session = await readCognitoSession();
+      if (!cfg?.apiGatewayUrl || !session?.refreshToken) return;
       try {
-        const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
+        const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
         const resp = await fetch(`${cfg.apiGatewayUrl}/data/types`, {
           signal: AbortSignal.timeout(8000),
           headers: { Authorization: `Bearer ${tokens.accessToken}` },
@@ -344,19 +309,22 @@ export default function DashboardPage() {
     async function fetchCosts() {
       const cfg = await readCloudConfig();
       if (!cfg || !cfg.apiGatewayUrl) { setCosts("no-data"); return; }
+      const session = await readCognitoSession();
       let creds: STSCredentials | null = await readCloudCredentials();
       if (!creds || credentialsNearExpiry(creds)) {
+        if (!session?.refreshToken) { setCosts("not-signed-in"); return; }
         try {
-          const tokens = await refreshTokens(cfg.cognitoConfig, cfg.cognitoRefreshToken);
+          const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
           creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
           await writeCloudCredentials(creds);
+          await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
         } catch { setCosts("not-signed-in"); return; }
       }
       try {
         const resp = await fetch("/api/costs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ credentials: creds, s3Region: cfg.s3Region, stackPrefix: cfg.stackPrefix }),
+          body: JSON.stringify({ credentials: creds, stackPrefix: cfg.stackPrefix }),
         });
         if (!resp.ok) {
           const body = await resp.json().catch(() => ({})) as { error?: string; code?: string };
@@ -387,9 +355,7 @@ export default function DashboardPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ idToken: result.tokens.idToken, refreshToken: result.tokens.refreshToken }),
         });
-        if (cloudConfig) {
-          await writeCloudConfig({ ...cloudConfig, cognitoConfig, cognitoRefreshToken: result.tokens.refreshToken, userEmail: email ?? undefined });
-        }
+        await writeCognitoSession({ refreshToken: result.tokens.refreshToken, userEmail: email ?? undefined });
         setSignInOpen(false);
         setRefreshKey((k) => k + 1);
       } else if (result.challengeName === "NEW_PASSWORD_REQUIRED" && result.session) {
@@ -418,9 +384,7 @@ export default function DashboardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }),
       });
-      if (cloudConfig) {
-        await writeCloudConfig({ ...cloudConfig, cognitoConfig, cognitoRefreshToken: tokens.refreshToken, userEmail: email ?? undefined });
-      }
+      await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: email ?? undefined });
       setSignInOpen(false);
       setRefreshKey((k) => k + 1);
     } catch (err) {
@@ -470,7 +434,7 @@ export default function DashboardPage() {
   }
 
   const signedIn = localAuthAuthenticated ?? false;
-  const authStale = signedIn && cloudConfig != null && !cloudConfig.userEmail;
+  const authStale = signedIn && !cognitoSession?.userEmail;
 
   async function handleSignOut() {
     await fetch("http://127.0.0.1:9820/auth/logout", { method: "POST" }).catch(() => {});
@@ -704,8 +668,8 @@ export default function DashboardPage() {
                       >
                         {authStale ? "Stale session" : "Signed in"}
                       </Badge>
-                      {cloudConfig.userEmail && (
-                        <span className="text-sm text-muted-foreground">{cloudConfig.userEmail}</span>
+                      {cognitoSession?.userEmail && (
+                        <span className="text-sm text-muted-foreground">{cognitoSession.userEmail}</span>
                       )}
                       <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={handleSignOut}>
                         Sign out

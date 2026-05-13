@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { extname, join, dirname, relative, resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
+import { regionFromUserPoolId } from "../../../../src/lib/cloud-config";
 import type { STSCredentials } from "../../../../src/lib/cognito-auth";
 
 const MIME: Record<string, string> = {
@@ -55,7 +56,7 @@ function runCmd(
 async function buildFrontend(
   photosWebPath: string,
   photosApiGatewayUrl: string,
-  starkeepCfg: { region?: string; userPoolId?: string; userPoolClientId?: string; identityPoolId?: string; apiGatewayUrl?: string; auroraEndpoint?: string; s3Bucket?: string; s3Region?: string },
+  starkeepCfg: { userPoolId?: string; userPoolClientId?: string; identityPoolId?: string; apiGatewayUrl?: string; auroraEndpoint?: string; s3Bucket?: string },
   env: NodeJS.ProcessEnv,
   emit: (line: string) => void,
 ): Promise<void> {
@@ -67,18 +68,19 @@ async function buildFrontend(
   // Write a cloud-only runtime config — omit localDataServerUrl so the deployed
   // app never tries to reach localhost. readCloudConfig() looks for `apiGatewayUrl`
   // (not `photosApiGatewayUrl`), so map the field name correctly.
+  const region = regionFromUserPoolId(starkeepCfg.userPoolId ?? "");
   const cloudRuntimeConfig = {
     // apiGatewayUrl = user-data gateway (handles /data/records, /data/files, etc.)
     apiGatewayUrl: starkeepCfg.apiGatewayUrl ?? "",
     // photosApiGatewayUrl = photos-specific gateway (handles /data/generate only)
     photosApiGatewayUrl: photosApiGatewayUrl,
-    region: starkeepCfg.region ?? "",
+    region,
     userPoolId: starkeepCfg.userPoolId ?? "",
     userPoolClientId: starkeepCfg.userPoolClientId ?? "",
     identityPoolId: starkeepCfg.identityPoolId ?? "",
     auroraEndpoint: starkeepCfg.auroraEndpoint ?? "",
     s3Bucket: starkeepCfg.s3Bucket ?? "",
-    s3Region: starkeepCfg.s3Region ?? starkeepCfg.region ?? "",
+    s3Region: region,
   };
   writeFileSync(
     resolve(photosWebPath, "public/starkeep-runtime-config.json"),
@@ -89,7 +91,7 @@ async function buildFrontend(
     NODE_ENV: "production",
     NEXT_PUBLIC_FORCE_REMOTE: "true",
     NEXT_PUBLIC_API_GATEWAY_URL: photosApiGatewayUrl,
-    NEXT_PUBLIC_COGNITO_REGION: starkeepCfg.region ?? "",
+    NEXT_PUBLIC_COGNITO_REGION: region,
     NEXT_PUBLIC_COGNITO_USER_POOL_ID: starkeepCfg.userPoolId ?? "",
     NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID: starkeepCfg.userPoolClientId ?? "",
   }, emit);
@@ -175,14 +177,12 @@ export async function POST(req: NextRequest) {
   const starkeepConfigRaw = readFileSync(starkeepConfigPath, "utf-8");
   const starkeepCfg = JSON.parse(starkeepConfigRaw) as {
     stage?: string;
-    region?: string;
     userPoolId?: string;
     userPoolClientId?: string;
     identityPoolId?: string;
     apiGatewayUrl?: string;
     auroraEndpoint?: string;
     s3Bucket?: string;
-    s3Region?: string;
   };
   const stage = starkeepCfg.stage ?? "starkeep";
 

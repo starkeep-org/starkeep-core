@@ -5,13 +5,16 @@
  * Replaces the old `sst deploy` flow entirely — there is no SST anymore.
  * cloud-data-server is provisioned via the standard admin-installer pipeline:
  * Manager attaches a wide temp policy, the cloud-data-server app role runs
- * Pulumi up to create DSQL/S3/Lambda/APIGw, the schema migrations declared
- * in the cloud-data-server manifest are applied, and the temp policy is
- * detached.
+ * Pulumi up to create DSQL/S3/Lambda/APIGw, the shared-schema DDL is
+ * applied, and the temp policy is detached.
  *
- * Reads starkeep-config.json from the repo root. Generate it from admin-web's
- * "Download CLI config" button after a successful bootstrap-stack deploy
- * (Cognito user pool + bootstrap IAM roles must already exist).
+ * Reads starkeep-config.json from the repo root. The admin-web wizard writes
+ * this file server-side via /api/config as it advances through setup steps,
+ * so it must already exist (with at least userPoolId / userPoolClientId /
+ * identityPoolId from the Stack outputs step) before this script runs.
+ *
+ * Region is NOT stored in the file — it is derived from `userPoolId` (AWS
+ * encodes the region into the pool ID, e.g. `us-east-2_Xxxxx`).
  *
  * Usage:
  *   pnpm tsx scripts/cli-install-cloud-data-server.ts
@@ -36,9 +39,8 @@ import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { installCloudDataServer } from "../src/builtin-installs";
 
 interface StarkeepConfig {
-  region: string;
   stage: string;
-  accountId: string;
+  accountId?: string;
   userPoolId: string;
   userPoolClientId: string;
   identityPoolId: string;
@@ -51,8 +53,18 @@ interface StarkeepConfig {
   apiGatewayId?: string;
   authorizerId?: string;
   s3Bucket?: string;
-  s3Region?: string;
   auroraEndpoint?: string;
+}
+
+function regionFromUserPoolId(userPoolId: string): string {
+  const parts = userPoolId.split("_");
+  if (parts.length < 2 || !parts[0]) {
+    throw new Error(
+      `userPoolId "${userPoolId}" is not in the expected format <region>_<id>. ` +
+      `Region is derived from userPoolId, so this prevents the installer from running.`,
+    );
+  }
+  return parts[0];
 }
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -116,7 +128,8 @@ async function authenticate(
   email: string,
   password: string,
 ): Promise<string> {
-  const client = new CognitoIdentityProviderClient({ region: config.region });
+  const region = regionFromUserPoolId(config.userPoolId);
+  const client = new CognitoIdentityProviderClient({ region });
 
   const initResponse = await client.send(
     new InitiateAuthCommand({
@@ -160,8 +173,9 @@ async function getSTSCredentials(
   config: StarkeepConfig,
   idToken: string,
 ): Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string }> {
-  const client = new CognitoIdentityClient({ region: config.region });
-  const loginKey = `cognito-idp.${config.region}.amazonaws.com/${config.userPoolId}`;
+  const region = regionFromUserPoolId(config.userPoolId);
+  const client = new CognitoIdentityClient({ region });
+  const loginKey = `cognito-idp.${region}.amazonaws.com/${config.userPoolId}`;
   const logins = { [loginKey]: idToken };
 
   const idResponse = await client.send(
@@ -189,6 +203,7 @@ const flags = process.argv.slice(2);
 const nonInteractive = flags.includes("--non-interactive");
 
 const config = loadConfig();
+const region = regionFromUserPoolId(config.userPoolId);
 const stackPrefix = config.stage;
 
 if (nonInteractive) {
@@ -212,7 +227,7 @@ if (nonInteractive) {
   process.env.AWS_ACCESS_KEY_ID = creds.accessKeyId;
   process.env.AWS_SECRET_ACCESS_KEY = creds.secretAccessKey;
   process.env.AWS_SESSION_TOKEN = creds.sessionToken;
-  process.env.AWS_REGION = config.region;
+  process.env.AWS_REGION = region;
 }
 
 // Derive account ID from STS if not already in config.
@@ -220,7 +235,7 @@ let accountId: string;
 if (config.accountId) {
   accountId = config.accountId;
 } else {
-  const sts = new STSClient({ region: config.region });
+  const sts = new STSClient({ region });
   const identity = await sts.send(new GetCallerIdentityCommand({}));
   if (!identity.Account) {
     console.error("Error: could not determine AWS account ID from credentials");
@@ -238,10 +253,10 @@ const foundationalPermissionsBoundaryArn =
   config.foundationalPermissionsBoundaryArn
   ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
 const pulumiStateBucket =
-  config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${config.region}`;
+  config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
 
 console.log("\nStarkeep cloud-data-server install");
-console.log(`  Region : ${config.region}`);
+console.log(`  Region : ${region}`);
 console.log(`  Stage  : ${config.stage}`);
 console.log(`  Account: ${accountId}`);
 console.log("");
@@ -249,7 +264,7 @@ console.log("");
 console.log("\nInstalling cloud-data-server…\n");
 const outputs = await installCloudDataServer({
   stackPrefix,
-  region: config.region,
+  region,
   accountId,
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
@@ -270,7 +285,6 @@ const updated: StarkeepConfig = {
   apiGatewayId: outputs.apiGatewayId,
   authorizerId: outputs.authorizerId,
   s3Bucket: outputs.bucketName,
-  s3Region: outputs.region,
   auroraEndpoint: outputs.auroraHostname,
 };
 writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
@@ -279,5 +293,3 @@ console.log("\nInstall complete. Updated starkeep-config.json:");
 console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
 console.log(`  s3Bucket       : ${outputs.bucketName}`);
 console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);
-console.log(`  appliedMigrations : [${outputs.appliedMigrations.join(", ")}]`);
-console.log(`  skippedMigrations : [${outputs.skippedMigrations.join(", ")}]`);

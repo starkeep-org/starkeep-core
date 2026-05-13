@@ -8,8 +8,10 @@ import {
   CreateRoleCommand,
   DeleteRoleCommand,
   GetRoleCommand,
+  GetRolePolicyCommand,
   PutRolePolicyCommand,
   DeleteRolePolicyCommand,
+  UpdateAssumeRolePolicyCommand,
 } from "@aws-sdk/client-iam";
 import type { AwsCredentials } from "./session";
 import {
@@ -222,25 +224,65 @@ export async function deleteAppRole(
   );
 }
 
+/** Returns a canonical, key-sorted JSON string for deterministic comparison. */
+function canonicalJson(obj: unknown): string {
+  if (Array.isArray(obj)) return `[${obj.map(canonicalJson).join(",")}]`;
+  if (obj !== null && typeof obj === "object") {
+    const pairs = Object.keys(obj as object)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson((obj as Record<string, unknown>)[k])}`);
+    return `{${pairs.join(",")}}`;
+  }
+  return JSON.stringify(obj);
+}
+
 /**
  * Attach the wider temp-install policy used only by the cloud-data-server
  * built-in app's install/update — covers DSQL cluster management, S3 bucket
  * creation, API Gateway management, and the foundational Lambda + log group.
+ *
+ * Returns true if PutRolePolicy was actually called (policy was new or changed),
+ * false if the existing policy was already identical and the call was skipped.
+ * Callers should add an IAM propagation wait when this returns true.
  */
 export async function attachTempInstallCloudDataServerPolicy(
   stackPrefix: string,
   accountId: string,
   region: string,
   managerCreds: AwsCredentials,
-): Promise<void> {
+): Promise<boolean> {
   const iam = makeIamClient(managerCreds);
+  const roleName = `${stackPrefix}-app-cloud-data-server-role`;
+  const policyName = "temp-install-cloud-data-server";
+  const desiredDocument = buildTempInstallCloudDataServerPolicy(stackPrefix, accountId, region);
+
+  // Skip PutRolePolicy if the live policy content is identical to what we'd
+  // set. Calling PutRolePolicy — even with the same document — resets IAM's
+  // per-service propagation cache (Lambda, CUR, S3, …), forcing a full
+  // re-propagation delay on every install attempt. Skipping preserves the
+  // already-propagated state from the previous run.
+  try {
+    const existing = await iam.send(new GetRolePolicyCommand({ RoleName: roleName, PolicyName: policyName }));
+    if (existing.PolicyDocument) {
+      const currentDoc = JSON.parse(decodeURIComponent(existing.PolicyDocument));
+      const desiredDoc = JSON.parse(desiredDocument);
+      if (canonicalJson(currentDoc) === canonicalJson(desiredDoc)) {
+        console.log("temp-install-cloud-data-server policy unchanged; skipping PutRolePolicy (preserves IAM propagation)");
+        return false;
+      }
+    }
+  } catch {
+    // Policy doesn't exist yet or GetRolePolicy failed — fall through to PutRolePolicy.
+  }
+
   await iam.send(
     new PutRolePolicyCommand({
-      RoleName: `${stackPrefix}-app-cloud-data-server-role`,
-      PolicyName: "temp-install-cloud-data-server",
-      PolicyDocument: buildTempInstallCloudDataServerPolicy(stackPrefix, accountId, region),
+      RoleName: roleName,
+      PolicyName: policyName,
+      PolicyDocument: desiredDocument,
     }),
   );
+  return true;
 }
 
 export async function detachTempInstallCloudDataServerPolicy(
@@ -252,6 +294,47 @@ export async function detachTempInstallCloudDataServerPolicy(
     new DeleteRolePolicyCommand({
       RoleName: `${stackPrefix}-app-cloud-data-server-role`,
       PolicyName: "temp-install-cloud-data-server",
+    }),
+  );
+}
+
+/**
+ * Re-apply the standard trust policy to an existing app role.
+ *
+ * Trust policies pin the principal to the role's unique RoleId at the moment
+ * they're set, not by ARN. If the manager role is ever deleted + recreated
+ * (e.g. bootstrap stack rebuilt), its RoleId changes and any app role's
+ * trust policy is left pointing at the dead RoleId — assume-role denies.
+ *
+ * Calling this idempotently on every install re-resolves the manager-role
+ * ARN to its current RoleId, healing that drift. Cheap and safe to do
+ * regardless.
+ */
+export async function updateAppRoleTrustPolicy(
+  stackPrefix: string,
+  appId: string,
+  accountId: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  await iam.send(
+    new UpdateAssumeRolePolicyCommand({
+      RoleName: `${stackPrefix}-app-${appId}-role`,
+      PolicyDocument: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow",
+            Principal: { Service: "lambda.amazonaws.com" },
+            Action: "sts:AssumeRole",
+          },
+          {
+            Effect: "Allow",
+            Principal: { AWS: `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role` },
+            Action: "sts:AssumeRole",
+          },
+        ],
+      }),
     }),
   );
 }

@@ -9,6 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import {
   readCloudConfig,
+  readCognitoSession,
   writeCloudCredentials,
 } from "../../src/lib/cloud-config";
 import { startCredentialRefreshTimer } from "../../src/lib/cognito-auth";
@@ -53,10 +54,14 @@ function ShellGate({ children }: { children: ReactNode }) {
 
     async function init() {
       const config = await readCloudConfig();
-      if (config?.cognitoRefreshToken && config.cognitoConfig) {
+      const session = await readCognitoSession();
+      if (config?.cognitoConfig && session?.refreshToken) {
         cleanupTimer = startCredentialRefreshTimer(
           config.cognitoConfig,
-          () => config.cognitoRefreshToken,
+          async () => {
+            const s = await readCognitoSession();
+            return s?.refreshToken ?? null;
+          },
           async (newCreds) => {
             await writeCloudCredentials(newCreds).catch(console.error);
           },

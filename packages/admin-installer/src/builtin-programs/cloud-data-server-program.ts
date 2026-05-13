@@ -55,34 +55,11 @@ export function buildCloudDataServerProgram(
     // Files bucket + bucket policy
     // -----------------------------------------------------------------------
     const bucket = new aws.s3.BucketV2(`${ctx.stackPrefix}-files`, {
-      bucket: `${ctx.stackPrefix}-files-${ctx.accountId}-${ctx.region}-an`,
+      bucket: `${ctx.stackPrefix}-files-${ctx.accountId}-${ctx.region}`,
       tags: {
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",
       },
-    });
-
-    new aws.s3.BucketPolicy(`${ctx.stackPrefix}-files-policy`, {
-      bucket: bucket.id,
-      policy: pulumi.jsonStringify({
-        Version: "2012-10-17",
-        Statement: [
-          {
-            Sid: "DenyMismatchedAppPrefix",
-            Effect: "Deny",
-            Principal: "*",
-            Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-            Resource: pulumi.interpolate`${bucket.arn}/apps/*`,
-            Condition: {
-              StringNotLike: {
-                "s3:prefix": [
-                  "apps/${aws:PrincipalTag/starkeep:appId}/*",
-                ],
-              },
-            },
-          },
-        ],
-      }),
     });
 
     // -----------------------------------------------------------------------
@@ -214,7 +191,7 @@ export function buildCloudDataServerProgram(
     const usEast1Provider = new aws.Provider("us-east-1-provider", { region: "us-east-1" });
 
     const billingBucket = new aws.s3.BucketV2(`${ctx.stackPrefix}-billing`, {
-      bucket: `${ctx.stackPrefix}-billing-${ctx.accountId}-${ctx.region}-an`,
+      bucket: `${ctx.stackPrefix}-billing-${ctx.accountId}-${ctx.region}`,
       tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
     });
 

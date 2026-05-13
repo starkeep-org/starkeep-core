@@ -50,6 +50,10 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
         "iam:UntagRole",
         "iam:ListRolePolicies",
         "iam:ListAttachedRolePolicies",
+        // Needed to heal trust-policy RoleId drift when the manager role is
+        // ever deleted and recreated (its AROA changes, leaving each app
+        // role's existing trust policy pointing at the dead AROA).
+        "iam:UpdateAssumeRolePolicy",
       ],
       Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-app-*`),
     },

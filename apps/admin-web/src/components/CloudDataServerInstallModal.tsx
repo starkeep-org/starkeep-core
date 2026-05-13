@@ -20,8 +20,6 @@ export interface CloudDataServerInstallOutputs {
   authorizerId: string;
   functionArn: string;
   region: string;
-  appliedMigrations: string[];
-  skippedMigrations: string[];
 }
 
 interface Props {

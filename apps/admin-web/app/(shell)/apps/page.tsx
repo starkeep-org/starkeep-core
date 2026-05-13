@@ -15,6 +15,8 @@ import {
   readCloudConfig,
   readCloudCredentials,
   writeCloudCredentials,
+  readCognitoSession,
+  writeCognitoSession,
 } from "../../../src/lib/cloud-config";
 import { refreshTokens, getIdentityPoolCredentials } from "../../../src/lib/cognito-auth";
 
@@ -279,11 +281,14 @@ function PhotosWebSection() {
       if (!config) throw new Error("No cloud configuration — complete the setup wizard first.");
       let creds = await readCloudCredentials();
       if (!creds) {
-        const tokens = await refreshTokens(config.cognitoConfig, config.cognitoRefreshToken);
+        const session = await readCognitoSession();
+        if (!session?.refreshToken) throw new Error("Not signed in — sign in before deploying.");
+        const tokens = await refreshTokens(config.cognitoConfig, session.refreshToken);
         creds = await getIdentityPoolCredentials(config.cognitoConfig, tokens.idToken);
         await writeCloudCredentials(creds);
+        await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
       }
-      const credentials = { ...creds, region: config.cognitoConfig.region };
+      const credentials = { ...creds, region: config.region };
       const res = await fetch("/api/photos-web/deploy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

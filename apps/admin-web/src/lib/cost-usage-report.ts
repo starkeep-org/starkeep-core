@@ -143,16 +143,20 @@ function parseCsvCosts(csv: string): Record<string, number> {
   return totals;
 }
 
+// AWS Cost and Usage Reports is locked to us-east-1 — the CUR service runs
+// there exclusively and the billing bucket must live in us-east-1 regardless
+// of where the rest of the stack is deployed. Hardcode it here.
+const CUR_REGION = "us-east-1";
+
 export async function fetchMtdCostsByService(
   creds: STSCredentials,
-  s3Region: string,
   stackPrefix: string,
 ): Promise<ServiceCost[] | null> {
   const accountId = await getAccountId(creds);
   const billingBucket = `${stackPrefix}-billing-${accountId}`;
   const reportName = `${stackPrefix}-billing`;
 
-  const s3 = makeS3Client(creds, s3Region);
+  const s3 = makeS3Client(creds, CUR_REGION);
   const prefix = billingPeriodPrefix(reportName);
 
   const listed = await s3.send(

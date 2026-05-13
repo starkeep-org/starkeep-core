@@ -16,8 +16,12 @@ import {
   getBootstrapStackOutputsUrl,
 } from "@starkeep/admin-core";
 import {
-  writeCloudConfig,
+  readCloudConfig,
+  patchCloudConfig,
   writeCloudCredentials,
+  writeCognitoSession,
+  readCognitoSession,
+  regionFromUserPoolId,
   type CloudConfig,
 } from "../lib/cloud-config";
 import {
@@ -42,53 +46,6 @@ const STEPS: { id: StepId; label: string }[] = [
   { id: 4, label: "Sign in" },
   { id: 5, label: "Deploy" },
 ];
-
-const STORAGE_KEY = "starkeep-cloud-setup";
-
-interface PersistedSetup {
-  stackPrefix?: string;
-  userPoolId?: string;
-  userPoolClientId?: string;
-  identityPoolId?: string;
-  refreshToken?: string;
-  step3Done?: boolean;
-}
-
-function loadPersisted(): PersistedSetup {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as PersistedSetup) : {};
-  } catch {
-    return {};
-  }
-}
-
-function savePersisted(patch: Partial<PersistedSetup>) {
-  try {
-    const existing = loadPersisted();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...existing, ...patch }));
-  } catch { /* ignore */ }
-}
-
-function clearPersistedFrom(step: StepId) {
-  try {
-    const existing = loadPersisted();
-    if (step <= 1) delete existing.stackPrefix;
-    if (step <= 2) {
-      delete existing.userPoolId;
-      delete existing.userPoolClientId;
-      delete existing.identityPoolId;
-    }
-    if (step <= 3) delete existing.step3Done;
-    if (step <= 4) delete existing.refreshToken;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
-  } catch { /* ignore */ }
-}
-
-function regionFromUserPoolId(userPoolId: string): string {
-  const parts = userPoolId.split("_");
-  return parts.length > 1 ? parts[0] : "us-east-1";
-}
 
 function openUrl(url: string) {
   window.open(url, "_blank", "noopener,noreferrer");
@@ -165,12 +122,19 @@ function StepToC({
 // ---------------------------------------------------------------------------
 
 function Step1Bootstrap({
+  initialStackPrefix,
+  initialRegion,
   onContinue,
 }: {
+  initialStackPrefix: string;
+  initialRegion: string;
   onContinue: (stackPrefix: string) => void;
 }) {
-  const [region, setRegion] = useState("us-east-1");
-  const [stackPrefix, setStackPrefix] = useState("starkeep");
+  // Step 1's region exists only to construct the CloudFormation console URL
+  // and the bootstrap template's stack name. It is not persisted: once Step 2
+  // captures the userPoolId, region is derived from that going forward.
+  const [region, setRegion] = useState(initialRegion);
+  const [stackPrefix, setStackPrefix] = useState(initialStackPrefix);
   const [downloaded, setDownloaded] = useState(false);
 
   const canContinue = !!region.trim() && !!stackPrefix.trim();
@@ -305,7 +269,7 @@ function Step2Outputs({
     identityPoolId: validateIdentityPoolId(identityPoolId),
   };
   const isValid = Object.values(errors).every((e) => e === null);
-  const region = regionFromUserPoolId(userPoolId) || "us-east-1";
+  const region = regionFromUserPoolId(userPoolId);
 
   return (
     <div className="flex flex-col gap-5">
@@ -317,6 +281,7 @@ function Step2Outputs({
         variant="outline"
         size="sm"
         className="w-fit"
+        disabled={!region}
         onClick={() => openUrl(getBootstrapStackOutputsUrl(region, `${stackPrefix}-bootstrap`))}
       >
         Open stack outputs in AWS console ↗
@@ -371,14 +336,6 @@ function Step2Outputs({
           )}
         </div>
       </div>
-
-      <Alert>
-        <AlertDescription>
-          These values are the same across all your devices. After completing setup on this device,
-          use <strong>Settings → Export Cloud Config</strong> to share the configuration with other
-          devices — they will skip this step and go straight to sign in.
-        </AlertDescription>
-      </Alert>
 
       <div className="flex justify-between">
         <Button variant="ghost" onClick={onBack}>Back</Button>
@@ -610,44 +567,31 @@ function Step4SignIn({
 
 interface DeployOutputs {
   s3Bucket: string;
-  s3Region: string;
   auroraEndpoint: string;
   apiGatewayUrl?: string;
 }
 
-function downloadCliConfig(config: {
-  region: string;
-  stage: string;
-  userPoolId: string;
-  userPoolClientId: string;
-  identityPoolId: string;
-  s3Bucket?: string;
-  s3Region?: string;
-  auroraEndpoint?: string;
-  apiGatewayUrl?: string;
-}) {
-  const json = JSON.stringify(config, null, 2);
-  const blob = new Blob([json], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "starkeep-config.json";
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 function Step5Deploy({
-  cognitoConfig,
-  stackPrefix,
   credentials,
+  refreshCredentials,
   onSuccess,
   onBack,
+  onTokenExpired,
 }: {
-  cognitoConfig: CognitoConfig;
-  stackPrefix: string;
   credentials: STSCredentials;
+  /**
+   * Mints a fresh Cognito-Identity-Pool STS session right before the install
+   * runs. Cognito's STS creds last ~1 hour from sign-in; if the user paused
+   * between Step 4 and Step 5, refreshing here avoids the common case where
+   * the installer ExpiredTokens partway through. Returns null if no refresh
+   * token is available; throws if the refresh itself fails (caller decides
+   * whether to send the user back to Sign In).
+   */
+  refreshCredentials: () => Promise<STSCredentials | null>;
   onSuccess: (result: DeployOutputs) => void;
   onBack: () => void;
+  /** Called when the installer reports EXPIRED_TOKEN — wizard sends the user back to Step 4. */
+  onTokenExpired: () => void;
 }) {
   const [installing, setInstalling] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
@@ -659,25 +603,39 @@ function Step5Deploy({
   const [manualApi, setManualApi] = useState("");
   const [readConfigError, setReadConfigError] = useState<string | null>(null);
   const [readingConfig, setReadingConfig] = useState(false);
-
-  const region = cognitoConfig.region;
+  const [tokenExpired, setTokenExpired] = useState(false);
 
   function handleInstall() {
     setInstalling(true);
     setLines([]);
     setStatus("running");
     setReadConfigError(null);
+    setTokenExpired(false);
     let aborted = false;
 
     async function run() {
       try {
+        // Mint fresh STS creds right before the install so a long pause
+        // between Sign In and Deploy doesn't expire us mid-run. Failure
+        // here means the Cognito refresh token is also dead — route back
+        // to Sign In rather than starting a doomed install.
+        let creds: STSCredentials = credentials;
+        try {
+          const fresh = await refreshCredentials();
+          if (fresh) creds = fresh;
+        } catch {
+          setTokenExpired(true);
+          setStatus("failure");
+          return;
+        }
+
         const resp = await fetch("/api/cloud-data-server/install", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            accessKeyId: credentials.accessKeyId,
-            secretAccessKey: credentials.secretAccessKey,
-            sessionToken: credentials.sessionToken,
+            accessKeyId: creds.accessKeyId,
+            secretAccessKey: creds.secretAccessKey,
+            sessionToken: creds.sessionToken,
           }),
         });
 
@@ -717,11 +675,9 @@ function Step5Deploy({
                   auroraHostname: string;
                   bucketName: string;
                   apiGatewayUrl: string;
-                  region: string;
                 };
                 const result: DeployOutputs = {
                   s3Bucket: outputs.bucketName,
-                  s3Region: outputs.region,
                   auroraEndpoint: outputs.auroraHostname,
                   apiGatewayUrl: outputs.apiGatewayUrl,
                 };
@@ -732,8 +688,24 @@ function Step5Deploy({
                 setStatus("failure");
               }
             } else if (eventType === "error") {
-              try { setLines((l) => [...l, `Error: ${JSON.parse(data) as string}`]); }
-              catch { setLines((l) => [...l, `Error: ${data}`]); }
+              // Server now emits structured `{ message, code? }` JSON for
+              // error events; keep the older bare-string form working too
+              // in case anything else (e.g. a network proxy) injects one.
+              let message = data;
+              let code: string | undefined;
+              try {
+                const parsed = JSON.parse(data);
+                if (typeof parsed === "string") {
+                  message = parsed;
+                } else if (parsed && typeof parsed === "object") {
+                  if (typeof parsed.message === "string") message = parsed.message;
+                  if (typeof parsed.code === "string") code = parsed.code;
+                }
+              } catch {
+                /* not JSON — leave message as-is */
+              }
+              setLines((l) => [...l, `Error: ${message}`]);
+              if (code === "EXPIRED_TOKEN") setTokenExpired(true);
               setStatus("failure");
             } else if (data) {
               try { setLines((l) => [...l, JSON.parse(data) as string]); }
@@ -762,7 +734,6 @@ function Step5Deploy({
       const res = await fetch("/api/exec/deploy-outputs");
       const data = (await res.json()) as {
         s3Bucket?: string;
-        s3Region?: string;
         auroraEndpoint?: string;
         apiGatewayUrl?: string;
         error?: string;
@@ -770,7 +741,6 @@ function Step5Deploy({
       if (!res.ok) throw new Error(data.error ?? "Failed to read deploy outputs");
       onSuccess({
         s3Bucket: data.s3Bucket!,
-        s3Region: data.s3Region ?? region,
         auroraEndpoint: data.auroraEndpoint!,
         apiGatewayUrl: data.apiGatewayUrl,
       });
@@ -785,7 +755,6 @@ function Step5Deploy({
     if (!manualBucket || !manualAurora) return;
     onSuccess({
       s3Bucket: manualBucket.trim(),
-      s3Region: region,
       auroraEndpoint: manualAurora.trim(),
       apiGatewayUrl: manualApi.trim() || undefined,
     });
@@ -859,29 +828,7 @@ function Step5Deploy({
       {deployResult && status === "success" && (
         <>
           <Alert>
-            <AlertDescription className="flex flex-col gap-2">
-              <span>cloud-data-server is installed in your AWS account.</span>
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-fit"
-                onClick={() =>
-                  downloadCliConfig({
-                    region,
-                    stage: stackPrefix,
-                    userPoolId: cognitoConfig.userPoolId,
-                    userPoolClientId: cognitoConfig.userPoolClientId,
-                    identityPoolId: cognitoConfig.identityPoolId,
-                    s3Bucket: deployResult.s3Bucket,
-                    s3Region: deployResult.s3Region,
-                    auroraEndpoint: deployResult.auroraEndpoint,
-                    apiGatewayUrl: deployResult.apiGatewayUrl,
-                  })
-                }
-              >
-                Download CLI config (starkeep-config.json)
-              </Button>
-            </AlertDescription>
+            <AlertDescription>cloud-data-server is installed in your AWS account.</AlertDescription>
           </Alert>
           <div className="flex justify-end">
             <Button onClick={() => onSuccess(deployResult)}>Continue →</Button>
@@ -889,7 +836,19 @@ function Step5Deploy({
         </>
       )}
 
-      {status === "failure" && (
+      {status === "failure" && tokenExpired && (
+        <>
+          <Alert variant="destructive">
+            <AlertDescription>
+              Your AWS sign-in session expired. Sign in again to retry the deploy —
+              your progress so far is preserved.
+            </AlertDescription>
+          </Alert>
+          <Button onClick={onTokenExpired} variant="outline">Sign in again</Button>
+        </>
+      )}
+
+      {status === "failure" && !tokenExpired && (
         <Button onClick={handleInstall} variant="outline">Retry install</Button>
       )}
 
@@ -933,9 +892,18 @@ export function CloudSetupWizard({ onComplete }: Props) {
   const [completedSteps, setCompletedSteps] = useState<Set<StepId>>(new Set());
   const [resuming, setResuming] = useState(true);
 
-  // Step data (in-memory)
-  const [stackPrefix, setStackPrefix] = useState("starkeep");
-  const [cognitoConfig, setCognitoConfig] = useState<Partial<CognitoConfig>>({});
+  // In-memory mirror of the file. Updated on mount and after each PATCH.
+  const [cloudConfig, setCloudConfig] = useState<CloudConfig | null>(null);
+  const stackPrefix = cloudConfig?.stackPrefix ?? "";
+  const cognitoConfig: Partial<CognitoConfig> = cloudConfig
+    ? {
+        userPoolId: cloudConfig.userPoolId,
+        userPoolClientId: cloudConfig.userPoolClientId,
+        identityPoolId: cloudConfig.identityPoolId,
+      }
+    : {};
+
+  // Session state — lives in localStorage, not in the config file.
   const [signInResult, setSignInResult] = useState<{ idToken: string; refreshToken: string } | null>(null);
   const [credentials, setCredentials] = useState<STSCredentials | null>(null);
 
@@ -950,80 +918,51 @@ export function CloudSetupWizard({ onComplete }: Props) {
   }, []);
 
   const handleNavigate = useCallback((targetStep: StepId) => {
-    if (targetStep >= currentStep) {
-      setCurrentStep(targetStep);
-      return;
-    }
-
-    const stepLabel = STEPS.find((s) => s.id === targetStep)?.label ?? `Step ${targetStep}`;
-    const confirmed = window.confirm(
-      `Going back to "${stepLabel}" will clear all progress from that step onward. This cannot be undone. Continue?`
-    );
-    if (!confirmed) return;
-
-    clearPersistedFrom(targetStep);
-
-    if (targetStep <= 1) setStackPrefix("starkeep");
-    if (targetStep <= 2) setCognitoConfig({});
     if (targetStep <= 4) {
       setSignInResult(null);
       setCredentials(null);
-    }
-
-    setCompletedSteps((prev) => {
-      const next = new Set(prev);
-      ([1, 2, 3, 4, 5] as StepId[]).forEach((s) => {
-        if (s >= targetStep) next.delete(s);
+      setCompletedSteps((prev) => {
+        const next = new Set(prev);
+        next.delete(4);
+        next.delete(5);
+        return next;
       });
-      return next;
-    });
-
+    }
     setCurrentStep(targetStep);
-  }, [currentStep]);
+  }, []);
 
-  // On mount: restore persisted state and determine starting step
+  // On mount: read the file + cognito session, derive starting step.
   useEffect(() => {
     async function restore() {
-      const saved = loadPersisted();
-
-      if (saved.stackPrefix) setStackPrefix(saved.stackPrefix);
-
-      const hasCognito = !!(saved.userPoolId && saved.userPoolClientId && saved.identityPoolId);
-      if (hasCognito) {
-        setCognitoConfig({
-          userPoolId: saved.userPoolId,
-          userPoolClientId: saved.userPoolClientId,
-          identityPoolId: saved.identityPoolId,
-        });
-      }
+      const cfg = await readCloudConfig();
+      setCloudConfig(cfg);
 
       const done = new Set<StepId>();
-      if (saved.stackPrefix) done.add(1);
+      if (cfg?.stackPrefix) done.add(1);
+      const hasCognito = !!(cfg?.userPoolId && cfg?.userPoolClientId && cfg?.identityPoolId);
       if (hasCognito) done.add(2);
-      if (saved.step3Done) done.add(3);
 
-      // Try to refresh tokens if we have a refresh token
-      if (saved.refreshToken && hasCognito) {
+      // Step 3 (create user) leaves no persistent state — it's "done" iff we
+      // have a refresh token, since you can't sign in until the user exists.
+      const session = await readCognitoSession();
+      if (cfg && hasCognito && session?.refreshToken) {
         try {
-          const cogCfg: CognitoConfig = {
-            userPoolId: saved.userPoolId!,
-            userPoolClientId: saved.userPoolClientId!,
-            identityPoolId: saved.identityPoolId!,
-            region: regionFromUserPoolId(saved.userPoolId!),
-          };
-          const tokens = await refreshTokens(cogCfg, saved.refreshToken);
-          const creds = await getIdentityPoolCredentials(cogCfg, tokens.idToken);
+          const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
+          const creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
           setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
           setCredentials(creds);
+          await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
+          done.add(3);
           done.add(4);
         } catch {
-          // Token expired — user will need to re-sign in
+          // Token expired — user will need to re-sign in.
         }
       }
 
+      if (cfg?.s3Bucket && cfg?.auroraEndpoint) done.add(5);
+
       setCompletedSteps(done);
 
-      // Start from the first incomplete step (or step 5 if all done)
       const firstIncomplete = ([1, 2, 3, 4, 5] as StepId[]).find((s) => !done.has(s));
       setCurrentStep(firstIncomplete ?? 5);
       setResuming(false);
@@ -1032,48 +971,20 @@ export function CloudSetupWizard({ onComplete }: Props) {
     restore();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const fullCognitoConfig = (): CognitoConfig => ({
-    userPoolId: cognitoConfig.userPoolId ?? "",
-    userPoolClientId: cognitoConfig.userPoolClientId ?? "",
-    identityPoolId: cognitoConfig.identityPoolId ?? "",
-    region: cognitoConfig.userPoolId ? regionFromUserPoolId(cognitoConfig.userPoolId) : "us-east-1",
-  });
+  const fullCognitoConfig = (): CognitoConfig | null => {
+    if (!cloudConfig) return null;
+    return cloudConfig.cognitoConfig;
+  };
 
-  const handleComplete = (result: DeployOutputs) => {
+  const handleComplete = (_result: DeployOutputs) => {
     if (!signInResult || !credentials) return;
-
-    async function finish() {
-      const config: CloudConfig = {
-        stackPrefix,
-        s3Bucket: result.s3Bucket,
-        s3Region: result.s3Region,
-        auroraEndpoint: result.auroraEndpoint,
-        apiGatewayUrl: result.apiGatewayUrl,
-        cognitoConfig: fullCognitoConfig(),
-        cognitoRefreshToken: signInResult!.refreshToken,
-      };
-      await writeCloudConfig(config);
-      await writeCloudCredentials(credentials!);
-      await fetch("http://127.0.0.1:9820/config", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          s3Bucket: result.s3Bucket,
-          s3Region: result.s3Region,
-          auroraEndpoint: result.auroraEndpoint,
-          ...(result.apiGatewayUrl ? { apiGatewayUrl: result.apiGatewayUrl } : {}),
-        }),
-      }).catch(() => {});
-      localStorage.removeItem(STORAGE_KEY);
-
-      if (onComplete) {
-        onComplete();
-      } else {
-        router.push("/");
-      }
+    // The install route already wrote the deploy outputs to starkeep-config.json.
+    // The wizard has nothing else to persist.
+    if (onComplete) {
+      onComplete();
+    } else {
+      router.push("/");
     }
-
-    finish();
   };
 
   if (resuming) {
@@ -1092,6 +1003,8 @@ export function CloudSetupWizard({ onComplete }: Props) {
     4: "Sign In",
     5: "Deploy cloud-data-server",
   };
+
+  const cogCfg = fullCognitoConfig();
 
   return (
     <div className="flex gap-6 min-h-[400px]">
@@ -1118,9 +1031,33 @@ export function CloudSetupWizard({ onComplete }: Props) {
 
         {currentStep === 1 && (
           <Step1Bootstrap
-            onContinue={(prefix) => {
-              setStackPrefix(prefix);
-              savePersisted({ stackPrefix: prefix });
+            initialStackPrefix={stackPrefix}
+            initialRegion={cloudConfig?.userPoolId ? regionFromUserPoolId(cloudConfig.userPoolId) : ""}
+            onContinue={async (prefix) => {
+              const isChanging = !!cloudConfig?.stackPrefix && cloudConfig.stackPrefix !== prefix;
+              const hasDownstream = !!cloudConfig?.userPoolId;
+              if (isChanging && hasDownstream) {
+                const confirmed = window.confirm(
+                  `Changing the stack prefix will clear stack outputs and all later configuration. Continue?`,
+                );
+                if (!confirmed) return;
+                const updated = await patchCloudConfig({
+                  stackPrefix: prefix,
+                  stage: prefix,
+                  userPoolId: null, userPoolClientId: null, identityPoolId: null,
+                  accountId: null, permissionsBoundaryArn: null,
+                  foundationalPermissionsBoundaryArn: null, managerRoleArn: null,
+                  pulumiStateBucket: null, s3Bucket: null, auroraEndpoint: null,
+                  apiGatewayUrl: null, apiGatewayId: null, authorizerId: null,
+                });
+                setCloudConfig(updated);
+                setSignInResult(null);
+                setCredentials(null);
+                setCompletedSteps(new Set());
+              } else {
+                const updated = await patchCloudConfig({ stackPrefix: prefix, stage: prefix });
+                setCloudConfig(updated);
+              }
               markDone(1);
             }}
           />
@@ -1130,13 +1067,37 @@ export function CloudSetupWizard({ onComplete }: Props) {
           <Step2Outputs
             stackPrefix={stackPrefix}
             initialCognitoConfig={cognitoConfig}
-            onContinue={(config) => {
-              setCognitoConfig(config);
-              savePersisted({
-                userPoolId: config.userPoolId,
-                userPoolClientId: config.userPoolClientId,
-                identityPoolId: config.identityPoolId,
-              });
+            onContinue={async (config) => {
+              const isChanging = !!cloudConfig?.userPoolId && cloudConfig.userPoolId !== config.userPoolId;
+              const hasDownstream = !!(cloudConfig?.s3Bucket || cloudConfig?.apiGatewayUrl);
+              if (isChanging && hasDownstream) {
+                const confirmed = window.confirm(
+                  `Changing the Cognito configuration will clear deployment outputs and require re-signing in. Continue?`,
+                );
+                if (!confirmed) return;
+                const updated = await patchCloudConfig({
+                  userPoolId: config.userPoolId,
+                  userPoolClientId: config.userPoolClientId,
+                  identityPoolId: config.identityPoolId,
+                  s3Bucket: null, auroraEndpoint: null,
+                  apiGatewayUrl: null, apiGatewayId: null, authorizerId: null,
+                });
+                setCloudConfig(updated);
+                setSignInResult(null);
+                setCredentials(null);
+                setCompletedSteps((prev) => {
+                  const next = new Set(prev);
+                  ([3, 4, 5] as StepId[]).forEach((s) => next.delete(s));
+                  return next;
+                });
+              } else {
+                const updated = await patchCloudConfig({
+                  userPoolId: config.userPoolId,
+                  userPoolClientId: config.userPoolClientId,
+                  identityPoolId: config.identityPoolId,
+                });
+                setCloudConfig(updated);
+              }
               markDone(2);
             }}
             onBack={() => handleNavigate(1)}
@@ -1146,34 +1107,41 @@ export function CloudSetupWizard({ onComplete }: Props) {
         {currentStep === 3 && (
           <Step3CreateUser
             cognitoConfig={cognitoConfig}
-            onContinue={() => {
-              savePersisted({ step3Done: true });
-              markDone(3);
-            }}
+            onContinue={() => markDone(3)}
             onBack={() => handleNavigate(2)}
           />
         )}
 
-        {currentStep === 4 && (
+        {currentStep === 4 && cogCfg && (
           <Step4SignIn
-            cognitoConfig={fullCognitoConfig()}
-            onSuccess={(tokens, creds) => {
+            cognitoConfig={cogCfg}
+            onSuccess={async (tokens, creds) => {
               setSignInResult(tokens);
               setCredentials(creds);
-              savePersisted({ refreshToken: tokens.refreshToken });
+              await writeCognitoSession({ refreshToken: tokens.refreshToken });
+              await writeCloudCredentials(creds);
               markDone(4);
             }}
             onBack={() => handleNavigate(3)}
           />
         )}
 
-        {currentStep === 5 && credentials && signInResult && (
+        {currentStep === 5 && credentials && signInResult && cogCfg && (
           <Step5Deploy
-            cognitoConfig={fullCognitoConfig()}
-            stackPrefix={stackPrefix}
             credentials={credentials}
+            refreshCredentials={async () => {
+              if (!signInResult.refreshToken) return null;
+              const tokens = await refreshTokens(cogCfg, signInResult.refreshToken);
+              const fresh = await getIdentityPoolCredentials(cogCfg, tokens.idToken);
+              setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
+              setCredentials(fresh);
+              await writeCognitoSession({ refreshToken: tokens.refreshToken });
+              await writeCloudCredentials(fresh);
+              return fresh;
+            }}
             onSuccess={handleComplete}
             onBack={() => handleNavigate(4)}
+            onTokenExpired={() => handleNavigate(4)}
           />
         )}
 

@@ -70,6 +70,8 @@ export function foundationalPermissionsBoundaryStatements(
         "dsql:TagResource",
         "dsql:UntagResource",
         "dsql:ListTagsForResource",
+        // Pulumi/terraform-provider-aws reads this after CreateCluster.
+        "dsql:GetVpcEndpointServiceName",
         "dsql:DbConnect",
         "dsql:DbConnectAdmin",
       ],
@@ -158,7 +160,6 @@ export function foundationalPermissionsBoundaryStatements(
       Action: [
         "logs:CreateLogGroup",
         "logs:DeleteLogGroup",
-        "logs:DescribeLogGroups",
         "logs:PutRetentionPolicy",
         "logs:TagResource",
         "logs:UntagResource",
@@ -169,10 +170,39 @@ export function foundationalPermissionsBoundaryStatements(
       Resource: `arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-${cdsAppId}-*`,
     },
     {
+      // DescribeLogGroups is a list-level action — AWS evaluates it against
+      // the all-zeros resource arn:aws:logs:…:log-group::log-stream:, so it
+      // must be granted on Resource:"*" regardless of which group we want
+      // to filter for in the API call.
+      Sid: "FoundationalLogsList",
+      Effect: "Allow",
+      Action: ["logs:DescribeLogGroups"],
+      Resource: "*",
+    },
+    {
       Sid: "FoundationalApiGateway",
       Effect: "Allow",
       Action: apigatewayv2Verbs,
       Resource: "*",
+    },
+    {
+      // API Gateway v2 (HTTP APIs) tagging and several create paths still
+      // authorize against the legacy `apigateway` IAM service namespace
+      // using REST-method action names (apigateway:GET/POST/…), not
+      // apigatewayv2:*. Without this, CreateApi fails on the tag write.
+      Sid: "FoundationalApiGatewayRestActions",
+      Effect: "Allow",
+      Action: [
+        "apigateway:GET",
+        "apigateway:POST",
+        "apigateway:PATCH",
+        "apigateway:PUT",
+        "apigateway:DELETE",
+      ],
+      Resource: [
+        "arn:aws:apigateway:*::/v2/*",
+        "arn:aws:apigateway:*::/tags/*",
+      ],
     },
     {
       Sid: "FoundationalCur",
