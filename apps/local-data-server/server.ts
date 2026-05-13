@@ -130,7 +130,6 @@ const STARKEEP_CONFIG_PATH =
   fileURLToPath(new URL("../../starkeep-config.json", import.meta.url));
 
 interface StarkeepConfig {
-  region: string;
   stage: string;
   userPoolId: string;
   userPoolClientId: string;
@@ -139,6 +138,11 @@ interface StarkeepConfig {
   s3Region?: string;
   auroraEndpoint?: string;
   apiGatewayUrl?: string;
+}
+
+function regionFromUserPoolId(userPoolId: string): string {
+  const parts = userPoolId.split("_");
+  return parts.length > 1 ? parts[0] : "";
 }
 
 interface CloudCredentials {
@@ -319,8 +323,9 @@ async function main() {
 
   // Load cloud config from starkeep-config.json at the repo root
   const starkeepConfig = await loadStarkeepConfig();
+  const configRegion = starkeepConfig ? regionFromUserPoolId(starkeepConfig.userPoolId) : "";
   if (starkeepConfig) {
-    console.log(`Cloud config loaded: stage=${starkeepConfig.stage}, region=${starkeepConfig.region}`);
+    console.log(`Cloud config loaded: stage=${starkeepConfig.stage}, region=${configRegion}`);
     if (starkeepConfig.s3Bucket) console.log(`  S3 bucket=${starkeepConfig.s3Bucket}`);
     if (starkeepConfig.auroraEndpoint) console.log(`  DSQL=${starkeepConfig.auroraEndpoint}`);
     if (starkeepConfig.apiGatewayUrl) console.log(`  API=${starkeepConfig.apiGatewayUrl}`);
@@ -337,7 +342,7 @@ async function main() {
 
   const cognitoConfig: CognitoConfig | null = starkeepConfig
     ? {
-        region: starkeepConfig.region,
+        region: configRegion,
         userPoolId: starkeepConfig.userPoolId,
         userPoolClientId: starkeepConfig.userPoolClientId,
         identityPoolId: starkeepConfig.identityPoolId,
@@ -367,7 +372,7 @@ async function main() {
     const credentialProvider = await makeCloudCredentialProvider();
     remoteAdapter = new S3ObjectStorageAdapter({
       bucketName: starkeepConfig.s3Bucket,
-      region: starkeepConfig.s3Region ?? starkeepConfig.region,
+      region: starkeepConfig.s3Region ?? configRegion,
       credentialProvider,
     });
     console.log("Remote S3 adapter initialized from cloud config");
@@ -396,7 +401,7 @@ async function main() {
     remoteDatabaseAdapter = new AuroraDsqlDatabaseAdapter(
       {
         hostname: starkeepConfig.auroraEndpoint,
-        region: starkeepConfig.s3Region ?? starkeepConfig.region,
+        region: starkeepConfig.s3Region ?? configRegion,
       },
       new CloudCredentialsDsqlClientFactory(),
     );
@@ -632,14 +637,15 @@ async function main() {
           json(res, { error: "No cloud config loaded" });
           return;
         }
+        const freshRegion = regionFromUserPoolId(freshConfig.userPoolId);
         json(res, {
           stage: freshConfig.stage,
           s3Bucket: freshConfig.s3Bucket ?? null,
-          s3Region: freshConfig.s3Region ?? freshConfig.region,
+          s3Region: freshConfig.s3Region ?? freshRegion,
           auroraEndpoint: freshConfig.auroraEndpoint ?? null,
           apiGatewayUrl: freshConfig.apiGatewayUrl ?? null,
           cognitoConfig: {
-            region: freshConfig.region,
+            region: freshRegion,
             userPoolId: freshConfig.userPoolId,
             userPoolClientId: freshConfig.userPoolClientId,
             identityPoolId: freshConfig.identityPoolId,
