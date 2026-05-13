@@ -22,6 +22,5 @@
       },
       "brokerPower": true
     }
-  },
-  "migrations": ["0001_init"]
+  }
 }

@@ -1,4 +1,4 @@
-import { readCloudConfig } from "./cloud-config";
+import { readCloudConfig, readCognitoSession, writeCognitoSession } from "./cloud-config";
 import { refreshTokens } from "./cognito-auth";
 
 export type DataSourceMode = "local" | "remote";
@@ -8,10 +8,12 @@ let tokenCache: { accessToken: string; expiresAt: number } | null = null;
 
 async function getAccessToken(): Promise<string | null> {
   const config = await readCloudConfig();
-  if (!config?.cognitoConfig || !config.cognitoRefreshToken) return null;
+  const session = await readCognitoSession();
+  if (!config?.cognitoConfig || !session?.refreshToken) return null;
   const now = Date.now();
   if (tokenCache && tokenCache.expiresAt > now + 60_000) return tokenCache.accessToken;
-  const tokens = await refreshTokens(config.cognitoConfig, config.cognitoRefreshToken);
+  const tokens = await refreshTokens(config.cognitoConfig, session.refreshToken);
+  await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
   tokenCache = { accessToken: tokens.accessToken, expiresAt: now + tokens.expiresIn * 1000 };
   return tokens.accessToken;
 }

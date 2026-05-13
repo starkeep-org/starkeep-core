@@ -1,18 +1,11 @@
 import {
-  CostAndUsageReportServiceClient,
-  DescribeReportDefinitionsCommand,
-  PutReportDefinitionCommand,
-} from "@aws-sdk/client-cost-and-usage-report-service";
-import {
   S3Client,
-  HeadBucketCommand,
-  CreateBucketCommand,
-  PutBucketPolicyCommand,
   ListObjectsV2Command,
   GetObjectCommand,
 } from "@aws-sdk/client-s3";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import type { STSCredentials } from "./cognito-auth";
+
 
 export interface ServiceCost {
   service: string;
@@ -28,18 +21,6 @@ const SERVICE_LABELS: Record<string, string> = {
 const KNOWN_SERVICES = new Set(Object.keys(SERVICE_LABELS));
 
 const SKIP_LINE_ITEM_TYPES = new Set(["Tax", "Credit", "Refund", "RIFee", "SavingsPlanRecurringFee"]);
-
-function makeCurClient(creds: STSCredentials): CostAndUsageReportServiceClient {
-  // CUR service endpoint is always us-east-1 (global service).
-  return new CostAndUsageReportServiceClient({
-    region: "us-east-1",
-    credentials: {
-      accessKeyId: creds.accessKeyId,
-      secretAccessKey: creds.secretAccessKey,
-      sessionToken: creds.sessionToken,
-    },
-  });
-}
 
 function makeS3Client(creds: STSCredentials, region: string): S3Client {
   return new S3Client({
@@ -64,80 +45,6 @@ async function getAccountId(creds: STSCredentials): Promise<string> {
   const { Account } = await sts.send(new GetCallerIdentityCommand({}));
   if (!Account) throw new Error("Could not determine AWS account ID");
   return Account;
-}
-
-async function ensureCurSetup(
-  creds: STSCredentials,
-  billingBucket: string,
-  s3Region: string,
-  reportName: string,
-  accountId: string,
-): Promise<void> {
-  const s3 = makeS3Client(creds, s3Region);
-
-  // Create the bucket if needed.
-  try {
-    await s3.send(new HeadBucketCommand({ Bucket: billingBucket }));
-  } catch {
-    const createParams =
-      s3Region === "us-east-1"
-        ? { Bucket: billingBucket }
-        : { Bucket: billingBucket, CreateBucketConfiguration: { LocationConstraint: s3Region as never } };
-    await s3.send(new CreateBucketCommand(createParams));
-  }
-
-  // Idempotency check: skip CUR report creation if it already exists.
-  const curClient = makeCurClient(creds);
-  const existing = await curClient.send(new DescribeReportDefinitionsCommand({}));
-  const alreadyExists = existing.ReportDefinitions?.some((r) => r.ReportName === reportName);
-  if (alreadyExists) return;
-
-  // Allow the AWS billing service to deliver reports to the bucket.
-  const bucketArn = `arn:aws:s3:::${billingBucket}`;
-  const curSourceArn = `arn:aws:cur:us-east-1:${accountId}:definition/*`;
-  const curCondition = { StringEquals: { "aws:SourceArn": curSourceArn, "aws:SourceAccount": accountId } };
-  const policy = {
-    Version: "2012-10-17",
-    Statement: [
-      {
-        Sid: "AllowCurServiceCheck",
-        Effect: "Allow",
-        Principal: { Service: "billingreports.amazonaws.com" },
-        Action: ["s3:GetBucketAcl", "s3:GetBucketPolicy"],
-        Resource: bucketArn,
-        Condition: curCondition,
-      },
-      {
-        Sid: "AllowCurDelivery",
-        Effect: "Allow",
-        Principal: { Service: "billingreports.amazonaws.com" },
-        Action: "s3:PutObject",
-        Resource: `${bucketArn}/*`,
-        Condition: curCondition,
-      },
-    ],
-  };
-  await s3.send(
-    new PutBucketPolicyCommand({ Bucket: billingBucket, Policy: JSON.stringify(policy) }),
-  );
-
-  // Create the CUR report definition.
-  await curClient.send(
-    new PutReportDefinitionCommand({
-      ReportDefinition: {
-        ReportName: reportName,
-        TimeUnit: "DAILY",
-        Format: "textORcsv",
-        Compression: "GZIP",
-        AdditionalSchemaElements: [],
-        S3Bucket: billingBucket,
-        S3Prefix: "reports",
-        S3Region: s3Region as never,
-        RefreshClosedReports: true,
-        ReportVersioning: "OVERWRITE_REPORT",
-      },
-    }),
-  );
 }
 
 function billingPeriodPrefix(reportName: string, today = new Date()): string {
@@ -236,18 +143,20 @@ function parseCsvCosts(csv: string): Record<string, number> {
   return totals;
 }
 
+// AWS Cost and Usage Reports is locked to us-east-1 — the CUR service runs
+// there exclusively and the billing bucket must live in us-east-1 regardless
+// of where the rest of the stack is deployed. Hardcode it here.
+const CUR_REGION = "us-east-1";
+
 export async function fetchMtdCostsByService(
   creds: STSCredentials,
-  s3Region: string,
   stackPrefix: string,
 ): Promise<ServiceCost[] | null> {
   const accountId = await getAccountId(creds);
   const billingBucket = `${stackPrefix}-billing-${accountId}`;
   const reportName = `${stackPrefix}-billing`;
 
-  await ensureCurSetup(creds, billingBucket, s3Region, reportName, accountId);
-
-  const s3 = makeS3Client(creds, s3Region);
+  const s3 = makeS3Client(creds, CUR_REGION);
   const prefix = billingPeriodPrefix(reportName);
 
   const listed = await s3.send(

@@ -9,7 +9,9 @@ export function buildTempInstallPolicy(
   stackPrefix: string,
   appId: string,
   accountId: string,
+  region: string,
 ): string {
+  const pulumiStateBucket = `${stackPrefix}-pulumi-state-${accountId}-${region}`;
   return JSON.stringify({
     Version: "2012-10-17",
     Statement: [
@@ -27,9 +29,9 @@ export function buildTempInstallPolicy(
         Effect: "Allow",
         Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
         Resource: [
-          `arn:aws:s3:::${stackPrefix}-pulumi-state-${accountId}/.pulumi/stacks/${stackPrefix}-app-${appId}.json`,
-          `arn:aws:s3:::${stackPrefix}-pulumi-state-${accountId}/.pulumi/`,
-          `arn:aws:s3:::${stackPrefix}-pulumi-state-${accountId}/.pulumi/*`,
+          `arn:aws:s3:::${pulumiStateBucket}/.pulumi/stacks/${stackPrefix}-app-${appId}.json`,
+          `arn:aws:s3:::${pulumiStateBucket}/.pulumi/`,
+          `arn:aws:s3:::${pulumiStateBucket}/.pulumi/*`,
         ],
       },
       {
@@ -49,30 +51,93 @@ export function buildTempInstallPolicy(
         Effect: "Allow",
         Action: [
           "lambda:CreateFunction",
+          "lambda:DeleteFunction",
+          "lambda:GetFunction",
+          "lambda:GetFunctionConfiguration",
           "lambda:UpdateFunctionCode",
           "lambda:UpdateFunctionConfiguration",
           "lambda:TagResource",
-          "lambda:GetFunction",
-          "lambda:DeleteFunction",
+          "lambda:UntagResource",
+          "lambda:ListTags",
         ],
         Resource: `arn:aws:lambda:*:${accountId}:function:${stackPrefix}-app-${appId}-*`,
       },
       {
         Sid: "TempInstallLogs",
         Effect: "Allow",
-        Action: ["logs:CreateLogGroup", "logs:PutRetentionPolicy", "logs:TagResource", "logs:DeleteLogGroup"],
+        Action: [
+          "logs:CreateLogGroup",
+          "logs:DeleteLogGroup",
+          "logs:PutRetentionPolicy",
+          "logs:TagResource",
+          "logs:UntagResource",
+          "logs:ListTagsForResource",
+        ],
         Resource: `arn:aws:logs:*:${accountId}:log-group:/aws/lambda/${stackPrefix}-app-${appId}-*`,
+      },
+      {
+        // logs:DescribeLogGroups is a list-level action — AWS evaluates it
+        // on the all-zeros resource, not the filtered group, so it must be
+        // granted on Resource:"*".
+        Sid: "TempInstallLogsList",
+        Effect: "Allow",
+        Action: ["logs:DescribeLogGroups"],
+        Resource: "*",
       },
       {
         Sid: "TempInstallApiGateway",
         Effect: "Allow",
-        Action: ["apigatewayv2:CreateIntegration", "apigatewayv2:UpdateIntegration",
-                 "apigatewayv2:DeleteIntegration", "apigatewayv2:GetIntegration",
-                 "apigatewayv2:CreateRoute", "apigatewayv2:UpdateRoute",
-                 "apigatewayv2:DeleteRoute", "apigatewayv2:GetRoute",
-                 "apigatewayv2:GetRoutes", "apigatewayv2:GetIntegrations",
-                 "apigatewayv2:GetApis"],
+        Action: [
+          "apigatewayv2:GetApi",
+          "apigatewayv2:GetApis",
+          "apigatewayv2:GetAuthorizer",
+          "apigatewayv2:GetAuthorizers",
+          "apigatewayv2:CreateIntegration",
+          "apigatewayv2:UpdateIntegration",
+          "apigatewayv2:DeleteIntegration",
+          "apigatewayv2:GetIntegration",
+          "apigatewayv2:GetIntegrations",
+          "apigatewayv2:CreateRoute",
+          "apigatewayv2:UpdateRoute",
+          "apigatewayv2:DeleteRoute",
+          "apigatewayv2:GetRoute",
+          "apigatewayv2:GetRoutes",
+          "apigatewayv2:TagResource",
+          "apigatewayv2:UntagResource",
+          "apigatewayv2:ListTagsForResource",
+        ],
         Resource: "*",
+      },
+      {
+        // API Gateway v2 (HTTP APIs) tagging + several create paths still
+        // authorize against the legacy `apigateway` IAM service namespace
+        // (REST-method action names), not apigatewayv2:*.
+        Sid: "TempInstallApiGatewayRestActions",
+        Effect: "Allow",
+        Action: [
+          "apigateway:GET",
+          "apigateway:POST",
+          "apigateway:PATCH",
+          "apigateway:PUT",
+          "apigateway:DELETE",
+        ],
+        Resource: [
+          "arn:aws:apigateway:*::/v2/*",
+          "arn:aws:apigateway:*::/tags/*",
+        ],
+      },
+      {
+        // Pulumi's lambda.Function resource runs CreateFunction under the
+        // app's STS session, so AWS evaluates iam:PassRole on this session.
+        // Scoped to the app's own role only; the boundary's
+        // AppPassRoleOwnRoleToLambda also caps PassRole to lambda.
+        Sid: "TempInstallPassRoleOwnRoleToLambda",
+        Effect: "Allow",
+        Action: "iam:PassRole",
+        Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${appId}-role`,
+        Condition: {
+          StringEquals: { "iam:PassedToService": "lambda.amazonaws.com" },
+        },
       },
     ],
   });
@@ -82,7 +147,9 @@ export function buildTempUninstallPolicy(
   stackPrefix: string,
   appId: string,
   accountId: string,
+  region: string,
 ): string {
+  const pulumiStateBucket = `${stackPrefix}-pulumi-state-${accountId}-${region}`;
   return JSON.stringify({
     Version: "2012-10-17",
     Statement: [
@@ -100,9 +167,9 @@ export function buildTempUninstallPolicy(
         Effect: "Allow",
         Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
         Resource: [
-          `arn:aws:s3:::${stackPrefix}-pulumi-state-${accountId}/.pulumi/stacks/${stackPrefix}-app-${appId}.json`,
-          `arn:aws:s3:::${stackPrefix}-pulumi-state-${accountId}/.pulumi/`,
-          `arn:aws:s3:::${stackPrefix}-pulumi-state-${accountId}/.pulumi/*`,
+          `arn:aws:s3:::${pulumiStateBucket}/.pulumi/stacks/${stackPrefix}-app-${appId}.json`,
+          `arn:aws:s3:::${pulumiStateBucket}/.pulumi/`,
+          `arn:aws:s3:::${pulumiStateBucket}/.pulumi/*`,
         ],
       },
       {
@@ -120,7 +187,11 @@ export function buildTempUninstallPolicy(
       {
         Sid: "TempUninstallLambda",
         Effect: "Allow",
-        Action: ["lambda:DeleteFunction", "lambda:GetFunction"],
+        Action: [
+          "lambda:DeleteFunction",
+          "lambda:GetFunction",
+          "lambda:GetFunctionConfiguration",
+        ],
         Resource: `arn:aws:lambda:*:${accountId}:function:${stackPrefix}-app-${appId}-*`,
       },
       {
@@ -130,11 +201,28 @@ export function buildTempUninstallPolicy(
         Resource: `arn:aws:logs:*:${accountId}:log-group:/aws/lambda/${stackPrefix}-app-${appId}-*`,
       },
       {
+        // List-level action — see TempInstallLogsList.
+        Sid: "TempUninstallLogsList",
+        Effect: "Allow",
+        Action: ["logs:DescribeLogGroups"],
+        Resource: "*",
+      },
+      {
         Sid: "TempUninstallApiGateway",
         Effect: "Allow",
-        Action: ["apigatewayv2:DeleteIntegration", "apigatewayv2:DeleteRoute",
-                 "apigatewayv2:GetRoute", "apigatewayv2:GetRoutes",
-                 "apigatewayv2:GetIntegrations", "apigatewayv2:GetApis"],
+        Action: [
+          "apigatewayv2:GetApi",
+          "apigatewayv2:GetApis",
+          "apigatewayv2:GetAuthorizer",
+          "apigatewayv2:GetAuthorizers",
+          "apigatewayv2:GetIntegration",
+          "apigatewayv2:GetIntegrations",
+          "apigatewayv2:DeleteIntegration",
+          "apigatewayv2:GetRoute",
+          "apigatewayv2:GetRoutes",
+          "apigatewayv2:DeleteRoute",
+          "apigatewayv2:ListTagsForResource",
+        ],
         Resource: "*",
       },
     ],
@@ -151,19 +239,33 @@ export function buildTempUninstallPolicy(
 export function buildTempInstallCloudDataServerPolicy(
   stackPrefix: string,
   accountId: string,
+  region: string,
 ): string {
   const appId = "cloud-data-server";
+  const pulumiStateBucket = `${stackPrefix}-pulumi-state-${accountId}-${region}`;
   return JSON.stringify({
     Version: "2012-10-17",
     Statement: [
       {
         Sid: "TempInstallPulumiState",
         Effect: "Allow",
-        Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+        Action: [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+          // Used as a propagation probe: probePulumiStateBucket waits for
+          // this action to succeed before handing control to Pulumi, ensuring
+          // that PutRolePolicy's IAM cache propagation is complete for
+          // s3:GetAccelerateConfiguration (which Pulumi reads on every
+          // BucketV2 create/refresh). Probing on the known-existing state
+          // bucket is the only pre-Pulumi S3 target we can use.
+          "s3:GetAccelerateConfiguration",
+        ],
         Resource: [
-          `arn:aws:s3:::${stackPrefix}-pulumi-state-${accountId}`,
-          `arn:aws:s3:::${stackPrefix}-pulumi-state-${accountId}/.pulumi/`,
-          `arn:aws:s3:::${stackPrefix}-pulumi-state-${accountId}/.pulumi/*`,
+          `arn:aws:s3:::${pulumiStateBucket}`,
+          `arn:aws:s3:::${pulumiStateBucket}/.pulumi/`,
+          `arn:aws:s3:::${pulumiStateBucket}/.pulumi/*`,
         ],
       },
       {
@@ -190,6 +292,8 @@ export function buildTempInstallCloudDataServerPolicy(
           "dsql:TagResource",
           "dsql:UntagResource",
           "dsql:ListTagsForResource",
+          // Pulumi/terraform-provider-aws reads this after CreateCluster.
+          "dsql:GetVpcEndpointServiceName",
         ],
         Resource: "*",
       },
@@ -216,6 +320,14 @@ export function buildTempInstallCloudDataServerPolicy(
           "s3:PutBucketOwnershipControls",
           "s3:GetEncryptionConfiguration",
           "s3:PutEncryptionConfiguration",
+          "s3:GetBucketWebsite",
+          "s3:GetAccelerateConfiguration",
+          "s3:GetBucketLogging",
+          "s3:GetBucketRequestPayment",
+          "s3:GetBucketObjectLockConfiguration",
+          "s3:GetReplicationConfiguration",
+          "s3:GetLifecycleConfiguration",
+          "s3:GetBucketNotification",
           "s3:ListBucket",
         ],
         Resource: [
@@ -245,6 +357,11 @@ export function buildTempInstallCloudDataServerPolicy(
           "lambda:RemovePermission",
           "lambda:GetPolicy",
           "lambda:PublishVersion",
+          "lambda:ListVersionsByFunction",
+          "lambda:GetFunctionCodeSigningConfig",
+          "lambda:GetFunctionConcurrency",
+          "lambda:GetFunctionUrlConfig",
+          "lambda:ListFunctionEventInvokeConfigs",
         ],
         Resource: `arn:aws:lambda:*:${accountId}:function:${stackPrefix}-app-${appId}-*`,
       },
@@ -254,7 +371,6 @@ export function buildTempInstallCloudDataServerPolicy(
         Action: [
           "logs:CreateLogGroup",
           "logs:DeleteLogGroup",
-          "logs:DescribeLogGroups",
           "logs:PutRetentionPolicy",
           "logs:TagResource",
           "logs:UntagResource",
@@ -263,10 +379,74 @@ export function buildTempInstallCloudDataServerPolicy(
         Resource: `arn:aws:logs:*:${accountId}:log-group:/aws/lambda/${stackPrefix}-app-${appId}-*`,
       },
       {
+        // List-level action — must be granted on Resource:"*".
+        Sid: "TempInstallLogsList",
+        Effect: "Allow",
+        Action: ["logs:DescribeLogGroups"],
+        Resource: "*",
+      },
+      {
         Sid: "TempInstallApiGateway",
         Effect: "Allow",
-        Action: ["apigatewayv2:*"],
+        Action: [
+          "apigatewayv2:CreateApi",
+          "apigatewayv2:UpdateApi",
+          "apigatewayv2:DeleteApi",
+          "apigatewayv2:GetApi",
+          "apigatewayv2:GetApis",
+          "apigatewayv2:CreateAuthorizer",
+          "apigatewayv2:UpdateAuthorizer",
+          "apigatewayv2:DeleteAuthorizer",
+          "apigatewayv2:GetAuthorizer",
+          "apigatewayv2:GetAuthorizers",
+          "apigatewayv2:CreateStage",
+          "apigatewayv2:UpdateStage",
+          "apigatewayv2:DeleteStage",
+          "apigatewayv2:GetStage",
+          "apigatewayv2:GetStages",
+          "apigatewayv2:CreateIntegration",
+          "apigatewayv2:UpdateIntegration",
+          "apigatewayv2:DeleteIntegration",
+          "apigatewayv2:GetIntegration",
+          "apigatewayv2:GetIntegrations",
+          "apigatewayv2:CreateRoute",
+          "apigatewayv2:UpdateRoute",
+          "apigatewayv2:DeleteRoute",
+          "apigatewayv2:GetRoute",
+          "apigatewayv2:GetRoutes",
+          "apigatewayv2:CreateApiMapping",
+          "apigatewayv2:UpdateApiMapping",
+          "apigatewayv2:DeleteApiMapping",
+          "apigatewayv2:TagResource",
+          "apigatewayv2:UntagResource",
+          "apigatewayv2:ListTagsForResource",
+        ],
         Resource: "*",
+      },
+      {
+        // v2 HTTP API create/update/delete paths authorize against the legacy
+        // `apigateway` IAM namespace with REST-method action names. The IAM
+        // resource uses the un-prefixed path (e.g. /apis, /apis/*) rather than
+        // /v2/apis — both forms appear in practice depending on the SDK version.
+        // TagResource/UntagResource also fire under the legacy namespace when
+        // tagging stages, integrations, and routes.
+        Sid: "TempInstallApiGatewayRestActions",
+        Effect: "Allow",
+        Action: [
+          "apigateway:GET",
+          "apigateway:POST",
+          "apigateway:PATCH",
+          "apigateway:PUT",
+          "apigateway:DELETE",
+          "apigateway:TagResource",
+          "apigateway:UntagResource",
+        ],
+        Resource: [
+          "arn:aws:apigateway:*::/apis",
+          "arn:aws:apigateway:*::/apis/*",
+          "arn:aws:apigateway:*::/v2/*",
+          "arn:aws:apigateway:*::/tags/*",
+        ],
       },
       {
         Sid: "TempInstallPassRoleToLambda",
@@ -276,6 +456,53 @@ export function buildTempInstallCloudDataServerPolicy(
         Condition: {
           StringEquals: { "iam:PassedToService": "lambda.amazonaws.com" },
         },
+      },
+      {
+        Sid: "TempInstallBillingBucket",
+        Effect: "Allow",
+        Action: [
+          "s3:CreateBucket",
+          "s3:DeleteBucket",
+          "s3:GetBucketAcl",
+          "s3:GetBucketLocation",
+          "s3:GetBucketPolicy",
+          "s3:PutBucketPolicy",
+          "s3:DeleteBucketPolicy",
+          "s3:GetBucketTagging",
+          "s3:PutBucketTagging",
+          "s3:GetBucketVersioning",
+          "s3:PutBucketVersioning",
+          "s3:GetBucketPublicAccessBlock",
+          "s3:PutBucketPublicAccessBlock",
+          "s3:GetBucketOwnershipControls",
+          "s3:PutBucketOwnershipControls",
+          "s3:GetEncryptionConfiguration",
+          "s3:PutEncryptionConfiguration",
+          "s3:GetBucketCORS",
+          "s3:GetBucketWebsite",
+          "s3:GetAccelerateConfiguration",
+          "s3:GetBucketLogging",
+          "s3:GetBucketRequestPayment",
+          "s3:GetBucketObjectLockConfiguration",
+          "s3:GetReplicationConfiguration",
+          "s3:GetLifecycleConfiguration",
+          "s3:GetBucketNotification",
+          "s3:ListBucket",
+        ],
+        Resource: `arn:aws:s3:::${stackPrefix}-billing-*`,
+      },
+      {
+        Sid: "TempInstallCur",
+        Effect: "Allow",
+        Action: [
+          "cur:PutReportDefinition",
+          "cur:DescribeReportDefinitions",
+          "cur:DeleteReportDefinition",
+          "cur:ListTagsForResource",
+          "cur:TagResource",
+          "cur:UntagResource",
+        ],
+        Resource: "*",
       },
     ],
   });
