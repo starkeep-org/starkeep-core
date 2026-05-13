@@ -1,56 +1,71 @@
 /**
  * Install (or re-install / update) the cloud-data-server built-in app.
  *
- * Triggered by admin-web after the user has signed in with Cognito and the
- * bootstrap CFN stack outputs are loaded into starkeep-config.json. The flow
- * mirrors `packages/admin-installer/scripts/cli-install-cloud-data-server.ts`,
- * but runs server-side inside the local Next.js process and streams progress
- * back to the browser via SSE.
+ * Spawns `packages/admin-installer/scripts/cli-install-cloud-data-server.ts`
+ * as a child process and streams its stdout/stderr to the browser via SSE.
+ * Running Pulumi out-of-process keeps `@pulumi/*` (and the rest of the
+ * installer source tree) out of admin-web's dev bundle — the dev server was
+ * OOMing because the bundler kept those module graphs hot.
  *
- * Request body:
- *   {
- *     accessKeyId: string,
- *     secretAccessKey: string,
- *     sessionToken: string,
- *   }
+ * Request body: { accessKeyId, secretAccessKey, sessionToken }
  *
  * Response: text/event-stream
- *   Each line emitted via console.log inside installCloudDataServer is
- *   forwarded as `data: <json-encoded line>\n\n`.
- *   Completion: `event: done\ndata: <json outputs>\n\n` then close.
- *   Failure:    `event: error\ndata: <json msg>\n\n` then close.
+ *   data:  <stdout/stderr line>
+ *   event: done   data: { apiGatewayUrl, apiGatewayId, authorizerId,
+ *                         bucketName, region, auroraHostname }
+ *   event: error  data: { message: string, code?: "EXPIRED_TOKEN" | ... }
+ *
+ * Structured error codes let the client distinguish recoverable failures
+ * (e.g. the Cognito-minted STS session expired mid-install) from generic
+ * installer errors, so the UI can route the user to the right remedy
+ * rather than dumping a stack trace.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { NextRequest } from "next/server";
-import { installCloudDataServer } from "@starkeep/admin-installer";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
+import { getRegion } from "../../../../src/lib/cloud-config";
 
 const CONFIG_PATH = resolve(REPO_ROOT, "starkeep-config.json");
 
+// Module-level store for an in-progress install. When the browser suspends
+// (laptop sleep) the SSE connection drops but the child keeps running. A
+// subsequent POST from the reconnecting client reattaches to the existing
+// child rather than spawning a duplicate, then auto-restarts if the old run
+// failed.
+let runningChild: ChildProcess | null = null;
+// Listeners are stored as a Map so each SSE stream can remove its own entry
+// when it disconnects, preventing writes to closed controllers.
+const runningChildListeners = new Map<symbol, (line: string) => void>();
+let runningChildDone: ((code: number | null) => void) | null = null;
+
+function broadcastLine(line: string): void {
+  for (const listener of runningChildListeners.values()) {
+    try {
+      listener(line);
+    } catch {
+      // Listener's controller was already closed — harmless, will be removed
+      // when that stream's cancel() fires.
+    }
+  }
+}
+
 interface StarkeepConfig {
-  region: string;
-  stage: string;
-  accountId?: string;
   userPoolId: string;
-  userPoolClientId: string;
-  identityPoolId: string;
-  permissionsBoundaryArn?: string;
-  managerRoleArn?: string;
-  pulumiStateBucket?: string;
   apiGatewayUrl?: string;
   apiGatewayId?: string;
   authorizerId?: string;
   s3Bucket?: string;
-  s3Region?: string;
   auroraEndpoint?: string;
 }
 
-function loadConfig(): StarkeepConfig | null {
-  if (!existsSync(CONFIG_PATH)) return null;
-  return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
-}
+const EXPIRED_TOKEN_SIGNATURES = [
+  "ExpiredToken",
+  "ExpiredTokenException",
+  "The security token included in the request is expired",
+];
 
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as {
@@ -66,106 +81,165 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const config = loadConfig();
-  if (!config) {
+  if (!existsSync(CONFIG_PATH)) {
     return new Response(
       JSON.stringify({ error: `starkeep-config.json not found at ${CONFIG_PATH}` }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
-  if (!config.accountId) {
+  const preConfig = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
+
+  if (!preConfig.userPoolId) {
     return new Response(
-      JSON.stringify({ error: "starkeep-config.json missing accountId" }),
+      JSON.stringify({
+        error:
+          "starkeep-config.json has no userPoolId — complete the wizard's Stack outputs step first",
+      }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
+  const region = getRegion(preConfig);
 
-  const stackPrefix = config.stage;
-  const accountId = config.accountId;
-  const managerRoleArn =
-    config.managerRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
-  const permissionsBoundaryArn =
-    config.permissionsBoundaryArn
-    ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
-  const pulumiStateBucket =
-    config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}`;
+  const spawnEnv = {
+    ...process.env,
+    AWS_ACCESS_KEY_ID: body.accessKeyId,
+    AWS_SECRET_ACCESS_KEY: body.secretAccessKey,
+    AWS_SESSION_TOKEN: body.sessionToken,
+    AWS_REGION: region,
+  };
 
   const encoder = new TextEncoder();
+  // Unique key so cancel() can remove exactly this stream's listener.
+  const listenerId = Symbol();
+
   const stream = new ReadableStream({
-    async start(controller) {
-      const emit = (line: string) =>
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`));
+    start(controller) {
+      let sawExpiredToken = false;
 
-      // installCloudDataServer streams progress via console.log. Hijack the
-      // global console for the duration of this request to forward those
-      // lines as SSE events. This is OK because Next.js API routes run in
-      // their own request scope; the patch is reverted in finally.
-      const originalLog = console.log;
-      const originalWarn = console.warn;
-      console.log = (...args: unknown[]) => {
-        emit(args.map(String).join(" "));
-        originalLog(...args);
-      };
-      console.warn = (...args: unknown[]) => {
-        emit("[warn] " + args.map(String).join(" "));
-        originalWarn(...args);
+      const emit = (line: string) => {
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`));
+        } catch {
+          // Controller already closed (e.g. client disconnected).
+        }
       };
 
-      // Surface the install creds via the env vars consulted by the AWS SDK
-      // default credential provider chain. installCloudDataServer's first call
-      // is `roleChain([managerRoleArn])` which uses the default chain to
-      // assume Manager from these creds.
-      const prevAk = process.env.AWS_ACCESS_KEY_ID;
-      const prevSk = process.env.AWS_SECRET_ACCESS_KEY;
-      const prevSt = process.env.AWS_SESSION_TOKEN;
-      const prevRg = process.env.AWS_REGION;
-      process.env.AWS_ACCESS_KEY_ID = body.accessKeyId;
-      process.env.AWS_SECRET_ACCESS_KEY = body.secretAccessKey;
-      process.env.AWS_SESSION_TOKEN = body.sessionToken;
-      process.env.AWS_REGION = config.region;
+      const emitEvent = (event: string, data: unknown) => {
+        try {
+          controller.enqueue(
+            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+          );
+        } catch {}
+      };
 
-      try {
-        const outputs = await installCloudDataServer({
-          stackPrefix,
-          region: config.region,
-          accountId,
-          permissionsBoundaryArn,
-          managerRoleArn,
-          pulumiStateBucket,
-          userPoolId: config.userPoolId,
-          userPoolClientId: config.userPoolClientId,
+      const finish = (code: number | null) => {
+        if (code === 0) {
+          try {
+            const post = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
+            emitEvent("done", {
+              apiGatewayUrl: post.apiGatewayUrl,
+              apiGatewayId: post.apiGatewayId,
+              authorizerId: post.authorizerId,
+              bucketName: post.s3Bucket,
+              auroraHostname: post.auroraEndpoint,
+            });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            emitEvent("error", { message: `Install completed but reading outputs failed: ${msg}` });
+          }
+        } else if (sawExpiredToken) {
+          emitEvent("error", {
+            message:
+              "Your AWS sign-in session expired while the installer was running. Sign in again to retry.",
+            code: "EXPIRED_TOKEN",
+          });
+        } else {
+          emitEvent("error", { message: `Installer exited with code ${code}` });
+        }
+        controller.close();
+      };
+
+      // Spawn a new child process using the credentials from this POST request.
+      const spawnChild = () => {
+        const child = spawn(
+          "pnpm",
+          ["--filter", "@starkeep/admin-installer", "cli:install-cloud-data-server", "--non-interactive"],
+          { cwd: REPO_ROOT, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] },
+        );
+        runningChild = child;
+        runningChildDone = finish;
+
+        runningChildListeners.set(listenerId, (line) => {
+          if (!sawExpiredToken && EXPIRED_TOKEN_SIGNATURES.some((sig) => line.includes(sig))) {
+            sawExpiredToken = true;
+          }
+          emit(line);
         });
 
-        const updated: StarkeepConfig = {
-          ...config,
-          permissionsBoundaryArn,
-          managerRoleArn,
-          pulumiStateBucket,
-          apiGatewayUrl: outputs.apiGatewayUrl,
-          apiGatewayId: outputs.apiGatewayId,
-          authorizerId: outputs.authorizerId,
-          s3Bucket: outputs.bucketName,
-          s3Region: outputs.region,
-          auroraEndpoint: outputs.auroraHostname,
+        let buffer = "";
+        const onChunk = (chunk: Buffer) => {
+          buffer += chunk.toString();
+          let nl: number;
+          while ((nl = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, nl);
+            buffer = buffer.slice(nl + 1);
+            if (line.length > 0) broadcastLine(line);
+          }
         };
-        writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
+        child.stdout.on("data", onChunk);
+        child.stderr.on("data", onChunk);
 
-        controller.enqueue(
-          encoder.encode(`event: done\ndata: ${JSON.stringify(outputs)}\n\n`),
-        );
-        controller.close();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify(msg)}\n\n`));
-        controller.close();
-      } finally {
-        console.log = originalLog;
-        console.warn = originalWarn;
-        process.env.AWS_ACCESS_KEY_ID = prevAk;
-        process.env.AWS_SECRET_ACCESS_KEY = prevSk;
-        process.env.AWS_SESSION_TOKEN = prevSt;
-        process.env.AWS_REGION = prevRg;
+        child.on("error", (err) => {
+          runningChild = null;
+          runningChildListeners.clear();
+          runningChildDone = null;
+          emitEvent("error", { message: err.message });
+          controller.close();
+        });
+
+        child.on("close", (code) => {
+          if (buffer.length > 0) broadcastLine(buffer);
+          runningChild = null;
+          runningChildListeners.clear();
+          const done = runningChildDone;
+          runningChildDone = null;
+          if (done) done(code);
+        });
+      };
+
+      if (runningChild !== null) {
+        // Reattach to the still-running child from a prior (suspended) request.
+        // If that run fails, auto-restart with the credentials from this POST.
+        emit("[Reconnected to in-progress install]");
+
+        runningChildListeners.set(listenerId, (line) => {
+          if (!sawExpiredToken && EXPIRED_TOKEN_SIGNATURES.some((sig) => line.includes(sig))) {
+            sawExpiredToken = true;
+          }
+          emit(line);
+        });
+
+        runningChildDone = (code) => {
+          if (code === 0) {
+            finish(code);
+          } else {
+            // Previous run failed — spawn fresh with the new credentials.
+            emit("[Previous run ended — starting fresh install...]");
+            sawExpiredToken = false;
+            spawnChild();
+          }
+        };
+        return;
       }
+
+      spawnChild();
+    },
+
+    cancel() {
+      // Client disconnected (e.g. laptop sleep). Remove this stream's listener
+      // so future broadcasts don't try to write to its closed controller.
+      // Leave the child running so the reconnect path can reattach.
+      runningChildListeners.delete(listenerId);
     },
   });
 

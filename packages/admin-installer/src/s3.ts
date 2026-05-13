@@ -9,7 +9,7 @@ import {
   ListObjectsV2Command,
   DeleteObjectsCommand,
 } from "@aws-sdk/client-s3";
-import type { AwsCredentials } from "./session.js";
+import type { AwsCredentials } from "./session";
 
 function makeS3Client(creds: AwsCredentials, region: string): S3Client {
   return new S3Client({

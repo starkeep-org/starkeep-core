@@ -16,7 +16,7 @@ export async function GET() {
     return NextResponse.json({ error: "Failed to parse starkeep-config.json" }, { status: 500 });
   }
 
-  const { s3Bucket, s3Region, auroraEndpoint, apiGatewayUrl } = config;
+  const { s3Bucket, auroraEndpoint, apiGatewayUrl } = config;
   if (!s3Bucket || !auroraEndpoint) {
     return NextResponse.json(
       { error: "Config is missing s3Bucket or auroraEndpoint — has cloud-data-server been installed?" },
@@ -24,5 +24,5 @@ export async function GET() {
     );
   }
 
-  return NextResponse.json({ s3Bucket, s3Region, auroraEndpoint, apiGatewayUrl });
+  return NextResponse.json({ s3Bucket, auroraEndpoint, apiGatewayUrl });
 }

@@ -1,7 +1,11 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { ColorSchemeScript, MantineProvider } from "@mantine/core";
-import "@mantine/core/styles.css";
+import { Geist } from "next/font/google";
+import { Toaster } from "@/components/ui/sonner";
+import { cn } from "@/lib/utils";
+import "./globals.css";
+
+const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
   title: "Starkeep Admin",
@@ -9,12 +13,10 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <head>
-        <ColorSchemeScript />
-      </head>
-      <body style={{ margin: 0 }}>
-        <MantineProvider>{children}</MantineProvider>
+    <html lang="en" suppressHydrationWarning className={cn("font-sans", geist.variable)}>
+      <body>
+        {children}
+        <Toaster />
       </body>
     </html>
   );

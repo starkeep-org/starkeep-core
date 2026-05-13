@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "
 import { dirname, relative, resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
+import { regionFromUserPoolId } from "../../../../src/lib/cloud-config";
 
 const PIDS_DIR = resolve(REPO_ROOT, ".pids");
 const PID_FILE = resolve(PIDS_DIR, "photos-web.pid");
@@ -95,9 +96,13 @@ export async function POST(req: NextRequest) {
     photosCloudConfig = JSON.parse(readFileSync(photosCloudConfigPath, "utf-8")) as Record<string, unknown>;
   }
 
+  const userPoolId = typeof starkeepConfig.userPoolId === "string" ? starkeepConfig.userPoolId : "";
+  const region = regionFromUserPoolId(userPoolId);
   const runtimeConfig = {
     localDataServerUrl: "http://127.0.0.1:9820",
     ...starkeepConfig,
+    region,
+    s3Region: region,
     ...photosCloudConfig,
   };
 

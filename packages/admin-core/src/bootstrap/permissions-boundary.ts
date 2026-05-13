@@ -28,9 +28,9 @@ export function appPermissionsBoundaryStatements(stackPrefix: string): IamStatem
       Effect: "Allow",
       Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
       Resource: [
-        `arn:aws:s3:::${stackPrefix}-pulumi-state/.pulumi/stacks/${stackPrefix}-app-\${aws:PrincipalTag/starkeep:appId}.json`,
-        `arn:aws:s3:::${stackPrefix}-pulumi-state/.pulumi/`,
-        `arn:aws:s3:::${stackPrefix}-pulumi-state/.pulumi/*`,
+        `arn:aws:s3:::${stackPrefix}-pulumi-state-*/.pulumi/stacks/${stackPrefix}-app-\${aws:PrincipalTag/starkeep:appId}.json`,
+        `arn:aws:s3:::${stackPrefix}-pulumi-state-*/.pulumi/`,
+        `arn:aws:s3:::${stackPrefix}-pulumi-state-*/.pulumi/*`,
       ],
     },
     {
@@ -58,9 +58,46 @@ export function appPermissionsBoundaryStatements(stackPrefix: string): IamStatem
       Resource: `arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-*`,
     },
     {
-      Sid: "DenyIam",
+      // Pulumi's lambda CreateFunction call runs under the app's STS session,
+      // so AWS evaluates iam:PassRole on the app session. Resource is
+      // restricted to ${prefix}-app-* (the role's own ARN is enforced by the
+      // temp-install policy at install time).
+      Sid: "AppPassRoleOwnRoleToLambda",
+      Effect: "Allow",
+      Action: "iam:PassRole",
+      Resource: `arn:aws:iam::*:role/${stackPrefix}-app-*`,
+      Condition: {
+        StringEquals: {
+          "iam:PassedToService": "lambda.amazonaws.com",
+        },
+      },
+    },
+    {
+      // Defense-in-depth: deny every mutating IAM verb. PassRole is omitted
+      // so the Allow above survives. Read-only IAM verbs aren't denied but
+      // are implicitly denied at the boundary because nothing Allows them.
+      Sid: "DenyOtherIam",
       Effect: "Deny",
-      Action: "iam:*",
+      Action: [
+        "iam:Add*",
+        "iam:Attach*",
+        "iam:Change*",
+        "iam:Create*",
+        "iam:Deactivate*",
+        "iam:Delete*",
+        "iam:Detach*",
+        "iam:Enable*",
+        "iam:Generate*",
+        "iam:Put*",
+        "iam:Remove*",
+        "iam:Reset*",
+        "iam:Resync*",
+        "iam:Set*",
+        "iam:Tag*",
+        "iam:Untag*",
+        "iam:Update*",
+        "iam:Upload*",
+      ],
       Resource: "*",
     },
   ];

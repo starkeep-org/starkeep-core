@@ -170,14 +170,14 @@ export async function getIdentityPoolCredentials(
 
 export function startCredentialRefreshTimer(
   config: CognitoConfig,
-  getRefreshToken: () => string | null,
+  getRefreshToken: () => string | null | Promise<string | null>,
   onNewCredentials: (creds: STSCredentials) => void,
   onError?: (err: Error) => void,
 ): () => void {
   const REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 
   const refresh = async () => {
-    const refreshToken = getRefreshToken();
+    const refreshToken = await getRefreshToken();
     if (!refreshToken) return;
     try {
       const tokens = await refreshTokens(config, refreshToken);
