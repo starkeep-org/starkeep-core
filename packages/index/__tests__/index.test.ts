@@ -23,7 +23,7 @@ describe("UnifiedIndex", () => {
   describe("search", () => {
     it("should return data records", async () => {
       const dataRecord = createDataRecord(
-        { type: "@test/photo", ownerId: "user1", content: { title: "sunset" } },
+        { type: "@test/photo", ownerId: "user1", originAppId: "test", content: { title: "sunset" } },
         clock,
       );
       await databaseAdapter.put(dataRecord);
@@ -36,11 +36,11 @@ describe("UnifiedIndex", () => {
 
     it("should filter by type", async () => {
       const photoRecord = createDataRecord(
-        { type: "@test/photo", ownerId: "user1" },
+        { type: "@test/photo", ownerId: "user1", originAppId: "test" },
         clock,
       );
       const videoRecord = createDataRecord(
-        { type: "@test/video", ownerId: "user1" },
+        { type: "@test/video", ownerId: "user1", originAppId: "test" },
         clock,
       );
       await databaseAdapter.put(photoRecord);
@@ -54,11 +54,11 @@ describe("UnifiedIndex", () => {
 
     it("should filter by syncBoundary", async () => {
       const localRecord = createDataRecord(
-        { type: "@test/photo", ownerId: "user1" },
+        { type: "@test/photo", ownerId: "user1", originAppId: "test" },
         clock,
       );
       const syncedRecord = createDataRecord(
-        { type: "@test/photo", ownerId: "user1" },
+        { type: "@test/photo", ownerId: "user1", originAppId: "test" },
         clock,
       );
       syncedRecord.syncStatus = SyncStatus.PendingPush;
@@ -80,7 +80,7 @@ describe("UnifiedIndex", () => {
 
     it("should support pagination with limit and cursor", async () => {
       const records = Array.from({ length: 5 }, (_, i) =>
-        createDataRecord({ type: `@test/item-${i}`, ownerId: "user1" }, clock),
+        createDataRecord({ type: `@test/item-${i}`, ownerId: "user1", originAppId: "test" }, clock),
       );
       for (const record of records) {
         await databaseAdapter.put(record);
@@ -104,7 +104,7 @@ describe("UnifiedIndex", () => {
   describe("getWithMetadata", () => {
     it("should return data record by id", async () => {
       const dataRecord = createDataRecord(
-        { type: "@test/photo", ownerId: "user1", content: { title: "beach" } },
+        { type: "@test/photo", ownerId: "user1", originAppId: "test", content: { title: "beach" } },
         clock,
       );
       await databaseAdapter.put(dataRecord);
@@ -125,7 +125,7 @@ describe("UnifiedIndex", () => {
   describe("syncBoundary", () => {
     it("should mark a record as sync eligible", async () => {
       const record = createDataRecord(
-        { type: "@test/photo", ownerId: "user1" },
+        { type: "@test/photo", ownerId: "user1", originAppId: "test" },
         clock,
       );
       await databaseAdapter.put(record);
@@ -140,7 +140,7 @@ describe("UnifiedIndex", () => {
 
     it("should mark a record as local only", async () => {
       const record = createDataRecord(
-        { type: "@test/photo", ownerId: "user1" },
+        { type: "@test/photo", ownerId: "user1", originAppId: "test" },
         clock,
       );
       record.syncStatus = SyncStatus.PendingPush;
@@ -154,13 +154,13 @@ describe("UnifiedIndex", () => {
 
     it("should check if a record is sync eligible", async () => {
       const localRecord = createDataRecord(
-        { type: "@test/photo", ownerId: "user1" },
+        { type: "@test/photo", ownerId: "user1", originAppId: "test" },
         clock,
       );
       await databaseAdapter.put(localRecord);
 
       const syncedRecord = createDataRecord(
-        { type: "@test/photo", ownerId: "user1" },
+        { type: "@test/photo", ownerId: "user1", originAppId: "test" },
         clock,
       );
       syncedRecord.syncStatus = SyncStatus.PendingPush;

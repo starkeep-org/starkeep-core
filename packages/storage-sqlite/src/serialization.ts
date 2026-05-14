@@ -16,6 +16,8 @@ export interface SqliteRow {
   mime_type: string | null;
   size_bytes: number | null;
   original_filename: string | null;
+  origin_app_id: string;
+  parent_id: string | null;
 }
 
 export function recordToRow(record: DataRecord): SqliteRow {
@@ -34,6 +36,8 @@ export function recordToRow(record: DataRecord): SqliteRow {
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
     original_filename: record.originalFilename,
+    origin_app_id: record.originAppId,
+    parent_id: record.parentId,
   };
 }
 
@@ -54,5 +58,7 @@ export function rowToRecord(row: SqliteRow): DataRecord {
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
     originalFilename: row.original_filename,
+    originAppId: row.origin_app_id,
+    parentId: row.parent_id ? createStarkeepId(row.parent_id) : null,
   };
 }

@@ -57,7 +57,7 @@ describe("AccessControl", () => {
 
   describe("checkAccess", () => {
     it("should allow access with matching item-specific policy", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord({ type: "@test/note", ownerId, originAppId: "test" }, clock);
       await databaseAdapter.put(record);
 
       await engine.createPolicy({
@@ -81,7 +81,7 @@ describe("AccessControl", () => {
     });
 
     it("should allow access with wildcard policy", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord({ type: "@test/note", ownerId, originAppId: "test" }, clock);
       await databaseAdapter.put(record);
 
       await engine.createPolicy({
@@ -104,7 +104,7 @@ describe("AccessControl", () => {
     });
 
     it("should deny access when no matching policy exists", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord({ type: "@test/note", ownerId, originAppId: "test" }, clock);
       await databaseAdapter.put(record);
 
       const result = await engine.checkAccess({
@@ -120,7 +120,7 @@ describe("AccessControl", () => {
     });
 
     it("should deny access for expired policy", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord({ type: "@test/note", ownerId, originAppId: "test" }, clock);
       await databaseAdapter.put(record);
 
       const pastTimestamp = { wallTime: 1000, counter: 0, nodeId: "test-node" };
@@ -145,7 +145,7 @@ describe("AccessControl", () => {
     });
 
     it("should grant all access with admin permission", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord({ type: "@test/note", ownerId, originAppId: "test" }, clock);
       await databaseAdapter.put(record);
 
       await engine.createPolicy({
@@ -266,7 +266,7 @@ describe("AccessControl", () => {
 
   describe("enforced database adapter", () => {
     it("should allow reads with read permission", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord({ type: "@test/note", ownerId, originAppId: "test" }, clock);
       await databaseAdapter.put(record);
 
       await engine.createPolicy({
@@ -289,7 +289,7 @@ describe("AccessControl", () => {
     });
 
     it("should deny writes without write permission", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord({ type: "@test/note", ownerId, originAppId: "test" }, clock);
 
       await engine.createPolicy({
         subjectType: "user",
@@ -311,7 +311,7 @@ describe("AccessControl", () => {
 
     it("should throw AccessDeniedError on put when no policy covers the record type", async () => {
       // No policy exists for "media:photo" — type-based check must deny.
-      const record = createDataRecord({ type: "media:photo", ownerId }, clock);
+      const record = createDataRecord({ type: "media:photo", ownerId, originAppId: "test" }, clock);
 
       const enforcedAdapter = createEnforcedDatabaseAdapter({
         databaseAdapter,
@@ -325,7 +325,7 @@ describe("AccessControl", () => {
 
     it("should throw AccessDeniedError accessing another app's private type, even with a wildcard policy", async () => {
       // Record owned by "starkeep-tasks" private namespace.
-      const record = createDataRecord({ type: "starkeep-tasks:private:settings", ownerId }, clock);
+      const record = createDataRecord({ type: "starkeep-tasks:private:settings", ownerId, originAppId: "test" }, clock);
       await databaseAdapter.put(record);
 
       // Grant a wildcard policy to @starkeep/notes — structural rule must still block.
@@ -349,7 +349,7 @@ describe("AccessControl", () => {
 
     it("should allow access to own private types without any policy", async () => {
       // "starkeep-notes" is the normalized form of "@starkeep/notes".
-      const record = createDataRecord({ type: "starkeep-notes:private:settings", ownerId }, clock);
+      const record = createDataRecord({ type: "starkeep-notes:private:settings", ownerId, originAppId: "test" }, clock);
       await databaseAdapter.put(record);
 
       // No policies created — structural rule alone should permit access.

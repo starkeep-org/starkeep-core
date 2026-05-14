@@ -36,6 +36,7 @@
 import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
+import { CORE_TYPES, pgMetadataDdl } from "@starkeep/core";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -157,22 +158,11 @@ export async function initializeSharedSchema(
          detected_at timestamptz NOT NULL DEFAULT now()
        )`,
 
-      // Per-type metadata tables, one per type in CORE_TYPE_REGISTRY.
+      // Per-type metadata tables, generated from @starkeep/core's CORE_TYPES.
       // record_id is logically an FK to shared.records(id); DSQL has no FK
       // constraints or ON DELETE CASCADE, so deletes must be performed in
       // application code (delete the metadata row alongside the records row).
-      `CREATE TABLE IF NOT EXISTS shared.record_image_metadata (
-         record_id   text        PRIMARY KEY,
-         width       integer,
-         height      integer,
-         captured_at timestamptz
-       )`,
-      `CREATE TABLE IF NOT EXISTS shared.record_markdown_metadata (
-         record_id text PRIMARY KEY
-       )`,
-      `CREATE TABLE IF NOT EXISTS shared.record_unknown_metadata (
-         record_id text PRIMARY KEY
-       )`,
+      ...CORE_TYPES.map(pgMetadataDdl),
 
       // app_install_steps — per-step state for idempotent install/uninstall.
       `CREATE TABLE IF NOT EXISTS shared.app_install_steps (

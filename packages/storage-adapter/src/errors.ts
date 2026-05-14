@@ -21,13 +21,6 @@ export class TransactionError extends StorageError {
   }
 }
 
-export class MigrationError extends StorageError {
-  constructor(message: string, cause?: unknown) {
-    super(message, cause);
-    this.name = "MigrationError";
-  }
-}
-
 export class ObjectNotFoundError extends StorageError {
   constructor(key: string) {
     super(`Object not found: ${key}`);

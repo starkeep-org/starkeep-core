@@ -10,7 +10,7 @@ describe("record builders", () => {
   describe("createDataRecord", () => {
     it("should create a data record with required fields", () => {
       const record = createDataRecord(
-        { type: "@test/photo", ownerId: "user-1" },
+        { type: "@test/photo", ownerId: "user-1", originAppId: "test" },
         clock,
       );
 
@@ -33,6 +33,7 @@ describe("record builders", () => {
         {
           type: "@test/photo",
           ownerId: "user-1",
+          originAppId: "test",
           contentHash: "sha256:abc123",
           objectStorageKey: "notes/abc123",
           mimeType: "image/jpeg",
@@ -51,7 +52,7 @@ describe("record builders", () => {
 
     it("should have matching createdAt and updatedAt", () => {
       const record = createDataRecord(
-        { type: "@test/photo", ownerId: "user-1" },
+        { type: "@test/photo", ownerId: "user-1", originAppId: "test" },
         clock,
       );
 
@@ -59,8 +60,8 @@ describe("record builders", () => {
     });
 
     it("should generate unique IDs for each record", () => {
-      const record1 = createDataRecord({ type: "@test/a", ownerId: "u" }, clock);
-      const record2 = createDataRecord({ type: "@test/b", ownerId: "u" }, clock);
+      const record1 = createDataRecord({ type: "@test/a", ownerId: "u", originAppId: "test" }, clock);
+      const record2 = createDataRecord({ type: "@test/b", ownerId: "u", originAppId: "test" }, clock);
       expect(record1.id).not.toBe(record2.id);
     });
   });

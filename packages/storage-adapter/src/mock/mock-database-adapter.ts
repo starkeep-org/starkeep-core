@@ -4,7 +4,6 @@ import type {
   Query,
   QueryResult,
   BatchOperation,
-  Migration,
   Transaction,
 } from "../database/types.js";
 
@@ -111,10 +110,6 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
       this.store = snapshot;
       throw error;
     }
-  }
-
-  async runMigrations(_migrations: Migration[]): Promise<void> {
-    // No-op for mock
   }
 
   get size(): number {

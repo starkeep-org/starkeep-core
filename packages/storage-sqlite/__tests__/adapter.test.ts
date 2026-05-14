@@ -37,6 +37,7 @@ describe("SqliteDatabaseAdapter", () => {
         {
           type: "@test/photo",
           ownerId: "u1",
+          originAppId: "test",
           content: { name: "sunset.jpg" },
           contentHash: "sha256:abc",
           mimeType: "image/jpeg",
@@ -63,7 +64,7 @@ describe("SqliteDatabaseAdapter", () => {
     });
 
     it("should upsert on put with same ID", async () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record);
 
       const updated = { ...record, version: 2, syncStatus: SyncStatus.Synced };
@@ -77,7 +78,7 @@ describe("SqliteDatabaseAdapter", () => {
 
   describe("delete", () => {
     it("should remove a record", async () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record);
       await adapter.delete(record.id);
       expect(await adapter.get(record.id)).toBeNull();
@@ -91,8 +92,8 @@ describe("SqliteDatabaseAdapter", () => {
 
   describe("query", () => {
     it("should filter by type", async () => {
-      await adapter.put(createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock));
-      await adapter.put(createDataRecord({ type: "@test/video", ownerId: "u1" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/video", ownerId: "u1", originAppId: "test" }, clock));
 
       const result = await adapter.query({ type: "@test/photo" });
       expect(result.records).toHaveLength(1);
@@ -100,8 +101,8 @@ describe("SqliteDatabaseAdapter", () => {
     });
 
     it("should support eq filter", async () => {
-      await adapter.put(createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock));
-      await adapter.put(createDataRecord({ type: "@test/photo", ownerId: "u2" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/photo", ownerId: "u2", originAppId: "test" }, clock));
 
       const result = await adapter.query({
         filters: [{ field: "ownerId", operator: "eq", value: "u2" }],
@@ -111,8 +112,8 @@ describe("SqliteDatabaseAdapter", () => {
     });
 
     it("should support like filter", async () => {
-      await adapter.put(createDataRecord({ type: "@test/photo-jpeg", ownerId: "u1" }, clock));
-      await adapter.put(createDataRecord({ type: "@test/video-mp4", ownerId: "u1" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/photo-jpeg", ownerId: "u1", originAppId: "test" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/video-mp4", ownerId: "u1", originAppId: "test" }, clock));
 
       const result = await adapter.query({
         filters: [{ field: "type", operator: "like", value: "photo" }],
@@ -121,8 +122,8 @@ describe("SqliteDatabaseAdapter", () => {
     });
 
     it("should support sorting", async () => {
-      await adapter.put(createDataRecord({ type: "@test/b", ownerId: "u1" }, clock));
-      await adapter.put(createDataRecord({ type: "@test/a", ownerId: "u1" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/b", ownerId: "u1", originAppId: "test" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/a", ownerId: "u1", originAppId: "test" }, clock));
 
       const result = await adapter.query({
         sort: [{ field: "type", direction: "asc" }],
@@ -132,8 +133,8 @@ describe("SqliteDatabaseAdapter", () => {
     });
 
     it("should support descending sort", async () => {
-      await adapter.put(createDataRecord({ type: "@test/a", ownerId: "u1" }, clock));
-      await adapter.put(createDataRecord({ type: "@test/b", ownerId: "u1" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/a", ownerId: "u1", originAppId: "test" }, clock));
+      await adapter.put(createDataRecord({ type: "@test/b", ownerId: "u1", originAppId: "test" }, clock));
 
       const result = await adapter.query({
         sort: [{ field: "type", direction: "desc" }],
@@ -143,7 +144,7 @@ describe("SqliteDatabaseAdapter", () => {
 
     it("should support limit and cursor pagination", async () => {
       for (let i = 0; i < 5; i++) {
-        await adapter.put(createDataRecord({ type: `@test/item`, ownerId: "u1" }, clock));
+        await adapter.put(createDataRecord({ type: `@test/item`, ownerId: "u1", originAppId: "test" }, clock));
       }
 
       const page1 = await adapter.query({ limit: 2 });
@@ -163,8 +164,8 @@ describe("SqliteDatabaseAdapter", () => {
 
   describe("batch", () => {
     it("should apply multiple operations atomically", async () => {
-      const record1 = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
-      const record2 = createDataRecord({ type: "@test/b", ownerId: "u1" }, clock);
+      const record1 = createDataRecord({ type: "@test/a", ownerId: "u1", originAppId: "test" }, clock);
+      const record2 = createDataRecord({ type: "@test/b", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record1);
 
       await adapter.batch([
@@ -179,7 +180,7 @@ describe("SqliteDatabaseAdapter", () => {
 
   describe("transaction", () => {
     it("should commit on success", async () => {
-      const record = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/a", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.transaction(async (transaction) => {
         await transaction.put(record);
       });
@@ -187,7 +188,7 @@ describe("SqliteDatabaseAdapter", () => {
     });
 
     it("should rollback on error", async () => {
-      const record = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/a", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record);
 
       await expect(
@@ -201,41 +202,4 @@ describe("SqliteDatabaseAdapter", () => {
     });
   });
 
-  describe("migrations", () => {
-    it("should run pending migrations", async () => {
-      let migrationRan = false;
-      await adapter.runMigrations([
-        {
-          version: 1,
-          name: "test-migration",
-          up: async () => {
-            migrationRan = true;
-          },
-        },
-      ]);
-      expect(migrationRan).toBe(true);
-    });
-
-    it("should skip already applied migrations", async () => {
-      let runCount = 0;
-      const migration = {
-        version: 1,
-        name: "test-migration",
-        up: async () => { runCount++; },
-      };
-
-      await adapter.runMigrations([migration]);
-      await adapter.runMigrations([migration]);
-      expect(runCount).toBe(1);
-    });
-
-    it("should run migrations in order", async () => {
-      const order: number[] = [];
-      await adapter.runMigrations([
-        { version: 2, name: "second", up: async () => { order.push(2); } },
-        { version: 1, name: "first", up: async () => { order.push(1); } },
-      ]);
-      expect(order).toEqual([1, 2]);
-    });
-  });
 });

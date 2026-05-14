@@ -6,12 +6,14 @@ import { type DataRecord, type MetadataRecord, SyncStatus } from "./types.js";
 export interface CreateDataRecordInput {
   type: string;
   ownerId: string;
+  originAppId: string;
   content?: Record<string, unknown>;
   contentHash?: string | null;
   objectStorageKey?: string | null;
   mimeType?: string | null;
   sizeBytes?: number | null;
   originalFilename?: string | null;
+  parentId?: StarkeepId | null;
 }
 
 export interface CreateMetadataRecordInput {
@@ -40,6 +42,8 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     sizeBytes: input.sizeBytes ?? null,
     originalFilename: input.originalFilename ?? null,
     content: input.content ?? {},
+    originAppId: input.originAppId,
+    parentId: input.parentId ?? null,
   };
 }
 

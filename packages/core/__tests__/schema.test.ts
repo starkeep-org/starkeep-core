@@ -74,7 +74,7 @@ describe("schema validation", () => {
 
   describe("validateDataRecord", () => {
     it("should validate a correctly built data record", () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock);
       const result = validateDataRecord(record);
       expect(result.success).toBe(true);
     });
@@ -85,7 +85,7 @@ describe("schema validation", () => {
     });
 
     it("should reject a record with wrong kind", () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock);
       const result = validateDataRecord({ ...record, kind: "metadata" });
       expect(result.success).toBe(false);
     });

@@ -1,5 +1,9 @@
 import type { AppManifest } from "./schema.js";
 import { appManifestSchema } from "./schema.js";
+import {
+  WILDCARD_EXPANDABLE_TYPE_IDS,
+  RESTRICTED_CORE_TYPE_IDS,
+} from "@starkeep/core";
 
 export interface ValidationResult {
   valid: boolean;
@@ -10,13 +14,13 @@ export interface ValidationResult {
 
 const RESERVED_PREFIX = "@starkeep/";
 
-// Core shared-type registry — fixed at the core system version.
-// Apps cannot register new types; adding a type requires a core version bump + DDL migration.
-export const CORE_TYPE_REGISTRY = new Set(["image", "markdown"]);
+// Core shared-type registry — derived from @starkeep/core's CORE_TYPES.
+// Apps cannot register new types; adding a type requires editing core-types.ts.
+// Restricted types (e.g. "unknown") are excluded — access is gated via
+// canIngestUnknown / canPromoteFromUnknown instead.
+export const CORE_TYPE_REGISTRY = new Set(WILDCARD_EXPANDABLE_TYPE_IDS);
 
-// Types that cannot appear directly in sharedTypeAccess.
-// Access is gated via canIngestUnknown / canPromoteFromUnknown instead.
-const BUILTIN_RESTRICTED_TYPES = new Set(["unknown"]);
+const BUILTIN_RESTRICTED_TYPES = new Set(RESTRICTED_CORE_TYPE_IDS);
 
 export function validateManifest(raw: unknown): ValidationResult {
   const result = appManifestSchema.safeParse(raw);

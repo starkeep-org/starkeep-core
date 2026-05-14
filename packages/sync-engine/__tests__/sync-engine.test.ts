@@ -76,7 +76,7 @@ describe("createChangeLog", () => {
       nodeId: "test",
       wallClockFunction: () => 1000,
     });
-    const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+    const record = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine" }, clock);
 
     const entry = await changeLog.append({
       recordId: record.id,
@@ -94,8 +94,8 @@ describe("createChangeLog", () => {
     const changeLog = createChangeLog();
     const clock = createHLCClock({ nodeId: "test", wallClockFunction: () => 1000 });
 
-    const r1 = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
-    const r2 = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
+    const r1 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
+    const r2 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
 
     await changeLog.append({
       recordId: r1.id,
@@ -121,8 +121,8 @@ describe("createChangeLog", () => {
   it("prunes old entries", async () => {
     const changeLog = createChangeLog();
     const clock = createHLCClock({ nodeId: "test", wallClockFunction: () => 1000 });
-    const r1 = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
-    const r2 = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
+    const r1 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
+    const r2 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
     await changeLog.append({
       recordId: r1.id,
       operation: "create",
@@ -151,7 +151,7 @@ describe("decidePushAccept (OCC server check)", () => {
   const clock = createHLCClock({ nodeId: "n", wallClockFunction: () => 1000 });
 
   it("accepts create when no server record exists", () => {
-    const record = createDataRecord({ type: "@t/photo", ownerId: "u1" }, clock);
+    const record = createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine" }, clock);
     const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: record.id,
@@ -164,7 +164,7 @@ describe("decidePushAccept (OCC server check)", () => {
   });
 
   it("rejects create when server already has the record", () => {
-    const record = createDataRecord({ type: "@t/photo", ownerId: "u1" }, clock);
+    const record = createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine" }, clock);
     const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: record.id,
@@ -177,7 +177,7 @@ describe("decidePushAccept (OCC server check)", () => {
   });
 
   it("accepts update when baseVersion matches server", () => {
-    const server = createDataRecord({ type: "@t/photo", ownerId: "u1" }, clock);
+    const server = createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine" }, clock);
     const updated: DataRecord = {
       ...server,
       version: 2,
@@ -195,7 +195,7 @@ describe("decidePushAccept (OCC server check)", () => {
   });
 
   it("rejects update when baseVersion doesn't match", () => {
-    const server = { ...createDataRecord({ type: "@t/photo", ownerId: "u1" }, clock), version: 3 };
+    const server = { ...createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine" }, clock), version: 3 };
     const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: server.id,
@@ -208,7 +208,7 @@ describe("decidePushAccept (OCC server check)", () => {
   });
 
   it("rejects update when record doesn't exist on server", () => {
-    const record = createDataRecord({ type: "@t/photo", ownerId: "u1" }, clock);
+    const record = createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine" }, clock);
     const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: record.id,
@@ -225,7 +225,7 @@ describe("decidePullApply", () => {
   const clock = createHLCClock({ nodeId: "n", wallClockFunction: () => 1000 });
 
   it("applies cleanly when local is absent", () => {
-    const remote = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
+    const remote = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
     const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: remote.id,
@@ -238,7 +238,7 @@ describe("decidePullApply", () => {
   });
 
   it("flags local-dirty conflict when local has unsynced change", () => {
-    const record = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
+    const record = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
     const remoteChange: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: record.id,
@@ -254,7 +254,7 @@ describe("decidePullApply", () => {
   });
 
   it("skips when local version >= remote", () => {
-    const record = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
+    const record = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
     const local: DataRecord = { ...record, version: 5 };
     const remote: DataRecord = { ...record, version: 3 };
     const change: ChangeLogEntry = {
@@ -333,7 +333,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     await initAll(setup);
     const { syncEngine, localDatabase, remoteDatabase, localClock } = setup;
 
-    const record = createDataRecord({ type: "@t/note", ownerId: "u" }, localClock);
+    const record = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine" }, localClock);
     await localDatabase.put(record);
     await syncEngine.recordChange("create", record, { baseVersion: null });
 
@@ -350,7 +350,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     await initAll(setup);
     const { syncEngine, localDatabase, remoteDatabase, localClock } = setup;
 
-    const record = createDataRecord({ type: "@t/note", ownerId: "u" }, localClock);
+    const record = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine" }, localClock);
     await localDatabase.put(record);
     await remoteDatabase.put(record);
 
@@ -392,7 +392,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     await initAll(setup);
     const { syncEngine, localDatabase, remoteDatabase, remoteClock } = setup;
 
-    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u" }, remoteClock);
+    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine" }, remoteClock);
     await remoteDatabase.put(remoteRecord);
 
     const pullResult = await syncEngine.pull();
@@ -408,7 +408,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     await initAll(setup);
     const { syncEngine, localDatabase, remoteDatabase, localClock, remoteClock } = setup;
 
-    const record = createDataRecord({ type: "@t/note", ownerId: "u" }, localClock);
+    const record = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine" }, localClock);
     await localDatabase.put(record);
     await remoteDatabase.put(record);
 
@@ -447,7 +447,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     await initAll(setup);
     const { syncEngine, localDatabase, localClock } = setup;
 
-    const record = createDataRecord({ type: "@t/note", ownerId: "u" }, localClock);
+    const record = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine" }, localClock);
     await localDatabase.put(record);
     await syncEngine.recordChange("create", record, { baseVersion: null });
 
@@ -464,7 +464,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     const listener = vi.fn();
     syncEngine.changeNotifier.subscribe(listener);
 
-    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u" }, remoteClock);
+    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine" }, remoteClock);
     await remoteDatabase.put(remoteRecord);
 
     await syncEngine.pull();
@@ -478,7 +478,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     await initAll(setup);
     const { syncEngine, localDatabase, remoteDatabase, localClock } = setup;
 
-    const record = createDataRecord({ type: "@t/note", ownerId: "u" }, localClock);
+    const record = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine" }, localClock);
     await localDatabase.put(record);
     await remoteDatabase.put({ ...record, version: 5 });
 

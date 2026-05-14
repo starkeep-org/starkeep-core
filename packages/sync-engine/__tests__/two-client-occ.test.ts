@@ -92,7 +92,7 @@ async function createOnNode(
   content: Record<string, unknown>,
 ): Promise<DataRecord> {
   const record = createDataRecord(
-    { type: "@test/note", ownerId, content },
+    { type: "@test/note", ownerId, originAppId: "@starkeep/sync-engine", content },
     node.clock,
   );
   await node.db.put(record);

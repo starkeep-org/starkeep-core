@@ -4,7 +4,6 @@ import type {
   Query,
   QueryResult,
   BatchOperation,
-  Migration,
   Transaction,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
@@ -179,43 +178,6 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       );
       await this.getClient().query("RELEASE SAVEPOINT starkeep_transaction");
       throw new TransactionError("Transaction failed", error);
-    }
-  }
-
-  async runMigrations(migrations: Migration[]): Promise<void> {
-    const applied = await this.getClient().query(
-      "SELECT version FROM migrations ORDER BY version",
-    );
-    const appliedVersions = new Set(
-      applied.rows.map((record) => record.version as number),
-    );
-
-    const pending = migrations
-      .filter((migration) => !appliedVersions.has(migration.version))
-      .sort((a, b) => a.version - b.version);
-
-    for (const migration of pending) {
-      await this.getClient().query("BEGIN");
-      try {
-        const transaction: Transaction = {
-          put: async (record) => this.put(record),
-          get: async (id) => this.get(id),
-          delete: async (id) => this.delete(id),
-          query: async (query) => this.query(query),
-        };
-        await migration.up(transaction);
-        await this.getClient().query(
-          "INSERT INTO migrations (version, name) VALUES ($1, $2)",
-          [migration.version, migration.name],
-        );
-        await this.getClient().query("COMMIT");
-      } catch (error) {
-        await this.getClient().query("ROLLBACK");
-        throw new StorageError(
-          `Migration ${migration.version} (${migration.name}) failed`,
-          error,
-        );
-      }
     }
   }
 

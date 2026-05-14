@@ -1,6 +1,7 @@
 import {
   createHLCClock,
   createDataRecord,
+  dataRecordObjectKey,
   makePrivateType,
   SyncStatus,
   type StarkeepId,
@@ -176,7 +177,7 @@ export async function createStarkeepSdk(
 
       async putWithFile(input, file, contentType) {
         const contentHash = await sha256Hex(file);
-        const objectStorageKey = `${contentHash.slice(0, 2)}/${contentHash}`;
+        const objectStorageKey = dataRecordObjectKey(input.type, contentHash);
 
         await objectStorageAdapter.put(objectStorageKey, file, { contentType });
 
@@ -200,7 +201,7 @@ export async function createStarkeepSdk(
       async putWithLocalFile(input, filePath, contentType) {
         const fileBytes = await readFile(filePath);
         const contentHash = await sha256Hex(fileBytes);
-        const objectStorageKey = `${contentHash.slice(0, 2)}/${contentHash}`;
+        const objectStorageKey = dataRecordObjectKey(input.type, contentHash);
 
         if (objectStorageAdapter.putSymlink) {
           await objectStorageAdapter.putSymlink(objectStorageKey, filePath, { contentType });
@@ -357,7 +358,10 @@ export async function createStarkeepSdk(
             return {
               async put(subtype: string, content: Record<string, unknown> = {}) {
                 const privateType = makePrivateType(subject.subjectId, subtype);
-                const record = createDataRecord({ type: privateType, ownerId, content }, clock);
+                const record = createDataRecord(
+                  { type: privateType, ownerId, originAppId: subject.subjectId, content },
+                  clock,
+                );
                 await databaseAdapter.put(record);
                 return record;
               },

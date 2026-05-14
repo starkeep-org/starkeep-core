@@ -87,7 +87,7 @@ describe("HTTP sync transport round-trip", () => {
     });
 
     const record = createDataRecord(
-      { type: "@test/note", ownerId: "u1", content: { title: "hi" } },
+      { type: "@test/note", ownerId: "u1", originAppId: "@starkeep/sync-engine", content: { title: "hi" } },
       clientAClock,
     );
     await clientADb.put(record);
@@ -134,7 +134,7 @@ describe("HTTP sync transport round-trip", () => {
       wallClockFunction: () => Date.now(),
     });
     const record = createDataRecord(
-      { type: "@test/note", ownerId: "u2" },
+      { type: "@test/note", ownerId: "u2", originAppId: "@starkeep/sync-engine" },
       serverClock,
     );
     const recordV3: DataRecord = { ...record, version: 3 };

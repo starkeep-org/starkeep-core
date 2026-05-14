@@ -1,9 +1,8 @@
-import type { DataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
+import type { DataRecord, StarkeepId } from "@starkeep/core";
 import type {
   Query,
   QueryResult,
   BatchOperation,
-  Migration,
   Transaction,
 } from "./types.js";
 
@@ -18,6 +17,4 @@ export interface DatabaseAdapter {
   query(query: Query): Promise<QueryResult>;
   batch(operations: BatchOperation[]): Promise<void>;
   transaction<T>(callback: (transaction: Transaction) => Promise<T>): Promise<T>;
-
-  runMigrations(migrations: Migration[]): Promise<void>;
 }

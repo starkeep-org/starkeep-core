@@ -24,7 +24,7 @@ describe("MockDatabaseAdapter", () => {
 
   describe("put / get", () => {
     it("should store and retrieve a data record", async () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record);
       const retrieved = await adapter.get(record.id);
       expect(retrieved).toEqual(record);
@@ -36,7 +36,7 @@ describe("MockDatabaseAdapter", () => {
     });
 
     it("should return clones (not same reference)", async () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record);
       const a = await adapter.get(record.id);
       const b = await adapter.get(record.id);
@@ -47,7 +47,7 @@ describe("MockDatabaseAdapter", () => {
 
   describe("delete", () => {
     it("should remove a record", async () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record);
       await adapter.delete(record.id);
       expect(await adapter.get(record.id)).toBeNull();
@@ -56,8 +56,8 @@ describe("MockDatabaseAdapter", () => {
 
   describe("query", () => {
     it("should filter by type", async () => {
-      const record1 = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
-      const record2 = createDataRecord({ type: "@test/video", ownerId: "u1" }, clock);
+      const record1 = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock);
+      const record2 = createDataRecord({ type: "@test/video", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record1);
       await adapter.put(record2);
 
@@ -68,7 +68,7 @@ describe("MockDatabaseAdapter", () => {
 
     it("should support limit and cursor pagination", async () => {
       const records = Array.from({ length: 5 }, (_, i) =>
-        createDataRecord({ type: `@test/item-${i}`, ownerId: "u1" }, clock),
+        createDataRecord({ type: `@test/item-${i}`, ownerId: "u1", originAppId: "test" }, clock),
       );
       for (const record of records) await adapter.put(record);
 
@@ -87,8 +87,8 @@ describe("MockDatabaseAdapter", () => {
     });
 
     it("should support eq filter", async () => {
-      const record1 = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
-      const record2 = createDataRecord({ type: "@test/photo", ownerId: "u2" }, clock);
+      const record1 = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "test" }, clock);
+      const record2 = createDataRecord({ type: "@test/photo", ownerId: "u2", originAppId: "test" }, clock);
       await adapter.put(record1);
       await adapter.put(record2);
 
@@ -100,8 +100,8 @@ describe("MockDatabaseAdapter", () => {
     });
 
     it("should support sorting", async () => {
-      const record1 = createDataRecord({ type: "@test/b", ownerId: "u1" }, clock);
-      const record2 = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
+      const record1 = createDataRecord({ type: "@test/b", ownerId: "u1", originAppId: "test" }, clock);
+      const record2 = createDataRecord({ type: "@test/a", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record1);
       await adapter.put(record2);
 
@@ -115,8 +115,8 @@ describe("MockDatabaseAdapter", () => {
 
   describe("batch", () => {
     it("should apply multiple operations", async () => {
-      const record1 = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
-      const record2 = createDataRecord({ type: "@test/b", ownerId: "u1" }, clock);
+      const record1 = createDataRecord({ type: "@test/a", ownerId: "u1", originAppId: "test" }, clock);
+      const record2 = createDataRecord({ type: "@test/b", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record1);
 
       await adapter.batch([
@@ -131,7 +131,7 @@ describe("MockDatabaseAdapter", () => {
 
   describe("transaction", () => {
     it("should commit changes on success", async () => {
-      const record = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/a", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.transaction(async (transaction) => {
         await transaction.put(record);
       });
@@ -139,7 +139,7 @@ describe("MockDatabaseAdapter", () => {
     });
 
     it("should rollback on error", async () => {
-      const record = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
+      const record = createDataRecord({ type: "@test/a", ownerId: "u1", originAppId: "test" }, clock);
       await adapter.put(record);
 
       await expect(

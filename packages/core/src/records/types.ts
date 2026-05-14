@@ -28,6 +28,16 @@ export interface DataRecord extends BaseRecord {
   sizeBytes: number | null;
   originalFilename: string | null;
   content: Record<string, unknown>;
+  /**
+   * App identity that produced this record. Set by the data-server at write
+   * time from the authenticated subject. Required on every write.
+   */
+  originAppId: string;
+  /**
+   * Optional parent record id (e.g. an `image` thumbnail's parent is its
+   * original). Same type as the parent — typed-to-typed relations only.
+   */
+  parentId: StarkeepId | null;
 }
 
 /**

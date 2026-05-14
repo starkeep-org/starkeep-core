@@ -77,8 +77,56 @@ describe("createStarkeepSdk", () => {
       expect(record.mimeType).toBe("image/jpeg");
       expect(record.sizeBytes).toBe(fileData.length);
 
+      // Key must live under shared/<typeId>/... so that any app with read
+      // access to the type can resolve it under its own IAM grants — the
+      // key MUST NOT carry the writing app's identifier.
+      expect(record.objectStorageKey!).toMatch(/^shared\/@test\/photo\/[0-9a-f]{2}\/[0-9a-f]{64}$/);
+
       const stored = await localObjectStorage.get(record.objectStorageKey!);
       expect(stored).not.toBeNull();
+    });
+
+    it("writes the same shared/<type> key regardless of which client wrote the file", async () => {
+      // Two SDK instances sharing the underlying storage simulates two apps
+      // that both have access to the same type. The bug being guarded against:
+      // a previous implementation prefixed keys with the writing app's appId,
+      // which made cross-app reads impossible at the IAM layer.
+      const localDatabase = new MockDatabaseAdapter();
+      const localObjectStorage = new MockObjectStorageAdapter();
+      const clock = createHLCClock({
+        nodeId: "shared",
+        wallClockFunction: () => 1000,
+      });
+      const sdkA = await createStarkeepSdk({
+        databaseAdapter: localDatabase,
+        objectStorageAdapter: localObjectStorage,
+        ownerId: "test-owner",
+        nodeId: "app-a",
+        clock,
+      });
+      const sdkB = await createStarkeepSdk({
+        databaseAdapter: localDatabase,
+        objectStorageAdapter: localObjectStorage,
+        ownerId: "test-owner",
+        nodeId: "app-b",
+        clock,
+      });
+
+      const fileData = Buffer.from("shared bytes");
+      const written = await sdkA.data.putWithFile(
+        { type: "@test/photo", ownerId: "test-owner" },
+        fileData,
+        "image/jpeg",
+      );
+
+      const readBack = await sdkB.data.get(written.id);
+      expect(readBack).not.toBeNull();
+      expect(readBack!.objectStorageKey).toBe(written.objectStorageKey);
+      expect(written.objectStorageKey).toMatch(/^shared\/@test\/photo\//);
+
+      const fileFromB = await localObjectStorage.get(readBack!.objectStorageKey!);
+      expect(fileFromB).not.toBeNull();
+      expect(Buffer.from(fileFromB!.data).toString()).toBe("shared bytes");
     });
 
     it("should delete a record", async () => {

@@ -21,7 +21,15 @@ import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
-import { generateId, createHLCClock, SyncStatus, serializeHLC } from "@starkeep/core";
+import {
+  generateId,
+  createHLCClock,
+  SyncStatus,
+  serializeHLC,
+  dataRecordObjectKey,
+  appPrivateObjectKey,
+  appPrivateHashedKey,
+} from "@starkeep/core";
 import type { DataRecord, StarkeepId } from "@starkeep/core";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import type {
@@ -340,7 +348,7 @@ export async function handler(event: APIGatewayEvent) {
         const fileBuffer = Buffer.from(body.fileBase64, "base64");
         const hash = createHash("sha256").update(fileBuffer).digest("hex");
         contentHash = hash;
-        objectStorageKey = `apps/${appId}/${hash.slice(0, 2)}/${hash}`;
+        objectStorageKey = dataRecordObjectKey(body.type, hash);
         sizeBytes = fileBuffer.length;
         await storage.put(objectStorageKey, fileBuffer, { contentType: mimeType ?? undefined });
       }
@@ -377,7 +385,7 @@ export async function handler(event: APIGatewayEvent) {
       if (fileBuffer.length === 0) return clientErr("Request body must not be empty", 400);
       if (fileBuffer.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
       const hex = createHash("sha256").update(fileBuffer).digest("hex");
-      const key = `apps/${appId}/metadata/${hex}`;
+      const key = appPrivateHashedKey(appId, hex);
       await storage.put(key, fileBuffer, { contentType: mimeType });
       return ok({ key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
     }
@@ -472,8 +480,7 @@ export async function handler(event: APIGatewayEvent) {
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as { key?: string; contentType?: string; expiresIn?: number };
       if (!body.key) return clientErr("key is required", 400);
-      // Enforce app prefix on the S3 key
-      const safeKey = body.key.startsWith(`apps/${appId}/`) ? body.key : `apps/${appId}/${body.key}`;
+      const safeKey = appPrivateObjectKey(appId, body.key);
       const expiresIn = body.expiresIn ?? 3600;
       const url = await storage.getSignedPutUrl!(safeKey, { contentType: body.contentType, expiresIn });
       return ok({ url, key: safeKey, expiresIn });
@@ -483,7 +490,7 @@ export async function handler(event: APIGatewayEvent) {
     const filesPresignMatch = subPath.match(/^\/files\/(.+)\/presign$/);
     if (filesPresignMatch && method === "GET") {
       const key = decodeURIComponent(filesPresignMatch[1]!);
-      const safeKey = key.startsWith(`apps/${appId}/`) ? key : `apps/${appId}/${key}`;
+      const safeKey = appPrivateObjectKey(appId, key);
       const exists = await storage.has(safeKey);
       if (!exists) return clientErr("File not found", 404);
       const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
@@ -495,7 +502,7 @@ export async function handler(event: APIGatewayEvent) {
     const filesMatch = subPath.match(/^\/files\/(.+)$/);
     if (filesMatch) {
       const key = decodeURIComponent(filesMatch[1]!);
-      const safeKey = key.startsWith(`apps/${appId}/`) ? key : `apps/${appId}/${key}`;
+      const safeKey = appPrivateObjectKey(appId, key);
 
       if (method === "HEAD") {
         const result = await storage.get(safeKey);
@@ -530,6 +537,14 @@ export async function handler(event: APIGatewayEvent) {
 
     return clientErr("Not found", 404);
   } catch (e) {
+    // S3 AccessDenied surfaces when an app touches a key its per-app IAM role
+    // can't reach — typically a write to shared/<typeId>/* for a type the
+    // manifest only granted read access to. Map to 403 so callers can
+    // distinguish a permission problem from an unexpected server fault.
+    if (isAccessDenied(e)) {
+      console.warn("Handler access denied:", (e as Error).message);
+      return clientErr("AccessDenied", 403);
+    }
     console.error("Handler error:", e);
     return {
       statusCode: 500,
@@ -537,4 +552,12 @@ export async function handler(event: APIGatewayEvent) {
       body: JSON.stringify({ error: "Internal server error" }),
     };
   }
+}
+
+function isAccessDenied(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const name = err.name;
+  if (name === "AccessDenied" || name === "Forbidden") return true;
+  const status = (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+  return status === 403;
 }

@@ -4,7 +4,6 @@ import type {
   Query,
   QueryResult,
   BatchOperation,
-  Migration,
   Transaction,
 } from "@starkeep/storage-adapter";
 import type { AccessControlEngine, EnforcedDatabaseAdapter, SubjectType } from "./types.js";
@@ -145,10 +144,6 @@ export function createEnforcedDatabaseAdapter(options: {
     return databaseAdapter.transaction(callback);
   }
 
-  async function runMigrations(migrations: Migration[]): Promise<void> {
-    return databaseAdapter.runMigrations(migrations);
-  }
-
   return {
     init,
     close,
@@ -159,6 +154,5 @@ export function createEnforcedDatabaseAdapter(options: {
     query,
     batch,
     transaction,
-    runMigrations,
   };
 }
