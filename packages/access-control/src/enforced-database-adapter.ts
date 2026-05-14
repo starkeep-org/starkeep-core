@@ -1,4 +1,4 @@
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -9,19 +9,6 @@ import type {
 import type { AccessControlEngine, EnforcedDatabaseAdapter, SubjectType } from "./types.js";
 import { AccessDeniedError } from "./errors.js";
 
-/** Normalize an app ID to its private-type prefix form.
- *  "@starkeep/notes" → "starkeep-notes" */
-function normalizeAppId(appId: string): string {
-  return appId.replace(/^@/, "").replace(/\//g, "-");
-}
-
-/** If `type` matches `<prefix>:private:<subtype>`, return `prefix`; otherwise `null`. */
-function getPrivateTypeOwner(type: string): string | null {
-  const idx = type.indexOf(":private:");
-  if (idx === -1) return null;
-  return type.slice(0, idx);
-}
-
 export function createEnforcedDatabaseAdapter(options: {
   databaseAdapter: DatabaseAdapter;
   accessControlEngine: AccessControlEngine;
@@ -29,33 +16,12 @@ export function createEnforcedDatabaseAdapter(options: {
   subjectId: string;
 }): EnforcedDatabaseAdapter {
   const { databaseAdapter, accessControlEngine, subjectType, subjectId } = options;
-  const normalizedSubject = normalizeAppId(subjectId);
 
-  /**
-   * Enforce access for a record whose type is already known.
-   *
-   * Private-storage rule (structural, not policy-based):
-   *   - Own private type  → allowed without a policy.
-   *   - Other app's private type → denied regardless of policies.
-   *
-   * All other types → policy-based check via the access-control engine.
-   */
   async function assertTypeAccess(
     recordType: string,
     recordId: StarkeepId,
     permission: "read" | "write" | "delete",
   ): Promise<void> {
-    const privateOwner = getPrivateTypeOwner(recordType);
-    if (privateOwner !== null) {
-      if (normalizedSubject === privateOwner) {
-        // Own private type — structurally allowed.
-        return;
-      }
-      throw new AccessDeniedError(
-        `Access denied: ${permission} on private type ${recordType} for ${subjectType}:${subjectId}`,
-      );
-    }
-
     const result = await accessControlEngine.checkAccess({
       subjectType,
       subjectId,
@@ -107,15 +73,6 @@ export function createEnforcedDatabaseAdapter(options: {
     const accessibleRecords: DataRecord[] = [];
 
     for (const record of result.records) {
-      const privateOwner = getPrivateTypeOwner(record.type);
-      if (privateOwner !== null) {
-        if (normalizedSubject === privateOwner) {
-          accessibleRecords.push(record);
-        }
-        // Other app's private records are silently excluded.
-        continue;
-      }
-
       const accessResult = await accessControlEngine.checkAccess({
         subjectType,
         subjectId,
@@ -144,6 +101,41 @@ export function createEnforcedDatabaseAdapter(options: {
     return databaseAdapter.transaction(callback);
   }
 
+  async function putMetadata(typeId: string, row: MetadataRow): Promise<void> {
+    await assertTypeAccess(typeId, row.recordId, "write");
+    return databaseAdapter.putMetadata(typeId, row);
+  }
+
+  async function getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
+    await assertTypeAccess(typeId, recordId, "read");
+    return databaseAdapter.getMetadata(typeId, recordId);
+  }
+
+  async function getMetadataByIds(
+    typeId: string,
+    recordIds: StarkeepId[],
+  ): Promise<Map<StarkeepId, MetadataRow>> {
+    // Filter the result set by per-record access; cheaper than per-id pre-check.
+    const all = await databaseAdapter.getMetadataByIds(typeId, recordIds);
+    const accessible = new Map<StarkeepId, MetadataRow>();
+    for (const [recordId, row] of all) {
+      const result = await accessControlEngine.checkAccess({
+        subjectType,
+        subjectId,
+        resourceId: recordId,
+        recordType: typeId,
+        permission: "read",
+      });
+      if (result.allowed) accessible.set(recordId, row);
+    }
+    return accessible;
+  }
+
+  async function deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
+    await assertTypeAccess(typeId, recordId, "delete");
+    return databaseAdapter.deleteMetadata(typeId, recordId);
+  }
+
   return {
     init,
     close,
@@ -154,5 +146,9 @@ export function createEnforcedDatabaseAdapter(options: {
     query,
     batch,
     transaction,
+    putMetadata,
+    getMetadata,
+    getMetadataByIds,
+    deleteMetadata,
   };
 }

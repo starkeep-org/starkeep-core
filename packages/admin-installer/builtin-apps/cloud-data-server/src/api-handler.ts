@@ -236,12 +236,12 @@ function recordToResponse(record: DataRecord) {
     owner_id: record.ownerId,
     sync_status: record.syncStatus,
     version: record.version,
-    payload: record.content,
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
     content_hash: record.contentHash,
     object_storage_key: record.objectStorageKey,
     original_filename: record.originalFilename,
+    parent_id: record.parentId,
   };
 }
 
@@ -327,38 +327,27 @@ export async function handler(event: APIGatewayEvent) {
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as {
         type?: string;
-        payload?: Record<string, unknown>;
-        content?: Record<string, unknown>;
         fileName?: string;
         contentType?: string;
         fileBase64?: string;
+        parentId?: string;
       };
       if (!body.type) return clientErr("type is required", 400);
+      if (!body.fileBase64) return clientErr("fileBase64 is required — every record must be file-backed", 400);
+      if (!body.contentType) return clientErr("contentType is required", 400);
 
       const now = clock.now();
-      const recordContent = body.payload ?? body.content ?? {};
-      const originalFilename = body.fileName ?? null;
-      const mimeType = body.contentType ?? null;
-
-      let objectStorageKey: string | null = null;
-      let contentHash: string | null = null;
-      let sizeBytes: number | null = null;
-
-      if (body.fileBase64) {
-        const fileBuffer = Buffer.from(body.fileBase64, "base64");
-        const hash = createHash("sha256").update(fileBuffer).digest("hex");
-        contentHash = hash;
-        objectStorageKey = dataRecordObjectKey(body.type, hash);
-        sizeBytes = fileBuffer.length;
-        await storage.put(objectStorageKey, fileBuffer, { contentType: mimeType ?? undefined });
-      }
+      const fileBuffer = Buffer.from(body.fileBase64, "base64");
+      const contentHash = createHash("sha256").update(fileBuffer).digest("hex");
+      const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
+      await storage.put(objectStorageKey, fileBuffer, { contentType: body.contentType });
 
       const record: DataRecord = {
         id: generateId(),
         kind: "data",
         type: body.type,
-        content: { ...recordContent, ...(originalFilename ? { fileName: originalFilename } : {}), originAppId: appId },
         ownerId,
+        originAppId: appId,
         createdAt: now,
         updatedAt: now,
         syncStatus: SyncStatus.Synced,
@@ -366,9 +355,10 @@ export async function handler(event: APIGatewayEvent) {
         version: 1,
         contentHash,
         objectStorageKey,
-        mimeType,
-        sizeBytes,
-        originalFilename,
+        mimeType: body.contentType,
+        sizeBytes: fileBuffer.length,
+        originalFilename: body.fileName ?? null,
+        parentId: (body.parentId as DataRecord["parentId"]) ?? null,
       };
       await db.put(record);
       return ok({ record: recordToResponse(record) }, 201);
@@ -435,12 +425,24 @@ export async function handler(event: APIGatewayEvent) {
       }
 
       if (method === "PUT") {
+        // Records are immutable apart from system mutations (promotion, sync,
+        // tombstones). Editing user fields lives in app-specific data which is
+        // out of scope; the PUT endpoint accepts only originalFilename and
+        // parentId for now.
         const existing = await db.get(id);
         if (!existing) return clientErr("Record not found", 404);
-        const body = event.body ? (JSON.parse(event.body) as { content?: Record<string, unknown> }) : null;
-        if (!body?.content) return clientErr("content is required", 400);
+        const body = event.body
+          ? (JSON.parse(event.body) as { originalFilename?: string | null; parentId?: string | null })
+          : null;
+        if (!body) return clientErr("body is required", 400);
         const now = clock.now();
-        const updated: DataRecord = { ...existing, content: body.content, updatedAt: now, version: existing.version + 1 };
+        const updated: DataRecord = {
+          ...existing,
+          originalFilename: body.originalFilename ?? existing.originalFilename,
+          parentId: (body.parentId as DataRecord["parentId"]) ?? existing.parentId,
+          updatedAt: now,
+          version: existing.version + 1,
+        };
         await db.put(updated);
         return ok({ record: recordToResponse(updated) });
       }

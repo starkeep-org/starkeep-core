@@ -1,4 +1,3 @@
-import { SyncStatus } from "@starkeep/core";
 import type { DatabaseAdapter, Query, Filter } from "@starkeep/storage-adapter";
 import type { IndexQuery } from "./types.js";
 
@@ -27,12 +26,6 @@ export async function planQuery(
       operator: "lte",
       value: query.dateRange.end,
     });
-  }
-
-  if (query.syncBoundary === "sync-eligible") {
-    filters.push({ field: "syncStatus", operator: "neq", value: SyncStatus.Local });
-  } else if (query.syncBoundary === "local-only") {
-    filters.push({ field: "syncStatus", operator: "eq", value: SyncStatus.Local });
   }
 
   if (query.fullTextSearch) {

@@ -1,7 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
+import { sqliteMetadataTableName } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -71,10 +72,10 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     this.getDatabase().prepare(sql).run(...(params as Parameters<ReturnType<DatabaseSync["prepare"]>["run"]>));
   }
 
-  private getRow(sql: string, ...params: unknown[]): SqliteRow | undefined {
+  private getRow<T = SqliteRow>(sql: string, ...params: unknown[]): T | undefined {
     return this.getDatabase().prepare(sql).get(
       ...(params as Parameters<ReturnType<DatabaseSync["prepare"]>["get"]>),
-    ) as unknown as SqliteRow | undefined;
+    ) as unknown as T | undefined;
   }
 
   private allRows<T = SqliteRow>(sql: string, ...params: unknown[]): T[] {
@@ -96,7 +97,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   async get(id: StarkeepId): Promise<DataRecord | null> {
-    const row = this.getRow("SELECT * FROM shared_records WHERE id = ?", id);
+    const row = this.getRow<SqliteRow>("SELECT * FROM shared_records WHERE id = ?", id);
     return row ? rowToRecord(row) : null;
   }
 
@@ -106,7 +107,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
 
   async query(query: Query): Promise<QueryResult> {
     const { sql, params } = buildSelectQuery(query);
-    const rows = this.allRows(sql, ...params);
+    const rows = this.allRows<SqliteRow>(sql, ...params);
 
     const limit = query.limit;
     const hasMore = limit ? rows.length > limit : false;
@@ -155,4 +156,70 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
+  async putMetadata(typeId: string, row: MetadataRow): Promise<void> {
+    const table = sqliteMetadataTableName(typeId);
+    const cols: string[] = ["record_id"];
+    const values: unknown[] = [row.recordId];
+    for (const [key, value] of Object.entries(row)) {
+      if (key === "recordId") continue;
+      cols.push(key);
+      values.push(value);
+    }
+    const placeholders = cols.map(() => "?").join(", ");
+    const updates = cols
+      .filter((c) => c !== "record_id")
+      .map((c) => `${c} = excluded.${c}`)
+      .join(", ");
+    const sql = updates
+      ? `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO UPDATE SET ${updates}`
+      : `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO NOTHING`;
+    this.runStmt(sql, ...values);
+  }
+
+  async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
+    const table = sqliteMetadataTableName(typeId);
+    const row = this.getRow<Record<string, unknown>>(
+      `SELECT * FROM ${table} WHERE record_id = ?`,
+      recordId,
+    );
+    if (!row) return null;
+    return columnsToMetadataRow(recordId, row);
+  }
+
+  async getMetadataByIds(
+    typeId: string,
+    recordIds: StarkeepId[],
+  ): Promise<Map<StarkeepId, MetadataRow>> {
+    const result = new Map<StarkeepId, MetadataRow>();
+    if (recordIds.length === 0) return result;
+    const table = sqliteMetadataTableName(typeId);
+    const placeholders = recordIds.map(() => "?").join(", ");
+    const rows = this.allRows<Record<string, unknown>>(
+      `SELECT * FROM ${table} WHERE record_id IN (${placeholders})`,
+      ...recordIds,
+    );
+    for (const row of rows) {
+      const recordId = row["record_id"] as StarkeepId;
+      result.set(recordId, columnsToMetadataRow(recordId, row));
+    }
+    return result;
+  }
+
+  async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
+    const table = sqliteMetadataTableName(typeId);
+    this.runStmt(`DELETE FROM ${table} WHERE record_id = ?`, recordId);
+  }
+
+}
+
+function columnsToMetadataRow(
+  recordId: StarkeepId,
+  columns: Record<string, unknown>,
+): MetadataRow {
+  const row: MetadataRow = { recordId };
+  for (const [key, value] of Object.entries(columns)) {
+    if (key === "record_id") continue;
+    row[key] = value;
+  }
+  return row;
 }

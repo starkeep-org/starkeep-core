@@ -19,6 +19,7 @@
     "lint": "eslint src/"
   },
   "dependencies": {
+    "@starkeep/access-control": "workspace:*",
     "@starkeep/core": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*"
   },

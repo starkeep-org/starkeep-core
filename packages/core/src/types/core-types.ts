@@ -12,11 +12,10 @@
  * metadata columns of an existing type.
  */
 
-import * as v from "valibot";
-
 export type LogicalColumnType =
   | "integer"
   | "bigint"
+  | "real"
   | "text"
   | "timestamp"
   | "boolean";
@@ -31,12 +30,6 @@ export interface CoreTypeMetadataColumn {
 export interface CoreType {
   id: string;
   description: string;
-  /**
-   * Payload validator for the JSON `content` column on `shared.records`.
-   * Substantive file bytes live in object storage; payload carries app-level
-   * display fields apps may set on creation.
-   */
-  recordSchema: v.BaseSchema<unknown, unknown, v.BaseIssue<unknown>>;
   metadataColumns: CoreTypeMetadataColumn[];
   /**
    * True for types that are excluded from wildcard `sharedTypeAccess` expansion
@@ -46,32 +39,40 @@ export interface CoreType {
   restricted?: boolean;
 }
 
-const filePayloadSchema = v.object({
-  fileName: v.optional(v.string()),
-  title: v.optional(v.string()),
-});
+/**
+ * Image metadata columns. Every column must be deterministically derivable
+ * from the image file bytes (EXIF or pixel inspection). App-level / user
+ * fields belong in app-private storage, not here.
+ */
+const IMAGE_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
+  { name: "width", type: "integer" },
+  { name: "height", type: "integer" },
+  { name: "captured_at", type: "timestamp" },
+  { name: "camera_make", type: "text" },
+  { name: "camera_model", type: "text" },
+  { name: "f_number", type: "real" },
+  { name: "exposure_time", type: "text" },
+  { name: "iso", type: "integer" },
+  { name: "lens_model", type: "text" },
+  { name: "gps_lat", type: "real" },
+  { name: "gps_lon", type: "real" },
+  { name: "orientation", type: "integer" },
+];
 
 export const CORE_TYPES: readonly CoreType[] = [
   {
     id: "image",
-    description: "Image file (photos, thumbnails, scans). Bytes in object storage; metadata columns hold dimensions and capture timestamp.",
-    recordSchema: filePayloadSchema,
-    metadataColumns: [
-      { name: "width", type: "integer" },
-      { name: "height", type: "integer" },
-      { name: "captured_at", type: "timestamp" },
-    ],
+    description: "Image file (photos, thumbnails, scans). Bytes in object storage; metadata columns hold dimensions, capture time, EXIF, and orientation.",
+    metadataColumns: IMAGE_METADATA_COLUMNS,
   },
   {
     id: "markdown",
     description: "Markdown document. Bytes in object storage; no type-specific metadata columns.",
-    recordSchema: filePayloadSchema,
     metadataColumns: [],
   },
   {
     id: "unknown",
     description: "Holding pen for ingested files the system cannot classify. Apps cannot read this directly — egress only via promoteFromUnknown.",
-    recordSchema: filePayloadSchema,
     metadataColumns: [],
     restricted: true,
   },
@@ -103,6 +104,7 @@ function pgColumnType(t: LogicalColumnType): string {
   switch (t) {
     case "integer": return "integer";
     case "bigint": return "bigint";
+    case "real": return "double precision";
     case "text": return "text";
     case "timestamp": return "timestamptz";
     case "boolean": return "boolean";
@@ -113,6 +115,7 @@ function sqliteColumnType(t: LogicalColumnType): string {
   switch (t) {
     case "integer": return "INTEGER";
     case "bigint": return "INTEGER";
+    case "real": return "REAL";
     case "text": return "TEXT";
     case "timestamp": return "TEXT";
     case "boolean": return "INTEGER";
@@ -148,4 +151,14 @@ export function sqliteMetadataDdl(t: CoreType): string {
     }),
   ];
   return `CREATE TABLE IF NOT EXISTS shared_record_${t.id}_metadata (\n${cols.join(",\n")}\n    )`;
+}
+
+/** Returns the SQLite table name for the per-type metadata table. */
+export function sqliteMetadataTableName(typeId: string): string {
+  return `shared_record_${typeId.replace(/-/g, "_")}_metadata`;
+}
+
+/** Returns the DSQL/Postgres table name for the per-type metadata table. */
+export function pgMetadataTableName(typeId: string): string {
+  return `shared.record_${typeId.replace(/-/g, "_")}_metadata`;
 }

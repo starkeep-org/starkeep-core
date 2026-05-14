@@ -118,15 +118,23 @@ export async function initializeSharedSchema(
       // shared.records — single flat table for all shared data types.
       // parent_id is a plain text column: DSQL has no FK constraints, so the
       // app must clear/repoint dangling parent_id values on delete.
+      // Every record is file-backed; no inline content column.
       `CREATE TABLE IF NOT EXISTS shared.records (
-         id            text        PRIMARY KEY,
-         type          text        NOT NULL,
-         created_at    timestamptz NOT NULL DEFAULT now(),
-         updated_at    timestamptz NOT NULL DEFAULT now(),
-         origin_app_id text        NOT NULL,
-         parent_id     text,
-         size_bytes    bigint      NOT NULL,
-         mime_type     text        NOT NULL
+         id                 text        PRIMARY KEY,
+         type               text        NOT NULL,
+         created_at         text        NOT NULL,
+         updated_at         text        NOT NULL,
+         owner_id           text        NOT NULL,
+         sync_status        text        NOT NULL DEFAULT 'pending_push',
+         deleted_at         text,
+         version            integer     NOT NULL DEFAULT 1,
+         content_hash       text        NOT NULL,
+         object_storage_key text        NOT NULL,
+         mime_type          text        NOT NULL,
+         size_bytes         bigint      NOT NULL,
+         original_filename  text,
+         origin_app_id      text        NOT NULL,
+         parent_id          text
        )`,
 
       `ALTER DEFAULT PRIVILEGES IN SCHEMA shared GRANT ALL ON TABLES TO user_data_owner`,
@@ -174,6 +182,46 @@ export async function initializeSharedSchema(
          PRIMARY KEY (app_id, step)
        )`,
       `GRANT INSERT, UPDATE, SELECT ON shared.app_install_steps TO "${installer}"`,
+
+      // Control-plane tables. These are NOT shared across apps the way
+      // shared.records is — they hold per-instance config consumed by the
+      // cloud-data-server and access-control engine. See the refactor plan.
+      `CREATE TABLE IF NOT EXISTS shared.access_policies (
+         policy_id     text NOT NULL PRIMARY KEY,
+         subject_type  text NOT NULL,
+         subject_id    text NOT NULL,
+         resource_type text NOT NULL,
+         resource_id   text NOT NULL,
+         permissions   text NOT NULL,
+         granted_at    text NOT NULL,
+         expires_at    text
+       )`,
+
+      // sharing_tokens lives cloud-side only — bearer credentials that
+      // validate against an access policy. token_hash is the looked-up key;
+      // the unhashed token is never persisted.
+      `CREATE TABLE IF NOT EXISTS shared.sharing_tokens (
+         token_id    text    NOT NULL PRIMARY KEY,
+         token_hash  text    NOT NULL,
+         policy_id   text    NOT NULL,
+         created_at  text    NOT NULL,
+         expires_at  text,
+         max_uses    integer,
+         usage_count integer NOT NULL DEFAULT 0
+       )`,
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_sharing_tokens_token_hash ON shared.sharing_tokens(token_hash)`,
+
+      // type_registrations declare which app handles which shared type id.
+      // Instance-local control plane; both local and cloud bootstrap their
+      // own from app manifests on startup.
+      `CREATE TABLE IF NOT EXISTS shared.type_registrations (
+         type_id              text NOT NULL PRIMARY KEY,
+         schema_json          text NOT NULL,
+         schema_version       text NOT NULL,
+         description          text NOT NULL,
+         registered_by_app_id text NOT NULL,
+         registered_at        text NOT NULL
+       )`,
     ];
 
     for (const stmt of statements) {

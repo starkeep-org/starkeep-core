@@ -587,6 +587,9 @@ importers:
 
   packages/storage-aurora-dsql:
     dependencies:
+      '@starkeep/access-control':
+        specifier: workspace:*
+        version: link:../access-control
       '@starkeep/core':
         specifier: workspace:*
         version: link:../core
@@ -656,6 +659,9 @@ importers:
 
   packages/storage-sqlite:
     dependencies:
+      '@starkeep/access-control':
+        specifier: workspace:*
+        version: link:../access-control
       '@starkeep/core':
         specifier: workspace:*
         version: link:../core

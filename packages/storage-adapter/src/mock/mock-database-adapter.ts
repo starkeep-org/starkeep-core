@@ -1,4 +1,4 @@
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
 import type { DatabaseAdapter } from "../database/adapter.js";
 import type {
   Query,
@@ -9,6 +9,7 @@ import type {
 
 export class MockDatabaseAdapter implements DatabaseAdapter {
   private store = new Map<string, DataRecord>();
+  private metadata = new Map<string, Map<string, MetadataRow>>();
   private initialized = false;
 
   async init(): Promise<void> {
@@ -112,11 +113,44 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
+  async putMetadata(typeId: string, row: MetadataRow): Promise<void> {
+    let typeTable = this.metadata.get(typeId);
+    if (!typeTable) {
+      typeTable = new Map();
+      this.metadata.set(typeId, typeTable);
+    }
+    typeTable.set(row.recordId, structuredClone(row));
+  }
+
+  async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
+    const row = this.metadata.get(typeId)?.get(recordId);
+    return row ? structuredClone(row) : null;
+  }
+
+  async getMetadataByIds(
+    typeId: string,
+    recordIds: StarkeepId[],
+  ): Promise<Map<StarkeepId, MetadataRow>> {
+    const table = this.metadata.get(typeId);
+    const result = new Map<StarkeepId, MetadataRow>();
+    if (!table) return result;
+    for (const id of recordIds) {
+      const row = table.get(id);
+      if (row) result.set(id, structuredClone(row));
+    }
+    return result;
+  }
+
+  async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
+    this.metadata.get(typeId)?.delete(recordId);
+  }
+
   get size(): number {
     return this.store.size;
   }
 
   clear(): void {
     this.store.clear();
+    this.metadata.clear();
   }
 }

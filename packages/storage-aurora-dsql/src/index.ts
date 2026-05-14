@@ -6,3 +6,8 @@ export type {
   DatabaseClient,
   DatabaseClientFactory,
 } from "./types.js";
+export {
+  createDsqlAccessPolicyStore,
+  createDsqlSharingTokenStore,
+  createDsqlTypeRegistrationStore,
+} from "./control-plane-stores.js";

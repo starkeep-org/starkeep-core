@@ -42,11 +42,18 @@ interface LocalAppEntry {
   status: "active" | "installing" | "uninstalling" | "not_installed";
 }
 
+interface DaemonStatus { running: boolean; pid?: number; port?: number; }
+
 function LocalAppsSection() {
   const [apps, setApps] = useState<LocalAppEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingConsent, setPendingConsent] = useState<LocalAppEntry | null>(null);
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
+  const [runStatus, setRunStatus] = useState<Record<string, DaemonStatus>>({});
+  // Per-app pending transition. We keep this set until the polled status
+  // reflects the target state (running for "start", not-running for "stop"),
+  // so the spinner survives the first poll round.
+  const [pending, setPending] = useState<Record<string, "start" | "stop" | undefined>>({});
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -60,9 +67,98 @@ function LocalAppsSection() {
     }
   }, []);
 
+  const refreshStatus = useCallback(async (appIds: string[]) => {
+    const entries = await Promise.all(appIds.map(async (id) => {
+      try {
+        const res = await fetch(`/api/exec/daemon/status?id=${encodeURIComponent(id)}`);
+        if (!res.ok) return [id, { running: false }] as const;
+        return [id, (await res.json()) as DaemonStatus] as const;
+      } catch {
+        return [id, { running: false }] as const;
+      }
+    }));
+    setRunStatus((prev) => {
+      const next = { ...prev };
+      for (const [id, s] of entries) next[id] = s;
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // One-shot status fetch for all installed apps when the list changes. No
+  // background polling — we only poll while a specific transition is in
+  // flight (see waitForTransition below).
+  const installedIds = apps?.filter((a) => a.status === "active").map((a) => a.appId) ?? [];
+  const installedKey = installedIds.join(",");
+  useEffect(() => {
+    if (installedIds.length === 0) return;
+    refreshStatus(installedIds);
+  }, [installedKey, refreshStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll one app's status until it matches the requested transition, with a
+  // hard cap. Resolves with the final status, or null on timeout.
+  const waitForTransition = useCallback(
+    async (appId: string, want: "start" | "stop"): Promise<DaemonStatus | null> => {
+      const MAX_ATTEMPTS = 20; // 20 × 1s = 20s
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        let s: DaemonStatus = { running: false };
+        try {
+          const res = await fetch(`/api/exec/daemon/status?id=${encodeURIComponent(appId)}`);
+          if (res.ok) s = (await res.json()) as DaemonStatus;
+        } catch { /* keep s as not-running and retry */ }
+        setRunStatus((prev) => ({ ...prev, [appId]: s }));
+        if ((want === "start" && s.running) || (want === "stop" && !s.running)) return s;
+      }
+      return null;
+    },
+    [],
+  );
+
+  const handleStart = async (appId: string) => {
+    setPending((p) => ({ ...p, [appId]: "start" }));
+    try {
+      const res = await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "start", id: appId }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `start failed: ${res.status}`);
+      }
+      const final = await waitForTransition(appId, "start");
+      if (!final) setError(`${appId} did not come online within 20s`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending((p) => { const n = { ...p }; delete n[appId]; return n; });
+    }
+  };
+
+  const handleStop = async (appId: string) => {
+    setPending((p) => ({ ...p, [appId]: "stop" }));
+    try {
+      const res = await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop", id: appId }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `stop failed: ${res.status}`);
+      }
+      const final = await waitForTransition(appId, "stop");
+      if (!final) setError(`${appId} did not shut down within 20s`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending((p) => { const n = { ...p }; delete n[appId]; return n; });
+    }
+  };
 
   const handleApprove = async (entry: LocalAppEntry) => {
     setPendingConsent(null);
@@ -134,6 +230,11 @@ function LocalAppsSection() {
       {apps?.map((entry) => {
         const grants = entry.manifest.infraRequirements?.sharedTypeAccess ?? [];
         const installed = entry.status === "active";
+        const status = runStatus[entry.appId];
+        const want = pending[entry.appId];
+        const running = status?.running === true;
+        const port = status?.port;
+        const busy = !!want;
         return (
           <div key={entry.appId} className="rounded-md border p-3 flex flex-col gap-2">
             <div className="flex items-center justify-between gap-3">
@@ -145,8 +246,66 @@ function LocalAppsSection() {
                     Installed
                   </Badge>
                 )}
+                {installed && running && port && (
+                  <a
+                    href={`http://localhost:${port}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`Open http://localhost:${port}`}
+                  >
+                    <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 hover:bg-blue-200 dark:hover:bg-blue-800 cursor-pointer">
+                      Running :{port} ↗
+                    </Badge>
+                  </a>
+                )}
+                {installed && !running && want === "start" && (
+                  <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                    Starting…
+                  </Badge>
+                )}
+                {installed && running && want === "stop" && (
+                  <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                    Stopping…
+                  </Badge>
+                )}
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 items-center">
+                {installed && running && port && (
+                  <a
+                    href={`http://localhost:${port}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm underline"
+                  >
+                    Open ↗
+                  </a>
+                )}
+                {installed && !running && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleStart(entry.appId)}
+                    disabled={busy}
+                  >
+                    {want === "start" && (
+                      <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                    )}
+                    {want === "start" ? "Starting…" : "Start"}
+                  </Button>
+                )}
+                {installed && running && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleStop(entry.appId)}
+                    disabled={busy}
+                  >
+                    {want === "stop" && (
+                      <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                    )}
+                    {want === "stop" ? "Stopping…" : "Stop"}
+                  </Button>
+                )}
                 {!installed && (
                   <Button
                     size="sm"
@@ -161,7 +320,8 @@ function LocalAppsSection() {
                     size="sm"
                     variant="outline"
                     onClick={() => handleUninstall(entry)}
-                    disabled={busyAppId === entry.appId}
+                    disabled={busyAppId === entry.appId || running || busy}
+                    title={running ? "Stop the app before uninstalling" : undefined}
                   >
                     {busyAppId === entry.appId ? "Uninstalling…" : "Uninstall"}
                   </Button>

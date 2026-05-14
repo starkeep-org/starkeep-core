@@ -18,6 +18,11 @@ import {
   appRegistryRow,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
+import {
+  createSqliteAccessPolicyStore,
+  createSqliteTypeRegistrationStore,
+} from "../../packages/storage-sqlite/src/control-plane-stores.js";
+import { disabledSharingTokenStore } from "../../packages/access-control/src/stores.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import { AuroraDsqlDatabaseAdapter } from "../../packages/storage-aurora-dsql/src/adapter.js";
@@ -34,11 +39,7 @@ import {
   createSqliteChangeLog,
   createSqliteSyncStateStore,
 } from "../../packages/sync-engine/src/index.js";
-import { createTypeRegistry } from "../../packages/core/src/schema/index.js";
-import {
-  CORE_TYPES,
-  WILDCARD_EXPANDABLE_TYPE_IDS,
-} from "../../packages/core/src/types/core-types.js";
+import { WILDCARD_EXPANDABLE_TYPE_IDS } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
 import { appPrivateHashedKey } from "../../packages/core/src/storage/object-keys.js";
 import { join } from "node:path";
@@ -425,18 +426,6 @@ async function main() {
   // installer (POST /admin/apps/install). No startup-time auto-discovery —
   // apps appear only after going through install.
 
-  // Global type registry — the data-server is the authoritative validator for
-  // all registered types. Populated from @starkeep/core's CORE_TYPES so local
-  // and cloud always agree on the type set.
-  const typeRegistry = createTypeRegistry();
-  for (const t of CORE_TYPES) {
-    typeRegistry.register({
-      namespace: "@starkeep",
-      name: t.id,
-      schema: t.recordSchema,
-    });
-  }
-
   const clock = createHLCClock({ nodeId: NODE_ID, wallClockFunction: Date.now });
 
   // Pre-init so we can hand the raw SQLite handle to the sync change log +
@@ -467,9 +456,18 @@ async function main() {
   // tables (registry, grants) that have no adapter wrapper.
   const localDb = databaseAdapter.getRawDatabase();
 
+  const accessPolicyStore = createSqliteAccessPolicyStore(localDb);
+  const typeRegistrationStore = createSqliteTypeRegistrationStore(localDb);
+
   const sdk = await createStarkeepSdk({
     databaseAdapter,
     objectStorageAdapter: localAdapter,
+    accessPolicyStore,
+    // Tokens are issued and validated cloud-side only — local has no
+    // sharing_tokens table. This stub throws on every call so anything that
+    // tries to issue locally fails loudly.
+    sharingTokenStore: disabledSharingTokenStore(),
+    typeRegistrationStore,
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
     syncTransport,
@@ -541,8 +539,36 @@ async function main() {
     pullTimer = setTimeout(runPull, PULL_INTERVAL_MS);
   }
 
+  // Built-in watcher identity: register it in shared_app_registry just like an
+  // external app, so its writes have a valid origin_app_id and so its grants
+  // flow through the same access-control path. No user consent — it's part of
+  // the local-data-server itself.
+  const watcherManifest = {
+    id: "@starkeep/watcher",
+    name: "Local Watcher",
+    version: "1.0.0",
+    tier: "official" as const,
+    infraRequirements: {
+      sharedTypeAccess: [
+        {
+          typeId: "*",
+          access: "readwrite" as const,
+          rationale: "Built-in file watcher ingests arbitrary files into all shared types.",
+        },
+      ],
+      appPrivate: { canIngestUnknown: true },
+    },
+  };
+  const { appId: watcherAppId } = installLocal(localDb, watcherManifest);
+
   // File watch manager — monitors local directories and syncs to Starkeep
-  const watchManager = createFileWatchManager({ sdk, db: databaseAdapter.getRawDatabase(), databaseAdapter, ownerId: OWNER_ID });
+  const watchManager = createFileWatchManager({
+    sdk,
+    db: databaseAdapter.getRawDatabase(),
+    databaseAdapter,
+    ownerId: OWNER_ID,
+    appId: watcherAppId,
+  });
 
   // Restore persisted watches from local config file
   const persistedWatches = await loadWatchConfigs();
@@ -575,10 +601,14 @@ async function main() {
 
     // Watches are an admin/host concern (configured via admin-web, not by
      // installed apps), so they intentionally do not require app HMAC headers.
+    // `/data/files/:token` is also exempt — the signed token in the path is
+    // the authorization, and the URL is meant to be embeddable (e.g. in <img src>).
     const APP_AUTH_REQUIRED_PREFIXES = ["/data/", "/sync/"];
-    const requiresAppAuth = APP_AUTH_REQUIRED_PREFIXES.some((p) =>
-      path === p.replace(/\/$/, "") || path.startsWith(p),
-    );
+    const APP_AUTH_EXEMPT_PATTERNS = [/^\/data\/files\/[^/]+$/];
+    const requiresAppAuth =
+      APP_AUTH_REQUIRED_PREFIXES.some((p) =>
+        path === p.replace(/\/$/, "") || path.startsWith(p),
+      ) && !APP_AUTH_EXEMPT_PATTERNS.some((re) => re.test(path));
 
     if (requiresAppAuth) {
       if (!appId) {
@@ -873,7 +903,7 @@ async function main() {
           }
 
           // Check for records not in any watch (Library)
-          const allData = await databaseAdapter.query({ kind: "data", limit: 100000 });
+          const allData = await databaseAdapter.query({ limit: 100000 });
           const watchFileIds = new Set<string>();
           const unwatchedRecords: typeof allData.records = [];
           for (const r of allData.records) {
@@ -955,7 +985,7 @@ async function main() {
 
         // /Library — untracked records grouped by type
         if (browsePath === "/virtual:library") {
-          const allData = await databaseAdapter.query({ kind: "data", limit: 100000 });
+          const allData = await databaseAdapter.query({ limit: 100000 });
           const typeCounts = new Map<string, number>();
 
           for (const r of allData.records) {
@@ -984,7 +1014,6 @@ async function main() {
         if (libraryTypeMatch) {
           const recordType = libraryTypeMatch[1]!;
           const result = await databaseAdapter.query({
-            kind: "data",
             filters: [{ field: "type" as const, operator: "eq" as const, value: recordType }],
             limit: 10000,
           });
@@ -1016,7 +1045,7 @@ async function main() {
 
       // GET /data/types — list record types with counts
       if (path === "/data/types" && req.method === "GET") {
-        const result = await databaseAdapter.query({ kind: "data", limit: 10000 });
+        const result = await databaseAdapter.query({ limit: 10000 });
 
         const typeCounts = new Map<string, { count: number; latest: number }>();
         for (const record of result.records) {
@@ -1066,7 +1095,6 @@ async function main() {
         }
 
         const result = await databaseAdapter.query({
-          kind: "data",
           filters,
           limit,
           sort: [{ field: "updatedAt", direction: "desc" as const }],
@@ -1084,13 +1112,13 @@ async function main() {
               owner_id: r.ownerId,
               sync_status: r.syncStatus,
               version: r.version,
-              payload: r.kind === "data" ? r.content : null,
-              content_hash: r.kind === "data" ? r.contentHash : null,
-              object_storage_key: r.kind === "data" ? r.objectStorageKey : null,
-              mime_type: r.kind === "data" ? r.mimeType : null,
-              size_bytes: r.kind === "data" ? r.sizeBytes : null,
-              original_filename: r.kind === "data" ? r.originalFilename : null,
-              path: r.kind === "data" && r.objectStorageKey
+              content_hash: r.contentHash,
+              object_storage_key: r.objectStorageKey,
+              mime_type: r.mimeType,
+              size_bytes: r.sizeBytes,
+              original_filename: r.originalFilename,
+              parent_id: r.parentId,
+              path: r.objectStorageKey
                 ? await localAdapter.resolvePath(r.objectStorageKey)
                 : null,
             }))
@@ -1104,10 +1132,22 @@ async function main() {
       // Body: JSON { type, payload, fileName?, contentType?, fileBase64?, filePath? }
       if (path === "/data/records" && req.method === "POST") {
         const body = await readBody(req);
-        const { type, payload, fileName, contentType, fileBase64, filePath } = JSON.parse(body);
+        const { type, fileName, contentType, fileBase64, filePath } = JSON.parse(body);
         if (!type) {
           res.writeHead(400);
           json(res, { error: "type is required" });
+          return;
+        }
+        if (!filePath && !fileBase64) {
+          res.writeHead(400);
+          json(res, {
+            error: "filePath or fileBase64 is required — every record must be file-backed",
+          });
+          return;
+        }
+        if (!contentType) {
+          res.writeHead(400);
+          json(res, { error: "contentType is required" });
           return;
         }
 
@@ -1127,19 +1167,17 @@ async function main() {
         if (filePath) {
           const resolvedName = fileName ?? (filePath as string).split("/").pop() ?? filePath;
           record = await sdk.data.putWithLocalFile(
-            { ...baseInput, content: { ...payload, ...(resolvedName ? { fileName: resolvedName } : {}) }, originalFilename: resolvedName },
+            { ...baseInput, originalFilename: resolvedName },
             filePath,
             contentType,
           );
-        } else if (fileBase64) {
+        } else {
           uploadedBuffer = Buffer.from(fileBase64, "base64");
           record = await sdk.data.putWithFile(
-            { ...baseInput, content: { ...payload, ...(fileName ? { fileName } : {}) }, originalFilename: fileName ?? null },
+            { ...baseInput, originalFilename: fileName ?? null },
             uploadedBuffer,
             contentType,
           );
-        } else {
-          record = await sdk.data.put({ ...baseInput, content: payload ?? {} });
         }
 
         // Dual-write to remote S3 + Aurora DSQL when cloud config is present.
@@ -1168,11 +1206,11 @@ async function main() {
             created_at: new Date(record.createdAt.wallTime).toISOString(),
             updated_at: new Date(record.updatedAt.wallTime).toISOString(),
             owner_id: record.ownerId,
-            payload: record.content,
             mime_type: record.mimeType,
             size_bytes: record.sizeBytes,
             object_storage_key: record.objectStorageKey,
             original_filename: record.originalFilename,
+            parent_id: record.parentId,
             path: record.objectStorageKey
               ? await localAdapter.resolvePath(record.objectStorageKey)
               : null,
@@ -1290,7 +1328,6 @@ async function main() {
             owner_id: record.ownerId,
             sync_status: record.syncStatus,
             version: record.version,
-            payload: record.content,
             content_hash: record.contentHash,
             object_storage_key: record.objectStorageKey,
             mime_type: record.mimeType,
@@ -1457,11 +1494,18 @@ async function main() {
           json(res, { error: "Only 'unknown' records can be promoted" });
           return;
         }
-        const updated = await sdk.data.update(recordId as any, {
+        // Promotion changes the type — that's an admin-level mutation rather
+        // than a data-plane update, so we write to the underlying adapter
+        // directly and bump version. No metadata changes; the file already
+        // sits at its canonical objectStorageKey.
+        const promoted = {
+          ...record,
           type: body.targetType,
-          content: { ...record.content, promotedBy: appId ?? "admin", promotedAt: new Date().toISOString() },
-        });
-        json(res, { record: { id: updated.id, type: updated.type, promoted_from: "unknown" } });
+          version: record.version + 1,
+          updatedAt: { wallTime: Date.now(), counter: 0, nodeId: NODE_ID },
+        };
+        await databaseAdapter.put(promoted);
+        json(res, { record: { id: promoted.id, type: promoted.type, promoted_from: "unknown" } });
         return;
       }
 

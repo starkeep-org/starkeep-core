@@ -24,4 +24,6 @@ export {
   isRestrictedCoreTypeId,
   pgMetadataDdl,
   sqliteMetadataDdl,
+  sqliteMetadataTableName,
+  pgMetadataTableName,
 } from "./core-types.js";

@@ -10,10 +10,16 @@ import { CORE_TYPES, sqliteMetadataDdl } from "@starkeep/core";
  * writes are created here — promotion, metadata enrichment, and the janitor
  * land as separate workstreams with their own DDL.
  *
- *   - shared_records           — all shared data, all types
- *   - shared_access_grants     — per-app, per-type permissions (read by AccessControlEngine)
+ *   - shared_records           — all shared data, all types (file-backed only)
+ *   - shared_record_<t>_metadata — per-type metadata rows (typed columns)
+ *   - shared_access_grants     — per-app, per-type permissions
  *   - shared_app_registry      — installed apps + HMAC secrets
  *   - shared_app_install_steps — idempotent install/uninstall ledger
+ *   - access_policies          — control-plane: AccessControlEngine policies
+ *   - type_registrations       — control-plane: app-declared type metadata
+ *
+ * `sharing_tokens` lives cloud-side only (tokens are issued and validated by
+ * the cloud-data-server against shared resources). See plan.
  *
  * No migration system: this is a fresh-start schema. The user removes
  * ~/.starkeep/data.db (or the local-data-server's STARKEEP_DIR is fresh)
@@ -30,14 +36,13 @@ export function initializeLocalSchema(db: DatabaseSync): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       owner_id TEXT NOT NULL,
-      sync_status TEXT NOT NULL DEFAULT 'local',
+      sync_status TEXT NOT NULL DEFAULT 'pending_push',
       deleted_at TEXT,
       version INTEGER NOT NULL DEFAULT 1,
-      content TEXT NOT NULL DEFAULT '{}',
-      content_hash TEXT,
-      object_storage_key TEXT,
-      mime_type TEXT,
-      size_bytes INTEGER,
+      content_hash TEXT NOT NULL,
+      object_storage_key TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
       original_filename TEXT,
       origin_app_id TEXT NOT NULL,
       parent_id TEXT
@@ -45,6 +50,7 @@ export function initializeLocalSchema(db: DatabaseSync): void {
   `);
   db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_type ON shared_records(type)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_origin_app ON shared_records(origin_app_id)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_parent_id ON shared_records(parent_id)");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS shared_access_grants (
@@ -81,6 +87,35 @@ export function initializeLocalSchema(db: DatabaseSync): void {
       error TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (app_id, operation, step)
+    )
+  `);
+
+  // Control-plane: access policies issued via sdk.accessControl.createPolicy.
+  // Instance-local; never synced. See AccessControlEngine.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS access_policies (
+      policy_id     TEXT PRIMARY KEY,
+      subject_type  TEXT NOT NULL,
+      subject_id    TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      resource_id   TEXT NOT NULL,
+      permissions   TEXT NOT NULL,
+      granted_at    TEXT NOT NULL,
+      expires_at    TEXT
+    )
+  `);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_access_policies_subject ON access_policies(subject_type, subject_id)");
+
+  // Control-plane: per-app type registrations bootstrapped on app install.
+  // Instance-local; never synced.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS type_registrations (
+      type_id              TEXT PRIMARY KEY,
+      schema_json          TEXT NOT NULL,
+      schema_version       TEXT NOT NULL,
+      description          TEXT NOT NULL,
+      registered_by_app_id TEXT NOT NULL,
+      registered_at        TEXT NOT NULL
     )
   `);
 

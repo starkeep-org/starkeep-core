@@ -2,10 +2,11 @@ import {
   createHLCClock,
   createDataRecord,
   dataRecordObjectKey,
-  makePrivateType,
   SyncStatus,
   type StarkeepId,
   type DataRecord,
+  type MetadataRow,
+  type TypeRegistration,
 } from "@starkeep/core";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -21,7 +22,12 @@ import { createAggregationEngine } from "@starkeep/aggregations";
 import { createSyncEngine, type SyncEngine } from "@starkeep/sync-engine";
 import { createAccessControlEngine, createEnforcedDatabaseAdapter } from "@starkeep/access-control";
 import { createSharedSpaceApi } from "@starkeep/shared-space-api";
-import type { StarkeepSdk, StarkeepSdkOptions, ConflictResolution } from "./types.js";
+import type {
+  StarkeepSdk,
+  StarkeepSdkOptions,
+  ConflictResolution,
+  DataPutInput,
+} from "./types.js";
 
 export async function createStarkeepSdk(
   options: StarkeepSdkOptions,
@@ -29,6 +35,9 @@ export async function createStarkeepSdk(
   const {
     databaseAdapter: rawDatabaseAdapter,
     objectStorageAdapter,
+    accessPolicyStore,
+    sharingTokenStore,
+    typeRegistrationStore,
     ownerId,
     nodeId,
     syncTransport,
@@ -70,7 +79,8 @@ export async function createStarkeepSdk(
   // When a subject is provided, wrap the adapter so every operation is
   // gated by access control and the private-storage structural rule.
   const accessControlEngine = createAccessControlEngine({
-    databaseAdapter: rawDatabaseAdapter,
+    policyStore: accessPolicyStore,
+    tokenStore: sharingTokenStore,
     clock,
     ownerId,
   });
@@ -164,38 +174,52 @@ export async function createStarkeepSdk(
     return resolution.record;
   }
 
+  async function writeRecordAndMetadata(
+    input: DataPutInput,
+    fileBytes: Uint8Array,
+    contentType: string,
+    originalFilename: string | null,
+  ): Promise<DataRecord> {
+    const contentHash = await sha256Hex(fileBytes);
+    const objectStorageKey = dataRecordObjectKey(input.type, contentHash);
+
+    const record = createDataRecord(
+      {
+        ...input,
+        contentHash,
+        objectStorageKey,
+        mimeType: contentType,
+        sizeBytes: fileBytes.length,
+        originalFilename,
+      },
+      clock,
+    );
+    await databaseAdapter.put(record);
+    if (input.metadata) {
+      await databaseAdapter.putMetadata(input.type, {
+        ...input.metadata,
+        recordId: record.id,
+      });
+    }
+    if (syncEngine) {
+      await syncEngine.recordChange("create", record, { baseVersion: null });
+    }
+    return record;
+  }
+
   return {
     data: {
-      async put(input) {
-        const record = createDataRecord(input, clock);
-        await databaseAdapter.put(record);
-        if (syncEngine) {
-          await syncEngine.recordChange("create", record, { baseVersion: null });
-        }
-        return record;
-      },
-
       async putWithFile(input, file, contentType) {
         const contentHash = await sha256Hex(file);
         const objectStorageKey = dataRecordObjectKey(input.type, contentHash);
 
         await objectStorageAdapter.put(objectStorageKey, file, { contentType });
-
-        const record = createDataRecord(
-          {
-            ...input,
-            contentHash,
-            objectStorageKey,
-            mimeType: contentType ?? null,
-            sizeBytes: file.length,
-          },
-          clock,
+        return writeRecordAndMetadata(
+          { ...input, contentHash, objectStorageKey } as DataPutInput,
+          file,
+          contentType,
+          input.originalFilename ?? null,
         );
-        await databaseAdapter.put(record);
-        if (syncEngine) {
-          await syncEngine.recordChange("create", record, { baseVersion: null });
-        }
-        return record;
       },
 
       async putWithLocalFile(input, filePath, contentType) {
@@ -209,22 +233,12 @@ export async function createStarkeepSdk(
           await objectStorageAdapter.put(objectStorageKey, fileBytes, { contentType });
         }
 
-        const record = createDataRecord(
-          {
-            ...input,
-            contentHash,
-            objectStorageKey,
-            mimeType: contentType ?? null,
-            sizeBytes: fileBytes.length,
-            originalFilename: input.originalFilename ?? basename(filePath),
-          },
-          clock,
+        return writeRecordAndMetadata(
+          input,
+          fileBytes,
+          contentType,
+          input.originalFilename ?? basename(filePath),
         );
-        await databaseAdapter.put(record);
-        if (syncEngine) {
-          await syncEngine.recordChange("create", record, { baseVersion: null });
-        }
-        return record;
       },
 
       async get(recordId) {
@@ -242,10 +256,8 @@ export async function createStarkeepSdk(
         const baseVersion = existing.version;
         const updated: DataRecord = {
           ...existing,
-          ...patch,
-          id: existing.id,
-          kind: "data",
-          createdAt: existing.createdAt,
+          originalFilename: patch.originalFilename ?? existing.originalFilename,
+          parentId: patch.parentId ?? existing.parentId,
           version: baseVersion + 1,
           updatedAt: clock.now(),
           syncStatus: SyncStatus.PendingPush,
@@ -268,6 +280,7 @@ export async function createStarkeepSdk(
           syncStatus: SyncStatus.PendingPush,
         };
         await databaseAdapter.put(tombstone);
+        await databaseAdapter.deleteMetadata(existing.type, recordId);
         if (syncEngine) {
           await syncEngine.recordChange("delete", tombstone, {
             baseVersion: existing.version,
@@ -278,6 +291,18 @@ export async function createStarkeepSdk(
       async query(params) {
         const result = await databaseAdapter.query(params);
         return result.records;
+      },
+
+      async putMetadata(typeId: string, row: MetadataRow) {
+        await databaseAdapter.putMetadata(typeId, row);
+      },
+
+      async getMetadata(typeId, recordId) {
+        return databaseAdapter.getMetadata(typeId, recordId);
+      },
+
+      async getMetadataByIds(typeId, recordIds) {
+        return databaseAdapter.getMetadataByIds(typeId, recordIds);
       },
 
       resolveConflict: resolveConflictImpl,
@@ -352,30 +377,24 @@ export async function createStarkeepSdk(
       },
     },
 
-    privateStore:
-      subject?.subjectType === "app"
-        ? (() => {
-            return {
-              async put(subtype: string, content: Record<string, unknown> = {}) {
-                const privateType = makePrivateType(subject.subjectId, subtype);
-                const record = createDataRecord(
-                  { type: privateType, ownerId, originAppId: subject.subjectId, content },
-                  clock,
-                );
-                await databaseAdapter.put(record);
-                return record;
-              },
+    typeRegistrations: {
+      async register(registration) {
+        const full: TypeRegistration = {
+          ...registration,
+          registeredAt: clock.now(),
+        };
+        await typeRegistrationStore.put(full);
+        return full;
+      },
 
-              async get(recordId: StarkeepId) {
-                return databaseAdapter.get(recordId);
-              },
+      async get(typeId) {
+        return typeRegistrationStore.get(typeId);
+      },
 
-              async delete(recordId: StarkeepId) {
-                await databaseAdapter.delete(recordId);
-              },
-            };
-          })()
-        : null,
+      async list() {
+        return typeRegistrationStore.list();
+      },
+    },
 
     api: {
       get router() {

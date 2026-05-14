@@ -18,10 +18,6 @@ const FIELD_MAP: Record<string, string> = {
 };
 
 function mapField(field: string): string {
-  if (field.startsWith("content.")) {
-    const jsonKey = field.slice("content.".length);
-    return `json_extract(content, '$.${jsonKey}')`;
-  }
   return FIELD_MAP[field] ?? field;
 }
 
@@ -107,4 +103,3 @@ export function buildSelectQuery(query: Query): BuiltQuery {
 
   return { sql, params };
 }
-

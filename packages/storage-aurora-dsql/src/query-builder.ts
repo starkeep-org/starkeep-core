@@ -13,13 +13,11 @@ const FIELD_MAP: Record<string, string> = {
   objectStorageKey: "object_storage_key",
   mimeType: "mime_type",
   sizeBytes: "size_bytes",
+  originAppId: "origin_app_id",
+  parentId: "parent_id",
 };
 
-function mapField(field: string, parameterIndex: { value: number }): string {
-  if (field.startsWith("content.")) {
-    const jsonKey = field.slice("content.".length);
-    return `(content::json)->>'${jsonKey}'`;
-  }
+function mapField(field: string): string {
   return FIELD_MAP[field] ?? field;
 }
 
@@ -41,7 +39,7 @@ export function buildPostgresQuery(query: Query): BuiltPostgresQuery {
 
   if (query.filters) {
     for (const filter of query.filters) {
-      const column = mapField(filter.field, { value: parameterIndex });
+      const column = mapField(filter.field);
       switch (filter.operator) {
         case "eq":
           conditions.push(`${column} = $${parameterIndex}`);
@@ -107,7 +105,7 @@ export function buildPostgresQuery(query: Query): BuiltPostgresQuery {
   if (query.sort && query.sort.length > 0) {
     const orderClauses = query.sort.map(
       (sortField) =>
-        `${mapField(sortField.field, { value: 0 })} ${sortField.direction === "desc" ? "DESC" : "ASC"}`,
+        `${mapField(sortField.field)} ${sortField.direction === "desc" ? "DESC" : "ASC"}`,
     );
     text += ` ORDER BY ${orderClauses.join(", ")}`;
   } else {
@@ -122,4 +120,3 @@ export function buildPostgresQuery(query: Query): BuiltPostgresQuery {
 
   return { text, values };
 }
-
