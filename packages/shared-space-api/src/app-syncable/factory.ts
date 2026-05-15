@@ -3,10 +3,9 @@ import { serializeHLC } from "@starkeep/core";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { appSyncableObjectKey } from "@starkeep/core";
 import type {
-  ChangeLog,
   AppSyncableNamespaceStore,
   AppSyncableApplier,
-  AppSyncableRowLogEntry,
+  AppSyncableRowEntry,
 } from "@starkeep/sync-engine";
 import type { AppSpecificOperations, ApiSubject } from "../types.js";
 import { validateTableName } from "./validation.js";
@@ -20,7 +19,6 @@ export interface AppSpecificFactoryOptions {
    * Optional — when omitted, `fileUrl()` returns null.
    */
   buildFileUrl?: (key: string, mimeType: string, expiresIn: number) => string;
-  changeLog: ChangeLog;
   clock: HLCClock;
 }
 
@@ -28,15 +26,15 @@ export interface AppSpecificFactoryOptions {
  * Builds the per-request `appSpecific` view. Returns a factory shaped to
  * plug directly into `createSharedSpaceApi({ getAppSpecific })`.
  *
- * All row mutations go through the change log before being applied so every
- * write is captured for sync. The same applier the pull path uses is called
- * here, making the code path identical regardless of whether a change
- * originated locally or arrived from a remote.
+ * All row mutations are applied directly via the applier, which uses LWW on
+ * `updated_at`. The same applier the pull path uses is called here, making
+ * the code path identical regardless of whether a change originated locally
+ * or arrived from a remote.
  */
 export function createAppSpecificFactory(
   options: AppSpecificFactoryOptions,
 ): (subject: ApiSubject) => AppSpecificOperations | null {
-  const { namespace, applier, fileStorage, buildFileUrl, changeLog, clock } = options;
+  const { namespace, applier, fileStorage, buildFileUrl, clock } = options;
 
   return (subject) => {
     if (subject.subjectType !== "app") return null;
@@ -58,55 +56,47 @@ export function createAppSpecificFactory(
       }
     }
 
-    async function appendAndApply(
-      input: Omit<AppSyncableRowLogEntry, "changeId">,
-    ): Promise<void> {
-      const appended = await changeLog.append(input) as AppSyncableRowLogEntry;
-      await applier.apply(appended);
-    }
-
     return {
       async insertRow(table, row) {
         resolveTable(table);
         const ts = clock.now();
-        await appendAndApply({
-          kind: "appSyncableRow",
+        const entry: AppSyncableRowEntry = {
           timestamp: ts,
           appId,
           table,
           op: "insert",
           row: { ...row, updated_at: serializeHLC(ts), deleted_at: null },
-        });
+        };
+        await applier.apply(entry);
       },
 
       async updateRow(table, where, patch) {
         resolveTable(table);
         const ts = clock.now();
-        await appendAndApply({
-          kind: "appSyncableRow",
+        const entry: AppSyncableRowEntry = {
           timestamp: ts,
           appId,
           table,
           op: "update",
           row: { ...patch, updated_at: serializeHLC(ts) },
           where,
-        });
-        // Return value (count) is not available after log-then-apply; return 1
-        // as a best-effort signal that the operation was dispatched.
+        };
+        await applier.apply(entry);
+        // Return 1 as best-effort signal that the operation was dispatched.
         return 1;
       },
 
       async deleteRow(table, where) {
         resolveTable(table);
         const ts = clock.now();
-        await appendAndApply({
-          kind: "appSyncableRow",
+        const entry: AppSyncableRowEntry = {
           timestamp: ts,
           appId,
           table,
           op: "delete",
           where,
-        });
+        };
+        await applier.apply(entry);
         return 1;
       },
 

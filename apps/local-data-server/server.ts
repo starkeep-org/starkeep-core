@@ -449,9 +449,6 @@ async function main() {
         getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
       })
     : undefined;
-  // Change log and state store are always created (not just when CLOUD_URL is
-  // set) because the factory needs the change log to record app-row mutations
-  // even in offline-only mode.
   const syncChangeLog = createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() });
   const syncStateStore = CLOUD_URL
     ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
@@ -476,7 +473,6 @@ async function main() {
       const token = createFileToken(key, mimeType, expiresIn);
       return `http://127.0.0.1:${PORT}/data/files/${token}`;
     },
-    changeLog: syncChangeLog,
     clock,
   });
 
@@ -508,7 +504,7 @@ async function main() {
     syncStateStore,
     getAppSpecific: appSpecificFactory,
     listAppSyncableFiles,
-    appSyncableApplier: appApplier,
+    appSyncableSource: { namespaces: namespaceStore, applier: appApplier },
   });
 
   const syncRuntime = {

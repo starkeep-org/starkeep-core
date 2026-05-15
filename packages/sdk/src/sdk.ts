@@ -46,7 +46,7 @@ export async function createStarkeepSdk(
     syncStateStore,
     subject,
     listAppSyncableFiles,
-    appSyncableApplier,
+    appSyncableSource,
   } = options;
 
   await rawDatabaseAdapter.init();
@@ -112,7 +112,7 @@ export async function createStarkeepSdk(
       changeLog: syncChangeLog,
       syncState: syncStateStore,
       listAppSyncableFiles,
-      appSyncableApplier,
+      appSyncableSource,
     });
   }
 

@@ -1,5 +1,5 @@
 import type { AnyRecord } from "@starkeep/core";
-import type { RecordChangeLogEntry } from "./types.js";
+import type { ChangeLogEntry } from "./types.js";
 
 export type PullApplyKind =
   | "apply-clean"
@@ -20,8 +20,8 @@ export interface PullApplyDecision {
  */
 export function decidePullApply(
   localRecord: AnyRecord | null,
-  remoteChange: RecordChangeLogEntry,
-  localUnsyncedChangeForRecord: RecordChangeLogEntry | undefined,
+  remoteChange: ChangeLogEntry,
+  localUnsyncedChangeForRecord: ChangeLogEntry | undefined,
 ): PullApplyDecision {
   if (localUnsyncedChangeForRecord) {
     return { kind: "local-dirty-conflict" };
@@ -51,7 +51,7 @@ export interface PushAcceptDecision {
 
 export function decidePushAccept(
   currentServerRecord: AnyRecord | null,
-  incomingChange: RecordChangeLogEntry,
+  incomingChange: ChangeLogEntry,
 ): PushAcceptDecision {
   if (incomingChange.operation === "create") {
     if (currentServerRecord) {

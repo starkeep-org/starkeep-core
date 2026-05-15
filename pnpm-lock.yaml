@@ -605,6 +605,9 @@ importers:
       '@starkeep/storage-adapter':
         specifier: workspace:*
         version: link:../storage-adapter
+      '@starkeep/sync-engine':
+        specifier: workspace:*
+        version: link:../sync-engine
     devDependencies:
       '@types/node':
         specifier: ^25.4.0

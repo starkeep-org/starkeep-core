@@ -1,10 +1,10 @@
 import { serializeHLC, deserializeHLC } from "@starkeep/core";
 import type {
   AppSyncableApplier,
-  AppSyncableRowLogEntry,
+  AppSyncableRowEntry,
   AppSyncableNamespaceStore,
+  ScanCapableApplier,
 } from "@starkeep/sync-engine";
-import type { ScanCapableApplier } from "@starkeep/sync-engine";
 import type { DatabaseClient } from "../types.js";
 
 /**
@@ -23,7 +23,7 @@ export class DsqlAppSyncableApplier
     private readonly namespace: AppSyncableNamespaceStore,
   ) {}
 
-  async apply(entry: AppSyncableRowLogEntry): Promise<void> {
+  async apply(entry: AppSyncableRowEntry): Promise<void> {
     const ns = this.namespace.get(entry.appId);
     if (!ns) {
       throw new Error(
@@ -52,7 +52,7 @@ export class DsqlAppSyncableApplier
   private async applyInsert(
     schemaTable: string,
     pkColumns: string[],
-    entry: AppSyncableRowLogEntry,
+    entry: AppSyncableRowEntry,
   ): Promise<void> {
     const row = entry.row ?? {};
     const cols = Object.keys(row);
@@ -93,7 +93,7 @@ export class DsqlAppSyncableApplier
 
   private async applyUpdate(
     schemaTable: string,
-    entry: AppSyncableRowLogEntry,
+    entry: AppSyncableRowEntry,
   ): Promise<void> {
     const patch = entry.row ?? {};
     const where = entry.where ?? {};
@@ -122,7 +122,7 @@ export class DsqlAppSyncableApplier
 
   private async applyDelete(
     schemaTable: string,
-    entry: AppSyncableRowLogEntry,
+    entry: AppSyncableRowEntry,
   ): Promise<void> {
     const where = entry.where ?? {};
     const whereCols = Object.keys(where);
@@ -152,7 +152,7 @@ export class DsqlAppSyncableApplier
     appId: string,
     table: string,
     sinceHlcStr: string,
-  ): Promise<AppSyncableRowLogEntry[]> {
+  ): Promise<AppSyncableRowEntry[]> {
     const schemaTable = `app_${appId.replace(/-/g, "_")}."${table}"`;
     let result: { rows: Record<string, unknown>[] };
     try {
@@ -187,15 +187,13 @@ function rowToEntry(
   appId: string,
   table: string,
   row: Record<string, unknown>,
-): AppSyncableRowLogEntry {
+): AppSyncableRowEntry {
   const updatedAtStr = row["updated_at"] as string;
   const deletedAtStr = row["deleted_at"] as string | null | undefined;
   const timestamp = deserializeHLC(updatedAtStr);
   const op = deletedAtStr ? "delete" : "update";
 
   return {
-    kind: "appSyncableRow",
-    changeId: updatedAtStr as AppSyncableRowLogEntry["changeId"],
     timestamp,
     appId,
     table,

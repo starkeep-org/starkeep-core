@@ -1,7 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { serializeHLC, deserializeHLC } from "@starkeep/core";
-import type { AppSyncableApplier, AppSyncableRowLogEntry, AppSyncableNamespaceStore } from "@starkeep/shared-space-api";
-import type { ScanCapableApplier } from "@starkeep/sync-engine";
+import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier } from "@starkeep/shared-space-api";
 import { appSyncableTableName } from "./namespace.js";
 
 /**
@@ -23,7 +22,7 @@ export class SqliteAppSyncableApplier
     private readonly namespace: AppSyncableNamespaceStore,
   ) {}
 
-  apply(entry: AppSyncableRowLogEntry): void {
+  apply(entry: AppSyncableRowEntry): void {
     const ns = this.namespace.get(entry.appId);
     if (!ns) {
       throw new Error(
@@ -52,7 +51,7 @@ export class SqliteAppSyncableApplier
   private applyInsert(
     fullName: string,
     pkColumns: string[],
-    entry: AppSyncableRowLogEntry,
+    entry: AppSyncableRowEntry,
   ): void {
     const row = entry.row ?? {};
     const cols = Object.keys(row);
@@ -91,7 +90,7 @@ export class SqliteAppSyncableApplier
       .run(...(values as never[]));
   }
 
-  private applyUpdate(fullName: string, entry: AppSyncableRowLogEntry): void {
+  private applyUpdate(fullName: string, entry: AppSyncableRowEntry): void {
     const patch = entry.row ?? {};
     const where = entry.where ?? {};
     const patchCols = Object.keys(patch);
@@ -116,7 +115,7 @@ export class SqliteAppSyncableApplier
       .run(...(params as never[]));
   }
 
-  private applyDelete(fullName: string, entry: AppSyncableRowLogEntry): void {
+  private applyDelete(fullName: string, entry: AppSyncableRowEntry): void {
     const where = entry.where ?? {};
     const whereCols = Object.keys(where);
     // Soft-delete: set deleted_at and updated_at.
@@ -149,7 +148,7 @@ export class SqliteAppSyncableApplier
     appId: string,
     table: string,
     sinceHlcStr: string,
-  ): Promise<AppSyncableRowLogEntry[]> {
+  ): Promise<AppSyncableRowEntry[]> {
     const fullName = appSyncableTableName(appId, table);
     let rows: Record<string, unknown>[];
     try {
@@ -190,7 +189,7 @@ function rowToEntry(
   appId: string,
   table: string,
   row: Record<string, unknown>,
-): AppSyncableRowLogEntry {
+): AppSyncableRowEntry {
   const updatedAtStr = row["updated_at"] as string;
   const deletedAtStr = row["deleted_at"] as string | null | undefined;
 
@@ -198,8 +197,6 @@ function rowToEntry(
   const op = deletedAtStr ? "delete" : "update";
 
   return {
-    kind: "appSyncableRow",
-    changeId: updatedAtStr as AppSyncableRowLogEntry["changeId"],
     timestamp,
     appId,
     table,

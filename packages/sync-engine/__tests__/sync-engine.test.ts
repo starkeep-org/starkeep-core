@@ -20,7 +20,7 @@ import {
   decidePullApply,
   decidePushAccept,
 } from "../src/conflict-resolver.js";
-import type { RecordChangeLogEntry } from "../src/types.js";
+import type { ChangeLogEntry } from "../src/types.js";
 
 function createTestSetup() {
   let time = 1000;
@@ -79,7 +79,6 @@ describe("createChangeLog", () => {
     const record = createDataRecord({ type: "@test/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
 
     const entry = await changeLog.append({
-      kind: "record",
       recordId: record.id,
       operation: "create",
       timestamp: clock.now(),
@@ -88,7 +87,7 @@ describe("createChangeLog", () => {
     });
 
     expect(entry.changeId).toBeDefined();
-    expect((entry as RecordChangeLogEntry).baseVersion).toBeNull();
+    expect(entry.baseVersion).toBeNull();
   });
 
   it("filters by HLC timestamp", async () => {
@@ -99,7 +98,6 @@ describe("createChangeLog", () => {
     const r2 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
 
     await changeLog.append({
-      kind: "record",
       recordId: r1.id,
       operation: "create",
       timestamp: { wallTime: 1000, counter: 0, nodeId: "test" },
@@ -107,7 +105,6 @@ describe("createChangeLog", () => {
       baseVersion: null,
     });
     await changeLog.append({
-      kind: "record",
       recordId: r2.id,
       operation: "create",
       timestamp: { wallTime: 3000, counter: 0, nodeId: "test" },
@@ -118,7 +115,7 @@ describe("createChangeLog", () => {
     const midpoint: HLCTimestamp = { wallTime: 2000, counter: 0, nodeId: "test" };
     const changes = await changeLog.getChangesSince(midpoint);
     expect(changes).toHaveLength(1);
-    expect((changes[0] as RecordChangeLogEntry).recordId).toBe(r2.id);
+    expect(changes[0].recordId).toBe(r2.id);
   });
 
   it("prunes old entries", async () => {
@@ -127,7 +124,6 @@ describe("createChangeLog", () => {
     const r1 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
     const r2 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
     await changeLog.append({
-      kind: "record",
       recordId: r1.id,
       operation: "create",
       timestamp: { wallTime: 1000, counter: 0, nodeId: "test" },
@@ -135,7 +131,6 @@ describe("createChangeLog", () => {
       baseVersion: null,
     });
     await changeLog.append({
-      kind: "record",
       recordId: r2.id,
       operation: "create",
       timestamp: { wallTime: 2000, counter: 0, nodeId: "test" },
@@ -157,8 +152,7 @@ describe("decidePushAccept (OCC server check)", () => {
 
   it("accepts create when no server record exists", () => {
     const record = createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
-    const change: RecordChangeLogEntry = {
-      kind: "record",
+    const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: record.id,
       operation: "create",
@@ -171,8 +165,7 @@ describe("decidePushAccept (OCC server check)", () => {
 
   it("rejects create when server already has the record", () => {
     const record = createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
-    const change: RecordChangeLogEntry = {
-      kind: "record",
+    const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: record.id,
       operation: "create",
@@ -190,8 +183,7 @@ describe("decidePushAccept (OCC server check)", () => {
       version: 2,
       updatedAt: { wallTime: 2000, counter: 0, nodeId: "n" },
     };
-    const change: RecordChangeLogEntry = {
-      kind: "record",
+    const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: server.id,
       operation: "update",
@@ -204,8 +196,7 @@ describe("decidePushAccept (OCC server check)", () => {
 
   it("rejects update when baseVersion doesn't match", () => {
     const server = { ...createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock), version: 3 };
-    const change: RecordChangeLogEntry = {
-      kind: "record",
+    const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: server.id,
       operation: "update",
@@ -218,8 +209,7 @@ describe("decidePushAccept (OCC server check)", () => {
 
   it("rejects update when record doesn't exist on server", () => {
     const record = createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
-    const change: RecordChangeLogEntry = {
-      kind: "record",
+    const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: record.id,
       operation: "update",
@@ -236,8 +226,7 @@ describe("decidePullApply", () => {
 
   it("applies cleanly when local is absent", () => {
     const remote = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
-    const change: RecordChangeLogEntry = {
-      kind: "record",
+    const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: remote.id,
       operation: "update",
@@ -250,8 +239,7 @@ describe("decidePullApply", () => {
 
   it("flags local-dirty conflict when local has unsynced change", () => {
     const record = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
-    const remoteChange: RecordChangeLogEntry = {
-      kind: "record",
+    const remoteChange: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: record.id,
       operation: "update",
@@ -259,7 +247,7 @@ describe("decidePullApply", () => {
       recordSnapshot: record,
       baseVersion: null,
     };
-    const localChange: RecordChangeLogEntry = { ...remoteChange, changeId: "c2" as StarkeepId };
+    const localChange: ChangeLogEntry = { ...remoteChange, changeId: "c2" as StarkeepId };
     expect(decidePullApply(record, remoteChange, localChange).kind).toBe(
       "local-dirty-conflict",
     );
@@ -269,8 +257,7 @@ describe("decidePullApply", () => {
     const record = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
     const local: DataRecord = { ...record, version: 5 };
     const remote: DataRecord = { ...record, version: 3 };
-    const change: RecordChangeLogEntry = {
-      kind: "record",
+    const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
       recordId: record.id,
       operation: "update",

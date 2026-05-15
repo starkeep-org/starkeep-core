@@ -1,15 +1,15 @@
 import { generateId, compareHLC, maxHLC } from "@starkeep/core";
 import type { HLCTimestamp } from "@starkeep/core";
-import type { ChangeLog, ChangeLogEntry, RecordChangeLogEntry, AppSyncableRowLogEntry } from "./types.js";
+import type { ChangeLog, ChangeLogEntry } from "./types.js";
 
 export function createChangeLog(): ChangeLog {
   const entries: ChangeLogEntry[] = [];
 
   return {
     async append(
-      entry: Omit<RecordChangeLogEntry, "changeId"> | Omit<AppSyncableRowLogEntry, "changeId">,
+      entry: Omit<ChangeLogEntry, "changeId">,
     ): Promise<ChangeLogEntry> {
-      const fullEntry = { ...entry, changeId: generateId() } as ChangeLogEntry;
+      const fullEntry: ChangeLogEntry = { ...entry, changeId: generateId() };
       entries.push(fullEntry);
       return fullEntry;
     },

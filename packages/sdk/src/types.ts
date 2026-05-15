@@ -191,9 +191,12 @@ export interface StarkeepSdkOptions {
    */
   readonly listAppSyncableFiles?: () => Promise<import("@starkeep/sync-engine").FileEntry[]>;
   /**
-   * Applies incoming `appSyncableRow` change-log entries from the remote.
-   * Provided by the harness so the sync engine can write to app-syncable
-   * tables during pull.
+   * Provides the applier and namespace store for app-syncable row sync.
+   * Provided by the harness (local-data-server). Without it, app-syncable
+   * rows are silently skipped on pull and omitted from push.
    */
-  readonly appSyncableApplier?: import("@starkeep/sync-engine").AppSyncableApplier;
+  readonly appSyncableSource?: {
+    readonly namespaces: import("@starkeep/sync-engine").AppSyncableNamespaceStore;
+    readonly applier: import("@starkeep/sync-engine").AppSyncableApplier & import("@starkeep/sync-engine").ScanCapableApplier;
+  };
 }

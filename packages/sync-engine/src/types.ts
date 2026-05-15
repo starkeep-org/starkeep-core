@@ -24,16 +24,40 @@ export interface AppSyncableNamespaceStore {
   list(): AppSyncableNamespace[];
 }
 
+// ---------------------------------------------------------------------------
+// App-syncable row wire type — used in push requests and pull responses.
+// Not a ChangeLogEntry: no changeId, no kind discriminator.
+// Both push and pull synthesize these inline by scanning updated_at per table.
+// ---------------------------------------------------------------------------
+
+export interface AppSyncableRowEntry {
+  readonly timestamp: HLCTimestamp;
+  readonly appId: string;
+  /** Bare table name (no engine prefix on the wire). */
+  readonly table: string;
+  readonly op: "insert" | "update" | "delete";
+  readonly row?: Record<string, unknown>;
+  readonly where?: Record<string, unknown>;
+}
+
 export interface AppSyncableApplier {
-  apply(entry: AppSyncableRowLogEntry): Promise<void> | void;
+  apply(entry: AppSyncableRowEntry): Promise<void> | void;
+}
+
+/** Optional capability that appliers can implement to support pull/push synthesis. */
+export interface ScanCapableApplier extends AppSyncableApplier {
+  scanSince(
+    appId: string,
+    table: string,
+    sinceHlcStr: string,
+  ): Promise<AppSyncableRowEntry[]>;
 }
 
 // ---------------------------------------------------------------------------
-// Change-log entry discriminated union
+// Change-log entry — record-only. App-syncable rows are NOT logged here.
 // ---------------------------------------------------------------------------
 
-export interface RecordChangeLogEntry {
-  readonly kind: "record";
+export interface ChangeLogEntry {
   readonly changeId: StarkeepId;
   readonly recordId: StarkeepId;
   readonly operation: "create" | "update" | "delete";
@@ -44,24 +68,8 @@ export interface RecordChangeLogEntry {
   readonly baseVersion: number | null;
 }
 
-export interface AppSyncableRowLogEntry {
-  readonly kind: "appSyncableRow";
-  readonly changeId: StarkeepId;
-  readonly timestamp: HLCTimestamp;
-  readonly appId: string;
-  /** Bare table name (no prefix). Appliers add their engine-specific prefix. */
-  readonly table: string;
-  readonly op: "insert" | "update" | "delete";
-  readonly row?: Record<string, unknown>;
-  readonly where?: Record<string, unknown>;
-}
-
-export type ChangeLogEntry = RecordChangeLogEntry | AppSyncableRowLogEntry;
-
 export interface ChangeLog {
-  append(
-    entry: Omit<RecordChangeLogEntry, "changeId"> | Omit<AppSyncableRowLogEntry, "changeId">,
-  ): Promise<ChangeLogEntry>;
+  append(entry: Omit<ChangeLogEntry, "changeId">): Promise<ChangeLogEntry>;
   getChangesSince(timestamp: HLCTimestamp): Promise<ChangeLogEntry[]>;
   getLatestTimestamp(): Promise<HLCTimestamp | null>;
   prune(olderThan: HLCTimestamp): Promise<number>;
@@ -74,12 +82,14 @@ export interface SyncPullRequest {
 
 export interface SyncPullResponse {
   readonly changes: ChangeLogEntry[];
+  readonly appSyncableRows: AppSyncableRowEntry[];
   readonly latestTimestamp: HLCTimestamp;
   readonly hasMore: boolean;
 }
 
 export interface SyncPushRequest {
   readonly changes: ChangeLogEntry[];
+  readonly appSyncableRows?: AppSyncableRowEntry[];
 }
 
 export type RejectionReason =
@@ -215,9 +225,12 @@ export interface SyncEngineOptions {
    */
   readonly listAppSyncableFiles?: () => Promise<FileEntry[]>;
   /**
-   * Applies incoming `appSyncableRow` change-log entries from the remote.
-   * Without it, app-syncable row entries in pull responses are silently
-   * skipped (with a warn).
+   * Provides the applier (for applying incoming pull rows) and namespace store
+   * (for scanning pending rows on push). Without it, app-syncable rows in pull
+   * responses are silently skipped and no app rows are sent on push.
    */
-  readonly appSyncableApplier?: AppSyncableApplier;
+  readonly appSyncableSource?: {
+    readonly namespaces: AppSyncableNamespaceStore;
+    readonly applier: AppSyncableApplier & ScanCapableApplier;
+  };
 }

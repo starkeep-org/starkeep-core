@@ -6,5 +6,6 @@ export type {
   AppSyncableNamespace,
   AppSyncableNamespaceStore,
   AppSyncableApplier,
-  AppSyncableRowLogEntry,
+  ScanCapableApplier,
+  AppSyncableRowEntry,
 } from "@starkeep/sync-engine";

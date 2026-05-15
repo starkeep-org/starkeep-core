@@ -28,7 +28,8 @@ export type {
   AppSyncableNamespace,
   AppSyncableNamespaceStore,
   AppSyncableApplier,
-  AppSyncableRowLogEntry,
+  ScanCapableApplier,
+  AppSyncableRowEntry,
 } from "./app-syncable/types.js";
 export {
   createAppSpecificFactory,
