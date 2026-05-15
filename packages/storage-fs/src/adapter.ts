@@ -38,10 +38,16 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     return join(this.basePath, key.slice(0, 2), key);
   }
 
-  async put(key: string, data: Buffer | Uint8Array, _options?: PutOptions): Promise<void> {
+  async put(key: string, data: Buffer | Uint8Array, options?: PutOptions): Promise<void> {
     const filePath = this.keyToPath(key);
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, data);
+    if (options?.contentType || options?.metadata) {
+      await writeFile(
+        `${filePath}.meta.json`,
+        JSON.stringify({ contentType: options.contentType, metadata: options.metadata }),
+      );
+    }
   }
 
   async putSymlink(key: string, targetPath: string, _options?: PutOptions): Promise<void> {
@@ -59,7 +65,17 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     const filePath = this.keyToPath(key);
     try {
       const data = await readFile(filePath);
-      return { data, size: data.length };
+      let contentType: string | undefined;
+      let metadata: Record<string, string> | undefined;
+      try {
+        const metaRaw = await readFile(`${filePath}.meta.json`, "utf8");
+        const meta = JSON.parse(metaRaw) as { contentType?: string; metadata?: Record<string, string> };
+        contentType = meta.contentType;
+        metadata = meta.metadata;
+      } catch {
+        // No sidecar — older put() call or symlinked file. Leave contentType undefined.
+      }
+      return { data, contentType, metadata, size: data.length };
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
@@ -76,8 +92,14 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
   }
 
   async delete(key: string): Promise<void> {
+    const filePath = this.keyToPath(key);
     try {
-      await unlink(this.keyToPath(key));
+      await unlink(filePath);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    try {
+      await unlink(`${filePath}.meta.json`);
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }

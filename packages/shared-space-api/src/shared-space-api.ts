@@ -34,15 +34,18 @@ function parseRoutePath(fullPath: string): {
 export function createSharedSpaceApi(
   options: SharedSpaceApiOptions,
 ): SharedSpaceApi {
-  const { databaseAdapter, objectStorageAdapter, clock, ownerId, changeNotifier } = options;
+  const { databaseAdapter, objectStorageAdapter, clock, ownerId, changeNotifier, getAppSpecific } = options;
   const router = createApiRouter();
 
-  const context: ApiContext = {
-    databaseAdapter,
-    objectStorageAdapter,
-    clock,
-    ownerId,
-  };
+  function buildContext(request: ApiRequest): ApiContext {
+    return {
+      databaseAdapter,
+      objectStorageAdapter,
+      clock,
+      ownerId,
+      appSpecific: getAppSpecific ? getAppSpecific(request.subject) : null,
+    };
+  }
 
   // Track connected WebSocket clients
   const connections = new Map<string, WebSocketConnection>();
@@ -90,7 +93,7 @@ export function createSharedSpaceApi(
       }
 
       try {
-        return await endpoint.handler(request, context);
+        return await endpoint.handler(request, buildContext(request));
       } catch (error) {
         if (error instanceof Error) {
           return {

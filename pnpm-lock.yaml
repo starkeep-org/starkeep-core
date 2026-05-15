@@ -281,6 +281,15 @@ importers:
       '@starkeep/core':
         specifier: workspace:*
         version: link:../core
+      '@starkeep/shared-space-api':
+        specifier: workspace:*
+        version: link:../shared-space-api
+      '@starkeep/storage-adapter':
+        specifier: workspace:*
+        version: link:../storage-adapter
+      '@starkeep/storage-sqlite':
+        specifier: workspace:*
+        version: link:../storage-sqlite
       kysely:
         specifier: ^0.27.0
         version: 0.27.6
@@ -665,6 +674,9 @@ importers:
       '@starkeep/core':
         specifier: workspace:*
         version: link:../core
+      '@starkeep/shared-space-api':
+        specifier: workspace:*
+        version: link:../shared-space-api
       '@starkeep/storage-adapter':
         specifier: workspace:*
         version: link:../storage-adapter

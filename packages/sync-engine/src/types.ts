@@ -161,4 +161,11 @@ export interface SyncEngineOptions {
   readonly clock: import("@starkeep/core").HLCClock;
   readonly changeLog?: ChangeLog;
   readonly syncState?: SyncStateStore;
+  /**
+   * Returns the list of `apps/<appId>/syncable/...` file keys to sync. Called
+   * once per push/pull. Returning an empty list (or omitting this option)
+   * preserves the previous behaviour where only record-attached blobs are
+   * synced. The harness fills this in from `app_syncable_namespaces`.
+   */
+  readonly listAppSyncableFiles?: () => Promise<FileEntry[]>;
 }

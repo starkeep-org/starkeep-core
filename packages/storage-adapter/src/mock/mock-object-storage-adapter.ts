@@ -2,7 +2,14 @@ import type { ObjectStorageAdapter } from "../object-storage/adapter.js";
 import type { PutOptions, GetResult, ListOptions, ListResult } from "../object-storage/types.js";
 
 export class MockObjectStorageAdapter implements ObjectStorageAdapter {
-  private store = new Map<string, { data: Uint8Array; contentType?: string }>();
+  private store = new Map<
+    string,
+    {
+      data: Uint8Array;
+      contentType?: string;
+      metadata?: Record<string, string>;
+    }
+  >();
   private initialized = false;
 
   async init(): Promise<void> {
@@ -21,6 +28,7 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
     this.store.set(key, {
       data: new Uint8Array(data),
       contentType: options?.contentType,
+      metadata: options?.metadata,
     });
   }
 
@@ -28,8 +36,11 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
     const entry = this.store.get(key);
     if (!entry) return null;
     return {
-      data: new Uint8Array(entry.data),
+      // Return a Buffer (extends Uint8Array) so callers using `.toString()`
+      // get a UTF-8 decode rather than the comma-joined byte representation.
+      data: Buffer.from(entry.data),
       contentType: entry.contentType,
+      metadata: entry.metadata,
       size: entry.data.length,
     };
   }

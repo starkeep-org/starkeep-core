@@ -58,7 +58,7 @@ interface CloudDataServerManifest {
   version: string;
   tier: string;
   infraRequirements: {
-    appPrivate: { brokerPower: boolean };
+    brokerPower: boolean;
     sharedTypeAccess: unknown[];
   };
 }
@@ -212,7 +212,7 @@ export async function installCloudDataServer(
       sharedTypeAccess: [],
       canIngestUnknown: false,
       canPromoteFromUnknown: false,
-      brokerPower: manifest.infraRequirements.appPrivate.brokerPower,
+      brokerPower: manifest.infraRequirements.brokerPower,
       managerCreds,
     });
   } else {

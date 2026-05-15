@@ -107,9 +107,9 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
       permissionsBoundaryArn: config.permissionsBoundaryArn,
       foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
       sharedTypeAccess: ir.sharedTypeAccess,
-      canIngestUnknown: ir.appPrivate.canIngestUnknown,
-      canPromoteFromUnknown: ir.appPrivate.canPromoteFromUnknown,
-      brokerPower: ir.appPrivate.brokerPower,
+      canIngestUnknown: ir.canIngestUnknown,
+      canPromoteFromUnknown: ir.canPromoteFromUnknown,
+      brokerPower: ir.brokerPower,
       managerCreds,
     });
   });
@@ -133,7 +133,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
   };
 
   await runStep(appId, "install", "run_dsql_ddl", done, () =>
-    runAppInstallDdl(dsqlOpts, appId, ir.sharedTypeAccess, ir.appPrivate.canIngestUnknown, ir.appPrivate.canPromoteFromUnknown),
+    runAppInstallDdl(dsqlOpts, appId, ir.sharedTypeAccess, ir.canIngestUnknown, ir.canPromoteFromUnknown),
   );
 
   await runStep(appId, "install", "put_s3_keep_file", done, () =>
@@ -145,7 +145,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
   );
 
   let receipt: InstallReceipt | null = null;
-  if (ir.appPrivate.compute.enabled) {
+  if (ir.compute.enabled) {
     await runStep(appId, "install", "install_compute_stack", done, async () => {
       const computeCtx: ComputeContext = {
         stackPrefix: config.stackPrefix,
@@ -192,7 +192,7 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
 
   const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
 
-  if (ir.appPrivate.compute.enabled) {
+  if (ir.compute.enabled) {
     await runStep(appId, "uninstall", "uninstall_compute_stack", done, () => {
       const computeCtx: ComputeContext = {
         stackPrefix: config.stackPrefix,

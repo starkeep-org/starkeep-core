@@ -1,8 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   dataRecordObjectKey,
-  appPrivateObjectKey,
-  appPrivateHashedKey,
+  appSyncableObjectKey,
 } from "../src/storage/object-keys.js";
 
 describe("dataRecordObjectKey", () => {
@@ -27,24 +26,29 @@ describe("dataRecordObjectKey", () => {
   });
 });
 
-describe("appPrivateObjectKey", () => {
-  it("prefixes a relative subKey with apps/<appId>/", () => {
-    expect(appPrivateObjectKey("photos", "thumbs/abc.jpg")).toBe(
-      "apps/photos/thumbs/abc.jpg",
+describe("appSyncableObjectKey", () => {
+  it("prefixes a relative subKey with apps/<appId>/syncable/", () => {
+    expect(appSyncableObjectKey("photos", "style-graphic")).toBe(
+      "apps/photos/syncable/style-graphic",
     );
   });
 
   it("is idempotent when the key is already prefixed", () => {
-    const already = "apps/photos/cache/x";
-    expect(appPrivateObjectKey("photos", already)).toBe(already);
+    const already = "apps/photos/syncable/cache/x";
+    expect(appSyncableObjectKey("photos", already)).toBe(already);
   });
-});
 
-describe("appPrivateHashedKey", () => {
-  it("uses the 2-char shard layout under apps/<appId>/", () => {
-    const hash = "deadbeef".padEnd(64, "0");
-    expect(appPrivateHashedKey("photos", hash)).toBe(
-      `apps/photos/de/${hash}`,
-    );
+  it("rejects subKeys that start with /", () => {
+    expect(() => appSyncableObjectKey("photos", "/leading-slash")).toThrow();
+  });
+
+  it("rejects subKeys with .. segments", () => {
+    expect(() => appSyncableObjectKey("photos", "../escape")).toThrow();
+    expect(() => appSyncableObjectKey("photos", "foo/../bar")).toThrow();
+  });
+
+  it("rejects invalid appIds", () => {
+    expect(() => appSyncableObjectKey("", "x")).toThrow();
+    expect(() => appSyncableObjectKey("bad/id", "x")).toThrow();
   });
 });

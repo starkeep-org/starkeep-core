@@ -28,10 +28,8 @@ interface ManifestSummary {
   description?: string;
   infraRequirements?: {
     sharedTypeAccess?: SharedTypeAccess[];
-    appPrivate?: {
-      canIngestUnknown?: boolean;
-      canPromoteFromUnknown?: boolean;
-    };
+    canIngestUnknown?: boolean;
+    canPromoteFromUnknown?: boolean;
   };
 }
 
@@ -366,8 +364,8 @@ function ConsentModal({
   onCancel: () => void;
 }) {
   const grants = entry.manifest.infraRequirements?.sharedTypeAccess ?? [];
-  const canIngestUnknown = entry.manifest.infraRequirements?.appPrivate?.canIngestUnknown;
-  const canPromoteFromUnknown = entry.manifest.infraRequirements?.appPrivate?.canPromoteFromUnknown;
+  const canIngestUnknown = entry.manifest.infraRequirements?.canIngestUnknown;
+  const canPromoteFromUnknown = entry.manifest.infraRequirements?.canPromoteFromUnknown;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">

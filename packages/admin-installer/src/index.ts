@@ -25,7 +25,7 @@ export {
   LocalInstallError,
   ManifestValidationError,
 } from "./local/installer";
-export type { InstallLocalResult } from "./local/installer";
+export type { InstallLocalResult, UninstallLocalOptions } from "./local/installer";
 export {
   listAppRegistry,
   appRegistryRow,

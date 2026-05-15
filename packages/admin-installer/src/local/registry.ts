@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AppManifest, SharedTypeAccess } from "@starkeep/admin-manifest";
+import type { AppManifest, SharedTypeAccess, SyncableTable } from "@starkeep/admin-manifest";
+import { appSyncableTableName } from "@starkeep/storage-sqlite";
 
 export type Operation = "install" | "uninstall";
 export type StepStatus = "pending" | "done" | "failed";
@@ -123,6 +124,45 @@ export function insertAccessGrants(
 
 export function deleteAccessGrants(db: DatabaseSync, appId: string): void {
   db.prepare("DELETE FROM shared_access_grants WHERE app_id = ?").run(appId);
+}
+
+const SQLITE_COLUMN_TYPES: Record<SyncableTable["columns"][number]["type"], string> = {
+  text: "TEXT",
+  integer: "INTEGER",
+  real: "REAL",
+  blob: "BLOB",
+  boolean: "INTEGER",
+};
+
+export function createAppSyncableTables(
+  db: DatabaseSync,
+  appId: string,
+  tables: SyncableTable[],
+): void {
+  for (const table of tables) {
+    const fullName = appSyncableTableName(appId, table.name);
+    const columnDdl = table.columns
+      .map((c) => {
+        const parts = [`"${c.name}"`, SQLITE_COLUMN_TYPES[c.type]];
+        if (c.notNull || c.primaryKey) parts.push("NOT NULL");
+        return parts.join(" ");
+      })
+      .join(", ");
+    const pks = table.columns.filter((c) => c.primaryKey).map((c) => `"${c.name}"`);
+    const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
+    db.exec(`CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}${pkClause})`);
+  }
+}
+
+export function dropAppSyncableTables(
+  db: DatabaseSync,
+  appId: string,
+  tableNames: string[],
+): void {
+  for (const name of tableNames) {
+    const fullName = appSyncableTableName(appId, name);
+    db.exec(`DROP TABLE IF EXISTS "${fullName}"`);
+  }
 }
 
 export interface RegisteredApp {

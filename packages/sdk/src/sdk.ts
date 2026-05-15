@@ -118,6 +118,7 @@ export async function createStarkeepSdk(
     clock,
     ownerId,
     changeNotifier: syncEngine?.changeNotifier,
+    getAppSpecific: options.getAppSpecific,
   });
 
   async function resolveConflictImpl(

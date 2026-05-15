@@ -67,17 +67,17 @@ export function validateManifest(raw: unknown): ValidationResult {
   }
 
   if (
-    manifest.infraRequirements.appPrivate.compute.enabled &&
-    manifest.infraRequirements.appPrivate.compute.handlers.length === 0
+    manifest.infraRequirements.compute.enabled &&
+    manifest.infraRequirements.compute.handlers.length === 0
   ) {
     errors.push(
-      "infraRequirements.appPrivate.compute.enabled is true but no handlers are declared",
+      "infraRequirements.compute.enabled is true but no handlers are declared",
     );
   }
 
-  if (manifest.infraRequirements.appPrivate.brokerPower && manifest.id !== "cloud-data-server") {
+  if (manifest.infraRequirements.brokerPower && manifest.id !== "cloud-data-server") {
     errors.push(
-      `infraRequirements.appPrivate.brokerPower may only be true for the "cloud-data-server" app (got "${manifest.id}")`,
+      `infraRequirements.brokerPower may only be true for the "cloud-data-server" app (got "${manifest.id}")`,
     );
   }
 

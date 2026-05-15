@@ -6,6 +6,7 @@ export type {
   ApiHandler,
   ApiContext,
   ApiRouter,
+  AppSpecificOperations,
   SharedSpaceApi,
   SharedSpaceApiOptions,
   WebSocketConnection,

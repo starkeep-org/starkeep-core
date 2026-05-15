@@ -31,6 +31,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     clock,
     changeLog = createChangeLog(),
     syncState,
+    listAppSyncableFiles,
   } = options;
 
   const changeNotifier = createChangeNotifier();
@@ -204,6 +205,37 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
+      // Pull app-specific syncable files that exist remotely but not locally.
+      // Done after record application so any newly-installed app's files land
+      // in the same pull cycle.
+      if (listAppSyncableFiles) {
+        try {
+          const extras = await listAppSyncableFiles();
+          if (extras.length > 0) {
+            const filesToPull = await fileSyncEngine.getFilesToPull(
+              localObjectStorage,
+              remoteObjectStorage,
+              extras,
+            );
+            for (const manifest of filesToPull) {
+              try {
+                await fileSyncEngine.transferFile(
+                  manifest,
+                  remoteObjectStorage,
+                  localObjectStorage,
+                );
+              } catch (err) {
+                console.warn(
+                  `[sync] app-syncable pull skipped: ${manifest.objectStorageKey} — ${(err as Error).message}`,
+                );
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(`[sync] listAppSyncableFiles failed: ${(err as Error).message}`);
+        }
+      }
+
       await savePullCursor(response.latestTimestamp);
 
       if (appliedIds.length > 0) {
@@ -247,12 +279,24 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // Push files for records that carry references. Use pushable (skip
       // records already in conflict) and propagate mimeType so the remote
       // stores it alongside the blob.
-      const fileEntries = pushable
+      const fileEntries: Array<{ key: string; mimeType?: string }> = pushable
         .filter((change) => change.recordSnapshot.objectStorageKey !== null)
         .map((change) => ({
           key: change.recordSnapshot.objectStorageKey as string,
           mimeType: change.recordSnapshot.mimeType ?? undefined,
         }));
+
+      // App-specific syncable files: enumerated outside the record stream so
+      // they can move independently of any record change. They are pushed
+      // (and below, pulled) symmetrically — no protocol bump needed.
+      if (listAppSyncableFiles) {
+        try {
+          const extras = await listAppSyncableFiles();
+          for (const e of extras) fileEntries.push(e);
+        } catch (err) {
+          console.warn(`[sync] listAppSyncableFiles failed: ${(err as Error).message}`);
+        }
+      }
 
       const failedKeys = new Set<string>();
 

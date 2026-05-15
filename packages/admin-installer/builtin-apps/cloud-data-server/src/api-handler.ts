@@ -27,8 +27,6 @@ import {
   SyncStatus,
   serializeHLC,
   dataRecordObjectKey,
-  appPrivateObjectKey,
-  appPrivateHashedKey,
 } from "@starkeep/core";
 import type { DataRecord, StarkeepId } from "@starkeep/core";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
@@ -364,8 +362,13 @@ export async function handler(event: APIGatewayEvent) {
       return ok({ record: recordToResponse(record) }, 201);
     }
 
-    // POST /apps/{appId}/data/files
+    // POST /apps/{appId}/data/files?type=<typeId>
+    // Writes raw bytes under shared/<typeId>/<shard>/<hash>. The app's IAM
+    // role gates which shared/<typeId>/ prefixes it can write — the handler
+    // does not re-check the manifest here.
     if (method === "POST" && subPath === "/data/files") {
+      const typeId = query["type"];
+      if (!typeId) return clientErr("type query param is required", 400);
       const headers = event.headers ?? {};
       const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
       const mimeType = contentTypeHeader.split(";")[0]!.trim();
@@ -375,7 +378,7 @@ export async function handler(event: APIGatewayEvent) {
       if (fileBuffer.length === 0) return clientErr("Request body must not be empty", 400);
       if (fileBuffer.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
       const hex = createHash("sha256").update(fileBuffer).digest("hex");
-      const key = appPrivateHashedKey(appId, hex);
+      const key = dataRecordObjectKey(typeId, hex);
       await storage.put(key, fileBuffer, { contentType: mimeType });
       return ok({ key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
     }
@@ -473,68 +476,6 @@ export async function handler(event: APIGatewayEvent) {
       const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
       const response = await transport.pushChanges(body);
       return ok(response);
-    }
-
-    // POST /apps/{appId}/files/presign
-    if (method === "POST" && subPath === "/files/presign") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
-      const body = JSON.parse(rawBody) as { key?: string; contentType?: string; expiresIn?: number };
-      if (!body.key) return clientErr("key is required", 400);
-      const safeKey = appPrivateObjectKey(appId, body.key);
-      const expiresIn = body.expiresIn ?? 3600;
-      const url = await storage.getSignedPutUrl!(safeKey, { contentType: body.contentType, expiresIn });
-      return ok({ url, key: safeKey, expiresIn });
-    }
-
-    // GET /apps/{appId}/files/{+key}/presign
-    const filesPresignMatch = subPath.match(/^\/files\/(.+)\/presign$/);
-    if (filesPresignMatch && method === "GET") {
-      const key = decodeURIComponent(filesPresignMatch[1]!);
-      const safeKey = appPrivateObjectKey(appId, key);
-      const exists = await storage.has(safeKey);
-      if (!exists) return clientErr("File not found", 404);
-      const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
-      const url = await storage.getSignedUrl!(safeKey, { expiresIn });
-      return ok({ url, expiresIn });
-    }
-
-    // HEAD|GET|PUT /apps/{appId}/files/{+key}
-    const filesMatch = subPath.match(/^\/files\/(.+)$/);
-    if (filesMatch) {
-      const key = decodeURIComponent(filesMatch[1]!);
-      const safeKey = appPrivateObjectKey(appId, key);
-
-      if (method === "HEAD") {
-        const result = await storage.get(safeKey);
-        return { statusCode: result ? 200 : 404, headers: {}, body: "" };
-      }
-
-      if (method === "GET") {
-        const result = await storage.get(safeKey);
-        if (!result) return clientErr("File not found", 404);
-        const data = result.data instanceof Uint8Array ? result.data : new Uint8Array(result.data as ArrayBuffer);
-        return {
-          statusCode: 200,
-          headers: {
-            "Content-Type": result.contentType ?? "application/octet-stream",
-            "Content-Length": String(data.byteLength),
-          },
-          body: Buffer.from(data).toString("base64"),
-          isBase64Encoded: true,
-        };
-      }
-
-      if (method === "PUT") {
-        const headers = event.headers ?? {};
-        const contentType = (headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream").split(";")[0]!.trim();
-        const fileBuffer = event.isBase64Encoded && event.body
-          ? Buffer.from(event.body, "base64")
-          : Buffer.from(event.body ?? "", "binary");
-        await storage.put(safeKey, fileBuffer, { contentType });
-        return ok({ ok: true });
-      }
     }
 
     return clientErr("Not found", 404);

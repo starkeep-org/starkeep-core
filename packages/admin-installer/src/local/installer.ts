@@ -8,8 +8,10 @@ import {
 import {
   appRegistryRow,
   clearStepLedger,
+  createAppSyncableTables,
   deleteAccessGrants,
   deleteAppRegistry,
+  dropAppSyncableTables,
   getCompletedSteps,
   insertAccessGrants,
   insertAppRegistry,
@@ -17,6 +19,11 @@ import {
   setAppStatus,
   type Operation,
 } from "./registry.js";
+import {
+  deleteAppSyncableNamespace,
+  getAppSyncableNamespace,
+  upsertAppSyncableNamespace,
+} from "@starkeep/storage-sqlite";
 
 export interface InstallLocalResult {
   appId: string;
@@ -80,6 +87,20 @@ export function installLocal(db: DatabaseSync, rawManifest: unknown): InstallLoc
     insertAccessGrants(db, appId, manifest.infraRequirements.sharedTypeAccess);
   });
 
+  const syncable = manifest.infraRequirements.appSpecificSyncable;
+  runStep(db, appId, "install", "create_syncable_tables", done, () => {
+    createAppSyncableTables(db, appId, syncable.tables);
+  });
+
+  runStep(db, appId, "install", "register_syncable_namespace", done, () => {
+    upsertAppSyncableNamespace(
+      db,
+      appId,
+      syncable.tables.map((t) => t.name),
+      syncable.files,
+    );
+  });
+
   runStep(db, appId, "install", "mark_active", done, () => {
     setAppStatus(db, appId, "active");
   });
@@ -92,7 +113,22 @@ export function installLocal(db: DatabaseSync, rawManifest: unknown): InstallLoc
  * records produced by the app stay behind — they belong to the data, not the
  * app — matching the cloud-side design.
  */
-export function uninstallLocal(db: DatabaseSync, appId: string): void {
+export interface UninstallLocalOptions {
+  /**
+   * Called with the `apps/<appId>/syncable/` prefix so the caller can delete
+   * any object-storage entries for the uninstalled app. The installer itself
+   * doesn't know about the storage adapter; the local-data-server wires this
+   * up. Errors here don't roll back the uninstall — the DB cleanup is
+   * authoritative — but they are logged.
+   */
+  deleteFilesPrefix?: (prefix: string) => void | Promise<void>;
+}
+
+export function uninstallLocal(
+  db: DatabaseSync,
+  appId: string,
+  options: UninstallLocalOptions = {},
+): void {
   const existing = appRegistryRow(db, appId);
   if (!existing) {
     // Nothing to do, but clear any lingering step ledger from a failed
@@ -109,6 +145,34 @@ export function uninstallLocal(db: DatabaseSync, appId: string): void {
 
   runStep(db, appId, "uninstall", "revoke_access_grants", done, () => {
     deleteAccessGrants(db, appId);
+  });
+
+  runStep(db, appId, "uninstall", "drop_syncable_tables", done, () => {
+    const ns = getAppSyncableNamespace(db, appId);
+    if (ns) dropAppSyncableTables(db, appId, ns.tableNames);
+  });
+
+  runStep(db, appId, "uninstall", "delete_syncable_files", done, () => {
+    const ns = getAppSyncableNamespace(db, appId);
+    if (ns?.filesEnabled && options.deleteFilesPrefix) {
+      const prefix = `apps/${appId}/syncable/`;
+      try {
+        const result = options.deleteFilesPrefix(prefix);
+        if (result && typeof (result as Promise<void>).then === "function") {
+          // Step ledger is synchronous; fire-and-forget the async deletion.
+          // Local-data-server logs any failure via the returned Promise.
+          (result as Promise<void>).catch((err) =>
+            console.error(`uninstall: failed to clear ${prefix}:`, err),
+          );
+        }
+      } catch (err) {
+        console.error(`uninstall: failed to clear ${prefix}:`, err);
+      }
+    }
+  });
+
+  runStep(db, appId, "uninstall", "delete_syncable_namespace", done, () => {
+    deleteAppSyncableNamespace(db, appId);
   });
 
   runStep(db, appId, "uninstall", "delete_app_registry_row", done, () => {

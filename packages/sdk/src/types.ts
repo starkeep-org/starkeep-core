@@ -30,7 +30,14 @@ import type {
   SharingTokenStore,
 } from "@starkeep/access-control";
 import type { TypeRegistrationStore } from "@starkeep/core";
-import type { ApiRequest, ApiResponse, ApiRouter, WebSocketConnection } from "@starkeep/shared-space-api";
+import type {
+  ApiRequest,
+  ApiResponse,
+  ApiRouter,
+  ApiSubject,
+  AppSpecificOperations,
+  WebSocketConnection,
+} from "@starkeep/shared-space-api";
 
 export type ConflictResolution =
   | { keep: "local" }
@@ -171,4 +178,10 @@ export interface StarkeepSdkOptions {
     readonly subjectType: SubjectType;
     readonly subjectId: string;
   };
+  /**
+   * Factory for the app-scoped app-specific operations exposed on the
+   * ApiContext. Provided by the harness (local-data-server) since it owns
+   * the syncable-namespace registry and storage layout.
+   */
+  readonly getAppSpecific?: (subject: ApiSubject) => AppSpecificOperations | null;
 }

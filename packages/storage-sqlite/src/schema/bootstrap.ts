@@ -90,6 +90,20 @@ export function initializeLocalSchema(db: DatabaseSync): void {
     )
   `);
 
+  // App-specific syncable namespace registry. One row per installed app that
+  // declared `infraRequirements.appSpecificSyncable`. Lists the tables the
+  // installer materialized as `<app_id>_syncable_<name>` and whether the app
+  // opted into the `apps/<app_id>/syncable/` file prefix. Read by the SDK to
+  // gate row CRUD/file ops and by the sync engine to enumerate what to sync.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_syncable_namespaces (
+      app_id           TEXT PRIMARY KEY,
+      table_names_json TEXT NOT NULL,
+      files_enabled    INTEGER NOT NULL DEFAULT 0,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
   // Control-plane: access policies issued via sdk.accessControl.createPolicy.
   // Instance-local; never synced. See AccessControlEngine.
   db.exec(`
