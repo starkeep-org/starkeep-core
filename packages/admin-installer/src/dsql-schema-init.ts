@@ -222,6 +222,19 @@ export async function initializeSharedSchema(
          registered_by_app_id text NOT NULL,
          registered_at        text NOT NULL
        )`,
+
+      // App-specific syncable namespace registry. Mirrors the local SQLite
+      // app_syncable_namespaces table. One row per installed app that declared
+      // infraRequirements.appSpecificSyncable. The tables_json column is a JSON
+      // array of { name, pkColumns } objects. Read by the pull path to
+      // enumerate per-app tables for inline-HLC change synthesis.
+      `CREATE TABLE IF NOT EXISTS shared.app_syncable_namespaces (
+         app_id        text    NOT NULL PRIMARY KEY,
+         tables_json   text    NOT NULL,
+         files_enabled boolean NOT NULL DEFAULT false
+       )`,
+      `GRANT SELECT ON shared.app_syncable_namespaces TO PUBLIC`,
+      `GRANT INSERT, UPDATE, DELETE ON shared.app_syncable_namespaces TO "${installer}"`,
     ];
 
     for (const stmt of statements) {

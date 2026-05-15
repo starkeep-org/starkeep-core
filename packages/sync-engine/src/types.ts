@@ -1,7 +1,39 @@
 import type { StarkeepId, HLCTimestamp, AnyRecord } from "@starkeep/core";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 
-export interface ChangeLogEntry {
+// ---------------------------------------------------------------------------
+// Per-table schema info stored in the namespace registry so appliers can UPSERT
+// by PK without re-consulting the manifest at apply time.
+// ---------------------------------------------------------------------------
+
+export interface AppSyncableTableInfo {
+  readonly name: string;
+  readonly pkColumns: string[];
+}
+
+export interface AppSyncableNamespace {
+  readonly appId: string;
+  readonly tables: AppSyncableTableInfo[];
+  readonly filesEnabled: boolean;
+  /** Derived from tables — convenience accessor. */
+  readonly tableNames: string[];
+}
+
+export interface AppSyncableNamespaceStore {
+  get(appId: string): AppSyncableNamespace | null;
+  list(): AppSyncableNamespace[];
+}
+
+export interface AppSyncableApplier {
+  apply(entry: AppSyncableRowLogEntry): Promise<void> | void;
+}
+
+// ---------------------------------------------------------------------------
+// Change-log entry discriminated union
+// ---------------------------------------------------------------------------
+
+export interface RecordChangeLogEntry {
+  readonly kind: "record";
   readonly changeId: StarkeepId;
   readonly recordId: StarkeepId;
   readonly operation: "create" | "update" | "delete";
@@ -12,9 +44,23 @@ export interface ChangeLogEntry {
   readonly baseVersion: number | null;
 }
 
+export interface AppSyncableRowLogEntry {
+  readonly kind: "appSyncableRow";
+  readonly changeId: StarkeepId;
+  readonly timestamp: HLCTimestamp;
+  readonly appId: string;
+  /** Bare table name (no prefix). Appliers add their engine-specific prefix. */
+  readonly table: string;
+  readonly op: "insert" | "update" | "delete";
+  readonly row?: Record<string, unknown>;
+  readonly where?: Record<string, unknown>;
+}
+
+export type ChangeLogEntry = RecordChangeLogEntry | AppSyncableRowLogEntry;
+
 export interface ChangeLog {
   append(
-    entry: Omit<ChangeLogEntry, "changeId">,
+    entry: Omit<RecordChangeLogEntry, "changeId"> | Omit<AppSyncableRowLogEntry, "changeId">,
   ): Promise<ChangeLogEntry>;
   getChangesSince(timestamp: HLCTimestamp): Promise<ChangeLogEntry[]>;
   getLatestTimestamp(): Promise<HLCTimestamp | null>;
@@ -168,4 +214,10 @@ export interface SyncEngineOptions {
    * synced. The harness fills this in from `app_syncable_namespaces`.
    */
   readonly listAppSyncableFiles?: () => Promise<FileEntry[]>;
+  /**
+   * Applies incoming `appSyncableRow` change-log entries from the remote.
+   * Without it, app-syncable row entries in pull responses are silently
+   * skipped (with a warn).
+   */
+  readonly appSyncableApplier?: AppSyncableApplier;
 }

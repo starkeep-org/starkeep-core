@@ -30,6 +30,10 @@ import {
 } from "@starkeep/core";
 import type { DataRecord, StarkeepId } from "@starkeep/core";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
+import {
+  DsqlAppSyncableNamespaceStore,
+  DsqlAppSyncableApplier,
+} from "@starkeep/storage-aurora-dsql";
 import type {
   DatabaseClientFactory,
   DatabaseClient,
@@ -191,9 +195,11 @@ function makeAdapters(appId: string, creds: CachedCreds) {
   if (!auroraEndpoint) throw new Error("AURORA_ENDPOINT env var is required");
   if (!s3Bucket) throw new Error("S3_BUCKET env var is required");
 
+  const clientFactory = new AppDsqlClientFactory(appId, creds, stackPrefix);
+
   const db = new AuroraDsqlDatabaseAdapter(
     { hostname: auroraEndpoint, region },
-    new AppDsqlClientFactory(appId, creds, stackPrefix),
+    clientFactory,
   );
 
   const storage = new S3ObjectStorageAdapter({
@@ -208,7 +214,7 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 
   const clock = createHLCClock({ nodeId: appId, wallClockFunction: Date.now });
 
-  return { db, storage, clock };
+  return { db, storage, clock, clientFactory, auroraEndpoint, region };
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +273,7 @@ export async function handler(event: APIGatewayEvent) {
     const { appId, subPath } = parsed;
 
     const creds = await getAppCreds(appId);
-    const { db, storage, clock } = makeAdapters(appId, creds);
+    const { db, storage, clock, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
 
     await db.init();
 
@@ -462,7 +468,8 @@ export async function handler(event: APIGatewayEvent) {
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody);
-      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
+      const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
       const response = await transport.pullChanges(body);
       return ok(response);
     }
@@ -473,7 +480,8 @@ export async function handler(event: APIGatewayEvent) {
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody);
-      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
+      const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
       const response = await transport.pushChanges(body);
       return ok(response);
     }
@@ -495,6 +503,18 @@ export async function handler(event: APIGatewayEvent) {
       body: JSON.stringify({ error: "Internal server error" }),
     };
   }
+}
+
+async function buildAppSyncableSource(
+  clientFactory: AppDsqlClientFactory,
+  hostname: string,
+  region: string,
+): Promise<{ namespaces: DsqlAppSyncableNamespaceStore; applier: DsqlAppSyncableApplier }> {
+  const client = await clientFactory.createClient({ hostname, region });
+  const namespaces = new DsqlAppSyncableNamespaceStore(client);
+  await namespaces.load();
+  const applier = new DsqlAppSyncableApplier(client, namespaces);
+  return { namespaces, applier };
 }
 
 function isAccessDenied(err: unknown): boolean {

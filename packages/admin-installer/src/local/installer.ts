@@ -96,7 +96,10 @@ export function installLocal(db: DatabaseSync, rawManifest: unknown): InstallLoc
     upsertAppSyncableNamespace(
       db,
       appId,
-      syncable.tables.map((t) => t.name),
+      syncable.tables.map((t) => ({
+        name: t.name,
+        pkColumns: t.columns.filter((c) => c.primaryKey).map((c) => c.name),
+      })),
       syncable.files,
     );
   });

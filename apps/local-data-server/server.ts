@@ -17,12 +17,15 @@ import {
   listAppRegistry,
   appRegistryRow,
 } from "../../packages/admin-installer/src/local/registry.js";
-import { createAppSpecificFactory } from "../../packages/storage-sqlite/src/app-syncable/factory.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
   createSqliteAccessPolicyStore,
   createSqliteTypeRegistrationStore,
-} from "../../packages/storage-sqlite/src/control-plane-stores.js";
+  listAppSyncableNamespaces,
+  SqliteAppSyncableNamespaceStore,
+  SqliteAppSyncableApplier,
+} from "../../packages/storage-sqlite/src/index.js";
+import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
 import { disabledSharingTokenStore } from "../../packages/access-control/src/stores.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
@@ -446,9 +449,10 @@ async function main() {
         getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
       })
     : undefined;
-  const syncChangeLog = CLOUD_URL
-    ? createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() })
-    : undefined;
+  // Change log and state store are always created (not just when CLOUD_URL is
+  // set) because the factory needs the change log to record app-row mutations
+  // even in offline-only mode.
+  const syncChangeLog = createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() });
   const syncStateStore = CLOUD_URL
     ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
     : undefined;
@@ -461,14 +465,31 @@ async function main() {
   const accessPolicyStore = createSqliteAccessPolicyStore(localDb);
   const typeRegistrationStore = createSqliteTypeRegistrationStore(localDb);
 
+  const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
+  const appApplier = new SqliteAppSyncableApplier(localDb, namespaceStore);
+
   const appSpecificFactory = createAppSpecificFactory({
-    db: localDb,
-    storage: localAdapter,
+    namespace: namespaceStore,
+    applier: appApplier,
+    fileStorage: localAdapter,
     buildFileUrl: (key, mimeType, expiresIn) => {
       const token = createFileToken(key, mimeType, expiresIn);
       return `http://127.0.0.1:${PORT}/data/files/${token}`;
     },
+    changeLog: syncChangeLog,
+    clock,
   });
+
+  async function listAppSyncableFiles() {
+    const namespaces = listAppSyncableNamespaces(localDb);
+    const entries: { key: string }[] = [];
+    for (const ns of namespaces) {
+      if (!ns.filesEnabled) continue;
+      const result = await localAdapter.list(`apps/${ns.appId}/syncable/`);
+      for (const key of result.keys) entries.push({ key });
+    }
+    return entries;
+  }
 
   const sdk = await createStarkeepSdk({
     databaseAdapter,
@@ -486,6 +507,8 @@ async function main() {
     syncChangeLog,
     syncStateStore,
     getAppSpecific: appSpecificFactory,
+    listAppSyncableFiles,
+    appSyncableApplier: appApplier,
   });
 
   const syncRuntime = {

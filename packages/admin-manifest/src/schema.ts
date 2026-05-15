@@ -33,12 +33,18 @@ export const appComputeHandlerSchema = z.object({
   env: z.record(z.string()).default({}),
 });
 
-export const syncableTableColumnSchema = z.object({
-  name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
-  type: z.enum(["text", "integer", "real", "blob", "boolean"]),
-  notNull: z.boolean().default(false),
-  primaryKey: z.boolean().default(false),
-});
+const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);
+
+export const syncableTableColumnSchema = z
+  .object({
+    name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
+    type: z.enum(["text", "integer", "real", "blob", "boolean"]),
+    notNull: z.boolean().default(false),
+    primaryKey: z.boolean().default(false),
+  })
+  .refine((col) => !RESERVED_SYNC_COLUMNS.has(col.name), {
+    message: `Column names "updated_at" and "deleted_at" are reserved by the sync runtime`,
+  });
 
 export const syncableTableSchema = z.object({
   // Becomes "<appId>_syncable_<name>" in the local SQLite schema.

@@ -150,7 +150,15 @@ export function createAppSyncableTables(
       .join(", ");
     const pks = table.columns.filter((c) => c.primaryKey).map((c) => `"${c.name}"`);
     const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
-    db.exec(`CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}${pkClause})`);
+    // updated_at and deleted_at are reserved by the sync runtime for inline-HLC
+    // change tracking; they are appended automatically and must not be declared
+    // in the manifest.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}${pkClause}, "updated_at" TEXT NOT NULL, "deleted_at" TEXT)`,
+    );
+    db.exec(
+      `CREATE INDEX IF NOT EXISTS "idx_${fullName}_updated_at" ON "${fullName}"("updated_at")`,
+    );
   }
 }
 

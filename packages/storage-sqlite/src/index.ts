@@ -11,7 +11,7 @@ export {
   upsertAppSyncableNamespace,
   deleteAppSyncableNamespace,
   listAppSyncableNamespaces,
+  SqliteAppSyncableNamespaceStore,
 } from "./app-syncable/namespace.js";
-export type { AppSyncableNamespaceRow } from "./app-syncable/namespace.js";
-export { createAppSpecificFactory } from "./app-syncable/factory.js";
-export type { AppSpecificFactoryOptions } from "./app-syncable/factory.js";
+export type { AppSyncableNamespace, AppSyncableTableInfo } from "./app-syncable/namespace.js";
+export { SqliteAppSyncableApplier } from "./app-syncable/apply.js";

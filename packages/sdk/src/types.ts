@@ -184,4 +184,16 @@ export interface StarkeepSdkOptions {
    * the syncable-namespace registry and storage layout.
    */
   readonly getAppSpecific?: (subject: ApiSubject) => AppSpecificOperations | null;
+  /**
+   * Returns the list of `apps/<appId>/syncable/...` file keys to include in
+   * each push and pull cycle. Provided by the harness (local-data-server).
+   * Omitting this option limits file sync to record-attached blobs only.
+   */
+  readonly listAppSyncableFiles?: () => Promise<import("@starkeep/sync-engine").FileEntry[]>;
+  /**
+   * Applies incoming `appSyncableRow` change-log entries from the remote.
+   * Provided by the harness so the sync engine can write to app-syncable
+   * tables during pull.
+   */
+  readonly appSyncableApplier?: import("@starkeep/sync-engine").AppSyncableApplier;
 }

@@ -11,7 +11,7 @@ import type {
   SyncEngineOptions,
   SyncPullResponse,
   SyncPushResponse,
-  ChangeLogEntry,
+  RecordChangeLogEntry,
   SyncConflict,
   RecordChangeOptions,
 } from "./types.js";
@@ -32,6 +32,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     changeLog = createChangeLog(),
     syncState,
     listAppSyncableFiles,
+    appSyncableApplier,
   } = options;
 
   const changeNotifier = createChangeNotifier();
@@ -101,6 +102,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
       const ts = clock.now();
       await changeLog.append({
+        kind: "record",
         recordId: record.id,
         operation,
         timestamp: ts,
@@ -126,21 +128,39 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       const conflictIds: StarkeepId[] = [];
       const appliedIds: StarkeepId[] = [];
 
-      // Fetch local unsynced changes in bulk so dirty-conflict detection
-      // is O(1) per remote change.
+      // Fetch local unsynced record changes in bulk so dirty-conflict detection
+      // is O(1) per remote record change.
       const localUnsyncedBoundary = pushCursor ?? ZERO_HLC;
       const localUnsynced = await changeLog.getChangesSince(
         localUnsyncedBoundary,
       );
-      const localUnsyncedByRecord = new Map<StarkeepId, ChangeLogEntry>();
+      const localUnsyncedByRecord = new Map<StarkeepId, RecordChangeLogEntry>();
       for (const entry of localUnsynced) {
-        localUnsyncedByRecord.set(entry.recordId, entry);
+        if (entry.kind === "record") {
+          localUnsyncedByRecord.set(entry.recordId, entry);
+        }
       }
 
       for (const remoteChange of response.changes) {
         // Keep our HLC causally ahead of anything we observe.
         clock.receive(remoteChange.timestamp);
 
+        if (remoteChange.kind === "appSyncableRow") {
+          if (appSyncableApplier) {
+            try {
+              await appSyncableApplier.apply(remoteChange);
+            } catch (err) {
+              console.warn(
+                `[sync] appSyncableRow apply failed (app=${remoteChange.appId} table=${remoteChange.table}): ${(err as Error).message}`,
+              );
+            }
+          } else {
+            console.warn("[sync] appSyncableRow entry received but no applier configured — skipping");
+          }
+          continue;
+        }
+
+        // kind === "record"
         const localRecord = await localDatabaseAdapter.get(
           remoteChange.recordId,
         );
@@ -262,11 +282,15 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
       const localChanges = await changeLog.getChangesSince(since);
 
-      // Skip records we already know are in conflict — they need manual
-      // resolution before we push anything new for them.
-      const pushable = localChanges.filter(
-        (change) => !conflicts.has(change.recordId),
-      );
+      // Skip record entries already known to be in conflict — they need manual
+      // resolution before we push anything new for them. App-syncable row
+      // entries have no per-record conflict state; they always pass through.
+      const pushable = localChanges.filter((change) => {
+        if (change.kind === "record") {
+          return !conflicts.has(change.recordId);
+        }
+        return true;
+      });
 
       if (pushable.length === 0) {
         return {
@@ -280,7 +304,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // records already in conflict) and propagate mimeType so the remote
       // stores it alongside the blob.
       const fileEntries: Array<{ key: string; mimeType?: string }> = pushable
-        .filter((change) => change.recordSnapshot.objectStorageKey !== null)
+        .filter((change): change is RecordChangeLogEntry =>
+          change.kind === "record" && change.recordSnapshot.objectStorageKey !== null,
+        )
         .map((change) => ({
           key: change.recordSnapshot.objectStorageKey as string,
           mimeType: change.recordSnapshot.mimeType ?? undefined,
@@ -320,18 +346,23 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
-      // Exclude records whose file transfer failed — they'll be retried on the next push.
-      const pushableWithFiles = pushable.filter(
-        (change) =>
+      // Exclude record entries whose file transfer failed — they'll be retried on the next push.
+      // App-syncable row entries are never excluded by file failures.
+      const pushableWithFiles = pushable.filter((change) => {
+        if (change.kind !== "record") return true;
+        return (
           change.recordSnapshot.objectStorageKey === null ||
-          !failedKeys.has(change.recordSnapshot.objectStorageKey),
-      );
+          !failedKeys.has(change.recordSnapshot.objectStorageKey as string)
+        );
+      });
 
       const response = await transport.pushChanges({ changes: pushableWithFiles });
 
       // Accepted: mark corresponding local records as Synced.
+      // For app-syncable rows there is no local record state to update.
       const acceptedSet = new Set(response.accepted);
       for (const change of pushable) {
+        if (change.kind !== "record") continue;
         if (acceptedSet.has(change.recordId)) {
           const localRecord = await localDatabaseAdapter.get(change.recordId);
           if (

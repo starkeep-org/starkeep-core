@@ -1,5 +1,7 @@
 export type {
   ChangeLogEntry,
+  RecordChangeLogEntry,
+  AppSyncableRowLogEntry,
   ChangeLog,
   SyncPullRequest,
   SyncPullResponse,
@@ -19,6 +21,10 @@ export type {
   SyncEngineOptions,
   SyncStateStore,
   RecordChangeOptions,
+  AppSyncableTableInfo,
+  AppSyncableNamespace,
+  AppSyncableNamespaceStore,
+  AppSyncableApplier,
 } from "./types.js";
 
 export { createChangeLog } from "./change-log.js";

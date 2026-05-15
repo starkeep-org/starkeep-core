@@ -97,10 +97,10 @@ export function initializeLocalSchema(db: DatabaseSync): void {
   // gate row CRUD/file ops and by the sync engine to enumerate what to sync.
   db.exec(`
     CREATE TABLE IF NOT EXISTS app_syncable_namespaces (
-      app_id           TEXT PRIMARY KEY,
-      table_names_json TEXT NOT NULL,
-      files_enabled    INTEGER NOT NULL DEFAULT 0,
-      created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+      app_id        TEXT PRIMARY KEY,
+      tables_json   TEXT NOT NULL,
+      files_enabled INTEGER NOT NULL DEFAULT 0,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
 

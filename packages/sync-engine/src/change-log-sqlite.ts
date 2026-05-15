@@ -1,18 +1,29 @@
 import type { DatabaseSync } from "node:sqlite";
 import { generateId } from "@starkeep/core";
 import type { HLCTimestamp } from "@starkeep/core";
-import type { ChangeLog, ChangeLogEntry } from "./types.js";
+import type {
+  ChangeLog,
+  ChangeLogEntry,
+  RecordChangeLogEntry,
+  AppSyncableRowLogEntry,
+} from "./types.js";
 
 const CREATE_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS sync_change_log (
     change_id TEXT PRIMARY KEY,
-    record_id TEXT NOT NULL,
-    operation TEXT NOT NULL CHECK(operation IN ('create', 'update', 'delete')),
+    kind TEXT NOT NULL DEFAULT 'record',
+    record_id TEXT,
+    operation TEXT CHECK(operation IN ('create', 'update', 'delete')),
     timestamp_wall INTEGER NOT NULL,
     timestamp_counter INTEGER NOT NULL,
     timestamp_node TEXT NOT NULL,
-    record_snapshot_json TEXT NOT NULL,
+    record_snapshot_json TEXT,
     base_version INTEGER,
+    app_id TEXT,
+    table_name TEXT,
+    app_op TEXT CHECK(app_op IN ('insert', 'update', 'delete')),
+    row_json TEXT,
+    where_json TEXT,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
   )
 `;
@@ -38,18 +49,27 @@ export function createSqliteChangeLog(
   db.exec(CREATE_TABLE_SQL);
   for (const sql of CREATE_INDEXES_SQL) db.exec(sql);
 
-  const insertStmt = db.prepare(
+  const insertRecordStmt = db.prepare(
     `INSERT INTO sync_change_log (
-      change_id, record_id, operation,
+      change_id, kind, record_id, operation,
       timestamp_wall, timestamp_counter, timestamp_node,
       record_snapshot_json, base_version
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, 'record', ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  const insertAppRowStmt = db.prepare(
+    `INSERT INTO sync_change_log (
+      change_id, kind, timestamp_wall, timestamp_counter, timestamp_node,
+      app_id, table_name, app_op, row_json, where_json
+    ) VALUES (?, 'appSyncableRow', ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   const selectSinceStmt = db.prepare(
-    `SELECT change_id, record_id, operation,
+    `SELECT change_id, kind,
+            record_id, operation,
             timestamp_wall, timestamp_counter, timestamp_node,
-            record_snapshot_json, base_version
+            record_snapshot_json, base_version,
+            app_id, table_name, app_op, row_json, where_json
      FROM sync_change_log
      WHERE (timestamp_wall > ?)
         OR (timestamp_wall = ? AND timestamp_counter > ?)
@@ -66,20 +86,35 @@ export function createSqliteChangeLog(
 
   return {
     async append(
-      entry: Omit<ChangeLogEntry, "changeId">,
+      entry: Omit<RecordChangeLogEntry, "changeId"> | Omit<AppSyncableRowLogEntry, "changeId">,
     ): Promise<ChangeLogEntry> {
       const changeId = generateId();
-      insertStmt.run(
-        changeId,
-        entry.recordId,
-        entry.operation,
-        entry.timestamp.wallTime,
-        entry.timestamp.counter,
-        entry.timestamp.nodeId,
-        JSON.stringify(entry.recordSnapshot),
-        entry.baseVersion,
-      );
-      return { ...entry, changeId };
+      if (entry.kind === "record") {
+        insertRecordStmt.run(
+          changeId,
+          entry.recordId,
+          entry.operation,
+          entry.timestamp.wallTime,
+          entry.timestamp.counter,
+          entry.timestamp.nodeId,
+          JSON.stringify(entry.recordSnapshot),
+          entry.baseVersion,
+        );
+        return { ...entry, changeId } as RecordChangeLogEntry;
+      } else {
+        insertAppRowStmt.run(
+          changeId,
+          entry.timestamp.wallTime,
+          entry.timestamp.counter,
+          entry.timestamp.nodeId,
+          entry.appId,
+          entry.table,
+          entry.op,
+          entry.row ? JSON.stringify(entry.row) : null,
+          entry.where ? JSON.stringify(entry.where) : null,
+        );
+        return { ...entry, changeId } as AppSyncableRowLogEntry;
+      }
     },
 
     async getChangesSince(
@@ -135,26 +170,46 @@ export function createSqliteChangeLog(
 
 interface RawRow {
   change_id: string;
-  record_id: string;
-  operation: "create" | "update" | "delete";
+  kind: string;
+  record_id: string | null;
+  operation: "create" | "update" | "delete" | null;
   timestamp_wall: number;
   timestamp_counter: number;
   timestamp_node: string;
-  record_snapshot_json: string;
+  record_snapshot_json: string | null;
   base_version: number | null;
+  app_id: string | null;
+  table_name: string | null;
+  app_op: "insert" | "update" | "delete" | null;
+  row_json: string | null;
+  where_json: string | null;
 }
 
 function rowToEntry(row: RawRow): ChangeLogEntry {
+  const ts = {
+    wallTime: row.timestamp_wall,
+    counter: row.timestamp_counter,
+    nodeId: row.timestamp_node,
+  };
+  if (row.kind === "appSyncableRow") {
+    return {
+      kind: "appSyncableRow",
+      changeId: row.change_id as AppSyncableRowLogEntry["changeId"],
+      timestamp: ts,
+      appId: row.app_id!,
+      table: row.table_name!,
+      op: row.app_op!,
+      row: row.row_json ? JSON.parse(row.row_json) : undefined,
+      where: row.where_json ? JSON.parse(row.where_json) : undefined,
+    };
+  }
   return {
-    changeId: row.change_id as ChangeLogEntry["changeId"],
-    recordId: row.record_id as ChangeLogEntry["recordId"],
-    operation: row.operation,
-    timestamp: {
-      wallTime: row.timestamp_wall,
-      counter: row.timestamp_counter,
-      nodeId: row.timestamp_node,
-    },
-    recordSnapshot: JSON.parse(row.record_snapshot_json),
+    kind: "record",
+    changeId: row.change_id as RecordChangeLogEntry["changeId"],
+    recordId: row.record_id as RecordChangeLogEntry["recordId"],
+    operation: row.operation!,
+    timestamp: ts,
+    recordSnapshot: JSON.parse(row.record_snapshot_json!),
     baseVersion: row.base_version,
   };
 }

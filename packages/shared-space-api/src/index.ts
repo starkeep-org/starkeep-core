@@ -22,3 +22,16 @@ export {
   type PaginatedApiResponse,
 } from "./helpers/pagination.js";
 export { ApiError, RouteNotFoundError, MethodNotAllowedError } from "./errors.js";
+
+export type {
+  AppSyncableTableInfo,
+  AppSyncableNamespace,
+  AppSyncableNamespaceStore,
+  AppSyncableApplier,
+  AppSyncableRowLogEntry,
+} from "./app-syncable/types.js";
+export {
+  createAppSpecificFactory,
+  type AppSpecificFactoryOptions,
+} from "./app-syncable/factory.js";
+export { quoteIdent, validateTableName, RESERVED_COLUMN_NAMES } from "./app-syncable/validation.js";

@@ -133,7 +133,15 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
   };
 
   await runStep(appId, "install", "run_dsql_ddl", done, () =>
-    runAppInstallDdl(dsqlOpts, appId, ir.sharedTypeAccess, ir.canIngestUnknown, ir.canPromoteFromUnknown),
+    runAppInstallDdl(
+      dsqlOpts,
+      appId,
+      ir.sharedTypeAccess,
+      ir.canIngestUnknown,
+      ir.canPromoteFromUnknown,
+      ir.appSpecificSyncable.tables,
+      ir.appSpecificSyncable.files,
+    ),
   );
 
   await runStep(appId, "install", "put_s3_keep_file", done, () =>
