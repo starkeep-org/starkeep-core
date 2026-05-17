@@ -27,6 +27,7 @@ import {
   SyncStatus,
   serializeHLC,
   dataRecordObjectKey,
+  CORE_TYPES,
 } from "@starkeep/core";
 import type { DataRecord, StarkeepId } from "@starkeep/core";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
@@ -408,6 +409,40 @@ export async function handler(event: APIGatewayEvent) {
       await db.put(promoted);
 
       return ok({ record: recordToResponse(promoted) });
+    }
+
+    // POST /apps/{appId}/data/records/:id/metadata — write type-specific metadata.
+    // The calling app does the extraction (e.g. EXIF); the server validates keys
+    // against the declared type schema and persists via the database adapter.
+    const metadataWriteMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata$/);
+    if (metadataWriteMatch && method === "POST") {
+      const recordId = decodeURIComponent(metadataWriteMatch[1]!) as StarkeepId;
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const { typeId, metadata } = JSON.parse(rawBody) as { typeId?: string; metadata?: Record<string, unknown> };
+      if (!typeId) return clientErr("typeId is required", 400);
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+        return clientErr("metadata must be an object", 400);
+      }
+      const coreType = CORE_TYPES.find((t) => t.id === typeId);
+      if (!coreType) return clientErr(`Unknown type "${typeId}" — only core types support metadata`, 400);
+      const allowedColumns = new Set(coreType.metadataColumns.map((c) => c.name));
+      const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
+      if (unknownKeys.length > 0) {
+        return clientErr(`Unknown metadata columns: ${unknownKeys.join(", ")}`, 400);
+      }
+      await db.putMetadata(typeId, { recordId, ...metadata });
+      return ok({ ok: true });
+    }
+
+    // GET /apps/{appId}/data/records/:id/metadata/:typeId — read type-specific metadata.
+    const metadataReadMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata\/([^/]+)$/);
+    if (metadataReadMatch && method === "GET") {
+      const recordId = decodeURIComponent(metadataReadMatch[1]!) as StarkeepId;
+      const typeId = decodeURIComponent(metadataReadMatch[2]!);
+      const metadata = await db.getMetadata(typeId, recordId);
+      return ok({ metadata });
     }
 
     // GET /apps/{appId}/data/records/:id/file-url

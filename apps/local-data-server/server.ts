@@ -43,7 +43,7 @@ import {
   createSqliteChangeLog,
   createSqliteSyncStateStore,
 } from "../../packages/sync-engine/src/index.js";
-import { WILDCARD_EXPANDABLE_TYPE_IDS } from "../../packages/core/src/types/core-types.js";
+import { WILDCARD_EXPANDABLE_TYPE_IDS, CORE_TYPES } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
 import { dataRecordObjectKey } from "../../packages/core/src/storage/object-keys.js";
 import { join } from "node:path";
@@ -117,6 +117,11 @@ function appCanRead(db: DatabaseSync, appId: string, type: string): boolean {
 function appCanWrite(db: DatabaseSync, appId: string, type: string): boolean {
   const grants = expandGrantsForApp(db, appId);
   return grants.some((g) => g.type_id === type && g.access === "readwrite");
+}
+
+function appCanWriteMetadata(db: DatabaseSync, appId: string, type: string): boolean {
+  const grants = expandGrantsForApp(db, appId);
+  return grants.some((g) => g.type_id === type && g.metadata_write === 1);
 }
 
 function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
@@ -1466,6 +1471,64 @@ async function main() {
           "Cache-Control": "private, no-store",
         });
         res.end(Buffer.from(fileResult.data));
+        return;
+      }
+
+      // POST /data/records/:id/metadata — write type-specific metadata for a record.
+      // The app is responsible for extracting metadata values (e.g. EXIF from image
+      // bytes); the server validates keys against the declared type schema and persists.
+      // Requires readwrite access to the type.
+      const metadataWriteMatch = path.match(/^\/data\/records\/([^/]+)\/metadata$/);
+      if (metadataWriteMatch && req.method === "POST") {
+        const recordId = metadataWriteMatch[1]!;
+        const body = await readBody(req);
+        const { typeId, metadata } = JSON.parse(body) as { typeId?: string; metadata?: Record<string, unknown> };
+        if (!typeId) {
+          res.writeHead(400);
+          json(res, { error: "typeId is required" });
+          return;
+        }
+        if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+          res.writeHead(400);
+          json(res, { error: "metadata must be an object" });
+          return;
+        }
+        if (!appCanWriteMetadata(localDb, appId!, typeId)) {
+          res.writeHead(403);
+          json(res, { error: "AccessDenied", detail: `app "${appId}" has no metadataWrite grant on type "${typeId}"` });
+          return;
+        }
+        const coreType = CORE_TYPES.find((t) => t.id === typeId);
+        if (!coreType) {
+          res.writeHead(400);
+          json(res, { error: `Unknown type "${typeId}" — only core types support metadata` });
+          return;
+        }
+        const allowedColumns = new Set(coreType.metadataColumns.map((c) => c.name));
+        const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
+        if (unknownKeys.length > 0) {
+          res.writeHead(400);
+          json(res, { error: `Unknown metadata columns: ${unknownKeys.join(", ")}` });
+          return;
+        }
+        await sdk.data.putMetadata(typeId, { recordId: recordId as any, ...metadata });
+        json(res, { ok: true });
+        return;
+      }
+
+      // GET /data/records/:id/metadata/:typeId — read type-specific metadata for a record.
+      // Requires read or readwrite access to the type.
+      const metadataReadMatch = path.match(/^\/data\/records\/([^/]+)\/metadata\/([^/]+)$/);
+      if (metadataReadMatch && req.method === "GET") {
+        const recordId = metadataReadMatch[1]!;
+        const typeId = metadataReadMatch[2]!;
+        if (!appCanRead(localDb, appId!, typeId)) {
+          res.writeHead(403);
+          json(res, { error: "AccessDenied", detail: `app "${appId}" has no read grant on type "${typeId}"` });
+          return;
+        }
+        const metadata = await sdk.data.getMetadata(typeId, recordId as any);
+        json(res, { metadata });
         return;
       }
 

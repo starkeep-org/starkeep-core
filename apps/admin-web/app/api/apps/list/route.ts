@@ -18,7 +18,7 @@ export async function GET() {
     for (const name of readdirSync(APPS_DIR)) {
       const appDir = resolve(APPS_DIR, name);
       if (!statSync(appDir).isDirectory()) continue;
-      const manifestPath = resolve(appDir, "manifest.json");
+      const manifestPath = resolve(appDir, "starkeep.manifest.json");
       if (!existsSync(manifestPath)) continue;
       try {
         const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;

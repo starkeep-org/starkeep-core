@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const manifestPath = resolve(APPS_DIR, appId, "manifest.json");
+  const manifestPath = resolve(APPS_DIR, appId, "starkeep.manifest.json");
   if (!existsSync(manifestPath)) {
     return NextResponse.json({ error: `manifest not found at ${manifestPath}` }, { status: 404 });
   }

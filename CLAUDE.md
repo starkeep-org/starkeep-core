@@ -5,3 +5,5 @@ Don't implement things that aren't needed now (or only because they're expected 
 Conversely, anything that does get implemented must be fully hooked up to the relevant system so we can actually test how it works. Implementing disconnected modules create an impression that more has been done than we thought and causes gotchas later.
 
 When working with shared or app specific data, refer to docs/shared-vs-app-specific-data.md.
+
+Use the Typescript LSP proactively as needed.
