@@ -154,7 +154,7 @@ export function createAppSyncableTables(
     // change tracking; they are appended automatically and must not be declared
     // in the manifest.
     db.exec(
-      `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}${pkClause}, "updated_at" TEXT NOT NULL, "deleted_at" TEXT)`,
+      `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}, "updated_at" TEXT NOT NULL, "deleted_at" TEXT${pkClause})`,
     );
     db.exec(
       `CREATE INDEX IF NOT EXISTS "idx_${fullName}_updated_at" ON "${fullName}"("updated_at")`,
