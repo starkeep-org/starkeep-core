@@ -50,7 +50,6 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { createFileWatchManager } from "./watcher.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
@@ -143,11 +142,7 @@ function validateAppHmac(db: DatabaseSync, appId: string, body: string, sig: str
   return timingSafeEqual(sigBuf, expBuf);
 }
 
-// Path to starkeep-config.json — resolved relative to this file so it works
-// regardless of cwd. Override via STARKEEP_CONFIG env var for non-standard layouts.
-const STARKEEP_CONFIG_PATH =
-  process.env.STARKEEP_CONFIG ??
-  fileURLToPath(new URL("../../starkeep-config.json", import.meta.url));
+const STARKEEP_CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 interface StarkeepConfig {
   stage: string;
@@ -208,7 +203,7 @@ async function loadStarkeepConfig(): Promise<StarkeepConfig | null> {
   try {
     return JSON.parse(await readFile(STARKEEP_CONFIG_PATH, "utf8")) as StarkeepConfig;
   } catch {
-    console.warn(`No starkeep-config.json found at ${STARKEEP_CONFIG_PATH} — cloud features disabled`);
+    console.warn(`No config found at ${STARKEEP_CONFIG_PATH} — cloud features disabled`);
     return null;
   }
 }
@@ -342,7 +337,7 @@ async function main() {
     basePath: objectsBasePath,
   });
 
-  // Load cloud config from starkeep-config.json at the repo root
+  // Load cloud config from ~/.starkeep/config.json
   const starkeepConfig = await loadStarkeepConfig();
   const configRegion = starkeepConfig ? regionFromUserPoolId(starkeepConfig.userPoolId) : "";
   if (starkeepConfig) {
@@ -387,7 +382,7 @@ async function main() {
     );
   }
 
-  // S3: use starkeep-config.json values when available, otherwise fall back to env vars
+  // S3: use ~/.starkeep/config.json values when available, otherwise fall back to env vars
   let remoteAdapter: ObjectStorageAdapter | null = null;
   if (starkeepConfig?.s3Bucket) {
     const credentialProvider = await makeCloudCredentialProvider();
@@ -719,7 +714,7 @@ async function main() {
       if (path === "/auth/login" && req.method === "POST") {
         if (!cognitoConfig) {
           res.writeHead(503);
-          json(res, { error: "No starkeep-config.json found — cannot authenticate" });
+          json(res, { error: "No ~/.starkeep/config.json found — cannot authenticate" });
           return;
         }
         const body = JSON.parse(await readBody(req)) as {

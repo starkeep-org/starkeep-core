@@ -7,3 +7,4 @@ Conversely, anything that does get implemented must be fully hooked up to the re
 When working with shared or app specific data, refer to docs/shared-vs-app-specific-data.md.
 
 Use the Typescript LSP proactively as needed.
+Use Kysely when writing new SQL or modifying existing SQL.

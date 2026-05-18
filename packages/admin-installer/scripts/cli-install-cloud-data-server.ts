@@ -8,10 +8,11 @@
  * Pulumi up to create DSQL/S3/Lambda/APIGw, the shared-schema DDL is
  * applied, and the temp policy is detached.
  *
- * Reads starkeep-config.json from the repo root. The admin-web wizard writes
- * this file server-side via /api/config as it advances through setup steps,
- * so it must already exist (with at least userPoolId / userPoolClientId /
- * identityPoolId from the Stack outputs step) before this script runs.
+ * Reads ~/.starkeep/config.json (or $STARKEEP_DATA_DIR/config.json). The
+ * admin-web wizard writes this file server-side via /api/config as it advances
+ * through setup steps, so it must already exist (with at least userPoolId /
+ * userPoolClientId / identityPoolId from the Stack outputs step) before this
+ * script runs.
  *
  * Region is NOT stored in the file — it is derived from `userPoolId` (AWS
  * encodes the region into the pool ID, e.g. `us-east-2_Xxxxx`).
@@ -21,10 +22,10 @@
  *   pnpm tsx scripts/cli-install-cloud-data-server.ts --non-interactive
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
 import {
   CognitoIdentityProviderClient,
   InitiateAuthCommand,
@@ -67,23 +68,22 @@ function regionFromUserPoolId(userPoolId: string): string {
   return parts[0];
 }
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..", "..");
-const CONFIG_PATH = resolve(REPO_ROOT, "starkeep-config.json");
+const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
 
 function loadConfig(): StarkeepConfig {
   let raw: string;
   try {
     raw = readFileSync(CONFIG_PATH, "utf-8");
   } catch {
-    console.error(`Error: starkeep-config.json not found at ${CONFIG_PATH}`);
-    console.error('Generate it from admin-web after the bootstrap stack is deployed.');
+    console.error(`Error: ~/.starkeep/config.json not found at ${CONFIG_PATH}`);
+    console.error("Generate it from admin-web after the bootstrap stack is deployed.");
     process.exit(1);
   }
   try {
     return JSON.parse(raw) as StarkeepConfig;
   } catch {
-    console.error("Error: starkeep-config.json is not valid JSON");
+    console.error("Error: ~/.starkeep/config.json is not valid JSON");
     process.exit(1);
   }
 }
@@ -287,9 +287,10 @@ const updated: StarkeepConfig = {
   s3Bucket: outputs.bucketName,
   auroraEndpoint: outputs.auroraHostname,
 };
+mkdirSync(STARKEEP_DATA_DIR, { recursive: true });
 writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
 
-console.log("\nInstall complete. Updated starkeep-config.json:");
+console.log("\nInstall complete. Updated ~/.starkeep/config.json:");
 console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
 console.log(`  s3Bucket       : ${outputs.bucketName}`);
 console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);

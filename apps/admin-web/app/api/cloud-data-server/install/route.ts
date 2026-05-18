@@ -23,12 +23,14 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { NextRequest } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 import { getRegion } from "../../../../src/lib/cloud-config";
 
-const CONFIG_PATH = resolve(REPO_ROOT, "starkeep-config.json");
+const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
 
 // Module-level store for an in-progress install. When the browser suspends
 // (laptop sleep) the SSE connection drops but the child keeps running. A
@@ -83,7 +85,7 @@ export async function POST(req: NextRequest) {
 
   if (!existsSync(CONFIG_PATH)) {
     return new Response(
-      JSON.stringify({ error: `starkeep-config.json not found at ${CONFIG_PATH}` }),
+      JSON.stringify({ error: `~/.starkeep/config.json not found` }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -93,7 +95,7 @@ export async function POST(req: NextRequest) {
     return new Response(
       JSON.stringify({
         error:
-          "starkeep-config.json has no userPoolId — complete the wizard's Stack outputs step first",
+          "~/.starkeep/config.json has no userPoolId — complete the wizard's Stack outputs step first",
       }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );

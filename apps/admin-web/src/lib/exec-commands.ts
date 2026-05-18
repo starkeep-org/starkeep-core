@@ -2,7 +2,7 @@ import "server-only";
 import { resolve } from "node:path";
 
 export type DaemonId = "local-data-server";
-export type StreamCommandId = "reset-local-data";
+export type StreamCommandId = "reset-local-data" | "local-deploy";
 
 // Next.js runs from apps/admin-web; ../../ is the repo root
 export const REPO_ROOT = resolve(process.cwd(), "../..");
@@ -37,5 +37,9 @@ export const STREAM_COMMANDS: Record<StreamCommandId, { args: string[]; requires
   "reset-local-data": {
     args: ["bash", "scripts/reset-local-data.sh", "--yes"],
     requiresCreds: false,
+  },
+  "local-deploy": {
+    args: ["pnpm", "--filter", "@starkeep/admin-installer", "cli:install-cloud-data-server", "--non-interactive"],
+    requiresCreds: true,
   },
 };
