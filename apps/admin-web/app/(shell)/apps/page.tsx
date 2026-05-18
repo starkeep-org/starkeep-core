@@ -1,423 +1,420 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  readPhotosWebPath,
-  writePhotosWebPath,
-  readFileBrowserPath,
-  writeFileBrowserPath,
-  readCloudConfig,
-  readCloudCredentials,
-  writeCloudCredentials,
-  readCognitoSession,
-  writeCognitoSession,
-} from "../../../src/lib/cloud-config";
-import { refreshTokens, getIdentityPoolCredentials } from "../../../src/lib/cognito-auth";
 
 export default function AppsPage() {
   return (
     <div className="max-w-3xl flex flex-col gap-6">
       <h1 className="text-2xl font-semibold">Apps</h1>
-      <PhotosWebSection />
-      <FileBrowserSection />
+      <LocalAppsSection />
     </div>
   );
 }
 
-async function readFileBrowserInstallStream(
-  fileBrowserPath: string,
-  onLine: (line: string) => void,
-): Promise<{ port: number; pid: number }> {
-  const res = await fetch("/api/file-browser/install", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fileBrowserPath }),
-  });
-  if (!res.ok || !res.body) {
-    const data = await res.json() as { error?: string };
-    throw new Error(data.error ?? "Install failed");
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop() ?? "";
-    for (const event of events) {
-      const lines = event.split("\n");
-      const eventType = lines.find((l) => l.startsWith("event:"))?.slice(7).trim();
-      const dataLine = lines.find((l) => l.startsWith("data:"))?.slice(5).trim();
-      if (!dataLine) continue;
-      if (eventType === "done") return JSON.parse(dataLine) as { port: number; pid: number };
-      else if (eventType === "error") throw new Error(JSON.parse(dataLine) as string);
-      else onLine(JSON.parse(dataLine) as string);
-    }
-  }
-  throw new Error("Install stream ended without a done event");
+interface SharedTypeAccess {
+  typeId: string;
+  access: "read" | "readwrite";
+  metadataWrite?: boolean;
+  rationale: string;
 }
 
-async function readInstallStream(
-  photosWebPath: string,
-  onLine: (line: string) => void,
-): Promise<{ port: number; pid: number }> {
-  const res = await fetch("/api/photos-web/install", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ photosWebPath }),
-  });
-  if (!res.ok || !res.body) {
-    const data = await res.json() as { error?: string };
-    throw new Error(data.error ?? "Install failed");
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop() ?? "";
-    for (const event of events) {
-      const lines = event.split("\n");
-      const eventType = lines.find((l) => l.startsWith("event:"))?.slice(7).trim();
-      const dataLine = lines.find((l) => l.startsWith("data:"))?.slice(5).trim();
-      if (!dataLine) continue;
-      if (eventType === "done") return JSON.parse(dataLine) as { port: number; pid: number };
-      else if (eventType === "error") throw new Error(JSON.parse(dataLine) as string);
-      else onLine(JSON.parse(dataLine) as string);
-    }
-  }
-  throw new Error("Install stream ended without a done event");
+interface ManifestSummary {
+  id?: string;
+  name?: string;
+  version?: string;
+  description?: string;
+  infraRequirements?: {
+    sharedTypeAccess?: SharedTypeAccess[];
+    canIngestUnknown?: boolean;
+    canPromoteFromUnknown?: boolean;
+  };
 }
 
-function FileBrowserSection() {
-  const [path, setPath] = useState("");
-  const [installing, setInstalling] = useState(false);
-  const [stopping, setStopping] = useState(false);
-  const [running, setRunning] = useState<boolean | null>(null);
-  const [port, setPort] = useState<number | null>(null);
-  const [installLog, setInstallLog] = useState<string[]>([]);
+interface LocalAppEntry {
+  appId: string;
+  manifest: ManifestSummary;
+  sourceDir: string;
+  status: "active" | "installing" | "uninstalling" | "not_installed";
+}
+
+interface DaemonStatus { running: boolean; pid?: number; port?: number; }
+
+function LocalAppsSection() {
+  const [apps, setApps] = useState<LocalAppEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
-  const logEndRef = useRef<HTMLDivElement>(null);
+  const [pendingConsent, setPendingConsent] = useState<LocalAppEntry | null>(null);
+  const [busyAppId, setBusyAppId] = useState<string | null>(null);
+  const [runStatus, setRunStatus] = useState<Record<string, DaemonStatus>>({});
+  // Per-app pending transition. We keep this set until the polled status
+  // reflects the target state (running for "start", not-running for "stop"),
+  // so the spinner survives the first poll round.
+  const [pending, setPending] = useState<Record<string, "start" | "stop" | undefined>>({});
 
-  useEffect(() => {
-    readFileBrowserPath().then((saved) => { if (saved) setPath(saved); });
-    checkStatus();
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      const res = await fetch("/api/apps/list");
+      if (!res.ok) throw new Error(`list failed: ${res.status}`);
+      const body = (await res.json()) as { apps: LocalAppEntry[] };
+      setApps(body.apps);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }, []);
 
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [installLog]);
-
-  const checkStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/api/exec/daemon/status?id=file-browser");
-      if (res.ok) {
-        const data = await res.json() as { running: boolean; port?: number };
-        setRunning(data.running); setPort(data.port ?? null);
+  const refreshStatus = useCallback(async (appIds: string[]) => {
+    const entries = await Promise.all(appIds.map(async (id) => {
+      try {
+        const res = await fetch(`/api/exec/daemon/status?id=${encodeURIComponent(id)}`);
+        if (!res.ok) return [id, { running: false }] as const;
+        return [id, (await res.json()) as DaemonStatus] as const;
+      } catch {
+        return [id, { running: false }] as const;
       }
-    } catch { setRunning(false); setPort(null); }
+    }));
+    setRunStatus((prev) => {
+      const next = { ...prev };
+      for (const [id, s] of entries) next[id] = s;
+      return next;
+    });
   }, []);
 
-  const handleInstall = async () => {
-    if (!path.trim()) return;
-    setInstalling(true); setError(null); setSuccess(false); setInstallLog([]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // One-shot status fetch for all installed apps when the list changes. No
+  // background polling — we only poll while a specific transition is in
+  // flight (see waitForTransition below).
+  const installedIds = apps?.filter((a) => a.status === "active").map((a) => a.appId) ?? [];
+  const installedKey = installedIds.join(",");
+  useEffect(() => {
+    if (installedIds.length === 0) return;
+    refreshStatus(installedIds);
+  }, [installedKey, refreshStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll one app's status until it matches the requested transition, with a
+  // hard cap. Resolves with the final status, or null on timeout.
+  const waitForTransition = useCallback(
+    async (appId: string, want: "start" | "stop"): Promise<DaemonStatus | null> => {
+      const MAX_ATTEMPTS = 20; // 20 × 1s = 20s
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        let s: DaemonStatus = { running: false };
+        try {
+          const res = await fetch(`/api/exec/daemon/status?id=${encodeURIComponent(appId)}`);
+          if (res.ok) s = (await res.json()) as DaemonStatus;
+        } catch { /* keep s as not-running and retry */ }
+        setRunStatus((prev) => ({ ...prev, [appId]: s }));
+        if ((want === "start" && s.running) || (want === "stop" && !s.running)) return s;
+      }
+      return null;
+    },
+    [],
+  );
+
+  const handleStart = async (appId: string) => {
+    setPending((p) => ({ ...p, [appId]: "start" }));
     try {
-      await writeFileBrowserPath(path.trim());
-      const result = await readFileBrowserInstallStream(path.trim(), (line) => setInstallLog((prev) => [...prev, line]));
-      setSuccess(true); setRunning(true); setPort(result.port);
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
-    finally { setInstalling(false); }
+      const res = await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "start", id: appId }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `start failed: ${res.status}`);
+      }
+      const final = await waitForTransition(appId, "start");
+      if (!final) setError(`${appId} did not come online within 20s`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending((p) => { const n = { ...p }; delete n[appId]; return n; });
+    }
   };
 
-  const handleStop = async () => {
-    setStopping(true); setError(null);
+  const handleStop = async (appId: string) => {
+    setPending((p) => ({ ...p, [appId]: "stop" }));
     try {
-      await fetch("/api/exec/daemon", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop", id: "file-browser" }) });
-      setRunning(false); setPort(null); setSuccess(false);
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
-    finally { setStopping(false); }
+      const res = await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop", id: appId }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `stop failed: ${res.status}`);
+      }
+      const final = await waitForTransition(appId, "stop");
+      if (!final) setError(`${appId} did not shut down within 20s`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending((p) => { const n = { ...p }; delete n[appId]; return n; });
+    }
+  };
+
+  const handleApprove = async (entry: LocalAppEntry) => {
+    setPendingConsent(null);
+    setBusyAppId(entry.appId);
+    setError(null);
+    try {
+      const res = await fetch("/api/apps/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appId: entry.appId, approved: true }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `install failed: ${res.status}`);
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAppId(null);
+    }
+  };
+
+  const handleUninstall = async (entry: LocalAppEntry) => {
+    if (!confirm(`Uninstall ${entry.appId}? Records it produced will remain in shared storage.`)) return;
+    setBusyAppId(entry.appId);
+    setError(null);
+    try {
+      const res = await fetch("/api/apps/uninstall", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appId: entry.appId }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `uninstall failed: ${res.status}`);
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAppId(null);
+    }
   };
 
   return (
     <div className="rounded-lg border p-5 flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-base font-semibold">File Browser</h2>
-        {running === true && <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Running</Badge>}
-        {running === false && <Badge variant="secondary" className="text-xs">Stopped</Badge>}
+        <h2 className="text-base font-semibold">Local install</h2>
+        <Button variant="outline" size="sm" onClick={refresh}>Refresh</Button>
       </div>
-      <p className="text-sm text-muted-foreground">Manage the file-browser app from your local checkout.</p>
+      <p className="text-sm text-muted-foreground">
+        Apps discovered from <code className="text-xs">starkeep-apps/</code>. Installing wires the
+        app into the local data server with its declared per-type permissions.
+      </p>
 
-      <div className="flex flex-col gap-1.5">
-        <label className="text-sm font-medium">File Browser repo path</label>
-        <Input
-          placeholder="~/projects/starkeep/starkeep-apps/file-browser"
-          value={path}
-          onChange={(e) => setPath(e.currentTarget.value)}
-          disabled={installing}
-        />
-      </div>
-
-      {error && <Alert variant="destructive"><AlertTitle>Error</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-      {success && port && (
-        <Alert>
-          <AlertTitle>Running</AlertTitle>
-          <AlertDescription>
-            file-browser is running at{" "}
-            <a href={`http://localhost:${port}`} target="_blank" rel="noopener noreferrer" className="underline">{`http://localhost:${port}`}</a>
-          </AlertDescription>
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      <div className="flex flex-wrap gap-2">
-        <Button onClick={handleInstall} disabled={installing || !path.trim()}>
-          {installing && <span className="mr-1 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-          {running ? "Reinstall & Restart" : "Install & Start"}
-        </Button>
-        {running && (
-          <Button variant="outline" onClick={handleStop} disabled={stopping}>
-            {stopping && <span className="mr-1 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-            Stop
-          </Button>
-        )}
-        {running && port && (
-          <a href={`http://localhost:${port}`} target="_blank" rel="noopener noreferrer" className="text-sm underline self-center">Open file-browser ↗</a>
-        )}
-      </div>
+      {apps === null && <p className="text-sm text-muted-foreground">Loading…</p>}
+      {apps !== null && apps.length === 0 && (
+        <p className="text-sm text-muted-foreground">No apps found in starkeep-apps/.</p>
+      )}
 
-      {(installing || installLog.length > 0) && (
-        <ScrollArea className="h-48 rounded-md border">
-          <pre className="p-3 font-mono text-xs whitespace-pre-wrap">{installLog.join("\n")}</pre>
-          <div ref={logEndRef} />
-        </ScrollArea>
+      {apps?.map((entry) => {
+        const grants = entry.manifest.infraRequirements?.sharedTypeAccess ?? [];
+        const installed = entry.status === "active";
+        const status = runStatus[entry.appId];
+        const want = pending[entry.appId];
+        const running = status?.running === true;
+        const port = status?.port;
+        const busy = !!want;
+        return (
+          <div key={entry.appId} className="rounded-md border p-3 flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="font-medium">{entry.manifest.name ?? entry.appId}</span>
+                <span className="text-xs text-muted-foreground">v{entry.manifest.version ?? "?"}</span>
+                {installed && (
+                  <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                    Installed
+                  </Badge>
+                )}
+                {installed && running && port && (
+                  <a
+                    href={`http://localhost:${port}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`Open http://localhost:${port}`}
+                  >
+                    <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 hover:bg-blue-200 dark:hover:bg-blue-800 cursor-pointer">
+                      Running :{port} ↗
+                    </Badge>
+                  </a>
+                )}
+                {installed && !running && want === "start" && (
+                  <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                    Starting…
+                  </Badge>
+                )}
+                {installed && running && want === "stop" && (
+                  <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                    Stopping…
+                  </Badge>
+                )}
+              </div>
+              <div className="flex gap-2 items-center">
+                {installed && running && port && (
+                  <a
+                    href={`http://localhost:${port}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm underline"
+                  >
+                    Open ↗
+                  </a>
+                )}
+                {installed && !running && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleStart(entry.appId)}
+                    disabled={busy}
+                  >
+                    {want === "start" && (
+                      <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                    )}
+                    {want === "start" ? "Starting…" : "Start"}
+                  </Button>
+                )}
+                {installed && running && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleStop(entry.appId)}
+                    disabled={busy}
+                  >
+                    {want === "stop" && (
+                      <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                    )}
+                    {want === "stop" ? "Stopping…" : "Stop"}
+                  </Button>
+                )}
+                {!installed && (
+                  <Button
+                    size="sm"
+                    onClick={() => setPendingConsent(entry)}
+                    disabled={busyAppId === entry.appId}
+                  >
+                    {busyAppId === entry.appId ? "Installing…" : "Install"}
+                  </Button>
+                )}
+                {installed && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleUninstall(entry)}
+                    disabled={busyAppId === entry.appId || running || busy}
+                    title={running ? "Stop the app before uninstalling" : undefined}
+                  >
+                    {busyAppId === entry.appId ? "Uninstalling…" : "Uninstall"}
+                  </Button>
+                )}
+              </div>
+            </div>
+            {entry.manifest.description && (
+              <p className="text-sm text-muted-foreground">{entry.manifest.description}</p>
+            )}
+            {grants.length > 0 && (
+              <ul className="text-xs text-muted-foreground flex flex-col gap-0.5">
+                {grants.map((g) => (
+                  <li key={g.typeId}>
+                    <span className="font-mono">{g.typeId}</span>: {g.access}
+                    {g.metadataWrite ? " + metadata:write" : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+
+      {pendingConsent && (
+        <ConsentModal
+          entry={pendingConsent}
+          onApprove={() => handleApprove(pendingConsent)}
+          onCancel={() => setPendingConsent(null)}
+        />
       )}
     </div>
   );
 }
 
-function PhotosWebSection() {
-  const [path, setPath] = useState("");
-  const [installing, setInstalling] = useState(false);
-  const [stopping, setStopping] = useState(false);
-  const [running, setRunning] = useState<boolean | null>(null);
-  const [port, setPort] = useState<number | null>(null);
-  const [installLog, setInstallLog] = useState<string[]>([]);
-  const [localError, setLocalError] = useState<string | null>(null);
-  const [localSuccess, setLocalSuccess] = useState(false);
-
-  const [deploying, setDeploying] = useState(false);
-  const [deployLog, setDeployLog] = useState<string[]>([]);
-  const [deployError, setDeployError] = useState<string | null>(null);
-  const [deploySuccess, setDeploySuccess] = useState(false);
-  const [cloudDeployed, setCloudDeployed] = useState<boolean | null>(null);
-  const [cloudConfig, setCloudConfig] = useState<Record<string, unknown> | null>(null);
-  const [coreDeployed, setCoreDeployed] = useState<boolean | null>(null);
-
-  const installLogEndRef = useRef<HTMLDivElement>(null);
-  const deployLogEndRef = useRef<HTMLDivElement>(null);
-
-  const checkCloudStatus = useCallback(async (p: string) => {
-    if (!p.trim()) { setCloudDeployed(null); return; }
-    try {
-      const res = await fetch(`/api/photos-web/deploy?path=${encodeURIComponent(p.trim())}`);
-      if (res.ok) {
-        const data = await res.json() as { deployed: boolean; photosCloudConfig: Record<string, unknown> | null; coreDeployed: boolean };
-        setCloudDeployed(data.deployed); setCloudConfig(data.photosCloudConfig ?? null); setCoreDeployed(data.coreDeployed ?? null);
-      }
-    } catch { setCloudDeployed(null); }
-  }, []);
-
-  useEffect(() => {
-    readPhotosWebPath().then((saved) => { if (saved) { setPath(saved); checkCloudStatus(saved); } });
-    checkStatus();
-  }, []);
-
-  useEffect(() => { installLogEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [installLog]);
-  useEffect(() => { deployLogEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [deployLog]);
-
-  const checkStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/api/exec/daemon/status?id=photos-web");
-      if (res.ok) { const data = await res.json() as { running: boolean; port?: number }; setRunning(data.running); setPort(data.port ?? null); }
-    } catch { setRunning(false); setPort(null); }
-  }, []);
-
-  const handleInstall = async () => {
-    if (!path.trim()) return;
-    setInstalling(true); setLocalError(null); setLocalSuccess(false); setInstallLog([]);
-    try {
-      await writePhotosWebPath(path.trim());
-      const result = await readInstallStream(path.trim(), (line) => setInstallLog((prev) => [...prev, line]));
-      setLocalSuccess(true); setRunning(true); setPort(result.port);
-    } catch (err) { setLocalError(err instanceof Error ? err.message : String(err)); }
-    finally { setInstalling(false); }
-  };
-
-  const handleStop = async () => {
-    setStopping(true); setLocalError(null);
-    try {
-      await fetch("/api/exec/daemon", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop", id: "photos-web" }) });
-      setRunning(false); setPort(null); setLocalSuccess(false);
-    } catch (err) { setLocalError(err instanceof Error ? err.message : String(err)); }
-    finally { setStopping(false); }
-  };
-
-  const handleDeploy = async () => {
-    if (!path.trim()) return;
-    setDeploying(true); setDeployLog([]); setDeployError(null); setDeploySuccess(false);
-    try {
-      const config = await readCloudConfig();
-      if (!config) throw new Error("No cloud configuration — complete the setup wizard first.");
-      let creds = await readCloudCredentials();
-      if (!creds) {
-        const session = await readCognitoSession();
-        if (!session?.refreshToken) throw new Error("Not signed in — sign in before deploying.");
-        const tokens = await refreshTokens(config.cognitoConfig, session.refreshToken);
-        creds = await getIdentityPoolCredentials(config.cognitoConfig, tokens.idToken);
-        await writeCloudCredentials(creds);
-        await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
-      }
-      const credentials = { ...creds, region: config.region };
-      const res = await fetch("/api/photos-web/deploy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ photosWebPath: path.trim(), credentials }),
-      });
-      if (!res.ok || !res.body) { const data = await res.json() as { error?: string }; throw new Error(data.error ?? "Deploy request failed"); }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split("\n\n");
-        buffer = events.pop() ?? "";
-        for (const event of events) {
-          const lines = event.split("\n");
-          const eventType = lines.find((l) => l.startsWith("event:"))?.slice(7).trim();
-          const dataLine = lines.find((l) => l.startsWith("data:"))?.slice(5).trim();
-          if (!dataLine) continue;
-          if (eventType === "done") {
-            const result = JSON.parse(dataLine) as { exitCode: number; photosCloudConfig: Record<string, unknown> | null };
-            if (result.exitCode !== 0) throw new Error(`Deploy exited with code ${result.exitCode}`);
-            setDeploySuccess(true); setCloudDeployed(true);
-            if (result.photosCloudConfig) {
-              setCloudConfig(result.photosCloudConfig);
-              const webUrl = result.photosCloudConfig.photosWebUrl;
-              if (typeof webUrl === "string") setDeployLog((prev) => [...prev, `Remote app URL: ${webUrl}`]);
-              setDeployLog((prev) => [...prev, "Re-installing with updated cloud config..."]);
-              const reinstall = await readInstallStream(path.trim(), (line) => setDeployLog((prev) => [...prev, line]));
-              setPort(reinstall.port); setRunning(true);
-              setDeployLog((prev) => [...prev, `Local dev server: http://localhost:${reinstall.port}`]);
-            }
-          } else if (eventType === "error") {
-            throw new Error(JSON.parse(dataLine) as string);
-          } else {
-            setDeployLog((prev) => [...prev, JSON.parse(dataLine) as string]);
-          }
-        }
-      }
-    } catch (err) { setDeployError(err instanceof Error ? err.message : String(err)); }
-    finally { setDeploying(false); }
-  };
+function ConsentModal({
+  entry,
+  onApprove,
+  onCancel,
+}: {
+  entry: LocalAppEntry;
+  onApprove: () => void;
+  onCancel: () => void;
+}) {
+  const grants = entry.manifest.infraRequirements?.sharedTypeAccess ?? [];
+  const canIngestUnknown = entry.manifest.infraRequirements?.canIngestUnknown;
+  const canPromoteFromUnknown = entry.manifest.infraRequirements?.canPromoteFromUnknown;
 
   return (
-    <div className="rounded-lg border p-5 flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-base font-semibold">Photos Web</h2>
-        {running === true && <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Running</Badge>}
-        {running === false && <Badge variant="secondary" className="text-xs">Stopped</Badge>}
-      </div>
-      <p className="text-sm text-muted-foreground">Manage the photos-web app from your local checkout.</p>
-
-      <div className="flex flex-col gap-1.5">
-        <label className="text-sm font-medium">Photos Web repo path</label>
-        <Input
-          placeholder="~/projects/starkeep/photos"
-          value={path}
-          onChange={(e) => setPath(e.currentTarget.value)}
-          disabled={installing || deploying}
-        />
-      </div>
-
-      {/* Local */}
-      <div className="flex flex-col gap-3">
-        <p className="text-sm font-medium">Local</p>
-        {localError && <Alert variant="destructive"><AlertTitle>Error</AlertTitle><AlertDescription>{localError}</AlertDescription></Alert>}
-        {localSuccess && port && (
-          <Alert>
-            <AlertTitle>Running</AlertTitle>
-            <AlertDescription>
-              photos-web is running at{" "}
-              <a href={`http://localhost:${port}`} target="_blank" rel="noopener noreferrer" className="underline">{`http://localhost:${port}`}</a>
-            </AlertDescription>
-          </Alert>
-        )}
-        <div className="flex flex-wrap gap-2">
-          <Button onClick={handleInstall} disabled={installing || !path.trim()}>
-            {installing && <span className="mr-1 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-            {running ? "Reinstall & Restart" : "Install & Start"}
-          </Button>
-          {running && (
-            <Button variant="outline" onClick={handleStop} disabled={stopping}>
-              {stopping && <span className="mr-1 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-              Stop
-            </Button>
-          )}
-          {running && port && (
-            <a href={`http://localhost:${port}`} target="_blank" rel="noopener noreferrer" className="text-sm underline self-center">Open photos-web ↗</a>
-          )}
-        </div>
-        {(installing || installLog.length > 0) && (
-          <ScrollArea className="h-48 rounded-md border">
-            <pre className="p-3 font-mono text-xs whitespace-pre-wrap">{installLog.join("\n")}</pre>
-            <div ref={installLogEndRef} />
-          </ScrollArea>
-        )}
-      </div>
-
-      <Separator />
-
-      {/* Cloud */}
-      <div className="flex flex-col gap-3">
-        <div className="flex items-center gap-2">
-          <p className="text-sm font-medium">Cloud</p>
-          {cloudDeployed === true && <Badge variant="secondary" className="text-xs bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200">Deployed</Badge>}
-          {cloudDeployed === true && cloudConfig && typeof cloudConfig.photosWebUrl === "string" && (
-            <a href={cloudConfig.photosWebUrl} target="_blank" rel="noopener noreferrer" className="text-sm underline">{cloudConfig.photosWebUrl} ↗</a>
-          )}
-        </div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-background rounded-lg border shadow-lg max-w-lg w-full flex flex-col gap-4 p-5">
+        <h3 className="text-lg font-semibold">
+          Install {entry.manifest.name ?? entry.appId}?
+        </h3>
         <p className="text-sm text-muted-foreground">
-          Deploy photos-web infrastructure to AWS (thumbnail Lambda, static server Lambda, API Gateway). Requires cloud setup to be complete.
+          This app is requesting the following access to your shared data. Other apps with grants on
+          the same types will see records this app creates; records persist if the app is uninstalled.
         </p>
-        {deployError && <Alert variant="destructive"><AlertTitle>Deploy failed</AlertTitle><AlertDescription>{deployError}</AlertDescription></Alert>}
-        {deploySuccess && <Alert><AlertTitle>Deployed</AlertTitle><AlertDescription>Photos infrastructure deployed. Runtime config updated with new cloud URLs.</AlertDescription></Alert>}
-        <div className="flex flex-wrap gap-2">
-          <Button onClick={handleDeploy} disabled={deploying || !path.trim() || coreDeployed === false}>
-            {deploying && <span className="mr-1 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-            Deploy to cloud
-          </Button>
-        </div>
-        {coreDeployed === false && <p className="text-xs text-muted-foreground">Core infrastructure must be deployed first.</p>}
-        {(deploying || deployLog.length > 0) && (
-          <ScrollArea className="h-60 rounded-md border">
-            <pre className="p-3 font-mono text-xs whitespace-pre-wrap">{deployLog.join("\n")}</pre>
-            <div ref={deployLogEndRef} />
-          </ScrollArea>
+
+        {grants.length === 0 ? (
+          <p className="text-sm">No shared-type grants requested.</p>
+        ) : (
+          <ul className="flex flex-col gap-3">
+            {grants.map((g) => {
+              // Per design: any access (read or readwrite) implicitly grants
+              // SELECT on the per-type metadata table. metadataWrite adds
+              // INSERT/UPDATE on top of that read.
+              const dataPermissions = g.access === "readwrite" ? "read + write" : "read";
+              const metadataPermissions = g.metadataWrite ? "read + write" : "read";
+              return (
+                <li key={g.typeId} className="border rounded-md p-3 flex flex-col gap-1">
+                  <div className="flex items-center gap-2 text-sm flex-wrap">
+                    <span className="font-mono">{g.typeId}</span>
+                    <Badge variant="secondary" className="text-xs">records: {dataPermissions}</Badge>
+                    <Badge variant="secondary" className="text-xs">metadata: {metadataPermissions}</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{g.rationale}</p>
+                </li>
+              );
+            })}
+          </ul>
         )}
+
+        {(canIngestUnknown || canPromoteFromUnknown) && (
+          <div className="text-xs text-muted-foreground">
+            Additionally: {canIngestUnknown ? "ingest unknown-type files; " : ""}
+            {canPromoteFromUnknown ? "promote unknown records to typed records" : ""}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="outline" onClick={onCancel}>Cancel</Button>
+          <Button onClick={onApprove}>Approve &amp; Install</Button>
+        </div>
       </div>
     </div>
   );
 }
+

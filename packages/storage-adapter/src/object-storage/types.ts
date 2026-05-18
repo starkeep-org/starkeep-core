@@ -1,10 +1,14 @@
 export interface PutOptions {
   contentType?: string;
+  /** Free-form user metadata; preserved by adapters that support it. */
+  metadata?: Record<string, string>;
 }
 
 export interface GetResult {
   data: Uint8Array;
   contentType?: string;
+  /** User metadata supplied at write time. */
+  metadata?: Record<string, string>;
   size: number;
 }
 

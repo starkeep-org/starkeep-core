@@ -1,5 +1,8 @@
 export type {
   ChangeLogEntry,
+  AppSyncableRowEntry,
+  AppSyncableApplier,
+  ScanCapableApplier,
   ChangeLog,
   SyncPullRequest,
   SyncPullResponse,
@@ -10,6 +13,7 @@ export type {
   SyncConflict,
   SyncTransport,
   FileSyncManifest,
+  FileEntry,
   FileSyncEngine,
   ChangeEventType,
   ChangeEvent,
@@ -19,6 +23,9 @@ export type {
   SyncEngineOptions,
   SyncStateStore,
   RecordChangeOptions,
+  AppSyncableTableInfo,
+  AppSyncableNamespace,
+  AppSyncableNamespaceStore,
 } from "./types.js";
 
 export { createChangeLog } from "./change-log.js";

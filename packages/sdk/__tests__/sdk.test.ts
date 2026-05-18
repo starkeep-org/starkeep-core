@@ -1,11 +1,56 @@
 import { describe, it, expect } from "vitest";
-import { createHLCClock } from "@starkeep/core";
+import {
+  createHLCClock,
+  type StarkeepId,
+  type HLCTimestamp,
+  type TypeRegistration,
+  type TypeRegistrationStore,
+} from "@starkeep/core";
 import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,
 } from "@starkeep/storage-adapter";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
+import {
+  type AccessPolicy,
+  type AccessPolicyStore,
+  type SharingToken,
+  type SharingTokenStore,
+} from "@starkeep/access-control";
 import { createStarkeepSdk } from "../src/sdk.js";
+
+function memoryPolicyStore(): AccessPolicyStore {
+  const policies = new Map<StarkeepId, AccessPolicy>();
+  return {
+    async putPolicy(p) { policies.set(p.policyId, p); },
+    async getPolicy(id) { return policies.get(id) ?? null; },
+    async listPolicies() { return Array.from(policies.values()); },
+    async deletePolicy(id) { policies.delete(id); },
+  };
+}
+
+function memoryTokenStore(): SharingTokenStore {
+  const byHash = new Map<string, SharingToken>();
+  return {
+    async putToken(t) { byHash.set(t.tokenHash, t); },
+    async getTokenByHash(h) { return byHash.get(h) ?? null; },
+    async incrementUsage(h, _now: HLCTimestamp) {
+      const t = byHash.get(h);
+      if (t) t.usageCount++;
+    },
+    async deleteToken(h) { byHash.delete(h); },
+  };
+}
+
+function memoryTypeRegistrationStore(): TypeRegistrationStore {
+  const regs = new Map<string, TypeRegistration>();
+  return {
+    async put(r) { regs.set(r.typeId, r); },
+    async get(id) { return regs.get(id) ?? null; },
+    async list() { return Array.from(regs.values()); },
+    async delete(id) { regs.delete(id); },
+  };
+}
 
 describe("createStarkeepSdk", () => {
   async function createTestSdk(withSync = false) {
@@ -35,6 +80,9 @@ describe("createStarkeepSdk", () => {
     const sdk = await createStarkeepSdk({
       databaseAdapter: localDatabase,
       objectStorageAdapter: localObjectStorage,
+      accessPolicyStore: memoryPolicyStore(),
+      sharingTokenStore: memoryTokenStore(),
+      typeRegistrationStore: memoryTypeRegistrationStore(),
       ownerId: "test-owner",
       nodeId: "test-node",
       clock,
@@ -45,29 +93,12 @@ describe("createStarkeepSdk", () => {
   }
 
   describe("data operations", () => {
-    it("should put and get a data record", async () => {
-      const { sdk } = await createTestSdk();
-
-      const record = await sdk.data.put({
-        type: "@test/photo",
-        ownerId: "test-owner",
-        content: { title: "My Photo" },
-      });
-
-      expect(record.kind).toBe("data");
-      expect(record.type).toBe("@test/photo");
-
-      const retrieved = await sdk.data.get(record.id);
-      expect(retrieved).not.toBeNull();
-      expect(retrieved!.content).toEqual({ title: "My Photo" });
-    });
-
     it("should put with file and compute content hash", async () => {
       const { sdk, localObjectStorage } = await createTestSdk();
 
       const fileData = Buffer.from("fake image data");
       const record = await sdk.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner" },
+        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
         fileData,
         "image/jpeg",
       );
@@ -77,21 +108,92 @@ describe("createStarkeepSdk", () => {
       expect(record.mimeType).toBe("image/jpeg");
       expect(record.sizeBytes).toBe(fileData.length);
 
-      const stored = await localObjectStorage.get(record.objectStorageKey!);
+      // Key must live under shared/<typeId>/... so that any app with read
+      // access to the type can resolve it under its own IAM grants — the
+      // key MUST NOT carry the writing app's identifier.
+      expect(record.objectStorageKey).toMatch(/^shared\/@test\/photo\/[0-9a-f]{2}\/[0-9a-f]{64}$/);
+
+      const stored = await localObjectStorage.get(record.objectStorageKey);
       expect(stored).not.toBeNull();
+    });
+
+    it("writes the same shared/<type> key regardless of which client wrote the file", async () => {
+      const localDatabase = new MockDatabaseAdapter();
+      const localObjectStorage = new MockObjectStorageAdapter();
+      const clock = createHLCClock({
+        nodeId: "shared",
+        wallClockFunction: () => 1000,
+      });
+      const sdkA = await createStarkeepSdk({
+        databaseAdapter: localDatabase,
+        objectStorageAdapter: localObjectStorage,
+        accessPolicyStore: memoryPolicyStore(),
+        sharingTokenStore: memoryTokenStore(),
+        typeRegistrationStore: memoryTypeRegistrationStore(),
+        ownerId: "test-owner",
+        nodeId: "app-a",
+        clock,
+      });
+      const sdkB = await createStarkeepSdk({
+        databaseAdapter: localDatabase,
+        objectStorageAdapter: localObjectStorage,
+        accessPolicyStore: memoryPolicyStore(),
+        sharingTokenStore: memoryTokenStore(),
+        typeRegistrationStore: memoryTypeRegistrationStore(),
+        ownerId: "test-owner",
+        nodeId: "app-b",
+        clock,
+      });
+
+      const fileData = Buffer.from("shared bytes");
+      const written = await sdkA.data.putWithFile(
+        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        fileData,
+        "image/jpeg",
+      );
+
+      const readBack = await sdkB.data.get(written.id);
+      expect(readBack).not.toBeNull();
+      expect(readBack!.objectStorageKey).toBe(written.objectStorageKey);
+      expect(written.objectStorageKey).toMatch(/^shared\/@test\/photo\//);
+
+      const fileFromB = await localObjectStorage.get(readBack!.objectStorageKey);
+      expect(fileFromB).not.toBeNull();
+      expect(Buffer.from(fileFromB!.data).toString()).toBe("shared bytes");
     });
 
     it("should delete a record", async () => {
       const { sdk } = await createTestSdk();
 
-      const record = await sdk.data.put({
-        type: "@test/photo",
-        ownerId: "test-owner",
-      });
+      const record = await sdk.data.putWithFile(
+        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        Buffer.from("x"),
+        "image/jpeg",
+      );
 
       await sdk.data.delete(record.id);
       const retrieved = await sdk.data.get(record.id);
       expect(retrieved).toBeNull();
+    });
+
+    it("writes and reads a per-type metadata row", async () => {
+      const { sdk } = await createTestSdk();
+      const record = await sdk.data.putWithFile(
+        { type: "image", ownerId: "test-owner", originAppId: "test" },
+        Buffer.from("x"),
+        "image/jpeg",
+      );
+
+      await sdk.data.putMetadata("image", {
+        recordId: record.id,
+        width: 800,
+        height: 600,
+      });
+
+      const meta = await sdk.data.getMetadata("image", record.id);
+      expect(meta).not.toBeNull();
+      expect(meta!["width"]).toBe(800);
+      expect(meta!["height"]).toBe(600);
     });
   });
 
@@ -99,13 +201,18 @@ describe("createStarkeepSdk", () => {
     it("should search records", async () => {
       const { sdk } = await createTestSdk();
 
-      await sdk.data.put({ type: "@test/photo", ownerId: "test-owner" });
-      await sdk.data.put({ type: "@test/document", ownerId: "test-owner" });
+      await sdk.data.putWithFile(
+        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        Buffer.from("a"),
+        "image/jpeg",
+      );
+      await sdk.data.putWithFile(
+        { type: "@test/document", ownerId: "test-owner", originAppId: "test" },
+        Buffer.from("b"),
+        "text/plain",
+      );
 
-      const result = await sdk.index.search({
-        types: ["@test/photo"],
-      });
-
+      const result = await sdk.index.search({ types: ["@test/photo"] });
       expect(result.items.length).toBeGreaterThanOrEqual(1);
     });
   });
@@ -114,18 +221,16 @@ describe("createStarkeepSdk", () => {
     it("should compute aggregations", async () => {
       const { sdk } = await createTestSdk();
 
-      await sdk.data.put({
-        type: "@test/photo",
-        ownerId: "test-owner",
-        sizeBytes: 1000,
-        mimeType: "image/jpeg",
-      });
-      await sdk.data.put({
-        type: "@test/photo",
-        ownerId: "test-owner",
-        sizeBytes: 2000,
-        mimeType: "image/png",
-      });
+      await sdk.data.putWithFile(
+        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        Buffer.alloc(1000),
+        "image/jpeg",
+      );
+      await sdk.data.putWithFile(
+        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        Buffer.alloc(2000),
+        "image/png",
+      );
 
       const result = await sdk.aggregations.compute();
       expect(result.totalCount).toBe(2);
@@ -154,6 +259,25 @@ describe("createStarkeepSdk", () => {
     });
   });
 
+  describe("type registrations", () => {
+    it("should register and list types", async () => {
+      const { sdk } = await createTestSdk();
+      const reg = await sdk.typeRegistrations.register({
+        typeId: "image",
+        schema: { type: "object" },
+        schemaVersion: "1.0.0",
+        description: "Image file",
+        registeredByAppId: "photos",
+      });
+      expect(reg.typeId).toBe("image");
+      expect(reg.registeredAt).toBeTruthy();
+
+      const list = await sdk.typeRegistrations.list();
+      expect(list).toHaveLength(1);
+      expect(list[0].typeId).toBe("image");
+    });
+  });
+
   describe("sync operations", () => {
     it("should be null when no remote adapters configured", async () => {
       const { sdk } = await createTestSdk(false);
@@ -168,10 +292,11 @@ describe("createStarkeepSdk", () => {
     it("should sync data between local and remote", async () => {
       const { sdk } = await createTestSdk(true);
 
-      await sdk.data.put({
-        type: "@test/photo",
-        ownerId: "test-owner",
-      });
+      await sdk.data.putWithFile(
+        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        Buffer.from("x"),
+        "image/jpeg",
+      );
 
       const result = await sdk.sync!.fullSync();
       expect(result.pushed).toBeGreaterThanOrEqual(1);

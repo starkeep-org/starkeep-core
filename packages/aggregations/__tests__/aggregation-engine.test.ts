@@ -31,6 +31,7 @@ describe("createAggregationEngine", () => {
       {
         type: options.type,
         ownerId: "test-owner",
+        originAppId: "test",
         mimeType: options.mimeType ?? null,
         sizeBytes: options.sizeBytes ?? null,
       },

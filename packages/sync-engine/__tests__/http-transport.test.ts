@@ -4,6 +4,7 @@ import {
   createHLCClock,
   createDataRecord,
   type DataRecord,
+  type CreateDataRecordInput,
 } from "@starkeep/core";
 import {
   MockDatabaseAdapter,
@@ -12,6 +13,19 @@ import {
 import { createHttpSyncHandler } from "../src/transports/http-server.js";
 import { createHttpSyncTransport } from "../src/transports/http-transport.js";
 import { createSyncEngine } from "../src/sync-engine.js";
+
+function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
+  return {
+    type: "@test/note",
+    ownerId: "u1",
+    originAppId: "@starkeep/sync-engine",
+    contentHash: `sha256:${Math.random().toString(36).slice(2)}`,
+    objectStorageKey: `shared/@test/note/ab/${Math.random().toString(36).slice(2)}`,
+    mimeType: "text/plain",
+    sizeBytes: 4,
+    ...over,
+  };
+}
 
 async function startServer(
   handler: ReturnType<typeof createHttpSyncHandler>,
@@ -87,7 +101,7 @@ describe("HTTP sync transport round-trip", () => {
     });
 
     const record = createDataRecord(
-      { type: "@test/note", ownerId: "u1", content: { title: "hi" } },
+      baseInput({ originalFilename: "hi.txt" }),
       clientAClock,
     );
     await clientADb.put(record);
@@ -123,7 +137,7 @@ describe("HTTP sync transport round-trip", () => {
 
     const pulled = await clientBDb.get(record.id);
     expect(pulled).not.toBeNull();
-    expect((pulled as DataRecord).content).toEqual({ title: "hi" });
+    expect((pulled as DataRecord).originalFilename).toBe("hi.txt");
   });
 
   it("server rejects a push whose baseVersion is stale", async () => {
@@ -133,10 +147,7 @@ describe("HTTP sync transport round-trip", () => {
       nodeId: "server",
       wallClockFunction: () => Date.now(),
     });
-    const record = createDataRecord(
-      { type: "@test/note", ownerId: "u2" },
-      serverClock,
-    );
+    const record = createDataRecord(baseInput({ ownerId: "u2" }), serverClock);
     const recordV3: DataRecord = { ...record, version: 3 };
     await remoteDatabase.put(recordV3);
 
@@ -164,7 +175,7 @@ describe("HTTP sync transport round-trip", () => {
       ...recordV3,
       version: 2,
       updatedAt: clientClock.now(),
-      content: { title: "stale" },
+      originalFilename: "stale",
     };
     await clientDb.put(stale);
     await engine.recordChange("update", stale, { baseVersion: 1 });

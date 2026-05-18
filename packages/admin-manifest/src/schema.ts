@@ -33,9 +33,33 @@ export const appComputeHandlerSchema = z.object({
   env: z.record(z.string()).default({}),
 });
 
-export const appPrivateResourceSchema = z.object({
-  database: z.boolean().default(true),
-  objectStorage: z.boolean().default(true),
+const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);
+
+export const syncableTableColumnSchema = z
+  .object({
+    name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
+    type: z.enum(["text", "integer", "real", "blob", "boolean"]),
+    notNull: z.boolean().default(false),
+    primaryKey: z.boolean().default(false),
+  })
+  .refine((col) => !RESERVED_SYNC_COLUMNS.has(col.name), {
+    message: `Column names "updated_at" and "deleted_at" are reserved by the sync runtime`,
+  });
+
+export const syncableTableSchema = z.object({
+  // Becomes "<appId>_syncable_<name>" in the local SQLite schema.
+  name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
+  columns: z.array(syncableTableColumnSchema).min(1),
+});
+
+export const appSpecificSyncableSchema = z.object({
+  tables: z.array(syncableTableSchema).default([]),
+  // Opt-in for apps/<appId>/syncable/ object-storage prefix.
+  files: z.boolean().default(false),
+});
+
+export const infraRequirementsSchema = z.object({
+  sharedTypeAccess: z.array(sharedTypeAccessSchema).default([]),
   compute: z
     .object({
       enabled: z.boolean().default(false),
@@ -49,11 +73,7 @@ export const appPrivateResourceSchema = z.object({
   canIngestUnknown: z.boolean().default(false),
   // Read access to `unknown` plus the right to call promoteFromUnknown.
   canPromoteFromUnknown: z.boolean().default(false),
-});
-
-export const infraRequirementsSchema = z.object({
-  sharedTypeAccess: z.array(sharedTypeAccessSchema).default([]),
-  appPrivate: appPrivateResourceSchema.default({}),
+  appSpecificSyncable: appSpecificSyncableSchema.default({}),
   sharedResources: z.array(sharedResourceRequirementSchema).default([]),
 });
 
@@ -87,7 +107,9 @@ export type AppTier = z.infer<typeof appTierSchema>;
 export type SharedTypeAccess = z.infer<typeof sharedTypeAccessSchema>;
 export type SharedResourceRequirement = z.infer<typeof sharedResourceRequirementSchema>;
 export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;
-export type AppPrivateResource = z.infer<typeof appPrivateResourceSchema>;
+export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;
+export type SyncableTable = z.infer<typeof syncableTableSchema>;
+export type AppSpecificSyncable = z.infer<typeof appSpecificSyncableSchema>;
 export type PermissionEntry = z.infer<typeof permissionEntrySchema>;
 export type InfraRequirements = z.infer<typeof infraRequirementsSchema>;
 export type AppManifest = z.infer<typeof appManifestSchema>;

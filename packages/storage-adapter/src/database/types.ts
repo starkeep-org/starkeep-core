@@ -31,12 +31,6 @@ export type BatchOperation =
   | { type: "put"; record: DataRecord }
   | { type: "delete"; id: StarkeepId };
 
-export interface Migration {
-  version: number;
-  name: string;
-  up: (transaction: Transaction) => void | Promise<void>;
-}
-
 export interface Transaction {
   put(record: DataRecord): Promise<void>;
   get(id: StarkeepId): Promise<DataRecord | null>;

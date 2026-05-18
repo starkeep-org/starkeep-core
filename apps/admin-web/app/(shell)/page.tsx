@@ -63,7 +63,6 @@ interface DataTypesResponse {
 interface Watch {
   id: string;
   directoryPath: string;
-  targetType: string;
   state: string;
   totalFiles: number;
   syncedFiles: number;
@@ -97,6 +96,8 @@ function extractEmail(idToken: string): string | null {
 
 export default function DashboardPage() {
   const [refreshKey, setRefreshKey] = useState(0);
+  const [localRefreshKey, setLocalRefreshKey] = useState(0);
+  const bumpAll = () => { setRefreshKey((k) => k + 1); setLocalRefreshKey((k) => k + 1); };
 
   // Local data server
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
@@ -159,7 +160,7 @@ export default function DashboardPage() {
   const anyDaemonLoading = Object.values(daemonLoading).some(Boolean);
   useEffect(() => {
     if (!anyDaemonLoading) return;
-    const timer = setInterval(() => setRefreshKey((k) => k + 1), 2000);
+    const timer = setInterval(() => setLocalRefreshKey((k) => k + 1), 2000);
     return () => clearInterval(timer);
   }, [anyDaemonLoading]);
 
@@ -175,6 +176,15 @@ export default function DashboardPage() {
   }, [localFileBrowser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function startDaemon(id: string) {
+    // Defense in depth: if the data server is already reachable, refuse to
+    // re-spawn it. The current process would fail to bind port 9820 anyway,
+    // and the daemon route would clobber the existing pid file in the process.
+    if (id === "local-data-server") {
+      try {
+        const probe = await fetch("http://127.0.0.1:9820/health", { signal: AbortSignal.timeout(1500) });
+        if (probe.ok) { setLocalRefreshKey((k) => k + 1); return; }
+      } catch { /* not reachable — proceed to start */ }
+    }
     setDaemonLoading((l) => ({ ...l, [id]: true }));
     try {
       await fetch("/api/exec/daemon", {
@@ -188,7 +198,7 @@ export default function DashboardPage() {
     }
     setTimeout(() => {
       setDaemonLoading((l) => ({ ...l, [id]: false }));
-      setRefreshKey((k) => k + 1);
+      setLocalRefreshKey((k) => k + 1);
     }, 90_000);
   }
 
@@ -200,7 +210,7 @@ export default function DashboardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "stop", id }),
       });
-      setRefreshKey((k) => k + 1);
+      setLocalRefreshKey((k) => k + 1);
     } finally {
       setDaemonLoading((l) => ({ ...l, [id]: false }));
     }
@@ -243,14 +253,24 @@ export default function DashboardPage() {
 
     async function fetchLocal() {
       try {
+        const healthResp = await fetch("http://127.0.0.1:9820/health", { signal: controller.signal });
+        if (!healthResp.ok) { setLocalOnline(false); return; }
+        setLocalOnline(true);
+      } catch {
+        if (!controller.signal.aborted) setLocalOnline(false);
+        return;
+      }
+      // Server is reachable. Data-bearing endpoints require app-auth headers
+      // that admin-web doesn't currently send, so a non-2xx here doesn't mean
+      // the server is offline — just that we can't read that view.
+      try {
         const [typesResp, watchesResp, configResp, authStatusResp] = await Promise.all([
           fetch("http://127.0.0.1:9820/data/types", { signal: controller.signal }),
           fetch("http://127.0.0.1:9820/watches", { signal: controller.signal }),
           fetch("http://127.0.0.1:9820/config", { signal: controller.signal }),
           fetch("http://127.0.0.1:9820/auth/status", { signal: controller.signal }),
         ]);
-        if (typesResp.ok) { setLocalTypes(await typesResp.json()); setLocalOnline(true); }
-        else setLocalOnline(false);
+        if (typesResp.ok) setLocalTypes(await typesResp.json());
         if (watchesResp.ok) setWatches((await watchesResp.json()).watches);
         if (configResp.ok) {
           const cfg = await configResp.json();
@@ -260,20 +280,18 @@ export default function DashboardPage() {
           const status = await authStatusResp.json();
           setLocalAuthAuthenticated(status.authenticated as boolean);
         }
-      } catch {
-        if (!controller.signal.aborted) setLocalOnline(false);
-      }
+      } catch { /* leave per-section state null */ }
     }
 
     fetchLocal();
     return () => controller.abort();
-  }, [refreshKey]);
+  }, [refreshKey, localRefreshKey]);
 
   // Fetch local app status
   useEffect(() => {
     setLocalFileBrowser(null);
     checkUrl("http://localhost:5173").then(setLocalFileBrowser);
-  }, [refreshKey]);
+  }, [refreshKey, localRefreshKey]);
 
   // Read cloud config + cognito session
   useEffect(() => {
@@ -357,7 +375,7 @@ export default function DashboardPage() {
         });
         await writeCognitoSession({ refreshToken: result.tokens.refreshToken, userEmail: email ?? undefined });
         setSignInOpen(false);
-        setRefreshKey((k) => k + 1);
+        bumpAll();
       } else if (result.challengeName === "NEW_PASSWORD_REQUIRED" && result.session) {
         setSignInChallenge({ session: result.session });
       } else {
@@ -386,7 +404,7 @@ export default function DashboardPage() {
       });
       await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: email ?? undefined });
       setSignInOpen(false);
-      setRefreshKey((k) => k + 1);
+      bumpAll();
     } catch (err) {
       setSignInError(err instanceof Error ? err.message : "Failed to set new password");
     } finally {
@@ -412,7 +430,7 @@ export default function DashboardPage() {
       const resp = await fetch("http://127.0.0.1:9820/watches", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ directoryPath: path, targetType: "@starkeep/image", recursive: true }),
+        body: JSON.stringify({ directoryPath: path, recursive: true }),
       });
       const data = await resp.json();
       if (resp.ok) {
@@ -438,14 +456,14 @@ export default function DashboardPage() {
 
   async function handleSignOut() {
     await fetch("http://127.0.0.1:9820/auth/logout", { method: "POST" }).catch(() => {});
-    setRefreshKey((k) => k + 1);
+    bumpAll();
   }
 
   return (
     <div className="max-w-7xl">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
-        <Button variant="outline" size="sm" onClick={() => setRefreshKey((k) => k + 1)}>Refresh</Button>
+        <Button variant="outline" size="sm" onClick={bumpAll}>Refresh</Button>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
@@ -488,33 +506,37 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {localOnline === true && localTypes && (
+            {localOnline === true && (
               <div className="flex flex-col gap-3">
-                <button
-                  className="text-sm text-left underline decoration-dotted underline-offset-2"
-                  onClick={() => setTypesExpanded((e) => !e)}
-                >
-                  {localTypes.types.length} type{localTypes.types.length !== 1 ? "s" : ""} registered
-                  &nbsp;·&nbsp;
-                  {localTypes.total} record{localTypes.total !== 1 ? "s" : ""} total
-                </button>
+                {localTypes && (
+                  <>
+                    <button
+                      className="text-sm text-left underline decoration-dotted underline-offset-2"
+                      onClick={() => setTypesExpanded((e) => !e)}
+                    >
+                      {localTypes.types.length} type{localTypes.types.length !== 1 ? "s" : ""} registered
+                      &nbsp;·&nbsp;
+                      {localTypes.total} record{localTypes.total !== 1 ? "s" : ""} total
+                    </button>
 
-                {typesExpanded && (
-                  <div className="flex flex-col gap-1 pl-2">
-                    {localTypes.types.length === 0 ? (
-                      <span className="text-xs text-muted-foreground">No records yet</span>
-                    ) : (
-                      localTypes.types.map((t) => (
-                        <div key={t.record_type} className="flex items-center justify-between">
-                          <code className="font-mono text-xs">{t.record_type}</code>
-                          <Badge variant="secondary" className="text-xs">{t.count}</Badge>
-                        </div>
-                      ))
+                    {typesExpanded && (
+                      <div className="flex flex-col gap-1 pl-2">
+                        {localTypes.types.length === 0 ? (
+                          <span className="text-xs text-muted-foreground">No records yet</span>
+                        ) : (
+                          localTypes.types.map((t) => (
+                            <div key={t.record_type} className="flex items-center justify-between">
+                              <code className="font-mono text-xs">{t.record_type}</code>
+                              <Badge variant="secondary" className="text-xs">{t.count}</Badge>
+                            </div>
+                          ))
+                        )}
+                      </div>
                     )}
-                  </div>
-                )}
 
-                <Separator />
+                    <Separator />
+                  </>
+                )}
 
                 <p className="text-xs font-medium text-muted-foreground">Watches</p>
 
@@ -524,7 +546,8 @@ export default function DashboardPage() {
                       <div key={w.id} className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0 flex-1">
                           <span className="text-sm truncate flex-1">{w.directoryPath}</span>
-                          <Badge variant="outline" className="text-xs shrink-0">{w.targetType}</Badge>
+                          <Badge variant="outline" className="text-xs shrink-0">{w.state}</Badge>
+                          <span className="text-xs text-muted-foreground shrink-0">{w.syncedFiles}/{w.totalFiles}</span>
                         </div>
                         <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive shrink-0"
                           onClick={() => handleRemoveWatch(w.id)}

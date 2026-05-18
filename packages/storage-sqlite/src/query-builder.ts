@@ -13,13 +13,11 @@ const FIELD_MAP: Record<string, string> = {
   objectStorageKey: "object_storage_key",
   mimeType: "mime_type",
   sizeBytes: "size_bytes",
+  originAppId: "origin_app_id",
+  parentId: "parent_id",
 };
 
 function mapField(field: string): string {
-  if (field.startsWith("content.")) {
-    const jsonKey = field.slice("content.".length);
-    return `json_extract(content, '$.${jsonKey}')`;
-  }
   return FIELD_MAP[field] ?? field;
 }
 
@@ -84,7 +82,7 @@ export function buildSelectQuery(query: Query): BuiltQuery {
     params.push(query.cursor);
   }
 
-  let sql = "SELECT * FROM records";
+  let sql = "SELECT * FROM shared_records";
   if (conditions.length > 0) {
     sql += ` WHERE ${conditions.join(" AND ")}`;
   }
@@ -105,4 +103,3 @@ export function buildSelectQuery(query: Query): BuiltQuery {
 
   return { sql, params };
 }
-

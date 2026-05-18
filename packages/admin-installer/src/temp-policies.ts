@@ -520,14 +520,14 @@ export function buildRuntimePolicy(
   const s3SharedResources: string[] = [];
   for (const typeId of sharedTypeIds) {
     s3SharedResources.push(
-      `arn:aws:s3:::${stackPrefix}-files-*/shared/${typeId}/data/*`,
+      `arn:aws:s3:::${stackPrefix}-files-*/shared/${typeId}/*`,
     );
   }
   if (canIngestUnknown) {
-    s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/unknown/data/*`);
+    s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/unknown/*`);
   }
   if (canPromoteFromUnknown) {
-    s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/unknown/data/*`);
+    s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/unknown/*`);
   }
 
   const statements: object[] = [

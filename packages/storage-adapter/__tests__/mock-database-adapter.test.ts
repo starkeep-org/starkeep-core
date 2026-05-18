@@ -1,10 +1,23 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createHLCClock, createDataRecord, createStarkeepId } from "@starkeep/core";
+import { createHLCClock, createDataRecord, createStarkeepId, type CreateDataRecordInput } from "@starkeep/core";
 import { MockDatabaseAdapter } from "../src/mock/mock-database-adapter.js";
+
+function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
+  return {
+    type: "@test/photo",
+    ownerId: "u1",
+    originAppId: "test",
+    contentHash: `sha256:${Math.random().toString(36).slice(2)}`,
+    objectStorageKey: `shared/@test/photo/ab/${Math.random().toString(36).slice(2)}`,
+    mimeType: "image/jpeg",
+    sizeBytes: 1024,
+    ...over,
+  };
+}
 
 describe("MockDatabaseAdapter", () => {
   let adapter: MockDatabaseAdapter;
-  const clock = createHLCClock({ nodeId: "test", wallClockFn: () => 1000 });
+  const clock = createHLCClock({ nodeId: "test", wallClockFunction: () => 1000 });
 
   beforeEach(async () => {
     adapter = new MockDatabaseAdapter();
@@ -24,7 +37,7 @@ describe("MockDatabaseAdapter", () => {
 
   describe("put / get", () => {
     it("should store and retrieve a data record", async () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord(baseInput(), clock);
       await adapter.put(record);
       const retrieved = await adapter.get(record.id);
       expect(retrieved).toEqual(record);
@@ -36,7 +49,7 @@ describe("MockDatabaseAdapter", () => {
     });
 
     it("should return clones (not same reference)", async () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord(baseInput(), clock);
       await adapter.put(record);
       const a = await adapter.get(record.id);
       const b = await adapter.get(record.id);
@@ -47,7 +60,7 @@ describe("MockDatabaseAdapter", () => {
 
   describe("delete", () => {
     it("should remove a record", async () => {
-      const record = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
+      const record = createDataRecord(baseInput(), clock);
       await adapter.put(record);
       await adapter.delete(record.id);
       expect(await adapter.get(record.id)).toBeNull();
@@ -56,8 +69,8 @@ describe("MockDatabaseAdapter", () => {
 
   describe("query", () => {
     it("should filter by type", async () => {
-      const record1 = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
-      const record2 = createDataRecord({ type: "@test/video", ownerId: "u1" }, clock);
+      const record1 = createDataRecord(baseInput({ type: "@test/photo" }), clock);
+      const record2 = createDataRecord(baseInput({ type: "@test/video" }), clock);
       await adapter.put(record1);
       await adapter.put(record2);
 
@@ -68,7 +81,7 @@ describe("MockDatabaseAdapter", () => {
 
     it("should support limit and cursor pagination", async () => {
       const records = Array.from({ length: 5 }, (_, i) =>
-        createDataRecord({ type: `@test/item-${i}`, ownerId: "u1" }, clock),
+        createDataRecord(baseInput({ type: `@test/item-${i}` }), clock),
       );
       for (const record of records) await adapter.put(record);
 
@@ -87,8 +100,8 @@ describe("MockDatabaseAdapter", () => {
     });
 
     it("should support eq filter", async () => {
-      const record1 = createDataRecord({ type: "@test/photo", ownerId: "u1" }, clock);
-      const record2 = createDataRecord({ type: "@test/photo", ownerId: "u2" }, clock);
+      const record1 = createDataRecord(baseInput({ ownerId: "u1" }), clock);
+      const record2 = createDataRecord(baseInput({ ownerId: "u2" }), clock);
       await adapter.put(record1);
       await adapter.put(record2);
 
@@ -100,8 +113,8 @@ describe("MockDatabaseAdapter", () => {
     });
 
     it("should support sorting", async () => {
-      const record1 = createDataRecord({ type: "@test/b", ownerId: "u1" }, clock);
-      const record2 = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
+      const record1 = createDataRecord(baseInput({ type: "@test/b" }), clock);
+      const record2 = createDataRecord(baseInput({ type: "@test/a" }), clock);
       await adapter.put(record1);
       await adapter.put(record2);
 
@@ -115,8 +128,8 @@ describe("MockDatabaseAdapter", () => {
 
   describe("batch", () => {
     it("should apply multiple operations", async () => {
-      const record1 = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
-      const record2 = createDataRecord({ type: "@test/b", ownerId: "u1" }, clock);
+      const record1 = createDataRecord(baseInput({ type: "@test/a" }), clock);
+      const record2 = createDataRecord(baseInput({ type: "@test/b" }), clock);
       await adapter.put(record1);
 
       await adapter.batch([
@@ -131,7 +144,7 @@ describe("MockDatabaseAdapter", () => {
 
   describe("transaction", () => {
     it("should commit changes on success", async () => {
-      const record = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
+      const record = createDataRecord(baseInput({ type: "@test/a" }), clock);
       await adapter.transaction(async (transaction) => {
         await transaction.put(record);
       });
@@ -139,7 +152,7 @@ describe("MockDatabaseAdapter", () => {
     });
 
     it("should rollback on error", async () => {
-      const record = createDataRecord({ type: "@test/a", ownerId: "u1" }, clock);
+      const record = createDataRecord(baseInput({ type: "@test/a" }), clock);
       await adapter.put(record);
 
       await expect(

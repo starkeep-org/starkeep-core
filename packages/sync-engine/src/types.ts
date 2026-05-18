@@ -1,6 +1,62 @@
 import type { StarkeepId, HLCTimestamp, AnyRecord } from "@starkeep/core";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 
+// ---------------------------------------------------------------------------
+// Per-table schema info stored in the namespace registry so appliers can UPSERT
+// by PK without re-consulting the manifest at apply time.
+// ---------------------------------------------------------------------------
+
+export interface AppSyncableTableInfo {
+  readonly name: string;
+  readonly pkColumns: string[];
+}
+
+export interface AppSyncableNamespace {
+  readonly appId: string;
+  readonly tables: AppSyncableTableInfo[];
+  readonly filesEnabled: boolean;
+  /** Derived from tables — convenience accessor. */
+  readonly tableNames: string[];
+}
+
+export interface AppSyncableNamespaceStore {
+  get(appId: string): AppSyncableNamespace | null;
+  list(): AppSyncableNamespace[];
+}
+
+// ---------------------------------------------------------------------------
+// App-syncable row wire type — used in push requests and pull responses.
+// Not a ChangeLogEntry: no changeId, no kind discriminator.
+// Both push and pull synthesize these inline by scanning updated_at per table.
+// ---------------------------------------------------------------------------
+
+export interface AppSyncableRowEntry {
+  readonly timestamp: HLCTimestamp;
+  readonly appId: string;
+  /** Bare table name (no engine prefix on the wire). */
+  readonly table: string;
+  readonly op: "insert" | "update" | "delete";
+  readonly row?: Record<string, unknown>;
+  readonly where?: Record<string, unknown>;
+}
+
+export interface AppSyncableApplier {
+  apply(entry: AppSyncableRowEntry): Promise<void> | void;
+}
+
+/** Optional capability that appliers can implement to support pull/push synthesis. */
+export interface ScanCapableApplier extends AppSyncableApplier {
+  scanSince(
+    appId: string,
+    table: string,
+    sinceHlcStr: string,
+  ): Promise<AppSyncableRowEntry[]>;
+}
+
+// ---------------------------------------------------------------------------
+// Change-log entry — record-only. App-syncable rows are NOT logged here.
+// ---------------------------------------------------------------------------
+
 export interface ChangeLogEntry {
   readonly changeId: StarkeepId;
   readonly recordId: StarkeepId;
@@ -13,9 +69,7 @@ export interface ChangeLogEntry {
 }
 
 export interface ChangeLog {
-  append(
-    entry: Omit<ChangeLogEntry, "changeId">,
-  ): Promise<ChangeLogEntry>;
+  append(entry: Omit<ChangeLogEntry, "changeId">): Promise<ChangeLogEntry>;
   getChangesSince(timestamp: HLCTimestamp): Promise<ChangeLogEntry[]>;
   getLatestTimestamp(): Promise<HLCTimestamp | null>;
   prune(olderThan: HLCTimestamp): Promise<number>;
@@ -28,12 +82,14 @@ export interface SyncPullRequest {
 
 export interface SyncPullResponse {
   readonly changes: ChangeLogEntry[];
+  readonly appSyncableRows: AppSyncableRowEntry[];
   readonly latestTimestamp: HLCTimestamp;
   readonly hasMore: boolean;
 }
 
 export interface SyncPushRequest {
   readonly changes: ChangeLogEntry[];
+  readonly appSyncableRows?: AppSyncableRowEntry[];
 }
 
 export type RejectionReason =
@@ -161,4 +217,20 @@ export interface SyncEngineOptions {
   readonly clock: import("@starkeep/core").HLCClock;
   readonly changeLog?: ChangeLog;
   readonly syncState?: SyncStateStore;
+  /**
+   * Returns the list of `apps/<appId>/syncable/...` file keys to sync. Called
+   * once per push/pull. Returning an empty list (or omitting this option)
+   * preserves the previous behaviour where only record-attached blobs are
+   * synced. The harness fills this in from `app_syncable_namespaces`.
+   */
+  readonly listAppSyncableFiles?: () => Promise<FileEntry[]>;
+  /**
+   * Provides the applier (for applying incoming pull rows) and namespace store
+   * (for scanning pending rows on push). Without it, app-syncable rows in pull
+   * responses are silently skipped and no app rows are sent on push.
+   */
+  readonly appSyncableSource?: {
+    readonly namespaces: AppSyncableNamespaceStore;
+    readonly applier: AppSyncableApplier & ScanCapableApplier;
+  };
 }

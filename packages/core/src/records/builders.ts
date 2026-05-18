@@ -1,25 +1,18 @@
 import type { StarkeepId } from "../identifiers/types.js";
 import type { HLCClock } from "../hlc/types.js";
 import { generateId } from "../identifiers/ulid.js";
-import { type DataRecord, type MetadataRecord, SyncStatus } from "./types.js";
+import { type DataRecord, SyncStatus } from "./types.js";
 
 export interface CreateDataRecordInput {
   type: string;
   ownerId: string;
-  content?: Record<string, unknown>;
-  contentHash?: string | null;
-  objectStorageKey?: string | null;
-  mimeType?: string | null;
-  sizeBytes?: number | null;
+  originAppId: string;
+  contentHash: string;
+  objectStorageKey: string;
+  mimeType: string;
+  sizeBytes: number;
   originalFilename?: string | null;
-}
-
-export interface CreateMetadataRecordInput {
-  targetId: StarkeepId;
-  generatorId: string;
-  generatorVersion: number;
-  inputHash: string;
-  value: Record<string, unknown>;
+  parentId?: StarkeepId | null;
 }
 
 export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock): DataRecord {
@@ -31,24 +24,15 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     createdAt: now,
     updatedAt: now,
     ownerId: input.ownerId,
-    syncStatus: SyncStatus.Local,
+    syncStatus: SyncStatus.PendingPush,
     deletedAt: null,
     version: 1,
-    contentHash: input.contentHash ?? null,
-    objectStorageKey: input.objectStorageKey ?? null,
-    mimeType: input.mimeType ?? null,
-    sizeBytes: input.sizeBytes ?? null,
+    contentHash: input.contentHash,
+    objectStorageKey: input.objectStorageKey,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes,
     originalFilename: input.originalFilename ?? null,
-    content: input.content ?? {},
-  };
-}
-
-export function createMetadataRecord(input: CreateMetadataRecordInput): MetadataRecord {
-  return {
-    targetId: input.targetId,
-    generatorId: input.generatorId,
-    generatorVersion: input.generatorVersion,
-    inputHash: input.inputHash,
-    value: input.value,
+    originAppId: input.originAppId,
+    parentId: input.parentId ?? null,
   };
 }

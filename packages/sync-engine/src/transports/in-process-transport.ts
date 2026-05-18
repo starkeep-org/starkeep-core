@@ -1,6 +1,7 @@
 import {
   compareHLC,
   maxHLC,
+  serializeHLC,
   type AnyRecord,
   type HLCClock,
   type HLCTimestamp,
@@ -13,13 +14,25 @@ import type {
   SyncPushRequest,
   SyncPushResponse,
   ChangeLogEntry,
+  AppSyncableRowEntry,
   RejectedChange,
+  AppSyncableNamespaceStore,
+  AppSyncableApplier,
+  ScanCapableApplier,
 } from "../types.js";
 import { decidePushAccept } from "../conflict-resolver.js";
 
 export interface InProcessTransportOptions {
   readonly databaseAdapter: DatabaseAdapter;
   readonly clock: HLCClock;
+  /**
+   * When provided, the transport synthesizes app-syncable row entries on pull
+   * (by scanning updated_at per table) and applies them on push (LWW UPSERT).
+   */
+  readonly appSyncableSource?: {
+    readonly namespaces: AppSyncableNamespaceStore;
+    readonly applier: AppSyncableApplier;
+  };
 }
 
 /**
@@ -27,13 +40,15 @@ export interface InProcessTransportOptions {
  * Used for tests and for running a "cloud" side in the same Node process.
  *
  * Pull: queries the adapter for records whose `updatedAt` is after the
- * requested cursor and returns them as change-log entries.
+ * requested cursor and returns them as change-log entries. App-syncable rows
+ * are returned in a separate `appSyncableRows` field.
  * Push: for each incoming change, applies the OCC rule via decidePushAccept.
+ * App-syncable rows in `appSyncableRows` are applied with LWW.
  */
 export function createInProcessSyncTransport(
   options: InProcessTransportOptions,
 ): SyncTransport {
-  const { databaseAdapter, clock } = options;
+  const { databaseAdapter, clock, appSyncableSource } = options;
 
   return {
     async pullChanges(request: SyncPullRequest): Promise<SyncPullResponse> {
@@ -42,6 +57,7 @@ export function createInProcessSyncTransport(
       });
 
       const changes: ChangeLogEntry[] = [];
+      const appSyncableRows: AppSyncableRowEntry[] = [];
       let latest: HLCTimestamp = request.sinceTimestamp;
 
       for (const record of result.records) {
@@ -51,8 +67,30 @@ export function createInProcessSyncTransport(
         if (changes.length >= request.limit) break;
       }
 
+      // Synthesize appSyncableRow entries from per-table scans.
+      if (appSyncableSource && changes.length < request.limit) {
+        const namespaces = appSyncableSource.namespaces.list();
+        const sinceStr = serializeHLC(request.sinceTimestamp);
+        const scanCapable = appSyncableSource.applier as ScanCapableApplier;
+        if (typeof scanCapable.scanSince === "function") {
+          for (const ns of namespaces) {
+            for (const tableInfo of ns.tables) {
+              const rows = await scanCapable.scanSince(ns.appId, tableInfo.name, sinceStr);
+              for (const row of rows) {
+                appSyncableRows.push(row);
+                latest = maxHLC(latest, row.timestamp);
+                if (changes.length + appSyncableRows.length >= request.limit) break;
+              }
+              if (changes.length + appSyncableRows.length >= request.limit) break;
+            }
+            if (changes.length + appSyncableRows.length >= request.limit) break;
+          }
+        }
+      }
+
       return {
         changes,
+        appSyncableRows,
         latestTimestamp: latest,
         hasMore: changes.length >= request.limit && result.hasMore,
       };
@@ -63,6 +101,7 @@ export function createInProcessSyncTransport(
       const rejected: RejectedChange[] = [];
       let latest: HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
 
+      // Record changes: apply OCC.
       for (const change of request.changes) {
         const current = await databaseAdapter.get(change.recordId);
         const decision = decidePushAccept(current, change);
@@ -90,9 +129,31 @@ export function createInProcessSyncTransport(
         }
       }
 
+      // App-syncable rows: apply LWW with permission gate.
+      for (const entry of request.appSyncableRows ?? []) {
+        if (!appSyncableSource) {
+          console.warn(
+            `[sync] push: appSyncableRow entry for app "${entry.appId}" ignored — no appSyncableSource configured`,
+          );
+          continue;
+        }
+        const ns = appSyncableSource.namespaces.get(entry.appId);
+        if (!ns) {
+          console.warn(
+            `[sync] push: appSyncableRow rejected — app "${entry.appId}" not installed on this instance`,
+          );
+          continue;
+        }
+        await appSyncableSource.applier.apply(entry);
+        latest = maxHLC(latest, entry.timestamp);
+      }
+
       // Advance clock to account for the updates we just applied.
       for (const change of request.changes) {
         clock.receive(change.timestamp);
+      }
+      for (const entry of request.appSyncableRows ?? []) {
+        clock.receive(entry.timestamp);
       }
 
       return {

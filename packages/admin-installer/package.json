@@ -10,6 +10,10 @@
     "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts"
   },
   "dependencies": {
+    "@starkeep/core": "workspace:*",
+    "@starkeep/shared-space-api": "workspace:*",
+    "@starkeep/storage-adapter": "workspace:*",
+    "@starkeep/storage-sqlite": "workspace:*",
     "kysely": "^0.27.0",
     "@aws-sdk/client-cognito-identity": "^3.700.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
@@ -31,7 +35,6 @@
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
-    "@starkeep/admin-manifest": "workspace:*",
-    "@starkeep/admin-db": "workspace:*"
+    "@starkeep/admin-manifest": "workspace:*"
   }
 }

@@ -1,6 +1,7 @@
 import {
   compareHLC,
   maxHLC,
+  serializeHLC,
   SyncStatus,
   type StarkeepId,
   type AnyRecord,
@@ -31,6 +32,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     clock,
     changeLog = createChangeLog(),
     syncState,
+    listAppSyncableFiles,
+    appSyncableSource,
   } = options;
 
   const changeNotifier = createChangeNotifier();
@@ -125,8 +128,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       const conflictIds: StarkeepId[] = [];
       const appliedIds: StarkeepId[] = [];
 
-      // Fetch local unsynced changes in bulk so dirty-conflict detection
-      // is O(1) per remote change.
+      // Fetch local unsynced record changes in bulk so dirty-conflict detection
+      // is O(1) per remote record change.
       const localUnsyncedBoundary = pushCursor ?? ZERO_HLC;
       const localUnsynced = await changeLog.getChangesSince(
         localUnsyncedBoundary,
@@ -204,6 +207,53 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
+      // Apply incoming app-syncable rows (LWW, no OCC).
+      if (response.appSyncableRows.length > 0) {
+        if (appSyncableSource) {
+          for (const entry of response.appSyncableRows) {
+            clock.receive(entry.timestamp);
+            try {
+              await appSyncableSource.applier.apply(entry);
+            } catch (err) {
+              console.warn(
+                `[sync] appSyncableRow apply failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}`,
+              );
+            }
+          }
+        } else {
+          console.warn("[sync] appSyncableRows received but no appSyncableSource configured — skipping");
+        }
+      }
+
+      // Pull app-specific syncable files that exist remotely but not locally.
+      if (listAppSyncableFiles) {
+        try {
+          const extras = await listAppSyncableFiles();
+          if (extras.length > 0) {
+            const filesToPull = await fileSyncEngine.getFilesToPull(
+              localObjectStorage,
+              remoteObjectStorage,
+              extras,
+            );
+            for (const manifest of filesToPull) {
+              try {
+                await fileSyncEngine.transferFile(
+                  manifest,
+                  remoteObjectStorage,
+                  localObjectStorage,
+                );
+              } catch (err) {
+                console.warn(
+                  `[sync] app-syncable pull skipped: ${manifest.objectStorageKey} — ${(err as Error).message}`,
+                );
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(`[sync] listAppSyncableFiles failed: ${(err as Error).message}`);
+        }
+      }
+
       await savePullCursor(response.latestTimestamp);
 
       if (appliedIds.length > 0) {
@@ -230,13 +280,35 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
       const localChanges = await changeLog.getChangesSince(since);
 
-      // Skip records we already know are in conflict — they need manual
+      // Skip records already known to be in conflict — they need manual
       // resolution before we push anything new for them.
       const pushable = localChanges.filter(
         (change) => !conflicts.has(change.recordId),
       );
 
-      if (pushable.length === 0) {
+      // Scan app-syncable tables for rows updated since the push cursor.
+      const appSyncableRows: import("./types.js").AppSyncableRowEntry[] = [];
+      if (appSyncableSource) {
+        const sinceStr = serializeHLC(since);
+        for (const ns of appSyncableSource.namespaces.list()) {
+          for (const tableInfo of ns.tables) {
+            try {
+              const rows = await appSyncableSource.applier.scanSince(
+                ns.appId,
+                tableInfo.name,
+                sinceStr,
+              );
+              for (const row of rows) appSyncableRows.push(row);
+            } catch (err) {
+              console.warn(
+                `[sync] push: scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
+              );
+            }
+          }
+        }
+      }
+
+      if (pushable.length === 0 && appSyncableRows.length === 0) {
         return {
           accepted: [],
           rejected: [],
@@ -244,15 +316,23 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         };
       }
 
-      // Push files for records that carry references. Use pushable (skip
-      // records already in conflict) and propagate mimeType so the remote
-      // stores it alongside the blob.
-      const fileEntries = pushable
+      // Push files for records that carry references.
+      const fileEntries: Array<{ key: string; mimeType?: string }> = pushable
         .filter((change) => change.recordSnapshot.objectStorageKey !== null)
         .map((change) => ({
           key: change.recordSnapshot.objectStorageKey as string,
           mimeType: change.recordSnapshot.mimeType ?? undefined,
         }));
+
+      // App-specific syncable files: enumerated outside the record stream.
+      if (listAppSyncableFiles) {
+        try {
+          const extras = await listAppSyncableFiles();
+          for (const e of extras) fileEntries.push(e);
+        } catch (err) {
+          console.warn(`[sync] listAppSyncableFiles failed: ${(err as Error).message}`);
+        }
+      }
 
       const failedKeys = new Set<string>();
 
@@ -276,14 +356,17 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
-      // Exclude records whose file transfer failed — they'll be retried on the next push.
+      // Exclude record entries whose file transfer failed.
       const pushableWithFiles = pushable.filter(
         (change) =>
           change.recordSnapshot.objectStorageKey === null ||
-          !failedKeys.has(change.recordSnapshot.objectStorageKey),
+          !failedKeys.has(change.recordSnapshot.objectStorageKey as string),
       );
 
-      const response = await transport.pushChanges({ changes: pushableWithFiles });
+      const response = await transport.pushChanges({
+        changes: pushableWithFiles,
+        appSyncableRows: appSyncableRows.length > 0 ? appSyncableRows : undefined,
+      });
 
       // Accepted: mark corresponding local records as Synced.
       const acceptedSet = new Set(response.accepted);
@@ -325,13 +408,16 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         });
       }
 
-      // Advance push cursor to max timestamp of the pushed batch —
-      // both accepted AND rejected, so rejected stays parked in the
-      // conflict map rather than being retried automatically.
-      const maxTimestamp = pushable.reduce(
+      // Advance push cursor to max timestamp across both records and app rows.
+      const recordsMax = pushable.reduce(
         (acc, entry) => maxHLC(acc, entry.timestamp),
         since,
       );
+      const appRowsMax = appSyncableRows.reduce(
+        (acc, entry) => maxHLC(acc, entry.timestamp),
+        since,
+      );
+      const maxTimestamp = maxHLC(recordsMax, appRowsMax);
       if (compareHLC(maxTimestamp, since) > 0) {
         await savePushCursor(maxTimestamp);
       }

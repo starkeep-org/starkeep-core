@@ -5,6 +5,7 @@ import {
   SyncStatus,
   type HLCClock,
   type DataRecord,
+  type CreateDataRecordInput,
 } from "@starkeep/core";
 import {
   MockDatabaseAdapter,
@@ -20,9 +21,8 @@ import type { SyncEngine } from "../src/types.js";
  * paths that the HTTP transport would also hit — same `decidePushAccept` /
  * `decidePullApply` — without the HTTP dance.
  *
- * This fills the gap that scripts/test-sync.sh can't hit: the data-server
- * currently has no update endpoint, so OCC rejection must be verified at the
- * SyncEngine level.
+ * Record bodies are now file-backed-only; we differentiate logical "versions"
+ * of a record via `originalFilename` instead of the dropped `content` field.
  */
 
 interface Node {
@@ -41,9 +41,20 @@ interface World {
   readonly ownerId: string;
 }
 
+function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
+  return {
+    type: "@test/note",
+    ownerId: "u1",
+    originAppId: "@starkeep/sync-engine",
+    contentHash: `sha256:${Math.random().toString(36).slice(2)}`,
+    objectStorageKey: `shared/@test/note/ab/${Math.random().toString(36).slice(2)}`,
+    mimeType: "text/plain",
+    sizeBytes: 4,
+    ...over,
+  };
+}
+
 async function makeWorld(): Promise<World> {
-  // Monotonic wall-clock source shared by every clock so HLC timestamps
-  // are totally orderable inside the test.
   let wall = 1000;
   const tick = () => wall++;
 
@@ -89,12 +100,9 @@ async function makeWorld(): Promise<World> {
 async function createOnNode(
   node: Node,
   ownerId: string,
-  content: Record<string, unknown>,
+  label: string,
 ): Promise<DataRecord> {
-  const record = createDataRecord(
-    { type: "@test/note", ownerId, content },
-    node.clock,
-  );
+  const record = createDataRecord(baseInput({ ownerId, originalFilename: label }), node.clock);
   await node.db.put(record);
   await node.engine.recordChange("create", record, { baseVersion: null });
   return record;
@@ -128,47 +136,40 @@ describe("two-client OCC end-to-end", () => {
   it("A creates, B pulls and sees it", async () => {
     const { nodeA, nodeB, ownerId } = world;
 
-    const record = await createOnNode(nodeA, ownerId, { body: "hello from A" });
+    const record = await createOnNode(nodeA, ownerId, "hello from A");
     const push = await nodeA.engine.push();
     expect(push.accepted).toEqual([record.id]);
 
     await nodeB.engine.pull();
     const onB = await nodeB.db.get(record.id);
     expect(onB).not.toBeNull();
-    expect((onB as DataRecord).content).toEqual({ body: "hello from A" });
+    expect((onB as DataRecord).originalFilename).toBe("hello from A");
     expect(onB!.syncStatus).toBe(SyncStatus.Synced);
   });
 
   it("concurrent updates to same record: second push is rejected (OCC)", async () => {
     const { nodeA, nodeB, ownerId } = world;
 
-    // Seed: create on A, propagate to cloud and to B.
-    const seed = await createOnNode(nodeA, ownerId, { body: "v1" });
+    const seed = await createOnNode(nodeA, ownerId, "v1");
     await nodeA.engine.push();
     await nodeB.engine.pull();
 
     const seedOnB = (await nodeB.db.get(seed.id)) as DataRecord;
     expect(seedOnB.version).toBe(seed.version);
 
-    // Both nodes edit their local copy independently.
-    await updateOnNode(nodeA, seed, { content: { body: "A wins race" } });
-    await updateOnNode(nodeB, seedOnB, { content: { body: "B wins race" } });
+    await updateOnNode(nodeA, seed, { originalFilename: "A wins race" });
+    await updateOnNode(nodeB, seedOnB, { originalFilename: "B wins race" });
 
-    // A pushes first — accepted.
     const pushA = await nodeA.engine.push();
     expect(pushA.accepted).toEqual([seed.id]);
     expect(pushA.rejected).toHaveLength(0);
 
-    // B pushes second — rejected, because server advanced past B's baseVersion.
     const pushB = await nodeB.engine.push();
     expect(pushB.accepted).toHaveLength(0);
     expect(pushB.rejected).toHaveLength(1);
     expect(pushB.rejected[0].reason).toBe("version-mismatch");
-    expect((pushB.rejected[0].serverRecord as DataRecord).content).toEqual({
-      body: "A wins race",
-    });
+    expect((pushB.rejected[0].serverRecord as DataRecord).originalFilename).toBe("A wins race");
 
-    // B's local record is now parked as Conflict.
     const bAfter = (await nodeB.db.get(seed.id)) as DataRecord;
     expect(bAfter.syncStatus).toBe(SyncStatus.Conflict);
     expect(nodeB.engine.getConflicts()).toHaveLength(1);
@@ -177,50 +178,42 @@ describe("two-client OCC end-to-end", () => {
   it("pull-side dirty-conflict: B's unsynced edit survives an incoming remote update", async () => {
     const { nodeA, nodeB, ownerId } = world;
 
-    const seed = await createOnNode(nodeA, ownerId, { body: "v1" });
+    const seed = await createOnNode(nodeA, ownerId, "v1");
     await nodeA.engine.push();
     await nodeB.engine.pull();
 
     const seedOnB = (await nodeB.db.get(seed.id)) as DataRecord;
 
-    // A pushes a v2 (server now has v2).
-    await updateOnNode(nodeA, seed, { content: { body: "remote v2" } });
+    await updateOnNode(nodeA, seed, { originalFilename: "remote v2" });
     await nodeA.engine.push();
 
-    // B has its own unsynced v2. Pull must NOT clobber it.
-    await updateOnNode(nodeB, seedOnB, { content: { body: "local v2" } });
+    await updateOnNode(nodeB, seedOnB, { originalFilename: "local v2" });
     await nodeB.engine.pull();
 
     const bAfter = (await nodeB.db.get(seed.id)) as DataRecord;
-    expect(bAfter.content).toEqual({ body: "local v2" });
+    expect(bAfter.originalFilename).toBe("local v2");
     expect(bAfter.syncStatus).toBe(SyncStatus.Conflict);
 
     const conflicts = nodeB.engine.getConflicts();
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0].source).toBe("pull");
-    expect((conflicts[0].server as DataRecord).content).toEqual({
-      body: "remote v2",
-    });
+    expect((conflicts[0].server as DataRecord).originalFilename).toBe("remote v2");
   });
 
   it("after OCC rejection on B, clearing the conflict and re-pushing with fresh baseVersion succeeds", async () => {
     const { nodeA, nodeB, ownerId } = world;
 
-    const seed = await createOnNode(nodeA, ownerId, { body: "v1" });
+    const seed = await createOnNode(nodeA, ownerId, "v1");
     await nodeA.engine.push();
     await nodeB.engine.pull();
 
     const seedOnB = (await nodeB.db.get(seed.id)) as DataRecord;
 
-    // Race: A writes v2, B writes v2. A pushes first.
-    await updateOnNode(nodeA, seed, { content: { body: "A v2" } });
-    await updateOnNode(nodeB, seedOnB, { content: { body: "B v2" } });
+    await updateOnNode(nodeA, seed, { originalFilename: "A v2" });
+    await updateOnNode(nodeB, seedOnB, { originalFilename: "B v2" });
     await nodeA.engine.push();
-    await nodeB.engine.push(); // rejected
+    await nodeB.engine.push();
 
-    // Simulate resolving "keep local": B pulls the server version, rebases
-    // its edit on top (version = server.version + 1), clears conflict,
-    // re-pushes.
     const conflict = nodeB.engine.getConflicts()[0];
     const serverVersion = (conflict.server as DataRecord).version;
     const rebased: DataRecord = {
@@ -239,17 +232,16 @@ describe("two-client OCC end-to-end", () => {
     expect(finalPush.accepted).toEqual([seed.id]);
     expect(finalPush.rejected).toHaveLength(0);
 
-    // A pulls and sees B's resolution.
     await nodeA.engine.pull();
     const onA = (await nodeA.db.get(seed.id)) as DataRecord;
-    expect(onA.content).toEqual({ body: "B v2" });
+    expect(onA.originalFilename).toBe("B v2");
     expect(onA.version).toBe(serverVersion + 1);
   });
 
   it("cursors advance: second push from a node with no new changes is a no-op", async () => {
     const { nodeA, ownerId } = world;
 
-    await createOnNode(nodeA, ownerId, { body: "one" });
+    await createOnNode(nodeA, ownerId, "one");
     const first = await nodeA.engine.push();
     expect(first.accepted).toHaveLength(1);
 

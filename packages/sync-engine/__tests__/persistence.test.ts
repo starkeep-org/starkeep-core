@@ -17,7 +17,7 @@ describe("createSqliteChangeLog", () => {
     const db = makeDb();
     const log = createSqliteChangeLog({ db });
     const clock = createHLCClock({ nodeId: "n", wallClockFunction: () => 1000 });
-    const r = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
+    const r = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
 
     await log.append({
       recordId: r.id,
@@ -39,8 +39,8 @@ describe("createSqliteChangeLog", () => {
     const db = makeDb();
     const log = createSqliteChangeLog({ db });
     const clock = createHLCClock({ nodeId: "n", wallClockFunction: () => 1 });
-    const r1 = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
-    const r2 = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
+    const r1 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
+    const r2 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
 
     await log.append({
       recordId: r1.id,
@@ -67,7 +67,7 @@ describe("createSqliteChangeLog", () => {
     const db = makeDb();
     const log = createSqliteChangeLog({ db });
     const clock = createHLCClock({ nodeId: "n", wallClockFunction: () => 1 });
-    const r = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
+    const r = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
     await log.append({
       recordId: r.id,
       operation: "create",
@@ -86,8 +86,8 @@ describe("createSqliteChangeLog", () => {
     const db = makeDb();
     const log = createSqliteChangeLog({ db });
     const clock = createHLCClock({ nodeId: "n", wallClockFunction: () => 1 });
-    const r1 = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
-    const r2 = createDataRecord({ type: "@t/x", ownerId: "u" }, clock);
+    const r1 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
+    const r2 = createDataRecord({ type: "@t/x", ownerId: "u", originAppId: "@starkeep/sync-engine" }, clock);
     await log.append({
       recordId: r1.id,
       operation: "create",

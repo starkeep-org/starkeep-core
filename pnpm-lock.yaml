@@ -240,37 +240,6 @@ importers:
         specifier: ^3.0.0
         version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
 
-  packages/admin-db:
-    dependencies:
-      '@aws-sdk/client-s3':
-        specifier: ^3.958.0
-        version: 3.1009.0
-      '@starkeep/admin-shared':
-        specifier: workspace:*
-        version: link:../admin-shared
-      pg:
-        specifier: ^8.16.3
-        version: 8.20.0
-    devDependencies:
-      '@types/node':
-        specifier: ^25.0.3
-        version: 25.4.0
-      '@types/pg':
-        specifier: ^8.16.0
-        version: 8.20.0
-      tsup:
-        specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
-      tsx:
-        specifier: ^4.21.0
-        version: 4.21.0
-      typescript:
-        specifier: ^5.7.0
-        version: 5.9.3
-      vitest:
-        specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
-
   packages/admin-installer:
     dependencies:
       '@aws-sdk/client-cloudwatch-logs':
@@ -306,12 +275,21 @@ importers:
       '@pulumi/pulumi':
         specifier: ^3.0.0
         version: 3.237.0(typescript@5.9.3)
-      '@starkeep/admin-db':
-        specifier: workspace:*
-        version: link:../admin-db
       '@starkeep/admin-manifest':
         specifier: workspace:*
         version: link:../admin-manifest
+      '@starkeep/core':
+        specifier: workspace:*
+        version: link:../core
+      '@starkeep/shared-space-api':
+        specifier: workspace:*
+        version: link:../shared-space-api
+      '@starkeep/storage-adapter':
+        specifier: workspace:*
+        version: link:../storage-adapter
+      '@starkeep/storage-sqlite':
+        specifier: workspace:*
+        version: link:../storage-sqlite
       kysely:
         specifier: ^0.27.0
         version: 0.27.6
@@ -386,6 +364,9 @@ importers:
 
   packages/admin-manifest:
     dependencies:
+      '@starkeep/core':
+        specifier: workspace:*
+        version: link:../core
       zod:
         specifier: ^3.22.4
         version: 3.24.2
@@ -615,12 +596,18 @@ importers:
 
   packages/storage-aurora-dsql:
     dependencies:
+      '@starkeep/access-control':
+        specifier: workspace:*
+        version: link:../access-control
       '@starkeep/core':
         specifier: workspace:*
         version: link:../core
       '@starkeep/storage-adapter':
         specifier: workspace:*
         version: link:../storage-adapter
+      '@starkeep/sync-engine':
+        specifier: workspace:*
+        version: link:../sync-engine
     devDependencies:
       '@types/node':
         specifier: ^25.4.0
@@ -684,9 +671,15 @@ importers:
 
   packages/storage-sqlite:
     dependencies:
+      '@starkeep/access-control':
+        specifier: workspace:*
+        version: link:../access-control
       '@starkeep/core':
         specifier: workspace:*
         version: link:../core
+      '@starkeep/shared-space-api':
+        specifier: workspace:*
+        version: link:../shared-space-api
       '@starkeep/storage-adapter':
         specifier: workspace:*
         version: link:../storage-adapter

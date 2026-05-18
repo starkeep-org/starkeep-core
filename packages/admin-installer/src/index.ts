@@ -18,3 +18,16 @@ export type {
 
 export { roleChain } from "./session";
 export type { AwsCredentials } from "./session";
+
+export {
+  installLocal,
+  uninstallLocal,
+  LocalInstallError,
+  ManifestValidationError,
+} from "./local/installer";
+export type { InstallLocalResult, UninstallLocalOptions } from "./local/installer";
+export {
+  listAppRegistry,
+  appRegistryRow,
+} from "./local/registry";
+export type { RegisteredApp } from "./local/registry";

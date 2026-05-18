@@ -1,9 +1,8 @@
-import type { DataRecord, StarkeepId, HLCTimestamp } from "@starkeep/core";
+import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
 import type {
   Query,
   QueryResult,
   BatchOperation,
-  Migration,
   Transaction,
 } from "./types.js";
 
@@ -19,5 +18,26 @@ export interface DatabaseAdapter {
   batch(operations: BatchOperation[]): Promise<void>;
   transaction<T>(callback: (transaction: Transaction) => Promise<T>): Promise<T>;
 
-  runMigrations(migrations: Migration[]): Promise<void>;
+  /**
+   * Write (insert-or-replace) the per-type metadata row keyed by `row.recordId`.
+   * Caller is responsible for ensuring the corresponding records-table row
+   * exists; we do not enforce FK at the DB level (Aurora DSQL doesn't support
+   * FKs anyway) but a metadata row without its record is meaningless.
+   */
+  putMetadata(typeId: string, row: MetadataRow): Promise<void>;
+
+  /** Read the per-type metadata row for `recordId`, or null if absent. */
+  getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null>;
+
+  /**
+   * Batched read of per-type metadata rows. Returned map is keyed by recordId
+   * and contains only ids that have a metadata row.
+   */
+  getMetadataByIds(
+    typeId: string,
+    recordIds: StarkeepId[],
+  ): Promise<Map<StarkeepId, MetadataRow>>;
+
+  /** Delete the per-type metadata row for `recordId` (no-op if absent). */
+  deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void>;
 }
