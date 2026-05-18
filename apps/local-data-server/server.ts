@@ -5,8 +5,28 @@
  */
 
 import { createServer } from "node:http";
-import { createHmac, createHash, randomBytes } from "node:crypto";
+import { createHmac, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
+import {
+  installLocal,
+  uninstallLocal,
+  LocalInstallError,
+  ManifestValidationError,
+} from "../../packages/admin-installer/src/local/installer.js";
+import {
+  listAppRegistry,
+  appRegistryRow,
+} from "../../packages/admin-installer/src/local/registry.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
+import {
+  createSqliteAccessPolicyStore,
+  createSqliteTypeRegistrationStore,
+  listAppSyncableNamespaces,
+  SqliteAppSyncableNamespaceStore,
+  SqliteAppSyncableApplier,
+} from "../../packages/storage-sqlite/src/index.js";
+import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
+import { disabledSharingTokenStore } from "../../packages/access-control/src/stores.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import { AuroraDsqlDatabaseAdapter } from "../../packages/storage-aurora-dsql/src/adapter.js";
@@ -23,16 +43,16 @@ import {
   createSqliteChangeLog,
   createSqliteSyncStateStore,
 } from "../../packages/sync-engine/src/index.js";
-import { createTypeRegistry } from "../../packages/core/src/schema/index.js";
+import { WILDCARD_EXPANDABLE_TYPE_IDS, CORE_TYPES } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
+import { dataRecordObjectKey } from "../../packages/core/src/storage/object-keys.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { stat as fsStat, readFile, writeFile, mkdir, unlink, readdir } from "node:fs/promises";
+import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createFileWatchManager, type FileWatchManager } from "./watcher.js";
+import { createFileWatchManager } from "./watcher.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
-import * as v from "valibot";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import {
@@ -54,73 +74,73 @@ const OWNER_ID = process.env.STARKEEP_OWNER_ID || "craig";
 const NODE_ID = process.env.STARKEEP_NODE_ID || "admin-desktop";
 const PULL_INTERVAL_MS = parseInt(process.env.STARKEEP_PULL_INTERVAL_MS || "30000", 10);
 const PUSH_DEBOUNCE_MS = parseInt(process.env.STARKEEP_PUSH_DEBOUNCE_MS || "500", 10);
-// If set, HMAC app request signatures are verified. Unset = trust all locally (dev mode).
-const APP_HMAC_SECRET = process.env.STARKEEP_APP_HMAC_SECRET ?? "";
-
 // ---------------------------------------------------------------------------
-// Per-app access registry — populated from manifests at startup + admin API
+// Per-app access enforcement — backed by shared_app_registry + shared_access_grants
+// in the local sqlite DB. Populated by the installer (POST /admin/apps/install).
 // ---------------------------------------------------------------------------
 
-interface AppAccess {
-  types: Map<string, "read" | "readwrite">;
-  canIngestUnknown: boolean;
-  canPromoteFromUnknown: boolean;
+type GrantAccess = "read" | "readwrite";
+
+interface AppGrantRow {
+  type_id: string;
+  access: GrantAccess;
+  metadata_write: number;
 }
 
-const appAccessMap = new Map<string, AppAccess>();
-const APP_ACCESS_PATH = join(STARKEEP_DIR, "app-access.json");
-
-async function saveAppAccessMap(): Promise<void> {
-  const out: Record<string, { types: Record<string, "read"|"readwrite">; canIngestUnknown: boolean; canPromoteFromUnknown: boolean }> = {};
-  for (const [id, acc] of appAccessMap) {
-    out[id] = { types: Object.fromEntries(acc.types), canIngestUnknown: acc.canIngestUnknown, canPromoteFromUnknown: acc.canPromoteFromUnknown };
-  }
-  await mkdir(STARKEEP_DIR, { recursive: true });
-  await writeFile(APP_ACCESS_PATH, JSON.stringify(out, null, 2), "utf8");
-}
-
-async function loadAppAccessMap(): Promise<void> {
-  try {
-    const raw = JSON.parse(await readFile(APP_ACCESS_PATH, "utf8")) as Record<string, { types: Record<string, "read"|"readwrite">; canIngestUnknown: boolean; canPromoteFromUnknown: boolean }>;
-    for (const [id, acc] of Object.entries(raw)) {
-      appAccessMap.set(id, { types: new Map(Object.entries(acc.types)), canIngestUnknown: acc.canIngestUnknown, canPromoteFromUnknown: acc.canPromoteFromUnknown });
-    }
-  } catch {
-    // File doesn't exist yet — start fresh
-  }
-}
-
-function registerAppFromManifest(manifest: { name: string; infraRequirements?: { sharedTypeAccess?: Array<{ typeId: string; access: "read"|"readwrite" }>; appPrivate?: { canIngestUnknown?: boolean; canPromoteFromUnknown?: boolean } } }): void {
-  const appId = manifest.name;
-  const ir = manifest.infraRequirements ?? {};
-  const types = new Map<string, "read" | "readwrite">();
-  for (const entry of (ir.sharedTypeAccess ?? [])) {
-    if (entry.typeId === "*") {
-      // Wildcard: grant read access to all core types
-      for (const t of ["image", "markdown"]) types.set(t, entry.access);
+function expandGrantsForApp(db: DatabaseSync, appId: string): AppGrantRow[] {
+  const rows = db
+    .prepare(
+      "SELECT type_id, access, metadata_write FROM shared_access_grants WHERE app_id = ?",
+    )
+    .all(appId) as unknown as AppGrantRow[];
+  // Wildcard expansion: '*' grants the access level on every registered core type
+  // except 'unknown' (which is gated by canIngestUnknown / canPromoteFromUnknown
+  // and lives on the manifest, not access_grants).
+  const out: AppGrantRow[] = [];
+  for (const row of rows) {
+    if (row.type_id === "*") {
+      for (const t of WILDCARD_EXPANDABLE_TYPE_IDS) {
+        out.push({ type_id: t, access: row.access, metadata_write: row.metadata_write });
+      }
     } else {
-      types.set(entry.typeId, entry.access);
+      out.push(row);
     }
   }
-  appAccessMap.set(appId, {
-    types,
-    canIngestUnknown: ir.appPrivate?.canIngestUnknown ?? false,
-    canPromoteFromUnknown: ir.appPrivate?.canPromoteFromUnknown ?? false,
-  });
+  return out;
 }
 
-function appCanAccessType(appId: string, type: string): boolean {
-  const acc = appAccessMap.get(appId);
-  if (!acc) return false;
-  if (type === "unknown") return acc.canIngestUnknown || acc.canPromoteFromUnknown;
-  return acc.types.has(type);
+function appCanRead(db: DatabaseSync, appId: string, type: string): boolean {
+  const grants = expandGrantsForApp(db, appId);
+  return grants.some((g) => g.type_id === type);
 }
 
-function validateAppHmac(appId: string, body: string, sig: string | undefined): boolean {
-  if (!APP_HMAC_SECRET) return true; // dev mode — trust all
+function appCanWrite(db: DatabaseSync, appId: string, type: string): boolean {
+  const grants = expandGrantsForApp(db, appId);
+  return grants.some((g) => g.type_id === type && g.access === "readwrite");
+}
+
+function appCanWriteMetadata(db: DatabaseSync, appId: string, type: string): boolean {
+  const grants = expandGrantsForApp(db, appId);
+  return grants.some((g) => g.type_id === type && g.metadata_write === 1);
+}
+
+function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
+  const row = db
+    .prepare("SELECT hmac_secret FROM shared_app_registry WHERE app_id = ? AND status = 'active'")
+    .get(appId) as { hmac_secret: string } | undefined;
+  return row?.hmac_secret ?? null;
+}
+
+function validateAppHmac(db: DatabaseSync, appId: string, body: string, sig: string | undefined): boolean {
   if (!sig) return false;
-  const expected = createHmac("sha256", APP_HMAC_SECRET).update(`${appId}:${body}`).digest("hex");
-  return sig === expected;
+  const secret = getAppHmacSecret(db, appId);
+  if (!secret) return false;
+  const expected = createHmac("sha256", secret).update(`${appId}:${body}`).digest("hex");
+  // timingSafeEqual requires equal-length buffers
+  const sigBuf = Buffer.from(sig, "hex");
+  const expBuf = Buffer.from(expected, "hex");
+  if (sigBuf.length !== expBuf.length) return false;
+  return timingSafeEqual(sigBuf, expBuf);
 }
 
 // Path to starkeep-config.json — resolved relative to this file so it works
@@ -317,8 +337,9 @@ async function main() {
   });
 
   // Local FS is always available — acts as a cache when S3 is configured
+  const objectsBasePath = join(STARKEEP_DIR, "objects");
   const localAdapter = new FsObjectStorageAdapter({
-    basePath: join(STARKEEP_DIR, "objects"),
+    basePath: objectsBasePath,
   });
 
   // Load cloud config from starkeep-config.json at the repo root
@@ -411,51 +432,9 @@ async function main() {
     console.log("Remote Aurora DSQL adapter initialized from cloud config");
   }
 
-  // Load persisted app access map + auto-discover manifests from starkeep-apps/
-  await loadAppAccessMap();
-  {
-    const appsDir = fileURLToPath(new URL("../../../../starkeep-apps", import.meta.url));
-    try {
-      const appNames = await readdir(appsDir, { withFileTypes: true });
-      for (const entry of appNames) {
-        if (!entry.isDirectory()) continue;
-        const manifestPath = `${appsDir}/${entry.name}/manifest.json`;
-        try {
-          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-          registerAppFromManifest(manifest);
-        } catch { /* manifest missing or invalid — skip */ }
-      }
-    } catch { /* starkeep-apps dir doesn't exist — ok in non-monorepo layouts */ }
-  }
-
-  // Global type registry — the data-server is the authoritative validator for all registered types.
-  const typeRegistry = createTypeRegistry();
-  typeRegistry.register({
-    namespace: "@starkeep",
-    name: "image",
-    schema: v.object({
-      // File-backed record: substantive content lives in object storage, not payload.
-      // Payload carries app-level display fields that apps may set on creation.
-      fileName: v.optional(v.string()),
-      title: v.optional(v.string()),
-    }),
-  });
-  typeRegistry.register({
-    namespace: "@starkeep",
-    name: "markdown",
-    schema: v.object({
-      fileName: v.optional(v.string()),
-      title: v.optional(v.string()),
-    }),
-  });
-  typeRegistry.register({
-    namespace: "@starkeep",
-    name: "unknown",
-    schema: v.object({
-      fileName: v.optional(v.string()),
-      title: v.optional(v.string()),
-    }),
-  });
+  // App identities are stored in shared_app_registry; populated by the
+  // installer (POST /admin/apps/install). No startup-time auto-discovery —
+  // apps appear only after going through install.
 
   const clock = createHLCClock({ nodeId: NODE_ID, wallClockFunction: Date.now });
 
@@ -475,48 +454,62 @@ async function main() {
         getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
       })
     : undefined;
-  const syncChangeLog = CLOUD_URL
-    ? createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() })
-    : undefined;
+  const syncChangeLog = createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() });
   const syncStateStore = CLOUD_URL
     ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
     : undefined;
 
-  // One-time cleanup: remove any "system:*" rows that older builds wrote
-  // into the user data layer. Watch tracking now lives in the private
-  // `watch_files` table — nothing should ever land in `records` (or its
-  // changelog) with a `system:` type. Idempotent on a clean DB.
-  {
-    const rawDb = databaseAdapter.getRawDatabase();
-    const recordsResult = rawDb
-      .prepare("DELETE FROM records WHERE type LIKE 'system:%'")
-      .run();
-    let changelogChanges = 0;
-    if (syncChangeLog) {
-      const changelogResult = rawDb
-        .prepare(
-          "DELETE FROM sync_change_log WHERE json_extract(record_snapshot_json, '$.type') LIKE 'system:%'",
-        )
-        .run();
-      changelogChanges = Number(changelogResult.changes ?? 0);
+  // Direct sqlite handle for app-identity / grant lookups. The records-layer
+  // adapter operates on the same DB; we use raw access for the shared_*
+  // tables (registry, grants) that have no adapter wrapper.
+  const localDb = databaseAdapter.getRawDatabase();
+
+  const accessPolicyStore = createSqliteAccessPolicyStore(localDb);
+  const typeRegistrationStore = createSqliteTypeRegistrationStore(localDb);
+
+  const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
+  const appApplier = new SqliteAppSyncableApplier(localDb, namespaceStore);
+
+  const appSpecificFactory = createAppSpecificFactory({
+    namespace: namespaceStore,
+    applier: appApplier,
+    fileStorage: localAdapter,
+    buildFileUrl: (key, mimeType, expiresIn) => {
+      const token = createFileToken(key, mimeType, expiresIn);
+      return `http://127.0.0.1:${PORT}/data/files/${token}`;
+    },
+    clock,
+  });
+
+  async function listAppSyncableFiles() {
+    const namespaces = listAppSyncableNamespaces(localDb);
+    const entries: { key: string }[] = [];
+    for (const ns of namespaces) {
+      if (!ns.filesEnabled) continue;
+      const result = await localAdapter.list(`apps/${ns.appId}/syncable/`);
+      for (const key of result.keys) entries.push({ key });
     }
-    const recordsChanges = Number(recordsResult.changes ?? 0);
-    if (recordsChanges + changelogChanges > 0) {
-      console.log(
-        `Cleaned up ${recordsChanges} legacy system:* record(s) and ${changelogChanges} changelog entry/entries from local SQLite.`,
-      );
-    }
+    return entries;
   }
 
   const sdk = await createStarkeepSdk({
     databaseAdapter,
     objectStorageAdapter: localAdapter,
+    accessPolicyStore,
+    // Tokens are issued and validated cloud-side only — local has no
+    // sharing_tokens table. This stub throws on every call so anything that
+    // tries to issue locally fails loudly.
+    sharingTokenStore: disabledSharingTokenStore(),
+    typeRegistrationStore,
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
     syncTransport,
     remoteObjectStorageAdapter: syncRemoteStorage,
     syncChangeLog,
     syncStateStore,
+    getAppSpecific: appSpecificFactory,
+    listAppSyncableFiles,
+    appSyncableSource: { namespaces: namespaceStore, applier: appApplier },
   });
 
   const syncRuntime = {
@@ -582,8 +575,36 @@ async function main() {
     pullTimer = setTimeout(runPull, PULL_INTERVAL_MS);
   }
 
+  // Built-in watcher identity: register it in shared_app_registry just like an
+  // external app, so its writes have a valid origin_app_id and so its grants
+  // flow through the same access-control path. No user consent — it's part of
+  // the local-data-server itself.
+  const watcherManifest = {
+    id: "@starkeep/watcher",
+    name: "Local Watcher",
+    version: "1.0.0",
+    tier: "official" as const,
+    infraRequirements: {
+      sharedTypeAccess: [
+        {
+          typeId: "*",
+          access: "readwrite" as const,
+          rationale: "Built-in file watcher ingests arbitrary files into all shared types.",
+        },
+      ],
+      canIngestUnknown: true,
+    },
+  };
+  const { appId: watcherAppId } = installLocal(localDb, watcherManifest);
+
   // File watch manager — monitors local directories and syncs to Starkeep
-  const watchManager = createFileWatchManager({ sdk, db: databaseAdapter.getRawDatabase(), databaseAdapter, ownerId: OWNER_ID });
+  const watchManager = createFileWatchManager({
+    sdk,
+    db: databaseAdapter.getRawDatabase(),
+    databaseAdapter,
+    ownerId: OWNER_ID,
+    appId: watcherAppId,
+  });
 
   // Restore persisted watches from local config file
   const persistedWatches = await loadWatchConfigs();
@@ -607,21 +628,39 @@ async function main() {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);
     const path = url.pathname;
 
-    // Per-request app identity. When present, access is scoped to the app's declared types.
+    // Per-request app identity. Required for every data/sync/watches request:
+    // the local-data-server enforces app-scoped access on top of the same
+    // (currently unused) cloud identity flow. Admin & system endpoints that
+    // belong to admin-web rather than an installed app are exempt below.
     const appId = req.headers["x-starkeep-app-id"] as string | undefined;
     const appSig = req.headers["x-starkeep-app-sig"] as string | undefined;
 
-    // For mutating requests with an appId, validate the HMAC signature when a secret is configured.
-    if (appId && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") {
-      const rawBody = await readBody(req);
-      if (!validateAppHmac(appId, rawBody, appSig)) {
+    // Watches are an admin/host concern (configured via admin-web, not by
+     // installed apps), so they intentionally do not require app HMAC headers.
+    // `/data/files/:token` is also exempt — the signed token in the path is
+    // the authorization, and the URL is meant to be embeddable (e.g. in <img src>).
+    const APP_AUTH_REQUIRED_PREFIXES = ["/data/", "/sync/", "/app-data/"];
+    const APP_AUTH_EXEMPT_PATTERNS = [/^\/data\/files\/[^/]+$/];
+    const requiresAppAuth =
+      APP_AUTH_REQUIRED_PREFIXES.some((p) =>
+        path === p.replace(/\/$/, "") || path.startsWith(p),
+      ) && !APP_AUTH_EXEMPT_PATTERNS.some((re) => re.test(path));
+
+    if (requiresAppAuth) {
+      if (!appId) {
         res.writeHead(401);
-        json(res, { error: "Invalid X-Starkeep-App-Sig" });
+        json(res, { error: "X-Starkeep-App-Id header required" });
         return;
       }
-      // Re-attach the body so downstream handlers can read it again
-      // (we've already consumed the stream — store it on a synthetic readable)
-      (req as any)._cachedBody = rawBody;
+      const rawBody =
+        req.method === "GET" || req.method === "HEAD" ? "" : await readBody(req);
+      if (!validateAppHmac(localDb, appId, rawBody, appSig)) {
+        res.writeHead(401);
+        json(res, { error: "Invalid X-Starkeep-App-Sig (app not installed or signature mismatch)" });
+        return;
+      }
+      // readBody caches the raw bytes on the request itself, so downstream
+      // handlers calling readBody or readBodyBuffer hit the cache.
     }
 
     try {
@@ -900,7 +939,7 @@ async function main() {
           }
 
           // Check for records not in any watch (Library)
-          const allData = await databaseAdapter.query({ kind: "data", limit: 100000 });
+          const allData = await databaseAdapter.query({ limit: 100000 });
           const watchFileIds = new Set<string>();
           const unwatchedRecords: typeof allData.records = [];
           for (const r of allData.records) {
@@ -982,7 +1021,7 @@ async function main() {
 
         // /Library — untracked records grouped by type
         if (browsePath === "/virtual:library") {
-          const allData = await databaseAdapter.query({ kind: "data", limit: 100000 });
+          const allData = await databaseAdapter.query({ limit: 100000 });
           const typeCounts = new Map<string, number>();
 
           for (const r of allData.records) {
@@ -1011,7 +1050,6 @@ async function main() {
         if (libraryTypeMatch) {
           const recordType = libraryTypeMatch[1]!;
           const result = await databaseAdapter.query({
-            kind: "data",
             filters: [{ field: "type" as const, operator: "eq" as const, value: recordType }],
             limit: 10000,
           });
@@ -1043,13 +1081,13 @@ async function main() {
 
       // GET /data/types — list record types with counts
       if (path === "/data/types" && req.method === "GET") {
-        const result = await databaseAdapter.query({ kind: "data", limit: 10000 });
+        const result = await databaseAdapter.query({ limit: 10000 });
 
         const typeCounts = new Map<string, { count: number; latest: number }>();
         for (const record of result.records) {
           if (record.deletedAt) continue;
           // When appId is present, restrict to types the app can access
-          if (appId && !appCanAccessType(appId, record.type)) continue;
+          if (!appCanRead(localDb, appId!, record.type)) continue;
           const existing = typeCounts.get(record.type);
           const wallTime = record.updatedAt.wallTime;
           if (!existing) {
@@ -1067,7 +1105,7 @@ async function main() {
         }));
         types.sort((a, b) => b.count - a.count);
 
-        json(res, { types, total: result.records.filter(r => !r.deletedAt && (!appId || appCanAccessType(appId, r.type))).length });
+        json(res, { types, total: result.records.filter(r => !r.deletedAt && appCanRead(localDb, appId!, r.type)).length });
         return;
       }
 
@@ -1093,7 +1131,6 @@ async function main() {
         }
 
         const result = await databaseAdapter.query({
-          kind: "data",
           filters,
           limit,
           sort: [{ field: "updatedAt", direction: "desc" as const }],
@@ -1101,7 +1138,7 @@ async function main() {
 
         const records = await Promise.all(
           result.records
-            .filter(r => !r.deletedAt && (!appId || appCanAccessType(appId, r.type)))
+            .filter(r => !r.deletedAt && appCanRead(localDb, appId!, r.type))
             .map(async r => ({
               id: r.id,
               kind: r.kind,
@@ -1111,13 +1148,13 @@ async function main() {
               owner_id: r.ownerId,
               sync_status: r.syncStatus,
               version: r.version,
-              payload: r.kind === "data" ? r.content : null,
-              content_hash: r.kind === "data" ? r.contentHash : null,
-              object_storage_key: r.kind === "data" ? r.objectStorageKey : null,
-              mime_type: r.kind === "data" ? r.mimeType : null,
-              size_bytes: r.kind === "data" ? r.sizeBytes : null,
-              original_filename: r.kind === "data" ? r.originalFilename : null,
-              path: r.kind === "data" && r.objectStorageKey
+              content_hash: r.contentHash,
+              object_storage_key: r.objectStorageKey,
+              mime_type: r.mimeType,
+              size_bytes: r.sizeBytes,
+              original_filename: r.originalFilename,
+              parent_id: r.parentId,
+              path: r.objectStorageKey
                 ? await localAdapter.resolvePath(r.objectStorageKey)
                 : null,
             }))
@@ -1131,32 +1168,52 @@ async function main() {
       // Body: JSON { type, payload, fileName?, contentType?, fileBase64?, filePath? }
       if (path === "/data/records" && req.method === "POST") {
         const body = await readBody(req);
-        const { type, payload, fileName, contentType, fileBase64, filePath } = JSON.parse(body);
+        const { type, fileName, contentType, fileBase64, filePath, parentId } = JSON.parse(body);
         if (!type) {
           res.writeHead(400);
           json(res, { error: "type is required" });
           return;
         }
+        if (!filePath && !fileBase64) {
+          res.writeHead(400);
+          json(res, {
+            error: "filePath or fileBase64 is required — every record must be file-backed",
+          });
+          return;
+        }
+        if (!contentType) {
+          res.writeHead(400);
+          json(res, { error: "contentType is required" });
+          return;
+        }
+
+        // Enforce write grant: the app's manifest must declare readwrite on this type.
+        if (!appCanWrite(localDb, appId!, type)) {
+          res.writeHead(403);
+          json(res, {
+            error: "AccessDenied",
+            detail: `app "${appId}" has no readwrite grant on type "${type}"`,
+          });
+          return;
+        }
 
         let record;
         let uploadedBuffer: Buffer | null = null;
-        const originMeta = appId ? { originAppId: appId } : {};
+        const baseInput = { type, ownerId: OWNER_ID, originAppId: appId!, parentId: parentId ?? null };
         if (filePath) {
           const resolvedName = fileName ?? (filePath as string).split("/").pop() ?? filePath;
           record = await sdk.data.putWithLocalFile(
-            { type, ownerId: OWNER_ID, content: { ...payload, ...originMeta, ...(resolvedName ? { fileName: resolvedName } : {}) }, originalFilename: resolvedName },
+            { ...baseInput, originalFilename: resolvedName },
             filePath,
             contentType,
           );
-        } else if (fileBase64) {
+        } else {
           uploadedBuffer = Buffer.from(fileBase64, "base64");
           record = await sdk.data.putWithFile(
-            { type, ownerId: OWNER_ID, content: { ...payload, ...originMeta, ...(fileName ? { fileName } : {}) }, originalFilename: fileName ?? null },
+            { ...baseInput, originalFilename: fileName ?? null },
             uploadedBuffer,
             contentType,
           );
-        } else {
-          record = await sdk.data.put({ type, ownerId: OWNER_ID, content: { ...payload, ...originMeta } || {} });
         }
 
         // Dual-write to remote S3 + Aurora DSQL when cloud config is present.
@@ -1185,11 +1242,11 @@ async function main() {
             created_at: new Date(record.createdAt.wallTime).toISOString(),
             updated_at: new Date(record.updatedAt.wallTime).toISOString(),
             owner_id: record.ownerId,
-            payload: record.content,
             mime_type: record.mimeType,
             size_bytes: record.sizeBytes,
             object_storage_key: record.objectStorageKey,
             original_filename: record.originalFilename,
+            parent_id: record.parentId,
             path: record.objectStorageKey
               ? await localAdapter.resolvePath(record.objectStorageKey)
               : null,
@@ -1198,12 +1255,30 @@ async function main() {
         return;
       }
 
-      // POST /data/files — store raw binary bytes in content-addressed local storage.
-      // General-purpose: used by thin-client apps to upload files (e.g. downsize thumbnails)
-      // before registering a metadata record that references the file.
+      // POST /data/files?type=<typeId> — store raw binary bytes in
+      // content-addressed local storage under shared/<typeId>/<shard>/<hash>.
+      // Used by thin-client apps to upload bytes (e.g. downsized thumbnails)
+      // before registering a metadata record that references the file. The
+      // calling app must have `readwrite` access to the declared type.
       // Body: raw bytes. Content-Type header is the mime type.
       // Response: { key, contentHash, mimeType, sizeBytes }
       if (path === "/data/files" && req.method === "POST") {
+        const typeId = url.searchParams.get("type");
+        if (!typeId) {
+          res.writeHead(400);
+          json(res, { error: "type query param is required" });
+          return;
+        }
+        const registered = appRegistryRow(localDb, appId!);
+        const access = registered?.manifest.infraRequirements.sharedTypeAccess ?? [];
+        const granted = access.some(
+          (e) => e.access === "readwrite" && (e.typeId === typeId || e.typeId === "*"),
+        );
+        if (!granted) {
+          res.writeHead(403);
+          json(res, { error: `App does not have readwrite access to type "${typeId}"` });
+          return;
+        }
         const fileBuffer = await readBodyBuffer(req);
         if (fileBuffer.length === 0) {
           res.writeHead(400);
@@ -1217,9 +1292,120 @@ async function main() {
         }
         const mimeType = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0]!.trim();
         const hex = createHash("sha256").update(fileBuffer).digest("hex");
-        const key = `metadata/${hex}`;
+        const key = dataRecordObjectKey(typeId, hex);
         await localAdapter.put(key, fileBuffer, { contentType: mimeType });
         json(res, { key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
+        return;
+      }
+
+      // ----- App-specific syncable data -----
+      // All /app-data/... routes are implicitly scoped to the caller's appId
+      // (resolved from the HMAC header by the auth middleware above), so the
+      // URL never carries it. The handlers use the `appSpecific` view built
+      // by createAppSpecificFactory which refuses ops on tables/files the
+      // app didn't declare.
+      if (path.startsWith("/app-data/")) {
+        const view = appSpecificFactory({ subjectType: "app", subjectId: appId! });
+        if (!view) {
+          res.writeHead(404);
+          json(res, {
+            error: "App did not declare appSpecificSyncable in its manifest",
+          });
+          return;
+        }
+
+        const dbMatch = path.match(/^\/app-data\/db\/([^/]+)$/);
+        if (dbMatch) {
+          const table = decodeURIComponent(dbMatch[1]!);
+          try {
+            if (req.method === "POST") {
+              const body = JSON.parse(await readBody(req)) as { row?: Record<string, unknown> };
+              if (!body.row) {
+                res.writeHead(400);
+                json(res, { error: "row is required" });
+                return;
+              }
+              await view.insertRow(table, body.row);
+              json(res, { ok: true });
+              return;
+            }
+            if (req.method === "PATCH") {
+              const body = JSON.parse(await readBody(req)) as {
+                where?: Record<string, unknown>;
+                patch?: Record<string, unknown>;
+              };
+              if (!body.where || !body.patch) {
+                res.writeHead(400);
+                json(res, { error: "where and patch are required" });
+                return;
+              }
+              const changes = await view.updateRow(table, body.where, body.patch);
+              json(res, { changes });
+              return;
+            }
+            if (req.method === "DELETE") {
+              const body = JSON.parse(await readBody(req)) as { where?: Record<string, unknown> };
+              if (!body.where) {
+                res.writeHead(400);
+                json(res, { error: "where is required" });
+                return;
+              }
+              const changes = await view.deleteRow(table, body.where);
+              json(res, { changes });
+              return;
+            }
+            if (req.method === "GET") {
+              const where: Record<string, unknown> = {};
+              for (const [k, v] of url.searchParams) where[k] = v;
+              const rows = await view.queryRows(table, Object.keys(where).length ? where : undefined);
+              json(res, { rows });
+              return;
+            }
+          } catch (err) {
+            res.writeHead(400);
+            json(res, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+        }
+
+        const fileMatch = path.match(/^\/app-data\/files\/(.+)$/);
+        if (fileMatch) {
+          const subKey = decodeURIComponent(fileMatch[1]!);
+          try {
+            if (req.method === "PUT") {
+              const bytes = await readBodyBuffer(req);
+              const mimeType = (req.headers["content-type"] ?? "application/octet-stream")
+                .split(";")[0]!
+                .trim();
+              const result = await view.putFile(subKey, bytes, mimeType);
+              json(res, result);
+              return;
+            }
+            if (req.method === "GET") {
+              const expiresIn = parseInt(url.searchParams.get("expiresIn") ?? "3600", 10);
+              const fileUrl = await view.fileUrl(subKey, { expiresIn });
+              if (!fileUrl) {
+                res.writeHead(404);
+                json(res, { error: "File not found" });
+                return;
+              }
+              json(res, { url: fileUrl, expiresIn });
+              return;
+            }
+            if (req.method === "DELETE") {
+              await view.deleteFile(subKey);
+              json(res, { ok: true });
+              return;
+            }
+          } catch (err) {
+            res.writeHead(400);
+            json(res, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+        }
+
+        res.writeHead(404);
+        json(res, { error: "Not found" });
         return;
       }
 
@@ -1288,6 +1474,64 @@ async function main() {
         return;
       }
 
+      // POST /data/records/:id/metadata — write type-specific metadata for a record.
+      // The app is responsible for extracting metadata values (e.g. EXIF from image
+      // bytes); the server validates keys against the declared type schema and persists.
+      // Requires readwrite access to the type.
+      const metadataWriteMatch = path.match(/^\/data\/records\/([^/]+)\/metadata$/);
+      if (metadataWriteMatch && req.method === "POST") {
+        const recordId = metadataWriteMatch[1]!;
+        const body = await readBody(req);
+        const { typeId, metadata } = JSON.parse(body) as { typeId?: string; metadata?: Record<string, unknown> };
+        if (!typeId) {
+          res.writeHead(400);
+          json(res, { error: "typeId is required" });
+          return;
+        }
+        if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+          res.writeHead(400);
+          json(res, { error: "metadata must be an object" });
+          return;
+        }
+        if (!appCanWriteMetadata(localDb, appId!, typeId)) {
+          res.writeHead(403);
+          json(res, { error: "AccessDenied", detail: `app "${appId}" has no metadataWrite grant on type "${typeId}"` });
+          return;
+        }
+        const coreType = CORE_TYPES.find((t) => t.id === typeId);
+        if (!coreType) {
+          res.writeHead(400);
+          json(res, { error: `Unknown type "${typeId}" — only core types support metadata` });
+          return;
+        }
+        const allowedColumns = new Set(coreType.metadataColumns.map((c) => c.name));
+        const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
+        if (unknownKeys.length > 0) {
+          res.writeHead(400);
+          json(res, { error: `Unknown metadata columns: ${unknownKeys.join(", ")}` });
+          return;
+        }
+        await sdk.data.putMetadata(typeId, { recordId: recordId as any, ...metadata });
+        json(res, { ok: true });
+        return;
+      }
+
+      // GET /data/records/:id/metadata/:typeId — read type-specific metadata for a record.
+      // Requires read or readwrite access to the type.
+      const metadataReadMatch = path.match(/^\/data\/records\/([^/]+)\/metadata\/([^/]+)$/);
+      if (metadataReadMatch && req.method === "GET") {
+        const recordId = metadataReadMatch[1]!;
+        const typeId = metadataReadMatch[2]!;
+        if (!appCanRead(localDb, appId!, typeId)) {
+          res.writeHead(403);
+          json(res, { error: "AccessDenied", detail: `app "${appId}" has no read grant on type "${typeId}"` });
+          return;
+        }
+        const metadata = await sdk.data.getMetadata(typeId, recordId as any);
+        json(res, { metadata });
+        return;
+      }
+
       // GET /data/records/:id
       const recordMatch = path.match(/^\/data\/records\/([^/]+)$/);
       if (recordMatch && req.method === "GET") {
@@ -1307,12 +1551,12 @@ async function main() {
             owner_id: record.ownerId,
             sync_status: record.syncStatus,
             version: record.version,
-            payload: record.content,
             content_hash: record.contentHash,
             object_storage_key: record.objectStorageKey,
             mime_type: record.mimeType,
             size_bytes: record.sizeBytes,
             original_filename: record.originalFilename,
+            parent_id: record.parentId,
             path: record.kind === "data" && record.objectStorageKey
               ? await localAdapter.resolvePath(record.objectStorageKey)
               : null,
@@ -1457,13 +1701,11 @@ async function main() {
           json(res, { error: "targetType is required" });
           return;
         }
-        if (appId) {
-          const acc = appAccessMap.get(appId);
-          if (!acc?.canPromoteFromUnknown) {
-            res.writeHead(403);
-            json(res, { error: "App does not have canPromoteFromUnknown permission" });
-            return;
-          }
+        const registered = appRegistryRow(localDb, appId!);
+        if (!registered?.manifest.infraRequirements.canPromoteFromUnknown) {
+          res.writeHead(403);
+          json(res, { error: "App does not have canPromoteFromUnknown permission" });
+          return;
         }
         const record = await sdk.data.get(recordId as any);
         if (!record) {
@@ -1476,36 +1718,77 @@ async function main() {
           json(res, { error: "Only 'unknown' records can be promoted" });
           return;
         }
-        const updated = await sdk.data.update(recordId as any, {
+        // Promotion changes the type — that's an admin-level mutation rather
+        // than a data-plane update, so we write to the underlying adapter
+        // directly and bump version. No metadata changes; the file already
+        // sits at its canonical objectStorageKey.
+        const promoted = {
+          ...record,
           type: body.targetType,
-          content: { ...record.content, promotedBy: appId ?? "admin", promotedAt: new Date().toISOString() },
-        });
-        json(res, { record: { id: updated.id, type: updated.type, promoted_from: "unknown" } });
+          version: record.version + 1,
+          updatedAt: { wallTime: Date.now(), counter: 0, nodeId: NODE_ID },
+        };
+        await databaseAdapter.put(promoted);
+        json(res, { record: { id: promoted.id, type: promoted.type, promoted_from: "unknown" } });
         return;
       }
 
-      // POST /admin/apps — register an app's access grants from its manifest JSON.
-      // Called by admin-web during local app registration.
-      if (path === "/admin/apps" && req.method === "POST") {
+      // POST /admin/apps/install — run the local installer for a manifest.
+      // Body: the app's manifest.json. Returns { appId, hmacSecret } on success.
+      // Called by admin-web on user-initiated install. Localhost-only, no HMAC
+      // (the app has no secret yet — this is the bootstrapping primitive).
+      if (path === "/admin/apps/install" && req.method === "POST") {
         const body = JSON.parse(await readBody(req));
-        if (!body.name) {
-          res.writeHead(400);
-          json(res, { error: "manifest.name is required" });
-          return;
+        try {
+          const result = installLocal(localDb, body);
+          json(res, { appId: result.appId, hmacSecret: result.hmacSecret });
+        } catch (err) {
+          if (err instanceof ManifestValidationError) {
+            res.writeHead(400);
+            json(res, { error: "ManifestValidationError", details: err.errors });
+            return;
+          }
+          if (err instanceof LocalInstallError) {
+            res.writeHead(500);
+            json(res, { error: err.name, message: err.message });
+            return;
+          }
+          throw err;
         }
-        registerAppFromManifest(body);
-        await saveAppAccessMap();
-        json(res, { ok: true, appId: body.name });
         return;
       }
 
-      // GET /admin/apps — list registered apps and their access
+      // DELETE /admin/apps/:appId — run the local uninstaller for an app.
+      const uninstallMatch = path.match(/^\/admin\/apps\/([^/]+)$/);
+      if (uninstallMatch && req.method === "DELETE") {
+        const targetAppId = decodeURIComponent(uninstallMatch[1]!);
+        uninstallLocal(localDb, targetAppId, {
+          deleteFilesPrefix: async (prefix) => {
+            // Storage layout is the FS adapter's basePath/<key>. The syncable
+            // prefix is its own directory tree under apps/<appId>/syncable/,
+            // so removing it is just an rm -rf of that subtree.
+            const target = join(objectsBasePath, prefix);
+            await rm(target, { recursive: true, force: true });
+          },
+        });
+        json(res, { ok: true, appId: targetAppId });
+        return;
+      }
+
+      // GET /admin/apps — list registered apps. The HMAC secret is NOT
+      // returned here; it is only exposed at install time so the caller can
+      // hand it directly to the installed app.
       if (path === "/admin/apps" && req.method === "GET") {
-        const apps = Array.from(appAccessMap.entries()).map(([id, acc]) => ({
-          appId: id,
-          types: Object.fromEntries(acc.types),
-          canIngestUnknown: acc.canIngestUnknown,
-          canPromoteFromUnknown: acc.canPromoteFromUnknown,
+        const apps = listAppRegistry(localDb).map((row) => ({
+          appId: row.appId,
+          name: row.name,
+          version: row.version,
+          tier: row.tier,
+          status: row.status,
+          installedAt: row.installedAt,
+          sharedTypeAccess: row.manifest.infraRequirements.sharedTypeAccess,
+          canIngestUnknown: row.manifest.infraRequirements.canIngestUnknown,
+          canPromoteFromUnknown: row.manifest.infraRequirements.canPromoteFromUnknown,
         }));
         json(res, { apps });
         return;
@@ -1564,25 +1847,34 @@ function extensionForMime(mime: string | null): string {
   return map[mime] ?? "";
 }
 
-function readBody(req: import("node:http").IncomingMessage): Promise<string> {
-  if ((req as any)._cachedBody !== undefined) {
-    return Promise.resolve((req as any)._cachedBody as string);
-  }
+// We cache the raw bytes (not the utf-8 string), so a handler called after the
+// HMAC middleware has consumed the stream can still recover the original
+// payload — readBody and readBodyBuffer both read from the same cache. The
+// HMAC itself is computed over `cached.toString("utf8")` to match how callers
+// (the photos proxy, the SDK clients) sign their requests.
+type CachedReq = import("node:http").IncomingMessage & { _cachedBody?: Buffer };
+
+async function readBodyBufferRaw(req: CachedReq): Promise<Buffer> {
+  if (req._cachedBody !== undefined) return req._cachedBody;
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("end", () => {
+      const buf = Buffer.concat(chunks);
+      req._cachedBody = buf;
+      resolve(buf);
+    });
     req.on("error", reject);
   });
 }
 
-function readBodyBuffer(req: import("node:http").IncomingMessage): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
+async function readBody(req: import("node:http").IncomingMessage): Promise<string> {
+  const buf = await readBodyBufferRaw(req as CachedReq);
+  return buf.toString("utf8");
+}
+
+async function readBodyBuffer(req: import("node:http").IncomingMessage): Promise<Buffer> {
+  return readBodyBufferRaw(req as CachedReq);
 }
 
 function json(res: import("node:http").ServerResponse, body: unknown) {

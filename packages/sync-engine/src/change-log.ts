@@ -9,10 +9,7 @@ export function createChangeLog(): ChangeLog {
     async append(
       entry: Omit<ChangeLogEntry, "changeId">,
     ): Promise<ChangeLogEntry> {
-      const fullEntry: ChangeLogEntry = {
-        ...entry,
-        changeId: generateId(),
-      };
+      const fullEntry: ChangeLogEntry = { ...entry, changeId: generateId() };
       entries.push(fullEntry);
       return fullEntry;
     },

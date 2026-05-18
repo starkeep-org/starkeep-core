@@ -15,7 +15,7 @@ export function buildPulumiProgram(
   ctx: ComputeContext,
 ): () => Promise<Record<string, unknown>> {
   return async () => {
-    const handlers = manifest.infraRequirements.appPrivate.compute.handlers;
+    const handlers = manifest.infraRequirements.compute.handlers;
     const outputs: Record<string, unknown> = {};
 
     for (const handler of handlers) {

@@ -1,11 +1,20 @@
 import type { StarkeepId } from "../identifiers/types.js";
 import type { HLCTimestamp } from "../hlc/types.js";
 
+/**
+ * Lifecycle state of a DataRecord with respect to the sync pipeline.
+ *
+ * After the "all shared data is file-backed" refactor, every record in the
+ * records table is sync-eligible, so we no longer carry a separate
+ * "local-only" state. The lifecycle is:
+ *
+ *   PendingPush → Synced
+ *                 ↓
+ *               Conflict (manual resolution required)
+ */
 export enum SyncStatus {
-  Local = "local",
-  Synced = "synced",
   PendingPush = "pending_push",
-  PendingPull = "pending_pull",
+  Synced = "synced",
   Conflict = "conflict",
 }
 
@@ -20,54 +29,43 @@ export interface BaseRecord {
   version: number;
 }
 
+/**
+ * A row in the shared records table. Every DataRecord is backed by a file in
+ * object storage (`objectStorageKey` + `contentHash`); typed metadata derived
+ * from the file lives in the type-specific `record_<type>_metadata` table.
+ *
+ * App-level / user-authored fields that cannot be deterministically derived
+ * from the file (titles, captions, edit provenance, etc.) live in app-private
+ * storage, not on this row.
+ */
 export interface DataRecord extends BaseRecord {
   readonly kind: "data";
-  contentHash: string | null;
-  objectStorageKey: string | null;
-  mimeType: string | null;
-  sizeBytes: number | null;
+  contentHash: string;
+  objectStorageKey: string;
+  mimeType: string;
+  sizeBytes: number;
   originalFilename: string | null;
-  content: Record<string, unknown>;
+  /**
+   * App identity that produced this record. Set by the data-server at write
+   * time from the authenticated subject. Required on every write.
+   */
+  originAppId: string;
+  /**
+   * Optional parent record id (e.g. an `image` thumbnail's parent is its
+   * original). Same type as the parent — typed-to-typed relations only.
+   */
+  parentId: StarkeepId | null;
 }
 
 /**
- * A metadata record is a lightweight value object derived from a data record
- * by a generator. It is stored in a per-type metadata table, not in the main
- * records table. There is one row per data record in each metadata table.
- *
- * File-backed metadata (e.g. image downsizes) stores the generated file in
- * object storage and references it via `objectStorageKey`. The key uses the
- * same flat content-addressed scheme as `DataRecord` (SHA-256 hex).
+ * One row in a per-type metadata table (`shared_record_<type>_metadata` /
+ * `shared.record_<type>_metadata`). Columns are declared by the type's entry
+ * in `CORE_TYPES`. Every column other than `recordId` must be deterministically
+ * derivable from the record's file bytes.
  */
-export interface MetadataRecord {
-  readonly targetId: StarkeepId;
-  readonly generatorId: string;
-  generatorVersion: number;
-  inputHash: string;
-  value: Record<string, unknown>;
-  objectStorageKey?: string | null;
-  contentHash?: string | null;
-  mimeType?: string | null;
-  sizeBytes?: number | null;
+export interface MetadataRow {
+  recordId: StarkeepId;
+  [column: string]: unknown;
 }
 
 export type AnyRecord = DataRecord;
-
-/**
- * Stored as a DataRecord with type `@starkeep/type-registration`.
- * Only the admin layer (owner subject) may write these records.
- * `registeredByAppId` is provenance metadata only — it does not restrict
- * other apps from being granted access to the type.
- */
-export interface TypeRegistration {
-  /** Global type identifier, e.g. "media:photo" or "@starkeep/access-policy". */
-  readonly typeId: string;
-  /** JSON Schema for the record payload. */
-  readonly schema: object;
-  /** Semver string; increment on schema changes. */
-  readonly schemaVersion: string;
-  readonly description: string;
-  readonly registeredAt: HLCTimestamp;
-  /** Provenance only — does not imply ownership or exclusive access. */
-  readonly registeredByAppId: string;
-}

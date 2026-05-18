@@ -79,7 +79,7 @@ export function createSqliteChangeLog(
         JSON.stringify(entry.recordSnapshot),
         entry.baseVersion,
       );
-      return { ...entry, changeId };
+      return { ...entry, changeId } as ChangeLogEntry;
     },
 
     async getChangesSince(

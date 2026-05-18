@@ -15,7 +15,7 @@
 import { Kysely, PostgresDialect, sql } from "kysely";
 import pg from "pg";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import type { SharedTypeAccess } from "@starkeep/admin-manifest";
+import type { SharedTypeAccess, SyncableTable } from "@starkeep/admin-manifest";
 import { CORE_TYPE_REGISTRY } from "@starkeep/admin-manifest";
 
 export interface DsqlDdlOptions {
@@ -58,6 +58,8 @@ export async function runAppInstallDdl(
   sharedTypeAccess: SharedTypeAccess[],
   canIngestUnknown: boolean,
   canPromoteFromUnknown: boolean,
+  appSyncableTables: SyncableTable[] = [],
+  appSyncableFilesEnabled: boolean = false,
 ): Promise<void> {
   const pgRole = appIdToPgRole(opts.stackPrefix, appId);
   const db = await makeDb(opts);
@@ -133,10 +135,61 @@ export async function runAppInstallDdl(
           SET access = EXCLUDED.access, metadata_write = EXCLUDED.metadata_write
       `.execute(db);
     }
+
+    // App-specific syncable tables under the app's private schema.
+    // Each table gets reserved `updated_at` (HLC-serialized) and `deleted_at`
+    // columns for inline-HLC change tracking, plus an index on `updated_at`
+    // for efficient pull scans.
+    const schemaName = `app_${appId.replace(/-/g, "_")}`;
+    for (const table of appSyncableTables) {
+      const colDdl = table.columns
+        .map((c) => {
+          const pgType = DSQL_COLUMN_TYPES[c.type] ?? "text";
+          const notNull = c.notNull || c.primaryKey ? " NOT NULL" : "";
+          return `"${c.name}" ${pgType}${notNull}`;
+        })
+        .join(", ");
+      const pks = table.columns.filter((c) => c.primaryKey).map((c) => `"${c.name}"`);
+      const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
+      await sql.raw(
+        `CREATE TABLE IF NOT EXISTS ${schemaName}."${table.name}" (${colDdl}, "updated_at" text NOT NULL, "deleted_at" text${pkClause})`,
+      ).execute(db);
+      await sql.raw(
+        `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${table.name}_updated_at" ON ${schemaName}."${table.name}"("updated_at")`,
+      ).execute(db);
+      // Grant app role full DML on its own syncable tables.
+      await sql.raw(
+        `GRANT SELECT, INSERT, UPDATE, DELETE ON ${schemaName}."${table.name}" TO ${pgRole}`,
+      ).execute(db);
+    }
+
+    // Upsert namespace registry row so the pull path knows which tables exist.
+    if (appSyncableTables.length > 0 || appSyncableFilesEnabled) {
+      const tablesJson = JSON.stringify(
+        appSyncableTables.map((t) => ({
+          name: t.name,
+          pkColumns: t.columns.filter((c) => c.primaryKey).map((c) => c.name),
+        })),
+      );
+      await sql`
+        INSERT INTO shared.app_syncable_namespaces (app_id, tables_json, files_enabled)
+        VALUES (${appId}, ${tablesJson}, ${appSyncableFilesEnabled})
+        ON CONFLICT (app_id) DO UPDATE
+          SET tables_json = EXCLUDED.tables_json, files_enabled = EXCLUDED.files_enabled
+      `.execute(db);
+    }
   } finally {
     await db.destroy();
   }
 }
+
+const DSQL_COLUMN_TYPES: Record<string, string> = {
+  text: "text",
+  integer: "integer",
+  real: "real",
+  blob: "bytea",
+  boolean: "boolean",
+};
 
 /**
  * Per-app uninstall DDL. Revokes grants and drops the app schema + PG role.
@@ -160,6 +213,7 @@ export async function runAppUninstallDdl(
     }
 
     await sql`DELETE FROM shared.access_grants WHERE app_id = ${appId}`.execute(db);
+    await sql`DELETE FROM shared.app_syncable_namespaces WHERE app_id = ${appId}`.execute(db);
     await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
     await sql`
       DO $$

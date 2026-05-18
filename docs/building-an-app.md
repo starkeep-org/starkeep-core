@@ -18,17 +18,13 @@ Every Starkeep app starts with a `manifest.json`. The manifest is the spec — i
         "rationale": "Display the user's photos"
       }
     ],
-    "appPrivate": {
-      "database": true,
-      "objectStorage": true,
-      "compute": {
-        "enabled": false,
-        "handlers": []
-      },
-      "brokerPower": false,
-      "canIngestUnknown": false,
-      "canPromoteFromUnknown": false
-    }
+    "compute": {
+      "enabled": false,
+      "handlers": []
+    },
+    "brokerPower": false,
+    "canIngestUnknown": false,
+    "canPromoteFromUnknown": false
   }
 }
 ```
@@ -54,13 +50,17 @@ You cannot define new types. If your data doesn't fit a core type, use `unknown`
 
 Apps that receive files of an unknown format can ingest them as type `unknown` by requesting `canIngestUnknown: true` in the manifest. Unknown records sit in a holding pen until an authorized app promotes them to a typed record (`canPromoteFromUnknown: true`). Promotion is audited in `shared.reclassifications`.
 
-## App-Private Resources
+## App-Specific Syncable Data
 
-Your app always gets:
-- A private PostgreSQL schema (`app_${appId}`) in the shared DSQL cluster — use it for app-specific state
-- An S3 prefix (`apps/${appId}/`) in the shared files bucket — use it for app-private files
+If your app needs its own database tables or files, declare them in
+`appSpecificSyncable`. The installer materializes the declared tables as
+`<appId>_syncable_<name>` and, if `files: true`, enables the object-storage
+prefix `apps/<appId>/syncable/...`. Both are accessible only to your app and
+sync as a unit to other locations where your app is installed.
 
-These are isolated from other apps by IAM (the app role can only access its own prefix) and by PG role grants.
+There is no system-provided namespace for app-private non-syncable data —
+anything outside `shared/...` and `apps/<appId>/syncable/...` is your app's
+own responsibility.
 
 ## Compute (Lambda + API Gateway)
 

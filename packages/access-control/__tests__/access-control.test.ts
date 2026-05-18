@@ -1,14 +1,67 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createHLCClock, createDataRecord, createStarkeepId, type HLCClock } from "@starkeep/core";
+import {
+  createHLCClock,
+  createDataRecord,
+  type HLCClock,
+  type CreateDataRecordInput,
+  type StarkeepId,
+  type HLCTimestamp,
+} from "@starkeep/core";
 import { MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import { createAccessControlEngine } from "../src/access-control-engine.js";
 import { createEnforcedDatabaseAdapter } from "../src/enforced-database-adapter.js";
 import { AccessDeniedError } from "../src/errors.js";
-import type { AccessControlEngine } from "../src/types.js";
+import type {
+  AccessControlEngine,
+  AccessPolicy,
+  SharingToken,
+  AccessPolicyStore,
+  SharingTokenStore,
+} from "../src/index.js";
+
+function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
+  return {
+    type: "@test/note",
+    ownerId: "owner-user-1",
+    originAppId: "test",
+    contentHash: `sha256:${Math.random().toString(36).slice(2)}`,
+    objectStorageKey: `shared/@test/note/ab/${Math.random().toString(36).slice(2)}`,
+    mimeType: "application/octet-stream",
+    sizeBytes: 4,
+    ...over,
+  };
+}
+
+/** In-memory AccessPolicyStore for tests. */
+function memoryPolicyStore(): AccessPolicyStore {
+  const policies = new Map<StarkeepId, AccessPolicy>();
+  return {
+    async putPolicy(policy) { policies.set(policy.policyId, policy); },
+    async getPolicy(id) { return policies.get(id) ?? null; },
+    async listPolicies() { return Array.from(policies.values()); },
+    async deletePolicy(id) { policies.delete(id); },
+  };
+}
+
+/** In-memory SharingTokenStore for tests. */
+function memoryTokenStore(): SharingTokenStore {
+  const byHash = new Map<string, SharingToken>();
+  return {
+    async putToken(token) { byHash.set(token.tokenHash, token); },
+    async getTokenByHash(hash) { return byHash.get(hash) ?? null; },
+    async incrementUsage(hash, _now: HLCTimestamp) {
+      const t = byHash.get(hash);
+      if (t) t.usageCount++;
+    },
+    async deleteToken(hash) { byHash.delete(hash); },
+  };
+}
 
 describe("AccessControl", () => {
   let clock: HLCClock;
   let databaseAdapter: MockDatabaseAdapter;
+  let policyStore: AccessPolicyStore;
+  let tokenStore: SharingTokenStore;
   let engine: AccessControlEngine;
   const ownerId = "owner-user-1";
 
@@ -16,7 +69,9 @@ describe("AccessControl", () => {
     clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => Date.now() });
     databaseAdapter = new MockDatabaseAdapter();
     await databaseAdapter.init();
-    engine = createAccessControlEngine({ databaseAdapter, clock, ownerId });
+    policyStore = memoryPolicyStore();
+    tokenStore = memoryTokenStore();
+    engine = createAccessControlEngine({ policyStore, tokenStore, clock, ownerId });
   });
 
   describe("createPolicy and listPolicies", () => {
@@ -57,7 +112,7 @@ describe("AccessControl", () => {
 
   describe("checkAccess", () => {
     it("should allow access with matching item-specific policy", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord(baseInput(), clock);
       await databaseAdapter.put(record);
 
       await engine.createPolicy({
@@ -73,6 +128,7 @@ describe("AccessControl", () => {
         subjectId: "user-2",
         resourceId: record.id,
         permission: "read",
+        recordType: record.type,
       });
 
       expect(result.allowed).toBe(true);
@@ -81,7 +137,7 @@ describe("AccessControl", () => {
     });
 
     it("should allow access with wildcard policy", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord(baseInput(), clock);
       await databaseAdapter.put(record);
 
       await engine.createPolicy({
@@ -97,6 +153,7 @@ describe("AccessControl", () => {
         subjectId: "user-2",
         resourceId: record.id,
         permission: "read",
+        recordType: record.type,
       });
 
       expect(result.allowed).toBe(true);
@@ -104,7 +161,7 @@ describe("AccessControl", () => {
     });
 
     it("should deny access when no matching policy exists", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord(baseInput(), clock);
       await databaseAdapter.put(record);
 
       const result = await engine.checkAccess({
@@ -112,6 +169,7 @@ describe("AccessControl", () => {
         subjectId: "user-2",
         resourceId: record.id,
         permission: "read",
+        recordType: record.type,
       });
 
       expect(result.allowed).toBe(false);
@@ -120,7 +178,7 @@ describe("AccessControl", () => {
     });
 
     it("should deny access for expired policy", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord(baseInput(), clock);
       await databaseAdapter.put(record);
 
       const pastTimestamp = { wallTime: 1000, counter: 0, nodeId: "test-node" };
@@ -139,13 +197,14 @@ describe("AccessControl", () => {
         subjectId: "user-2",
         resourceId: record.id,
         permission: "read",
+        recordType: record.type,
       });
 
       expect(result.allowed).toBe(false);
     });
 
     it("should grant all access with admin permission", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord(baseInput(), clock);
       await databaseAdapter.put(record);
 
       await engine.createPolicy({
@@ -161,6 +220,7 @@ describe("AccessControl", () => {
         subjectId: "user-2",
         resourceId: record.id,
         permission: "read",
+        recordType: record.type,
       });
 
       const writeResult = await engine.checkAccess({
@@ -168,6 +228,7 @@ describe("AccessControl", () => {
         subjectId: "user-2",
         resourceId: record.id,
         permission: "write",
+        recordType: record.type,
       });
 
       const deleteResult = await engine.checkAccess({
@@ -175,6 +236,7 @@ describe("AccessControl", () => {
         subjectId: "user-2",
         resourceId: record.id,
         permission: "delete",
+        recordType: record.type,
       });
 
       expect(readResult.allowed).toBe(true);
@@ -209,7 +271,7 @@ describe("AccessControl", () => {
   });
 
   describe("persistence via loadPolicies", () => {
-    it("should restore policies after re-creating the engine with the same adapter", async () => {
+    it("should restore policies after re-creating the engine with the same stores", async () => {
       const policy = await engine.createPolicy({
         subjectType: "user",
         subjectId: "user-persist",
@@ -218,8 +280,7 @@ describe("AccessControl", () => {
         permissions: ["read", "write"],
       });
 
-      // Create a fresh engine backed by the same databaseAdapter
-      const engine2 = createAccessControlEngine({ databaseAdapter, clock, ownerId });
+      const engine2 = createAccessControlEngine({ policyStore, tokenStore, clock, ownerId });
       await engine2.loadPolicies();
 
       const policies = await engine2.listPolicies({ subjectId: "user-persist" });
@@ -238,7 +299,7 @@ describe("AccessControl", () => {
       });
       const { token } = await engine.createSharingToken(policy.policyId);
 
-      const engine2 = createAccessControlEngine({ databaseAdapter, clock, ownerId });
+      const engine2 = createAccessControlEngine({ policyStore, tokenStore, clock, ownerId });
       await engine2.loadPolicies();
 
       const validated = await engine2.validateSharingToken(token);
@@ -256,7 +317,7 @@ describe("AccessControl", () => {
       });
       await engine.revokePolicy(policy.policyId);
 
-      const engine2 = createAccessControlEngine({ databaseAdapter, clock, ownerId });
+      const engine2 = createAccessControlEngine({ policyStore, tokenStore, clock, ownerId });
       await engine2.loadPolicies();
 
       const policies = await engine2.listPolicies({ subjectId: "user-revoke" });
@@ -266,7 +327,7 @@ describe("AccessControl", () => {
 
   describe("enforced database adapter", () => {
     it("should allow reads with read permission", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord(baseInput(), clock);
       await databaseAdapter.put(record);
 
       await engine.createPolicy({
@@ -289,7 +350,7 @@ describe("AccessControl", () => {
     });
 
     it("should deny writes without write permission", async () => {
-      const record = createDataRecord({ type: "@test/note", ownerId }, clock);
+      const record = createDataRecord(baseInput(), clock);
 
       await engine.createPolicy({
         subjectType: "user",
@@ -310,8 +371,7 @@ describe("AccessControl", () => {
     });
 
     it("should throw AccessDeniedError on put when no policy covers the record type", async () => {
-      // No policy exists for "media:photo" — type-based check must deny.
-      const record = createDataRecord({ type: "media:photo", ownerId }, clock);
+      const record = createDataRecord(baseInput({ type: "media:photo" }), clock);
 
       const enforcedAdapter = createEnforcedDatabaseAdapter({
         databaseAdapter,
@@ -321,47 +381,6 @@ describe("AccessControl", () => {
       });
 
       await expect(enforcedAdapter.put(record)).rejects.toThrow(AccessDeniedError);
-    });
-
-    it("should throw AccessDeniedError accessing another app's private type, even with a wildcard policy", async () => {
-      // Record owned by "starkeep-tasks" private namespace.
-      const record = createDataRecord({ type: "starkeep-tasks:private:settings", ownerId }, clock);
-      await databaseAdapter.put(record);
-
-      // Grant a wildcard policy to @starkeep/notes — structural rule must still block.
-      await engine.createPolicy({
-        subjectType: "app",
-        subjectId: "@starkeep/notes",
-        resourceType: "wildcard",
-        resourceId: "*",
-        permissions: ["read", "write", "delete"],
-      });
-
-      const enforcedAdapter = createEnforcedDatabaseAdapter({
-        databaseAdapter,
-        accessControlEngine: engine,
-        subjectType: "app",
-        subjectId: "@starkeep/notes",
-      });
-
-      await expect(enforcedAdapter.get(record.id)).rejects.toThrow(AccessDeniedError);
-    });
-
-    it("should allow access to own private types without any policy", async () => {
-      // "starkeep-notes" is the normalized form of "@starkeep/notes".
-      const record = createDataRecord({ type: "starkeep-notes:private:settings", ownerId }, clock);
-      await databaseAdapter.put(record);
-
-      // No policies created — structural rule alone should permit access.
-      const enforcedAdapter = createEnforcedDatabaseAdapter({
-        databaseAdapter,
-        accessControlEngine: engine,
-        subjectType: "app",
-        subjectId: "@starkeep/notes",
-      });
-
-      const retrieved = await enforcedAdapter.get(record.id);
-      expect(retrieved).toEqual(record);
     });
   });
 });

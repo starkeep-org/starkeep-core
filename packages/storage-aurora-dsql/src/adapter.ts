@@ -1,10 +1,10 @@
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
+import { pgMetadataTableName } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
   QueryResult,
   BatchOperation,
-  Migration,
   Transaction,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
@@ -13,7 +13,12 @@ import type {
   DatabaseClient,
   DatabaseClientFactory,
 } from "./types.js";
-import { recordToRow, rowToRecord, type PostgresRow } from "./serialization.js";
+import {
+  recordToRow,
+  rowToRecord,
+  columnsToMetadataRow,
+  type PostgresRow,
+} from "./serialization.js";
 import { buildPostgresQuery } from "./query-builder.js";
 
 const CREATE_TABLE_SQL = `
@@ -23,15 +28,16 @@ const CREATE_TABLE_SQL = `
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     owner_id TEXT NOT NULL,
-    sync_status TEXT NOT NULL DEFAULT 'local',
+    sync_status TEXT NOT NULL DEFAULT 'pending_push',
     deleted_at TEXT,
     version INTEGER NOT NULL DEFAULT 1,
-    content TEXT NOT NULL DEFAULT '{}',
-    content_hash TEXT,
-    object_storage_key TEXT,
-    mime_type TEXT,
-    size_bytes INTEGER,
-    original_filename TEXT
+    content_hash TEXT NOT NULL,
+    object_storage_key TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    original_filename TEXT,
+    origin_app_id TEXT NOT NULL,
+    parent_id TEXT
   )
 `;
 
@@ -39,15 +45,8 @@ const CREATE_INDEXES_SQL = [
   "CREATE INDEX ASYNC IF NOT EXISTS idx_records_type ON records(type)",
   "CREATE INDEX ASYNC IF NOT EXISTS idx_records_sync_status ON records(sync_status)",
   "CREATE INDEX ASYNC IF NOT EXISTS idx_records_updated_at ON records(updated_at)",
+  "CREATE INDEX ASYNC IF NOT EXISTS idx_records_parent_id ON records(parent_id)",
 ];
-
-const CREATE_MIGRATIONS_TABLE_SQL = `
-  CREATE TABLE IF NOT EXISTS migrations (
-    version INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )
-`;
 
 export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private client: DatabaseClient | null = null;
@@ -68,7 +67,6 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     for (const sql of CREATE_INDEXES_SQL) {
       await this.client.query(sql);
     }
-    await this.client.query(CREATE_MIGRATIONS_TABLE_SQL);
   }
 
   async close(): Promise<void> {
@@ -98,11 +96,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async put(record: DataRecord): Promise<void> {
     const row = recordToRow(record);
     const columns = Object.keys(row);
-    const values = Object.values(row).map((value) =>
-      typeof value === "object" && value !== null
-        ? JSON.stringify(value)
-        : value,
-    );
+    const values = Object.values(row);
     const placeholders = columns.map((_, index) => `$${index + 1}`);
     const updates = columns
       .filter((column) => column !== "id")
@@ -182,41 +176,61 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
-  async runMigrations(migrations: Migration[]): Promise<void> {
-    const applied = await this.getClient().query(
-      "SELECT version FROM migrations ORDER BY version",
-    );
-    const appliedVersions = new Set(
-      applied.rows.map((record) => record.version as number),
-    );
-
-    const pending = migrations
-      .filter((migration) => !appliedVersions.has(migration.version))
-      .sort((a, b) => a.version - b.version);
-
-    for (const migration of pending) {
-      await this.getClient().query("BEGIN");
-      try {
-        const transaction: Transaction = {
-          put: async (record) => this.put(record),
-          get: async (id) => this.get(id),
-          delete: async (id) => this.delete(id),
-          query: async (query) => this.query(query),
-        };
-        await migration.up(transaction);
-        await this.getClient().query(
-          "INSERT INTO migrations (version, name) VALUES ($1, $2)",
-          [migration.version, migration.name],
-        );
-        await this.getClient().query("COMMIT");
-      } catch (error) {
-        await this.getClient().query("ROLLBACK");
-        throw new StorageError(
-          `Migration ${migration.version} (${migration.name}) failed`,
-          error,
-        );
-      }
+  async putMetadata(typeId: string, row: MetadataRow): Promise<void> {
+    const table = pgMetadataTableName(typeId);
+    const cols: string[] = ["record_id"];
+    const values: unknown[] = [row.recordId];
+    for (const [key, value] of Object.entries(row)) {
+      if (key === "recordId") continue;
+      cols.push(key);
+      values.push(value);
     }
+    const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
+    const updates = cols
+      .filter((c) => c !== "record_id")
+      .map((c) => `${c} = EXCLUDED.${c}`)
+      .join(", ");
+    const text = updates
+      ? `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO UPDATE SET ${updates}`
+      : `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO NOTHING`;
+    await this.getClient().query(text, values);
   }
 
+  async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
+    const table = pgMetadataTableName(typeId);
+    const result = await this.getClient().query(
+      `SELECT * FROM ${table} WHERE record_id = $1`,
+      [recordId],
+    );
+    if (result.rows.length === 0) return null;
+    return columnsToMetadataRow(recordId, result.rows[0] as Record<string, unknown>);
+  }
+
+  async getMetadataByIds(
+    typeId: string,
+    recordIds: StarkeepId[],
+  ): Promise<Map<StarkeepId, MetadataRow>> {
+    const result = new Map<StarkeepId, MetadataRow>();
+    if (recordIds.length === 0) return result;
+    const table = pgMetadataTableName(typeId);
+    const placeholders = recordIds.map((_, i) => `$${i + 1}`).join(", ");
+    const dbResult = await this.getClient().query(
+      `SELECT * FROM ${table} WHERE record_id IN (${placeholders})`,
+      recordIds,
+    );
+    for (const raw of dbResult.rows) {
+      const row = raw as Record<string, unknown>;
+      const recordId = row["record_id"] as StarkeepId;
+      result.set(recordId, columnsToMetadataRow(recordId, row));
+    }
+    return result;
+  }
+
+  async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
+    const table = pgMetadataTableName(typeId);
+    await this.getClient().query(
+      `DELETE FROM ${table} WHERE record_id = $1`,
+      [recordId],
+    );
+  }
 }

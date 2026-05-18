@@ -12,7 +12,7 @@ const baseRecordSchema = v.object({
   createdAt: hlcTimestampSchema,
   updatedAt: hlcTimestampSchema,
   ownerId: v.pipe(v.string(), v.minLength(1)),
-  syncStatus: v.picklist(["local", "synced", "pending_push", "pending_pull", "conflict"]),
+  syncStatus: v.picklist(["pending_push", "synced", "conflict"]),
   deletedAt: v.nullable(hlcTimestampSchema),
   version: v.pipe(v.number(), v.integer(), v.minValue(1)),
 });
@@ -20,25 +20,15 @@ const baseRecordSchema = v.object({
 export const dataRecordSchema = v.object({
   ...baseRecordSchema.entries,
   kind: v.literal("data"),
-  contentHash: v.nullable(v.string()),
-  objectStorageKey: v.nullable(v.string()),
-  mimeType: v.nullable(v.string()),
-  sizeBytes: v.nullable(v.pipe(v.number(), v.integer(), v.minValue(0))),
-  content: v.record(v.string(), v.unknown()),
-});
-
-export const metadataRecordSchema = v.object({
-  targetId: v.pipe(v.string(), v.length(26)),
-  generatorId: v.pipe(v.string(), v.minLength(1)),
-  generatorVersion: v.pipe(v.number(), v.integer(), v.minValue(1)),
-  inputHash: v.pipe(v.string(), v.minLength(1)),
-  value: v.record(v.string(), v.unknown()),
+  contentHash: v.pipe(v.string(), v.minLength(1)),
+  objectStorageKey: v.pipe(v.string(), v.minLength(1)),
+  mimeType: v.pipe(v.string(), v.minLength(1)),
+  sizeBytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  originalFilename: v.nullable(v.string()),
+  originAppId: v.pipe(v.string(), v.minLength(1)),
+  parentId: v.nullable(v.string()),
 });
 
 export function validateDataRecord(data: unknown) {
   return v.safeParse(dataRecordSchema, data);
-}
-
-export function validateMetadataRecord(data: unknown) {
-  return v.safeParse(metadataRecordSchema, data);
 }

@@ -1,4 +1,4 @@
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
 import { serializeHLC, deserializeHLC, SyncStatus, createStarkeepId } from "@starkeep/core";
 
 export interface PostgresRow {
@@ -10,12 +10,13 @@ export interface PostgresRow {
   sync_status: string;
   deleted_at: string | null;
   version: number;
-  content: Record<string, unknown> | string;
-  content_hash: string | null;
-  object_storage_key: string | null;
-  mime_type: string | null;
-  size_bytes: number | null;
+  content_hash: string;
+  object_storage_key: string;
+  mime_type: string;
+  size_bytes: number;
   original_filename: string | null;
+  origin_app_id: string;
+  parent_id: string | null;
 }
 
 export function recordToRow(record: DataRecord): PostgresRow {
@@ -28,19 +29,17 @@ export function recordToRow(record: DataRecord): PostgresRow {
     sync_status: record.syncStatus,
     deleted_at: record.deletedAt ? serializeHLC(record.deletedAt) : null,
     version: record.version,
-    content: record.content,
     content_hash: record.contentHash,
     object_storage_key: record.objectStorageKey,
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
     original_filename: record.originalFilename,
+    origin_app_id: record.originAppId,
+    parent_id: record.parentId,
   };
 }
 
 export function rowToRecord(row: PostgresRow): DataRecord {
-  const content =
-    typeof row.content === "string" ? JSON.parse(row.content) : row.content;
-
   return {
     id: createStarkeepId(row.id),
     kind: "data",
@@ -51,11 +50,24 @@ export function rowToRecord(row: PostgresRow): DataRecord {
     syncStatus: row.sync_status as SyncStatus,
     deletedAt: row.deleted_at ? deserializeHLC(row.deleted_at) : null,
     version: row.version,
-    content,
     contentHash: row.content_hash,
     objectStorageKey: row.object_storage_key,
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
     originalFilename: row.original_filename,
+    originAppId: row.origin_app_id,
+    parentId: row.parent_id ? createStarkeepId(row.parent_id) : null,
   };
+}
+
+export function columnsToMetadataRow(
+  recordId: StarkeepId,
+  columns: Record<string, unknown>,
+): MetadataRow {
+  const row: MetadataRow = { recordId };
+  for (const [key, value] of Object.entries(columns)) {
+    if (key === "record_id") continue;
+    row[key] = value;
+  }
+  return row;
 }

@@ -21,9 +21,20 @@ import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
-import { generateId, createHLCClock, SyncStatus, serializeHLC } from "@starkeep/core";
+import {
+  generateId,
+  createHLCClock,
+  SyncStatus,
+  serializeHLC,
+  dataRecordObjectKey,
+  CORE_TYPES,
+} from "@starkeep/core";
 import type { DataRecord, StarkeepId } from "@starkeep/core";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
+import {
+  DsqlAppSyncableNamespaceStore,
+  DsqlAppSyncableApplier,
+} from "@starkeep/storage-aurora-dsql";
 import type {
   DatabaseClientFactory,
   DatabaseClient,
@@ -185,9 +196,11 @@ function makeAdapters(appId: string, creds: CachedCreds) {
   if (!auroraEndpoint) throw new Error("AURORA_ENDPOINT env var is required");
   if (!s3Bucket) throw new Error("S3_BUCKET env var is required");
 
+  const clientFactory = new AppDsqlClientFactory(appId, creds, stackPrefix);
+
   const db = new AuroraDsqlDatabaseAdapter(
     { hostname: auroraEndpoint, region },
-    new AppDsqlClientFactory(appId, creds, stackPrefix),
+    clientFactory,
   );
 
   const storage = new S3ObjectStorageAdapter({
@@ -202,7 +215,7 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 
   const clock = createHLCClock({ nodeId: appId, wallClockFunction: Date.now });
 
-  return { db, storage, clock };
+  return { db, storage, clock, clientFactory, auroraEndpoint, region };
 }
 
 // ---------------------------------------------------------------------------
@@ -228,12 +241,12 @@ function recordToResponse(record: DataRecord) {
     owner_id: record.ownerId,
     sync_status: record.syncStatus,
     version: record.version,
-    payload: record.content,
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
     content_hash: record.contentHash,
     object_storage_key: record.objectStorageKey,
     original_filename: record.originalFilename,
+    parent_id: record.parentId,
   };
 }
 
@@ -261,7 +274,7 @@ export async function handler(event: APIGatewayEvent) {
     const { appId, subPath } = parsed;
 
     const creds = await getAppCreds(appId);
-    const { db, storage, clock } = makeAdapters(appId, creds);
+    const { db, storage, clock, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
 
     await db.init();
 
@@ -319,38 +332,27 @@ export async function handler(event: APIGatewayEvent) {
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as {
         type?: string;
-        payload?: Record<string, unknown>;
-        content?: Record<string, unknown>;
         fileName?: string;
         contentType?: string;
         fileBase64?: string;
+        parentId?: string;
       };
       if (!body.type) return clientErr("type is required", 400);
+      if (!body.fileBase64) return clientErr("fileBase64 is required — every record must be file-backed", 400);
+      if (!body.contentType) return clientErr("contentType is required", 400);
 
       const now = clock.now();
-      const recordContent = body.payload ?? body.content ?? {};
-      const originalFilename = body.fileName ?? null;
-      const mimeType = body.contentType ?? null;
-
-      let objectStorageKey: string | null = null;
-      let contentHash: string | null = null;
-      let sizeBytes: number | null = null;
-
-      if (body.fileBase64) {
-        const fileBuffer = Buffer.from(body.fileBase64, "base64");
-        const hash = createHash("sha256").update(fileBuffer).digest("hex");
-        contentHash = hash;
-        objectStorageKey = `apps/${appId}/${hash.slice(0, 2)}/${hash}`;
-        sizeBytes = fileBuffer.length;
-        await storage.put(objectStorageKey, fileBuffer, { contentType: mimeType ?? undefined });
-      }
+      const fileBuffer = Buffer.from(body.fileBase64, "base64");
+      const contentHash = createHash("sha256").update(fileBuffer).digest("hex");
+      const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
+      await storage.put(objectStorageKey, fileBuffer, { contentType: body.contentType });
 
       const record: DataRecord = {
         id: generateId(),
         kind: "data",
         type: body.type,
-        content: { ...recordContent, ...(originalFilename ? { fileName: originalFilename } : {}), originAppId: appId },
         ownerId,
+        originAppId: appId,
         createdAt: now,
         updatedAt: now,
         syncStatus: SyncStatus.Synced,
@@ -358,16 +360,22 @@ export async function handler(event: APIGatewayEvent) {
         version: 1,
         contentHash,
         objectStorageKey,
-        mimeType,
-        sizeBytes,
-        originalFilename,
+        mimeType: body.contentType,
+        sizeBytes: fileBuffer.length,
+        originalFilename: body.fileName ?? null,
+        parentId: (body.parentId as DataRecord["parentId"]) ?? null,
       };
       await db.put(record);
       return ok({ record: recordToResponse(record) }, 201);
     }
 
-    // POST /apps/{appId}/data/files
+    // POST /apps/{appId}/data/files?type=<typeId>
+    // Writes raw bytes under shared/<typeId>/<shard>/<hash>. The app's IAM
+    // role gates which shared/<typeId>/ prefixes it can write — the handler
+    // does not re-check the manifest here.
     if (method === "POST" && subPath === "/data/files") {
+      const typeId = query["type"];
+      if (!typeId) return clientErr("type query param is required", 400);
       const headers = event.headers ?? {};
       const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
       const mimeType = contentTypeHeader.split(";")[0]!.trim();
@@ -377,7 +385,7 @@ export async function handler(event: APIGatewayEvent) {
       if (fileBuffer.length === 0) return clientErr("Request body must not be empty", 400);
       if (fileBuffer.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
       const hex = createHash("sha256").update(fileBuffer).digest("hex");
-      const key = `apps/${appId}/metadata/${hex}`;
+      const key = dataRecordObjectKey(typeId, hex);
       await storage.put(key, fileBuffer, { contentType: mimeType });
       return ok({ key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
     }
@@ -401,6 +409,40 @@ export async function handler(event: APIGatewayEvent) {
       await db.put(promoted);
 
       return ok({ record: recordToResponse(promoted) });
+    }
+
+    // POST /apps/{appId}/data/records/:id/metadata — write type-specific metadata.
+    // The calling app does the extraction (e.g. EXIF); the server validates keys
+    // against the declared type schema and persists via the database adapter.
+    const metadataWriteMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata$/);
+    if (metadataWriteMatch && method === "POST") {
+      const recordId = decodeURIComponent(metadataWriteMatch[1]!) as StarkeepId;
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const { typeId, metadata } = JSON.parse(rawBody) as { typeId?: string; metadata?: Record<string, unknown> };
+      if (!typeId) return clientErr("typeId is required", 400);
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+        return clientErr("metadata must be an object", 400);
+      }
+      const coreType = CORE_TYPES.find((t) => t.id === typeId);
+      if (!coreType) return clientErr(`Unknown type "${typeId}" — only core types support metadata`, 400);
+      const allowedColumns = new Set(coreType.metadataColumns.map((c) => c.name));
+      const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
+      if (unknownKeys.length > 0) {
+        return clientErr(`Unknown metadata columns: ${unknownKeys.join(", ")}`, 400);
+      }
+      await db.putMetadata(typeId, { recordId, ...metadata });
+      return ok({ ok: true });
+    }
+
+    // GET /apps/{appId}/data/records/:id/metadata/:typeId — read type-specific metadata.
+    const metadataReadMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata\/([^/]+)$/);
+    if (metadataReadMatch && method === "GET") {
+      const recordId = decodeURIComponent(metadataReadMatch[1]!) as StarkeepId;
+      const typeId = decodeURIComponent(metadataReadMatch[2]!);
+      const metadata = await db.getMetadata(typeId, recordId);
+      return ok({ metadata });
     }
 
     // GET /apps/{appId}/data/records/:id/file-url
@@ -427,12 +469,24 @@ export async function handler(event: APIGatewayEvent) {
       }
 
       if (method === "PUT") {
+        // Records are immutable apart from system mutations (promotion, sync,
+        // tombstones). Editing user fields lives in app-specific data which is
+        // out of scope; the PUT endpoint accepts only originalFilename and
+        // parentId for now.
         const existing = await db.get(id);
         if (!existing) return clientErr("Record not found", 404);
-        const body = event.body ? (JSON.parse(event.body) as { content?: Record<string, unknown> }) : null;
-        if (!body?.content) return clientErr("content is required", 400);
+        const body = event.body
+          ? (JSON.parse(event.body) as { originalFilename?: string | null; parentId?: string | null })
+          : null;
+        if (!body) return clientErr("body is required", 400);
         const now = clock.now();
-        const updated: DataRecord = { ...existing, content: body.content, updatedAt: now, version: existing.version + 1 };
+        const updated: DataRecord = {
+          ...existing,
+          originalFilename: body.originalFilename ?? existing.originalFilename,
+          parentId: (body.parentId as DataRecord["parentId"]) ?? existing.parentId,
+          updatedAt: now,
+          version: existing.version + 1,
+        };
         await db.put(updated);
         return ok({ record: recordToResponse(updated) });
       }
@@ -449,7 +503,8 @@ export async function handler(event: APIGatewayEvent) {
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody);
-      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
+      const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
       const response = await transport.pullChanges(body);
       return ok(response);
     }
@@ -460,76 +515,22 @@ export async function handler(event: APIGatewayEvent) {
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody);
-      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock });
+      const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
       const response = await transport.pushChanges(body);
       return ok(response);
     }
 
-    // POST /apps/{appId}/files/presign
-    if (method === "POST" && subPath === "/files/presign") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
-      const body = JSON.parse(rawBody) as { key?: string; contentType?: string; expiresIn?: number };
-      if (!body.key) return clientErr("key is required", 400);
-      // Enforce app prefix on the S3 key
-      const safeKey = body.key.startsWith(`apps/${appId}/`) ? body.key : `apps/${appId}/${body.key}`;
-      const expiresIn = body.expiresIn ?? 3600;
-      const url = await storage.getSignedPutUrl!(safeKey, { contentType: body.contentType, expiresIn });
-      return ok({ url, key: safeKey, expiresIn });
-    }
-
-    // GET /apps/{appId}/files/{+key}/presign
-    const filesPresignMatch = subPath.match(/^\/files\/(.+)\/presign$/);
-    if (filesPresignMatch && method === "GET") {
-      const key = decodeURIComponent(filesPresignMatch[1]!);
-      const safeKey = key.startsWith(`apps/${appId}/`) ? key : `apps/${appId}/${key}`;
-      const exists = await storage.has(safeKey);
-      if (!exists) return clientErr("File not found", 404);
-      const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
-      const url = await storage.getSignedUrl!(safeKey, { expiresIn });
-      return ok({ url, expiresIn });
-    }
-
-    // HEAD|GET|PUT /apps/{appId}/files/{+key}
-    const filesMatch = subPath.match(/^\/files\/(.+)$/);
-    if (filesMatch) {
-      const key = decodeURIComponent(filesMatch[1]!);
-      const safeKey = key.startsWith(`apps/${appId}/`) ? key : `apps/${appId}/${key}`;
-
-      if (method === "HEAD") {
-        const result = await storage.get(safeKey);
-        return { statusCode: result ? 200 : 404, headers: {}, body: "" };
-      }
-
-      if (method === "GET") {
-        const result = await storage.get(safeKey);
-        if (!result) return clientErr("File not found", 404);
-        const data = result.data instanceof Uint8Array ? result.data : new Uint8Array(result.data as ArrayBuffer);
-        return {
-          statusCode: 200,
-          headers: {
-            "Content-Type": result.contentType ?? "application/octet-stream",
-            "Content-Length": String(data.byteLength),
-          },
-          body: Buffer.from(data).toString("base64"),
-          isBase64Encoded: true,
-        };
-      }
-
-      if (method === "PUT") {
-        const headers = event.headers ?? {};
-        const contentType = (headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream").split(";")[0]!.trim();
-        const fileBuffer = event.isBase64Encoded && event.body
-          ? Buffer.from(event.body, "base64")
-          : Buffer.from(event.body ?? "", "binary");
-        await storage.put(safeKey, fileBuffer, { contentType });
-        return ok({ ok: true });
-      }
-    }
-
     return clientErr("Not found", 404);
   } catch (e) {
+    // S3 AccessDenied surfaces when an app touches a key its per-app IAM role
+    // can't reach — typically a write to shared/<typeId>/* for a type the
+    // manifest only granted read access to. Map to 403 so callers can
+    // distinguish a permission problem from an unexpected server fault.
+    if (isAccessDenied(e)) {
+      console.warn("Handler access denied:", (e as Error).message);
+      return clientErr("AccessDenied", 403);
+    }
     console.error("Handler error:", e);
     return {
       statusCode: 500,
@@ -537,4 +538,24 @@ export async function handler(event: APIGatewayEvent) {
       body: JSON.stringify({ error: "Internal server error" }),
     };
   }
+}
+
+async function buildAppSyncableSource(
+  clientFactory: AppDsqlClientFactory,
+  hostname: string,
+  region: string,
+): Promise<{ namespaces: DsqlAppSyncableNamespaceStore; applier: DsqlAppSyncableApplier }> {
+  const client = await clientFactory.createClient({ hostname, region });
+  const namespaces = new DsqlAppSyncableNamespaceStore(client);
+  await namespaces.load();
+  const applier = new DsqlAppSyncableApplier(client, namespaces);
+  return { namespaces, applier };
+}
+
+function isAccessDenied(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const name = err.name;
+  if (name === "AccessDenied" || name === "Forbidden") return true;
+  const status = (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+  return status === 403;
 }

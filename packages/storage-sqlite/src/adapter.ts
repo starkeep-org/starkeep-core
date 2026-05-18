@@ -1,51 +1,19 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
+import { sqliteMetadataTableName } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
   QueryResult,
   BatchOperation,
-  Migration,
   Transaction,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
 import { recordToRow, rowToRecord, type SqliteRow } from "./serialization.js";
 import { buildSelectQuery } from "./query-builder.js";
-
-const CREATE_TABLE_SQL = `
-  CREATE TABLE IF NOT EXISTS records (
-    id TEXT PRIMARY KEY,
-    type TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    owner_id TEXT NOT NULL,
-    sync_status TEXT NOT NULL DEFAULT 'local',
-    deleted_at TEXT,
-    version INTEGER NOT NULL DEFAULT 1,
-    content TEXT NOT NULL DEFAULT '{}',
-    content_hash TEXT,
-    object_storage_key TEXT,
-    mime_type TEXT,
-    size_bytes INTEGER,
-    original_filename TEXT
-  )
-`;
-
-const CREATE_INDEXES_SQL = [
-  "CREATE INDEX IF NOT EXISTS idx_records_type ON records(type)",
-  "CREATE INDEX IF NOT EXISTS idx_records_sync_status ON records(sync_status)",
-  "CREATE INDEX IF NOT EXISTS idx_records_updated_at ON records(updated_at)",
-];
-
-const CREATE_MIGRATIONS_TABLE_SQL = `
-  CREATE TABLE IF NOT EXISTS migrations (
-    version INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`;
+import { initializeLocalSchema } from "./schema/bootstrap.js";
 
 export interface SqliteDatabaseAdapterOptions {
   path: string | ":memory:";
@@ -68,13 +36,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       }
     }
     this.database = new DatabaseSync(this.options.path);
-    this.database.exec("PRAGMA journal_mode = WAL");
-    this.database.exec("PRAGMA foreign_keys = ON");
-    this.database.exec(CREATE_TABLE_SQL);
-    for (const sql of CREATE_INDEXES_SQL) {
-      this.database.exec(sql);
-    }
-    this.database.exec(CREATE_MIGRATIONS_TABLE_SQL);
+    initializeLocalSchema(this.database);
   }
 
   async close(): Promise<void> {
@@ -110,10 +72,10 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     this.getDatabase().prepare(sql).run(...(params as Parameters<ReturnType<DatabaseSync["prepare"]>["run"]>));
   }
 
-  private getRow(sql: string, ...params: unknown[]): SqliteRow | undefined {
+  private getRow<T = SqliteRow>(sql: string, ...params: unknown[]): T | undefined {
     return this.getDatabase().prepare(sql).get(
       ...(params as Parameters<ReturnType<DatabaseSync["prepare"]>["get"]>),
-    ) as unknown as SqliteRow | undefined;
+    ) as unknown as T | undefined;
   }
 
   private allRows<T = SqliteRow>(sql: string, ...params: unknown[]): T[] {
@@ -130,22 +92,22 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       .filter((column) => column !== "id")
       .map((column) => `${column} = excluded.${column}`)
       .join(", ");
-    const sql = `INSERT INTO records (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`;
+    const sql = `INSERT INTO shared_records (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`;
     this.runStmt(sql, ...Object.values(row));
   }
 
   async get(id: StarkeepId): Promise<DataRecord | null> {
-    const row = this.getRow("SELECT * FROM records WHERE id = ?", id);
+    const row = this.getRow<SqliteRow>("SELECT * FROM shared_records WHERE id = ?", id);
     return row ? rowToRecord(row) : null;
   }
 
   async delete(id: StarkeepId): Promise<void> {
-    this.runStmt("DELETE FROM records WHERE id = ?", id);
+    this.runStmt("DELETE FROM shared_records WHERE id = ?", id);
   }
 
   async query(query: Query): Promise<QueryResult> {
     const { sql, params } = buildSelectQuery(query);
-    const rows = this.allRows(sql, ...params);
+    const rows = this.allRows<SqliteRow>(sql, ...params);
 
     const limit = query.limit;
     const hasMore = limit ? rows.length > limit : false;
@@ -194,38 +156,70 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
-  async runMigrations(migrations: Migration[]): Promise<void> {
-    const applied = this.allRows<{ version: number }>("SELECT version FROM migrations ORDER BY version");
-    const appliedVersions = new Set(applied.map((record) => record.version));
-
-    const pending = migrations
-      .filter((migration) => !appliedVersions.has(migration.version))
-      .sort((a, b) => a.version - b.version);
-
-    for (const migration of pending) {
-      this.getDatabase().exec("BEGIN");
-      try {
-        const transaction: Transaction = {
-          put: async (record) => this.put(record),
-          get: async (id) => this.get(id),
-          delete: async (id) => this.delete(id),
-          query: async (query) => this.query(query),
-        };
-        await migration.up(transaction);
-        this.runStmt(
-          "INSERT INTO migrations (version, name) VALUES (?, ?)",
-          migration.version,
-          migration.name,
-        );
-        this.getDatabase().exec("COMMIT");
-      } catch (error) {
-        this.getDatabase().exec("ROLLBACK");
-        throw new StorageError(
-          `Migration ${migration.version} (${migration.name}) failed`,
-          error,
-        );
-      }
+  async putMetadata(typeId: string, row: MetadataRow): Promise<void> {
+    const table = sqliteMetadataTableName(typeId);
+    const cols: string[] = ["record_id"];
+    const values: unknown[] = [row.recordId];
+    for (const [key, value] of Object.entries(row)) {
+      if (key === "recordId") continue;
+      cols.push(key);
+      values.push(value);
     }
+    const placeholders = cols.map(() => "?").join(", ");
+    const updates = cols
+      .filter((c) => c !== "record_id")
+      .map((c) => `${c} = excluded.${c}`)
+      .join(", ");
+    const sql = updates
+      ? `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO UPDATE SET ${updates}`
+      : `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO NOTHING`;
+    this.runStmt(sql, ...values);
   }
 
+  async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
+    const table = sqliteMetadataTableName(typeId);
+    const row = this.getRow<Record<string, unknown>>(
+      `SELECT * FROM ${table} WHERE record_id = ?`,
+      recordId,
+    );
+    if (!row) return null;
+    return columnsToMetadataRow(recordId, row);
+  }
+
+  async getMetadataByIds(
+    typeId: string,
+    recordIds: StarkeepId[],
+  ): Promise<Map<StarkeepId, MetadataRow>> {
+    const result = new Map<StarkeepId, MetadataRow>();
+    if (recordIds.length === 0) return result;
+    const table = sqliteMetadataTableName(typeId);
+    const placeholders = recordIds.map(() => "?").join(", ");
+    const rows = this.allRows<Record<string, unknown>>(
+      `SELECT * FROM ${table} WHERE record_id IN (${placeholders})`,
+      ...recordIds,
+    );
+    for (const row of rows) {
+      const recordId = row["record_id"] as StarkeepId;
+      result.set(recordId, columnsToMetadataRow(recordId, row));
+    }
+    return result;
+  }
+
+  async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
+    const table = sqliteMetadataTableName(typeId);
+    this.runStmt(`DELETE FROM ${table} WHERE record_id = ?`, recordId);
+  }
+
+}
+
+function columnsToMetadataRow(
+  recordId: StarkeepId,
+  columns: Record<string, unknown>,
+): MetadataRow {
+  const row: MetadataRow = { recordId };
+  for (const [key, value] of Object.entries(columns)) {
+    if (key === "record_id") continue;
+    row[key] = value;
+  }
+  return row;
 }

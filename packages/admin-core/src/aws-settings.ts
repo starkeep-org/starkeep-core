@@ -1,8 +1,9 @@
 /**
- * AWS Settings Service (Legacy - Deprecated)
+ * AWS Settings Service (in-memory)
  *
- * This service is deprecated. Use AwsSettingsRepository from @starkeep/admin-db instead.
- * All AWS connections now use cross-account roles for consistent security model.
+ * Holds the bootstrap AWS settings for the running admin-web process. Cross-account
+ * role connections are derived from this. Persistence (when needed) will live in
+ * DSQL alongside the other admin-side tables.
  */
 
 export interface AwsSettings {
@@ -22,9 +23,6 @@ export interface SaveAwsSettingsInput {
   stackPrefix: string;
 }
 
-/**
- * @deprecated Use AwsSettingsRepository from @starkeep/admin-db instead
- */
 export class AwsSettingsService {
   // In-memory store - replace with real database
   private settings: AwsSettings | null = null;

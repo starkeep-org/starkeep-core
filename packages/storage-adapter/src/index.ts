@@ -6,7 +6,6 @@ export type {
   SortField,
   SortDirection,
   BatchOperation,
-  Migration,
   Transaction,
 } from "./database/types.js";
 
@@ -24,7 +23,6 @@ export {
   StorageError,
   ConnectionError,
   TransactionError,
-  MigrationError,
   ObjectNotFoundError,
 } from "./errors.js";
 

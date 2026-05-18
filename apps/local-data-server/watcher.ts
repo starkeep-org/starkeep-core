@@ -79,9 +79,9 @@ function mimeFromPath(filePath: string): string {
 }
 
 function typeFromMime(mime: string): string {
-  if (mime.startsWith("image/")) return "@starkeep/image";
-  if (mime === "text/markdown") return "@starkeep/markdown";
-  return "@starkeep/unknown";
+  if (mime.startsWith("image/")) return "image";
+  if (mime === "text/markdown") return "markdown";
+  return "unknown";
 }
 
 // ---------------------------------------------------------------------------
@@ -141,8 +141,9 @@ export function createFileWatchManager(opts: {
   db: DatabaseSync;
   databaseAdapter: DatabaseAdapter;
   ownerId: string;
+  appId: string;
 }): FileWatchManager {
-  const { sdk, db, databaseAdapter, ownerId } = opts;
+  const { sdk, db, databaseAdapter, ownerId, appId } = opts;
   const watches = new Map<string, ActiveWatch>();
 
   // Create the private watch_files table if it doesn't exist.
@@ -285,6 +286,7 @@ export function createFileWatchManager(opts: {
           {
             type: typeFromMime(contentType),
             ownerId,
+            originAppId: appId,
             content: { title, fileName: filename, sourcePath: relativePath },
           },
           filePath,

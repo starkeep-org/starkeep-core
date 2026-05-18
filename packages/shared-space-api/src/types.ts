@@ -36,11 +36,48 @@ export type ApiHandler = (
   context: ApiContext,
 ) => Promise<ApiResponse>;
 
+/**
+ * App-specific syncable data operations. Scoped to the calling app — the
+ * `appId` is fixed at construction time by the harness so handlers cannot
+ * accidentally touch another app's tables or files. Tables are referred to by
+ * their manifest-declared short name (e.g. "captions"); the implementation
+ * resolves them to `<appId>_syncable_<name>`. File `subKey`s are paths under
+ * `apps/<appId>/syncable/`.
+ */
+export interface AppSpecificOperations {
+  insertRow(table: string, row: Record<string, unknown>): Promise<void>;
+  updateRow(
+    table: string,
+    where: Record<string, unknown>,
+    patch: Record<string, unknown>,
+  ): Promise<number>;
+  deleteRow(table: string, where: Record<string, unknown>): Promise<number>;
+  queryRows(
+    table: string,
+    where?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>[]>;
+
+  putFile(
+    subKey: string,
+    bytes: Uint8Array,
+    mimeType: string,
+  ): Promise<{ key: string }>;
+  getFile(subKey: string): Promise<{ bytes: Uint8Array; mimeType: string } | null>;
+  deleteFile(subKey: string): Promise<void>;
+  fileUrl(subKey: string, opts?: { expiresIn?: number }): Promise<string | null>;
+}
+
 export interface ApiContext {
   readonly databaseAdapter: DatabaseAdapter;
   readonly objectStorageAdapter: ObjectStorageAdapter;
   readonly clock: HLCClock;
   readonly ownerId: string;
+  /**
+   * Scoped row CRUD + file ops against the calling app's app-specific
+   * syncable namespace. `null` when the request subject is not an installed
+   * app (e.g. local-only admin requests).
+   */
+  readonly appSpecific: AppSpecificOperations | null;
 }
 
 export interface ApiRouter {
@@ -77,6 +114,12 @@ export interface SharedSpaceApiOptions {
   readonly ownerId: string;
   /** When provided, change events are forwarded to all connected WebSocket clients. */
   readonly changeNotifier?: ChangeNotifier;
+  /**
+   * Builds the app-scoped `appSpecific` view exposed on the ApiContext for a
+   * given request's subject. Wired in by the harness (local-data-server)
+   * since this package has no knowledge of the app registry.
+   */
+  readonly getAppSpecific?: (subject: ApiSubject) => AppSpecificOperations | null;
 }
 
 export type { ChangeEvent, ChangeNotifier };

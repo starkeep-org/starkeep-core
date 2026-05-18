@@ -2,7 +2,6 @@ import type { StarkeepId } from "@starkeep/core";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 import type { UnifiedIndex, IndexQuery, IndexItem, IndexResult } from "./types.js";
 import { planQuery } from "./query-planner.js";
-import { createSyncBoundary } from "./sync-boundary.js";
 
 export interface CreateUnifiedIndexOptions {
   readonly databaseAdapter: DatabaseAdapter;
@@ -10,7 +9,6 @@ export interface CreateUnifiedIndexOptions {
 
 export function createUnifiedIndex(options: CreateUnifiedIndexOptions): UnifiedIndex {
   const { databaseAdapter } = options;
-  const boundary = createSyncBoundary(databaseAdapter);
 
   return {
     async search(query: IndexQuery): Promise<IndexResult> {
@@ -31,7 +29,5 @@ export function createUnifiedIndex(options: CreateUnifiedIndexOptions): UnifiedI
       if (!record) return null;
       return { dataRecord: record };
     },
-
-    syncBoundary: boundary,
   };
 }

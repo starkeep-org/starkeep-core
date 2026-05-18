@@ -1,86 +1,50 @@
 import { describe, it, expect } from "vitest";
 import { createHLCClock } from "../src/hlc/clock.js";
-import { createDataRecord, createMetadataRecord } from "../src/records/builders.js";
+import { createDataRecord } from "../src/records/builders.js";
 import { SyncStatus } from "../src/records/types.js";
-import { createStarkeepId } from "../src/identifiers/types.js";
 
-describe("record builders", () => {
+describe("createDataRecord", () => {
   const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
 
-  describe("createDataRecord", () => {
-    it("should create a data record with required fields", () => {
-      const record = createDataRecord(
-        { type: "@test/photo", ownerId: "user-1" },
-        clock,
-      );
+  const baseInput = {
+    type: "@test/photo",
+    ownerId: "user-1",
+    originAppId: "test",
+    contentHash: "sha256:abc123",
+    objectStorageKey: "shared/@test/photo/ab/sha256:abc123",
+    mimeType: "image/jpeg",
+    sizeBytes: 1024,
+  };
 
-      expect(record.kind).toBe("data");
-      expect(record.type).toBe("@test/photo");
-      expect(record.ownerId).toBe("user-1");
-      expect(record.id).toHaveLength(26);
-      expect(record.version).toBe(1);
-      expect(record.syncStatus).toBe(SyncStatus.Local);
-      expect(record.deletedAt).toBeNull();
-      expect(record.content).toEqual({});
-      expect(record.contentHash).toBeNull();
-      expect(record.objectStorageKey).toBeNull();
-      expect(record.mimeType).toBeNull();
-      expect(record.sizeBytes).toBeNull();
-    });
+  it("populates the file-backed record fields", () => {
+    const record = createDataRecord(
+      { ...baseInput, originalFilename: "sunset.jpg" },
+      clock,
+    );
 
-    it("should accept optional file-backed fields", () => {
-      const record = createDataRecord(
-        {
-          type: "@test/photo",
-          ownerId: "user-1",
-          contentHash: "sha256:abc123",
-          objectStorageKey: "notes/abc123",
-          mimeType: "image/jpeg",
-          sizeBytes: 1024,
-          content: { name: "sunset.jpg" },
-        },
-        clock,
-      );
-
-      expect(record.contentHash).toBe("sha256:abc123");
-      expect(record.objectStorageKey).toBe("notes/abc123");
-      expect(record.mimeType).toBe("image/jpeg");
-      expect(record.sizeBytes).toBe(1024);
-      expect(record.content).toEqual({ name: "sunset.jpg" });
-    });
-
-    it("should have matching createdAt and updatedAt", () => {
-      const record = createDataRecord(
-        { type: "@test/photo", ownerId: "user-1" },
-        clock,
-      );
-
-      expect(record.createdAt).toEqual(record.updatedAt);
-    });
-
-    it("should generate unique IDs for each record", () => {
-      const record1 = createDataRecord({ type: "@test/a", ownerId: "u" }, clock);
-      const record2 = createDataRecord({ type: "@test/b", ownerId: "u" }, clock);
-      expect(record1.id).not.toBe(record2.id);
-    });
+    expect(record.kind).toBe("data");
+    expect(record.type).toBe("@test/photo");
+    expect(record.ownerId).toBe("user-1");
+    expect(record.id).toHaveLength(26);
+    expect(record.version).toBe(1);
+    expect(record.syncStatus).toBe(SyncStatus.PendingPush);
+    expect(record.deletedAt).toBeNull();
+    expect(record.contentHash).toBe("sha256:abc123");
+    expect(record.objectStorageKey).toBe("shared/@test/photo/ab/sha256:abc123");
+    expect(record.mimeType).toBe("image/jpeg");
+    expect(record.sizeBytes).toBe(1024);
+    expect(record.originalFilename).toBe("sunset.jpg");
+    expect(record.parentId).toBeNull();
   });
 
-  describe("createMetadataRecord", () => {
-    it("should create a metadata record with required fields", () => {
-      const targetId = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-      const record = createMetadataRecord({
-        targetId,
-        generatorId: "@starkeep/metadata-core:image-dimensions",
-        generatorVersion: 1,
-        inputHash: "hash-abc",
-        value: { width: 1920, height: 1080 },
-      });
+  it("matches createdAt and updatedAt on initial create", () => {
+    const record = createDataRecord(baseInput, clock);
+    expect(record.createdAt).toEqual(record.updatedAt);
+  });
 
-      expect(record.targetId).toBe(targetId);
-      expect(record.generatorId).toBe("@starkeep/metadata-core:image-dimensions");
-      expect(record.generatorVersion).toBe(1);
-      expect(record.inputHash).toBe("hash-abc");
-      expect(record.value).toEqual({ width: 1920, height: 1080 });
-    });
+  it("generates unique IDs for each record", () => {
+    const r1 = createDataRecord(baseInput, clock);
+    const r2 = createDataRecord(baseInput, clock);
+    expect(r1.id).not.toBe(r2.id);
   });
 });

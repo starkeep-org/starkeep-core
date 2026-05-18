@@ -44,13 +44,20 @@ One role per installed app. Scoped by the permissions boundary and further by it
 
 **Runtime policy grants (derived from manifest):**
 - `s3:GetObject/PutObject/DeleteObject/ListBucket` on `apps/${appId}/*` (own prefix)
-- `s3:GetObject` (+ write if `access: readwrite`) on `shared/${typeId}/data/*` for each declared type
+- `s3:GetObject` (+ write if `access: readwrite`) on `shared/${typeId}/*` for each declared type
 - `dsql:DbConnect` — signs DSQL tokens as the app's PG role (`${stackPrefix}_app_${appId}`)
 - `lambda:InvokeFunction` on own Lambda functions
 - Log writes on own log groups
 - `sts:AssumeRole` on `${stackPrefix}-app-*` if `brokerPower: true`
 
 **Capped by:** the app permissions boundary (see below).
+
+**Storage prefix rule.** The S3 key prefix is determined by *what* is being stored, not by *who* is writing it:
+
+- `kind: "data"` record blobs always land in `shared/<typeId>/<2-char>/<hash>`, regardless of which app produced them. An app with `readwrite` on a type writes there; an app with `read` on the same type can resolve the same key under its own role.
+- Everything else an app stores (private state, derived artifacts, raw blobs uploaded through `/files/*`) lives under `apps/<appId>/<...>`; the app organizes its own subtree.
+
+This is what allows a single object to be authored by one app and read by another via the per-type grants above — the routing namespace (`/apps/{appId}/...` in the API) and the storage namespace are decoupled.
 
 ---
 
