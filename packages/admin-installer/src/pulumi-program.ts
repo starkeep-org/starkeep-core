@@ -48,6 +48,18 @@ export function buildPulumiProgram(
         tags: { "starkeep:appId": ctx.appId, "starkeep:managed": "true" },
       }, { dependsOn: [logGroup] });
 
+      // Allow the shared API Gateway to invoke this Lambda. AWS_PROXY
+      // integrations require a Lambda resource-based policy entry — without
+      // it, every request through the gateway returns 403 from API Gateway.
+      // The sourceArn is the gateway execution ARN with /*/* wildcards
+      // (stage/method).
+      new aws.lambda.Permission(`invoke-${handler.name}`, {
+        action: "lambda:InvokeFunction",
+        function: fn.name,
+        principal: "apigateway.amazonaws.com",
+        sourceArn: `${ctx.apiGatewayExecutionArn}/*/*`,
+      });
+
       const integration = new aws.apigatewayv2.Integration(`integration-${handler.name}`, {
         apiId: ctx.apiGatewayId,
         integrationType: "AWS_PROXY",

@@ -52,6 +52,7 @@ interface StarkeepConfig {
   // populated by this script after a successful install:
   apiGatewayUrl?: string;
   apiGatewayId?: string;
+  apiGatewayExecutionArn?: string;
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
@@ -283,6 +284,7 @@ const updated: StarkeepConfig = {
   pulumiStateBucket,
   apiGatewayUrl: outputs.apiGatewayUrl,
   apiGatewayId: outputs.apiGatewayId,
+  apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
   authorizerId: outputs.authorizerId,
   s3Bucket: outputs.bucketName,
   auroraEndpoint: outputs.auroraHostname,

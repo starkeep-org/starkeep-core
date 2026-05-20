@@ -74,9 +74,11 @@ interface StarkeepConfig {
   foundationalPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   installDdlRoleArn?: string;
+  installInfraRoleArn?: string;
   pulumiStateBucket?: string;
   apiGatewayUrl?: string;
   apiGatewayId?: string;
+  apiGatewayExecutionArn?: string;
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
@@ -327,6 +329,13 @@ const managerRoleArn =
   config.managerRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
 const installDdlRoleArn =
   config.installDdlRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
+const installInfraRoleArn =
+  config.installInfraRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
+const apiGatewayExecutionArn =
+  config.apiGatewayExecutionArn ??
+  (config.apiGatewayId
+    ? `arn:aws:execute-api:${region}:${accountId}:${config.apiGatewayId}`
+    : "");
 const permissionsBoundaryArn =
   config.permissionsBoundaryArn ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
 const foundationalPermissionsBoundaryArn =
@@ -376,11 +385,13 @@ await installApp({
     artifactsBucket,
     pulumiStateBucket,
     apiGatewayId: config.apiGatewayId,
+    apiGatewayExecutionArn,
     authorizerId: config.authorizerId,
     permissionsBoundaryArn,
     foundationalPermissionsBoundaryArn,
     managerRoleArn,
     installDdlRoleArn,
+    installInfraRoleArn,
   },
 });
 

@@ -11,8 +11,12 @@
  *   AURORA_ENDPOINT  — Aurora DSQL cluster hostname
  *   S3_BUCKET        — S3 bucket for object storage (files)
  *   STACK_PREFIX     — e.g. "starkeep"
- *   MANAGER_ROLE_ARN — ARN of the Manager role to hop through for app role assumption
  *   AWS_REGION       — set automatically by Lambda runtime
+ *
+ * The CDS Lambda's broker capability is the cloud-data-server role's
+ * "broker-power" inline policy + each per-app role trusting the CDS role
+ * directly. AssumeRole is a single hop: Lambda exec role → per-app role.
+ * Manager is not involved in the runtime data path.
  */
 
 import { createHash } from "node:crypto";
@@ -64,35 +68,18 @@ async function getAppCreds(appId: string): Promise<CachedCreds> {
   }
 
   const stackPrefix = process.env.STACK_PREFIX;
-  const managerRoleArn = process.env.MANAGER_ROLE_ARN;
   const region = process.env.AWS_REGION ?? "us-east-1";
-  if (!stackPrefix || !managerRoleArn) {
-    throw new Error("STACK_PREFIX and MANAGER_ROLE_ARN env vars are required");
+  if (!stackPrefix) {
+    throw new Error("STACK_PREFIX env var is required");
   }
 
   const appRoleArn = `arn:aws:iam::${getAccountId()}:role/${stackPrefix}-app-${appId}-role`;
 
-  // Hop through Manager role first (Lambda exec role → Manager → app role)
+  // Single-hop AssumeRole: the CDS Lambda exec role's broker-power policy
+  // permits sts:AssumeRole on ${prefix}-app-*, and every per-app role's
+  // trust policy lists the CDS role as a principal. No Manager involvement.
   const sts = new STSClient({ region });
-  const managerResult = await sts.send(new AssumeRoleCommand({
-    RoleArn: managerRoleArn,
-    RoleSessionName: `lambda-mgr-${Date.now()}`,
-    DurationSeconds: 900,
-  }));
-  const mc = managerResult.Credentials;
-  if (!mc?.AccessKeyId || !mc.SecretAccessKey || !mc.SessionToken) {
-    throw new Error("Failed to assume Manager role");
-  }
-
-  const managerSts = new STSClient({
-    region,
-    credentials: {
-      accessKeyId: mc.AccessKeyId,
-      secretAccessKey: mc.SecretAccessKey,
-      sessionToken: mc.SessionToken,
-    },
-  });
-  const appResult = await managerSts.send(new AssumeRoleCommand({
+  const appResult = await sts.send(new AssumeRoleCommand({
     RoleArn: appRoleArn,
     RoleSessionName: `lambda-app-${appId}-${Date.now()}`,
     DurationSeconds: 900,

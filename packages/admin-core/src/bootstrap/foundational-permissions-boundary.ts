@@ -102,6 +102,16 @@ export function foundationalPermissionsBoundaryStatements(
         "s3:GetEncryptionConfiguration",
         "s3:PutEncryptionConfiguration",
         "s3:GetBucketWebsite",
+        // Pulumi's aws.s3.BucketV2 reads these on every refresh; without them
+        // every CDS install eats AccessDenied warnings or hard refresh
+        // failures (G6a).
+        "s3:GetAccelerateConfiguration",
+        "s3:GetBucketLogging",
+        "s3:GetBucketRequestPayment",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetBucketNotification",
       ],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-files-*`,
@@ -152,6 +162,14 @@ export function foundationalPermissionsBoundaryStatements(
         "lambda:GetPolicy",
         "lambda:PublishVersion",
         "lambda:InvokeFunction",
+        // Refresh-time reads fired by Pulumi's aws.lambda.Function on every
+        // refresh (G6b, G9k).
+        "lambda:ListVersionsByFunction",
+        "lambda:GetFunctionCodeSigningConfig",
+        "lambda:GetFunctionConcurrency",
+        "lambda:GetFunctionUrlConfig",
+        "lambda:ListFunctionEventInvokeConfigs",
+        "lambda:GetRuntimeManagementConfig",
       ],
       Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-${cdsAppId}-*`,
     },
@@ -200,6 +218,10 @@ export function foundationalPermissionsBoundaryStatements(
         "apigateway:PATCH",
         "apigateway:PUT",
         "apigateway:DELETE",
+        // v2 tagging on stages/integrations/routes fires under the legacy
+        // namespace (G6c).
+        "apigateway:TagResource",
+        "apigateway:UntagResource",
       ],
       Resource: [
         "arn:aws:apigateway:*::/apis",
@@ -215,8 +237,28 @@ export function foundationalPermissionsBoundaryStatements(
         "cur:PutReportDefinition",
         "cur:DescribeReportDefinitions",
         "cur:DeleteReportDefinition",
+        // Pulumi's CUR resource reads/writes tags on every refresh (G6d).
+        "cur:ListTagsForResource",
+        "cur:TagResource",
+        "cur:UntagResource",
       ],
       Resource: "*",
+    },
+    {
+      // First-ever dsql:CreateCluster in an account often needs the DSQL
+      // service-linked role created. AWS auto-creates SLRs when the caller
+      // holds iam:CreateServiceLinkedRole for the matching service. Scoped
+      // to the DSQL service principal so the FoundationalDenyOtherIam
+      // NotAction carve-out doesn't admit anything else (G9i).
+      Sid: "FoundationalIamCreateServiceLinkedRole",
+      Effect: "Allow",
+      Action: "iam:CreateServiceLinkedRole",
+      Resource: "*",
+      Condition: {
+        StringEquals: {
+          "iam:AWSServiceName": "dsql.amazonaws.com",
+        },
+      },
     },
     {
       Sid: "FoundationalPassRoleOwnRoleToLambda",
@@ -230,17 +272,30 @@ export function foundationalPermissionsBoundaryStatements(
       },
     },
     {
-      // Defense-in-depth: deny every mutating IAM verb. PassRole is omitted
-      // from the prefix list, so the Allow above survives. Read-only IAM
-      // verbs (Get*/List*) aren't denied here but are implicitly denied at
-      // the boundary because nothing Allows them.
+      // Defense-in-depth: deny every mutating IAM verb except the two we
+      // explicitly Allow above (iam:PassRole, iam:CreateServiceLinkedRole
+      // gated on dsql.amazonaws.com). iam:Create* is enumerated as the
+      // explicit subverbs rather than the wildcard so CreateServiceLinkedRole
+      // isn't accidentally caught (G9i). Read-only iam:Get*/List* are not
+      // denied — they remain implicitly denied because nothing Allows them.
       Sid: "FoundationalDenyOtherIam",
       Effect: "Deny",
       Action: [
         "iam:Add*",
         "iam:Attach*",
         "iam:Change*",
-        "iam:Create*",
+        "iam:CreateAccessKey",
+        "iam:CreateAccountAlias",
+        "iam:CreateGroup",
+        "iam:CreateInstanceProfile",
+        "iam:CreateLoginProfile",
+        "iam:CreateOpenIDConnectProvider",
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:CreateRole",
+        "iam:CreateSAMLProvider",
+        "iam:CreateUser",
+        "iam:CreateVirtualMFADevice",
         "iam:Deactivate*",
         "iam:Delete*",
         "iam:Detach*",

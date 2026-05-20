@@ -58,6 +58,7 @@ interface StarkeepConfig {
   userPoolId: string;
   apiGatewayUrl?: string;
   apiGatewayId?: string;
+  apiGatewayExecutionArn?: string;
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
@@ -141,6 +142,7 @@ export async function POST(req: NextRequest) {
             emitEvent("done", {
               apiGatewayUrl: post.apiGatewayUrl,
               apiGatewayId: post.apiGatewayId,
+              apiGatewayExecutionArn: post.apiGatewayExecutionArn,
               authorizerId: post.authorizerId,
               bucketName: post.s3Bucket,
               auroraHostname: post.auroraEndpoint,

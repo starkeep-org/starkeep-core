@@ -88,6 +88,7 @@ export interface CloudDataServerInstallOutputs {
   bucketName: string;
   apiGatewayUrl: string;
   apiGatewayId: string;
+  apiGatewayExecutionArn: string;
   authorizerId: string;
   functionArn: string;
   region: string;
@@ -290,13 +291,14 @@ export async function installCloudDataServer(
       pulumiStateBucket: config.pulumiStateBucket,
       region: config.region,
       stackPrefix: config.stackPrefix,
-      appCreds,
+      awsCreds: appCreds,
       preCleanupOrphans: makeCloudDataServerOrphanCleaner(config, appCreds),
     });
 
     const auroraHostname = String(outputs.auroraHostname);
     const bucketName = String(outputs.bucketName);
     const apiGatewayId = String(outputs.apiGatewayId);
+    const apiGatewayExecutionArn = String(outputs.apiGatewayExecutionArn);
     const apiGatewayUrl = String(outputs.apiGatewayUrl);
     const authorizerId = String(outputs.authorizerId);
     const functionArn = String(outputs.functionArn);
@@ -343,6 +345,7 @@ export async function installCloudDataServer(
       bucketName,
       apiGatewayUrl,
       apiGatewayId,
+      apiGatewayExecutionArn,
       authorizerId,
       functionArn,
       region,
@@ -409,7 +412,7 @@ export async function uninstallCloudDataServer(
     pulumiStateBucket: config.pulumiStateBucket,
     region: config.region,
     stackPrefix: config.stackPrefix,
-    appCreds,
+    awsCreds: appCreds,
   });
 
   console.log("Deleting app role…");

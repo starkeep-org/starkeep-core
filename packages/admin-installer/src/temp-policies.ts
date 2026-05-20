@@ -25,7 +25,19 @@ export function buildTempInstallDdlPolicy(stackPrefix: string): string {
   });
 }
 
-export function buildTempInstallPolicy(
+/**
+ * Temp policy for the install-infra-role, scoped to a single app being
+ * installed. Attached to ${stackPrefix}-install-infra-role under policy name
+ * temp-install-infra-${appId} and detached after the compute-stack step
+ * completes. The install-infra-role itself has zero standing power at steady
+ * state; this is the ephemeral grant that lets it provision the app's
+ * Lambda(s), log group(s), and API Gateway routes.
+ *
+ * Every resource is scoped to the specific appId — concurrent installs of
+ * different apps cannot affect each other because their temp policies sit
+ * under different policy names on the same role with disjoint ARNs.
+ */
+export function buildTempInstallInfraPolicy(
   stackPrefix: string,
   appId: string,
   accountId: string,
@@ -36,32 +48,42 @@ export function buildTempInstallPolicy(
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "TempInstallS3AppPrefix",
+        Sid: "TempInstallInfraPulumiState",
         Effect: "Allow",
-        Action: ["s3:PutObject", "s3:GetObject"],
-        Resource: [
-          `arn:aws:s3:::${stackPrefix}-files-*/apps/${appId}/*`,
-          `arn:aws:s3:::${stackPrefix}-artifacts/apps/${appId}/*`,
+        Action: [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+          // Propagation probe target — see probePulumiStateBucket().
+          "s3:GetAccelerateConfiguration",
         ],
-      },
-      {
-        Sid: "TempInstallPulumiState",
-        Effect: "Allow",
-        Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
         Resource: [
+          `arn:aws:s3:::${pulumiStateBucket}`,
           `arn:aws:s3:::${pulumiStateBucket}/.pulumi/stacks/${stackPrefix}-app-${appId}.json`,
           `arn:aws:s3:::${pulumiStateBucket}/.pulumi/`,
           `arn:aws:s3:::${pulumiStateBucket}/.pulumi/*`,
         ],
       },
       {
-        Sid: "TempInstallSsmPassphrase",
+        Sid: "TempInstallInfraSsmPassphrase",
         Effect: "Allow",
         Action: "ssm:GetParameter",
         Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`,
       },
       {
-        Sid: "TempInstallLambda",
+        // uploadAppBundle writes apps/<appId>/latest/dist.zip;
+        // Pulumi's lambda.Function reads the same key as code source.
+        Sid: "TempInstallInfraArtifacts",
+        Effect: "Allow",
+        Action: ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+        Resource: [
+          `arn:aws:s3:::${stackPrefix}-artifacts`,
+          `arn:aws:s3:::${stackPrefix}-artifacts/apps/${appId}/*`,
+        ],
+      },
+      {
+        Sid: "TempInstallInfraLambda",
         Effect: "Allow",
         Action: [
           "lambda:CreateFunction",
@@ -73,11 +95,24 @@ export function buildTempInstallPolicy(
           "lambda:TagResource",
           "lambda:UntagResource",
           "lambda:ListTags",
+          // AddPermission/GetPolicy: required for aws.lambda.Permission so
+          // API Gateway can invoke per-app Lambdas (G3).
+          "lambda:AddPermission",
+          "lambda:RemovePermission",
+          "lambda:GetPolicy",
+          // Refresh-time reads that Pulumi's aws.lambda.Function fires on
+          // every BucketV2-style refresh.
+          "lambda:ListVersionsByFunction",
+          "lambda:GetFunctionCodeSigningConfig",
+          "lambda:GetFunctionConcurrency",
+          "lambda:GetFunctionUrlConfig",
+          "lambda:ListFunctionEventInvokeConfigs",
+          "lambda:GetRuntimeManagementConfig",
         ],
         Resource: `arn:aws:lambda:*:${accountId}:function:${stackPrefix}-app-${appId}-*`,
       },
       {
-        Sid: "TempInstallLogs",
+        Sid: "TempInstallInfraLogs",
         Effect: "Allow",
         Action: [
           "logs:CreateLogGroup",
@@ -91,15 +126,14 @@ export function buildTempInstallPolicy(
       },
       {
         // logs:DescribeLogGroups is a list-level action — AWS evaluates it
-        // on the all-zeros resource, not the filtered group, so it must be
-        // granted on Resource:"*".
-        Sid: "TempInstallLogsList",
+        // against the all-zeros resource, so it must be granted on "*".
+        Sid: "TempInstallInfraLogsList",
         Effect: "Allow",
         Action: ["logs:DescribeLogGroups"],
         Resource: "*",
       },
       {
-        Sid: "TempInstallApiGateway",
+        Sid: "TempInstallInfraApiGatewayV2",
         Effect: "Allow",
         Action: [
           "apigatewayv2:GetApi",
@@ -123,10 +157,9 @@ export function buildTempInstallPolicy(
         Resource: "*",
       },
       {
-        // API Gateway v2 (HTTP APIs) tagging + several create paths still
-        // authorize against the legacy `apigateway` IAM service namespace
-        // (REST-method action names), not apigatewayv2:*.
-        Sid: "TempInstallApiGatewayRestActions",
+        // Legacy apigateway: namespace verbs for v2 integration/route paths
+        // and tag operations.
+        Sid: "TempInstallInfraApiGatewayLegacy",
         Effect: "Allow",
         Action: [
           "apigateway:GET",
@@ -134,6 +167,8 @@ export function buildTempInstallPolicy(
           "apigateway:PATCH",
           "apigateway:PUT",
           "apigateway:DELETE",
+          "apigateway:TagResource",
+          "apigateway:UntagResource",
         ],
         Resource: [
           "arn:aws:apigateway:*::/v2/*",
@@ -141,11 +176,10 @@ export function buildTempInstallPolicy(
         ],
       },
       {
-        // Pulumi's lambda.Function resource runs CreateFunction under the
-        // app's STS session, so AWS evaluates iam:PassRole on this session.
-        // Scoped to the app's own role only; the boundary's
-        // AppPassRoleOwnRoleToLambda also caps PassRole to lambda.
-        Sid: "TempInstallPassRoleOwnRoleToLambda",
+        // Pulumi's lambda.Function CreateFunction passes the per-app role as
+        // the Lambda exec role; install-infra is the principal making the
+        // call, so iam:PassRole is evaluated against this temp policy.
+        Sid: "TempInstallInfraPassRoleAppToLambda",
         Effect: "Allow",
         Action: "iam:PassRole",
         Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${appId}-role`,
@@ -157,7 +191,8 @@ export function buildTempInstallPolicy(
   });
 }
 
-export function buildTempUninstallPolicy(
+/** Symmetric uninstall variant — destroy-time + refresh-read verbs. */
+export function buildTempUninstallInfraPolicy(
   stackPrefix: string,
   appId: string,
   accountId: string,
@@ -168,55 +203,78 @@ export function buildTempUninstallPolicy(
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "TempUninstallS3AppPrefix",
+        Sid: "TempUninstallInfraPulumiState",
         Effect: "Allow",
-        Action: ["s3:DeleteObject", "s3:ListBucket", "s3:GetObject"],
-        Resource: [
-          `arn:aws:s3:::${stackPrefix}-files-*/apps/${appId}/*`,
-          `arn:aws:s3:::${stackPrefix}-artifacts/apps/${appId}/*`,
+        Action: [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+          "s3:GetAccelerateConfiguration",
         ],
-      },
-      {
-        Sid: "TempUninstallPulumiState",
-        Effect: "Allow",
-        Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
         Resource: [
+          `arn:aws:s3:::${pulumiStateBucket}`,
           `arn:aws:s3:::${pulumiStateBucket}/.pulumi/stacks/${stackPrefix}-app-${appId}.json`,
           `arn:aws:s3:::${pulumiStateBucket}/.pulumi/`,
           `arn:aws:s3:::${pulumiStateBucket}/.pulumi/*`,
         ],
       },
       {
-        Sid: "TempUninstallSsmPassphrase",
+        Sid: "TempUninstallInfraSsmPassphrase",
         Effect: "Allow",
         Action: "ssm:GetParameter",
         Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`,
       },
       {
-        Sid: "TempUninstallLambda",
+        // Bundle cleanup happens in deleteAppObjects which runs under app
+        // creds; install-infra needs read here so Pulumi's destroy-time
+        // refresh on aws.lambda.Function can re-resolve the code source.
+        Sid: "TempUninstallInfraArtifacts",
+        Effect: "Allow",
+        Action: ["s3:GetObject", "s3:ListBucket"],
+        Resource: [
+          `arn:aws:s3:::${stackPrefix}-artifacts`,
+          `arn:aws:s3:::${stackPrefix}-artifacts/apps/${appId}/*`,
+        ],
+      },
+      {
+        Sid: "TempUninstallInfraLambda",
         Effect: "Allow",
         Action: [
           "lambda:DeleteFunction",
           "lambda:GetFunction",
           "lambda:GetFunctionConfiguration",
+          // RemovePermission/GetPolicy: Pulumi destroy reads & deletes the
+          // resource-based policy statement before deleting the function.
+          "lambda:RemovePermission",
+          "lambda:GetPolicy",
+          // Refresh-time reads.
+          "lambda:ListVersionsByFunction",
+          "lambda:GetFunctionCodeSigningConfig",
+          "lambda:GetFunctionConcurrency",
+          "lambda:GetFunctionUrlConfig",
+          "lambda:ListFunctionEventInvokeConfigs",
+          "lambda:GetRuntimeManagementConfig",
         ],
         Resource: `arn:aws:lambda:*:${accountId}:function:${stackPrefix}-app-${appId}-*`,
       },
       {
-        Sid: "TempUninstallLogs",
+        Sid: "TempUninstallInfraLogs",
         Effect: "Allow",
-        Action: ["logs:DeleteLogGroup"],
+        Action: [
+          "logs:DeleteLogGroup",
+          "logs:ListTagsForResource",
+        ],
         Resource: `arn:aws:logs:*:${accountId}:log-group:/aws/lambda/${stackPrefix}-app-${appId}-*`,
       },
       {
-        // List-level action — see TempInstallLogsList.
-        Sid: "TempUninstallLogsList",
+        Sid: "TempUninstallInfraLogsList",
         Effect: "Allow",
         Action: ["logs:DescribeLogGroups"],
         Resource: "*",
       },
       {
-        Sid: "TempUninstallApiGateway",
+        Sid: "TempUninstallInfraApiGatewayV2",
         Effect: "Allow",
         Action: [
           "apigatewayv2:GetApi",
@@ -232,6 +290,21 @@ export function buildTempUninstallPolicy(
           "apigatewayv2:ListTagsForResource",
         ],
         Resource: "*",
+      },
+      {
+        // Legacy apigateway: DELETE/Untag is needed by Pulumi destroy on
+        // integrations, routes, and tag-on-* resources.
+        Sid: "TempUninstallInfraApiGatewayLegacy",
+        Effect: "Allow",
+        Action: [
+          "apigateway:GET",
+          "apigateway:DELETE",
+          "apigateway:UntagResource",
+        ],
+        Resource: [
+          "arn:aws:apigateway:*::/v2/*",
+          "arn:aws:apigateway:*::/tags/*",
+        ],
       },
     ],
   });
@@ -370,6 +443,8 @@ export function buildTempInstallCloudDataServerPolicy(
           "lambda:GetFunctionConcurrency",
           "lambda:GetFunctionUrlConfig",
           "lambda:ListFunctionEventInvokeConfigs",
+          // G9k — Pulumi reads runtime-management config on every refresh.
+          "lambda:GetRuntimeManagementConfig",
         ],
         Resource: `arn:aws:lambda:*:${accountId}:function:${stackPrefix}-app-${appId}-*`,
       },
@@ -512,6 +587,22 @@ export function buildTempInstallCloudDataServerPolicy(
         ],
         Resource: "*",
       },
+      {
+        // First dsql:CreateCluster in an account may need the DSQL
+        // service-linked role auto-created (G9i). This lives on the CDS
+        // temp policy specifically because cloud-data-server is the only
+        // identity that ever creates the DSQL cluster; per-app installs
+        // never run dsql:CreateCluster and intentionally do not carry this
+        // grant. Scoped to the DSQL service principal so no other SLRs can
+        // be created from this grant.
+        Sid: "TempInstallCreateDsqlServiceLinkedRole",
+        Effect: "Allow",
+        Action: "iam:CreateServiceLinkedRole",
+        Resource: "*",
+        Condition: {
+          StringEquals: { "iam:AWSServiceName": "dsql.amazonaws.com" },
+        },
+      },
     ],
   });
 }
@@ -542,10 +633,20 @@ export function buildRuntimePolicy(
     {
       Sid: "AppS3OwnPrefix",
       Effect: "Allow",
-      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
-      Resource: [
-        `arn:aws:s3:::${stackPrefix}-files-*/apps/${appId}/*`,
-      ],
+      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/${appId}/*`,
+    },
+    {
+      // ListBucket is a bucket-level action. The s3:prefix condition restricts
+      // enumeration to the app's own prefix; cross-prefix listing (other apps'
+      // keys, foreign shared/* prefixes) is denied.
+      Sid: "AppS3ListOwnPrefix",
+      Effect: "Allow",
+      Action: "s3:ListBucket",
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*`,
+      Condition: {
+        StringLike: { "s3:prefix": [`apps/${appId}/*`] },
+      },
     },
     {
       Sid: "AppDsqlConnect",

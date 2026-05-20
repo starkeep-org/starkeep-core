@@ -48,15 +48,33 @@ async function ensurePulumiCli(): Promise<pulumi.PulumiCommand> {
 export interface ComputeContext {
   stackPrefix: string;
   appId: string;
+  /**
+   * Per-app role ARN. The Pulumi program passes this as the Lambda exec
+   * role; the role itself is created and tagged by Manager before this
+   * context is built.
+   */
   appRoleArn: string;
   apiGatewayId: string;
+  /**
+   * Execution ARN of the shared API Gateway, used as the source-arn on
+   * aws.lambda.Permission so API Gateway is allowed to invoke per-app
+   * Lambdas (replaces the IAM-implicit invoke path which no longer covers
+   * this case under the stripped per-app boundary).
+   */
+  apiGatewayExecutionArn: string;
   authorizerId: string;
   region: string;
   accountId: string;
   pulumiStateBucket: string;
   dsqlHostname: string;
   filesBucket: string;
-  appCreds: AwsCredentials;
+  /**
+   * install-infra credentials. Per-app Pulumi up/destroy runs as
+   * install-infra (not the per-app role); this carries the install-time
+   * AWS-provisioning power scoped to this app via a temp policy attached
+   * upstream in the orchestrator.
+   */
+  infraCreds: AwsCredentials;
 }
 
 export interface InstallReceipt {
@@ -72,7 +90,7 @@ export interface InstallReceipt {
 export interface PulumiCredsContext {
   stackPrefix: string;
   region: string;
-  appCreds: AwsCredentials;
+  awsCreds: AwsCredentials;
 }
 
 /**
@@ -131,9 +149,9 @@ async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
   const ssm = new SSMClient({
     region: ctx.region,
     credentials: {
-      accessKeyId: ctx.appCreds.accessKeyId,
-      secretAccessKey: ctx.appCreds.secretAccessKey,
-      sessionToken: ctx.appCreds.sessionToken,
+      accessKeyId: ctx.awsCreds.accessKeyId,
+      secretAccessKey: ctx.awsCreds.secretAccessKey,
+      sessionToken: ctx.awsCreds.sessionToken,
     },
   });
 
@@ -172,14 +190,14 @@ async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
 async function probePulumiStateBucket(opts: {
   pulumiStateBucket: string;
   region: string;
-  appCreds: AwsCredentials;
+  awsCreds: AwsCredentials;
 }): Promise<void> {
   const s3 = new S3Client({
     region: opts.region,
     credentials: {
-      accessKeyId: opts.appCreds.accessKeyId,
-      secretAccessKey: opts.appCreds.secretAccessKey,
-      sessionToken: opts.appCreds.sessionToken,
+      accessKeyId: opts.awsCreds.accessKeyId,
+      secretAccessKey: opts.awsCreds.secretAccessKey,
+      sessionToken: opts.awsCreds.sessionToken,
     },
   });
 
@@ -239,7 +257,7 @@ export async function pulumiUpInline(opts: {
   pulumiStateBucket: string;
   region: string;
   stackPrefix: string;
-  appCreds: AwsCredentials;
+  awsCreds: AwsCredentials;
   /** Called after stack selection but before refresh/up, with the set of URNs currently in state. */
   preCleanupOrphans?: (inStateUrns: Set<string>) => Promise<void>;
 }): Promise<Record<string, unknown>> {
@@ -247,13 +265,13 @@ export async function pulumiUpInline(opts: {
     getPulumiPassphrase({
       stackPrefix: opts.stackPrefix,
       region: opts.region,
-      appCreds: opts.appCreds,
+      awsCreds: opts.awsCreds,
     }),
     ensurePulumiCli(),
     probePulumiStateBucket({
       pulumiStateBucket: opts.pulumiStateBucket,
       region: opts.region,
-      appCreds: opts.appCreds,
+      awsCreds: opts.awsCreds,
     }),
   ]);
 
@@ -267,9 +285,9 @@ export async function pulumiUpInline(opts: {
       pulumiCommand,
       workDir: undefined,
       envVars: {
-        AWS_ACCESS_KEY_ID: opts.appCreds.accessKeyId,
-        AWS_SECRET_ACCESS_KEY: opts.appCreds.secretAccessKey,
-        AWS_SESSION_TOKEN: opts.appCreds.sessionToken,
+        AWS_ACCESS_KEY_ID: opts.awsCreds.accessKeyId,
+        AWS_SECRET_ACCESS_KEY: opts.awsCreds.secretAccessKey,
+        AWS_SESSION_TOKEN: opts.awsCreds.sessionToken,
         AWS_REGION: opts.region,
         PULUMI_CONFIG_PASSPHRASE: passphrase,
         PULUMI_BACKEND_URL: `s3://${opts.pulumiStateBucket}`,
@@ -315,19 +333,19 @@ export async function pulumiDestroyInline(opts: {
   pulumiStateBucket: string;
   region: string;
   stackPrefix: string;
-  appCreds: AwsCredentials;
+  awsCreds: AwsCredentials;
 }): Promise<void> {
   const [passphrase, pulumiCommand] = await Promise.all([
     getPulumiPassphrase({
       stackPrefix: opts.stackPrefix,
       region: opts.region,
-      appCreds: opts.appCreds,
+      awsCreds: opts.awsCreds,
     }),
     ensurePulumiCli(),
     probePulumiStateBucket({
       pulumiStateBucket: opts.pulumiStateBucket,
       region: opts.region,
-      appCreds: opts.appCreds,
+      awsCreds: opts.awsCreds,
     }),
   ]);
 
@@ -343,9 +361,9 @@ export async function pulumiDestroyInline(opts: {
         pulumiCommand,
         workDir: undefined,
         envVars: {
-          AWS_ACCESS_KEY_ID: opts.appCreds.accessKeyId,
-          AWS_SECRET_ACCESS_KEY: opts.appCreds.secretAccessKey,
-          AWS_SESSION_TOKEN: opts.appCreds.sessionToken,
+          AWS_ACCESS_KEY_ID: opts.awsCreds.accessKeyId,
+          AWS_SECRET_ACCESS_KEY: opts.awsCreds.secretAccessKey,
+          AWS_SESSION_TOKEN: opts.awsCreds.sessionToken,
           AWS_REGION: opts.region,
           PULUMI_CONFIG_PASSPHRASE: passphrase,
           PULUMI_BACKEND_URL: `s3://${opts.pulumiStateBucket}`,
@@ -372,7 +390,7 @@ export async function installComputeStack(
     pulumiStateBucket: ctx.pulumiStateBucket,
     region: ctx.region,
     stackPrefix: ctx.stackPrefix,
-    appCreds: ctx.appCreds,
+    awsCreds: ctx.infraCreds,
   });
 
   const functionArns: string[] = [];
@@ -392,6 +410,6 @@ export async function uninstallComputeStack(ctx: ComputeContext): Promise<void> 
     pulumiStateBucket: ctx.pulumiStateBucket,
     region: ctx.region,
     stackPrefix: ctx.stackPrefix,
-    appCreds: ctx.appCreds,
+    awsCreds: ctx.infraCreds,
   });
 }
