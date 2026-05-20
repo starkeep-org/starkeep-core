@@ -54,6 +54,8 @@ export interface ComputeContext {
   region: string;
   accountId: string;
   pulumiStateBucket: string;
+  dsqlHostname: string;
+  filesBucket: string;
   appCreds: AwsCredentials;
 }
 

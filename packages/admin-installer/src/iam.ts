@@ -9,9 +9,11 @@ import {
   DeleteRoleCommand,
   GetRoleCommand,
   GetRolePolicyCommand,
+  ListRolePoliciesCommand,
   PutRolePolicyCommand,
   DeleteRolePolicyCommand,
   UpdateAssumeRolePolicyCommand,
+  EntityAlreadyExistsException,
 } from "@aws-sdk/client-iam";
 import type { AwsCredentials } from "./session";
 import {
@@ -19,6 +21,7 @@ import {
   buildTempInstallPolicy,
   buildTempUninstallPolicy,
   buildTempInstallCloudDataServerPolicy,
+  buildTempInstallDdlPolicy,
 } from "./temp-policies";
 import type { SharedTypeAccess } from "@starkeep/admin-manifest";
 import { CORE_TYPE_REGISTRY } from "@starkeep/admin-manifest";
@@ -94,28 +97,39 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
   const typeIds = expanded.map((e) => e.typeId);
   const hasWriteAccess = expanded.some((e) => e.access === "readwrite");
 
-  await iam.send(
-    new CreateRoleCommand({
-      RoleName: roleName,
-      AssumeRolePolicyDocument: JSON.stringify({
-        Version: "2012-10-17",
-        Statement: [
-          {
-            Effect: "Allow",
-            Principal: { Service: "lambda.amazonaws.com" },
-            Action: "sts:AssumeRole",
-          },
-          {
-            Effect: "Allow",
-            Principal: { AWS: `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role` },
-            Action: "sts:AssumeRole",
-          },
-        ],
+  const assumeRolePolicy = JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Principal: { Service: "lambda.amazonaws.com" },
+        Action: "sts:AssumeRole",
+      },
+      {
+        Effect: "Allow",
+        Principal: { AWS: `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role` },
+        Action: "sts:AssumeRole",
+      },
+    ],
+  });
+  try {
+    await iam.send(
+      new CreateRoleCommand({
+        RoleName: roleName,
+        AssumeRolePolicyDocument: assumeRolePolicy,
+        PermissionsBoundary: boundaryArn,
+        Tags: [{ Key: "starkeep:appId", Value: appId }, { Key: "starkeep:managed", Value: "true" }],
       }),
-      PermissionsBoundary: boundaryArn,
-      Tags: [{ Key: "starkeep:appId", Value: appId }, { Key: "starkeep:managed", Value: "true" }],
-    }),
-  );
+    );
+  } catch (err) {
+    if (!(err instanceof EntityAlreadyExistsException)) throw err;
+    await iam.send(
+      new UpdateAssumeRolePolicyCommand({
+        RoleName: roleName,
+        PolicyDocument: assumeRolePolicy,
+      }),
+    );
+  }
 
   const runtimePolicy = buildRuntimePolicy(
     stackPrefix, appId, typeIds, hasWriteAccess, canIngestUnknown, canPromoteFromUnknown,
@@ -213,6 +227,35 @@ export async function detachTempUninstallPolicy(
   );
 }
 
+export async function attachTempInstallDdlPolicy(
+  stackPrefix: string,
+  appId: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  await iam.send(
+    new PutRolePolicyCommand({
+      RoleName: `${stackPrefix}-install-ddl-role`,
+      PolicyName: `temp-install-ddl-${appId}`,
+      PolicyDocument: buildTempInstallDdlPolicy(stackPrefix),
+    }),
+  );
+}
+
+export async function detachTempInstallDdlPolicy(
+  stackPrefix: string,
+  appId: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  await iam.send(
+    new DeleteRolePolicyCommand({
+      RoleName: `${stackPrefix}-install-ddl-role`,
+      PolicyName: `temp-install-ddl-${appId}`,
+    }),
+  );
+}
+
 export async function deleteAppRole(
   stackPrefix: string,
   appId: string,
@@ -222,6 +265,27 @@ export async function deleteAppRole(
   await iam.send(
     new DeleteRoleCommand({ RoleName: `${stackPrefix}-app-${appId}-role` }),
   );
+}
+
+/**
+ * Delete all inline policies from an app role then delete the role itself.
+ * `DeleteRole` fails with DeleteConflict when inline policies are present,
+ * so we list and remove them first.
+ */
+export async function deleteAppRoleWithPolicies(
+  stackPrefix: string,
+  appId: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  const roleName = `${stackPrefix}-app-${appId}-role`;
+
+  const { PolicyNames = [] } = await iam.send(new ListRolePoliciesCommand({ RoleName: roleName }));
+  for (const policyName of PolicyNames) {
+    await iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyName }));
+  }
+
+  await iam.send(new DeleteRoleCommand({ RoleName: roleName }));
 }
 
 /** Returns a canonical, key-sorted JSON string for deterministic comparison. */

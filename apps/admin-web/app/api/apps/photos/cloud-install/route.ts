@@ -1,11 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { NextRequest } from "next/server";
 import { REPO_ROOT } from "../../../../../src/lib/exec-commands";
-
-const PHOTOS_INFRA_DIR = resolve(REPO_ROOT, "..", "starkeep-apps", "photos", "infra");
-const PHOTOS_CLOUD_CONFIG_PATH = resolve(PHOTOS_INFRA_DIR, "photos-cloud-config.json");
 
 let runningChild: ChildProcess | null = null;
 const runningChildListeners = new Map<symbol, (line: string) => void>();
@@ -36,13 +31,6 @@ export async function POST(req: NextRequest) {
   if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken || !body.region) {
     return new Response(
       JSON.stringify({ error: "accessKeyId, secretAccessKey, sessionToken, region required" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
-  }
-
-  if (!existsSync(PHOTOS_INFRA_DIR)) {
-    return new Response(
-      JSON.stringify({ error: `photos infra directory not found at ${PHOTOS_INFRA_DIR}` }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -78,15 +66,7 @@ export async function POST(req: NextRequest) {
 
       const finish = (code: number | null) => {
         if (code === 0) {
-          try {
-            const outputs = existsSync(PHOTOS_CLOUD_CONFIG_PATH)
-              ? JSON.parse(readFileSync(PHOTOS_CLOUD_CONFIG_PATH, "utf-8"))
-              : {};
-            emitEvent("done", outputs);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            emitEvent("error", { message: `Deploy completed but reading outputs failed: ${msg}` });
-          }
+          emitEvent("done", { appId: "photos" });
         } else if (sawExpiredToken) {
           emitEvent("error", {
             message:
@@ -102,8 +82,8 @@ export async function POST(req: NextRequest) {
       const spawnChild = () => {
         const child = spawn(
           "pnpm",
-          ["run", "local:deploy", "--", "--non-interactive"],
-          { cwd: PHOTOS_INFRA_DIR, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] },
+          ["--filter", "@starkeep/admin-installer", "cli:install-photos", "--non-interactive"],
+          { cwd: REPO_ROOT, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] },
         );
         runningChild = child;
         runningChildDone = finish;

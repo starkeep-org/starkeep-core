@@ -9,3 +9,4 @@ export { managerPolicyStatements } from "./manager-policy.js";
 export { adminAppPolicyStatements } from "./admin-app-policy.js";
 export { appPermissionsBoundaryStatements } from "./permissions-boundary.js";
 export { foundationalPermissionsBoundaryStatements } from "./foundational-permissions-boundary.js";
+export { installDdlBoundaryStatements } from "./install-ddl-boundary.js";

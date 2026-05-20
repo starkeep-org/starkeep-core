@@ -3,6 +3,7 @@ import { managerPolicyStatements } from "./manager-policy.js";
 import { adminAppPolicyStatements } from "./admin-app-policy.js";
 import { appPermissionsBoundaryStatements } from "./permissions-boundary.js";
 import { foundationalPermissionsBoundaryStatements } from "./foundational-permissions-boundary.js";
+import { installDdlBoundaryStatements } from "./install-ddl-boundary.js";
 
 export interface GenerateBootstrapTemplateInput {
   stackPrefix?: string;
@@ -39,6 +40,10 @@ export function generateBootstrapTemplate(
   );
   const foundationalBoundaryPolicyYaml = renderStatementsYaml(
     foundationalPermissionsBoundaryStatements(stackPrefix),
+    10,
+  );
+  const installDdlBoundaryPolicyYaml = renderStatementsYaml(
+    installDdlBoundaryStatements(stackPrefix),
     10,
   );
   return `AWSTemplateFormatVersion: '2010-09-09'
@@ -227,6 +232,48 @@ ${managerPolicyYaml}
           Value: !Ref StackPrefix
 
   # ---------------------------------------------------------------------------
+  # Install-DDL Permissions Boundary — ceiling for the install-ddl-role
+  # ---------------------------------------------------------------------------
+  InstallDdlPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '\${StackPrefix}-install-ddl-permissions-boundary'
+      Description: >-
+        Maximum permissions the install-ddl-role may hold. Permits only
+        dsql:DbConnectAdmin (used during app install/uninstall DDL) and
+        explicitly denies all IAM mutations for defense-in-depth.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+${installDdlBoundaryPolicyYaml}
+
+  # ---------------------------------------------------------------------------
+  # Install-DDL Role — the only identity that can connect to DSQL as PG admin.
+  # No standing permissions; Manager attaches a per-app temp policy around DDL.
+  # ---------------------------------------------------------------------------
+  InstallDdlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '\${StackPrefix}-install-ddl-role'
+      Description: >-
+        Dedicated role for running app install/uninstall DDL as DSQL PG admin.
+        Manager temporarily grants dsql:DbConnectAdmin via an inline policy
+        around each install/uninstall; no standing permissions at steady state.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt ManagerRole.Arn
+            Action: sts:AssumeRole
+      PermissionsBoundary: !Ref InstallDdlPermissionsBoundary
+      Tags:
+        - Key: starkeep:managed
+          Value: 'true'
+        - Key: StackPrefix
+          Value: !Ref StackPrefix
+
+  # ---------------------------------------------------------------------------
   # Pulumi state bucket for per-app stack state
   # ---------------------------------------------------------------------------
   PulumiStateBucket:
@@ -281,6 +328,10 @@ Outputs:
   AppFoundationalPermissionsBoundaryArn:
     Description: ARN of the wider permissions boundary for foundational app roles (cloud-data-server)
     Value: !Ref AppFoundationalPermissionsBoundary
+
+  InstallDdlRoleArn:
+    Description: ARN of the install-DDL role (the only identity that can connect to DSQL as PG admin)
+    Value: !GetAtt InstallDdlRole.Arn
 
   PulumiStateBucketName:
     Description: S3 bucket for Pulumi per-app stack state

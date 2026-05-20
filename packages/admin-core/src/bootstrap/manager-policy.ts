@@ -70,6 +70,18 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
       Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-app-*`),
     },
     {
+      Sid: "ManagerPutDeleteInstallDdlRolePolicies",
+      Effect: "Allow",
+      Action: ["iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy"],
+      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-install-ddl-role`),
+    },
+    {
+      Sid: "ManagerAssumeInstallDdlRole",
+      Effect: "Allow",
+      Action: "sts:AssumeRole",
+      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-install-ddl-role`),
+    },
+    {
       Sid: "ManagerGetCallerIdentity",
       Effect: "Allow",
       Action: "sts:GetCallerIdentity",

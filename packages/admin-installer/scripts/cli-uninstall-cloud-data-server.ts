@@ -1,28 +1,26 @@
 #!/usr/bin/env tsx
 /**
- * Install (or re-install / update) the cloud-data-server built-in app.
+ * Uninstall the cloud-data-server built-in app and all of its AWS resources.
  *
- * Replaces the old `sst deploy` flow entirely — there is no SST anymore.
- * cloud-data-server is provisioned via the standard admin-installer pipeline:
- * Manager attaches a wide temp policy, the cloud-data-server app role runs
- * Pulumi up to create DSQL/S3/Lambda/APIGw, the shared-schema DDL is
- * applied, and the temp policy is detached.
+ * Runs `pulumi destroy` on the cloud-data-server Pulumi stack (removes the
+ * DSQL cluster, files bucket, billing bucket, Lambda, API Gateway, and CUR
+ * report definition), then deletes the cloud-data-server IAM role.
+ *
+ * Use this before re-running the bootstrap installer when you need a clean
+ * slate — for example, after tearing down and redeploying the CloudFormation
+ * bootstrap stack.
  *
  * Reads ~/.starkeep/config.json (or $STARKEEP_DATA_DIR/config.json). The
- * admin-web wizard writes this file server-side via /api/config as it advances
- * through setup steps, so it must already exist (with at least userPoolId /
- * userPoolClientId / identityPoolId from the Stack outputs step) before this
- * script runs.
+ * file must contain at least userPoolId, userPoolClientId, and identityPoolId.
  *
- * Region is NOT stored in the file — it is derived from `userPoolId` (AWS
- * encodes the region into the pool ID, e.g. `us-east-2_Xxxxx`).
+ * Region is NOT stored in the file — it is derived from `userPoolId`.
  *
  * Usage:
- *   pnpm tsx scripts/cli-install-cloud-data-server.ts
- *   pnpm tsx scripts/cli-install-cloud-data-server.ts --non-interactive
+ *   pnpm tsx scripts/cli-uninstall-cloud-data-server.ts
+ *   pnpm tsx scripts/cli-uninstall-cloud-data-server.ts --non-interactive
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
@@ -37,7 +35,7 @@ import {
   GetCredentialsForIdentityCommand,
 } from "@aws-sdk/client-cognito-identity";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { installCloudDataServer } from "../src/builtin-installs";
+import { uninstallCloudDataServer } from "../src/builtin-installs";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -49,12 +47,6 @@ interface StarkeepConfig {
   foundationalPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   pulumiStateBucket?: string;
-  // populated by this script after a successful install:
-  apiGatewayUrl?: string;
-  apiGatewayId?: string;
-  authorizerId?: string;
-  s3Bucket?: string;
-  auroraEndpoint?: string;
 }
 
 function regionFromUserPoolId(userPoolId: string): string {
@@ -62,7 +54,7 @@ function regionFromUserPoolId(userPoolId: string): string {
   if (parts.length < 2 || !parts[0]) {
     throw new Error(
       `userPoolId "${userPoolId}" is not in the expected format <region>_<id>. ` +
-      `Region is derived from userPoolId, so this prevents the installer from running.`,
+      `Region is derived from userPoolId, so this prevents the uninstaller from running.`,
     );
   }
   return parts[0];
@@ -77,7 +69,7 @@ function loadConfig(): StarkeepConfig {
     raw = readFileSync(CONFIG_PATH, "utf-8");
   } catch {
     console.error(`Error: ~/.starkeep/config.json not found at ${CONFIG_PATH}`);
-    console.error("Generate it from admin-web after the bootstrap stack is deployed.");
+    console.error("The config file is required to locate the AWS resources to remove.");
     process.exit(1);
   }
   try {
@@ -100,14 +92,14 @@ function prompt(question: string, hidden = false): Promise<string> {
       process.stdin.setEncoding("utf8");
 
       const onData = (char: string) => {
-        if (char === "\n" || char === "\r" || char === "") {
+        if (char === "\n" || char === "\r" || char === "") {
           process.stdin.setRawMode?.(false);
           process.stdin.pause();
           process.stdin.removeListener("data", onData);
           process.stdout.write("\n");
           rl.close();
           resolveFn(value);
-        } else if (char === "" || char === "\b") {
+        } else if (char === "" || char === "\b") {
           value = value.slice(0, -1);
         } else {
           value += char;
@@ -230,7 +222,6 @@ if (nonInteractive) {
   process.env.AWS_REGION = region;
 }
 
-// Derive account ID from STS if not already in config.
 let accountId: string;
 if (config.accountId) {
   accountId = config.accountId;
@@ -255,14 +246,24 @@ const foundationalPermissionsBoundaryArn =
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
 
-console.log("\nStarkeep cloud-data-server install");
+console.log("\nStarkeep cloud-data-server uninstall");
 console.log(`  Region : ${region}`);
-console.log(`  Prefix : ${stackPrefix}`);
+console.log(`  Stage  : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log("");
+console.log("WARNING: This will permanently destroy the DSQL cluster, files bucket,");
+console.log("         billing bucket, Lambda, API Gateway, and the app IAM role.");
+console.log("");
 
-console.log("\nInstalling cloud-data-server…\n");
-const outputs = await installCloudDataServer({
+if (!nonInteractive) {
+  const confirm = await prompt('Type "yes" to continue: ');
+  if (confirm.trim() !== "yes") {
+    console.log("Aborted.");
+    process.exit(0);
+  }
+}
+
+await uninstallCloudDataServer({
   stackPrefix,
   region,
   accountId,
@@ -274,23 +275,4 @@ const outputs = await installCloudDataServer({
   userPoolClientId: config.userPoolClientId,
 });
 
-const updated: StarkeepConfig = {
-  ...config,
-  accountId,
-  permissionsBoundaryArn,
-  foundationalPermissionsBoundaryArn,
-  managerRoleArn,
-  pulumiStateBucket,
-  apiGatewayUrl: outputs.apiGatewayUrl,
-  apiGatewayId: outputs.apiGatewayId,
-  authorizerId: outputs.authorizerId,
-  s3Bucket: outputs.bucketName,
-  auroraEndpoint: outputs.auroraHostname,
-};
-mkdirSync(STARKEEP_DATA_DIR, { recursive: true });
-writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
-
-console.log("\nInstall complete. Updated ~/.starkeep/config.json:");
-console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
-console.log(`  s3Bucket       : ${outputs.bucketName}`);
-console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);
+console.log("\nUninstall complete.");

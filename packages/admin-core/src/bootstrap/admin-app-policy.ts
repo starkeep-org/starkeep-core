@@ -44,13 +44,17 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
       Resource: { GetAtt: "UserPool.Arn" },
     },
     {
+      Sid: "AdminAppS3ListOwnPrefix",
+      Effect: "Allow",
+      Action: "s3:ListBucket",
+      Resource: SUB(`arn:aws:s3:::${stackPrefix}-files-*`),
+      Condition: { StringLike: { "s3:prefix": "apps/admin/*" } },
+    },
+    {
       Sid: "AdminAppS3OwnPrefix",
       Effect: "Allow",
-      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
-      Resource: [
-        SUB(`arn:aws:s3:::${stackPrefix}-files-*`),
-        SUB(`arn:aws:s3:::${stackPrefix}-files-*/apps/admin/*`),
-      ],
+      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      Resource: SUB(`arn:aws:s3:::${stackPrefix}-files-*/apps/admin/*`),
     },
     {
       Sid: "AdminAppDsqlConnect",

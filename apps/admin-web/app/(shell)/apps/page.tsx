@@ -373,17 +373,11 @@ function LocalAppsSection() {
 // Cloud photos section
 // ---------------------------------------------------------------------------
 
-interface PhotosCloudOutputs {
-  photosApiGatewayUrl?: string;
-  photosWebUrl?: string;
-  region?: string;
-}
-
 function CloudPhotosSection() {
   const [installOpen, setInstallOpen] = useState(false);
   const [credentials, setCredentials] = useState<STSCredentials | null>(null);
   const [credError, setCredError] = useState<string | null>(null);
-  const [outputs, setOutputs] = useState<PhotosCloudOutputs | null>(null);
+  const [installed, setInstalled] = useState(false);
 
   const handleInstall = async () => {
     setCredError(null);
@@ -412,33 +406,16 @@ function CloudPhotosSection() {
     <div className="rounded-lg border p-5 flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold">Photos — cloud install</h2>
-        {outputs?.photosWebUrl && (
-          <a
-            href={outputs.photosWebUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sm underline"
-          >
-            Open ↗
-          </a>
+        {installed && (
+          <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+            Installed
+          </Badge>
         )}
       </div>
       <p className="text-sm text-muted-foreground">
-        Deploy the photos app to AWS using SST. Requires cloud infrastructure to be set up and a
-        valid sign-in session. On first deploy the process runs twice — once to provision the API
-        gateway, and again to bundle the frontend with the live URL.
+        Deploy the photos app to AWS. Requires cloud infrastructure to be set up and a valid
+        sign-in session.
       </p>
-
-      {outputs && (
-        <div className="text-xs text-muted-foreground flex flex-col gap-0.5">
-          {outputs.photosApiGatewayUrl && (
-            <span>API: <span className="font-mono">{outputs.photosApiGatewayUrl}</span></span>
-          )}
-          {outputs.photosWebUrl && (
-            <span>Web: <span className="font-mono">{outputs.photosWebUrl}</span></span>
-          )}
-        </div>
-      )}
 
       {credError && (
         <Alert variant="destructive">
@@ -449,7 +426,7 @@ function CloudPhotosSection() {
 
       <div className="flex justify-end">
         <Button size="sm" onClick={handleInstall}>
-          {outputs ? "Redeploy" : "Install in cloud"}
+          {installed ? "Redeploy" : "Install in cloud"}
         </Button>
       </div>
 
@@ -457,7 +434,7 @@ function CloudPhotosSection() {
         opened={installOpen}
         credentials={credentials}
         onClose={() => { setInstallOpen(false); setCredentials(null); }}
-        onSuccess={(o) => setOutputs(o)}
+        onSuccess={() => setInstalled(true)}
       />
     </div>
   );
@@ -472,7 +449,7 @@ function CloudPhotosInstallModal({
   opened: boolean;
   credentials: STSCredentials | null;
   onClose: () => void;
-  onSuccess?: (outputs: PhotosCloudOutputs) => void;
+  onSuccess?: () => void;
 }) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
@@ -528,14 +505,8 @@ function CloudPhotosInstallModal({
               else if (part.startsWith("data: ")) data = part.slice(6);
             }
             if (eventType === "done") {
-              try {
-                const outputs = JSON.parse(data) as PhotosCloudOutputs;
-                setStatus("success");
-                onSuccess?.(outputs);
-              } catch {
-                setLines((l) => [...l, `Error: malformed done event: ${data}`]);
-                setStatus("failure");
-              }
+              setStatus("success");
+              onSuccess?.();
             } else if (eventType === "error") {
               try { setLines((l) => [...l, `Error: ${(JSON.parse(data) as { message?: string }).message ?? data}`]); }
               catch { setLines((l) => [...l, `Error: ${data}`]); }

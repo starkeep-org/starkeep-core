@@ -7,7 +7,8 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts"
+    "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts",
+    "cli:install-photos": "tsx scripts/cli-install-photos.ts"
   },
   "dependencies": {
     "@starkeep/core": "workspace:*",
@@ -31,6 +32,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/pg": "^8.0.0",
+    "esbuild": "^0.24.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   },

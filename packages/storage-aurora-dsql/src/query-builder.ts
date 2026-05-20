@@ -97,7 +97,7 @@ export function buildPostgresQuery(query: Query): BuiltPostgresQuery {
     parameterIndex++;
   }
 
-  let text = "SELECT * FROM records";
+  let text = "SELECT * FROM shared.records";
   if (conditions.length > 0) {
     text += ` WHERE ${conditions.join(" AND ")}`;
   }

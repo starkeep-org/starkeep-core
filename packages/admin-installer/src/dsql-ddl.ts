@@ -8,8 +8,9 @@
  * IAM→PG mapping: ${StackPrefix}-app-<appId>-role → ${stackPrefix}_app_<appId>
  * (lowercased, hyphens → underscores).
  *
- * DDL is run by the app's own session (with a temp install policy), not by
- * Manager directly. The session connects as the ${stackPrefix}_installer PG role.
+ * DDL is run by the dedicated install-DDL role, temporarily granted
+ * dsql:DbConnectAdmin by Manager around each install/uninstall. The session
+ * connects as the DSQL admin PG role.
  */
 
 import { Kysely, PostgresDialect, sql } from "kysely";
@@ -40,7 +41,7 @@ async function makeDb(opts: DsqlDdlOptions): Promise<Kysely<any>> {
     host: opts.hostname,
     port: 5432,
     database: "postgres",
-    user: `${opts.stackPrefix}_installer`,
+    user: "admin",
     password: token,
     ssl: { rejectUnauthorized: true },
     max: 1,

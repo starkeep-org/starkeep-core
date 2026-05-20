@@ -41,6 +41,7 @@ import type {
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
 import { ok, clientErr, type APIGatewayEvent } from "./handler-utils.js";
+import { loadAccessGrants, canRead, canWrite, type AccessGrants } from "./access-enforcer.js";
 
 // ---------------------------------------------------------------------------
 // Per-app credential cache (STS sessions ~15 min, refreshed at 14 min)
@@ -278,6 +279,17 @@ export async function handler(event: APIGatewayEvent) {
 
     await db.init();
 
+    // Per-type read/write enforcement on shared.records. DSQL has no RLS and
+    // the table is shared across every type, so we load the caller app's
+    // grants once per request and gate both the records and sync paths below.
+    const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+    let grants: AccessGrants;
+    try {
+      grants = await loadAccessGrants(grantClient, appId);
+    } finally {
+      await grantClient.end();
+    }
+
     const query = event.queryStringParameters ?? {};
     const claims = event.requestContext.authorizer?.jwt?.claims;
     const ownerId = claims?.sub ?? "unknown";
@@ -291,7 +303,11 @@ export async function handler(event: APIGatewayEvent) {
 
     // GET /apps/{appId}/data/types
     if (method === "GET" && subPath === "/data/types") {
-      const result = await db.query({ limit: 10000 });
+      if (grants.readableTypes.size === 0) return ok({ types: [], total: 0 });
+      const result = await db.query({
+        filters: [{ field: "type", operator: "in", value: [...grants.readableTypes] }],
+        limit: 10000,
+      });
       const counts = new Map<string, number>();
       for (const record of result.records) {
         counts.set(record.type, (counts.get(record.type) ?? 0) + 1);
@@ -307,7 +323,15 @@ export async function handler(event: APIGatewayEvent) {
       const cursor = query["cursor"];
       const updatedAfter = query["updated_after"];
 
-      const filters: { field: string; operator: "gt"; value: string }[] = [];
+      // Per-type read enforcement. An explicit ?type= must be in the caller's
+      // readable set; otherwise constrain the scan to readable types.
+      if (type !== undefined) {
+        if (!canRead(grants, type)) return clientErr("Forbidden", 403);
+      } else if (grants.readableTypes.size === 0) {
+        return ok({ records: [], hasMore: false, nextCursor: null });
+      }
+
+      const filters: { field: string; operator: "gt" | "in"; value: string | string[] }[] = [];
       if (updatedAfter) {
         const ms = new Date(updatedAfter).getTime();
         if (!isNaN(ms)) {
@@ -317,6 +341,9 @@ export async function handler(event: APIGatewayEvent) {
             value: serializeHLC({ wallTime: ms, counter: 0, nodeId: "" }),
           });
         }
+      }
+      if (type === undefined) {
+        filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
       }
 
       const result = await db.query({ type, filters: filters.length > 0 ? filters : undefined, limit: limit + 1, cursor });
@@ -340,6 +367,7 @@ export async function handler(event: APIGatewayEvent) {
       if (!body.type) return clientErr("type is required", 400);
       if (!body.fileBase64) return clientErr("fileBase64 is required — every record must be file-backed", 400);
       if (!body.contentType) return clientErr("contentType is required", 400);
+      if (!canWrite(grants, body.type)) return clientErr("Forbidden", 403);
 
       const now = clock.now();
       const fileBuffer = Buffer.from(body.fileBase64, "base64");
@@ -376,6 +404,7 @@ export async function handler(event: APIGatewayEvent) {
     if (method === "POST" && subPath === "/data/files") {
       const typeId = query["type"];
       if (!typeId) return clientErr("type query param is required", 400);
+      if (!canWrite(grants, typeId)) return clientErr("Forbidden", 403);
       const headers = event.headers ?? {};
       const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
       const mimeType = contentTypeHeader.split(";")[0]!.trim();
@@ -403,6 +432,10 @@ export async function handler(event: APIGatewayEvent) {
       const record = await db.get(recordId as StarkeepId);
       if (!record) return clientErr("Record not found", 404);
       if (record.type !== "unknown") return clientErr("Only 'unknown' records can be promoted", 409);
+      // Promotion is a read of `unknown` (gated by canPromoteFromUnknown) plus
+      // a write of the target type (gated by the normal writable set).
+      if (!canRead(grants, "unknown")) return clientErr("Forbidden", 403);
+      if (!canWrite(grants, body.targetType)) return clientErr("Forbidden", 403);
 
       const now = clock.now();
       const promoted: DataRecord = { ...record, type: body.targetType, updatedAt: now, version: record.version + 1 };
@@ -427,6 +460,9 @@ export async function handler(event: APIGatewayEvent) {
       }
       const coreType = CORE_TYPES.find((t) => t.id === typeId);
       if (!coreType) return clientErr(`Unknown type "${typeId}" — only core types support metadata`, 400);
+      // Writing metadata for a type counts as writing that type — gate on the
+      // caller's writable set. PG GRANTs back this up at the metadata table.
+      if (!canWrite(grants, typeId)) return clientErr("Forbidden", 403);
       const allowedColumns = new Set(coreType.metadataColumns.map((c) => c.name));
       const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
       if (unknownKeys.length > 0) {
@@ -441,6 +477,7 @@ export async function handler(event: APIGatewayEvent) {
     if (metadataReadMatch && method === "GET") {
       const recordId = decodeURIComponent(metadataReadMatch[1]!) as StarkeepId;
       const typeId = decodeURIComponent(metadataReadMatch[2]!);
+      if (!canRead(grants, typeId)) return clientErr("Forbidden", 403);
       const metadata = await db.getMetadata(typeId, recordId);
       return ok({ metadata });
     }
@@ -451,6 +488,7 @@ export async function handler(event: APIGatewayEvent) {
       const id = decodeURIComponent(fileUrlMatch[1]!) as StarkeepId;
       const record = await db.get(id);
       if (!record) return clientErr("Record not found", 404);
+      if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
       if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
       const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
       const url = await storage.getSignedUrl!(record.objectStorageKey, { expiresIn });
@@ -465,6 +503,7 @@ export async function handler(event: APIGatewayEvent) {
       if (method === "GET") {
         const record = await db.get(id);
         if (!record) return clientErr("Record not found", 404);
+        if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
         return ok({ record: recordToResponse(record) });
       }
 
@@ -475,6 +514,7 @@ export async function handler(event: APIGatewayEvent) {
         // parentId for now.
         const existing = await db.get(id);
         if (!existing) return clientErr("Record not found", 404);
+        if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
         const body = event.body
           ? (JSON.parse(event.body) as { originalFilename?: string | null; parentId?: string | null })
           : null;
@@ -492,6 +532,9 @@ export async function handler(event: APIGatewayEvent) {
       }
 
       if (method === "DELETE") {
+        const existing = await db.get(id);
+        if (!existing) return clientErr("Record not found", 404);
+        if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
         await db.delete(id);
         return ok({ deleted: true });
       }
@@ -510,15 +553,132 @@ export async function handler(event: APIGatewayEvent) {
     }
 
     // POST /apps/{appId}/sync/push
+    //
+    // Sync push replays records produced by the local data server under the
+    // *originating* app's IAM identity, not the caller's. We group incoming
+    // record changes by `originAppId`, re-assume that role per group via the
+    // broker capability on this Lambda's app role, and apply each group with
+    // its own STS-assumed credentials. Records whose origin app is not
+    // installed in the cloud are rejected with 409 — never silently written
+    // under any other identity. Records of type `unknown` require the origin
+    // role to hold canIngestUnknown (access_grants), otherwise 403.
     if (method === "POST" && subPath === "/sync/push") {
       const rawBody = event.isBase64Encoded && event.body
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
-      const body = JSON.parse(rawBody);
-      const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
-      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
-      const response = await transport.pushChanges(body);
-      return ok(response);
+      const body = JSON.parse(rawBody) as {
+        changes?: Array<{ recordSnapshot: DataRecord } & Record<string, unknown>>;
+        appSyncableRows?: Array<{ appId: string } & Record<string, unknown>>;
+      };
+
+      // Group record changes by originAppId, validate every group, and only
+      // start applying once all groups have been validated. This makes the
+      // 409/403 path observable to callers without partial application.
+      const changesByOrigin = new Map<string, typeof body.changes>();
+      for (const change of body.changes ?? []) {
+        const originAppId = change.recordSnapshot?.originAppId;
+        if (!originAppId) return clientErr("change.recordSnapshot.originAppId is required", 400);
+        const arr = changesByOrigin.get(originAppId) ?? [];
+        arr.push(change);
+        changesByOrigin.set(originAppId, arr);
+      }
+
+      // Validate each origin can be assumed and has the needed grants.
+      type OriginContext = {
+        creds: CachedCreds;
+        grants: AccessGrants;
+      };
+      const originContexts = new Map<string, OriginContext>();
+      for (const [originAppId, group] of changesByOrigin) {
+        let originCreds: CachedCreds;
+        try {
+          originCreds = await getAppCreds(originAppId);
+        } catch (err) {
+          if (isUninstalledOriginError(err)) {
+            return clientErr(`originAppId "${originAppId}" is not installed`, 409);
+          }
+          throw err;
+        }
+        const originAdapters = makeAdapters(originAppId, originCreds);
+        const grantClient = await originAdapters.clientFactory.createClient({
+          hostname: originAdapters.auroraEndpoint,
+          region: originAdapters.region,
+        });
+        let originGrants: AccessGrants;
+        try {
+          originGrants = await loadAccessGrants(grantClient, originAppId);
+        } finally {
+          await grantClient.end();
+        }
+        // Type=unknown records require canIngestUnknown on the origin role.
+        for (const change of group ?? []) {
+          const recordType = change.recordSnapshot?.type;
+          if (recordType === "unknown" && !canWrite(originGrants, "unknown")) {
+            return clientErr(
+              `originAppId "${originAppId}" cannot ingest type=unknown`,
+              403,
+            );
+          }
+          // Defense-in-depth: every record's type must be writable for its origin.
+          if (typeof recordType === "string" && !canWrite(originGrants, recordType)) {
+            return clientErr(
+              `originAppId "${originAppId}" is not writable for type "${recordType}"`,
+              403,
+            );
+          }
+        }
+        originContexts.set(originAppId, { creds: originCreds, grants: originGrants });
+      }
+
+      // Apply per-origin record changes under each origin's STS-assumed db.
+      // App-syncable rows ride along with their declared appId; we keep them
+      // on the caller-scoped transport since they're already gated by the
+      // applier's namespace check (see in-process-transport.ts).
+      const accepted: string[] = [];
+      const rejected: unknown[] = [];
+      let latestTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
+      for (const [originAppId, group] of changesByOrigin) {
+        const ctx = originContexts.get(originAppId)!;
+        const originAdapters = makeAdapters(originAppId, ctx.creds);
+        await originAdapters.db.init();
+        const originAppSyncableSource = await buildAppSyncableSource(
+          originAdapters.clientFactory,
+          originAdapters.auroraEndpoint,
+          originAdapters.region,
+        );
+        const originTransport = createInProcessSyncTransport({
+          databaseAdapter: originAdapters.db,
+          clock: originAdapters.clock,
+          appSyncableSource: originAppSyncableSource,
+        });
+        const partial = await originTransport.pushChanges({ changes: group ?? [] } as never);
+        accepted.push(...(partial.accepted as unknown as string[]));
+        rejected.push(...(partial.rejected as unknown as unknown[]));
+        if (
+          partial.latestTimestamp.wallTime > latestTimestamp.wallTime ||
+          (partial.latestTimestamp.wallTime === latestTimestamp.wallTime &&
+            partial.latestTimestamp.counter > latestTimestamp.counter)
+        ) {
+          latestTimestamp = partial.latestTimestamp;
+        }
+      }
+
+      // App-syncable rows still go via the caller's db (cheap path); the
+      // applier enforces per-app namespace membership.
+      if ((body.appSyncableRows ?? []).length > 0) {
+        const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+        const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
+        const partial = await transport.pushChanges({ changes: [], appSyncableRows: body.appSyncableRows } as never);
+        if (
+          partial.latestTimestamp.wallTime > latestTimestamp.wallTime ||
+          (partial.latestTimestamp.wallTime === latestTimestamp.wallTime &&
+            partial.latestTimestamp.counter > latestTimestamp.counter)
+        ) {
+          latestTimestamp = partial.latestTimestamp;
+        }
+      }
+
+      return ok({ accepted, rejected, latestTimestamp });
     }
 
     return clientErr("Not found", 404);
@@ -550,6 +710,19 @@ async function buildAppSyncableSource(
   await namespaces.load();
   const applier = new DsqlAppSyncableApplier(client, namespaces);
   return { namespaces, applier };
+}
+
+/**
+ * AssumeRole on a non-existent app role surfaces as a STS error. The local
+ * data server may push records whose `originAppId` refers to an app that has
+ * been uninstalled (or never installed in the cloud) — see the "Registered
+ * but not deployed" section of permissions-gaps.md. We map those to 409 so
+ * callers can distinguish them from a real auth failure on an existing role.
+ */
+function isUninstalledOriginError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const name = err.name;
+  return name === "NoSuchEntityException" || name === "NoSuchEntity";
 }
 
 function isAccessDenied(err: unknown): boolean {

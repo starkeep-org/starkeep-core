@@ -62,6 +62,49 @@ export function buildCloudDataServerProgram(
       },
     });
 
+    // Defense-in-depth: deny any principal whose starkeep:appId tag does not
+    // match the apps/<appId>/* prefix being accessed. The IAM permissions
+    // boundary already scopes per-app roles to their own prefix; this is a
+    // redundant second gate enforced at the bucket itself. cloud-data-server,
+    // when brokering on behalf of an app, uses the assumed app role's
+    // credentials (which carry the matching tag), so brokering is unaffected.
+    new aws.s3.BucketPolicy(`${ctx.stackPrefix}-files-policy`, {
+      bucket: bucket.id,
+      policy: pulumi.jsonStringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            // Deny object-level access under apps/* whose key does not live
+            // under apps/<principal's starkeep:appId>/*. The IAM permissions
+            // boundary already enforces this on the principal side; the
+            // bucket policy is a redundant second gate on the resource side.
+            //
+            // The ArnNotLike condition on aws:ResourceArn expands the
+            // ${aws:PrincipalTag/starkeep:appId} policy variable at
+            // evaluation time and compares against the requested resource
+            // ARN, so the same statement covers GetObject, PutObject,
+            // DeleteObject, etc.
+            //
+            // cloud-data-server, when brokering on behalf of an app, uses
+            // the assumed app role's credentials (which carry the matching
+            // tag), so brokering naturally satisfies the condition.
+            // Untagged principals get an empty expansion and are denied —
+            // which is intentional for the apps/* keyspace.
+            Sid: "DenyCrossAppPrefixAccess",
+            Effect: "Deny",
+            Principal: "*",
+            Action: "s3:*",
+            Resource: pulumi.interpolate`${bucket.arn}/apps/*`,
+            Condition: {
+              ArnNotLike: {
+                "aws:ResourceArn": pulumi.interpolate`${bucket.arn}/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
+              },
+            },
+          },
+        ],
+      }),
+    });
+
     // -----------------------------------------------------------------------
     // Lambda log group
     // -----------------------------------------------------------------------

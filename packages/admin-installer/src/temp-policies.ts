@@ -5,6 +5,26 @@
  * detached immediately after. The permissions boundary still caps everything.
  */
 
+/**
+ * Temp policy for the install-ddl-role. Single statement granting
+ * dsql:DbConnectAdmin, used for both install and uninstall DDL.
+ * Attached to ${stackPrefix}-install-ddl-role (not the app role).
+ */
+export function buildTempInstallDdlPolicy(stackPrefix: string): string {
+  void stackPrefix; // policy content is not stack-scoped; only the role name is
+  return JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "TempInstallDdlDbConnectAdmin",
+        Effect: "Allow",
+        Action: "dsql:DbConnectAdmin",
+        Resource: "*",
+      },
+    ],
+  });
+}
+
 export function buildTempInstallPolicy(
   stackPrefix: string,
   appId: string,
@@ -39,12 +59,6 @@ export function buildTempInstallPolicy(
         Effect: "Allow",
         Action: "ssm:GetParameter",
         Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`,
-      },
-      {
-        Sid: "TempInstallDsqlAdmin",
-        Effect: "Allow",
-        Action: "dsql:DbConnectAdmin",
-        Resource: "*",
       },
       {
         Sid: "TempInstallLambda",
@@ -177,12 +191,6 @@ export function buildTempUninstallPolicy(
         Effect: "Allow",
         Action: "ssm:GetParameter",
         Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`,
-      },
-      {
-        Sid: "TempUninstallDsqlAdmin",
-        Effect: "Allow",
-        Action: "dsql:DbConnectAdmin",
-        Resource: "*",
       },
       {
         Sid: "TempUninstallLambda",

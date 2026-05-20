@@ -21,6 +21,7 @@ export interface StarkeepConfig {
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
+  installDdlRoleArn?: string;
   pulumiStateBucket?: string;
   // Populated by the cloud-data-server install:
   apiGatewayUrl?: string;

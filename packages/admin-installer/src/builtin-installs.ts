@@ -33,10 +33,11 @@ import {
   appRoleExists,
   attachTempInstallCloudDataServerPolicy,
   createAppRole,
+  deleteAppRoleWithPolicies,
   detachTempInstallCloudDataServerPolicy,
   updateAppRoleTrustPolicy,
 } from "./iam";
-import { pulumiUpInline } from "./compute-stack";
+import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import {
@@ -354,4 +355,65 @@ export async function installCloudDataServer(
     );
     throw err;
   }
+}
+
+/**
+ * Tear down the cloud-data-server built-in app completely.
+ *
+ * Steps:
+ *   1. Verify the app role exists — if not, there is nothing to do.
+ *   2. Attach the temp-install-cloud-data-server policy (it covers all
+ *      delete-side actions: dsql:DeleteCluster, s3:DeleteBucket, etc.).
+ *   3. Role-chain to the app session.
+ *   4. Run `pulumi destroy` to remove all Pulumi-managed resources (DSQL
+ *      cluster, files bucket, Lambda, API Gateway, CUR report).
+ *   5. Delete all inline policies on the app role, then delete the role.
+ *
+ * Idempotent — safe to re-run if a previous attempt was interrupted.
+ */
+export async function uninstallCloudDataServer(
+  config: CloudDataServerInstallConfig,
+): Promise<void> {
+  const appId = "cloud-data-server";
+  const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
+
+  const managerCreds = await roleChain([config.managerRoleArn]);
+
+  if (!(await appRoleExists(config.stackPrefix, appId, managerCreds))) {
+    console.log(`${config.stackPrefix}-app-${appId}-role not found; nothing to uninstall.`);
+    return;
+  }
+
+  console.log("Attaching temp-install-cloud-data-server policy…");
+  const policyUpdated = await attachTempInstallCloudDataServerPolicy(
+    config.stackPrefix,
+    config.accountId,
+    config.region,
+    managerCreds,
+  );
+
+  if (policyUpdated) {
+    const PROPAGATION_WAIT_MS = 60_000;
+    console.log(
+      `Policy changed — waiting ${PROPAGATION_WAIT_MS / 1000}s for IAM propagation before running Pulumi.`,
+    );
+    await new Promise((r) => setTimeout(r, PROPAGATION_WAIT_MS));
+  }
+
+  const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
+
+  console.log("Running pulumi destroy for cloud-data-server…");
+  await pulumiDestroyInline({
+    stackName: `${config.stackPrefix}-cloud-data-server`,
+    projectName: `${config.stackPrefix}-builtins`,
+    pulumiStateBucket: config.pulumiStateBucket,
+    region: config.region,
+    stackPrefix: config.stackPrefix,
+    appCreds,
+  });
+
+  console.log("Deleting app role…");
+  await deleteAppRoleWithPolicies(config.stackPrefix, appId, managerCreds);
+
+  console.log("cloud-data-server uninstalled.");
 }

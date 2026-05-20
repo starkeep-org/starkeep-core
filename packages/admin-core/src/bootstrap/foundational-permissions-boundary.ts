@@ -101,6 +101,7 @@ export function foundationalPermissionsBoundaryStatements(
         "s3:PutBucketOwnershipControls",
         "s3:GetEncryptionConfiguration",
         "s3:PutEncryptionConfiguration",
+        "s3:GetBucketWebsite",
       ],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-files-*`,
@@ -120,7 +121,7 @@ export function foundationalPermissionsBoundaryStatements(
     {
       Sid: "FoundationalPulumiState",
       Effect: "Allow",
-      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetAccelerateConfiguration"],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-pulumi-state-*`,
         `arn:aws:s3:::${stackPrefix}-pulumi-state-*/.pulumi/`,
@@ -189,7 +190,8 @@ export function foundationalPermissionsBoundaryStatements(
       // API Gateway v2 (HTTP APIs) tagging and several create paths still
       // authorize against the legacy `apigateway` IAM service namespace
       // using REST-method action names (apigateway:GET/POST/…), not
-      // apigatewayv2:*. Without this, CreateApi fails on the tag write.
+      // apigatewayv2:*. CreateApi is evaluated against /apis (not /v2/apis),
+      // so both the un-prefixed and v2-prefixed path forms are required.
       Sid: "FoundationalApiGatewayRestActions",
       Effect: "Allow",
       Action: [
@@ -200,6 +202,8 @@ export function foundationalPermissionsBoundaryStatements(
         "apigateway:DELETE",
       ],
       Resource: [
+        "arn:aws:apigateway:*::/apis",
+        "arn:aws:apigateway:*::/apis/*",
         "arn:aws:apigateway:*::/v2/*",
         "arn:aws:apigateway:*::/tags/*",
       ],

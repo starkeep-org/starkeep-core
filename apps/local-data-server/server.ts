@@ -65,7 +65,7 @@ import {
 
 // Signing key for self-hosted file tokens — regenerated each startup so
 // all outstanding tokens are invalidated on restart (revocable by design).
-const TOKEN_SECRET = randomBytes(32);
+const TOKEN_SECRET = randomBytes(32) as unknown as Uint8Array;
 
 const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
@@ -139,7 +139,7 @@ function validateAppHmac(db: DatabaseSync, appId: string, body: string, sig: str
   const sigBuf = Buffer.from(sig, "hex");
   const expBuf = Buffer.from(expected, "hex");
   if (sigBuf.length !== expBuf.length) return false;
-  return timingSafeEqual(sigBuf, expBuf);
+  return timingSafeEqual(sigBuf as unknown as Uint8Array, expBuf as unknown as Uint8Array);
 }
 
 const STARKEEP_CONFIG_PATH = join(STARKEEP_DIR, "config.json");
@@ -1206,7 +1206,7 @@ async function main() {
           uploadedBuffer = Buffer.from(fileBase64, "base64");
           record = await sdk.data.putWithFile(
             { ...baseInput, originalFilename: fileName ?? null },
-            uploadedBuffer,
+            uploadedBuffer as unknown as Uint8Array,
             contentType,
           );
         }
@@ -1220,7 +1220,7 @@ async function main() {
             ?? null;
           if (fileData) {
             await remoteAdapter
-              .put(record.objectStorageKey, fileData, { contentType: record.mimeType ?? undefined })
+              .put(record.objectStorageKey, fileData as unknown as Uint8Array, { contentType: record.mimeType ?? undefined })
               .catch((err: Error) => console.error("S3 remote write failed (non-fatal):", err.message));
           }
         }
@@ -1286,7 +1286,7 @@ async function main() {
           return;
         }
         const mimeType = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0]!.trim();
-        const hex = createHash("sha256").update(fileBuffer).digest("hex");
+        const hex = createHash("sha256").update(fileBuffer as unknown as Uint8Array).digest("hex");
         const key = dataRecordObjectKey(typeId, hex);
         await localAdapter.put(key, fileBuffer, { contentType: mimeType });
         json(res, { key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
@@ -1372,7 +1372,7 @@ async function main() {
               const mimeType = (req.headers["content-type"] ?? "application/octet-stream")
                 .split(";")[0]!
                 .trim();
-              const result = await view.putFile(subKey, bytes, mimeType);
+              const result = await view.putFile(subKey, bytes as unknown as Uint8Array, mimeType);
               json(res, result);
               return;
             }
@@ -1855,7 +1855,7 @@ async function readBodyBufferRaw(req: CachedReq): Promise<Buffer> {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
-      const buf = Buffer.concat(chunks);
+      const buf = Buffer.concat(chunks as unknown as Uint8Array[]);
       req._cachedBody = buf;
       resolve(buf);
     });

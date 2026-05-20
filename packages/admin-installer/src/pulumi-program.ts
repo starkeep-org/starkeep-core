@@ -40,6 +40,8 @@ export function buildPulumiProgram(
           variables: {
             STARKEEP_APP_ID: ctx.appId,
             STARKEEP_STACK_PREFIX: ctx.stackPrefix,
+            STARKEEP_DSQL_HOSTNAME: ctx.dsqlHostname,
+            STARKEEP_FILES_BUCKET: ctx.filesBucket,
             ...handler.env,
           },
         },
