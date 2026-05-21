@@ -148,7 +148,12 @@ while True:
         if not m:
             continue
         app_id = m.group(1)
-        if app_id == "cloud-data-server":
+        # Skip bootstrap-owned roles:
+        #   - cloud-data-server: torn down by teardown-cloud-data-server.sh (step 8)
+        #   - admin: created by the bootstrap stack and wired into the Cognito
+        #     Identity Pool's authenticated role attachment. Deleting it breaks
+        #     bootstrap-user sign-in with "Invalid identity pool configuration".
+        if app_id in ("cloud-data-server", "admin"):
             continue
         tags_r = subprocess.run(
             ["aws", "iam", "list-role-tags", "--role-name", name, "--output", "json"],

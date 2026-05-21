@@ -28,6 +28,10 @@ import {
   CostAndUsageReportServiceClient,
   DeleteReportDefinitionCommand,
 } from "@aws-sdk/client-cost-and-usage-report-service";
+import {
+  LambdaClient,
+  DeleteFunctionCommand,
+} from "@aws-sdk/client-lambda";
 import { roleChain, type AwsCredentials } from "./session";
 import {
   appRoleExists,
@@ -119,6 +123,7 @@ function makeCloudDataServerOrphanCleaner(
 
     const s3 = new S3Client({ region: config.region, credentials });
     const logs = new CloudWatchLogsClient({ region: config.region, credentials });
+    const lambda = new LambdaClient({ region: config.region, credentials });
     // CUR is a global service that only accepts requests to us-east-1.
     const cur = new CostAndUsageReportServiceClient({ region: "us-east-1", credentials });
 
@@ -150,6 +155,16 @@ function makeCloudDataServerOrphanCleaner(
           logs.send(
             new DeleteLogGroupCommand({
               logGroupName: `/aws/lambda/${config.stackPrefix}-app-cloud-data-server-api`,
+            }),
+          ),
+      },
+      {
+        urn: `urn:pulumi:${stackName}::${projectName}::aws:lambda/function:Function::api`,
+        label: `lambda function ${config.stackPrefix}-app-cloud-data-server-api`,
+        cleanup: () =>
+          lambda.send(
+            new DeleteFunctionCommand({
+              FunctionName: `${config.stackPrefix}-app-cloud-data-server-api`,
             }),
           ),
       },

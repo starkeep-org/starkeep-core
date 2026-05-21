@@ -26,6 +26,16 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
+
+// TEMP (iam-permission-tests POC): if IAM_SDK_TRACE_PATH is set, record
+// every AWS SDK call this process makes to that file. Must run before any
+// AWS SDK client below is constructed. Imported by relative path so
+// admin-installer doesn't take a package-level dep on the POC. Remove
+// when the POC graduates or is dropped.
+if (process.env.IAM_SDK_TRACE_PATH) {
+  const { installSdkTrace } = await import("../../iam-permission-tests/src/sdk-trace");
+  installSdkTrace(process.env.IAM_SDK_TRACE_PATH);
+}
 import {
   CognitoIdentityProviderClient,
   InitiateAuthCommand,

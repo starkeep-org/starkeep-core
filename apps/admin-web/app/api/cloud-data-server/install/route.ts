@@ -22,7 +22,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { createWriteStream, existsSync, readFileSync, type WriteStream } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { NextRequest } from "next/server";
@@ -103,12 +103,29 @@ export async function POST(req: NextRequest) {
   }
   const region = getRegion(preConfig);
 
+  // TEMP (iam-permission-tests POC): capture two traces during install so
+  // packages/iam-permission-tests can replay every AWS call through
+  // iam-simulate.
+  //   - cds-install.trace: pulumi-aws HTTP traffic (via PULUMI_OPTION_*)
+  //   - cds-install.sdk.trace: Node-side @aws-sdk client calls made by the
+  //     installer itself (IAM CreateRole, STS AssumeRole, DSQL signer, …)
+  // Remove this block, the env vars, and the file-tee in spawnChild when
+  // the POC graduates or is dropped.
+  const traceFilePath = join(STARKEEP_DATA_DIR, "cds-install.trace");
+  const sdkTraceFilePath = join(STARKEEP_DATA_DIR, "cds-install.sdk.trace");
+
   const spawnEnv = {
     ...process.env,
     AWS_ACCESS_KEY_ID: body.accessKeyId,
     AWS_SECRET_ACCESS_KEY: body.secretAccessKey,
     AWS_SESSION_TOKEN: body.sessionToken,
     AWS_REGION: region,
+    // TEMP (iam-permission-tests POC) — remove with the block above.
+    TF_LOG: "DEBUG",
+    PULUMI_OPTION_LOGFLOW: "true",
+    PULUMI_OPTION_LOGTOSTDERR: "true",
+    PULUMI_OPTION_VERBOSE: "9",
+    IAM_SDK_TRACE_PATH: sdkTraceFilePath,
   };
 
   const encoder = new TextEncoder();
@@ -172,6 +189,22 @@ export async function POST(req: NextRequest) {
         );
         runningChild = child;
         runningChildDone = finish;
+
+        // TEMP (iam-permission-tests POC): tee child stdout+stderr to a file
+        // so we have a complete trace after the install regardless of whether
+        // the SSE client stayed connected. Overwrites on each fresh spawn.
+        // Remove with the env-var block in the POST handler when done.
+        let traceFile: WriteStream | null = null;
+        try {
+          traceFile = createWriteStream(traceFilePath, { flags: "w" });
+        } catch (err) {
+          console.warn(`[iam-trace] could not open ${traceFilePath}: ${err}`);
+        }
+        if (traceFile) {
+          child.stdout.pipe(traceFile, { end: false });
+          child.stderr.pipe(traceFile, { end: false });
+          child.on("close", () => traceFile?.end());
+        }
 
         runningChildListeners.set(listenerId, (line) => {
           if (!sawExpiredToken && EXPIRED_TOKEN_SIGNATURES.some((sig) => line.includes(sig))) {

@@ -88,9 +88,11 @@ echo "    SSM parameter        : $SSM_PARAM"
 echo "    IAM role             : ${STACK_PREFIX}-app-admin-role"
 echo "    IAM role             : ${STACK_PREFIX}-manager-role"
 echo "    IAM role             : ${STACK_PREFIX}-install-ddl-role"
+echo "    IAM role             : ${STACK_PREFIX}-install-infra-role"
 echo "    IAM policy           : ${STACK_PREFIX}-app-permissions-boundary"
 echo "    IAM policy           : ${STACK_PREFIX}-foundational-permissions-boundary"
 echo "    IAM policy           : ${STACK_PREFIX}-install-ddl-permissions-boundary"
+echo "    IAM policy           : ${STACK_PREFIX}-install-infra-permissions-boundary"
 [[ -n "$USER_POOL_ID" ]]      && echo "    Cognito User Pool    : $USER_POOL_ID"
 [[ -n "$IDENTITY_POOL_ID" ]]  && echo "    Cognito Identity Pool: $IDENTITY_POOL_ID"
 echo ""
@@ -268,9 +270,11 @@ fi
 delete_role "${STACK_PREFIX}-app-admin-role"
 delete_role "${STACK_PREFIX}-manager-role"
 delete_role "${STACK_PREFIX}-install-ddl-role"
+delete_role "${STACK_PREFIX}-install-infra-role"
 delete_managed_policy "${STACK_PREFIX}-app-permissions-boundary"
 delete_managed_policy "${STACK_PREFIX}-foundational-permissions-boundary"
 delete_managed_policy "${STACK_PREFIX}-install-ddl-permissions-boundary"
+delete_managed_policy "${STACK_PREFIX}-install-infra-permissions-boundary"
 
 # ── Step 4: Delete CloudFormation stack ──────────────────────────────────────
 # All resources that CF would trip over are already gone; this is fast and

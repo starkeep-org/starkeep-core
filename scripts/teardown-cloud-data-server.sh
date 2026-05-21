@@ -67,6 +67,7 @@ fi
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
+PULUMI_STATE_BUCKET="${STACK_PREFIX}-pulumi-state-${ACCOUNT_ID}-${REGION}"
 FILES_BUCKET="${STACK_PREFIX}-files-${ACCOUNT_ID}-${REGION}"
 BILLING_BUCKET="${STACK_PREFIX}-billing-${ACCOUNT_ID}-${REGION}"
 CUR_REPORT="${STACK_PREFIX}-billing"
@@ -168,6 +169,7 @@ echo "  DSQL cluster : (tagged starkeep:appId=cloud-data-server)"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
 echo "  CUR report   : $CUR_REPORT"
 echo "  IAM role     : $CDS_ROLE"
+echo "  Pulumi locks : s3://${PULUMI_STATE_BUCKET}/.pulumi/locks/ (cleared, bucket kept)"
 echo ""
 
 if [[ "$YES" != "true" ]]; then
@@ -183,6 +185,30 @@ fi
 echo ""
 echo ">>> Running teardown-cloud-apps.sh..."
 "$SCRIPT_DIR/teardown-cloud-apps.sh" --yes --prefix "$STACK_PREFIX" --region "$REGION"
+
+# ── Step 1b: Clear stale Pulumi locks ─────────────────────────────────────────
+# The Pulumi state bucket survives teardown. If a previous install/uninstall
+# was killed mid-run, its lock file is left behind and blocks the next run
+# with "the stack is currently locked by N lock(s)". We don't try to be
+# surgical — wipe every lock under .pulumi/locks/ so both the builtins stack
+# (cloud-data-server) and any per-app stacks are unblocked.
+
+step "Clearing stale Pulumi locks in s3://${PULUMI_STATE_BUCKET}/.pulumi/locks/"
+if aws s3api head-bucket --bucket "$PULUMI_STATE_BUCKET" 2>/dev/null; then
+  LOCK_KEYS=$(aws s3api list-objects-v2 --bucket "$PULUMI_STATE_BUCKET" \
+    --prefix ".pulumi/locks/" \
+    --query 'Contents[].Key' --output text 2>/dev/null || true)
+  if [[ -z "$LOCK_KEYS" || "$LOCK_KEYS" == "None" ]]; then
+    echo "  No locks found."
+  else
+    for key in $LOCK_KEYS; do
+      echo "  Removing: $key"
+      aws s3api delete-object --bucket "$PULUMI_STATE_BUCKET" --key "$key" >/dev/null
+    done
+  fi
+else
+  skip
+fi
 
 # ── Step 2: API Gateway v2 ────────────────────────────────────────────────────
 

@@ -309,15 +309,22 @@ export async function pulumiUpInline(opts: {
     await opts.preCleanupOrphans(inStateUrns);
   }
 
+  // TEMP (iam-permission-tests POC): forward pulumi's stderr to our own
+  // stderr so PULUMI_OPTION_LOGTOSTDERR=true + -v=9 traces (which include
+  // the AWS provider's HTTP requests/responses) reach the install
+  // log-tee in admin-web. Without onError, automation API buffers stderr
+  // internally and only surfaces it on failure. Remove when the POC ends.
+  const onError = (line: string) => process.stderr.write(line);
+
   // Clear any pending operations left by a prior interrupted run before
   // attempting up. refresh is a no-op on a brand-new stack.
   try {
-    await stack.refresh({ onOutput: console.log });
+    await stack.refresh({ onOutput: console.log, onError });
   } catch {
     // Ignore refresh errors (e.g. stack has no state yet).
   }
 
-  const result = await stack.up({ onOutput: console.log });
+  const result = await stack.up({ onOutput: console.log, onError });
 
   const outputs: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(result.outputs)) {
