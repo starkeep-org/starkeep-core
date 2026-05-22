@@ -65,6 +65,14 @@ else
   exit 1
 fi
 
+# Pin every aws subcommand below to the resolved region. The CLI's default
+# region (from ~/.aws/config) may differ from the starkeep config region, and
+# a mismatch silently targets the wrong region. Note: the CUR (Cost &
+# Usage Reports) section below explicitly overrides --region us-east-1 because
+# CUR is only available in us-east-1.
+export AWS_REGION="$REGION"
+export AWS_DEFAULT_REGION="$REGION"
+
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 PULUMI_STATE_BUCKET="${STACK_PREFIX}-pulumi-state-${ACCOUNT_ID}-${REGION}"
@@ -98,8 +106,26 @@ def aws_cmd(*args):
     r = subprocess.run(["aws"] + list(args), capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
+    return r.stdout
+
+def report_delete_response(stdout):
+    if not stdout.strip():
+        return 0
+    try:
+        resp = json.loads(stdout)
+    except json.JSONDecodeError:
+        print(f"  (non-JSON delete-objects response): {stdout[:500]}")
+        return 0
+    errors = resp.get("Errors", []) or []
+    for e in errors[:10]:
+        print(f"  ERROR deleting Key={e.get('Key')!r} VersionId={e.get('VersionId')!r} "
+              f"Code={e.get('Code')} Message={e.get('Message')}")
+    if len(errors) > 10:
+        print(f"  ... and {len(errors) - 10} more errors")
+    return len(errors)
 
 deleted = 0
+stalled = 0
 while True:
     data = aws_json("s3api", "list-object-versions", "--bucket", bucket,
                     "--max-items", "1000", "--output", "json")
@@ -107,10 +133,18 @@ while True:
             for o in data.get("Versions", []) + data.get("DeleteMarkers", [])]
     if not objs:
         break
-    payload = json.dumps({"Objects": objs, "Quiet": True})
-    aws_cmd("s3api", "delete-objects", "--bucket", bucket, "--delete", payload)
+    payload = json.dumps({"Objects": objs, "Quiet": False})
+    out = aws_cmd("s3api", "delete-objects", "--bucket", bucket, "--delete", payload)
+    n_errors = report_delete_response(out)
     deleted += len(objs)
-    print(f"  Deleted {deleted} versions/markers so far...")
+    print(f"  Attempted {len(objs)} (errors: {n_errors}); {deleted} versions/markers processed so far...")
+    if n_errors == len(objs):
+        stalled += 1
+        if stalled >= 2:
+            print("  Aborting: every delete in the last batch failed. See errors above.")
+            raise SystemExit(2)
+    else:
+        stalled = 0
 
 while True:
     data = aws_json("s3api", "list-objects-v2", "--bucket", bucket,
@@ -118,8 +152,9 @@ while True:
     objs = [{"Key": o["Key"]} for o in data.get("Contents", [])]
     if not objs:
         break
-    payload = json.dumps({"Objects": objs, "Quiet": True})
-    aws_cmd("s3api", "delete-objects", "--bucket", bucket, "--delete", payload)
+    payload = json.dumps({"Objects": objs, "Quiet": False})
+    out = aws_cmd("s3api", "delete-objects", "--bucket", bucket, "--delete", payload)
+    report_delete_response(out)
     deleted += len(objs)
     print(f"  Deleted {deleted} objects so far...")
 
@@ -289,6 +324,7 @@ fi
 
 step "Emptying S3 files bucket: $FILES_BUCKET"
 if aws s3api head-bucket --bucket "$FILES_BUCKET" 2>/dev/null; then
+  aws s3api delete-bucket-policy --bucket "$FILES_BUCKET" 2>/dev/null || true
   empty_bucket "$FILES_BUCKET"
   aws s3api delete-bucket --bucket "$FILES_BUCKET" --region "$REGION"
   echo "  Deleted $FILES_BUCKET."

@@ -297,7 +297,10 @@ export function buildCloudDataServerProgram(
       billingBucketName: billingBucket.bucket,
       apiGatewayId: api.id,
       apiGatewayExecutionArn: api.executionArn,
-      apiGatewayUrl: pulumi.interpolate`${api.apiEndpoint}/${stage.name}`,
+      // $default stage is served at the API root — do not append the stage name.
+      apiGatewayUrl: pulumi.all([api.apiEndpoint, stage.name]).apply(([endpoint, name]) =>
+        name === "$default" ? endpoint : `${endpoint}/${name}`,
+      ),
       authorizerId: authorizer.id,
       functionArn: fn.arn,
       region: ctx.region,

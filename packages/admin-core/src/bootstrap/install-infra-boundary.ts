@@ -56,8 +56,10 @@ export function installInfraBoundaryStatements(stackPrefix: string): IamStatemen
       Effect: "Allow",
       Action: ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
       Resource: [
-        `arn:aws:s3:::${stackPrefix}-artifacts`,
-        `arn:aws:s3:::${stackPrefix}-artifacts/apps/*`,
+        // Bucket name is suffixed with account+region (see bootstrap CFN
+        // ArtifactsBucket); wildcard absorbs the suffix.
+        `arn:aws:s3:::${stackPrefix}-artifacts-*`,
+        `arn:aws:s3:::${stackPrefix}-artifacts-*/apps/*`,
       ],
     },
     {
@@ -143,7 +145,10 @@ export function installInfraBoundaryStatements(stackPrefix: string): IamStatemen
     {
       // v2 HTTP API integration/route create paths and tagging authorize
       // against the legacy `apigateway` IAM namespace with REST-method
-      // action names.
+      // action names. The pulumi-aws provider issues these against the
+      // `/apis/{api-id}/{integrations,routes,...}` paths rather than `/v2/*`,
+      // so the boundary must allow `/apis/*`. `/v2/*` is kept for the rarer
+      // direct v2-namespace paths.
       Sid: "InstallInfraApiGatewayLegacy",
       Effect: "Allow",
       Action: [
@@ -156,6 +161,8 @@ export function installInfraBoundaryStatements(stackPrefix: string): IamStatemen
         "apigateway:UntagResource",
       ],
       Resource: [
+        "arn:aws:apigateway:*::/apis",
+        "arn:aws:apigateway:*::/apis/*",
         "arn:aws:apigateway:*::/v2/*",
         "arn:aws:apigateway:*::/tags/*",
       ],

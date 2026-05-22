@@ -36,7 +36,9 @@ export function parseSdkTrace(trace: string): ParseResult {
 
   for (const raw of lines) {
     if (!raw.trim()) continue;
-    let record: { clientName?: string; commandName?: string } | undefined;
+    let record:
+      | { clientName?: string; commandName?: string; principal?: string }
+      | undefined;
     try {
       record = JSON.parse(raw);
     } catch {
@@ -52,7 +54,11 @@ export function parseSdkTrace(trace: string): ParseResult {
     const sdkAction = `${service}:${operation}`;
     const iamAction = SDK_TO_IAM_ACTION[sdkAction] ?? sdkAction;
     const [mappedService, mappedOperation] = iamAction.split(":") as [string, string];
-    const key = iamAction;
+    const principalArn = record.principal ?? "unknown";
+    // Dedupe per (principal, action) — the same action invoked by Manager
+    // and again by install-ddl-role must remain two distinct rows so the
+    // simulator can evaluate each under the right context.
+    const key = `${principalArn}::${iamAction}`;
     const existing = byKey.get(key);
     if (existing) {
       existing.count++;
@@ -62,6 +68,7 @@ export function parseSdkTrace(trace: string): ParseResult {
         operation: mappedOperation,
         count: 1,
         evidence: raw.slice(0, 200),
+        principalArn,
       });
     }
   }

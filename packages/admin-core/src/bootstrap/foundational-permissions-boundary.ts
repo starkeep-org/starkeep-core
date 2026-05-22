@@ -125,7 +125,11 @@ export function foundationalPermissionsBoundaryStatements(
       Resource: [
         `arn:aws:s3:::${stackPrefix}-files-*/*`,
         `arn:aws:s3:::${stackPrefix}-billing-*/*`,
-        `arn:aws:s3:::${stackPrefix}-artifacts/apps/${cdsAppId}/*`,
+        // cds bundle is shipped via pulumi.asset.FileArchive (Pulumi's own
+        // asset machinery uploads it as part of stack state), not via the
+        // cds role PUTing to the artifacts bucket — so no artifacts grant
+        // is needed here. If cds ever switches to S3-sourced Lambda code,
+        // re-add an `${stackPrefix}-artifacts-*/apps/${cdsAppId}/*` resource.
       ],
     },
     {

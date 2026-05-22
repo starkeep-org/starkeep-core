@@ -68,6 +68,14 @@ else
   exit 1
 fi
 
+# Pin every aws subcommand below to the resolved region. The CLI's default
+# region (from ~/.aws/config) may differ from the starkeep config region, and
+# a mismatch silently targets the wrong region — orphan log groups, lambdas,
+# etc. get missed in cleanup. See teardown-bootstrap.sh / -cloud-data-server.sh
+# for the matching exports.
+export AWS_REGION="$REGION"
+export AWS_DEFAULT_REGION="$REGION"
+
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -173,24 +181,60 @@ for app_id in found:
 PYEOF
 )
 
-if [[ -z "$APP_IDS" ]]; then
-  echo "  No per-app installs found for prefix '${STACK_PREFIX}'."
-  if [[ "$YES" != "true" ]]; then
-    echo "  Nothing to do."
-  fi
-  exit 0
+if [[ -n "$APP_IDS" ]]; then
+  echo "  Found: $(echo "$APP_IDS" | tr '\n' ' ')"
+else
+  echo "  No per-app IAM roles found for prefix '${STACK_PREFIX}'."
 fi
 
-echo "  Found: $(echo "$APP_IDS" | tr '\n' ' ')"
+# Detect orphan Lambdas + log groups (from prior partial deploys where the IAM
+# role was never created or was torn down separately). Without sweeping these,
+# subsequent deploys fail with ResourceConflictException on CreateFunction or
+# ResourceAlreadyExistsException on CreateLogGroup.
+step "Scanning for orphan Lambdas under ${STACK_PREFIX}-app-"
+ORPHAN_LAMBDAS=$(aws lambda list-functions \
+  --query "Functions[?starts_with(FunctionName, '${STACK_PREFIX}-app-')].FunctionName" \
+  --output text 2>/dev/null \
+  | tr '\t' '\n' \
+  | grep -Ev "^${STACK_PREFIX}-app-(cloud-data-server|admin)-" \
+  || true)
+
+if [[ -n "$ORPHAN_LAMBDAS" ]]; then
+  echo "  Found: $(echo "$ORPHAN_LAMBDAS" | tr '\n' ' ')"
+else
+  echo "  None."
+fi
+
+step "Scanning for orphan log groups under /aws/lambda/${STACK_PREFIX}-app-"
+ORPHAN_LOG_GROUPS=$(aws logs describe-log-groups \
+  --log-group-name-prefix "/aws/lambda/${STACK_PREFIX}-app-" \
+  --query 'logGroups[].logGroupName' --output text 2>/dev/null \
+  | tr '\t' '\n' \
+  | grep -Ev "^/aws/lambda/${STACK_PREFIX}-app-(cloud-data-server|admin)-" \
+  || true)
+
+if [[ -n "$ORPHAN_LOG_GROUPS" ]]; then
+  echo "  Found: $(echo "$ORPHAN_LOG_GROUPS" | tr '\n' ' ')"
+else
+  echo "  None."
+fi
+
+if [[ -z "$APP_IDS" && -z "$ORPHAN_LAMBDAS" && -z "$ORPHAN_LOG_GROUPS" ]]; then
+  echo ""
+  echo "Nothing to do."
+  exit 0
+fi
 
 # ── Confirmation ──────────────────────────────────────────────────────────────
 
 echo ""
 echo "This will permanently destroy the following app resources:"
 echo ""
-echo "  Stack prefix : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
-echo "  Apps         : $(echo "$APP_IDS" | tr '\n' ' ')"
-echo "  Resources    : Lambda functions, CloudWatch log groups, IAM app roles"
+echo "  Stack prefix    : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
+echo "  Apps            : $(echo "${APP_IDS:-<none>}" | tr '\n' ' ')"
+echo "  Orphan lambdas  : $(echo "${ORPHAN_LAMBDAS:-<none>}" | tr '\n' ' ')"
+echo "  Orphan logs     : $(echo "${ORPHAN_LOG_GROUPS:-<none>}" | tr '\n' ' ')"
+echo "  Resources       : Lambda functions, CloudWatch log groups, IAM app roles"
 echo ""
 
 if [[ "$YES" != "true" ]]; then
@@ -220,6 +264,20 @@ for APP_ID in $APP_IDS; do
     delete_log_group "$lg"
   done
 done
+
+if [[ -n "$ORPHAN_LAMBDAS" ]]; then
+  step "Deleting orphan Lambdas"
+  for fn in $ORPHAN_LAMBDAS; do
+    delete_lambda "$fn"
+  done
+fi
+
+if [[ -n "$ORPHAN_LOG_GROUPS" ]]; then
+  step "Deleting orphan log groups"
+  for lg in $ORPHAN_LOG_GROUPS; do
+    delete_log_group "$lg"
+  done
+fi
 
 for APP_ID in $APP_IDS; do
   delete_role "${STACK_PREFIX}-app-${APP_ID}-role"

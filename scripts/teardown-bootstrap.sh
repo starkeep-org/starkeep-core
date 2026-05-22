@@ -71,8 +71,15 @@ else
   exit 1
 fi
 
+# Pin every aws subcommand below to the resolved region. The CLI's default
+# region (from ~/.aws/config) may differ from the starkeep config region, and
+# a mismatch silently targets the wrong region.
+export AWS_REGION="$REGION"
+export AWS_DEFAULT_REGION="$REGION"
+
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="${STACK_PREFIX}-pulumi-state-${ACCOUNT_ID}-${REGION}"
+ARTIFACTS_BUCKET="${STACK_PREFIX}-artifacts-${ACCOUNT_ID}-${REGION}"
 SSM_PARAM="/${STACK_PREFIX}/pulumi/passphrase"
 
 # ── Confirmation ────────────────────────────────────────────────────────────
@@ -84,6 +91,7 @@ echo "  Phase 2 — cloud-data-server: Lambda, API Gateway, DSQL, S3 app buckets
 echo "  Phase 3 — bootstrap    :"
 echo "    CloudFormation stack : $STACK_NAME  (region: $REGION)"
 echo "    S3 bucket            : $BUCKET"
+echo "    S3 bucket            : $ARTIFACTS_BUCKET"
 echo "    SSM parameter        : $SSM_PARAM"
 echo "    IAM role             : ${STACK_PREFIX}-app-admin-role"
 echo "    IAM role             : ${STACK_PREFIX}-manager-role"
@@ -246,10 +254,17 @@ PYEOF
   echo "  Deleted."
 }
 
-# ── Step 1: Empty S3 bucket ───────────────────────────────────────────────────
+# ── Step 1: Empty S3 buckets ──────────────────────────────────────────────────
 step "Emptying S3 bucket: $BUCKET"
 if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   empty_versioned_bucket "$BUCKET"
+else
+  skip
+fi
+
+step "Emptying S3 bucket: $ARTIFACTS_BUCKET"
+if aws s3api head-bucket --bucket "$ARTIFACTS_BUCKET" 2>/dev/null; then
+  empty_versioned_bucket "$ARTIFACTS_BUCKET"
 else
   skip
 fi
@@ -292,10 +307,20 @@ else
   skip
 fi
 
-# Delete the bucket itself (should be empty by now)
+# Delete the buckets themselves (should be empty by now). CF stack deletion
+# normally removes them, but if the stack was in CREATE_FAILED / ROLLBACK state
+# the bucket may have been orphaned from the stack — handle that here.
 step "Deleting S3 bucket: $BUCKET"
 if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   aws s3api delete-bucket --bucket "$BUCKET" --region "$REGION"
+  echo "  Deleted."
+else
+  skip
+fi
+
+step "Deleting S3 bucket: $ARTIFACTS_BUCKET"
+if aws s3api head-bucket --bucket "$ARTIFACTS_BUCKET" 2>/dev/null; then
+  aws s3api delete-bucket --bucket "$ARTIFACTS_BUCKET" --region "$REGION"
   echo "  Deleted."
 else
   skip

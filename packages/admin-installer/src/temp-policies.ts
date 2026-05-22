@@ -78,8 +78,10 @@ export function buildTempInstallInfraPolicy(
         Effect: "Allow",
         Action: ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
         Resource: [
-          `arn:aws:s3:::${stackPrefix}-artifacts`,
-          `arn:aws:s3:::${stackPrefix}-artifacts/apps/${appId}/*`,
+          // Suffixed bucket name (see bootstrap ArtifactsBucket); wildcard
+          // absorbs the account+region suffix.
+          `arn:aws:s3:::${stackPrefix}-artifacts-*`,
+          `arn:aws:s3:::${stackPrefix}-artifacts-*/apps/${appId}/*`,
         ],
       },
       {
@@ -158,7 +160,11 @@ export function buildTempInstallInfraPolicy(
       },
       {
         // Legacy apigateway: namespace verbs for v2 integration/route paths
-        // and tag operations.
+        // and tag operations. Despite the SDK being apigatewayv2, the
+        // pulumi-aws (terraform) provider issues these as REST-style calls
+        // against the `/apis/{api-id}/{integrations,routes,...}` paths, so
+        // IAM evaluates them as `apigateway:VERB` on `/apis/*`. `/v2/*` is
+        // kept for the (rarer) direct v2-namespace paths.
         Sid: "TempInstallInfraApiGatewayLegacy",
         Effect: "Allow",
         Action: [
@@ -171,6 +177,8 @@ export function buildTempInstallInfraPolicy(
           "apigateway:UntagResource",
         ],
         Resource: [
+          "arn:aws:apigateway:*::/apis",
+          "arn:aws:apigateway:*::/apis/*",
           "arn:aws:apigateway:*::/v2/*",
           "arn:aws:apigateway:*::/tags/*",
         ],
@@ -233,8 +241,8 @@ export function buildTempUninstallInfraPolicy(
         Effect: "Allow",
         Action: ["s3:GetObject", "s3:ListBucket"],
         Resource: [
-          `arn:aws:s3:::${stackPrefix}-artifacts`,
-          `arn:aws:s3:::${stackPrefix}-artifacts/apps/${appId}/*`,
+          `arn:aws:s3:::${stackPrefix}-artifacts-*`,
+          `arn:aws:s3:::${stackPrefix}-artifacts-*/apps/${appId}/*`,
         ],
       },
       {
@@ -293,7 +301,9 @@ export function buildTempUninstallInfraPolicy(
       },
       {
         // Legacy apigateway: DELETE/Untag is needed by Pulumi destroy on
-        // integrations, routes, and tag-on-* resources.
+        // integrations, routes, and tag-on-* resources. The provider issues
+        // these against `/apis/{api-id}/...` paths (mirror of the install
+        // policy above), not `/v2/*`.
         Sid: "TempUninstallInfraApiGatewayLegacy",
         Effect: "Allow",
         Action: [
@@ -302,6 +312,8 @@ export function buildTempUninstallInfraPolicy(
           "apigateway:UntagResource",
         ],
         Resource: [
+          "arn:aws:apigateway:*::/apis",
+          "arn:aws:apigateway:*::/apis/*",
           "arn:aws:apigateway:*::/v2/*",
           "arn:aws:apigateway:*::/tags/*",
         ],

@@ -18,13 +18,24 @@
  *   3. Invoke the CLI with --context=<your-name> <trace-files>.
  */
 
-import { buildTempInstallCloudDataServerPolicy } from "../../admin-installer/src/temp-policies";
+import {
+  buildTempInstallCloudDataServerPolicy,
+  buildTempInstallDdlPolicy,
+  buildTempInstallInfraPolicy,
+  buildRuntimePolicy,
+} from "../../admin-installer/src/temp-policies";
 import { foundationalPermissionsBoundaryStatements } from "../../admin-core/src/bootstrap/foundational-permissions-boundary";
+import { installDdlBoundaryStatements } from "../../admin-core/src/bootstrap/install-ddl-boundary";
+import { installInfraBoundaryStatements } from "../../admin-core/src/bootstrap/install-infra-boundary";
+import { managerPolicyStatements } from "../../admin-core/src/bootstrap/manager-policy";
+import { appPermissionsBoundaryStatements } from "../../admin-core/src/bootstrap/permissions-boundary";
 
 export interface ContextInput {
   stackPrefix: string;
   accountId: string;
   region: string;
+  /** Per-app contexts (install-ddl, install-infra, runtime-app) need an appId. */
+  appId?: string;
 }
 
 export interface PolicyDoc {
@@ -35,16 +46,46 @@ export interface PolicyDoc {
 export interface IamContext {
   /** What iam-simulate sees as the calling principal (an assumed-role session ARN). */
   principalArn: string;
+  /**
+   * IAM role name part of `principalArn` (the segment after `assumed-role/`
+   * and before the next `/`). Used to filter captured calls by role at trace
+   * replay time — captured-call ARNs have real session names that won't
+   * match `principalArn` literally.
+   */
+  principalRoleName: string;
   identityPolicies: PolicyDoc[];
   permissionBoundaryPolicies: PolicyDoc[];
   /** Context variables (aws:PrincipalTag/*, etc.) the principal carries at evaluation time. */
   contextVariables: Record<string, string | string[]>;
 }
 
+/**
+ * Models a single AWS call that a context is *expected* to make at install
+ * (or runtime) time, with concrete action + resource ARN. Expected calls are
+ * the source-of-truth for "deployments will work" — captured traces only
+ * confirm the model against what really happened.
+ */
+export interface ExpectedCall {
+  action: string;
+  /** Concrete resource ARN, or `*` for list-level actions. */
+  resource: string;
+  /** Optional per-call context variables (iam:PassedToService etc.). */
+  contextVariables?: Record<string, string | string[]>;
+  /** Human-readable note shown next to the call in output. */
+  why: string;
+}
+
 interface ContextBuilder {
   /** One-line description shown by `--list-contexts`. */
   description: string;
   build(input: ContextInput): IamContext;
+  /**
+   * The set of AWS calls this context is expected to make. Modeled
+   * declaratively so the simulator can verify policy ∩ boundary covers them
+   * *before* the deploy ever runs — captured traces are confirmation, not
+   * input. May be empty for contexts still being modeled.
+   */
+  expectedCalls(input: ContextInput): ExpectedCall[];
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +123,85 @@ function foundationalBoundary(stackPrefix: string): PolicyDoc {
   };
 }
 
+function installInfraBoundary(stackPrefix: string): PolicyDoc {
+  return {
+    name: "install-infra-boundary",
+    policy: {
+      Version: "2012-10-17",
+      Statement: installInfraBoundaryStatements(stackPrefix),
+    },
+  };
+}
+
+/**
+ * Resolve CloudFormation `{Sub: 's'}` (and other CfnValue shapes) into the
+ * plain strings iam-simulate expects. Policies authored for CloudFormation
+ * (manager-policy.ts, etc.) wrap every Resource/Condition value in `Sub`,
+ * but at TS build time those strings have already been interpolated — there
+ * are no `${AWS::AccountId}`-style markers left. So unwrapping is sufficient.
+ *
+ * Throws on `Ref`/`GetAtt` because those would need real CFN resolution
+ * and no current contexts use them.
+ */
+function resolveCfnValues<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map(resolveCfnValues) as unknown as T;
+  }
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.Sub === "string" && Object.keys(obj).length === 1) {
+      return obj.Sub as unknown as T;
+    }
+    if ("Ref" in obj || "GetAtt" in obj) {
+      throw new Error(
+        `iam-simulate cannot resolve CFN intrinsic ${JSON.stringify(obj)}; ` +
+          "extend resolveCfnValues if a context needs this.",
+      );
+    }
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) out[k] = resolveCfnValues(v);
+    return out as unknown as T;
+  }
+  return value;
+}
+
+function managerPolicy(stackPrefix: string): PolicyDoc {
+  return {
+    name: "manager-inline",
+    policy: {
+      Version: "2012-10-17",
+      Statement: resolveCfnValues(managerPolicyStatements(stackPrefix)),
+    },
+  };
+}
+
+function appPermissionsBoundary(stackPrefix: string): PolicyDoc {
+  return {
+    name: "app-permissions-boundary",
+    policy: {
+      Version: "2012-10-17",
+      Statement: appPermissionsBoundaryStatements(stackPrefix),
+    },
+  };
+}
+
+function installDdlBoundary(stackPrefix: string): PolicyDoc {
+  return {
+    name: "install-ddl-boundary",
+    policy: {
+      Version: "2012-10-17",
+      Statement: installDdlBoundaryStatements(stackPrefix),
+    },
+  };
+}
+
+function requireAppId(name: string, appId: string | undefined): string {
+  if (!appId) {
+    throw new Error(`context '${name}' requires APP_ID (or appId in ContextInput).`);
+  }
+  return appId;
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -101,12 +221,18 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       };
       return {
         principalArn: assumedRoleArn(accountId, roleName, "install"),
+        principalRoleName: roleName,
         identityPolicies: [brokerPowerPolicy(stackPrefix, accountId), tempInstall],
         permissionBoundaryPolicies: [foundationalBoundary(stackPrefix)],
         contextVariables: {
           "aws:PrincipalTag/starkeep:appId": "cloud-data-server",
         },
       };
+    },
+    expectedCalls() {
+      // Not yet modeled — captured traces from a cds install remain the
+      // primary source until we enumerate Pulumi's call set here.
+      return [];
     },
   },
 
@@ -120,17 +246,358 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         "context 'runtime-cloud-data-server' not implemented yet: needs runtime policy wiring (see buildRuntimePolicy in admin-installer/src/temp-policies.ts).",
       );
     },
+    expectedCalls() {
+      return [];
+    },
   },
-  "install-app": {
-    description: "Per-app install (manager → app role, temp-install-infra, app boundary).",
-    build() {
-      throw new Error("context 'install-app' not implemented yet.");
+  "install-ddl": {
+    description:
+      "Per-app DSQL DDL phase — install-ddl-role with temp-install-ddl-<appId> " +
+      "attached, capped by the install-ddl boundary. Set APP_ID to scope.",
+    build({ stackPrefix, appId, accountId }) {
+      const id = requireAppId("install-ddl", appId);
+      const roleName = `${stackPrefix}-install-ddl-role`;
+      const tempInstallDdl: PolicyDoc = {
+        name: `temp-install-ddl-${id}`,
+        // Temp DDL policy content is not appId-scoped; only the policy NAME
+        // varies per app.
+        policy: JSON.parse(buildTempInstallDdlPolicy(stackPrefix)),
+      };
+      return {
+        principalArn: assumedRoleArn(accountId, roleName, "install"),
+        principalRoleName: roleName,
+        identityPolicies: [tempInstallDdl],
+        permissionBoundaryPolicies: [installDdlBoundary(stackPrefix)],
+        contextVariables: {},
+      };
+    },
+    expectedCalls({ accountId, region }) {
+      // The DDL phase makes exactly one IAM-evaluated call: signing a DSQL
+      // admin connection. The actual SQL (CREATE TABLE etc.) flows over a
+      // postgres connection, not an IAM-checked AWS API.
+      return [
+        {
+          action: "dsql:DbConnectAdmin",
+          resource: `arn:aws:dsql:${region}:${accountId}:cluster/*`,
+          why: "runAppInstallDdl signs an admin connection to the DSQL cluster.",
+        },
+      ];
+    },
+  },
+  "install-infra": {
+    description:
+      "Per-app AWS-resource provisioning phase — install-infra-role with " +
+      "temp-install-infra-<appId> attached, capped by the install-infra boundary. " +
+      "Covers bundle upload + Pulumi up (Lambda/logs/APIGw). Set APP_ID to scope.",
+    build({ stackPrefix, accountId, region, appId }) {
+      const id = requireAppId("install-infra", appId);
+      const roleName = `${stackPrefix}-install-infra-role`;
+      const tempInstallInfra: PolicyDoc = {
+        name: `temp-install-infra-${id}`,
+        policy: JSON.parse(
+          buildTempInstallInfraPolicy(stackPrefix, id, accountId, region),
+        ),
+      };
+      return {
+        principalArn: assumedRoleArn(accountId, roleName, "install"),
+        principalRoleName: roleName,
+        identityPolicies: [tempInstallInfra],
+        permissionBoundaryPolicies: [installInfraBoundary(stackPrefix)],
+        contextVariables: {},
+      };
+    },
+    expectedCalls({ stackPrefix, accountId, region, appId }) {
+      const id = requireAppId("install-infra", appId);
+      const stateBucket = `${stackPrefix}-pulumi-state-${accountId}-${region}`;
+      const stateKey = `arn:aws:s3:::${stateBucket}/.pulumi/stacks/${stackPrefix}-app-${id}.json`;
+      const stateBucketArn = `arn:aws:s3:::${stateBucket}`;
+      const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
+      const artifactsBucketArn = `arn:aws:s3:::${artifactsBucket}`;
+      const artifactKey = `arn:aws:s3:::${artifactsBucket}/apps/${id}/latest/dist.zip`;
+      const lambdaArn = `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-${id}-api`;
+      const logGroupArn = `arn:aws:logs:${region}:${accountId}:log-group:/aws/lambda/${stackPrefix}-app-${id}-api`;
+      const appRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${id}-role`;
+      return [
+        // Pulumi state I/O — read/write the per-app stack file plus the
+        // shared .pulumi/ metadata.
+        { action: "s3:GetObject", resource: stateKey, why: "Pulumi reads existing stack state." },
+        { action: "s3:PutObject", resource: stateKey, why: "Pulumi writes updated stack state." },
+        { action: "s3:DeleteObject", resource: stateKey, why: "Pulumi removes stack state on destroy." },
+        { action: "s3:ListBucket", resource: stateBucketArn, why: "Pulumi enumerates state objects under .pulumi/." },
+        { action: "s3:GetAccelerateConfiguration", resource: stateBucketArn, why: "probePulumiStateBucket() — IAM propagation probe before Pulumi up." },
+        { action: "ssm:GetParameter", resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`, why: "Pulumi loads the passphrase for state encryption." },
+
+        // Artifacts upload + Pulumi-source read of the bundle.
+        { action: "s3:PutObject", resource: artifactKey, why: "uploadAppBundle writes apps/<appId>/latest/dist.zip." },
+        { action: "s3:GetObject", resource: artifactKey, why: "Pulumi's aws.lambda.Function reads the bundle as code source." },
+        { action: "s3:ListBucket", resource: artifactsBucketArn, why: "Pulumi enumerates artifacts under apps/<appId>/." },
+
+        // Lambda admin on the per-app function.
+        { action: "lambda:CreateFunction", resource: lambdaArn, why: "Pulumi provisions the app's Lambda." },
+        { action: "lambda:DeleteFunction", resource: lambdaArn, why: "destroy path." },
+        { action: "lambda:GetFunction", resource: lambdaArn, why: "Pulumi refresh." },
+        { action: "lambda:GetFunctionConfiguration", resource: lambdaArn, why: "Pulumi refresh." },
+        { action: "lambda:UpdateFunctionCode", resource: lambdaArn, why: "redeploy with new bundle." },
+        { action: "lambda:UpdateFunctionConfiguration", resource: lambdaArn, why: "env/memory/timeout updates." },
+        { action: "lambda:TagResource", resource: lambdaArn, why: "Pulumi tagging." },
+        { action: "lambda:UntagResource", resource: lambdaArn, why: "Pulumi tagging." },
+        { action: "lambda:ListTags", resource: lambdaArn, why: "Pulumi refresh." },
+        { action: "lambda:AddPermission", resource: lambdaArn, why: "aws.lambda.Permission for APIGw → invoke." },
+        { action: "lambda:RemovePermission", resource: lambdaArn, why: "destroy path." },
+        { action: "lambda:GetPolicy", resource: lambdaArn, why: "Pulumi refresh of resource-based policy." },
+        { action: "lambda:ListVersionsByFunction", resource: lambdaArn, why: "Pulumi BucketV2-style refresh read." },
+        { action: "lambda:GetFunctionCodeSigningConfig", resource: lambdaArn, why: "Pulumi refresh read." },
+        { action: "lambda:GetFunctionConcurrency", resource: lambdaArn, why: "Pulumi refresh read." },
+        { action: "lambda:GetFunctionUrlConfig", resource: lambdaArn, why: "Pulumi refresh read." },
+        { action: "lambda:ListFunctionEventInvokeConfigs", resource: lambdaArn, why: "Pulumi refresh read." },
+        { action: "lambda:GetRuntimeManagementConfig", resource: lambdaArn, why: "Pulumi refresh read." },
+
+        // CloudWatch Logs: per-app log group lifecycle.
+        { action: "logs:CreateLogGroup", resource: logGroupArn, why: "Pulumi provisions the app's log group." },
+        { action: "logs:DeleteLogGroup", resource: logGroupArn, why: "destroy path." },
+        { action: "logs:PutRetentionPolicy", resource: logGroupArn, why: "Pulumi sets retention." },
+        { action: "logs:TagResource", resource: logGroupArn, why: "Pulumi tagging." },
+        { action: "logs:UntagResource", resource: logGroupArn, why: "Pulumi tagging." },
+        { action: "logs:ListTagsForResource", resource: logGroupArn, why: "Pulumi refresh." },
+        { action: "logs:DescribeLogGroups", resource: "*", why: "Pulumi list-level read (must be on *)." },
+
+        // API Gateway v2: integrations + routes hung off the shared API.
+        { action: "apigatewayv2:GetApi", resource: "*", why: "Pulumi reads the shared API." },
+        { action: "apigatewayv2:GetApis", resource: "*", why: "Pulumi refresh." },
+        { action: "apigatewayv2:GetAuthorizer", resource: "*", why: "Pulumi reads JWT authorizer." },
+        { action: "apigatewayv2:GetAuthorizers", resource: "*", why: "Pulumi refresh." },
+        { action: "apigatewayv2:CreateIntegration", resource: "*", why: "Pulumi creates per-handler integration." },
+        { action: "apigatewayv2:UpdateIntegration", resource: "*", why: "Pulumi updates integration." },
+        { action: "apigatewayv2:DeleteIntegration", resource: "*", why: "destroy path." },
+        { action: "apigatewayv2:GetIntegration", resource: "*", why: "Pulumi refresh." },
+        { action: "apigatewayv2:GetIntegrations", resource: "*", why: "Pulumi refresh." },
+        { action: "apigatewayv2:CreateRoute", resource: "*", why: "Pulumi creates per-handler route." },
+        { action: "apigatewayv2:UpdateRoute", resource: "*", why: "Pulumi updates route." },
+        { action: "apigatewayv2:DeleteRoute", resource: "*", why: "destroy path." },
+        { action: "apigatewayv2:GetRoute", resource: "*", why: "Pulumi refresh." },
+        { action: "apigatewayv2:GetRoutes", resource: "*", why: "Pulumi refresh." },
+        { action: "apigatewayv2:TagResource", resource: "*", why: "Pulumi tagging." },
+        { action: "apigatewayv2:UntagResource", resource: "*", why: "Pulumi tagging." },
+        { action: "apigatewayv2:ListTagsForResource", resource: "*", why: "Pulumi refresh." },
+
+        // Legacy apigateway: namespace verbs. The pulumi-aws provider
+        // creates/updates v2 integrations and routes via REST-style POSTs to
+        // `/apis/{api-id}/integrations` etc. — not `/v2/*` — so the resource
+        // must match `/apis/*`. (Captured-call confirmation: photos install
+        // hit `apigateway:POST` on `/apis/<id>/integrations`.)
+        { action: "apigateway:GET", resource: "arn:aws:apigateway:*::/apis/*", why: "Pulumi reads integrations/routes via legacy namespace." },
+        { action: "apigateway:POST", resource: "arn:aws:apigateway:*::/apis/*", why: "Pulumi creates integrations/routes via legacy namespace." },
+        { action: "apigateway:PATCH", resource: "arn:aws:apigateway:*::/apis/*", why: "Pulumi updates integrations/routes via legacy namespace." },
+        { action: "apigateway:PUT", resource: "arn:aws:apigateway:*::/apis/*", why: "Pulumi upserts integrations/routes via legacy namespace." },
+        { action: "apigateway:DELETE", resource: "arn:aws:apigateway:*::/apis/*", why: "destroy path via legacy namespace." },
+        { action: "apigateway:TagResource", resource: "arn:aws:apigateway:*::/tags/*", why: "Pulumi tags v2 resources via legacy namespace." },
+        { action: "apigateway:UntagResource", resource: "arn:aws:apigateway:*::/tags/*", why: "Pulumi untags v2 resources via legacy namespace." },
+
+        // STS pre-flight that Pulumi's aws provider issues for account/region
+        // detection before any resource call. Always Allowed for any principal,
+        // but modeled so the call ledger matches reality.
+        { action: "sts:GetCallerIdentity", resource: "*", why: "pulumi-aws issues this on provider init to learn the calling account/region." },
+
+        // iam:PassRole — required so Pulumi can attach the per-app role to
+        // the new Lambda. Condition key must be set for the simulator.
+        {
+          action: "iam:PassRole",
+          resource: appRoleArn,
+          contextVariables: { "iam:PassedToService": "lambda.amazonaws.com" },
+          why: "Pulumi's lambda.Function passes the app role as the Lambda execution role.",
+        },
+      ];
     },
   },
   "runtime-app": {
     description: "Per-app Lambda runtime (runtime policy, app boundary).",
     build() {
       throw new Error("context 'runtime-app' not implemented yet.");
+    },
+    expectedCalls() {
+      return [];
+    },
+  },
+
+  "install-manager": {
+    description:
+      "starkeep-manager-role during install/uninstall — mints per-app roles, " +
+      "attaches/detaches temp install-ddl + install-infra policies, and chains " +
+      "into the install-ddl/install-infra/app roles via sts:AssumeRole. No " +
+      "permissions boundary (manager is a bootstrap-owned role).",
+    build({ stackPrefix, accountId }) {
+      const roleName = `${stackPrefix}-manager-role`;
+      return {
+        principalArn: assumedRoleArn(accountId, roleName, "install"),
+        principalRoleName: roleName,
+        identityPolicies: [managerPolicy(stackPrefix)],
+        // Manager is created by the CloudFormation bootstrap stack and has no
+        // permissions boundary attached — its inline policy IS the entire cap.
+        permissionBoundaryPolicies: [],
+        contextVariables: {},
+      };
+    },
+    expectedCalls({ stackPrefix, accountId, appId }) {
+      const id = requireAppId("install-manager", appId);
+      const appRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${id}-role`;
+      const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
+      const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
+      const appBoundaryArn = `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
+      return [
+        // ---- Mint / heal the per-app role (createAppRole). --------------
+        {
+          action: "iam:CreateRole",
+          resource: appRoleArn,
+          contextVariables: { "iam:PermissionsBoundary": appBoundaryArn },
+          why: "createAppRole provisions the per-app role with the app boundary attached.",
+        },
+        {
+          action: "iam:UpdateAssumeRolePolicy",
+          resource: appRoleArn,
+          why: "createAppRole catches EntityAlreadyExists and re-applies the trust policy in place.",
+        },
+        {
+          action: "iam:PutRolePolicy",
+          resource: appRoleArn,
+          why: "createAppRole attaches the inline 'runtime' policy (plus optional 'broker-power').",
+        },
+        {
+          action: "iam:DeleteRolePolicy",
+          resource: appRoleArn,
+          why: "uninstall sweeps any leftover inline policies before iam:DeleteRole.",
+        },
+        {
+          action: "iam:DeleteRole",
+          resource: appRoleArn,
+          why: "uninstallApp tears the per-app role down.",
+        },
+        {
+          action: "iam:GetRole",
+          resource: appRoleArn,
+          why: "orchestrator existence-checks the per-app role on resume.",
+        },
+        {
+          action: "iam:GetRolePolicy",
+          resource: appRoleArn,
+          why: "createAppRole re-reads the trust/inline policy to detect drift.",
+        },
+        {
+          action: "iam:ListRolePolicies",
+          resource: appRoleArn,
+          why: "uninstall enumerates inline policies before deleting them.",
+        },
+
+        // ---- Mutate temp policies on install-ddl / install-infra. ------
+        {
+          action: "iam:PutRolePolicy",
+          resource: installDdlRoleArn,
+          why: "attachTempInstallDdlPolicy adds temp-install-ddl-<appId> to install-ddl-role.",
+        },
+        {
+          action: "iam:DeleteRolePolicy",
+          resource: installDdlRoleArn,
+          why: "detachTempInstallDdlPolicy removes the temp policy after DDL completes.",
+        },
+        {
+          action: "iam:GetRolePolicy",
+          resource: installDdlRoleArn,
+          why: "Manager reads the existing temp policy on resume to detect drift.",
+        },
+        {
+          action: "iam:ListRolePolicies",
+          resource: installDdlRoleArn,
+          why: "Manager sweeps orphan temp-install-ddl-<appId> entries left by interrupted runs.",
+        },
+        {
+          action: "iam:PutRolePolicy",
+          resource: installInfraRoleArn,
+          why: "attachTempInstallInfraPolicy adds temp-install-infra-<appId> to install-infra-role.",
+        },
+        {
+          action: "iam:DeleteRolePolicy",
+          resource: installInfraRoleArn,
+          why: "detachTempInstallInfraPolicy removes the temp policy after Pulumi up completes.",
+        },
+        {
+          action: "iam:GetRolePolicy",
+          resource: installInfraRoleArn,
+          why: "Manager reads the existing temp policy on resume to detect drift.",
+        },
+        {
+          action: "iam:ListRolePolicies",
+          resource: installInfraRoleArn,
+          why: "Manager sweeps orphan temp-install-infra-<appId> entries left by interrupted runs.",
+        },
+
+        // ---- Role-chain into the three downstream roles. ---------------
+        {
+          action: "sts:AssumeRole",
+          resource: appRoleArn,
+          why: "Orchestrator assumes the app role to write the install-time .keep marker.",
+        },
+        {
+          action: "sts:AssumeRole",
+          resource: installDdlRoleArn,
+          why: "Orchestrator assumes install-ddl-role for the per-app DSQL DDL phase.",
+        },
+        {
+          action: "sts:AssumeRole",
+          resource: installInfraRoleArn,
+          why: "Orchestrator assumes install-infra-role for bundle upload + Pulumi up.",
+        },
+
+        // ---- Pre-flight identity check. --------------------------------
+        {
+          action: "sts:GetCallerIdentity",
+          resource: "*",
+          why: "cli-install-photos resolves the AWS account ID up front when not in config.",
+        },
+      ];
+    },
+  },
+
+  "install-app-role": {
+    description:
+      "Per-app role at install time (data-plane writes the orchestrator issues " +
+      "directly under the app role — currently just the .keep marker). Identity " +
+      "is the inline runtime policy; capped by the app permissions boundary. " +
+      "Set APP_ID to scope.",
+    build({ stackPrefix, appId, accountId }) {
+      const id = requireAppId("install-app-role", appId);
+      const roleName = `${stackPrefix}-app-${id}-role`;
+      const runtime: PolicyDoc = {
+        name: "runtime",
+        // sharedTypeAccess/canIngestUnknown/canPromoteFromUnknown shape the
+        // policy, but the .keep write uses only AppS3OwnPrefix, which is
+        // unconditional — so an empty-shared-types policy is sufficient for
+        // modeling the install-time call.
+        policy: JSON.parse(
+          buildRuntimePolicy(stackPrefix, id, [], false, false, false),
+        ),
+      };
+      return {
+        principalArn: assumedRoleArn(accountId, roleName, "install"),
+        principalRoleName: roleName,
+        identityPolicies: [runtime],
+        permissionBoundaryPolicies: [appPermissionsBoundary(stackPrefix)],
+        contextVariables: {
+          "aws:PrincipalTag/starkeep:appId": id,
+        },
+      };
+    },
+    expectedCalls({ stackPrefix, appId }) {
+      const id = requireAppId("install-app-role", appId);
+      // filesBucket name follows the bootstrap convention — wildcard on the
+      // account+region segment so the model matches the policy's wildcarded
+      // resource ARN.
+      const keepFileArn = `arn:aws:s3:::${stackPrefix}-files-*/apps/${id}/.keep`;
+      return [
+        {
+          action: "s3:PutObject",
+          resource: keepFileArn,
+          why: "putAppKeepFile writes the zero-byte sentinel that marks the app's S3 presence.",
+        },
+      ];
     },
   },
 };
@@ -150,4 +617,13 @@ export function buildContext(name: string, input: ContextInput): IamContext {
     throw new Error(`unknown context '${name}'. Available: ${available}`);
   }
   return ctx.build(input);
+}
+
+export function expectedCallsFor(name: string, input: ContextInput): ExpectedCall[] {
+  const ctx = CONTEXTS[name];
+  if (!ctx) {
+    const available = Object.keys(CONTEXTS).join(", ");
+    throw new Error(`unknown context '${name}'. Available: ${available}`);
+  }
+  return ctx.expectedCalls(input);
 }

@@ -25,6 +25,30 @@ before AWS catches them at runtime.
 - `test/sdk-mapping.test.ts` — guard test that every SDK→IAM action
   rename still resolves to a real action in `@cloud-copilot/iam-data`.
 
+## Two evidence sources
+
+Every `simulate` run combines:
+
+1. **Expected calls (modeled).** A static list each context declares of
+   the AWS calls it will make at install/runtime, with concrete action +
+   resource ARN (see `expectedCalls` on each ContextBuilder). This is
+   the authoritative "deployments will work" check — independent of any
+   live install, so you can run it before deploying.
+2. **Captured calls (optional).** Trace files supplement the model with
+   what really happened. Captured SDK calls carry the principal that
+   made them (`sdk-trace.ts` resolves credentials → assumed-role ARN at
+   send time, learning the mapping from `AssumeRole` / `GetCallerIdentity`
+   outputs), so a multi-role trace can be evaluated against each role's
+   context separately. Calls whose principal doesn't match the context
+   role are reported as skipped, not failed. Pulumi/TF traces don't
+   carry caller identity, so all of those calls are included.
+
+Verdict counts split into Allowed / Denied / Engine-error.
+`ExplicitlyDenied`/`ImplicitlyDenied` fail the run (exit 1). `Error` is
+a simulator-engine limitation (e.g. `apigatewayv2` isn't in iam-data,
+the verb-on-path `apigateway:GET` model isn't supported); these are
+reported but do not fail the exit code.
+
 ## Workflow
 
 ### 1. Capture traces
@@ -59,8 +83,44 @@ ACCOUNT_ID=<id> REGION=us-east-2 \
     ~/.starkeep/cds-install.sdk.trace
 ```
 
-Multiple trace files are unioned by (service:operation). The CLI
-auto-detects format per file (Pulumi vs SDK).
+For per-app install runs (photos, etc.) the admin-web cloud-install
+route writes `~/.starkeep/photos-install.{trace,sdk.trace}`. A per-app
+install wears two IAM hats in sequence — simulate against each context
+separately (same trace files, different `--context`):
+
+```sh
+# DSQL DDL phase (install-ddl-role + temp-install-ddl-<appId>)
+ACCOUNT_ID=<id> REGION=us-east-2 APP_ID=photos \
+  pnpm -F @starkeep/iam-permission-tests simulate \
+    --context=install-ddl \
+    ~/.starkeep/photos-install.trace \
+    ~/.starkeep/photos-install.sdk.trace
+
+# AWS-resource provisioning phase (install-infra-role + temp-install-infra-<appId>)
+ACCOUNT_ID=<id> REGION=us-east-2 APP_ID=photos \
+  pnpm -F @starkeep/iam-permission-tests simulate \
+    --context=install-infra \
+    ~/.starkeep/photos-install.trace \
+    ~/.starkeep/photos-install.sdk.trace
+```
+
+Calls made by the Manager role itself (CreateRole, PutRolePolicy on
+the per-app role and on install-ddl/install-infra-role) are correctly
+*skipped* by the principal filter in each per-app context — Manager
+has a standing policy, not a temp grant, and is a separate concern.
+
+Both contexts also work standalone (no trace) — the modeled expected
+calls run as a static check:
+
+```sh
+ACCOUNT_ID=<id> REGION=us-east-2 APP_ID=photos \
+  pnpm -F @starkeep/iam-permission-tests simulate --context=install-ddl
+```
+
+Multiple trace files are unioned per (principal, service:operation).
+The CLI auto-detects format per file (Pulumi vs SDK). Pass `--no-filter`
+to disable the principal scoping if you want to see every captured call
+evaluated against the chosen context.
 
 ### 3. Run the guard test
 
@@ -122,9 +182,13 @@ iam-data — so typos and stale renames are caught immediately.
 
 - `apps/admin-web/app/api/cloud-data-server/install/route.ts` — env
   vars + file tee
+- `apps/admin-web/app/api/apps/photos/cloud-install/route.ts` — env
+  vars + file tee
 - `packages/admin-installer/src/compute-stack.ts` — `onError`
   forwarding for pulumi stderr
 - `packages/admin-installer/scripts/cli-install-cloud-data-server.ts` —
+  conditional `installSdkTrace` import
+- `packages/admin-installer/scripts/cli-install-photos.ts` —
   conditional `installSdkTrace` import
 
 Grep for `iam-permission-tests POC` to find them all.

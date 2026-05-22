@@ -378,6 +378,20 @@ function CloudPhotosSection() {
   const [credentials, setCredentials] = useState<STSCredentials | null>(null);
   const [credError, setCredError] = useState<string | null>(null);
   const [installed, setInstalled] = useState(false);
+  const [photosUrl, setPhotosUrl] = useState<string | null>(null);
+
+  // Resolve the cloud photos URL from the persisted cloud config so the link
+  // survives a page reload (the install modal shows it once and then closes).
+  // We don't gate this on a per-app "installed" flag — once cloud is set up,
+  // showing the URL is harmless and the link is the answer to "where is my
+  // deployed app?" even before install completes.
+  useEffect(() => {
+    (async () => {
+      const cfg = await readCloudConfig();
+      if (cfg?.apiGatewayUrl) setPhotosUrl(`${cfg.apiGatewayUrl}/apps/photos/`);
+      else setPhotosUrl(null);
+    })();
+  }, [installed]);
 
   const handleInstall = async () => {
     setCredError(null);
@@ -405,17 +419,35 @@ function CloudPhotosSection() {
   return (
     <div className="rounded-lg border p-5 flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-base font-semibold">Photos — cloud install</h2>
-        {installed && (
-          <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-            Installed
-          </Badge>
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold">Photos — cloud install</h2>
+          {installed && (
+            <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+              Installed
+            </Badge>
+          )}
+        </div>
+        {photosUrl && (
+          <a
+            href={photosUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm underline"
+            title={photosUrl}
+          >
+            Open ↗
+          </a>
         )}
       </div>
       <p className="text-sm text-muted-foreground">
         Deploy the photos app to AWS. Requires cloud infrastructure to be set up and a valid
         sign-in session.
       </p>
+      {photosUrl && (
+        <p className="text-xs text-muted-foreground break-all">
+          URL: <a href={photosUrl} target="_blank" rel="noopener noreferrer" className="underline">{photosUrl}</a>
+        </p>
+      )}
 
       {credError && (
         <Alert variant="destructive">

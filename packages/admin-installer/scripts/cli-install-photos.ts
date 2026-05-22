@@ -16,6 +16,15 @@
  *   pnpm --filter @starkeep/admin-installer cli:install-photos --non-interactive
  */
 
+// TEMP (iam-permission-tests POC): if IAM_SDK_TRACE_PATH is set, record
+// every AWS SDK call this process makes to that file. Must run before any
+// AWS SDK client below is constructed. Imported by relative path so
+// admin-installer doesn't take a package-level dep on the POC. Remove
+// when the POC graduates or is dropped.
+if (process.env.IAM_SDK_TRACE_PATH) {
+  const { installSdkTrace } = await import("../../iam-permission-tests/src/sdk-trace");
+  installSdkTrace(process.env.IAM_SDK_TRACE_PATH);
+}
 import {
   execSync,
   spawnSync,
@@ -342,7 +351,9 @@ const foundationalPermissionsBoundaryArn =
   config.foundationalPermissionsBoundaryArn ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
-const artifactsBucket = `${stackPrefix}-artifacts`;
+// Suffixed with account+region to keep the bucket globally unique (the
+// bootstrap ArtifactsBucket has the same name shape).
+const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
 
 console.log("\nStarkeep photos cloud install");
 console.log(`  Region : ${region}`);

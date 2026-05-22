@@ -106,7 +106,7 @@ async function runStep(
 }
 
 export async function installApp(input: InstallInput): Promise<InstallResult> {
-  const { appId, manifest, zipBuffer, version, config } = input;
+  const { appId, manifest, zipBuffer, config } = input;
   const ir = manifest.infraRequirements;
   const done = await getCompletedSteps(appId, "install");
 
@@ -190,7 +190,6 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
         uploadAppBundle(
           config.stackPrefix,
           appId,
-          version,
           config.artifactsBucket,
           zipBuffer,
           config.region,
@@ -211,6 +210,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
           region: config.region,
           accountId: config.accountId,
           pulumiStateBucket: config.pulumiStateBucket,
+          artifactsBucket: config.artifactsBucket,
           dsqlHostname: config.dsqlHostname,
           filesBucket: config.filesBucket,
           infraCreds,
@@ -271,6 +271,7 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
         region: config.region,
         accountId: config.accountId,
         pulumiStateBucket: config.pulumiStateBucket,
+        artifactsBucket: config.artifactsBucket,
         dsqlHostname: config.dsqlHostname,
         filesBucket: config.filesBucket,
         infraCreds,

@@ -29,6 +29,12 @@ export interface CapturedCall {
   count: number;
   /** A short trimmed snippet of one of the matching log lines. */
   evidence: string;
+  /**
+   * Principal ARN that issued the call, as recorded by sdk-trace.ts.
+   * "unknown" when sdk-trace couldn't resolve it; undefined for Pulumi
+   * traces (tfbridge logs don't carry caller identity).
+   */
+  principalArn?: string;
 }
 
 export interface UnparsedEntry {
@@ -70,6 +76,7 @@ export const SDK_TO_IAM_ACTION: Record<string, string> = {
   // configuration actions when IAM was extended to S3.
   "s3:HeadBucket": "s3:ListBucket",
   "s3:HeadObject": "s3:GetObject",
+  "s3:ListObjectsV2": "s3:ListBucket",
   "s3:GetBucketAccelerateConfiguration": "s3:GetAccelerateConfiguration",
   "s3:GetBucketLifecycleConfiguration": "s3:GetLifecycleConfiguration",
   "s3:GetBucketReplication": "s3:GetReplicationConfiguration",

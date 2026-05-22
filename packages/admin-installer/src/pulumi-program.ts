@@ -32,7 +32,7 @@ export function buildPulumiProgram(
         role: ctx.appRoleArn,
         runtime: aws.lambda.Runtime.NodeJS22dX,
         handler: handler.handler,
-        s3Bucket: `${ctx.stackPrefix}-artifacts`,
+        s3Bucket: ctx.artifactsBucket,
         s3Key: `apps/${ctx.appId}/latest/dist.zip`,
         memorySize: handler.memoryMb,
         timeout: handler.timeoutSeconds,
@@ -73,9 +73,15 @@ export function buildPulumiProgram(
           ? `$default`
           : routes[i]!;
 
+        // Prefix every app route under /apps/<appId>. A route key like
+        // "GET /foo" becomes "GET /apps/photos/foo". The root "GET /" must
+        // collapse to "GET /apps/photos" (no trailing slash) — API Gateway v2
+        // rejects keys with empty path segments ("BadRequestException: Part of
+        // the given route key path is empty").
         const prefixedRouteKey = routeKey === "$default"
           ? routeKey
-          : routeKey.replace(/^([A-Z]+ )/, `$1/apps/${ctx.appId}`);
+          : routeKey.replace(/^([A-Z]+) \/(.*)$/, (_m, method, rest) =>
+              rest === "" ? `${method} /apps/${ctx.appId}` : `${method} /apps/${ctx.appId}/${rest}`);
 
         const route = new aws.apigatewayv2.Route(`route-${handler.name}-${i}`, {
           apiId: ctx.apiGatewayId,

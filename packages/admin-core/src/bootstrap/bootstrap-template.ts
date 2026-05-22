@@ -337,6 +337,29 @@ ${installInfraBoundaryPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
+  # ---------------------------------------------------------------------------
+  # Artifacts bucket — deployment-bundle store
+  # ---------------------------------------------------------------------------
+  # Holds each app's compiled Lambda bundle (apps/<appId>/latest/dist.zip).
+  # install-infra uploads here during install; aws.lambda.Function reads from
+  # here at function create/update; install-infra deletes the prefix on
+  # uninstall. Not data-plane — never holds user data.
+  #
+  # Name is suffixed with account+region to keep it globally unique, matching
+  # the PulumiStateBucket pattern. Policies that grant access use a
+  # \`\${StackPrefix}-artifacts-*\` wildcard to absorb the suffix.
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '\${StackPrefix}-artifacts-\${AWS::AccountId}-\${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: starkeep:managed
+          Value: 'true'
+        - Key: StackPrefix
+          Value: !Ref StackPrefix
+
   PulumiPassphrase:
     Type: AWS::SSM::Parameter
     Properties:
@@ -389,6 +412,10 @@ Outputs:
   PulumiStateBucketName:
     Description: S3 bucket for Pulumi per-app stack state
     Value: !Ref PulumiStateBucket
+
+  ArtifactsBucketName:
+    Description: S3 bucket holding compiled Lambda bundles per installed app
+    Value: !Ref ArtifactsBucket
 
   Region:
     Description: AWS region where this stack was deployed

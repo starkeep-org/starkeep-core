@@ -12,6 +12,7 @@ import * as pulumi from "@pulumi/pulumi/automation/index.js";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import type { AwsCredentials } from "./session";
 import { buildPulumiProgram } from "./pulumi-program";
+import { retryOnAccessDenied } from "./retry-on-access-denied";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import {
   S3Client,
@@ -66,6 +67,8 @@ export interface ComputeContext {
   region: string;
   accountId: string;
   pulumiStateBucket: string;
+  /** Bucket holding apps/<appId>/latest/dist.zip — Lambda code source. */
+  artifactsBucket: string;
   dsqlHostname: string;
   filesBucket: string;
   /**
@@ -93,57 +96,8 @@ export interface PulumiCredsContext {
   awsCreds: AwsCredentials;
 }
 
-/**
- * Run `fn` with retry on AccessDenied. Used to absorb IAM PutRolePolicy
- * propagation delay after Manager attaches the temp-install policy: AWS
- * docs say propagation can take a couple of minutes worst case, and
- * individual (action, resource) pairs propagate independently — so each
- * fresh action needs its own probe before we hand control to Pulumi.
- *
- * Budget: 12 attempts, exp backoff capped at 10s → ~90s worst case.
- */
-async function retryOnAccessDenied<T>(
-  label: string,
-  fn: () => Promise<T>,
-  opts: { maxAttempts?: number; maxDelayMs?: number } = {},
-): Promise<T> {
-  const maxAttempts = opts.maxAttempts ?? 12;
-  const maxDelayMs = opts.maxDelayMs ?? 10_000;
-  let delay = 1000;
-  const start = Date.now();
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const result = await fn();
-      if (attempt > 1) {
-        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        console.log(`[diag] ${label}: succeeded on attempt ${attempt} after ${elapsed}s`);
-      }
-      return result;
-    } catch (err) {
-      const name = (err as { name?: string })?.name;
-      const message = (err as { message?: string })?.message ?? "";
-      const isAccessDenied =
-        name === "AccessDeniedException" ||
-        name === "AccessDenied" ||
-        message.includes("AccessDenied");
-      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-      if (!isAccessDenied) {
-        console.log(`[diag] ${label}: attempt ${attempt} non-retryable error after ${elapsed}s: ${name ?? "?"}`);
-        throw err;
-      }
-      if (attempt === maxAttempts) {
-        console.log(`[diag] ${label}: gave up after ${attempt} attempts / ${elapsed}s`);
-        throw err;
-      }
-      console.log(
-        `[diag] ${label}: attempt ${attempt} AccessDenied at ${elapsed}s, retrying in ${(delay / 1000).toFixed(1)}s`,
-      );
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, maxDelayMs);
-    }
-  }
-  throw new Error(`unreachable: ${label}`);
-}
+// retryOnAccessDenied lives in ./retry-on-access-denied.ts so dsql-ddl can
+// share it for the dsql:DbConnectAdmin propagation probe.
 
 async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
   const ssm = new SSMClient({

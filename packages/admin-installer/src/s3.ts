@@ -10,6 +10,7 @@ import {
   DeleteObjectsCommand,
 } from "@aws-sdk/client-s3";
 import type { AwsCredentials } from "./session";
+import { retryOnAccessDenied } from "./retry-on-access-denied";
 
 function makeS3Client(creds: AwsCredentials, region: string): S3Client {
   return new S3Client({
@@ -40,24 +41,39 @@ export async function putAppKeepFile(
   );
 }
 
-/** Upload the app's dist.zip to the artifacts bucket. */
+/**
+ * Upload the app's dist.zip to the artifacts bucket at the well-known
+ * "latest" key. Pulumi's `aws.lambda.Function` reads the exact same key
+ * as `s3Key`, so the upload-then-pulumi-up sequence in installApp is
+ * self-consistent. The bucket is versioned (see bootstrap ArtifactsBucket),
+ * so previous bundles remain retrievable via S3 versioning if a rollback
+ * is ever needed — we don't currently key by version in the path.
+ */
 export async function uploadAppBundle(
   _stackPrefix: string,
   appId: string,
-  version: string,
   artifactsBucket: string,
   zipBuffer: Buffer,
   region: string,
   appCreds: AwsCredentials,
 ): Promise<void> {
   const s3 = makeS3Client(appCreds, region);
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: artifactsBucket,
-      Key: `apps/${appId}/${version}/dist.zip`,
-      Body: zipBuffer,
-      ContentType: "application/zip",
-    }),
+  const key = `apps/${appId}/latest/dist.zip`;
+  // Runs immediately after attachTempInstallInfraPolicy; S3 authz propagation
+  // after PutRolePolicy can take minutes (see probePulumiStateBucket comment).
+  await retryOnAccessDenied(
+    `s3:PutObject ${artifactsBucket}/${key}`,
+    async () => {
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: artifactsBucket,
+          Key: key,
+          Body: zipBuffer,
+          ContentType: "application/zip",
+        }),
+      );
+    },
+    { maxAttempts: 30, maxDelayMs: 10_000 },
   );
 }
 
