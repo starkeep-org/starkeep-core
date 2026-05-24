@@ -44,7 +44,7 @@ import type {
   DatabaseClient,
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
-import { ok, clientErr, type APIGatewayEvent } from "./handler-utils.js";
+import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
 import { loadAccessGrants, canRead, canWrite, type AccessGrants } from "./access-enforcer.js";
 
 // ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ interface CachedCreds {
 const credentialCache = new Map<string, CachedCreds>();
 const CRED_REFRESH_BUFFER_MS = 60_000; // refresh 60s before expiry
 
-async function getAppCreds(appId: string): Promise<CachedCreds> {
+async function getAppCreds(appId: string, accountId: string): Promise<CachedCreds> {
   const cached = credentialCache.get(appId);
   if (cached && cached.expiresAt - Date.now() > CRED_REFRESH_BUFFER_MS) {
     return cached;
@@ -73,7 +73,7 @@ async function getAppCreds(appId: string): Promise<CachedCreds> {
     throw new Error("STACK_PREFIX env var is required");
   }
 
-  const appRoleArn = `arn:aws:iam::${getAccountId()}:role/${stackPrefix}-app-${appId}-role`;
+  const appRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${appId}-role`;
 
   // Single-hop AssumeRole: the CDS Lambda exec role's broker-power policy
   // permits sts:AssumeRole on ${prefix}-app-*, and every per-app role's
@@ -99,10 +99,16 @@ async function getAppCreds(appId: string): Promise<CachedCreds> {
   return creds;
 }
 
-// Account ID parsed from Lambda ARN (available in every Lambda invocation)
-function getAccountId(): string {
-  const arnParts = (process.env.AWS_LAMBDA_FUNCTION_ARN ?? "").split(":");
-  return arnParts[4] ?? "unknown";
+// Account ID parsed from the Lambda invocation context's ARN. Lambda does not
+// expose the function ARN as an env var — only the invocation context does
+// (`context.invokedFunctionArn`), so the caller must thread it in.
+function getAccountId(invokedFunctionArn: string): string {
+  const arnParts = invokedFunctionArn.split(":");
+  const accountId = arnParts[4];
+  if (!accountId) {
+    throw new Error(`Cannot parse account ID from invokedFunctionArn: ${invokedFunctionArn}`);
+  }
+  return accountId;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +222,45 @@ function parseAppPath(rawPath: string): { appId: string; subPath: string } | nul
   return { appId: match[1]!, subPath: match[2] ?? "/" };
 }
 
+// Authorize an object-storage key against the caller's grants. Keys live in
+// two namespaces (see packages/core/src/storage/object-keys.ts):
+//   shared/<typeId>/<shard>/<hash>   — gated by per-type read/write grants
+//   apps/<appId>/syncable/<...>      — owned by the named app; only that app
+//                                       may touch it via its own files routes
+function parseObjectKey(
+  callerAppId: string,
+  decodedKey: string,
+  grants: AccessGrants,
+  mode: "read" | "write",
+): { ok: true } | { ok: false; status: number; message: string } {
+  if (decodedKey.startsWith("shared/")) {
+    const segments = decodedKey.split("/");
+    if (segments.length < 4 || !segments[1] || !segments[2] || !segments[3]) {
+      return { ok: false, status: 400, message: "Invalid shared key" };
+    }
+    const typeId = segments[1]!;
+    const allowed = mode === "read" ? canRead(grants, typeId) : canWrite(grants, typeId);
+    if (!allowed) return { ok: false, status: 403, message: "Forbidden" };
+    return { ok: true };
+  }
+  if (decodedKey.startsWith("apps/")) {
+    const segments = decodedKey.split("/");
+    if (
+      segments.length < 4 ||
+      !segments[1] ||
+      segments[2] !== "syncable" ||
+      !segments[3]
+    ) {
+      return { ok: false, status: 400, message: "Invalid app-syncable key" };
+    }
+    if (segments[1] !== callerAppId) {
+      return { ok: false, status: 403, message: "Forbidden (cross-app syncable key)" };
+    }
+    return { ok: true };
+  }
+  return { ok: false, status: 400, message: "Unknown key namespace" };
+}
+
 // ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
@@ -242,7 +287,7 @@ function recordToResponse(record: DataRecord) {
 // Handler
 // ---------------------------------------------------------------------------
 
-export async function handler(event: APIGatewayEvent) {
+export async function handler(event: APIGatewayEvent, context: LambdaContext) {
   try {
     const method = event.requestContext.http.method.toUpperCase();
     const rawPath = event.rawPath;
@@ -261,7 +306,8 @@ export async function handler(event: APIGatewayEvent) {
     if (!parsed) return clientErr("Not found", 404);
     const { appId, subPath } = parsed;
 
-    const creds = await getAppCreds(appId);
+    const accountId = getAccountId(context.invokedFunctionArn);
+    const creds = await getAppCreds(appId, accountId);
     const { db, storage, clock, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
 
     await db.init();
@@ -404,6 +450,55 @@ export async function handler(event: APIGatewayEvent) {
       const key = dataRecordObjectKey(typeId, hex);
       await storage.put(key, fileBuffer, { contentType: mimeType });
       return ok({ key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
+    }
+
+    // POST /apps/{appId}/files/presign — issue a presigned S3 PUT URL.
+    // Body: { key, contentType? }. The local-data-server's HttpObjectStorageAdapter
+    // uploads directly to S3 with the returned URL, bypassing API Gateway size limits.
+    if (method === "POST" && subPath === "/files/presign") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as { key?: string; contentType?: string };
+      if (!body.key) return clientErr("key is required", 400);
+      const check = parseObjectKey(appId, body.key, grants, "write");
+      if (!check.ok) return clientErr(check.message, check.status);
+      const url = await storage.getSignedPutUrl!(body.key, {
+        expiresIn: 3600,
+        ...(body.contentType ? { contentType: body.contentType } : {}),
+      });
+      return ok({ url });
+    }
+
+    // GET /apps/{appId}/files/{encodedKey}/presign — presigned S3 GET URL.
+    // The caller URL-encodes the full storage key (slashes become %2F) so it
+    // arrives as a single path segment.
+    const filePresignGetMatch = subPath.match(/^\/files\/([^/]+)\/presign$/);
+    if (filePresignGetMatch && method === "GET") {
+      const key = decodeURIComponent(filePresignGetMatch[1]!);
+      const check = parseObjectKey(appId, key, grants, "read");
+      if (!check.ok) return clientErr(check.message, check.status);
+      const exists = await storage.has(key);
+      if (!exists) return clientErr("Not found", 404);
+      const url = await storage.getSignedUrl!(key, { expiresIn: 3600 });
+      return ok({ url });
+    }
+
+    // HEAD|DELETE /apps/{appId}/files/{encodedKey}
+    const fileObjectMatch = subPath.match(/^\/files\/([^/]+)$/);
+    if (fileObjectMatch && method === "HEAD") {
+      const key = decodeURIComponent(fileObjectMatch[1]!);
+      const check = parseObjectKey(appId, key, grants, "read");
+      if (!check.ok) return { statusCode: check.status, body: "" };
+      const exists = await storage.has(key);
+      return { statusCode: exists ? 200 : 404, body: "" };
+    }
+    if (fileObjectMatch && method === "DELETE") {
+      const key = decodeURIComponent(fileObjectMatch[1]!);
+      const check = parseObjectKey(appId, key, grants, "write");
+      if (!check.ok) return clientErr(check.message, check.status);
+      await storage.delete(key);
+      return ok({ ok: true });
     }
 
     // POST /apps/{appId}/data/records/:id/promote — promote an 'unknown' record to a typed record
@@ -579,7 +674,7 @@ export async function handler(event: APIGatewayEvent) {
       for (const [originAppId, group] of changesByOrigin) {
         let originCreds: CachedCreds;
         try {
-          originCreds = await getAppCreds(originAppId);
+          originCreds = await getAppCreds(originAppId, accountId);
         } catch (err) {
           if (isUninstalledOriginError(err)) {
             return clientErr(`originAppId "${originAppId}" is not installed`, 409);

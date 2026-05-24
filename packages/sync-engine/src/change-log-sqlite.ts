@@ -24,6 +24,14 @@ const CREATE_INDEXES_SQL = [
 
 export interface SqliteChangeLogOptions {
   readonly db: DatabaseSync;
+  /**
+   * If set, `getChangesSince` returns only entries whose
+   * `recordSnapshot.originAppId` matches. Used by the local sync supervisor to
+   * give each per-app sync engine a view of only that app's pending writes.
+   * `append` and `prune` ignore this filter — the log is a single shared
+   * outbox; filtering happens at read time.
+   */
+  readonly originAppIdFilter?: string;
 }
 
 /**
@@ -34,7 +42,7 @@ export interface SqliteChangeLogOptions {
 export function createSqliteChangeLog(
   options: SqliteChangeLogOptions,
 ): ChangeLog {
-  const { db } = options;
+  const { db, originAppIdFilter } = options;
   db.exec(CREATE_TABLE_SQL);
   for (const sql of CREATE_INDEXES_SQL) db.exec(sql);
 
@@ -93,7 +101,11 @@ export function createSqliteChangeLog(
         timestamp.counter,
         timestamp.nodeId,
       ) as unknown as RawRow[];
-      return rows.map(rowToEntry);
+      const entries = rows.map(rowToEntry);
+      if (originAppIdFilter === undefined) return entries;
+      return entries.filter(
+        (e) => e.recordSnapshot.originAppId === originAppIdFilter,
+      );
     },
 
     async getLatestTimestamp(): Promise<HLCTimestamp | null> {

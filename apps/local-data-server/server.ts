@@ -21,7 +21,6 @@ import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter
 import {
   createSqliteAccessPolicyStore,
   createSqliteTypeRegistrationStore,
-  listAppSyncableNamespaces,
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
 } from "../../packages/storage-sqlite/src/index.js";
@@ -39,10 +38,10 @@ import type {
 } from "../../packages/storage-aurora-dsql/src/types.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import {
-  createHttpSyncTransport,
   createSqliteChangeLog,
   createSqliteSyncStateStore,
 } from "../../packages/sync-engine/src/index.js";
+import { createSyncSupervisor, type SyncSupervisor } from "./sync-supervisor.js";
 import { WILDCARD_EXPANDABLE_TYPE_IDS, CORE_TYPES } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
 import { dataRecordObjectKey } from "../../packages/core/src/storage/object-keys.js";
@@ -51,7 +50,6 @@ import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createFileWatchManager } from "./watcher.js";
-import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import {
@@ -437,18 +435,11 @@ async function main() {
   // state store, which share the records DB file.
   await databaseAdapter.init();
 
-  const syncTransport = CLOUD_URL
-    ? createHttpSyncTransport({
-        baseUrl: CLOUD_URL,
-        getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
-      })
-    : undefined;
-  const syncRemoteStorage: ObjectStorageAdapter | undefined = CLOUD_URL
-    ? new HttpObjectStorageAdapter({
-        baseUrl: `${CLOUD_URL}/files`,
-        getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
-      })
-    : undefined;
+  // The change log is the shared local-write outbox. The SDK appends to it
+  // on every record write; the supervisor's per-app sync engines each get a
+  // view filtered by originAppId. The state store here is used by the SDK
+  // for HLC clock state (global, one clock per node); per-app pull/push
+  // cursors are owned by the supervisor's per-app adapters around it.
   const syncChangeLog = createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() });
   const syncStateStore = CLOUD_URL
     ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
@@ -476,17 +467,6 @@ async function main() {
     clock,
   });
 
-  async function listAppSyncableFiles() {
-    const namespaces = listAppSyncableNamespaces(localDb);
-    const entries: { key: string }[] = [];
-    for (const ns of namespaces) {
-      if (!ns.filesEnabled) continue;
-      const result = await localAdapter.list(`apps/${ns.appId}/syncable/`);
-      for (const key of result.keys) entries.push({ key });
-    }
-    return entries;
-  }
-
   const sdk = await createStarkeepSdk({
     databaseAdapter,
     objectStorageAdapter: localAdapter,
@@ -498,76 +478,53 @@ async function main() {
     typeRegistrationStore,
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
-    syncTransport,
-    remoteObjectStorageAdapter: syncRemoteStorage,
-    syncChangeLog,
+    changeLog: syncChangeLog,
     syncStateStore,
     getAppSpecific: appSpecificFactory,
-    listAppSyncableFiles,
-    appSyncableSource: { namespaces: namespaceStore, applier: appApplier },
   });
-
-  const syncRuntime = {
-    lastPullAt: null as string | null,
-    lastPushAt: null as string | null,
-    lastError: null as string | null,
-    pullBackoffMs: PULL_INTERVAL_MS,
-    syncPaused: false,
-  };
-
-  let pushTimer: NodeJS.Timeout | null = null;
-  function schedulePush(): void {
-    if (!sdk.sync) return;
-    if (syncRuntime.syncPaused) return;
-    if (pushTimer) return;
-    pushTimer = setTimeout(async () => {
-      pushTimer = null;
-      try {
-        await sdk.sync!.push();
-        syncRuntime.lastPushAt = new Date().toISOString();
-        syncRuntime.lastError = null;
-      } catch (err) {
-        syncRuntime.lastError = (err as Error).message;
-        console.error("push failed:", err);
-      }
-    }, PUSH_DEBOUNCE_MS);
-  }
 
   const sseClients = new Set<import("node:http").ServerResponse>();
   setInterval(() => {
     for (const client of sseClients) client.write(": ping\n\n");
   }, 25_000);
 
-  if (sdk.sync) {
-    sdk.sync.onUpdate((event) => {
-      console.log(`[sync] ${event.eventType} records=${event.recordIds.length}`);
-      if (event.eventType === "local-change-recorded") {
-        schedulePush();
-      }
-      const payload = JSON.stringify(event);
-      for (const client of sseClients) client.write(`data: ${payload}\n\n`);
-    });
-  }
+  // SSE fan-out: every event on the SDK's unified notifier (writes from
+  // local-data-server, plus pull/conflict events forwarded by the supervisor
+  // below) is broadcast to connected SSE clients.
+  sdk.changeNotifier.subscribe((event) => {
+    console.log(`[sync] ${event.eventType} records=${event.recordIds.length}`);
+    const payload = JSON.stringify(event);
+    for (const client of sseClients) client.write(`data: ${payload}\n\n`);
+  });
 
-  let pullTimer: NodeJS.Timeout | null = null;
-  async function runPull(): Promise<void> {
-    if (!sdk.sync) return;
-    try {
-      await sdk.sync.pull();
-      syncRuntime.lastPullAt = new Date().toISOString();
-      syncRuntime.lastError = null;
-      syncRuntime.pullBackoffMs = PULL_INTERVAL_MS;
-    } catch (err) {
-      syncRuntime.lastError = (err as Error).message;
-      syncRuntime.pullBackoffMs = Math.min(syncRuntime.pullBackoffMs * 2, 5 * 60 * 1000);
-      console.error("pull failed:", err);
-    }
-    if (!syncRuntime.syncPaused) {
-      pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
-    }
-  }
-  if (sdk.sync) {
-    pullTimer = setTimeout(runPull, PULL_INTERVAL_MS);
+  // Sync supervisor: owns N SyncEngine instances, one per installed app.
+  // Without a cloud URL or sync state store there's no sync — leave it null.
+  let supervisor: SyncSupervisor | null = null;
+  if (CLOUD_URL && syncStateStore) {
+    supervisor = createSyncSupervisor({
+      sdk,
+      databaseAdapter,
+      localObjectStorage: localAdapter,
+      localDb: databaseAdapter.getRawDatabase(),
+      cloudUrl: CLOUD_URL,
+      getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
+      listInstalledApps: () =>
+        listAppRegistry(localDb).map((row) => ({
+          appId: row.appId,
+          status: row.status,
+        })),
+      namespaceStore,
+      appApplier,
+      listAppSyncableFiles: async (appId: string) => {
+        const ns = namespaceStore.get(appId);
+        if (!ns || !ns.filesEnabled) return [];
+        const result = await localAdapter.list(`apps/${appId}/syncable/`);
+        return result.keys.map((key) => ({ key }));
+      },
+      underlyingSyncStateStore: syncStateStore,
+      pullIntervalMs: PULL_INTERVAL_MS,
+      pushDebounceMs: PUSH_DEBOUNCE_MS,
+    });
   }
 
   // Built-in watcher identity: register it in shared_app_registry just like an
@@ -591,6 +548,13 @@ async function main() {
     },
   };
   const { appId: watcherAppId } = installLocal(localDb, watcherManifest);
+
+  // Now that the watcher and any other apps are in the registry, start
+  // per-app sync loops. New installs that happen via /admin/apps/install
+  // should call `supervisor.rescan()` to pick up the new app.
+  if (supervisor) {
+    supervisor.start();
+  }
 
   // File watch manager — monitors local directories and syncs to Starkeep
   const watchManager = createFileWatchManager({
@@ -824,80 +788,73 @@ async function main() {
         return;
       }
 
-      // Sync observability + manual trigger
+      // Sync observability + manual trigger — backed by the supervisor.
       if (path === "/sync/status" && req.method === "GET") {
-        json(res, {
-          enabled: sdk.sync !== null,
-          syncPaused: syncRuntime.syncPaused,
-          cloudUrl: CLOUD_URL ?? null,
-          lastPullAt: syncRuntime.lastPullAt,
-          lastPushAt: syncRuntime.lastPushAt,
-          lastError: syncRuntime.lastError,
-          pullBackoffMs: syncRuntime.pullBackoffMs,
-          conflictCount: sdk.sync ? sdk.sync.getConflicts().length : 0,
-        });
+        if (!supervisor) {
+          json(res, {
+            enabled: false,
+            syncPaused: false,
+            cloudUrl: CLOUD_URL ?? null,
+            perApp: [],
+            conflictCount: 0,
+            lastError: null,
+            lastPullAt: null,
+            lastPushAt: null,
+            pullBackoffMs: PULL_INTERVAL_MS,
+          });
+          return;
+        }
+        json(res, supervisor.status());
         return;
       }
 
       if (path === "/sync/pause" && req.method === "POST") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           res.writeHead(400);
           json(res, { error: "sync not configured" });
           return;
         }
-        syncRuntime.syncPaused = true;
-        if (pullTimer) { clearTimeout(pullTimer); pullTimer = null; }
-        if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+        supervisor.pause();
         json(res, { ok: true });
         return;
       }
 
       if (path === "/sync/resume" && req.method === "POST") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           res.writeHead(400);
           json(res, { error: "sync not configured" });
           return;
         }
-        syncRuntime.syncPaused = false;
-        sdk.sync.fullSync().then(() => {
-          syncRuntime.lastPullAt = new Date().toISOString();
-          syncRuntime.lastPushAt = new Date().toISOString();
-          syncRuntime.lastError = null;
-          syncRuntime.pullBackoffMs = PULL_INTERVAL_MS;
-        }).catch((err: Error) => {
-          syncRuntime.lastError = err.message;
-          console.error("resume fullSync failed:", err);
-        });
-        pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
+        supervisor.resume().catch((err: Error) =>
+          console.error("resume failed:", err),
+        );
         json(res, { ok: true });
         return;
       }
 
       if (path === "/sync/now" && req.method === "POST") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           res.writeHead(400);
           json(res, { error: "sync not configured" });
           return;
         }
-        const result = await sdk.sync.fullSync();
-        syncRuntime.lastPullAt = new Date().toISOString();
-        syncRuntime.lastPushAt = new Date().toISOString();
+        const result = await supervisor.fullSync();
         json(res, result);
         return;
       }
 
       if (path === "/sync/conflicts" && req.method === "GET") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           json(res, { conflicts: [] });
           return;
         }
-        json(res, { conflicts: sdk.sync.getConflicts() });
+        json(res, { conflicts: supervisor.conflicts() });
         return;
       }
 
       const resolveMatch = path.match(/^\/sync\/conflicts\/([^/]+)\/resolve$/);
       if (resolveMatch && req.method === "POST") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           res.writeHead(400);
           json(res, { error: "sync not configured" });
           return;
@@ -908,11 +865,10 @@ async function main() {
           json(res, { error: 'body must include { keep: "local" | "server" }' });
           return;
         }
-        const record = await sdk.data.resolveConflict(
+        const record = await supervisor.resolveConflict(
           resolveMatch[1]! as any,
           { keep: body.keep },
         );
-        schedulePush();
         json(res, { record });
         return;
       }
@@ -1736,6 +1692,8 @@ async function main() {
         const body = JSON.parse(await readBody(req));
         try {
           const result = installLocal(localDb, body);
+          // Bring up a sync loop for the freshly-installed app.
+          supervisor?.rescan();
           json(res, { appId: result.appId, hmacSecret: result.hmacSecret });
         } catch (err) {
           if (err instanceof ManifestValidationError) {
@@ -1766,6 +1724,8 @@ async function main() {
             await rm(target, { recursive: true, force: true });
           },
         });
+        // Tear down the per-app sync loop.
+        supervisor?.rescan();
         json(res, { ok: true, appId: targetAppId });
         return;
       }
@@ -1819,8 +1779,7 @@ async function main() {
   const shutdown = async () => {
     sseClients.forEach(c => c.end());
     server.close();
-    if (pullTimer) clearTimeout(pullTimer);
-    if (pushTimer) clearTimeout(pushTimer);
+    if (supervisor) await supervisor.stop();
     await watchManager.shutdown();
     await sdk.close();
     process.exit(0);

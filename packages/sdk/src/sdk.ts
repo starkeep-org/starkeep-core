@@ -3,7 +3,6 @@ import {
   createDataRecord,
   dataRecordObjectKey,
   SyncStatus,
-  type StarkeepId,
   type DataRecord,
   type MetadataRow,
   type TypeRegistration,
@@ -19,13 +18,12 @@ async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
 }
 import { createUnifiedIndex } from "@starkeep/index";
 import { createAggregationEngine } from "@starkeep/aggregations";
-import { createSyncEngine, type SyncEngine } from "@starkeep/sync-engine";
+import { createChangeNotifier } from "@starkeep/sync-engine";
 import { createAccessControlEngine, createEnforcedDatabaseAdapter } from "@starkeep/access-control";
 import { createSharedSpaceApi } from "@starkeep/shared-space-api";
 import type {
   StarkeepSdk,
   StarkeepSdkOptions,
-  ConflictResolution,
   DataPutInput,
 } from "./types.js";
 
@@ -40,13 +38,9 @@ export async function createStarkeepSdk(
     typeRegistrationStore,
     ownerId,
     nodeId,
-    syncTransport,
-    remoteObjectStorageAdapter,
-    syncChangeLog,
+    changeLog,
     syncStateStore,
     subject,
-    listAppSyncableFiles,
-    appSyncableSource,
   } = options;
 
   await rawDatabaseAdapter.init();
@@ -54,6 +48,9 @@ export async function createStarkeepSdk(
 
   // Seed the clock from persisted state and debounce write-back on tick,
   // so a restart resumes with an HLC causally after anything we emitted.
+  // The clock state is global (one clock per node) — the supervisor's
+  // per-app cursors live alongside it in the same store but are owned
+  // elsewhere.
   const initialHlcState =
     (await syncStateStore?.getHlcClockState()) ?? undefined;
   let pendingClockState: { wallTime: number; counter: number } | null = null;
@@ -78,6 +75,12 @@ export async function createStarkeepSdk(
         : undefined,
     });
 
+  // The SDK owns one shared change notifier. Writes emit
+  // `local-change-recorded`; the supervisor's per-app sync engines forward
+  // their own pull/conflict events onto this same notifier so consumers
+  // (sharedSpaceApi, SSE clients) see one unified stream.
+  const changeNotifier = createChangeNotifier();
+
   // When a subject is provided, wrap the adapter so every operation is
   // gated by access control and the private-storage structural rule.
   const accessControlEngine = createAccessControlEngine({
@@ -100,19 +103,25 @@ export async function createStarkeepSdk(
   const unifiedIndex = createUnifiedIndex({ databaseAdapter });
   const aggregationEngine = createAggregationEngine({ databaseAdapter });
 
-  let syncEngine: SyncEngine | null = null;
-  if (syncTransport && remoteObjectStorageAdapter) {
-    await remoteObjectStorageAdapter.init();
-    syncEngine = createSyncEngine({
-      localDatabaseAdapter: databaseAdapter,
-      localObjectStorage: objectStorageAdapter,
-      remoteObjectStorage: remoteObjectStorageAdapter,
-      transport: syncTransport,
-      clock,
-      changeLog: syncChangeLog,
-      syncState: syncStateStore,
-      listAppSyncableFiles,
-      appSyncableSource,
+  async function logChange(
+    operation: "create" | "update" | "delete",
+    record: DataRecord,
+    baseVersion: number | null,
+  ): Promise<void> {
+    const ts = clock.now();
+    if (changeLog) {
+      await changeLog.append({
+        recordId: record.id,
+        operation,
+        timestamp: ts,
+        recordSnapshot: record,
+        baseVersion,
+      });
+    }
+    changeNotifier.emit({
+      eventType: "local-change-recorded",
+      recordIds: [record.id],
+      timestamp: ts,
     });
   }
 
@@ -121,63 +130,9 @@ export async function createStarkeepSdk(
     objectStorageAdapter,
     clock,
     ownerId,
-    changeNotifier: syncEngine?.changeNotifier,
+    changeNotifier,
     getAppSpecific: options.getAppSpecific,
   });
-
-  async function resolveConflictImpl(
-    recordId: StarkeepId,
-    resolution: ConflictResolution,
-  ): Promise<DataRecord | null> {
-    if (!syncEngine) {
-      throw new Error("Sync is not configured; no conflicts to resolve.");
-    }
-    const current = syncEngine.getConflicts().find((c) => c.recordId === recordId);
-    if (!current) return null;
-
-    if (resolution.keep === "server") {
-      if (!current.server) {
-        await databaseAdapter.delete(recordId);
-        syncEngine.clearConflict(recordId);
-        return null;
-      }
-      await databaseAdapter.put({
-        ...current.server,
-        syncStatus: SyncStatus.Synced,
-      });
-      syncEngine.clearConflict(recordId);
-      return databaseAdapter.get(recordId);
-    }
-
-    if (resolution.keep === "local") {
-      const baseVersion = current.server?.version ?? null;
-      const rebased: DataRecord = {
-        ...current.local,
-        version: (baseVersion ?? 0) + 1,
-        updatedAt: clock.now(),
-        syncStatus: SyncStatus.PendingPush,
-      };
-      await databaseAdapter.put(rebased);
-      syncEngine.clearConflict(recordId);
-      await syncEngine.recordChange(
-        current.server ? "update" : "create",
-        rebased,
-        { baseVersion },
-      );
-      return rebased;
-    }
-
-    // keep: "custom" — caller supplies record verbatim, we trust its version.
-    await databaseAdapter.put({
-      ...resolution.record,
-      syncStatus: SyncStatus.PendingPush,
-    });
-    syncEngine.clearConflict(recordId);
-    await syncEngine.recordChange("update", resolution.record, {
-      baseVersion: current.server?.version ?? null,
-    });
-    return resolution.record;
-  }
 
   async function writeRecordAndMetadata(
     input: DataPutInput,
@@ -206,9 +161,7 @@ export async function createStarkeepSdk(
         recordId: record.id,
       });
     }
-    if (syncEngine) {
-      await syncEngine.recordChange("create", record, { baseVersion: null });
-    }
+    await logChange("create", record, null);
     return record;
   }
 
@@ -268,9 +221,7 @@ export async function createStarkeepSdk(
           syncStatus: SyncStatus.PendingPush,
         };
         await databaseAdapter.put(updated);
-        if (syncEngine) {
-          await syncEngine.recordChange("update", updated, { baseVersion });
-        }
+        await logChange("update", updated, baseVersion);
         return updated;
       },
 
@@ -286,11 +237,7 @@ export async function createStarkeepSdk(
         };
         await databaseAdapter.put(tombstone);
         await databaseAdapter.deleteMetadata(existing.type, recordId);
-        if (syncEngine) {
-          await syncEngine.recordChange("delete", tombstone, {
-            baseVersion: existing.version,
-          });
-        }
+        await logChange("delete", tombstone, existing.version);
       },
 
       async query(params) {
@@ -309,8 +256,6 @@ export async function createStarkeepSdk(
       async getMetadataByIds(typeId, recordIds) {
         return databaseAdapter.getMetadataByIds(typeId, recordIds);
       },
-
-      resolveConflict: resolveConflictImpl,
     },
 
     index: {
@@ -324,35 +269,6 @@ export async function createStarkeepSdk(
         return aggregationEngine.compute(aggregationOptions);
       },
     },
-
-    sync: syncEngine
-      ? {
-          async push() {
-            const result = await syncEngine!.push();
-            return {
-              pushed: result.accepted.length,
-              rejected: result.rejected.length,
-            };
-          },
-
-          async pull() {
-            const result = await syncEngine!.pull();
-            return { pulled: result.changes.length };
-          },
-
-          async fullSync() {
-            return syncEngine!.fullSync();
-          },
-
-          getConflicts() {
-            return syncEngine!.getConflicts();
-          },
-
-          onUpdate(listener) {
-            return syncEngine!.changeNotifier.subscribe(listener);
-          },
-        }
-      : null,
 
     accessControl: {
       async createPolicy(input) {
@@ -413,6 +329,10 @@ export async function createStarkeepSdk(
       },
     },
 
+    changeLog,
+    changeNotifier,
+    clock,
+
     async close() {
       if (clockFlushTimer) {
         clearTimeout(clockFlushTimer);
@@ -423,9 +343,6 @@ export async function createStarkeepSdk(
       }
       await databaseAdapter.close();
       await objectStorageAdapter.close();
-      if (remoteObjectStorageAdapter) {
-        await remoteObjectStorageAdapter.close();
-      }
     },
   };
 }

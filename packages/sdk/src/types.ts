@@ -3,7 +3,6 @@ import type {
   DataRecord,
   HLCClock,
   CreateDataRecordInput,
-  AnyRecord,
   MetadataRow,
   TypeRegistration,
 } from "@starkeep/core";
@@ -14,11 +13,9 @@ import type {
   AggregationOptions,
 } from "@starkeep/aggregations";
 import type {
-  ChangeListener,
-  SyncTransport,
-  SyncConflict,
-  SyncStateStore,
   ChangeLog,
+  ChangeNotifier,
+  SyncStateStore,
 } from "@starkeep/sync-engine";
 import type {
   CreatePolicyInput,
@@ -38,11 +35,6 @@ import type {
   AppSpecificOperations,
   WebSocketConnection,
 } from "@starkeep/shared-space-api";
-
-export type ConflictResolution =
-  | { keep: "local" }
-  | { keep: "server" }
-  | { keep: "custom"; record: AnyRecord };
 
 /**
  * Input to `data.putWithFile` / `data.putWithLocalFile` — the file-bytes /
@@ -86,10 +78,6 @@ export interface DataOperations {
   ): Promise<DataRecord>;
   delete(recordId: StarkeepId): Promise<void>;
   query(params: { type?: string; filters?: import("@starkeep/storage-adapter").Filter[] }): Promise<DataRecord[]>;
-  resolveConflict(
-    recordId: StarkeepId,
-    resolution: ConflictResolution,
-  ): Promise<DataRecord | null>;
 
   /** Write (insert-or-replace) a per-type metadata row. */
   putMetadata(typeId: string, row: MetadataRow): Promise<void>;
@@ -108,14 +96,6 @@ export interface IndexOperations {
 
 export interface AggregationOperations {
   compute(options?: AggregationOptions): Promise<AggregationResult>;
-}
-
-export interface SyncOperations {
-  push(): Promise<{ pushed: number; rejected: number }>;
-  pull(): Promise<{ pulled: number }>;
-  fullSync(): Promise<{ pulled: number; pushed: number; rejected: number }>;
-  getConflicts(): SyncConflict[];
-  onUpdate(listener: ChangeListener): () => void;
 }
 
 export interface AccessControlOperations {
@@ -148,10 +128,26 @@ export interface StarkeepSdk {
   readonly data: DataOperations;
   readonly index: IndexOperations;
   readonly aggregations: AggregationOperations;
-  readonly sync: SyncOperations | null;
   readonly accessControl: AccessControlOperations;
   readonly typeRegistrations: TypeRegistrationOperations;
   readonly api: ApiOperations;
+  /**
+   * Append-only outbox of local record writes. The local-data-server's sync
+   * supervisor consumes it (filtered per app by `originAppId`) to drive
+   * per-app sync loops. Undefined when the SDK is constructed without a
+   * change log (no sync).
+   */
+  readonly changeLog: ChangeLog | undefined;
+  /**
+   * Broadcast channel for record-level events. The SDK emits
+   * `local-change-recorded` on every write; the sync supervisor forwards
+   * `local-data-synced` and `conflict-detected` from its per-app engines
+   * onto this same notifier so subscribers (sharedSpaceApi, SSE clients)
+   * see one unified stream.
+   */
+  readonly changeNotifier: ChangeNotifier;
+  /** The clock backing this SDK — exposed so the supervisor can share it. */
+  readonly clock: HLCClock;
   close(): Promise<void>;
 }
 
@@ -170,9 +166,18 @@ export interface StarkeepSdkOptions {
   readonly ownerId: string;
   readonly nodeId: string;
   readonly clock?: HLCClock;
-  readonly syncTransport?: SyncTransport;
-  readonly remoteObjectStorageAdapter?: ObjectStorageAdapter;
-  readonly syncChangeLog?: ChangeLog;
+  /**
+   * Optional append-only change log. If provided, every record write is
+   * appended here for the sync supervisor (which lives outside the SDK) to
+   * consume. Omitting it disables write logging — the SDK still works for
+   * pure-local read/write without sync.
+   */
+  readonly changeLog?: ChangeLog;
+  /**
+   * Optional state store. The SDK uses it only to seed and persist HLC clock
+   * state (one clock per node). Per-app pull/push cursors are owned by the
+   * supervisor and never touched here.
+   */
   readonly syncStateStore?: SyncStateStore;
   readonly subject?: {
     readonly subjectType: SubjectType;
@@ -184,19 +189,4 @@ export interface StarkeepSdkOptions {
    * the syncable-namespace registry and storage layout.
    */
   readonly getAppSpecific?: (subject: ApiSubject) => AppSpecificOperations | null;
-  /**
-   * Returns the list of `apps/<appId>/syncable/...` file keys to include in
-   * each push and pull cycle. Provided by the harness (local-data-server).
-   * Omitting this option limits file sync to record-attached blobs only.
-   */
-  readonly listAppSyncableFiles?: () => Promise<import("@starkeep/sync-engine").FileEntry[]>;
-  /**
-   * Provides the applier and namespace store for app-syncable row sync.
-   * Provided by the harness (local-data-server). Without it, app-syncable
-   * rows are silently skipped on pull and omitted from push.
-   */
-  readonly appSyncableSource?: {
-    readonly namespaces: import("@starkeep/sync-engine").AppSyncableNamespaceStore;
-    readonly applier: import("@starkeep/sync-engine").AppSyncableApplier & import("@starkeep/sync-engine").ScanCapableApplier;
-  };
 }

@@ -265,6 +265,17 @@ export function foundationalPermissionsBoundaryStatements(
       },
     },
     {
+      // Broker pattern: cloud-data-server assumes the caller's per-app role on
+      // every sync request to act under that app's identity. The role's inline
+      // `broker-power` policy grants the same action; without this matching
+      // statement in the boundary, the intersection cap denies AssumeRole at
+      // runtime and every /apps/{appId}/sync/{pull,push} ends in 403.
+      Sid: "FoundationalBrokerAssumeAppRoles",
+      Effect: "Allow",
+      Action: "sts:AssumeRole",
+      Resource: `arn:aws:iam::*:role/${stackPrefix}-app-*`,
+    },
+    {
       Sid: "FoundationalPassRoleOwnRoleToLambda",
       Effect: "Allow",
       Action: "iam:PassRole",

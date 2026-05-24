@@ -106,7 +106,9 @@ function brokerPowerPolicy(stackPrefix: string, accountId: string): PolicyDoc {
           Sid: "BrokerAssumeAppRoles",
           Effect: "Allow",
           Action: "sts:AssumeRole",
-          Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*-role`,
+          // Matches iam.ts:147 exactly — `-app-*` (no trailing `-role`) so
+          // any future role-name suffix variants are covered too.
+          Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
         },
       ],
     },
@@ -236,18 +238,61 @@ const CONTEXTS: Record<string, ContextBuilder> = {
     },
   },
 
-  // Stubs — wired in shape but their policy sets aren't built yet. Throwing
-  // here is intentional so the CLI surfaces "not implemented" rather than
-  // silently simulating against an empty policy and printing all Allowed.
   "runtime-cloud-data-server": {
-    description: "cloud-data-server Lambda runtime (broker-power + runtime, no temp-install).",
-    build() {
-      throw new Error(
-        "context 'runtime-cloud-data-server' not implemented yet: needs runtime policy wiring (see buildRuntimePolicy in admin-installer/src/temp-policies.ts).",
-      );
+    description:
+      "cloud-data-server Lambda runtime — broker-power + runtime (no " +
+      "temp-install), capped by the foundational boundary. Models the " +
+      "AssumeRole / log-write calls the Lambda makes on every sync request. " +
+      "Set APP_ID to scope the AssumeRole target to a concrete per-app role.",
+    build({ stackPrefix, accountId }) {
+      const roleName = `${stackPrefix}-app-cloud-data-server-role`;
+      const runtime: PolicyDoc = {
+        name: "runtime",
+        // CDS is installed with sharedTypeAccess=[] (see
+        // builtin-installs.ts:229) — runtime data access happens under the
+        // assumed app creds, not the broker's exec creds, so AppS3SharedData
+        // isn't needed on the CDS role itself.
+        policy: JSON.parse(
+          buildRuntimePolicy(stackPrefix, "cloud-data-server", [], false, false, false),
+        ),
+      };
+      return {
+        principalArn: assumedRoleArn(accountId, roleName, "runtime"),
+        principalRoleName: roleName,
+        identityPolicies: [brokerPowerPolicy(stackPrefix, accountId), runtime],
+        permissionBoundaryPolicies: [foundationalBoundary(stackPrefix)],
+        contextVariables: {
+          "aws:PrincipalTag/starkeep:appId": "cloud-data-server",
+        },
+      };
     },
-    expectedCalls() {
-      return [];
+    expectedCalls({ stackPrefix, accountId, region, appId }) {
+      // AssumeRole is the load-bearing runtime call — without it every sync
+      // request 403s. Scope to a concrete per-app role ARN if APP_ID is set;
+      // otherwise model the wildcard pattern the broker-power policy grants.
+      const targetAppId = appId ?? "photos";
+      const targetAppRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${targetAppId}-role`;
+      const cdsLambdaLogGroup = `arn:aws:logs:${region}:${accountId}:log-group:/aws/lambda/${stackPrefix}-app-cloud-data-server-api`;
+      return [
+        {
+          action: "sts:AssumeRole",
+          resource: targetAppRoleArn,
+          why:
+            "On every /apps/{appId}/sync/{pull,push} the CDS Lambda assumes the caller's " +
+            "per-app role (single-hop broker pattern, api-handler.ts:64). Both broker-power " +
+            "AND the foundational boundary must grant sts:AssumeRole on the per-app role pattern.",
+        },
+        {
+          action: "logs:CreateLogStream",
+          resource: cdsLambdaLogGroup,
+          why: "Lambda runtime appends a log stream per invocation under the CDS log group.",
+        },
+        {
+          action: "logs:PutLogEvents",
+          resource: cdsLambdaLogGroup,
+          why: "Lambda runtime writes log events for every invocation.",
+        },
+      ];
     },
   },
   "install-ddl": {
