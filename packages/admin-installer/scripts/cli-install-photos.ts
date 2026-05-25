@@ -35,6 +35,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -224,11 +225,22 @@ async function buildPhotosBundle(): Promise<Buffer> {
     }
 
     // 2. Build with OpenNext (runs `open-next build` via pnpm build script).
+    //    STARKEEP_APP_BASE_PATH bakes Next's basePath into the build so all
+    //    asset URLs and routes are emitted under /apps/<appId>, matching how
+    //    the shared API Gateway forwards requests.
     console.log("\nBuilding photos app with OpenNext…");
     const buildResult = spawnSync("pnpm", ["build"], {
       cwd: PHOTOS_DIR,
       stdio: "inherit",
-      env: { ...process.env, NEXT_PUBLIC_FORCE_REMOTE: "true", NODE_ENV: "production" },
+      env: {
+        ...process.env,
+        NEXT_PUBLIC_FORCE_REMOTE: "true",
+        NODE_ENV: "production",
+        STARKEEP_APP_BASE_PATH: "/apps/photos",
+        // basePath isn't exposed to client JS by Next.js; mirror it as a
+        // NEXT_PUBLIC_* var so client fetch() calls can prepend it.
+        NEXT_PUBLIC_STARKEEP_APP_BASE_PATH: "/apps/photos",
+      },
     });
     if (buildResult.status !== 0) {
       console.error("photos OpenNext build failed.");
@@ -243,7 +255,132 @@ async function buildPhotosBundle(): Promise<Buffer> {
       process.exit(1);
     }
     console.log("\nCopying OpenNext server function…");
-    cpSync(serverFnDir, stagingDir, { recursive: true });
+    // verbatimSymlinks preserves the original relative symlink targets.
+    // OpenNext's output relies on pnpm-style relative links (e.g.
+    // photos/node_modules/next -> ../../node_modules/.pnpm/...); without this
+    // flag Node rewrites them to absolute paths pointing at the local dev
+    // machine, which obviously don't resolve inside the Lambda sandbox.
+    cpSync(serverFnDir, stagingDir, { recursive: true, verbatimSymlinks: true });
+
+    // 3b. Bundle Next.js static assets into the Lambda zip and overwrite
+    //     the OpenNext entry with a wrapper that serves /_next/* and
+    //     BUILD_ID from local disk before delegating to OpenNext. OpenNext
+    //     normally expects these to live on a CDN/S3 origin (see
+    //     open-next.output.json `behaviors`), but this installer ships the
+    //     server function as the only origin — so without this wrapper every
+    //     /apps/photos/_next/static/* request 404s and the page renders
+    //     blank (CSR bailout with no chunks).
+    const assetsSrc = resolve(PHOTOS_DIR, ".open-next", "assets");
+    if (!existsSync(assetsSrc)) {
+      console.error(`OpenNext assets dir not found at ${assetsSrc}.`);
+      process.exit(1);
+    }
+    console.log("Copying OpenNext static assets…");
+    cpSync(assetsSrc, join(stagingDir, "assets"), { recursive: true });
+
+    const APP_BASE_PATH = "/apps/photos";
+    const wrapper = `import { readFile, stat } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { dirname, join, normalize } from "node:path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ASSETS_DIR = join(__dirname, "assets");
+const BASE_PATH = ${JSON.stringify(APP_BASE_PATH)};
+
+const MIME = {
+  ".js": "application/javascript; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".txt": "text/plain; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+};
+
+const TEXT_EXT = new Set([".js", ".mjs", ".css", ".json", ".map", ".svg", ".txt", ".html"]);
+
+function contentTypeFor(path) {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return "application/octet-stream";
+  return MIME[path.slice(dot).toLowerCase()] ?? "application/octet-stream";
+}
+
+function isStaticAssetPath(rest) {
+  // Only _next/static/* and BUILD_ID live on disk in .open-next/assets.
+  // _next/data/* and _next/image* are handled by the OpenNext server.
+  return rest === "BUILD_ID" || rest.startsWith("_next/static/");
+}
+
+let upstreamHandler;
+async function getUpstream() {
+  if (!upstreamHandler) {
+    const mod = await import("./photos/index.mjs");
+    upstreamHandler = mod.handler;
+  }
+  return upstreamHandler;
+}
+
+export async function handler(event, context) {
+  const rawPath = event?.rawPath ?? "";
+  if (rawPath.startsWith(BASE_PATH + "/")) {
+    const rest = rawPath.slice(BASE_PATH.length + 1);
+    if (isStaticAssetPath(rest)) {
+      // normalize() collapses any "../" segments before we touch the FS;
+      // we then explicitly reject anything that still escapes ASSETS_DIR.
+      const safeRest = normalize(rest);
+      const filePath = join(ASSETS_DIR, safeRest);
+      if (!filePath.startsWith(ASSETS_DIR + "/") && filePath !== ASSETS_DIR) {
+        return { statusCode: 400, headers: { "content-type": "text/plain" }, body: "Bad path" };
+      }
+      try {
+        const s = await stat(filePath);
+        if (s.isFile()) {
+          const ct = contentTypeFor(filePath);
+          const ext = filePath.slice(filePath.lastIndexOf("."));
+          const isImmutable = rest.startsWith("_next/static/");
+          const cacheControl = isImmutable
+            ? "public, max-age=31536000, immutable"
+            : "public, max-age=0, must-revalidate";
+          if (TEXT_EXT.has(ext.toLowerCase())) {
+            const body = await readFile(filePath, "utf8");
+            return {
+              statusCode: 200,
+              headers: { "content-type": ct, "cache-control": cacheControl },
+              body,
+            };
+          }
+          const buf = await readFile(filePath);
+          return {
+            statusCode: 200,
+            headers: { "content-type": ct, "cache-control": cacheControl },
+            body: buf.toString("base64"),
+            isBase64Encoded: true,
+          };
+        }
+      } catch (e) {
+        if (e?.code !== "ENOENT") {
+          console.error("Static asset read error:", e);
+        }
+        // fall through to upstream on miss
+      }
+    }
+  }
+  const up = await getUpstream();
+  return up(event, context);
+}
+`;
+    writeFileSync(join(stagingDir, "index.mjs"), wrapper, "utf8");
 
     // 4. Bundle the backend Lambda handler with esbuild. sharp is external —
     //    it needs native binaries installed for the Lambda (linux) platform.
@@ -273,7 +410,11 @@ async function buildPhotosBundle(): Promise<Buffer> {
 
     // 6. Zip everything in staging dir.
     console.log("\nCreating dist.zip…");
-    execSync(`zip -r "${distZip}" . -q`, { cwd: stagingDir, stdio: "inherit" });
+    // -y preserves symlinks: OpenNext's output uses pnpm's virtual-store layout
+    // (e.g. photos/node_modules/next -> ../../node_modules/.pnpm/next@.../...),
+    // and dereferencing them collapses next into a real copy that can no longer
+    // resolve peer deps like @swc/helpers through the .pnpm sibling tree.
+    execSync(`zip -ry "${distZip}" . -q`, { cwd: stagingDir, stdio: "inherit" });
 
     return readFileSync(distZip);
   } finally {

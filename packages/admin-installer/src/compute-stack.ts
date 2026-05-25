@@ -72,6 +72,13 @@ export interface ComputeContext {
   dsqlHostname: string;
   filesBucket: string;
   /**
+   * Base64-encoded SHA-256 of the uploaded dist.zip. Wired to
+   * aws.lambda.Function.sourceCodeHash so Pulumi sees the bundle change
+   * even though s3Key is constant (apps/<appId>/latest/dist.zip).
+   * Optional: not all callers (e.g. uninstall) need to provide it.
+   */
+  bundleHash?: string;
+  /**
    * install-infra credentials. Per-app Pulumi up/destroy runs as
    * install-infra (not the per-app role); this carries the install-time
    * AWS-provisioning power scoped to this app via a temp policy attached

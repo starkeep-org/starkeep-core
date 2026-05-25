@@ -9,6 +9,7 @@
  * admin-app role. The manager role is assumed as the first hop.
  */
 
+import { createHash } from "node:crypto";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import { roleChain, type AwsCredentials } from "./session";
 import {
@@ -203,6 +204,9 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
 
     if (ir.compute.enabled) {
       await runStep(appId, "install", "install_compute_stack", done, async () => {
+        const bundleHash = zipBuffer
+          ? createHash("sha256").update(zipBuffer).digest("base64")
+          : undefined;
         const computeCtx: ComputeContext = {
           stackPrefix: config.stackPrefix,
           appId,
@@ -217,6 +221,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
           dsqlHostname: config.dsqlHostname,
           filesBucket: config.filesBucket,
           infraCreds,
+          bundleHash,
         };
         receipt = await installComputeStack(manifest, computeCtx);
       });

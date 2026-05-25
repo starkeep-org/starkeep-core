@@ -123,6 +123,12 @@ async function main(): Promise<void> {
     await client.connect();
     const r = await client.query("SELECT current_user, session_user, version()");
     console.log("OK:", r.rows[0]);
+    const customSql = process.env.SQL;
+    if (customSql) {
+      const r2 = await client.query(customSql);
+      console.log(`ROWS (${r2.rows.length}):`);
+      for (const row of r2.rows) console.log(row);
+    }
     await client.end();
   } catch (err) {
     const e = err as { code?: string; message?: string; hint?: string };

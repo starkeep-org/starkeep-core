@@ -34,6 +34,7 @@ export function buildPulumiProgram(
         handler: handler.handler,
         s3Bucket: ctx.artifactsBucket,
         s3Key: `apps/${ctx.appId}/latest/dist.zip`,
+        ...(ctx.bundleHash ? { sourceCodeHash: ctx.bundleHash } : {}),
         memorySize: handler.memoryMb,
         timeout: handler.timeoutSeconds,
         environment: {
@@ -83,12 +84,12 @@ export function buildPulumiProgram(
           : routeKey.replace(/^([A-Z]+) \/(.*)$/, (_m, method, rest) =>
               rest === "" ? `${method} /apps/${ctx.appId}` : `${method} /apps/${ctx.appId}/${rest}`);
 
+        const isPublic = handler.auth === "public";
         const route = new aws.apigatewayv2.Route(`route-${handler.name}-${i}`, {
           apiId: ctx.apiGatewayId,
           routeKey: prefixedRouteKey,
           target: pulumi.interpolate`integrations/${integration.id}`,
-          authorizerId: ctx.authorizerId,
-          authorizationType: "JWT",
+          ...(isPublic ? {} : { authorizerId: ctx.authorizerId, authorizationType: "JWT" }),
         });
 
         outputs[`routeId:${handler.name}-${i}`] = route.id;
