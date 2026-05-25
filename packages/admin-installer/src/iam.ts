@@ -79,6 +79,32 @@ export interface CreateAppRoleInput {
  */
 const FOUNDATIONAL_APP_ID = "cloud-data-server";
 
+/**
+ * The cloud-side identity that signs for records originated by the
+ * local-data-server's built-in features (notably the file watcher). LDS is a
+ * built-in; cloud-data-server is its symmetric built-in; this is the cloud
+ * role the cloud-data-server install creates so push requests carrying
+ * `originAppId: "local-data-sync"` can be STS-assumed and authorized.
+ */
+export const LOCAL_DATA_SYNC_APP_ID = "local-data-sync";
+
+/**
+ * Cloud-installable appIds must survive IAM role names, Postgres role names,
+ * S3 prefixes, and URL paths without per-component encoding tricks. The
+ * regex below is the conservative intersection: lowercase, starts with
+ * alnum, no `/`, `@`, `+`, `=`, etc. Mirrored in the cloud handler's
+ * `parseAppPath` regex (see cloud-data-server/src/api-handler.ts).
+ */
+const CLOUD_APP_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
+
+export function assertCloudInstallableAppId(appId: string): void {
+  if (!CLOUD_APP_ID_RE.test(appId)) {
+    throw new Error(
+      `appId ${JSON.stringify(appId)} is not cloud-installable: must match ${CLOUD_APP_ID_RE}`,
+    );
+  }
+}
+
 export async function createAppRole(input: CreateAppRoleInput): Promise<string> {
   const {
     stackPrefix, appId, accountId,

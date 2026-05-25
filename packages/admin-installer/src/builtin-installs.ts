@@ -48,6 +48,9 @@ import {
   logAppRoleSnapshot,
   logCallerIdentity,
 } from "./iam-diagnostics";
+import { LOCAL_DATA_SYNC_APP_ID, assertCloudInstallableAppId } from "./iam";
+import { installApp, uninstallApp, type InstallerConfig } from "./orchestrator";
+import { appManifestSchema } from "@starkeep/admin-manifest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -214,6 +217,8 @@ export async function installCloudDataServer(
   const manifest = loadCloudDataServerManifest();
   const appId = "cloud-data-server";
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
+
+  assertCloudInstallableAppId(appId);
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
@@ -434,4 +439,81 @@ export async function uninstallCloudDataServer(
   await deleteAppRoleWithPolicies(config.stackPrefix, appId, managerCreds);
 
   console.log("cloud-data-server uninstalled.");
+}
+
+/**
+ * Canned manifest for the `local-data-sync` built-in cloud identity.
+ *
+ * The local-data-server has built-in features (notably the file watcher) that
+ * originate shared-type records on behalf of the user. Those records must
+ * round-trip through cloud sync, but LDS itself has no cloud presence — it's a
+ * local process. `local-data-sync` is the cloud-side counterpart: an app role
+ * with write access on the relevant shared types so push requests carrying
+ * `originAppId: "local-data-sync"` can be STS-assumed and authorized.
+ *
+ * Symmetric to cloud-data-server's foundational install: paired built-in
+ * identities, one local and one cloud, that together describe LDS sync.
+ *
+ * No compute, no app-specific syncable tables, no `unknown` ingestion (the
+ * LDS resolves the type locally before write).
+ */
+function loadLocalDataSyncManifest() {
+  return appManifestSchema.parse({
+    id: LOCAL_DATA_SYNC_APP_ID,
+    name: "Local Data Sync",
+    version: "1.0.0",
+    tier: "official",
+    infraRequirements: {
+      sharedTypeAccess: [
+        {
+          typeId: "image",
+          access: "readwrite",
+          rationale: "LDS file watcher ingests image files.",
+        },
+        {
+          typeId: "markdown",
+          access: "readwrite",
+          rationale: "LDS file watcher ingests markdown files.",
+        },
+      ],
+      canIngestUnknown: true,
+    },
+  });
+}
+
+/**
+ * Install (or update) the `local-data-sync` built-in cloud identity.
+ *
+ * Thin wrapper over `installApp` with the canned manifest above. Must be
+ * called after `installCloudDataServer` has provisioned the foundational
+ * infra (DSQL, files bucket, API Gateway, install-ddl / install-infra
+ * roles) — `config` carries those outputs.
+ */
+export async function installLocalDataSync(config: InstallerConfig): Promise<void> {
+  assertCloudInstallableAppId(LOCAL_DATA_SYNC_APP_ID);
+  const manifest = loadLocalDataSyncManifest();
+  console.log(`\nInstalling ${LOCAL_DATA_SYNC_APP_ID}…`);
+  await installApp({
+    appId: LOCAL_DATA_SYNC_APP_ID,
+    manifest,
+    version: manifest.version,
+    config,
+  });
+  console.log(`${LOCAL_DATA_SYNC_APP_ID} installed.`);
+}
+
+/**
+ * Tear down the `local-data-sync` built-in cloud identity. Mirrors
+ * `installLocalDataSync` and is invoked from `uninstallCloudDataServer`
+ * (before the foundational tear-down, so the DSQL cluster still exists).
+ */
+export async function uninstallLocalDataSync(config: InstallerConfig): Promise<void> {
+  const manifest = loadLocalDataSyncManifest();
+  console.log(`\nUninstalling ${LOCAL_DATA_SYNC_APP_ID}…`);
+  await uninstallApp({
+    appId: LOCAL_DATA_SYNC_APP_ID,
+    manifest,
+    config,
+  });
+  console.log(`${LOCAL_DATA_SYNC_APP_ID} uninstalled.`);
 }

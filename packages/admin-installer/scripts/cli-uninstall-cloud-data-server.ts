@@ -35,7 +35,10 @@ import {
   GetCredentialsForIdentityCommand,
 } from "@aws-sdk/client-cognito-identity";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { uninstallCloudDataServer } from "../src/builtin-installs";
+import {
+  uninstallCloudDataServer,
+  uninstallLocalDataSync,
+} from "../src/builtin-installs";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -47,6 +50,15 @@ interface StarkeepConfig {
   foundationalPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   pulumiStateBucket?: string;
+  // Populated by the install script after a successful run. Needed here so
+  // we can uninstall local-data-sync (a regular per-app uninstall, which
+  // depends on DSQL/files-bucket existing) before tearing down cloud-data-
+  // server's foundational infra.
+  apiGatewayId?: string;
+  apiGatewayExecutionArn?: string;
+  authorizerId?: string;
+  s3Bucket?: string;
+  auroraEndpoint?: string;
 }
 
 function regionFromUserPoolId(userPoolId: string): string {
@@ -261,6 +273,42 @@ if (!nonInteractive) {
     console.log("Aborted.");
     process.exit(0);
   }
+}
+
+// Uninstall local-data-sync first (while DSQL/files-bucket still exist).
+// Skipped if the previous install never recorded its outputs (e.g. it
+// failed before reaching this step), since we can't issue the per-app
+// uninstall without the foundational infra coordinates.
+if (config.apiGatewayId && config.authorizerId && config.s3Bucket && config.auroraEndpoint && config.apiGatewayExecutionArn) {
+  const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
+  const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
+  const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
+  try {
+    await uninstallLocalDataSync({
+      stackPrefix,
+      region,
+      accountId,
+      dsqlHostname: config.auroraEndpoint,
+      filesBucket: config.s3Bucket,
+      artifactsBucket,
+      pulumiStateBucket,
+      apiGatewayId: config.apiGatewayId,
+      apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+      authorizerId: config.authorizerId,
+      permissionsBoundaryArn,
+      foundationalPermissionsBoundaryArn,
+      managerRoleArn,
+      installDdlRoleArn,
+      installInfraRoleArn,
+    });
+  } catch (err) {
+    console.warn(
+      `local-data-sync uninstall failed: ${err instanceof Error ? err.message : String(err)}\n` +
+        "Continuing with cloud-data-server tear-down — manual cleanup of the role may be needed.",
+    );
+  }
+} else {
+  console.log("Skipping local-data-sync uninstall (config missing post-install outputs).");
 }
 
 await uninstallCloudDataServer({

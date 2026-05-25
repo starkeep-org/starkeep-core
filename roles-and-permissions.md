@@ -2,8 +2,6 @@
 
 This document describes the system-level stance on roles, permissions, and trust boundaries in Starkeep's cloud deployment. It is intentionally high-level: it covers *who can do what, where the lines are drawn, and why* — but not the specific IAM actions, PG grants, or policy JSON. Those live in code and in the package-level READMEs.
 
-The companion doc `desired-state-roles-and-permissions.md` contains the older, more detailed implementation sketch and is retained for reference where lower-level specifics are needed.
-
 ---
 
 ## Stance

@@ -20,6 +20,7 @@ import {
   attachTempInstallDdlPolicy,
   detachTempInstallDdlPolicy,
   deleteAppRole,
+  assertCloudInstallableAppId,
 } from "./iam";
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
 import {
@@ -107,6 +108,7 @@ async function runStep(
 
 export async function installApp(input: InstallInput): Promise<InstallResult> {
   const { appId, manifest, zipBuffer, config } = input;
+  assertCloudInstallableAppId(appId);
   const ir = manifest.infraRequirements;
   const done = await getCompletedSteps(appId, "install");
 
@@ -139,6 +141,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
       hostname: config.dsqlHostname,
       region: config.region,
       stackPrefix: config.stackPrefix,
+      accountId: config.accountId,
       credentials: ddlCreds,
     };
     await runAppInstallDdl(
@@ -306,6 +309,7 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
       hostname: config.dsqlHostname,
       region: config.region,
       stackPrefix: config.stackPrefix,
+      accountId: config.accountId,
       credentials: ddlCreds,
     };
     await runAppUninstallDdl(dsqlOpts, appId, ir.sharedTypeAccess);

@@ -17,6 +17,7 @@ import {
   listAppRegistry,
   appRegistryRow,
 } from "../../packages/admin-installer/src/local/registry.js";
+import { LOCAL_DATA_SYNC_APP_ID } from "../../packages/admin-installer/src/iam.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
   createSqliteAccessPolicyStore,
@@ -527,13 +528,14 @@ async function main() {
     });
   }
 
-  // Built-in watcher identity: register it in shared_app_registry just like an
-  // external app, so its writes have a valid origin_app_id and so its grants
-  // flow through the same access-control path. No user consent — it's part of
-  // the local-data-server itself.
-  const watcherManifest = {
-    id: "@starkeep/watcher",
-    name: "Local Watcher",
+  // Built-in LDS sync identity: the cloud counterpart to the local-data-server.
+  // All records originated by LDS-built-in features (notably the file watcher)
+  // are stamped with this appId, both in the local change log and on the wire
+  // to cloud-data-server. Its grants flow through the same access-control path
+  // as any other app. No user consent — it's part of the LDS itself.
+  const localDataSyncManifest = {
+    id: LOCAL_DATA_SYNC_APP_ID,
+    name: "Local Data Sync",
     version: "1.0.0",
     tier: "official" as const,
     infraRequirements: {
@@ -541,13 +543,13 @@ async function main() {
         {
           typeId: "*",
           access: "readwrite" as const,
-          rationale: "Built-in file watcher ingests arbitrary files into all shared types.",
+          rationale: "Built-in LDS sync identity ingests arbitrary files into all shared types.",
         },
       ],
       canIngestUnknown: true,
     },
   };
-  const { appId: watcherAppId } = installLocal(localDb, watcherManifest);
+  const { appId: watcherAppId } = installLocal(localDb, localDataSyncManifest);
 
   // Now that the watcher and any other apps are in the registry, start
   // per-app sync loops. New installs that happen via /admin/apps/install

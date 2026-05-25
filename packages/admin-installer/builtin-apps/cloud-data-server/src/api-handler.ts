@@ -125,7 +125,6 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
   async createClient(options: AuroraDsqlDatabaseAdapterOptions): Promise<DatabaseClient> {
     const { hostname, region } = options;
     const pgUser = `${this.stackPrefix}_app_${this.appId}`.toLowerCase().replace(/-/g, "_");
-    const appId = this.appId;
     const creds = this.creds;
 
     const createPgClient = async (): Promise<pg.Client> => {
@@ -148,7 +147,6 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
         ssl: { rejectUnauthorized: true },
       });
       await client.connect();
-      await client.query("SET starkeep.app_id = $1", [appId]);
       return client;
     };
 
@@ -216,8 +214,11 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 // Path parsing
 // ---------------------------------------------------------------------------
 
+// Mirrors CLOUD_APP_ID_RE in packages/admin-installer/src/iam.ts. Kept in sync
+// by hand because the cloud handler lives in a separately-deployed artifact
+// and cannot import from the installer package at runtime.
 function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
-  const match = rawPath.match(/^\/apps\/([^/]+)(\/.*)?$/);
+  const match = rawPath.match(/^\/apps\/([a-z0-9][a-z0-9._-]*)(\/.*)?$/);
   if (!match) return null;
   return { appId: match[1]!, subPath: match[2] ?? "/" };
 }

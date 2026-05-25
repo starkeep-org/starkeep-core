@@ -46,8 +46,9 @@ import {
   GetIdCommand,
   GetCredentialsForIdentityCommand,
 } from "@aws-sdk/client-cognito-identity";
+import { execSync } from "node:child_process";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { installCloudDataServer } from "../src/builtin-installs";
+import { installCloudDataServer, installLocalDataSync } from "../src/builtin-installs";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -272,6 +273,15 @@ console.log(`  Prefix : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log("");
 
+// Rebuild dist.zip before installing. Without this, the install pipeline
+// uploads whatever zip was last built locally — and if its hash matches what
+// Lambda already has, Pulumi silently skips the code update, shipping stale
+// code with no warning. Build is idempotent and fast on incremental runs.
+console.log("\nBuilding cloud-data-server bundle…\n");
+execSync("pnpm --filter @starkeep/builtin-cloud-data-server build", {
+  stdio: "inherit",
+});
+
 console.log("\nInstalling cloud-data-server…\n");
 const outputs = await installCloudDataServer({
   stackPrefix,
@@ -283,6 +293,32 @@ const outputs = await installCloudDataServer({
   pulumiStateBucket,
   userPoolId: config.userPoolId,
   userPoolClientId: config.userPoolClientId,
+});
+
+// Install the paired local-data-sync identity. This is the cloud-side
+// counterpart to the local-data-server: it's the IAM role that signs for
+// records originated locally by LDS built-in features (notably the file
+// watcher). Bundled with cloud-data-server install so the two paired
+// identities always exist together.
+const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
+const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
+const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
+await installLocalDataSync({
+  stackPrefix,
+  region,
+  accountId,
+  dsqlHostname: outputs.auroraHostname,
+  filesBucket: outputs.bucketName,
+  artifactsBucket,
+  pulumiStateBucket,
+  apiGatewayId: outputs.apiGatewayId,
+  apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
+  authorizerId: outputs.authorizerId,
+  permissionsBoundaryArn,
+  foundationalPermissionsBoundaryArn,
+  managerRoleArn,
+  installDdlRoleArn,
+  installInfraRoleArn,
 });
 
 const updated: StarkeepConfig = {

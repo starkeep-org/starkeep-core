@@ -24,6 +24,7 @@ export interface DsqlDdlOptions {
   hostname: string;
   region: string;
   stackPrefix: string;
+  accountId: string;
   credentials: {
     accessKeyId: string;
     secretAccessKey: string;
@@ -115,6 +116,24 @@ export async function runAppInstallDdl(
     // admin, so this membership is only exercised during install/uninstall.
     // Idempotent: re-granting an existing membership is a no-op in PG.
     await sql.raw(`GRANT "${pgRole}" TO admin`).execute(db);
+
+    // DSQL-side IAM-to-PG mapping. CREATE ROLE LOGIN is not sufficient on its
+    // own: DSQL has its own authorization layer that decides which IAM ARN may
+    // log in as which PG role, separate from PG-level membership. Without this
+    // grant the app's runtime sts:DbConnect attempts fail with an opaque
+    // FATAL 28000 ("unable to accept connection, access denied", no hint).
+    // Probe sys.iam_pg_role_mappings first because AWS IAM GRANT is not
+    // idempotent in DSQL — re-granting an existing mapping errors.
+    const appRoleArn = `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-${appId}-role`;
+    const existingMapping = await sql<{ exists: boolean }>`
+      SELECT EXISTS (
+        SELECT 1 FROM sys.iam_pg_role_mappings
+        WHERE pg_role_name = ${pgRole} AND arn = ${appRoleArn}
+      ) AS exists
+    `.execute(db);
+    if (!existingMapping.rows[0]?.exists) {
+      await sql.raw(`AWS IAM GRANT "${pgRole}" TO '${appRoleArn}'`).execute(db);
+    }
 
     // App-private schema
     await sql`
@@ -257,6 +276,21 @@ export async function runAppUninstallDdl(
     await sql`DELETE FROM shared.access_grants WHERE app_id = ${appId}`.execute(db);
     await sql`DELETE FROM shared.app_syncable_namespaces WHERE app_id = ${appId}`.execute(db);
     await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
+
+    // Revoke the DSQL-side IAM mapping before DROP ROLE — DROP ROLE fails if
+    // any AWS IAM GRANT still references it. Probe first because AWS IAM
+    // REVOKE errors when the mapping is absent.
+    const appRoleArn = `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-${appId}-role`;
+    const existingMapping = await sql<{ exists: boolean }>`
+      SELECT EXISTS (
+        SELECT 1 FROM sys.iam_pg_role_mappings
+        WHERE pg_role_name = ${pgRole} AND arn = ${appRoleArn}
+      ) AS exists
+    `.execute(db);
+    if (existingMapping.rows[0]?.exists) {
+      await sql.raw(`AWS IAM REVOKE "${pgRole}" FROM '${appRoleArn}'`).execute(db);
+    }
+
     // DSQL doesn't support DO blocks — same pattern as install: probe then act.
     const existingRole = await sql<{ exists: boolean }>`
       SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${pgRole}) AS exists
