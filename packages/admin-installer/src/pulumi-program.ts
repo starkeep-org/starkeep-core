@@ -10,6 +10,16 @@ import * as pulumi from "@pulumi/pulumi";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import type { ComputeContext } from "./compute-stack";
 
+/**
+ * Sub-paths under /apps/{appId}/ claimed by the cloud-data-server's
+ * explicit APIGW routes (see cloud-data-server-program.ts). Per-app
+ * handlers may not register literal routes whose first sub-segment matches
+ * one of these — those paths are routed to the shared data broker by
+ * APIGW v2 specificity regardless of any app's {proxy+} claim, so a
+ * literal collision in a manifest is always a mistake.
+ */
+const RESERVED_SUBPATHS = new Set(["data", "files", "sync", "health"]);
+
 export function buildPulumiProgram(
   manifest: AppManifest,
   ctx: ComputeContext,
@@ -79,10 +89,32 @@ export function buildPulumiProgram(
         // collapse to "GET /apps/photos" (no trailing slash) — API Gateway v2
         // rejects keys with empty path segments ("BadRequestException: Part of
         // the given route key path is empty").
+        //
+        // The first sub-segment after /apps/<appId>/ is a reserved namespace
+        // for the cloud-data-server (data, files, sync, health). A literal
+        // segment matching any of those is rejected below; {proxy+} is fine
+        // and is shadowed by the more-specific reserved routes at runtime.
         const prefixedRouteKey = routeKey === "$default"
           ? routeKey
           : routeKey.replace(/^([A-Z]+) \/(.*)$/, (_m, method, rest) =>
               rest === "" ? `${method} /apps/${ctx.appId}` : `${method} /apps/${ctx.appId}/${rest}`);
+
+        if (prefixedRouteKey !== "$default") {
+          const match = prefixedRouteKey.match(/^[A-Z]+ (\/.*)$/);
+          const path = match?.[1] ?? "";
+          const prefix = `/apps/${ctx.appId}/`;
+          if (path.startsWith(prefix)) {
+            const firstSeg = path.slice(prefix.length).split("/")[0] ?? "";
+            if (RESERVED_SUBPATHS.has(firstSeg)) {
+              throw new Error(
+                `App "${ctx.appId}" handler "${handler.name}" declares route "${routes[i]}" ` +
+                `which after prefixing becomes "${prefixedRouteKey}". The sub-paths ` +
+                `/apps/${ctx.appId}/{data,files,sync,health}/... are reserved for the ` +
+                `cloud-data-server and cannot be claimed by an app handler.`,
+              );
+            }
+          }
+        }
 
         const isPublic = handler.auth === "public";
         const route = new aws.apigatewayv2.Route(`route-${handler.name}-${i}`, {

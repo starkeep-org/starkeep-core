@@ -17,6 +17,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { S3Client, DeleteBucketCommand } from "@aws-sdk/client-s3";
@@ -294,12 +295,17 @@ export async function installCloudDataServer(
     // Step 4: Pulumi up — creates DSQL, files bucket, Lambda, API Gateway.
     console.log("Running pulumi up for cloud-data-server…");
     const distZipPath = join(cloudDataServerPackageDir(), "dist.zip");
+    // sourceCodeHash forces Pulumi to detect a Lambda code change on redeploy
+    // even if the on-disk path is unchanged. Mirrors the per-app installer
+    // (pulumi-program.ts) — without it, a fresh dist.zip may not be picked up.
+    const bundleHash = createHash("sha256").update(readFileSync(distZipPath)).digest("base64");
     const program = buildCloudDataServerProgram({
       stackPrefix: config.stackPrefix,
       region: config.region,
       accountId: config.accountId,
       appRoleArn,
       distZipPath,
+      bundleHash,
       userPoolId: config.userPoolId,
       userPoolClientId: config.userPoolClientId,
     });

@@ -7,7 +7,7 @@
  *   - Lambda function (the protocol-core broker) using the per-app role
  *     ${stackPrefix}-app-cloud-data-server-role minted by Manager outside Pulumi
  *   - CloudWatch log group for the Lambda
- *   - API Gateway v2 + Cognito JWT authorizer + default catch-all routes
+ *   - API Gateway v2 + Cognito JWT authorizer + explicit reserved sub-namespaces
  *
  * Stack outputs match the previous SST shape so per-app Pulumi installs can
  * read apiGatewayId and authorizerId to attach their own routes:
@@ -29,6 +29,11 @@ export interface CloudDataServerProgramContext {
   appRoleArn: string;
   /** Local filesystem path to the prebuilt Lambda zip (admin-installer reads it from disk). */
   distZipPath: string;
+  /**
+   * Base64-encoded SHA-256 of dist.zip. Wired to aws.lambda.Function.sourceCodeHash
+   * so Pulumi detects bundle changes across redeploys. Mirrors the per-app installer.
+   */
+  bundleHash: string;
   /** Cognito user-pool resources from bootstrap, needed to wire the JWT authorizer. */
   userPoolId: string;
   userPoolClientId: string;
@@ -130,6 +135,7 @@ export function buildCloudDataServerProgram(
         runtime: aws.lambda.Runtime.NodeJS22dX,
         handler: "api-handler.handler",
         code: new pulumi.asset.FileArchive(ctx.distZipPath),
+        sourceCodeHash: ctx.bundleHash,
         memorySize: 256,
         timeout: 30,
         environment: {
@@ -150,7 +156,21 @@ export function buildCloudDataServerProgram(
     );
 
     // -----------------------------------------------------------------------
-    // API Gateway v2 + Cognito JWT authorizer + default catch-all routes
+    // API Gateway v2 + Cognito JWT authorizer + explicit reserved sub-namespaces
+    //
+    // The cloud-data-server lambda is reached via:
+    //   - OPTIONS /{proxy+}             (CORS preflight, no auth)
+    //   - GET     /health               (public liveness check)
+    //   - GET     /apps/{appId}/health  (per-app authenticated health)
+    //   - ANY     /apps/{appId}/data/{proxy+}
+    //   - ANY     /apps/{appId}/files/{proxy+}
+    //   - ANY     /apps/{appId}/sync/{proxy+}
+    //
+    // These routes claim the reserved data-plane sub-namespaces on the shared
+    // gateway. APIGW v2 picks the most-specific match, so an app's own
+    // `GET /apps/{appId}/{proxy+}` (e.g. photos static site) still serves UI
+    // paths but loses to these routes for `data`, `files`, `sync`, `health`.
+    // No `$default` — stray traffic gets an APIGW 404 without invoking lambda.
     // -----------------------------------------------------------------------
     const api = new aws.apigatewayv2.Api(`${ctx.stackPrefix}-gateway`, {
       name: `${ctx.stackPrefix}-gateway`,
@@ -215,10 +235,44 @@ export function buildCloudDataServerProgram(
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
-    // $default — every authenticated request not claimed by another route
-    new aws.apigatewayv2.Route("default", {
+    // Public liveness check (no auth)
+    new aws.apigatewayv2.Route("route-root-health", {
       apiId: api.id,
-      routeKey: "$default",
+      routeKey: "GET /health",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
+    // Per-app authenticated health endpoint
+    new aws.apigatewayv2.Route("route-app-health", {
+      apiId: api.id,
+      routeKey: "GET /apps/{appId}/health",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+      authorizerId: authorizer.id,
+      authorizationType: "JWT",
+    });
+
+    // Reserved data-plane sub-namespaces. {appId} is a path variable purely
+    // for APIGW route specificity — the handler parses appId from rawPath
+    // itself and does not read event.pathParameters.
+    new aws.apigatewayv2.Route("route-data-proxy", {
+      apiId: api.id,
+      routeKey: "ANY /apps/{appId}/data/{proxy+}",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+      authorizerId: authorizer.id,
+      authorizationType: "JWT",
+    });
+
+    new aws.apigatewayv2.Route("route-files-proxy", {
+      apiId: api.id,
+      routeKey: "ANY /apps/{appId}/files/{proxy+}",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+      authorizerId: authorizer.id,
+      authorizationType: "JWT",
+    });
+
+    new aws.apigatewayv2.Route("route-sync-proxy", {
+      apiId: api.id,
+      routeKey: "ANY /apps/{appId}/sync/{proxy+}",
       target: pulumi.interpolate`integrations/${integration.id}`,
       authorizerId: authorizer.id,
       authorizationType: "JWT",
