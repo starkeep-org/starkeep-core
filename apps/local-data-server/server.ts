@@ -1124,25 +1124,21 @@ async function main() {
         return;
       }
 
-      // POST /data/records — create a record, optionally with a file
-      // Three body shapes (in preference order):
+      // POST /data/records — create a record from a file.
+      // Two body shapes (in preference order):
       //   key-ref:  { type, contentType, contentHash, sizeBytes, fileName?, parentId? }
       //             Bytes already PUT via the presigned upload URL. Server
       //             verifies the blob is at shared/<type>/<shard>/<hash>.
-      //             This is the path that scales to large files.
+      //             The path that scales to large files.
       //   filePath: { type, contentType, filePath, fileName?, parentId? }
       //             Bytes live on local disk; SDK ingests by path. Same-machine
-      //             only.
-      //   inline:   { type, contentType, fileBase64, fileName?, parentId? }
-      //             Bytes ride through the request body. Wasteful — only use
-      //             for very small payloads.
+      //             only — legit optimization over the network round trip.
       if (path === "/data/records" && req.method === "POST") {
         const body = await readBody(req);
         const {
           type,
           fileName,
           contentType,
-          fileBase64,
           filePath,
           contentHash,
           sizeBytes,
@@ -1153,11 +1149,11 @@ async function main() {
           json(res, { error: "type is required" });
           return;
         }
-        if (!filePath && !fileBase64 && !contentHash) {
+        if (!filePath && !contentHash) {
           res.writeHead(400);
           json(res, {
             error:
-              "contentHash (key-ref), filePath, or fileBase64 is required — every record must be file-backed",
+              "contentHash (key-ref) or filePath is required — PUT bytes via a presigned URL first, then register by content-addressed key",
           });
           return;
         }
@@ -1178,7 +1174,6 @@ async function main() {
         }
 
         let record;
-        let uploadedBuffer: Buffer | null = null;
         const baseInput = { type, ownerId: OWNER_ID, originAppId: appId!, parentId: parentId ?? null };
         if (contentHash) {
           if (!/^[a-f0-9]{64}$/.test(contentHash)) {
@@ -1205,18 +1200,11 @@ async function main() {
             { ...baseInput, originalFilename: fileName ?? null },
             { contentHash, objectStorageKey: expectedKey, sizeBytes, mimeType: contentType },
           );
-        } else if (filePath) {
+        } else {
           const resolvedName = fileName ?? (filePath as string).split("/").pop() ?? filePath;
           record = await sdk.data.putWithLocalFile(
             { ...baseInput, originalFilename: resolvedName },
             filePath,
-            contentType,
-          );
-        } else {
-          uploadedBuffer = Buffer.from(fileBase64, "base64");
-          record = await sdk.data.putWithFile(
-            { ...baseInput, originalFilename: fileName ?? null },
-            uploadedBuffer as unknown as Uint8Array,
             contentType,
           );
         }
@@ -1225,9 +1213,7 @@ async function main() {
         // S3 write is awaited so the file is available for presigned URLs immediately
         // after the response is returned (avoids 404 on the first file-url request).
         if (remoteAdapter && record.objectStorageKey) {
-          const fileData = uploadedBuffer
-            ?? (await localAdapter.get(record.objectStorageKey).catch(() => null))?.data
-            ?? null;
+          const fileData = (await localAdapter.get(record.objectStorageKey).catch(() => null))?.data ?? null;
           if (fileData) {
             await remoteAdapter
               .put(record.objectStorageKey, fileData as unknown as Uint8Array, { contentType: record.mimeType ?? undefined })

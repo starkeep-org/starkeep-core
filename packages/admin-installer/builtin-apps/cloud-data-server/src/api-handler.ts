@@ -404,17 +404,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     // POST /apps/{appId}/data/records
     //
-    // Two body shapes:
-    //   inline form:    { type, contentType, fileBase64, fileName?, parentId? }
-    //                   Bytes ride through API Gateway. Subject to the 10 MB
-    //                   request cap — only suitable for small payloads.
-    //   key-ref form:   { type, contentType, contentHash, sizeBytes, fileName?, parentId? }
-    //                   Caller has already PUT the bytes to S3 via a
-    //                   presigned URL (see POST /files/presign). The server
-    //                   verifies the blob exists at the content-addressed
-    //                   key derived from (type, contentHash) and then writes
-    //                   the record. This is the preferred path for any
-    //                   payload that may exceed API Gateway limits.
+    // Body (key-ref form):
+    //   { type, contentType, contentHash, sizeBytes, fileName?, parentId? }
+    //
+    // The caller PUTs the bytes to S3 via a presigned URL first (see POST
+    // /files/presign), then registers the record by content-addressed key.
     if (method === "POST" && subPath === "/data/records") {
       const rawBody = event.isBase64Encoded && event.body
         ? Buffer.from(event.body, "base64").toString("utf8")
@@ -423,7 +417,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         type?: string;
         fileName?: string;
         contentType?: string;
-        fileBase64?: string;
         contentHash?: string;
         sizeBytes?: number;
         parentId?: string;
@@ -431,40 +424,26 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!body.type) return clientErr("type is required", 400);
       if (!body.contentType) return clientErr("contentType is required", 400);
       if (!canWrite(grants, body.type)) return clientErr("Forbidden", 403);
-
-      let contentHash: string;
-      let objectStorageKey: string;
-      let sizeBytes: number;
-
-      if (body.fileBase64) {
-        // Inline form.
-        const fileBuffer = Buffer.from(body.fileBase64, "base64");
-        contentHash = createHash("sha256").update(fileBuffer).digest("hex");
-        objectStorageKey = dataRecordObjectKey(body.type, contentHash);
-        sizeBytes = fileBuffer.length;
-        await storage.put(objectStorageKey, fileBuffer, { contentType: body.contentType });
-      } else if (body.contentHash) {
-        // Key-ref form.
-        if (!/^[a-f0-9]{64}$/.test(body.contentHash)) {
-          return clientErr("contentHash must be a 64-character lowercase hex sha256", 400);
-        }
-        if (typeof body.sizeBytes !== "number" || !Number.isFinite(body.sizeBytes) || body.sizeBytes < 0) {
-          return clientErr("sizeBytes is required and must be a non-negative number", 400);
-        }
-        contentHash = body.contentHash;
-        objectStorageKey = dataRecordObjectKey(body.type, contentHash);
-        sizeBytes = body.sizeBytes;
-        const exists = await storage.has(objectStorageKey);
-        if (!exists) {
-          return clientErr(
-            "Blob not found at the content-addressed key. PUT it via a presigned URL first.",
-            409,
-          );
-        }
-      } else {
+      if (!body.contentHash) {
         return clientErr(
-          "either fileBase64 or contentHash is required — every record must be file-backed",
+          "contentHash is required — PUT the bytes via a presigned URL first, then register the record by content-addressed key",
           400,
+        );
+      }
+      if (!/^[a-f0-9]{64}$/.test(body.contentHash)) {
+        return clientErr("contentHash must be a 64-character lowercase hex sha256", 400);
+      }
+      if (typeof body.sizeBytes !== "number" || !Number.isFinite(body.sizeBytes) || body.sizeBytes < 0) {
+        return clientErr("sizeBytes is required and must be a non-negative number", 400);
+      }
+      const contentHash = body.contentHash;
+      const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
+      const sizeBytes = body.sizeBytes;
+      const exists = await storage.has(objectStorageKey);
+      if (!exists) {
+        return clientErr(
+          "Blob not found at the content-addressed key. PUT it via a presigned URL first.",
+          409,
         );
       }
 
