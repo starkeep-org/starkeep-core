@@ -2,7 +2,16 @@ import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { FileSyncEngine, FileSyncManifest, FileEntry } from "./types.js";
 
 export function createFileSyncEngine(): FileSyncEngine {
+  // Object-storage keys currently being transferred in this process. Each
+  // transferFile call acquires the key on entry and releases on exit. Used by
+  // the retry pass to skip records whose transfer is already in flight.
+  const inFlightKeys = new Set<string>();
+
   return {
+    isTransferInFlight(key: string): boolean {
+      return inFlightKeys.has(key);
+    },
+
     async getFilesToPush(
       localStorage: ObjectStorageAdapter,
       remoteStorage: ObjectStorageAdapter,
@@ -57,14 +66,24 @@ export function createFileSyncEngine(): FileSyncEngine {
       manifest: FileSyncManifest,
       source: ObjectStorageAdapter,
       destination: ObjectStorageAdapter,
-    ): Promise<void> {
-      const file = await source.get(manifest.objectStorageKey);
-      if (!file) {
-        return;
+    ): Promise<boolean> {
+      const key = manifest.objectStorageKey;
+      if (inFlightKeys.has(key)) {
+        return false;
       }
-      await destination.put(manifest.objectStorageKey, file.data, {
-        contentType: manifest.mimeType,
-      });
+      inFlightKeys.add(key);
+      try {
+        const file = await source.get(key);
+        if (!file) {
+          return false;
+        }
+        await destination.put(key, file.data, {
+          contentType: manifest.mimeType,
+        });
+        return true;
+      } finally {
+        inFlightKeys.delete(key);
+      }
     },
   };
 }

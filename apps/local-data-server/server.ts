@@ -600,8 +600,14 @@ async function main() {
      // installed apps), so they intentionally do not require app HMAC headers.
     // `/data/files/:token` is also exempt — the signed token in the path is
     // the authorization, and the URL is meant to be embeddable (e.g. in <img src>).
-    const APP_AUTH_REQUIRED_PREFIXES = ["/data/", "/sync/", "/app-data/"];
-    const APP_AUTH_EXEMPT_PATTERNS = [/^\/data\/files\/[^/]+$/];
+    const APP_AUTH_REQUIRED_PREFIXES = ["/data/", "/sync/", "/app-data/", "/files/"];
+    // Token-authorized routes: the signed token in the path is the auth.
+    //  - GET /data/files/:token         — bearer read of a single blob
+    //  - PUT /data/files/upload/:token  — bearer write of a single blob
+    const APP_AUTH_EXEMPT_PATTERNS = [
+      /^\/data\/files\/upload\/[^/]+$/,
+      /^\/data\/files\/[^/]+$/,
+    ];
     const requiresAppAuth =
       APP_AUTH_REQUIRED_PREFIXES.some((p) =>
         path === p.replace(/\/$/, "") || path.startsWith(p),
@@ -1119,19 +1125,39 @@ async function main() {
       }
 
       // POST /data/records — create a record, optionally with a file
-      // Body: JSON { type, payload, fileName?, contentType?, fileBase64?, filePath? }
+      // Three body shapes (in preference order):
+      //   key-ref:  { type, contentType, contentHash, sizeBytes, fileName?, parentId? }
+      //             Bytes already PUT via the presigned upload URL. Server
+      //             verifies the blob is at shared/<type>/<shard>/<hash>.
+      //             This is the path that scales to large files.
+      //   filePath: { type, contentType, filePath, fileName?, parentId? }
+      //             Bytes live on local disk; SDK ingests by path. Same-machine
+      //             only.
+      //   inline:   { type, contentType, fileBase64, fileName?, parentId? }
+      //             Bytes ride through the request body. Wasteful — only use
+      //             for very small payloads.
       if (path === "/data/records" && req.method === "POST") {
         const body = await readBody(req);
-        const { type, fileName, contentType, fileBase64, filePath, parentId } = JSON.parse(body);
+        const {
+          type,
+          fileName,
+          contentType,
+          fileBase64,
+          filePath,
+          contentHash,
+          sizeBytes,
+          parentId,
+        } = JSON.parse(body);
         if (!type) {
           res.writeHead(400);
           json(res, { error: "type is required" });
           return;
         }
-        if (!filePath && !fileBase64) {
+        if (!filePath && !fileBase64 && !contentHash) {
           res.writeHead(400);
           json(res, {
-            error: "filePath or fileBase64 is required — every record must be file-backed",
+            error:
+              "contentHash (key-ref), filePath, or fileBase64 is required — every record must be file-backed",
           });
           return;
         }
@@ -1154,7 +1180,32 @@ async function main() {
         let record;
         let uploadedBuffer: Buffer | null = null;
         const baseInput = { type, ownerId: OWNER_ID, originAppId: appId!, parentId: parentId ?? null };
-        if (filePath) {
+        if (contentHash) {
+          if (!/^[a-f0-9]{64}$/.test(contentHash)) {
+            res.writeHead(400);
+            json(res, { error: "contentHash must be a 64-char lowercase hex sha256" });
+            return;
+          }
+          if (typeof sizeBytes !== "number" || !Number.isFinite(sizeBytes) || sizeBytes < 0) {
+            res.writeHead(400);
+            json(res, { error: "sizeBytes is required and must be a non-negative number" });
+            return;
+          }
+          const expectedKey = dataRecordObjectKey(type, contentHash);
+          const exists = await localAdapter.has(expectedKey);
+          if (!exists) {
+            res.writeHead(409);
+            json(res, {
+              error:
+                "Blob not found at the content-addressed key. PUT it via a presigned URL first.",
+            });
+            return;
+          }
+          record = await sdk.data.putWithExistingBlob(
+            { ...baseInput, originalFilename: fileName ?? null },
+            { contentHash, objectStorageKey: expectedKey, sizeBytes, mimeType: contentType },
+          );
+        } else if (filePath) {
           const resolvedName = fileName ?? (filePath as string).split("/").pop() ?? filePath;
           record = await sdk.data.putWithLocalFile(
             { ...baseInput, originalFilename: resolvedName },
@@ -1206,6 +1257,102 @@ async function main() {
               : null,
           },
         });
+        return;
+      }
+
+      // POST /files/presign — issue a short-lived URL the caller can PUT to.
+      // Mirrors the cloud-data-server API so a single client code path works
+      // against either backend. Body: { key, contentType? }. Response: { url }.
+      //
+      // Auth: requires the caller's app HMAC (same as any /data/ endpoint).
+      // The issued URL itself is bearer-style: anyone holding it can PUT to
+      // that exact key until it expires.
+      if (path === "/files/presign" && req.method === "POST") {
+        const body = JSON.parse(await readBody(req)) as {
+          key?: string;
+          contentType?: string;
+          expiresIn?: number;
+        };
+        if (!body.key) {
+          res.writeHead(400);
+          json(res, { error: "key is required" });
+          return;
+        }
+        // Extract typeId from the canonical shared/<typeId>/<shard>/<hash> key
+        // and enforce that this app can write that type. Mirrors the manifest
+        // check in POST /data/records.
+        const sharedMatch = body.key.match(/^shared\/([^/]+)\//);
+        if (!sharedMatch) {
+          res.writeHead(400);
+          json(res, {
+            error: "presign currently only supports shared/<typeId>/... keys",
+          });
+          return;
+        }
+        const typeId = sharedMatch[1]!;
+        if (!appCanWrite(localDb, appId!, typeId)) {
+          res.writeHead(403);
+          json(res, {
+            error: "AccessDenied",
+            detail: `app "${appId}" has no readwrite grant on type "${typeId}"`,
+          });
+          return;
+        }
+        const mimeType = body.contentType ?? "application/octet-stream";
+        const expiresIn = body.expiresIn ?? 3600;
+        const token = createUploadToken(body.key, mimeType, expiresIn);
+        json(res, {
+          url: `http://127.0.0.1:${PORT}/data/files/upload/${token}`,
+        });
+        return;
+      }
+
+      // PUT /data/files/upload/:token — accept raw bytes for the key encoded
+      // in the upload token. The token is the authorization (issued by the
+      // presign endpoint above), so the request itself doesn't need an app
+      // HMAC — see APP_AUTH_EXEMPT_PATTERNS.
+      const uploadMatch = path.match(/^\/data\/files\/upload\/([^/]+)$/);
+      if (uploadMatch && req.method === "PUT") {
+        const parsed = verifyUploadToken(uploadMatch[1]!);
+        if (!parsed) {
+          res.writeHead(403);
+          json(res, { error: "Invalid or expired upload token" });
+          return;
+        }
+        const fileBuffer = await readBodyBuffer(req);
+        if (fileBuffer.length === 0) {
+          res.writeHead(400);
+          json(res, { error: "Request body must not be empty" });
+          return;
+        }
+        // The token's key is content-addressed (shared/<typeId>/<shard>/<hash>).
+        // Verify the body actually hashes to the expected key, otherwise the
+        // caller is trying to write mismatched bytes under a fixed name.
+        const expectedHash = parsed.key.split("/").pop();
+        const actualHash = createHash("sha256")
+          .update(fileBuffer as unknown as Uint8Array)
+          .digest("hex");
+        if (expectedHash !== actualHash) {
+          res.writeHead(400);
+          json(res, {
+            error: "Upload body hash does not match the key",
+            expected: expectedHash,
+            actual: actualHash,
+          });
+          return;
+        }
+        await localAdapter.put(parsed.key, fileBuffer, { contentType: parsed.mimeType });
+        // Dual-write to remote S3 if configured, matching the /data/records
+        // path's behaviour so the blob is visible to cloud pullers.
+        if (remoteAdapter) {
+          await remoteAdapter
+            .put(parsed.key, fileBuffer as unknown as Uint8Array, { contentType: parsed.mimeType })
+            .catch((err: Error) =>
+              console.error("S3 remote write failed (non-fatal):", err.message),
+            );
+        }
+        res.writeHead(204);
+        res.end();
         return;
       }
 
@@ -1842,13 +1989,37 @@ function json(res: import("node:http").ServerResponse, body: unknown) {
 /** Encode storage key + mime + expiry into a URL-safe signed token. */
 function createFileToken(key: string, mimeType: string, expiresIn: number): string {
   const expires = Math.floor(Date.now() / 1000) + expiresIn;
-  const payload = `${key}|${mimeType}|${expires}`;
+  const payload = `r|${key}|${mimeType}|${expires}`;
   const sig = createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
   return `${Buffer.from(payload).toString("base64url")}.${sig}`;
 }
 
 /** Verify and decode a file token. Returns null if invalid or expired. */
 function verifyFileToken(token: string): { key: string; mimeType: string } | null {
+  const parsed = decodeSignedToken(token);
+  if (!parsed) return null;
+  if (parsed.scope !== "r") return null;
+  return { key: parsed.key, mimeType: parsed.mimeType };
+}
+
+/** Same shape as createFileToken but scoped to a single PUT upload. */
+function createUploadToken(key: string, mimeType: string, expiresIn: number): string {
+  const expires = Math.floor(Date.now() / 1000) + expiresIn;
+  const payload = `w|${key}|${mimeType}|${expires}`;
+  const sig = createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
+  return `${Buffer.from(payload).toString("base64url")}.${sig}`;
+}
+
+function verifyUploadToken(token: string): { key: string; mimeType: string } | null {
+  const parsed = decodeSignedToken(token);
+  if (!parsed) return null;
+  if (parsed.scope !== "w") return null;
+  return { key: parsed.key, mimeType: parsed.mimeType };
+}
+
+function decodeSignedToken(
+  token: string,
+): { scope: string; key: string; mimeType: string } | null {
   const dotIdx = token.indexOf(".");
   if (dotIdx === -1) return null;
   const payloadB64 = token.slice(0, dotIdx);
@@ -1857,10 +2028,17 @@ function verifyFileToken(token: string): { key: string; mimeType: string } | nul
   const expected = createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
   if (sig !== expected) return null;
   const parts = payload.split("|");
-  if (parts.length !== 3) return null;
-  const expires = parseInt(parts[2]!, 10);
+  // Legacy read-only tokens were `${key}|${mimeType}|${expires}` (3 parts);
+  // new tokens carry a scope prefix making 4. Accept both for the read path.
+  if (parts.length === 3) {
+    const expires = parseInt(parts[2]!, 10);
+    if (Date.now() / 1000 > expires) return null;
+    return { scope: "r", key: parts[0]!, mimeType: parts[1]! };
+  }
+  if (parts.length !== 4) return null;
+  const expires = parseInt(parts[3]!, 10);
   if (Date.now() / 1000 > expires) return null;
-  return { key: parts[0]!, mimeType: parts[1]! };
+  return { scope: parts[0]!, key: parts[1]!, mimeType: parts[2]! };
 }
 
 main().catch((err) => {

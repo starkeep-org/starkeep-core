@@ -28,4 +28,4 @@ Metadata is also generally represented in the metadata database tables.
 
 ### Design Heuristics
 
-- Always remember that data types are globally registered and that data generally kept in files, designed to be shared across apps and portable. The data records table is for indexing and bookkeeping purposes, not for storing substantive content. Metadata is registered within the app namespace, is primarily kept in a database, is not designed to be shared across or portable.
+- Always remember that data types are globally registered and that data is kept in files, designed to be shared across apps and portable. The data records table is for indexing and bookkeeping purposes, not for storing substantive content. Metadata is registered within the app namespace, is primarily kept in a database, is not designed to be shared across or portable.

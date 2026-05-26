@@ -403,6 +403,18 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     // POST /apps/{appId}/data/records
+    //
+    // Two body shapes:
+    //   inline form:    { type, contentType, fileBase64, fileName?, parentId? }
+    //                   Bytes ride through API Gateway. Subject to the 10 MB
+    //                   request cap — only suitable for small payloads.
+    //   key-ref form:   { type, contentType, contentHash, sizeBytes, fileName?, parentId? }
+    //                   Caller has already PUT the bytes to S3 via a
+    //                   presigned URL (see POST /files/presign). The server
+    //                   verifies the blob exists at the content-addressed
+    //                   key derived from (type, contentHash) and then writes
+    //                   the record. This is the preferred path for any
+    //                   payload that may exceed API Gateway limits.
     if (method === "POST" && subPath === "/data/records") {
       const rawBody = event.isBase64Encoded && event.body
         ? Buffer.from(event.body, "base64").toString("utf8")
@@ -412,19 +424,51 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         fileName?: string;
         contentType?: string;
         fileBase64?: string;
+        contentHash?: string;
+        sizeBytes?: number;
         parentId?: string;
       };
       if (!body.type) return clientErr("type is required", 400);
-      if (!body.fileBase64) return clientErr("fileBase64 is required — every record must be file-backed", 400);
       if (!body.contentType) return clientErr("contentType is required", 400);
       if (!canWrite(grants, body.type)) return clientErr("Forbidden", 403);
 
-      const now = clock.now();
-      const fileBuffer = Buffer.from(body.fileBase64, "base64");
-      const contentHash = createHash("sha256").update(fileBuffer).digest("hex");
-      const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
-      await storage.put(objectStorageKey, fileBuffer, { contentType: body.contentType });
+      let contentHash: string;
+      let objectStorageKey: string;
+      let sizeBytes: number;
 
+      if (body.fileBase64) {
+        // Inline form.
+        const fileBuffer = Buffer.from(body.fileBase64, "base64");
+        contentHash = createHash("sha256").update(fileBuffer).digest("hex");
+        objectStorageKey = dataRecordObjectKey(body.type, contentHash);
+        sizeBytes = fileBuffer.length;
+        await storage.put(objectStorageKey, fileBuffer, { contentType: body.contentType });
+      } else if (body.contentHash) {
+        // Key-ref form.
+        if (!/^[a-f0-9]{64}$/.test(body.contentHash)) {
+          return clientErr("contentHash must be a 64-character lowercase hex sha256", 400);
+        }
+        if (typeof body.sizeBytes !== "number" || !Number.isFinite(body.sizeBytes) || body.sizeBytes < 0) {
+          return clientErr("sizeBytes is required and must be a non-negative number", 400);
+        }
+        contentHash = body.contentHash;
+        objectStorageKey = dataRecordObjectKey(body.type, contentHash);
+        sizeBytes = body.sizeBytes;
+        const exists = await storage.has(objectStorageKey);
+        if (!exists) {
+          return clientErr(
+            "Blob not found at the content-addressed key. PUT it via a presigned URL first.",
+            409,
+          );
+        }
+      } else {
+        return clientErr(
+          "either fileBase64 or contentHash is required — every record must be file-backed",
+          400,
+        );
+      }
+
+      const now = clock.now();
       const record: DataRecord = {
         id: generateId(),
         kind: "data",
@@ -439,7 +483,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         contentHash,
         objectStorageKey,
         mimeType: body.contentType,
-        sizeBytes: fileBuffer.length,
+        sizeBytes,
         originalFilename: body.fileName ?? null,
         parentId: (body.parentId as DataRecord["parentId"]) ?? null,
       };
@@ -488,9 +532,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     // GET /apps/{appId}/files/{encodedKey}/presign — presigned S3 GET URL.
-    // The caller URL-encodes the full storage key (slashes become %2F) so it
-    // arrives as a single path segment.
-    const filePresignGetMatch = subPath.match(/^\/files\/([^/]+)\/presign$/);
+    // The caller URL-encodes the storage key, but API Gateway HTTP API
+    // normalizes %2F back to "/" before forwarding to Lambda, so the captured
+    // segment must allow embedded slashes (object keys are multi-segment, e.g.
+    // shared/image/<shard>/<hash>).
+    const filePresignGetMatch = subPath.match(/^\/files\/(.+)\/presign$/);
     if (filePresignGetMatch && method === "GET") {
       const key = decodeURIComponent(filePresignGetMatch[1]!);
       const check = parseObjectKey(appId, key, grants, "read");
@@ -501,8 +547,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return ok({ url });
     }
 
-    // HEAD|DELETE /apps/{appId}/files/{encodedKey}
-    const fileObjectMatch = subPath.match(/^\/files\/([^/]+)$/);
+    // HEAD|DELETE /apps/{appId}/files/{encodedKey} — same multi-segment key
+    // handling as the presign route above.
+    const fileObjectMatch = subPath.match(/^\/files\/(.+)$/);
     if (fileObjectMatch && method === "HEAD") {
       const key = decodeURIComponent(fileObjectMatch[1]!);
       const check = parseObjectKey(appId, key, grants, "read");
@@ -647,7 +694,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const body = JSON.parse(rawBody);
       const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
       toClose.push(() => appSyncableSource.client.end());
-      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
+      const transport = createInProcessSyncTransport({
+        databaseAdapter: db,
+        clock,
+        appSyncableSource,
+        objectStorage: storage,
+      });
       const response = await transport.pullChanges(body);
       return ok(response);
     }
@@ -752,6 +804,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           databaseAdapter: originAdapters.db,
           clock: originAdapters.clock,
           appSyncableSource: originAppSyncableSource,
+          objectStorage: originAdapters.storage,
         });
         const partial = await originTransport.pushChanges({ changes: group ?? [] } as never);
         accepted.push(...(partial.accepted as unknown as string[]));

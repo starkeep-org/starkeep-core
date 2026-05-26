@@ -137,6 +137,8 @@ export interface FileEntry {
 }
 
 export interface FileSyncEngine {
+  /** True if a transferFile for this key is currently running in this process. */
+  isTransferInFlight(key: string): boolean;
   getFilesToPush(
     localStorage: ObjectStorageAdapter,
     remoteStorage: ObjectStorageAdapter,
@@ -147,11 +149,16 @@ export interface FileSyncEngine {
     remoteStorage: ObjectStorageAdapter,
     entries: FileEntry[],
   ): Promise<FileSyncManifest[]>;
+  /**
+   * Resolve true on a successful transfer (or if the source key is now present
+   * at the destination). Resolves false if the transfer is already in flight
+   * or the source file doesn't exist.
+   */
   transferFile(
     manifest: FileSyncManifest,
     source: ObjectStorageAdapter,
     destination: ObjectStorageAdapter,
-  ): Promise<void>;
+  ): Promise<boolean>;
 }
 
 export type ChangeEventType =
@@ -198,6 +205,16 @@ export interface SyncEngine {
   ): Promise<void>;
   pull(): Promise<SyncPullResponse>;
   push(): Promise<SyncPushResponse>;
+  /**
+   * Scan local records in PendingFileUpload / PendingFileDownload and attempt
+   * to satisfy the owed blob transfer in either direction. Idempotent and
+   * cheap to call on every sync tick.
+   */
+  runFileTransferPass(): Promise<{
+    uploaded: number;
+    downloaded: number;
+    failed: number;
+  }>;
   fullSync(): Promise<{
     pulled: number;
     pushed: number;

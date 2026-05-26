@@ -175,36 +175,19 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         if (remoteChange.operation === "delete") {
           await localDatabaseAdapter.delete(remoteChange.recordId);
         } else {
+          // Receiver: if the record carries a blob, mark PendingFileDownload —
+          // the file retry pass will fetch the blob and flip to Synced. Records
+          // without a blob go straight to Synced.
+          const snapshot = remoteChange.recordSnapshot;
+          const needsBlob = !!snapshot.objectStorageKey;
           await localDatabaseAdapter.put({
-            ...remoteChange.recordSnapshot,
-            syncStatus: SyncStatus.Synced,
+            ...snapshot,
+            syncStatus: needsBlob
+              ? SyncStatus.PendingFileDownload
+              : SyncStatus.Synced,
           });
         }
         appliedIds.push(remoteChange.recordId);
-
-        // Pull corresponding files if the record references one.
-        if (remoteChange.operation !== "delete") {
-          const snapshot = remoteChange.recordSnapshot;
-          if (snapshot.objectStorageKey) {
-            const filesToPull = await fileSyncEngine.getFilesToPull(
-              localObjectStorage,
-              remoteObjectStorage,
-              [
-                {
-                  key: snapshot.objectStorageKey,
-                  mimeType: snapshot.mimeType ?? undefined,
-                },
-              ],
-            );
-            for (const manifest of filesToPull) {
-              await fileSyncEngine.transferFile(
-                manifest,
-                remoteObjectStorage,
-                localObjectStorage,
-              );
-            }
-          }
-        }
       }
 
       // Apply incoming app-syncable rows (LWW, no OCC).
@@ -255,6 +238,14 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       }
 
       await savePullCursor(response.latestTimestamp);
+
+      // Sweep PendingFileDownload / PendingFileUpload — including records just
+      // applied this pull and any that have been waiting from prior ticks.
+      try {
+        await this.runFileTransferPass();
+      } catch (err) {
+        console.warn(`[sync] file-transfer pass failed: ${(err as Error).message}`);
+      }
 
       if (appliedIds.length > 0) {
         changeNotifier.emit({
@@ -316,59 +307,17 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         };
       }
 
-      // Push files for records that carry references.
-      const fileEntries: Array<{ key: string; mimeType?: string }> = pushable
-        .filter((change) => change.recordSnapshot.objectStorageKey !== null)
-        .map((change) => ({
-          key: change.recordSnapshot.objectStorageKey as string,
-          mimeType: change.recordSnapshot.mimeType ?? undefined,
-        }));
-
-      // App-specific syncable files: enumerated outside the record stream.
-      if (listAppSyncableFiles) {
-        try {
-          const extras = await listAppSyncableFiles();
-          for (const e of extras) fileEntries.push(e);
-        } catch (err) {
-          console.warn(`[sync] listAppSyncableFiles failed: ${(err as Error).message}`);
-        }
-      }
-
-      const failedKeys = new Set<string>();
-
-      if (fileEntries.length > 0) {
-        const filesToPush = await fileSyncEngine.getFilesToPush(
-          localObjectStorage,
-          remoteObjectStorage,
-          fileEntries,
-        );
-        for (const manifest of filesToPush) {
-          try {
-            await fileSyncEngine.transferFile(
-              manifest,
-              localObjectStorage,
-              remoteObjectStorage,
-            );
-          } catch (err) {
-            console.warn(`[sync] file transfer skipped: ${manifest.objectStorageKey} — ${(err as Error).message}`);
-            failedKeys.add(manifest.objectStorageKey);
-          }
-        }
-      }
-
-      // Exclude record entries whose file transfer failed.
-      const pushableWithFiles = pushable.filter(
-        (change) =>
-          change.recordSnapshot.objectStorageKey === null ||
-          !failedKeys.has(change.recordSnapshot.objectStorageKey as string),
-      );
-
+      // Metadata first. The blob upload happens in the file-transfer pass
+      // after the server has durably acknowledged the metadata — that's the
+      // PendingPush → PendingFileUpload → Synced state machine.
       const response = await transport.pushChanges({
-        changes: pushableWithFiles,
+        changes: pushable,
         appSyncableRows: appSyncableRows.length > 0 ? appSyncableRows : undefined,
       });
 
-      // Accepted: mark corresponding local records as Synced.
+      // Accepted: move records carrying a blob into PendingFileUpload so the
+      // file-transfer pass picks them up. Records without a blob skip straight
+      // to Synced.
       const acceptedSet = new Set(response.accepted);
       for (const change of pushable) {
         if (acceptedSet.has(change.recordId)) {
@@ -377,9 +326,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             localRecord &&
             localRecord.version === change.recordSnapshot.version
           ) {
+            const needsBlob = !!localRecord.objectStorageKey;
             await localDatabaseAdapter.put({
               ...localRecord,
-              syncStatus: SyncStatus.Synced,
+              syncStatus: needsBlob
+                ? SyncStatus.PendingFileUpload
+                : SyncStatus.Synced,
             });
           }
         }
@@ -422,7 +374,110 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         await savePushCursor(maxTimestamp);
       }
 
+      // Sweep blobs the sender owes (PendingFileUpload), plus any pending
+      // downloads still owed from prior pulls.
+      try {
+        await this.runFileTransferPass();
+      } catch (err) {
+        console.warn(`[sync] file-transfer pass failed: ${(err as Error).message}`);
+      }
+
       return response;
+    },
+
+    async runFileTransferPass(): Promise<{
+      uploaded: number;
+      downloaded: number;
+      failed: number;
+    }> {
+      let uploaded = 0;
+      let downloaded = 0;
+      let failed = 0;
+
+      // Records the sender owes to the server: upload blob, then mark Synced.
+      const uploadResult = await localDatabaseAdapter.query({
+        filters: [
+          { field: "syncStatus", operator: "eq", value: SyncStatus.PendingFileUpload },
+        ],
+        limit: 1000,
+      });
+      for (const record of uploadResult.records) {
+        if (!record.objectStorageKey) {
+          // No blob to upload — should not normally happen in this state.
+          await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+          continue;
+        }
+        if (fileSyncEngine.isTransferInFlight(record.objectStorageKey)) {
+          continue;
+        }
+        try {
+          const ok = await fileSyncEngine.transferFile(
+            {
+              fileHash: record.objectStorageKey,
+              objectStorageKey: record.objectStorageKey,
+              sizeBytes: record.sizeBytes,
+              mimeType: record.mimeType ?? undefined,
+            },
+            localObjectStorage,
+            remoteObjectStorage,
+          );
+          if (ok) {
+            await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+            uploaded += 1;
+          }
+        } catch (err) {
+          console.warn(
+            `[sync] upload failed for ${record.objectStorageKey}: ${(err as Error).message}`,
+          );
+          failed += 1;
+        }
+      }
+
+      // Records the receiver still needs the blob for: download then mark Synced.
+      const downloadResult = await localDatabaseAdapter.query({
+        filters: [
+          { field: "syncStatus", operator: "eq", value: SyncStatus.PendingFileDownload },
+        ],
+        limit: 1000,
+      });
+      for (const record of downloadResult.records) {
+        if (!record.objectStorageKey) {
+          await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+          continue;
+        }
+        if (fileSyncEngine.isTransferInFlight(record.objectStorageKey)) {
+          continue;
+        }
+        try {
+          // Short-circuit if the file is already present locally.
+          if (await localObjectStorage.has(record.objectStorageKey)) {
+            await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+            downloaded += 1;
+            continue;
+          }
+          const ok = await fileSyncEngine.transferFile(
+            {
+              fileHash: record.objectStorageKey,
+              objectStorageKey: record.objectStorageKey,
+              sizeBytes: record.sizeBytes,
+              mimeType: record.mimeType ?? undefined,
+            },
+            remoteObjectStorage,
+            localObjectStorage,
+          );
+          if (ok) {
+            await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+            downloaded += 1;
+          }
+        } catch (err) {
+          console.warn(
+            `[sync] download failed for ${record.objectStorageKey}: ${(err as Error).message}`,
+          );
+          failed += 1;
+        }
+      }
+
+      return { uploaded, downloaded, failed };
     },
 
     async fullSync(): Promise<{
@@ -432,6 +487,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     }> {
       const pullResult = await this.pull();
       const pushResult = await this.push();
+      await this.runFileTransferPass();
 
       return {
         pulled: pullResult.changes.length,

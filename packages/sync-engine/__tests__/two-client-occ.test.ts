@@ -104,6 +104,13 @@ async function createOnNode(
 ): Promise<DataRecord> {
   const record = createDataRecord(baseInput({ ownerId, originalFilename: label }), node.clock);
   await node.db.put(record);
+  // Stage the blob locally so the file-transfer pass can upload it as part of
+  // the sender state machine (PendingPush → PendingFileUpload → Synced).
+  await node.localObj.put(
+    record.objectStorageKey,
+    new TextEncoder().encode(label),
+    { contentType: record.mimeType },
+  );
   await node.engine.recordChange("create", record, { baseVersion: null });
   return record;
 }

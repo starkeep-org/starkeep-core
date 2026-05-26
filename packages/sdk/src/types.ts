@@ -65,6 +65,22 @@ export interface DataOperations {
     filePath: string,
     contentType: string,
   ): Promise<DataRecord>;
+  /**
+   * Write a record for a blob that has already been placed in object storage
+   * (e.g. via a presigned PUT upload). The caller supplies the content hash,
+   * the resulting object-storage key, the byte length, and the mime type;
+   * the SDK does not re-read the bytes. Use this when the upload path is
+   * external to the SDK (e.g. browser → S3 → cloud-data-server confirm).
+   */
+  putWithExistingBlob(
+    input: DataPutInput,
+    blob: {
+      contentHash: string;
+      objectStorageKey: string;
+      sizeBytes: number;
+      mimeType: string;
+    },
+  ): Promise<DataRecord>;
   get(recordId: StarkeepId): Promise<DataRecord | null>;
   /**
    * Update tracked record metadata (parentId, originalFilename, mimeType). All

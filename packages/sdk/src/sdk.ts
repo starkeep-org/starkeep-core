@@ -199,6 +199,33 @@ export async function createStarkeepSdk(
         );
       },
 
+      async putWithExistingBlob(input, blob) {
+        // Bytes are already in object storage (uploaded out-of-band, e.g. via
+        // a presigned PUT). Skip the upload + re-hash; trust the caller's
+        // contentHash and sizeBytes. The records-table row is otherwise
+        // identical to what putWithFile would produce.
+        const record = createDataRecord(
+          {
+            ...input,
+            contentHash: blob.contentHash,
+            objectStorageKey: blob.objectStorageKey,
+            mimeType: blob.mimeType,
+            sizeBytes: blob.sizeBytes,
+            originalFilename: input.originalFilename ?? null,
+          } as DataPutInput as never,
+          clock,
+        );
+        await databaseAdapter.put(record);
+        if (input.metadata) {
+          await databaseAdapter.putMetadata(input.type, {
+            ...input.metadata,
+            recordId: record.id,
+          });
+        }
+        await logChange("create", record, null);
+        return record;
+      },
+
       async get(recordId) {
         const record = await databaseAdapter.get(recordId);
         if (!record) return null;
