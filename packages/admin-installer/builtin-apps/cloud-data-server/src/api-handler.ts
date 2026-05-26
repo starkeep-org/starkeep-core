@@ -146,6 +146,15 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
         password: token,
         ssl: { rejectUnauthorized: true },
       });
+      // Without an 'error' listener, an async socket failure (DSQL token
+      // expiry, idle timeout, network blip) emits 'error' on the Client with
+      // no handler → Node throws uncaughtException → the Lambda worker dies
+      // mid-invocation and API Gateway returns its default 500. Attach a
+      // no-op-with-log listener so socket errors stay async failures we can
+      // surface in CloudWatch instead of process-killers.
+      client.on("error", (err) => {
+        console.warn("[cds] pg client async error:", (err as Error).message);
+      });
       await client.connect();
       return client;
     };
@@ -289,6 +298,12 @@ function recordToResponse(record: DataRecord) {
 // ---------------------------------------------------------------------------
 
 export async function handler(event: APIGatewayEvent, context: LambdaContext) {
+  // Track every DB client opened during this request so we can close them in
+  // the finally below. Leaving clients open across Lambda freeze/thaw causes
+  // their underlying TCP socket to fire 'error' on a later invocation, which
+  // — combined with pg.Client's emit-or-throw default — has killed workers
+  // mid-handler and made API Gateway return a default 500.
+  const toClose: Array<() => Promise<void>> = [];
   try {
     const method = event.requestContext.http.method.toUpperCase();
     const rawPath = event.rawPath;
@@ -312,6 +327,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const { db, storage, clock, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
 
     await db.init();
+    toClose.push(() => db.close());
 
     // Per-type read/write enforcement on shared.records. DSQL has no RLS and
     // the table is shared across every type, so we load the caller app's
@@ -630,6 +646,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody);
       const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+      toClose.push(() => appSyncableSource.client.end());
       const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
       const response = await transport.pullChanges(body);
       return ok(response);
@@ -724,11 +741,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const ctx = originContexts.get(originAppId)!;
         const originAdapters = makeAdapters(originAppId, ctx.creds);
         await originAdapters.db.init();
+        toClose.push(() => originAdapters.db.close());
         const originAppSyncableSource = await buildAppSyncableSource(
           originAdapters.clientFactory,
           originAdapters.auroraEndpoint,
           originAdapters.region,
         );
+        toClose.push(() => originAppSyncableSource.client.end());
         const originTransport = createInProcessSyncTransport({
           databaseAdapter: originAdapters.db,
           clock: originAdapters.clock,
@@ -750,6 +769,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // applier enforces per-app namespace membership.
       if ((body.appSyncableRows ?? []).length > 0) {
         const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+        toClose.push(() => appSyncableSource.client.end());
         const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
         const partial = await transport.pushChanges({ changes: [], appSyncableRows: body.appSyncableRows } as never);
         if (
@@ -780,6 +800,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ error: "Internal server error" }),
     };
+  } finally {
+    // Close every pg client we opened. Without this, sockets outlive the
+    // handler, DSQL eventually closes them, and the resulting async 'error'
+    // event arrives on a future invocation. Errors during close are
+    // intentionally swallowed — at this point the handler has already
+    // returned a response, and a failed .end() should not corrupt that.
+    await Promise.allSettled(toClose.map((close) => close()));
   }
 }
 
@@ -787,12 +814,16 @@ async function buildAppSyncableSource(
   clientFactory: AppDsqlClientFactory,
   hostname: string,
   region: string,
-): Promise<{ namespaces: DsqlAppSyncableNamespaceStore; applier: DsqlAppSyncableApplier }> {
+): Promise<{
+  namespaces: DsqlAppSyncableNamespaceStore;
+  applier: DsqlAppSyncableApplier;
+  client: DatabaseClient;
+}> {
   const client = await clientFactory.createClient({ hostname, region });
   const namespaces = new DsqlAppSyncableNamespaceStore(client);
   await namespaces.load();
   const applier = new DsqlAppSyncableApplier(client, namespaces);
-  return { namespaces, applier };
+  return { namespaces, applier, client };
 }
 
 /**

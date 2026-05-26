@@ -384,13 +384,13 @@ export async function handler(event, context) {
 
     // 4. Bundle the backend Lambda handler with esbuild. sharp is external —
     //    it needs native binaries installed for the Lambda (linux) platform.
-    console.log("\nBundling photos-handler with esbuild…");
+    console.log("\nBundling resize-handler with esbuild…");
     const handlersDir = join(stagingDir, "infra", "src");
     mkdirSync(handlersDir, { recursive: true });
 
     await build({
       entryPoints: [
-        join(INFRA_DIR, "src", "photos-handler.ts"),
+        join(INFRA_DIR, "src", "resize-handler.ts"),
       ],
       bundle: true,
       platform: "node",
@@ -401,10 +401,15 @@ export async function handler(event, context) {
       allowOverwrite: true,
     });
 
-    // 5. Install sharp for the Lambda (linux x64) platform.
-    console.log("\nInstalling sharp for linux/x64…");
+    // 5. Install sharp for the Lambda (linux x64 glibc) platform. --libc=glibc
+    //    is required when installing from a non-glibc host (e.g. macOS): without
+    //    it npm's libc filter silently drops @img/sharp-linux-x64 and
+    //    @img/sharp-libvips-linux-x64, leaving the bundle with sharp's JS but
+    //    no native binary, and the Lambda fails at require("sharp") with
+    //    "Could not load the sharp module using the linux-x64 runtime".
+    console.log("\nInstalling sharp for linux/x64 (glibc)…");
     execSync(
-      "npm install --os=linux --cpu=x64 --no-package-lock --no-save sharp",
+      "npm install --os=linux --cpu=x64 --libc=glibc --no-package-lock --no-save sharp",
       { cwd: stagingDir, stdio: "inherit" },
     );
 

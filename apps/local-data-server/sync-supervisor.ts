@@ -63,7 +63,8 @@ interface EngineEntry {
   pushTimer: NodeJS.Timeout | null;
   lastPullAt: string | null;
   lastPushAt: string | null;
-  lastError: string | null;
+  lastPullError: string | null;
+  lastPushError: string | null;
   pullBackoffMs: number;
   unsubscribe: () => void;
 }
@@ -76,12 +77,14 @@ export interface SyncSupervisorStatus {
     appId: string;
     lastPullAt: string | null;
     lastPushAt: string | null;
-    lastError: string | null;
+    lastPullError: string | null;
+    lastPushError: string | null;
     pullBackoffMs: number;
     conflictCount: number;
   }>;
   readonly conflictCount: number;
-  readonly lastError: string | null;
+  readonly lastPullError: string | null;
+  readonly lastPushError: string | null;
   readonly lastPullAt: string | null;
   readonly lastPushAt: string | null;
   readonly pullBackoffMs: number;
@@ -211,12 +214,17 @@ export function createSyncSupervisor(
       pushTimer: null,
       lastPullAt: null,
       lastPushAt: null,
-      lastError: null,
+      lastPullError: null,
+      lastPushError: null,
       pullBackoffMs: pullIntervalMs,
       unsubscribe,
     };
     engines.set(appId, entry);
     schedulePullLoop(entry);
+    // Drain any change-log backlog appended before this engine existed
+    // (server restart, install race). Without this, pending pushes wait
+    // for the next unrelated local write to fan out a debounce.
+    schedulePushFor(appId);
     console.log(`[sync] started loop for app=${appId} at ${perAppBaseUrl}`);
   }
 
@@ -240,10 +248,10 @@ export function createSyncSupervisor(
     try {
       await entry.engine.pull();
       entry.lastPullAt = new Date().toISOString();
-      entry.lastError = null;
+      entry.lastPullError = null;
       entry.pullBackoffMs = pullIntervalMs;
     } catch (err) {
-      entry.lastError = (err as Error).message;
+      entry.lastPullError = (err as Error).message;
       entry.pullBackoffMs = Math.min(entry.pullBackoffMs * 2, 5 * 60 * 1000);
       console.error(`[sync] pull failed for app=${entry.appId}:`, err);
     }
@@ -260,9 +268,9 @@ export function createSyncSupervisor(
       try {
         await entry.engine.push();
         entry.lastPushAt = new Date().toISOString();
-        entry.lastError = null;
+        entry.lastPushError = null;
       } catch (err) {
-        entry.lastError = (err as Error).message;
+        entry.lastPushError = (err as Error).message;
         console.error(`[sync] push failed for app=${entry.appId}:`, err);
       }
     }, pushDebounceMs);
@@ -392,10 +400,16 @@ export function createSyncSupervisor(
             await entry.engine.fullSync();
             entry.lastPullAt = new Date().toISOString();
             entry.lastPushAt = new Date().toISOString();
-            entry.lastError = null;
+            entry.lastPullError = null;
+            entry.lastPushError = null;
             entry.pullBackoffMs = pullIntervalMs;
           } catch (err) {
-            entry.lastError = (err as Error).message;
+            // fullSync runs pull then push; we don't know which side threw
+            // here, so record on both. Subsequent runPullOnce/schedulePushFor
+            // will clear whichever one actually succeeds.
+            const msg = (err as Error).message;
+            entry.lastPullError = msg;
+            entry.lastPushError = msg;
             console.error(`[sync] resume fullSync failed for app=${entry.appId}:`, err);
           }
           schedulePullLoop(entry);
@@ -415,9 +429,12 @@ export function createSyncSupervisor(
           rejected += r.rejected;
           entry.lastPullAt = new Date().toISOString();
           entry.lastPushAt = new Date().toISOString();
-          entry.lastError = null;
+          entry.lastPullError = null;
+          entry.lastPushError = null;
         } catch (err) {
-          entry.lastError = (err as Error).message;
+          const msg = (err as Error).message;
+          entry.lastPullError = msg;
+          entry.lastPushError = msg;
           console.error(`[sync] fullSync failed for app=${entry.appId}:`, err);
         }
       }
@@ -431,7 +448,8 @@ export function createSyncSupervisor(
         appId: e.appId,
         lastPullAt: e.lastPullAt,
         lastPushAt: e.lastPushAt,
-        lastError: e.lastError,
+        lastPullError: e.lastPullError,
+        lastPushError: e.lastPushError,
         pullBackoffMs: e.pullBackoffMs,
         conflictCount: e.engine.getConflicts().length,
       }));
@@ -444,7 +462,8 @@ export function createSyncSupervisor(
         (acc, e) => (e.lastPushAt && (!acc || e.lastPushAt > acc) ? e.lastPushAt : acc),
         null,
       );
-      const lastError = perApp.find((e) => e.lastError !== null)?.lastError ?? null;
+      const lastPullError = perApp.find((e) => e.lastPullError !== null)?.lastPullError ?? null;
+      const lastPushError = perApp.find((e) => e.lastPushError !== null)?.lastPushError ?? null;
       const pullBackoffMs = perApp.reduce<number>(
         (acc, e) => Math.max(acc, e.pullBackoffMs),
         pullIntervalMs,
@@ -455,7 +474,8 @@ export function createSyncSupervisor(
         cloudUrl: cloudUrlBase,
         perApp,
         conflictCount: perApp.reduce((acc, e) => acc + e.conflictCount, 0),
-        lastError,
+        lastPullError,
+        lastPushError,
         lastPullAt,
         lastPushAt,
         pullBackoffMs,
