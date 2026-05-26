@@ -20,6 +20,11 @@ import { createChangeLog } from "./change-log.js";
 import { createChangeNotifier } from "./change-notifier.js";
 import { createFileSyncEngine } from "./file-sync-engine.js";
 import { decidePullApply } from "./conflict-resolver.js";
+import {
+  countNonTerminal,
+  logNonTerminalCounts,
+  logTransition,
+} from "./observability.js";
 
 const ZERO_HLC: HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
 
@@ -88,6 +93,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   ): Promise<void> {
     const updated = { ...record, syncStatus: SyncStatus.Conflict };
     await localDatabaseAdapter.put(updated);
+    logTransition("client", record.id, record.syncStatus, SyncStatus.Conflict, "conflict-detected");
   }
 
   return {
@@ -174,18 +180,30 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // apply-clean
         if (remoteChange.operation === "delete") {
           await localDatabaseAdapter.delete(remoteChange.recordId);
+          logTransition(
+            "client",
+            remoteChange.recordId,
+            localRecord?.syncStatus ?? null,
+            SyncStatus.Synced,
+            "pull-apply-delete",
+          );
         } else {
           // Receiver: if the record carries a blob, mark PendingFileDownload —
           // the file retry pass will fetch the blob and flip to Synced. Records
           // without a blob go straight to Synced.
           const snapshot = remoteChange.recordSnapshot;
           const needsBlob = !!snapshot.objectStorageKey;
-          await localDatabaseAdapter.put({
-            ...snapshot,
-            syncStatus: needsBlob
-              ? SyncStatus.PendingFileDownload
-              : SyncStatus.Synced,
-          });
+          const nextStatus = needsBlob
+            ? SyncStatus.PendingFileDownload
+            : SyncStatus.Synced;
+          await localDatabaseAdapter.put({ ...snapshot, syncStatus: nextStatus });
+          logTransition(
+            "client",
+            remoteChange.recordId,
+            localRecord?.syncStatus ?? null,
+            nextStatus,
+            "pull-apply",
+          );
         }
         appliedIds.push(remoteChange.recordId);
       }
@@ -327,12 +345,17 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             localRecord.version === change.recordSnapshot.version
           ) {
             const needsBlob = !!localRecord.objectStorageKey;
-            await localDatabaseAdapter.put({
-              ...localRecord,
-              syncStatus: needsBlob
-                ? SyncStatus.PendingFileUpload
-                : SyncStatus.Synced,
-            });
+            const nextStatus = needsBlob
+              ? SyncStatus.PendingFileUpload
+              : SyncStatus.Synced;
+            await localDatabaseAdapter.put({ ...localRecord, syncStatus: nextStatus });
+            logTransition(
+              "client",
+              change.recordId,
+              localRecord.syncStatus,
+              nextStatus,
+              "push-accepted",
+            );
           }
         }
       }
@@ -405,6 +428,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         if (!record.objectStorageKey) {
           // No blob to upload — should not normally happen in this state.
           await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+          logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "upload-skipped-no-key");
           continue;
         }
         if (fileSyncEngine.isTransferInFlight(record.objectStorageKey)) {
@@ -423,6 +447,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           );
           if (ok) {
             await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+            logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "upload-complete");
             uploaded += 1;
           }
         } catch (err) {
@@ -443,6 +468,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       for (const record of downloadResult.records) {
         if (!record.objectStorageKey) {
           await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+          logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "download-skipped-no-key");
           continue;
         }
         if (fileSyncEngine.isTransferInFlight(record.objectStorageKey)) {
@@ -452,6 +478,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           // Short-circuit if the file is already present locally.
           if (await localObjectStorage.has(record.objectStorageKey)) {
             await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+            logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "download-already-local");
             downloaded += 1;
             continue;
           }
@@ -467,6 +494,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           );
           if (ok) {
             await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
+            logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "download-complete");
             downloaded += 1;
           }
         } catch (err) {
@@ -475,6 +503,13 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           );
           failed += 1;
         }
+      }
+
+      try {
+        const counts = await countNonTerminal(localDatabaseAdapter);
+        logNonTerminalCounts("client", counts);
+      } catch (err) {
+        console.warn(`[sync-state] non-terminal count failed: ${(err as Error).message}`);
       }
 
       return { uploaded, downloaded, failed };

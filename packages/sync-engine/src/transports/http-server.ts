@@ -35,6 +35,7 @@ export function createHttpSyncHandler(
     createInProcessSyncTransport({
       databaseAdapter: options.databaseAdapter,
       clock: options.clock,
+      objectStorage: options.objectStorageAdapter,
     });
 
   return async (req, res) => {

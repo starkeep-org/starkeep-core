@@ -41,6 +41,7 @@ function createTestSetup() {
   const transport = createInProcessSyncTransport({
     databaseAdapter: remoteDatabase,
     clock: localClock,
+    objectStorage: remoteObjectStorage,
   });
 
   const syncEngine = createSyncEngine({
@@ -433,7 +434,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     await initAll(setup);
     const { syncEngine, localDatabase, remoteDatabase, remoteObjectStorage, localObjectStorage, remoteClock } = setup;
 
-    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock);
+    const remoteRecord: DataRecord = { ...createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock), syncStatus: SyncStatus.Synced };
     await remoteDatabase.put(remoteRecord);
     // Receiver downloads blobs from remote storage during the file-transfer pass.
     await remoteObjectStorage.put(remoteRecord.objectStorageKey, new Uint8Array([1, 2, 3, 4]), { contentType: "text/plain" });
@@ -453,7 +454,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     await initAll(setup);
     const { syncEngine, localDatabase, remoteDatabase, remoteClock } = setup;
 
-    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock);
+    const remoteRecord: DataRecord = { ...createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock), syncStatus: SyncStatus.Synced };
     await remoteDatabase.put(remoteRecord);
     // Deliberately do NOT put the blob on remote storage.
 
@@ -468,7 +469,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     await initAll(setup);
     const { syncEngine, localDatabase, remoteDatabase, remoteObjectStorage, remoteClock } = setup;
 
-    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock);
+    const remoteRecord: DataRecord = { ...createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock), syncStatus: SyncStatus.Synced };
     await remoteDatabase.put(remoteRecord);
 
     // First pull: blob missing remotely, record stuck in PendingFileDownload.
@@ -497,6 +498,7 @@ describe("createSyncEngine — OCC round-trip", () => {
       version: 2,
       updatedAt: remoteClock.now(),
       originalFilename: "remote change",
+      syncStatus: SyncStatus.Synced,
     };
     await remoteDatabase.put(remoteAdvanced);
 
@@ -543,7 +545,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     const listener = vi.fn();
     syncEngine.changeNotifier.subscribe(listener);
 
-    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock);
+    const remoteRecord: DataRecord = { ...createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock), syncStatus: SyncStatus.Synced };
     await remoteDatabase.put(remoteRecord);
 
     await syncEngine.pull();

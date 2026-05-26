@@ -75,6 +75,7 @@ async function makeWorld(): Promise<World> {
     const transport = createInProcessSyncTransport({
       databaseAdapter: cloudDb,
       clock: cloudClock,
+      objectStorage: cloudObj,
     });
 
     const engine = createSyncEngine({

@@ -22,6 +22,11 @@ import type {
   ScanCapableApplier,
 } from "../types.js";
 import { decidePushAccept } from "../conflict-resolver.js";
+import {
+  countNonTerminal,
+  logNonTerminalCounts,
+  logTransition,
+} from "../observability.js";
 
 export interface InProcessTransportOptions {
   readonly databaseAdapter: DatabaseAdapter;
@@ -35,12 +40,12 @@ export interface InProcessTransportOptions {
     readonly applier: AppSyncableApplier;
   };
   /**
-   * Object storage backing the records this transport serves. When provided,
-   * pull lazily flips PendingFileDownload records whose blob has landed to
-   * Synced, and push writes incoming records as PendingFileDownload (or Synced
-   * if the blob is already present).
+   * Object storage backing the records this transport serves. Pull lazily flips
+   * PendingFileDownload records whose blob has landed to Synced, and push
+   * writes incoming records as PendingFileDownload (or Synced if the blob is
+   * already present).
    */
-  readonly objectStorage?: ObjectStorageAdapter;
+  readonly objectStorage: ObjectStorageAdapter;
 }
 
 /**
@@ -71,22 +76,24 @@ export function createInProcessSyncTransport(
       for (const candidate of result.records) {
         if (compareHLC(candidate.updatedAt, request.sinceTimestamp) <= 0) continue;
         let record = candidate;
-        // Server-side state machine is only enforced when the transport owns
-        // the object storage. Without it (some test setups), the transport
-        // can't observe blob presence, so it preserves the snapshot as-is.
-        if (objectStorage) {
-          if (
-            record.syncStatus === SyncStatus.PendingFileDownload &&
-            record.objectStorageKey
-          ) {
-            if (await objectStorage.has(record.objectStorageKey)) {
-              record = { ...record, syncStatus: SyncStatus.Synced };
-              await databaseAdapter.put(record);
-            }
+        if (
+          record.syncStatus === SyncStatus.PendingFileDownload &&
+          record.objectStorageKey
+        ) {
+          if (await objectStorage.has(record.objectStorageKey)) {
+            record = { ...record, syncStatus: SyncStatus.Synced };
+            await databaseAdapter.put(record);
+            logTransition(
+              "server",
+              record.id,
+              SyncStatus.PendingFileDownload,
+              SyncStatus.Synced,
+              "pull-lazy-reconcile",
+            );
           }
-          // Only expose records whose blob is durably here.
-          if (record.syncStatus !== SyncStatus.Synced) continue;
         }
+        // Only expose records whose blob is durably here.
+        if (record.syncStatus !== SyncStatus.Synced) continue;
         changes.push(recordToChangeLogEntry(record));
         latest = maxHLC(latest, record.updatedAt);
         if (changes.length >= request.limit) break;
@@ -113,6 +120,13 @@ export function createInProcessSyncTransport(
         }
       }
 
+      try {
+        const counts = await countNonTerminal(databaseAdapter);
+        logNonTerminalCounts("server", counts);
+      } catch (err) {
+        console.warn(`[sync-state] non-terminal count failed: ${(err as Error).message}`);
+      }
+
       return {
         changes,
         appSyncableRows,
@@ -135,7 +149,14 @@ export function createInProcessSyncTransport(
           if (decision.kind === "accept") {
             if (change.operation === "delete") {
               await databaseAdapter.delete(change.recordId);
-            } else if (objectStorage) {
+              logTransition(
+                "server",
+                change.recordId,
+                current?.syncStatus ?? null,
+                SyncStatus.Synced,
+                "push-accept-delete",
+              );
+            } else {
               // Server-side state machine: write as PendingFileDownload until
               // the blob lands. If the blob is already on the server (re-push
               // after a successful upload), short-circuit to Synced.
@@ -151,16 +172,15 @@ export function createInProcessSyncTransport(
                 nextStatus = SyncStatus.Synced;
               }
               await databaseAdapter.put({ ...snapshot, syncStatus: nextStatus });
-            } else {
-              // Transport doesn't own object storage; store the snapshot as
-              // delivered. Callers manage blob/status correspondence externally.
-              await databaseAdapter.put(change.recordSnapshot);
+              logTransition(
+                "server",
+                change.recordId,
+                current?.syncStatus ?? null,
+                nextStatus,
+                "push-accept-write",
+              );
             }
-          } else if (
-            objectStorage &&
-            current &&
-            change.operation !== "delete"
-          ) {
+          } else if (current && change.operation !== "delete") {
             // accept-noop: server already holds this exact revision but its
             // sync_status may have drifted from blob reality (e.g. an older
             // server build wrote the client's pending_push verbatim, or a
@@ -181,6 +201,13 @@ export function createInProcessSyncTransport(
             }
             if (current.syncStatus !== nextStatus) {
               await databaseAdapter.put({ ...current, syncStatus: nextStatus });
+              logTransition(
+                "server",
+                current.id,
+                current.syncStatus,
+                nextStatus,
+                "push-noop-reconcile",
+              );
             }
           }
           // accept-noop: server already has this exact (id, version) — don't

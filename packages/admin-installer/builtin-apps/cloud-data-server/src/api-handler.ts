@@ -531,6 +531,38 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return ok({ url });
     }
 
+    // POST /apps/{appId}/files/confirm — close the loop after a presigned PUT.
+    // Body: { key }. Verifies the blob is durably in S3 and flips matching
+    // PendingFileDownload records to Synced so downstream pulls can see them
+    // without waiting for the lazy reconcile on the next pullChanges call.
+    // Idempotent: re-calling after rows are already Synced is a no-op 200.
+    if (method === "POST" && subPath === "/files/confirm") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as { key?: string };
+      if (!body.key) return clientErr("key is required", 400);
+      const check = parseObjectKey(appId, body.key, grants, "write");
+      if (!check.ok) return clientErr(check.message, check.status);
+      const exists = await storage.has(body.key);
+      if (!exists) return clientErr("Blob not yet visible at the supplied key", 409);
+      const matches = await db.query({
+        filters: [{ field: "objectStorageKey", operator: "eq", value: body.key }],
+        limit: 100,
+      });
+      let confirmed = 0;
+      for (const record of matches.records) {
+        if (record.syncStatus === SyncStatus.PendingFileDownload) {
+          await db.put({ ...record, syncStatus: SyncStatus.Synced });
+          console.info(
+            `[sync-state] side=server record=${record.id} from=${SyncStatus.PendingFileDownload} to=${SyncStatus.Synced} reason=confirm-endpoint`,
+          );
+          confirmed += 1;
+        }
+      }
+      return ok({ confirmed });
+    }
+
     // GET /apps/{appId}/files/{encodedKey}/presign — presigned S3 GET URL.
     // The caller URL-encodes the storage key, but API Gateway HTTP API
     // normalizes %2F back to "/" before forwarding to Lambda, so the captured
@@ -823,7 +855,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if ((body.appSyncableRows ?? []).length > 0) {
         const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
         toClose.push(() => appSyncableSource.client.end());
-        const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
+        const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource, objectStorage: storage });
         const partial = await transport.pushChanges({ changes: [], appSyncableRows: body.appSyncableRows } as never);
         if (
           partial.latestTimestamp.wallTime > latestTimestamp.wallTime ||
