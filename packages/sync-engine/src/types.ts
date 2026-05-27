@@ -53,6 +53,45 @@ export interface ScanCapableApplier extends AppSyncableApplier {
   ): Promise<AppSyncableRowEntry[]>;
 }
 
+/**
+ * A row read from the framework-owned `_starkeep_sync_records` table.
+ * Mirrors the column shape declared in `@starkeep/shared-space-api`'s
+ * `FILE_RECORDS_COLUMNS` plus the always-appended HLC bookkeeping columns.
+ * The sync engine consumes these in `runFileTransferPass` to drive
+ * upload/download decisions for app-syncable files.
+ */
+export interface FileRecordRow {
+  readonly id: string;
+  readonly sync_status: string;
+  readonly object_storage_key: string;
+  readonly content_hash: string;
+  readonly mime_type: string;
+  readonly size_bytes: number;
+  readonly original_filename: string | null;
+  readonly origin_app_id: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly deleted_at: string | null;
+}
+
+/**
+ * Helpers the sync engine calls against the reserved `_starkeep_sync_records`
+ * table. The status update is intentionally local-only — it must not bump
+ * `updated_at` (which would re-emit the row to remote replicas and trip the
+ * lazy reconciliation into a loop).
+ */
+export interface FileRecordsApplier {
+  scanFileRecordsByStatus(
+    appId: string,
+    statuses: string[],
+  ): Promise<FileRecordRow[]>;
+  setFileRecordStatus(
+    appId: string,
+    id: string,
+    status: string,
+  ): Promise<void>;
+}
+
 // ---------------------------------------------------------------------------
 // Change-log entry — record-only. App-syncable rows are NOT logged here.
 // ---------------------------------------------------------------------------
@@ -235,19 +274,12 @@ export interface SyncEngineOptions {
   readonly changeLog?: ChangeLog;
   readonly syncState?: SyncStateStore;
   /**
-   * Returns the list of `apps/<appId>/syncable/...` file keys to sync. Called
-   * once per push/pull. Returning an empty list (or omitting this option)
-   * preserves the previous behaviour where only record-attached blobs are
-   * synced. The harness fills this in from `app_syncable_namespaces`.
-   */
-  readonly listAppSyncableFiles?: () => Promise<FileEntry[]>;
-  /**
    * Provides the applier (for applying incoming pull rows) and namespace store
    * (for scanning pending rows on push). Without it, app-syncable rows in pull
    * responses are silently skipped and no app rows are sent on push.
    */
   readonly appSyncableSource?: {
     readonly namespaces: AppSyncableNamespaceStore;
-    readonly applier: AppSyncableApplier & ScanCapableApplier;
+    readonly applier: AppSyncableApplier & ScanCapableApplier & FileRecordsApplier;
   };
 }

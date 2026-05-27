@@ -30,9 +30,19 @@ export type {
   AppSyncableApplier,
   ScanCapableApplier,
   AppSyncableRowEntry,
+  FileRecordRow,
+  FileRecordsApplier,
 } from "./app-syncable/types.js";
 export {
   createAppSpecificFactory,
   type AppSpecificFactoryOptions,
 } from "./app-syncable/factory.js";
 export { quoteIdent, validateTableName, RESERVED_COLUMN_NAMES } from "./app-syncable/validation.js";
+export {
+  FILE_RECORDS_TABLE,
+  FILE_RECORDS_TABLE_INFO,
+  FILE_RECORDS_COLUMNS,
+  RESERVED_TABLE_NAMES,
+  withFileRecordsTable,
+  type FileRecordsTableColumn,
+} from "./app-syncable/reserved.js";

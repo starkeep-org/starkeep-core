@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { AppManifest, SharedTypeAccess, SyncableTable } from "@starkeep/admin-manifest";
 import { appSyncableTableName } from "@starkeep/storage-sqlite";
+import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
 
 export type Operation = "install" | "uninstall";
 export type StepStatus = "pending" | "done" | "failed";
@@ -160,6 +161,38 @@ export function createAppSyncableTables(
       `CREATE INDEX IF NOT EXISTS "idx_${fullName}_updated_at" ON "${fullName}"("updated_at")`,
     );
   }
+}
+
+/**
+ * Create the framework-owned `_starkeep_sync_records` table for an app that
+ * opted into `filesEnabled`. Same column shape as the manifest-declared
+ * syncable tables (plus the standard updated_at/deleted_at HLC columns) so
+ * the LWW applier can treat it uniformly.
+ */
+export function createReservedFileRecordsTable(
+  db: DatabaseSync,
+  appId: string,
+): void {
+  const fullName = appSyncableTableName(appId, FILE_RECORDS_TABLE);
+  const columnDdl = FILE_RECORDS_COLUMNS.map((c) => {
+    const sqlType = c.type === "integer" ? "INTEGER" : "TEXT";
+    const parts = [`"${c.name}"`, sqlType];
+    if (c.notNull || c.primaryKey) parts.push("NOT NULL");
+    return parts.join(" ");
+  }).join(", ");
+  const pks = FILE_RECORDS_COLUMNS.filter((c) => c.primaryKey).map(
+    (c) => `"${c.name}"`,
+  );
+  const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}, "updated_at" TEXT NOT NULL, "deleted_at" TEXT${pkClause})`,
+  );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS "idx_${fullName}_updated_at" ON "${fullName}"("updated_at")`,
+  );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS "idx_${fullName}_sync_status" ON "${fullName}"("sync_status")`,
+  );
 }
 
 export function dropAppSyncableTables(

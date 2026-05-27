@@ -29,14 +29,7 @@ import { createAppSpecificFactory } from "../../packages/shared-space-api/src/ap
 import { disabledSharingTokenStore } from "../../packages/access-control/src/stores.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
-import { AuroraDsqlDatabaseAdapter } from "../../packages/storage-aurora-dsql/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
-import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
-import type {
-  DatabaseClientFactory,
-  DatabaseClient,
-  AuroraDsqlDatabaseAdapterOptions,
-} from "../../packages/storage-aurora-dsql/src/types.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import {
   createSqliteChangeLog,
@@ -51,8 +44,6 @@ import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createFileWatchManager } from "./watcher.js";
-import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import pg from "pg";
 import {
   type CognitoConfig,
   type STSCredentials,
@@ -256,75 +247,6 @@ async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredent
   };
 }
 
-/**
- * Aurora DSQL client factory that reads STS credentials from the cloud
- * credentials file on each reconnect so rotating tokens are always fresh.
- */
-class CloudCredentialsDsqlClientFactory implements DatabaseClientFactory {
-  private readonly credentialsPath: string;
-
-  constructor() {
-    this.credentialsPath = join(STARKEEP_DIR, "cloud-credentials.json");
-  }
-
-  async createClient(
-    options: AuroraDsqlDatabaseAdapterOptions,
-  ): Promise<DatabaseClient> {
-    const createPgClient = async (): Promise<pg.Client> => {
-      let rawCreds: CloudCredentials;
-      try {
-        rawCreds = JSON.parse(await readFile(this.credentialsPath, "utf8")) as CloudCredentials;
-      } catch {
-        throw new Error("No cloud credentials — sign in to continue");
-      }
-      const signer = new DsqlSigner({
-        hostname: options.hostname,
-        region: options.region,
-        credentials: {
-          accessKeyId: rawCreds.accessKeyId,
-          secretAccessKey: rawCreds.secretAccessKey,
-          sessionToken: rawCreds.sessionToken,
-        },
-      });
-      const token = await signer.getDbConnectAdminAuthToken();
-      const client = new pg.Client({
-        host: options.hostname,
-        port: 5432,
-        database: options.database ?? "postgres",
-        user: "admin",
-        password: token,
-        ssl: { rejectUnauthorized: true },
-      });
-      await client.connect();
-      return client;
-    };
-
-    let inner = await createPgClient();
-
-    return {
-      async query(text, values) {
-        try {
-          const result = await inner.query(text, values);
-          return { rows: result.rows };
-        } catch (err: unknown) {
-          // IAM auth token expired (~15 min) — reconnect with fresh token and retry once
-          const code = (err as { code?: string })?.code;
-          if (code === "28000" || code === "28P01") {
-            await inner.end().catch(() => {});
-            inner = await createPgClient();
-            const result = await inner.query(text, values);
-            return { rows: result.rows };
-          }
-          throw err;
-        }
-      },
-      async end() {
-        await inner.end();
-      },
-    };
-  }
-}
-
 async function main() {
   const databaseAdapter = new SqliteDatabaseAdapter({
     path: join(STARKEEP_DIR, "data.db"),
@@ -408,22 +330,6 @@ async function main() {
             : undefined,
       });
     }
-  }
-
-  // Aurora DSQL remote database: initialized from cloud config when available
-  let remoteDatabaseAdapter: DatabaseAdapter | null = null;
-  if (starkeepConfig?.auroraEndpoint) {
-    remoteDatabaseAdapter = new AuroraDsqlDatabaseAdapter(
-      {
-        hostname: starkeepConfig.auroraEndpoint,
-        region: starkeepConfig.s3Region ?? configRegion,
-      },
-      new CloudCredentialsDsqlClientFactory(),
-    );
-    await remoteDatabaseAdapter.init().catch((err: Error) =>
-      console.error("Aurora DSQL init failed (non-fatal):", err.message),
-    );
-    console.log("Remote Aurora DSQL adapter initialized from cloud config");
   }
 
   // App identities are stored in shared_app_registry; populated by the
@@ -516,12 +422,6 @@ async function main() {
         })),
       namespaceStore,
       appApplier,
-      listAppSyncableFiles: async (appId: string) => {
-        const ns = namespaceStore.get(appId);
-        if (!ns || !ns.filesEnabled) return [];
-        const result = await localAdapter.list(`apps/${appId}/syncable/`);
-        return result.keys.map((key) => ({ key }));
-      },
       underlyingSyncStateStore: syncStateStore,
       pullIntervalMs: PULL_INTERVAL_MS,
       pushDebounceMs: PUSH_DEBOUNCE_MS,
@@ -577,7 +477,7 @@ async function main() {
 
   const server = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Starkeep-App-Id, X-Starkeep-App-Sig");
 
     if (req.method === "OPTIONS") {
@@ -1209,22 +1109,13 @@ async function main() {
           );
         }
 
-        // Dual-write to remote S3 + Aurora DSQL when cloud config is present.
-        // S3 write is awaited so the file is available for presigned URLs immediately
-        // after the response is returned (avoids 404 on the first file-url request).
-        if (remoteAdapter && record.objectStorageKey) {
-          const fileData = (await localAdapter.get(record.objectStorageKey).catch(() => null))?.data ?? null;
-          if (fileData) {
-            await remoteAdapter
-              .put(record.objectStorageKey, fileData as unknown as Uint8Array, { contentType: record.mimeType ?? undefined })
-              .catch((err: Error) => console.error("S3 remote write failed (non-fatal):", err.message));
-          }
-        }
-        if (remoteDatabaseAdapter) {
-          remoteDatabaseAdapter
-            .put(record)
-            .catch((err: Error) => console.error("Aurora DSQL write failed (non-fatal):", err.message));
-        }
+        // Cloud propagation happens via the sync engine, not from here. The
+        // engine pushes record metadata through the per-app sync transport and
+        // then uploads the blob via HttpObjectStorageAdapter against
+        // /apps/<originAppId>/files, where the cloud-data-server assumes the
+        // origin app's role to PUT into S3. That's the only path that
+        // attributes the byte to its originating app, per
+        // roles-and-permissions.md.
 
         json(res, {
           record: {
@@ -1328,15 +1219,10 @@ async function main() {
           return;
         }
         await localAdapter.put(parsed.key, fileBuffer, { contentType: parsed.mimeType });
-        // Dual-write to remote S3 if configured, matching the /data/records
-        // path's behaviour so the blob is visible to cloud pullers.
-        if (remoteAdapter) {
-          await remoteAdapter
-            .put(parsed.key, fileBuffer as unknown as Uint8Array, { contentType: parsed.mimeType })
-            .catch((err: Error) =>
-              console.error("S3 remote write failed (non-fatal):", err.message),
-            );
-        }
+        // Cloud propagation is handled by the sync engine's file-transfer pass
+        // (sync-engine.ts runFileTransferPass), which uploads the blob via the
+        // per-app sync transport so the byte is attributed to the originating
+        // app's role on the cloud side.
         res.writeHead(204);
         res.end();
         return;

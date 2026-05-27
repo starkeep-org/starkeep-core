@@ -639,6 +639,9 @@ importers:
       '@starkeep/core':
         specifier: workspace:*
         version: link:../core
+      '@starkeep/shared-space-api':
+        specifier: workspace:*
+        version: link:../shared-space-api
       '@starkeep/storage-adapter':
         specifier: workspace:*
         version: link:../storage-adapter

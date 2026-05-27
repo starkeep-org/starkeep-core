@@ -124,10 +124,7 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
         size: buffer.length,
       };
     } catch (error: unknown) {
-      if (
-        error instanceof Error &&
-        (error.name === "NoSuchKey" || error.name === "NotFound")
-      ) {
+      if (isMissingOrForbidden(error)) {
         return null;
       }
       throw error;
@@ -144,10 +141,13 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       );
       return true;
     } catch (error: unknown) {
-      if (
-        error instanceof Error &&
-        (error.name === "NoSuchKey" || error.name === "NotFound")
-      ) {
+      if (isMissingOrForbidden(error)) {
+        // S3 returns 403 (Forbidden) instead of 404 to callers without
+        // s3:ListBucket on the prefix — see the per-app permissions boundary
+        // in roles-and-permissions.md, which intentionally withholds ListBucket
+        // on shared/*. The two cases are indistinguishable from the SDK, so
+        // treat both as "not present". A genuine permission problem will
+        // surface clearly on the subsequent put/get of the same key.
         return false;
       }
       throw error;
@@ -217,4 +217,13 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       expiresIn: expiresInSeconds,
     });
   }
+}
+
+function isMissingOrForbidden(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const name = error.name;
+  if (name === "NoSuchKey" || name === "NotFound") return true;
+  if (name === "Forbidden" || name === "AccessDenied") return true;
+  const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+  return status === 404 || status === 403;
 }

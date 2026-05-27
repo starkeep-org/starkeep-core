@@ -26,6 +26,8 @@ export type {
   AppSyncableTableInfo,
   AppSyncableNamespace,
   AppSyncableNamespaceStore,
+  FileRecordRow,
+  FileRecordsApplier,
 } from "./types.js";
 
 export { createChangeLog } from "./change-log.js";

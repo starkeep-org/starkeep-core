@@ -11,6 +11,7 @@ import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
+  FileRecordsApplier,
 } from "../../packages/sync-engine/src/types.js";
 import type {
   StarkeepId,
@@ -47,10 +48,7 @@ export interface SyncSupervisorOptions {
    */
   readonly listInstalledApps: () => AppRegistryEntry[];
   readonly namespaceStore: AppSyncableNamespaceStore;
-  readonly appApplier: AppSyncableApplier & ScanCapableApplier;
-  readonly listAppSyncableFiles: (
-    appId: string,
-  ) => Promise<{ key: string }[]>;
+  readonly appApplier: AppSyncableApplier & ScanCapableApplier & FileRecordsApplier;
   readonly underlyingSyncStateStore: SyncStateStore;
   readonly pullIntervalMs: number;
   readonly pushDebounceMs: number;
@@ -146,7 +144,6 @@ export function createSyncSupervisor(
     listInstalledApps,
     namespaceStore,
     appApplier,
-    listAppSyncableFiles,
     underlyingSyncStateStore,
     pullIntervalMs,
     pushDebounceMs,
@@ -194,7 +191,6 @@ export function createSyncSupervisor(
       clock: sdk.clock,
       changeLog,
       syncState,
-      listAppSyncableFiles: () => listAppSyncableFiles(appId),
       appSyncableSource: {
         namespaces: narrowedNamespaces,
         applier: appApplier,
@@ -255,6 +251,12 @@ export function createSyncSupervisor(
       entry.pullBackoffMs = Math.min(entry.pullBackoffMs * 2, 5 * 60 * 1000);
       console.error(`[sync] pull failed for app=${entry.appId}:`, err);
     }
+    // Safety net for stranded local writes: a previous push may have failed
+    // (no retry timer of its own) or a change-notifier event may have been
+    // missed. Nudging a push every pull tick is cheap — schedulePushFor is
+    // idempotent against an already-armed timer, and engine.push() over an
+    // empty change-log is a no-op.
+    schedulePushFor(entry.appId);
     if (!paused) schedulePullLoop(entry);
   }
 

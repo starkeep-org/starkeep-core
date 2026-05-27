@@ -18,6 +18,10 @@ import pg from "pg";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import type { SharedTypeAccess, SyncableTable } from "@starkeep/admin-manifest";
 import { CORE_TYPE_REGISTRY } from "@starkeep/admin-manifest";
+import {
+  FILE_RECORDS_TABLE,
+  FILE_RECORDS_COLUMNS,
+} from "@starkeep/shared-space-api";
 import { retryOnAccessDenied } from "./retry-on-access-denied";
 
 export interface DsqlDdlOptions {
@@ -224,14 +228,52 @@ export async function runAppInstallDdl(
       ).execute(db);
     }
 
+    // Framework-owned reserved table for app-syncable file bookkeeping.
+    // Created in the app's private schema when files are enabled. Same
+    // updated_at/deleted_at HLC + GRANT pattern as the manifest-declared
+    // syncable tables.
+    if (appSyncableFilesEnabled) {
+      const reservedColDdl = FILE_RECORDS_COLUMNS.map((c) => {
+        const pgType = c.type === "integer" ? "bigint" : "text";
+        const notNull = c.notNull || c.primaryKey ? " NOT NULL" : "";
+        return `"${c.name}" ${pgType}${notNull}`;
+      }).join(", ");
+      const reservedPks = FILE_RECORDS_COLUMNS.filter((c) => c.primaryKey)
+        .map((c) => `"${c.name}"`)
+        .join(", ");
+      const reservedPkClause = reservedPks ? `, PRIMARY KEY (${reservedPks})` : "";
+      await sql
+        .raw(
+          `CREATE TABLE IF NOT EXISTS ${schemaName}."${FILE_RECORDS_TABLE}" (${reservedColDdl}, "updated_at" text NOT NULL, "deleted_at" text${reservedPkClause})`,
+        )
+        .execute(db);
+      await sql
+        .raw(
+          `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_updated_at" ON ${schemaName}."${FILE_RECORDS_TABLE}"("updated_at")`,
+        )
+        .execute(db);
+      await sql
+        .raw(
+          `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_sync_status" ON ${schemaName}."${FILE_RECORDS_TABLE}"("sync_status")`,
+        )
+        .execute(db);
+      await sql
+        .raw(
+          `GRANT SELECT, INSERT, UPDATE, DELETE ON ${schemaName}."${FILE_RECORDS_TABLE}" TO ${pgRole}`,
+        )
+        .execute(db);
+    }
+
     // Upsert namespace registry row so the pull path knows which tables exist.
     if (appSyncableTables.length > 0 || appSyncableFilesEnabled) {
-      const tablesJson = JSON.stringify(
-        appSyncableTables.map((t) => ({
-          name: t.name,
-          pkColumns: t.columns.filter((c) => c.primaryKey).map((c) => c.name),
-        })),
-      );
+      const tablesInfo = appSyncableTables.map((t) => ({
+        name: t.name,
+        pkColumns: t.columns.filter((c) => c.primaryKey).map((c) => c.name),
+      }));
+      if (appSyncableFilesEnabled) {
+        tablesInfo.push({ name: FILE_RECORDS_TABLE, pkColumns: ["id"] });
+      }
+      const tablesJson = JSON.stringify(tablesInfo);
       await sql`
         INSERT INTO shared.app_syncable_namespaces (app_id, tables_json, files_enabled)
         VALUES (${appId}, ${tablesJson}, ${appSyncableFilesEnabled})

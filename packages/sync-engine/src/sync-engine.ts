@@ -37,7 +37,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     clock,
     changeLog = createChangeLog(),
     syncState,
-    listAppSyncableFiles,
     appSyncableSource,
   } = options;
 
@@ -223,35 +222,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           }
         } else {
           console.warn("[sync] appSyncableRows received but no appSyncableSource configured — skipping");
-        }
-      }
-
-      // Pull app-specific syncable files that exist remotely but not locally.
-      if (listAppSyncableFiles) {
-        try {
-          const extras = await listAppSyncableFiles();
-          if (extras.length > 0) {
-            const filesToPull = await fileSyncEngine.getFilesToPull(
-              localObjectStorage,
-              remoteObjectStorage,
-              extras,
-            );
-            for (const manifest of filesToPull) {
-              try {
-                await fileSyncEngine.transferFile(
-                  manifest,
-                  remoteObjectStorage,
-                  localObjectStorage,
-                );
-              } catch (err) {
-                console.warn(
-                  `[sync] app-syncable pull skipped: ${manifest.objectStorageKey} — ${(err as Error).message}`,
-                );
-              }
-            }
-          }
-        } catch (err) {
-          console.warn(`[sync] listAppSyncableFiles failed: ${(err as Error).message}`);
         }
       }
 
@@ -502,6 +472,95 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             `[sync] download failed for ${record.objectStorageKey}: ${(err as Error).message}`,
           );
           failed += 1;
+        }
+      }
+
+      // Reserved-table file records for filesEnabled apps. Same state machine
+      // as shared_records, scoped by the per-app `_starkeep_sync_records`
+      // table the framework manages. Decision driver is blob location, not
+      // the stored sync_status (which can be stale from the producer's view).
+      if (appSyncableSource) {
+        for (const ns of appSyncableSource.namespaces.list()) {
+          if (!ns.filesEnabled) continue;
+          let rows;
+          try {
+            rows = await appSyncableSource.applier.scanFileRecordsByStatus(
+              ns.appId,
+              [SyncStatus.PendingFileUpload, SyncStatus.PendingFileDownload],
+            );
+          } catch (err) {
+            console.warn(
+              `[sync] scan reserved file-records failed (app=${ns.appId}): ${(err as Error).message}`,
+            );
+            continue;
+          }
+          for (const row of rows) {
+            if (!row.object_storage_key) continue;
+            if (fileSyncEngine.isTransferInFlight(row.object_storage_key)) continue;
+            const manifest = {
+              fileHash: row.content_hash || row.object_storage_key,
+              objectStorageKey: row.object_storage_key,
+              sizeBytes: row.size_bytes,
+              mimeType: row.mime_type || undefined,
+            };
+            const haveLocal = await localObjectStorage.has(row.object_storage_key);
+            try {
+              if (haveLocal) {
+                // Producer side or already-downloaded receiver: ensure remote
+                // has the blob, then mark synced. transferFile short-circuits
+                // when the destination already holds the key.
+                const ok = await fileSyncEngine.transferFile(
+                  manifest,
+                  localObjectStorage,
+                  remoteObjectStorage,
+                );
+                if (ok) {
+                  await appSyncableSource.applier.setFileRecordStatus(
+                    ns.appId,
+                    row.id,
+                    SyncStatus.Synced,
+                  );
+                  logTransition(
+                    "client",
+                    `${ns.appId}/${row.id}`,
+                    row.sync_status as SyncStatus,
+                    SyncStatus.Synced,
+                    "app-file-upload-or-noop",
+                  );
+                  uploaded += 1;
+                }
+              } else {
+                // Receiver: blob isn't local yet. Try to fetch from remote.
+                const ok = await fileSyncEngine.transferFile(
+                  manifest,
+                  remoteObjectStorage,
+                  localObjectStorage,
+                );
+                if (ok) {
+                  await appSyncableSource.applier.setFileRecordStatus(
+                    ns.appId,
+                    row.id,
+                    SyncStatus.Synced,
+                  );
+                  logTransition(
+                    "client",
+                    `${ns.appId}/${row.id}`,
+                    row.sync_status as SyncStatus,
+                    SyncStatus.Synced,
+                    "app-file-download-complete",
+                  );
+                  downloaded += 1;
+                }
+                // If !ok the sender hasn't uploaded yet; stay pending and try
+                // again on the next pass.
+              }
+            } catch (err) {
+              console.warn(
+                `[sync] app-file transfer failed (app=${ns.appId} key=${row.object_storage_key}): ${(err as Error).message}`,
+              );
+              failed += 1;
+            }
+          }
         }
       }
 

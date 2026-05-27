@@ -9,6 +9,7 @@ import {
   appRegistryRow,
   clearStepLedger,
   createAppSyncableTables,
+  createReservedFileRecordsTable,
   deleteAccessGrants,
   deleteAppRegistry,
   dropAppSyncableTables,
@@ -24,6 +25,7 @@ import {
   getAppSyncableNamespace,
   upsertAppSyncableNamespace,
 } from "@starkeep/storage-sqlite";
+import { FILE_RECORDS_TABLE_INFO } from "@starkeep/shared-space-api";
 
 export interface InstallLocalResult {
   appId: string;
@@ -90,18 +92,20 @@ export function installLocal(db: DatabaseSync, rawManifest: unknown): InstallLoc
   const syncable = manifest.infraRequirements.appSpecificSyncable;
   runStep(db, appId, "install", "create_syncable_tables", done, () => {
     createAppSyncableTables(db, appId, syncable.tables);
+    if (syncable.files) {
+      createReservedFileRecordsTable(db, appId);
+    }
   });
 
   runStep(db, appId, "install", "register_syncable_namespace", done, () => {
-    upsertAppSyncableNamespace(
-      db,
-      appId,
-      syncable.tables.map((t) => ({
-        name: t.name,
-        pkColumns: t.columns.filter((c) => c.primaryKey).map((c) => c.name),
-      })),
-      syncable.files,
-    );
+    const declaredTables = syncable.tables.map((t) => ({
+      name: t.name,
+      pkColumns: t.columns.filter((c) => c.primaryKey).map((c) => c.name),
+    }));
+    const tables = syncable.files
+      ? [...declaredTables, FILE_RECORDS_TABLE_INFO]
+      : declaredTables;
+    upsertAppSyncableNamespace(db, appId, tables, syncable.files);
   });
 
   runStep(db, appId, "install", "mark_active", done, () => {

@@ -9,6 +9,18 @@ import type {
 } from "@starkeep/sync-engine";
 import type { AppSpecificOperations, ApiSubject } from "../types.js";
 import { validateTableName } from "./validation.js";
+import { FILE_RECORDS_TABLE, RESERVED_TABLE_NAMES } from "./reserved.js";
+
+async function sha256Hex(data: Uint8Array): Promise<string> {
+  const copy = data.buffer.slice(
+    data.byteOffset,
+    data.byteOffset + data.byteLength,
+  ) as ArrayBuffer;
+  const buf = await crypto.subtle.digest("SHA-256", copy);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 export interface AppSpecificFactoryOptions {
   namespace: AppSyncableNamespaceStore;
@@ -41,13 +53,70 @@ export function createAppSpecificFactory(
     const appId = subject.subjectId;
     const ns = namespace.get(appId);
     if (!ns) return null;
-    const declaredTables = new Set(ns.tableNames);
+    // Framework-reserved tables (e.g. `_starkeep_sync_records`) live in
+    // ns.tables so the applier and pull scanner see them, but apps must not
+    // be able to address them through insertRow/updateRow/etc.
+    const declaredTables = new Set(
+      ns.tableNames.filter((t) => !RESERVED_TABLE_NAMES.has(t)),
+    );
 
     function resolveTable(table: string): void {
       validateTableName(table);
+      if (RESERVED_TABLE_NAMES.has(table)) {
+        throw new Error(
+          `Table "${table}" is reserved by the sync runtime and not writable by apps`,
+        );
+      }
       if (!declaredTables.has(table)) {
         throw new Error(`App "${appId}" did not declare app-syncable table "${table}"`);
       }
+    }
+
+    async function upsertFileRecord(
+      key: string,
+      bytes: Uint8Array,
+      mimeType: string,
+    ): Promise<void> {
+      const ts = clock.now();
+      const tsStr = serializeHLC(ts);
+      const contentHash = await sha256Hex(bytes);
+      const row: Record<string, unknown> = {
+        id: key,
+        sync_status: "pending_file_upload",
+        object_storage_key: key,
+        content_hash: contentHash,
+        mime_type: mimeType,
+        size_bytes: bytes.byteLength,
+        original_filename: null,
+        origin_app_id: appId,
+        created_at: tsStr,
+        updated_at: tsStr,
+        deleted_at: null,
+      };
+      const entry: AppSyncableRowEntry = {
+        timestamp: ts,
+        appId,
+        table: FILE_RECORDS_TABLE,
+        op: "insert",
+        row,
+      };
+      await applier.apply(entry);
+    }
+
+    async function tombstoneFileRecord(key: string): Promise<void> {
+      const ts = clock.now();
+      const tsStr = serializeHLC(ts);
+      // Soft-delete via the standard LWW applier delete path. The applier
+      // also bumps updated_at on the row so the tombstone propagates.
+      const entry: AppSyncableRowEntry = {
+        timestamp: ts,
+        appId,
+        table: FILE_RECORDS_TABLE,
+        op: "delete",
+        row: { updated_at: tsStr },
+        where: { id: key },
+      };
+      await applier.apply(entry);
     }
 
     function ensureFilesEnabled(): void {
@@ -114,6 +183,7 @@ export function createAppSpecificFactory(
         ensureFilesEnabled();
         const key = appSyncableObjectKey(appId, subKey);
         await fileStorage.put(key, bytes, { contentType: mimeType });
+        await upsertFileRecord(key, bytes, mimeType);
         return { key };
       },
 
@@ -133,6 +203,7 @@ export function createAppSpecificFactory(
         ensureFilesEnabled();
         const key = appSyncableObjectKey(appId, subKey);
         await fileStorage.delete(key);
+        await tombstoneFileRecord(key);
       },
 
       async fileUrl(subKey, opts) {
