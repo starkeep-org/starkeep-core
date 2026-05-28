@@ -25,9 +25,9 @@ export interface AppSyncableNamespaceStore {
 }
 
 // ---------------------------------------------------------------------------
-// App-syncable row wire type — used in push requests and pull responses.
-// Not a ChangeLogEntry: no changeId, no kind discriminator.
-// Both push and pull synthesize these inline by scanning updated_at per table.
+// App-syncable row wire type — the exchange protocol synthesizes these inline
+// by scanning updated_at per table and filtering against the caller's
+// watermarks.
 // ---------------------------------------------------------------------------
 
 export interface AppSyncableRowEntry {
@@ -44,7 +44,7 @@ export interface AppSyncableApplier {
   apply(entry: AppSyncableRowEntry): Promise<void> | void;
 }
 
-/** Optional capability that appliers can implement to support pull/push synthesis. */
+/** Optional capability that appliers can implement to support exchange synthesis. */
 export interface ScanCapableApplier extends AppSyncableApplier {
   scanSince(
     appId: string,
@@ -57,12 +57,12 @@ export interface ScanCapableApplier extends AppSyncableApplier {
  * A row read from the framework-owned `_starkeep_sync_records` table.
  * Mirrors the column shape declared in `@starkeep/shared-space-api`'s
  * `FILE_RECORDS_COLUMNS` plus the always-appended HLC bookkeeping columns.
- * The sync engine consumes these in `runFileTransferPass` to drive
- * upload/download decisions for app-syncable files.
+ * The sync engine's file-transfer pass derives upload/download decisions
+ * from blob presence (`localObjectStorage.has(key)`), not from any stored
+ * status — there is no `sync_status` column on this row.
  */
 export interface FileRecordRow {
   readonly id: string;
-  readonly sync_status: string;
   readonly object_storage_key: string;
   readonly content_hash: string;
   readonly mime_type: string;
@@ -75,92 +75,43 @@ export interface FileRecordRow {
 }
 
 /**
- * Helpers the sync engine calls against the reserved `_starkeep_sync_records`
- * table. The status update is intentionally local-only — it must not bump
- * `updated_at` (which would re-emit the row to remote replicas and trip the
- * lazy reconciliation into a loop).
+ * Reserved-table file-records source for the file-transfer pass. Scans rows
+ * the channel knows about; the pass then decides upload/download based on
+ * blob presence on each side.
  */
 export interface FileRecordsApplier {
-  scanFileRecordsByStatus(
-    appId: string,
-    statuses: string[],
-  ): Promise<FileRecordRow[]>;
-  setFileRecordStatus(
-    appId: string,
-    id: string,
-    status: string,
-  ): Promise<void>;
+  scanFileRecords(appId: string): Promise<FileRecordRow[]>;
 }
 
 // ---------------------------------------------------------------------------
-// Change-log entry — record-only. App-syncable rows are NOT logged here.
+// Version-vector exchange protocol — each side maintains a per-channel
+// { [nodeId]: HLC } map of "what I've seen per replica" and ships records the
+// peer hasn't seen. Conflict resolution is pure HLC LWW on shared records.
 // ---------------------------------------------------------------------------
 
-export interface ChangeLogEntry {
-  readonly changeId: StarkeepId;
-  readonly recordId: StarkeepId;
-  readonly operation: "create" | "update" | "delete";
-  readonly timestamp: HLCTimestamp;
-  readonly recordSnapshot: AnyRecord;
-  // Version the client believed was current when producing this change.
-  // null for creates. Used by the server for optimistic concurrency control.
-  readonly baseVersion: number | null;
+export type Watermarks = Record<string /* nodeId */, HLCTimestamp>;
+
+export interface SyncExchangeRequest {
+  /** Caller's view of what it has seen per nodeId. */
+  readonly watermarks: Watermarks;
+  /** Records the caller believes the peer hasn't seen yet. */
+  readonly records?: AnyRecord[];
+  /** App-syncable row deltas the caller believes the peer hasn't seen. */
+  readonly appSyncableRows?: AppSyncableRowEntry[];
+  /** Max records the responder should ship in this round. */
+  readonly limit?: number;
 }
 
-export interface ChangeLog {
-  append(entry: Omit<ChangeLogEntry, "changeId">): Promise<ChangeLogEntry>;
-  getChangesSince(timestamp: HLCTimestamp): Promise<ChangeLogEntry[]>;
-  getLatestTimestamp(): Promise<HLCTimestamp | null>;
-  prune(olderThan: HLCTimestamp): Promise<number>;
-}
-
-export interface SyncPullRequest {
-  readonly sinceTimestamp: HLCTimestamp;
-  readonly limit: number;
-}
-
-export interface SyncPullResponse {
-  readonly changes: ChangeLogEntry[];
+export interface SyncExchangeResponse {
+  /** Records the caller hasn't seen (`updated_at > callerWatermarks[nodeId]`). */
+  readonly records: AnyRecord[];
+  /** Same delta logic per app schema. */
   readonly appSyncableRows: AppSyncableRowEntry[];
-  readonly latestTimestamp: HLCTimestamp;
   readonly hasMore: boolean;
 }
 
-export interface SyncPushRequest {
-  readonly changes: ChangeLogEntry[];
-  readonly appSyncableRows?: AppSyncableRowEntry[];
-}
-
-export type RejectionReason =
-  | "version-mismatch"
-  | "deleted"
-  | "not-found";
-
-export interface RejectedChange {
-  readonly recordId: StarkeepId;
-  readonly clientChange: ChangeLogEntry;
-  // Server's current record, or null if reason === "not-found".
-  readonly serverRecord: AnyRecord | null;
-  readonly reason: RejectionReason;
-}
-
-export interface SyncPushResponse {
-  readonly accepted: StarkeepId[];
-  readonly rejected: RejectedChange[];
-  readonly latestTimestamp: HLCTimestamp;
-}
-
 export interface SyncTransport {
-  pullChanges(request: SyncPullRequest): Promise<SyncPullResponse>;
-  pushChanges(request: SyncPushRequest): Promise<SyncPushResponse>;
-}
-
-export interface SyncConflict {
-  readonly recordId: StarkeepId;
-  readonly local: AnyRecord;
-  readonly server: AnyRecord | null;
-  readonly source: "pull" | "push";
-  readonly detectedAt: HLCTimestamp;
+  exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse>;
 }
 
 export interface FileSyncManifest {
@@ -203,8 +154,7 @@ export interface FileSyncEngine {
 export type ChangeEventType =
   | "remote-update-available"
   | "local-data-synced"
-  | "local-change-recorded"
-  | "conflict-detected";
+  | "local-change-recorded";
 
 export interface ChangeEvent {
   readonly eventType: ChangeEventType;
@@ -220,48 +170,41 @@ export interface ChangeNotifier {
 }
 
 export interface SyncStateStore {
-  // HLC cursor up to which we've successfully pulled remote changes.
-  getPullCursor(): Promise<HLCTimestamp | null>;
-  setPullCursor(ts: HLCTimestamp): Promise<void>;
+  /** Caller's "what I've seen per nodeId" — advanced by records actually applied from peers. */
+  getWatermarks(): Promise<Watermarks>;
+  setWatermarks(watermarks: Watermarks): Promise<void>;
 
-  // HLC timestamp of the last local change-log entry successfully pushed.
-  getPushCursor(): Promise<HLCTimestamp | null>;
-  setPushCursor(ts: HLCTimestamp): Promise<void>;
+  /**
+   * Last-known peer-side watermarks, returned by the peer on the previous
+   * exchange. Used by the caller to compute outbound deltas without an extra
+   * round-trip. Defaults to {} on first exchange.
+   */
+  getPeerWatermarks(): Promise<Watermarks>;
+  setPeerWatermarks(watermarks: Watermarks): Promise<void>;
 
   getHlcClockState(): Promise<{ wallTime: number; counter: number } | null>;
   setHlcClockState(state: { wallTime: number; counter: number }): Promise<void>;
 }
 
-export interface RecordChangeOptions {
-  readonly baseVersion?: number | null;
+export interface ExchangeResult {
+  readonly applied: number;
+  readonly shipped: number;
+  readonly hasMore: boolean;
 }
 
 export interface SyncEngine {
-  recordChange(
-    operation: "create" | "update" | "delete",
-    record: AnyRecord,
-    options?: RecordChangeOptions,
-  ): Promise<void>;
-  pull(): Promise<SyncPullResponse>;
-  push(): Promise<SyncPushResponse>;
   /**
-   * Scan local records in PendingFileUpload / PendingFileDownload and attempt
-   * to satisfy the owed blob transfer in either direction. Idempotent and
-   * cheap to call on every sync tick.
+   * One version-vector exchange round with the peer:
+   *   1. Read own + last-known peer watermarks
+   *   2. For each outbound record (peer hasn't seen): push its blob if any,
+   *      then ship metadata. Blob push failure excludes that record from the
+   *      round; peerWatermarks stays behind it for an automatic retry.
+   *   3. For each inbound record: apply metadata, then pull its blob if any.
+   *      Blob pull failure leaves own watermark behind it; next round the
+   *      responder still ships it.
+   *   4. Persist updated watermarks.
    */
-  runFileTransferPass(): Promise<{
-    uploaded: number;
-    downloaded: number;
-    failed: number;
-  }>;
-  fullSync(): Promise<{
-    pulled: number;
-    pushed: number;
-    rejected: number;
-  }>;
-  getConflicts(): SyncConflict[];
-  clearConflict(recordId: StarkeepId): void;
-  readonly changeLog: ChangeLog;
+  exchange(): Promise<ExchangeResult>;
   readonly changeNotifier: ChangeNotifier;
 }
 
@@ -271,12 +214,11 @@ export interface SyncEngineOptions {
   readonly remoteObjectStorage: ObjectStorageAdapter;
   readonly transport: SyncTransport;
   readonly clock: import("@starkeep/core").HLCClock;
-  readonly changeLog?: ChangeLog;
   readonly syncState?: SyncStateStore;
   /**
-   * Provides the applier (for applying incoming pull rows) and namespace store
-   * (for scanning pending rows on push). Without it, app-syncable rows in pull
-   * responses are silently skipped and no app rows are sent on push.
+   * Provides the applier (for applying incoming exchange rows) and namespace
+   * store (for scanning local rows on the outbound side). Without it,
+   * app-syncable rows are silently skipped on both directions.
    */
   readonly appSyncableSource?: {
     readonly namespaces: AppSyncableNamespaceStore;

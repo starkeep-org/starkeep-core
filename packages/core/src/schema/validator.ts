@@ -12,7 +12,6 @@ const baseRecordSchema = v.object({
   createdAt: hlcTimestampSchema,
   updatedAt: hlcTimestampSchema,
   ownerId: v.pipe(v.string(), v.minLength(1)),
-  syncStatus: v.picklist(["pending_push", "synced", "conflict"]),
   deletedAt: v.nullable(hlcTimestampSchema),
   version: v.pipe(v.number(), v.integer(), v.minValue(1)),
 });

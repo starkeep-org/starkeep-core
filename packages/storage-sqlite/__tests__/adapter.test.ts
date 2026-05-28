@@ -3,7 +3,6 @@ import {
   createHLCClock,
   createDataRecord,
   createStarkeepId,
-  SyncStatus,
   type CreateDataRecordInput,
 } from "@starkeep/core";
 import { SqliteDatabaseAdapter } from "../src/adapter.js";
@@ -74,26 +73,29 @@ describe("SqliteDatabaseAdapter", () => {
       const record = createDataRecord(baseInput(), clock);
       await adapter.put(record);
 
-      const updated = { ...record, version: 2, syncStatus: SyncStatus.Synced };
+      const updated = { ...record, version: 2 };
       await adapter.put(updated);
 
       const retrieved = await adapter.get(record.id);
       expect(retrieved!.version).toBe(2);
-      expect(retrieved!.syncStatus).toBe(SyncStatus.Synced);
     });
   });
 
   describe("delete", () => {
-    it("should remove a record", async () => {
+    it("should soft-delete a record (tombstone)", async () => {
       const record = createDataRecord(baseInput(), clock);
       await adapter.put(record);
-      await adapter.delete(record.id);
-      expect(await adapter.get(record.id)).toBeNull();
+      const ts = clock.now();
+      await adapter.delete(record.id, ts);
+      const got = await adapter.get(record.id);
+      expect(got).not.toBeNull();
+      expect(got!.deletedAt).toEqual(ts);
+      expect(got!.updatedAt).toEqual(ts);
     });
 
     it("should not throw when deleting non-existent record", async () => {
       const id = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-      await expect(adapter.delete(id)).resolves.not.toThrow();
+      await expect(adapter.delete(id, clock.now())).resolves.not.toThrow();
     });
   });
 
@@ -175,12 +177,15 @@ describe("SqliteDatabaseAdapter", () => {
       const record2 = createDataRecord(baseInput({ type: "@test/b" }), clock);
       await adapter.put(record1);
 
+      const ts = clock.now();
       await adapter.batch([
         { type: "put", record: record2 },
-        { type: "delete", id: record1.id },
+        { type: "delete", id: record1.id, hlc: ts },
       ]);
 
-      expect(await adapter.get(record1.id)).toBeNull();
+      const r1 = await adapter.get(record1.id);
+      expect(r1).not.toBeNull();
+      expect(r1!.deletedAt).toEqual(ts);
       expect(await adapter.get(record2.id)).not.toBeNull();
     });
   });
@@ -200,7 +205,7 @@ describe("SqliteDatabaseAdapter", () => {
 
       await expect(
         adapter.transaction(async (transaction) => {
-          await transaction.delete(record.id);
+          await transaction.delete(record.id, clock.now());
           throw new Error("boom");
         }),
       ).rejects.toThrow();

@@ -170,43 +170,21 @@ export class DsqlAppSyncableApplier
   }
 
   /**
-   * Scan the reserved `_starkeep_sync_records` table for rows in the given
-   * sync_status set. Excludes soft-deleted rows. Returns an empty array if
-   * the app's schema doesn't have a reserved table yet.
+   * Scan the reserved `_starkeep_sync_records` table for live (non-deleted)
+   * rows. Returns an empty array if the app's schema doesn't have a reserved
+   * table yet.
    */
-  async scanFileRecordsByStatus(
-    appId: string,
-    statuses: string[],
-  ): Promise<FileRecordRow[]> {
-    if (statuses.length === 0) return [];
+  async scanFileRecords(appId: string): Promise<FileRecordRow[]> {
     const schemaTable = `app_${appId.replace(/-/g, "_")}."${FILE_RECORDS_TABLE}"`;
-    const placeholders = statuses.map((_, i) => `$${i + 1}`).join(", ");
     try {
       const result = await this.client.query(
-        `SELECT * FROM ${schemaTable}
-         WHERE deleted_at IS NULL AND sync_status IN (${placeholders})`,
-        statuses,
+        `SELECT * FROM ${schemaTable} WHERE deleted_at IS NULL`,
+        [],
       );
       return result.rows.map(rowToFileRecord);
     } catch {
       return [];
     }
-  }
-
-  /**
-   * Local-only sync_status update that intentionally does not touch
-   * `updated_at`. See FileRecordsApplier for the why.
-   */
-  async setFileRecordStatus(
-    appId: string,
-    id: string,
-    status: string,
-  ): Promise<void> {
-    const schemaTable = `app_${appId.replace(/-/g, "_")}."${FILE_RECORDS_TABLE}"`;
-    await this.client.query(
-      `UPDATE ${schemaTable} SET sync_status = $1 WHERE id = $2`,
-      [status, id],
-    );
   }
 
   /** Support read path from the factory's queryRows. */
@@ -229,7 +207,6 @@ export class DsqlAppSyncableApplier
 function rowToFileRecord(row: Record<string, unknown>): FileRecordRow {
   return {
     id: row["id"] as string,
-    sync_status: row["sync_status"] as string,
     object_storage_key: row["object_storage_key"] as string,
     content_hash: row["content_hash"] as string,
     mime_type: row["mime_type"] as string,

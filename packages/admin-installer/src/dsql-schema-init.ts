@@ -125,7 +125,6 @@ export async function initializeSharedSchema(
          created_at         text        NOT NULL,
          updated_at         text        NOT NULL,
          owner_id           text        NOT NULL,
-         sync_status        text        NOT NULL DEFAULT 'pending_push',
          deleted_at         text,
          version            integer     NOT NULL DEFAULT 1,
          content_hash       text        NOT NULL,

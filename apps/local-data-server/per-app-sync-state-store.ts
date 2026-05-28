@@ -1,22 +1,20 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { HLCTimestamp } from "@starkeep/core";
-import type { SyncStateStore } from "@starkeep/sync-engine";
+import type { SyncStateStore, Watermarks } from "@starkeep/sync-engine";
 
 /**
- * Wraps an underlying SyncStateStore so cursors are scoped per app. Cursor
- * lookups are keyed as `${appId}:pull_cursor` / `${appId}:push_cursor` and
- * read/written directly against the same `sync_state` table that
- * `createSqliteSyncStateStore` manages. HLC clock state is shared across
- * apps (one wall clock per node) — those methods pass through to the
- * underlying store unmodified.
+ * Wraps an underlying SyncStateStore so per-channel state is scoped by appId.
+ * Watermark lookups are keyed as `${appId}:watermarks` / `${appId}:peer_watermarks`
+ * and read/written directly against the same `sync_state` table that
+ * `createSqliteSyncStateStore` manages. HLC clock state is shared across apps
+ * (one wall clock per node) — those methods pass through unmodified.
  */
 export function createPerAppSyncStateStore(
   db: DatabaseSync,
   underlying: SyncStateStore,
   appId: string,
 ): SyncStateStore {
-  const pullKey = `${appId}:pull_cursor`;
-  const pushKey = `${appId}:push_cursor`;
+  const watermarksKey = `${appId}:watermarks`;
+  const peerWatermarksKey = `${appId}:peer_watermarks`;
 
   const getStmt = db.prepare(
     "SELECT value_json FROM sync_state WHERE key = ?",
@@ -40,23 +38,23 @@ export function createPerAppSyncStateStore(
   }
 
   return {
-    async getPullCursor(): Promise<HLCTimestamp | null> {
-      return getJson<HLCTimestamp>(pullKey);
+    async getWatermarks(): Promise<Watermarks> {
+      return getJson<Watermarks>(watermarksKey) ?? {};
     },
-    async setPullCursor(ts: HLCTimestamp): Promise<void> {
-      setJson(pullKey, ts);
+    async setWatermarks(watermarks: Watermarks): Promise<void> {
+      setJson(watermarksKey, watermarks);
     },
-    async getPushCursor(): Promise<HLCTimestamp | null> {
-      return getJson<HLCTimestamp>(pushKey);
+    async getPeerWatermarks(): Promise<Watermarks> {
+      return getJson<Watermarks>(peerWatermarksKey) ?? {};
     },
-    async setPushCursor(ts: HLCTimestamp): Promise<void> {
-      setJson(pushKey, ts);
+    async setPeerWatermarks(watermarks: Watermarks): Promise<void> {
+      setJson(peerWatermarksKey, watermarks);
     },
     // HLC clock state is shared across apps — pass through unmodified.
     getHlcClockState() {
       return underlying.getHlcClockState();
     },
-    setHlcClockState(state) {
+    setHlcClockState(state: { wallTime: number; counter: number }) {
       return underlying.setHlcClockState(state);
     },
   };

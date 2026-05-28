@@ -1,7 +1,7 @@
 import type { StarkeepId } from "../identifiers/types.js";
 import type { HLCClock } from "../hlc/types.js";
 import { generateId } from "../identifiers/ulid.js";
-import { type DataRecord, SyncStatus } from "./types.js";
+import { type DataRecord } from "./types.js";
 
 export interface CreateDataRecordInput {
   type: string;
@@ -24,7 +24,6 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     createdAt: now,
     updatedAt: now,
     ownerId: input.ownerId,
-    syncStatus: SyncStatus.PendingPush,
     deletedAt: null,
     version: 1,
     contentHash: input.contentHash,

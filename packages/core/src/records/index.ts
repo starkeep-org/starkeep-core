@@ -1,5 +1,4 @@
 export {
-  SyncStatus,
   type BaseRecord,
   type DataRecord,
   type MetadataRow,

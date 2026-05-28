@@ -59,11 +59,15 @@ describe("MockDatabaseAdapter", () => {
   });
 
   describe("delete", () => {
-    it("should remove a record", async () => {
+    it("should soft-delete a record (tombstone)", async () => {
       const record = createDataRecord(baseInput(), clock);
       await adapter.put(record);
-      await adapter.delete(record.id);
-      expect(await adapter.get(record.id)).toBeNull();
+      const ts = clock.now();
+      await adapter.delete(record.id, ts);
+      const got = await adapter.get(record.id);
+      expect(got).not.toBeNull();
+      expect(got!.deletedAt).toEqual(ts);
+      expect(got!.updatedAt).toEqual(ts);
     });
   });
 
@@ -132,12 +136,15 @@ describe("MockDatabaseAdapter", () => {
       const record2 = createDataRecord(baseInput({ type: "@test/b" }), clock);
       await adapter.put(record1);
 
+      const ts = clock.now();
       await adapter.batch([
         { type: "put", record: record2 },
-        { type: "delete", id: record1.id },
+        { type: "delete", id: record1.id, hlc: ts },
       ]);
 
-      expect(await adapter.get(record1.id)).toBeNull();
+      const r1 = await adapter.get(record1.id);
+      expect(r1).not.toBeNull();
+      expect(r1!.deletedAt).toEqual(ts);
       expect(await adapter.get(record2.id)).toEqual(record2);
     });
   });
@@ -157,7 +164,7 @@ describe("MockDatabaseAdapter", () => {
 
       await expect(
         adapter.transaction(async (transaction) => {
-          await transaction.delete(record.id);
+          await transaction.delete(record.id, clock.now());
           throw new Error("rollback");
         }),
       ).rejects.toThrow("rollback");

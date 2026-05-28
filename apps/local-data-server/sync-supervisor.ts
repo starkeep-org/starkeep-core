@@ -1,7 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   createHttpSyncTransport,
-  createSqliteChangeLog,
   createSyncEngine,
 } from "../../packages/sync-engine/src/index.js";
 import type {
@@ -13,22 +12,10 @@ import type {
   ScanCapableApplier,
   FileRecordsApplier,
 } from "../../packages/sync-engine/src/types.js";
-import type {
-  StarkeepId,
-  DataRecord,
-  AnyRecord,
-  HLCClock,
-} from "@starkeep/core";
-import { SyncStatus } from "@starkeep/core";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
-
-export type ConflictResolution =
-  | { keep: "local" }
-  | { keep: "server" }
-  | { keep: "custom"; record: AnyRecord };
 
 export interface AppRegistryEntry {
   readonly appId: string;
@@ -50,21 +37,22 @@ export interface SyncSupervisorOptions {
   readonly namespaceStore: AppSyncableNamespaceStore;
   readonly appApplier: AppSyncableApplier & ScanCapableApplier & FileRecordsApplier;
   readonly underlyingSyncStateStore: SyncStateStore;
-  readonly pullIntervalMs: number;
-  readonly pushDebounceMs: number;
+  /** Idle interval between exchange ticks. A local write nudges an early tick. */
+  readonly exchangeIntervalMs: number;
+  /** Debounce window for local-change-recorded → exchange. */
+  readonly nudgeDebounceMs: number;
 }
 
 interface EngineEntry {
   readonly appId: string;
   readonly engine: SyncEngine;
-  pullTimer: NodeJS.Timeout | null;
-  pushTimer: NodeJS.Timeout | null;
-  lastPullAt: string | null;
-  lastPushAt: string | null;
-  lastPullError: string | null;
-  lastPushError: string | null;
-  pullBackoffMs: number;
-  unsubscribe: () => void;
+  /** Idle tick timer — fires every exchangeIntervalMs unless nudged earlier. */
+  tickTimer: NodeJS.Timeout | null;
+  /** Local-write nudge timer — debounces local-change-recorded into one exchange. */
+  nudgeTimer: NodeJS.Timeout | null;
+  lastExchangeAt: string | null;
+  lastError: string | null;
+  backoffMs: number;
 }
 
 export interface SyncSupervisorStatus {
@@ -73,19 +61,15 @@ export interface SyncSupervisorStatus {
   readonly cloudUrl: string;
   readonly perApp: Array<{
     appId: string;
-    lastPullAt: string | null;
-    lastPushAt: string | null;
-    lastPullError: string | null;
-    lastPushError: string | null;
-    pullBackoffMs: number;
-    conflictCount: number;
+    lastExchangeAt: string | null;
+    lastError: string | null;
+    backoffMs: number;
   }>;
-  readonly conflictCount: number;
-  readonly lastPullError: string | null;
-  readonly lastPushError: string | null;
-  readonly lastPullAt: string | null;
-  readonly lastPushAt: string | null;
-  readonly pullBackoffMs: number;
+  /** Aggregated across all engines — null if no exchange has succeeded yet. */
+  readonly lastExchangeAt: string | null;
+  /** First non-null per-app error, or null if all healthy. */
+  readonly lastError: string | null;
+  readonly backoffMs: number;
 }
 
 export interface SyncSupervisor {
@@ -93,18 +77,14 @@ export interface SyncSupervisor {
   stop(): Promise<void>;
   pause(): void;
   resume(): Promise<void>;
-  fullSync(): Promise<{ pulled: number; pushed: number; rejected: number }>;
+  /** Trigger an immediate exchange across every engine. */
+  exchangeAll(): Promise<{ applied: number; shipped: number }>;
+  /** Nudge a specific app's exchange to fire on the debounce window. */
   schedulePushFor(appId: string): void;
   status(): SyncSupervisorStatus;
-  conflicts(): Array<{ appId: string; conflict: ReturnType<SyncEngine["getConflicts"]>[number] }>;
-  resolveConflict(
-    recordId: StarkeepId,
-    resolution: ConflictResolution,
-  ): Promise<DataRecord | null>;
   /**
    * Re-read the app registry and reconcile: start engines for newly-active
-   * apps, stop engines for apps no longer present. Called after install /
-   * uninstall flows mutate the registry.
+   * apps, stop engines for apps no longer present.
    */
   rescan(): void;
 }
@@ -113,8 +93,7 @@ export interface SyncSupervisor {
  * Per-app namespace store: list() returns only this app's namespace (or
  * nothing if the app has no syncable namespace registered). `get()` honors
  * lookups for any appId because the applier may need to apply incoming rows
- * for the same app — but only `list()` drives which tables the engine
- * scans on push, and that's what we narrow.
+ * for the same app — but only `list()` drives which tables the engine scans.
  */
 function narrowNamespaceStore(
   inner: AppSyncableNamespaceStore,
@@ -145,8 +124,8 @@ export function createSyncSupervisor(
     namespaceStore,
     appApplier,
     underlyingSyncStateStore,
-    pullIntervalMs,
-    pushDebounceMs,
+    exchangeIntervalMs,
+    nudgeDebounceMs,
   } = options;
 
   const engines = new Map<string, EngineEntry>();
@@ -168,13 +147,6 @@ export function createSyncSupervisor(
       getAuthHeader,
     });
 
-    // Each engine sees only its own app's pending writes — filter the
-    // shared sync_change_log by recordSnapshot.originAppId.
-    const changeLog = createSqliteChangeLog({
-      db: localDb,
-      originAppIdFilter: appId,
-    });
-
     const syncState = createPerAppSyncStateStore(
       localDb,
       underlyingSyncStateStore,
@@ -189,7 +161,6 @@ export function createSyncSupervisor(
       remoteObjectStorage: remoteStorage,
       transport,
       clock: sdk.clock,
-      changeLog,
       syncState,
       appSyncableSource: {
         namespaces: narrowedNamespaces,
@@ -197,160 +168,77 @@ export function createSyncSupervisor(
       },
     });
 
-    // Republish engine events on the SDK's unified notifier so consumers
-    // (sharedSpaceApi, SSE clients) see one stream.
-    const unsubscribe = engine.changeNotifier.subscribe((event) => {
-      sdk.changeNotifier.emit(event);
-    });
-
     const entry: EngineEntry = {
       appId,
       engine,
-      pullTimer: null,
-      pushTimer: null,
-      lastPullAt: null,
-      lastPushAt: null,
-      lastPullError: null,
-      lastPushError: null,
-      pullBackoffMs: pullIntervalMs,
-      unsubscribe,
+      tickTimer: null,
+      nudgeTimer: null,
+      lastExchangeAt: null,
+      lastError: null,
+      backoffMs: exchangeIntervalMs,
     };
     engines.set(appId, entry);
-    schedulePullLoop(entry);
-    // Drain any change-log backlog appended before this engine existed
-    // (server restart, install race). Without this, pending pushes wait
-    // for the next unrelated local write to fan out a debounce.
-    schedulePushFor(appId);
+    scheduleTick(entry);
+    // Drain any pending local writes that accumulated before this engine
+    // existed (server restart, install race).
+    scheduleNudge(appId);
     console.log(`[sync] started loop for app=${appId} at ${perAppBaseUrl}`);
   }
 
   function stopEngineFor(appId: string): void {
     const entry = engines.get(appId);
     if (!entry) return;
-    if (entry.pullTimer) clearTimeout(entry.pullTimer);
-    if (entry.pushTimer) clearTimeout(entry.pushTimer);
-    entry.unsubscribe();
+    if (entry.tickTimer) clearTimeout(entry.tickTimer);
+    if (entry.nudgeTimer) clearTimeout(entry.nudgeTimer);
     engines.delete(appId);
     console.log(`[sync] stopped loop for app=${appId}`);
   }
 
-  function schedulePullLoop(entry: EngineEntry): void {
+  function scheduleTick(entry: EngineEntry): void {
     if (paused) return;
-    entry.pullTimer = setTimeout(() => runPullOnce(entry), entry.pullBackoffMs);
+    entry.tickTimer = setTimeout(() => runExchangeOnce(entry), entry.backoffMs);
   }
 
-  async function runPullOnce(entry: EngineEntry): Promise<void> {
-    entry.pullTimer = null;
+  async function runExchangeOnce(entry: EngineEntry): Promise<void> {
+    entry.tickTimer = null;
     try {
-      await entry.engine.pull();
-      entry.lastPullAt = new Date().toISOString();
-      entry.lastPullError = null;
-      entry.pullBackoffMs = pullIntervalMs;
+      await entry.engine.exchange();
+      entry.lastExchangeAt = new Date().toISOString();
+      entry.lastError = null;
+      entry.backoffMs = exchangeIntervalMs;
     } catch (err) {
-      entry.lastPullError = (err as Error).message;
-      entry.pullBackoffMs = Math.min(entry.pullBackoffMs * 2, 5 * 60 * 1000);
-      console.error(`[sync] pull failed for app=${entry.appId}:`, err);
+      entry.lastError = (err as Error).message;
+      entry.backoffMs = Math.min(entry.backoffMs * 2, 5 * 60 * 1000);
+      console.error(`[sync] exchange failed for app=${entry.appId}:`, err);
     }
-    // Safety net for stranded local writes: a previous push may have failed
-    // (no retry timer of its own) or a change-notifier event may have been
-    // missed. Nudging a push every pull tick is cheap — schedulePushFor is
-    // idempotent against an already-armed timer, and engine.push() over an
-    // empty change-log is a no-op.
-    schedulePushFor(entry.appId);
-    if (!paused) schedulePullLoop(entry);
+    if (!paused) scheduleTick(entry);
   }
 
-  function schedulePushFor(appId: string): void {
+  function scheduleNudge(appId: string): void {
     const entry = engines.get(appId);
     if (!entry) return;
     if (paused) return;
-    if (entry.pushTimer) return;
-    entry.pushTimer = setTimeout(async () => {
-      entry.pushTimer = null;
-      try {
-        await entry.engine.push();
-        entry.lastPushAt = new Date().toISOString();
-        entry.lastPushError = null;
-      } catch (err) {
-        entry.lastPushError = (err as Error).message;
-        console.error(`[sync] push failed for app=${entry.appId}:`, err);
+    if (entry.nudgeTimer) return;
+    entry.nudgeTimer = setTimeout(async () => {
+      entry.nudgeTimer = null;
+      if (entry.tickTimer) {
+        clearTimeout(entry.tickTimer);
+        entry.tickTimer = null;
       }
-    }, pushDebounceMs);
+      await runExchangeOnce(entry);
+    }, nudgeDebounceMs);
   }
 
-  // Listen to local writes and fan out a debounced push to every engine.
-  // Each engine's change-log view is filtered by originAppId, so the
-  // engine for app X only pushes records originated by X.
+  // Local-write fan-out: any record write nudges every engine to exchange
+  // soon. Engines individually decide whether they have anything new to ship
+  // (records-table delta scan; empty for apps with no new rows).
   sdk.changeNotifier.subscribe((event) => {
     if (event.eventType !== "local-change-recorded") return;
     if (paused) return;
     for (const entry of engines.values()) {
-      schedulePushFor(entry.appId);
+      scheduleNudge(entry.appId);
     }
   });
-
-  function findConflictOwner(
-    recordId: StarkeepId,
-  ): { entry: EngineEntry; conflict: ReturnType<SyncEngine["getConflicts"]>[number] } | null {
-    for (const entry of engines.values()) {
-      const c = entry.engine.getConflicts().find((c) => c.recordId === recordId);
-      if (c) return { entry, conflict: c };
-    }
-    return null;
-  }
-
-  async function resolveConflict(
-    recordId: StarkeepId,
-    resolution: ConflictResolution,
-  ): Promise<DataRecord | null> {
-    const found = findConflictOwner(recordId);
-    if (!found) return null;
-    const { entry, conflict } = found;
-    const clock: HLCClock = sdk.clock;
-
-    if (resolution.keep === "server") {
-      if (!conflict.server) {
-        await databaseAdapter.delete(recordId);
-        entry.engine.clearConflict(recordId);
-        return null;
-      }
-      await databaseAdapter.put({
-        ...conflict.server,
-        syncStatus: SyncStatus.Synced,
-      });
-      entry.engine.clearConflict(recordId);
-      return databaseAdapter.get(recordId);
-    }
-
-    if (resolution.keep === "local") {
-      const baseVersion = conflict.server?.version ?? null;
-      const rebased: DataRecord = {
-        ...(conflict.local as DataRecord),
-        version: (baseVersion ?? 0) + 1,
-        updatedAt: clock.now(),
-        syncStatus: SyncStatus.PendingPush,
-      };
-      await databaseAdapter.put(rebased);
-      entry.engine.clearConflict(recordId);
-      await entry.engine.recordChange(
-        conflict.server ? "update" : "create",
-        rebased,
-        { baseVersion },
-      );
-      return rebased;
-    }
-
-    // keep: "custom"
-    await databaseAdapter.put({
-      ...(resolution.record as DataRecord),
-      syncStatus: SyncStatus.PendingPush,
-    });
-    entry.engine.clearConflict(recordId);
-    await entry.engine.recordChange("update", resolution.record, {
-      baseVersion: conflict.server?.version ?? null,
-    });
-    return resolution.record as DataRecord;
-  }
 
   function rescan(): void {
     const desired = new Set(
@@ -358,11 +246,9 @@ export function createSyncSupervisor(
         .filter((a) => a.status === "active")
         .map((a) => a.appId),
     );
-    // Start new apps
     for (const appId of desired) {
       if (!engines.has(appId)) startEngineFor(appId);
     }
-    // Stop apps no longer in the registry
     for (const appId of Array.from(engines.keys())) {
       if (!desired.has(appId)) stopEngineFor(appId);
     }
@@ -382,122 +268,81 @@ export function createSyncSupervisor(
     pause() {
       paused = true;
       for (const entry of engines.values()) {
-        if (entry.pullTimer) {
-          clearTimeout(entry.pullTimer);
-          entry.pullTimer = null;
+        if (entry.tickTimer) {
+          clearTimeout(entry.tickTimer);
+          entry.tickTimer = null;
         }
-        if (entry.pushTimer) {
-          clearTimeout(entry.pushTimer);
-          entry.pushTimer = null;
+        if (entry.nudgeTimer) {
+          clearTimeout(entry.nudgeTimer);
+          entry.nudgeTimer = null;
         }
       }
     },
 
     async resume() {
       paused = false;
-      // Kick off an immediate full sync per engine, then resume pull loops.
       await Promise.all(
         Array.from(engines.values()).map(async (entry) => {
           try {
-            await entry.engine.fullSync();
-            entry.lastPullAt = new Date().toISOString();
-            entry.lastPushAt = new Date().toISOString();
-            entry.lastPullError = null;
-            entry.lastPushError = null;
-            entry.pullBackoffMs = pullIntervalMs;
+            await entry.engine.exchange();
+            entry.lastExchangeAt = new Date().toISOString();
+            entry.lastError = null;
+            entry.backoffMs = exchangeIntervalMs;
           } catch (err) {
-            // fullSync runs pull then push; we don't know which side threw
-            // here, so record on both. Subsequent runPullOnce/schedulePushFor
-            // will clear whichever one actually succeeds.
-            const msg = (err as Error).message;
-            entry.lastPullError = msg;
-            entry.lastPushError = msg;
-            console.error(`[sync] resume fullSync failed for app=${entry.appId}:`, err);
+            entry.lastError = (err as Error).message;
+            console.error(`[sync] resume exchange failed for app=${entry.appId}:`, err);
           }
-          schedulePullLoop(entry);
+          scheduleTick(entry);
         }),
       );
     },
 
-    async fullSync() {
-      let pulled = 0;
-      let pushed = 0;
-      let rejected = 0;
+    async exchangeAll() {
+      let applied = 0;
+      let shipped = 0;
       for (const entry of engines.values()) {
         try {
-          const r = await entry.engine.fullSync();
-          pulled += r.pulled;
-          pushed += r.pushed;
-          rejected += r.rejected;
-          entry.lastPullAt = new Date().toISOString();
-          entry.lastPushAt = new Date().toISOString();
-          entry.lastPullError = null;
-          entry.lastPushError = null;
+          const r = await entry.engine.exchange();
+          applied += r.applied;
+          shipped += r.shipped;
+          entry.lastExchangeAt = new Date().toISOString();
+          entry.lastError = null;
         } catch (err) {
-          const msg = (err as Error).message;
-          entry.lastPullError = msg;
-          entry.lastPushError = msg;
-          console.error(`[sync] fullSync failed for app=${entry.appId}:`, err);
+          entry.lastError = (err as Error).message;
+          console.error(`[sync] exchangeAll failed for app=${entry.appId}:`, err);
         }
       }
-      return { pulled, pushed, rejected };
+      return { applied, shipped };
     },
 
-    schedulePushFor,
+    schedulePushFor: scheduleNudge,
 
     status() {
       const perApp = Array.from(engines.values()).map((e) => ({
         appId: e.appId,
-        lastPullAt: e.lastPullAt,
-        lastPushAt: e.lastPushAt,
-        lastPullError: e.lastPullError,
-        lastPushError: e.lastPushError,
-        pullBackoffMs: e.pullBackoffMs,
-        conflictCount: e.engine.getConflicts().length,
+        lastExchangeAt: e.lastExchangeAt,
+        lastError: e.lastError,
+        backoffMs: e.backoffMs,
       }));
-      // Aggregate fields for legacy /sync/status shape.
-      const lastPullAt = perApp.reduce<string | null>(
-        (acc, e) => (e.lastPullAt && (!acc || e.lastPullAt > acc) ? e.lastPullAt : acc),
+      const lastExchangeAt = perApp.reduce<string | null>(
+        (acc, e) => (e.lastExchangeAt && (!acc || e.lastExchangeAt > acc) ? e.lastExchangeAt : acc),
         null,
       );
-      const lastPushAt = perApp.reduce<string | null>(
-        (acc, e) => (e.lastPushAt && (!acc || e.lastPushAt > acc) ? e.lastPushAt : acc),
-        null,
-      );
-      const lastPullError = perApp.find((e) => e.lastPullError !== null)?.lastPullError ?? null;
-      const lastPushError = perApp.find((e) => e.lastPushError !== null)?.lastPushError ?? null;
-      const pullBackoffMs = perApp.reduce<number>(
-        (acc, e) => Math.max(acc, e.pullBackoffMs),
-        pullIntervalMs,
+      const lastError = perApp.find((e) => e.lastError !== null)?.lastError ?? null;
+      const backoffMs = perApp.reduce<number>(
+        (acc, e) => Math.max(acc, e.backoffMs),
+        exchangeIntervalMs,
       );
       return {
         enabled: engines.size > 0,
         syncPaused: paused,
         cloudUrl: cloudUrlBase,
         perApp,
-        conflictCount: perApp.reduce((acc, e) => acc + e.conflictCount, 0),
-        lastPullError,
-        lastPushError,
-        lastPullAt,
-        lastPushAt,
-        pullBackoffMs,
+        lastExchangeAt,
+        lastError,
+        backoffMs,
       };
     },
-
-    conflicts() {
-      const out: Array<{
-        appId: string;
-        conflict: ReturnType<SyncEngine["getConflicts"]>[number];
-      }> = [];
-      for (const entry of engines.values()) {
-        for (const c of entry.engine.getConflicts()) {
-          out.push({ appId: entry.appId, conflict: c });
-        }
-      }
-      return out;
-    },
-
-    resolveConflict,
 
     rescan,
   };

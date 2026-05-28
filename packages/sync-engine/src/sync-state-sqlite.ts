@@ -1,6 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { HLCTimestamp } from "@starkeep/core";
-import type { SyncStateStore } from "./types.js";
+import type { SyncStateStore, Watermarks } from "./types.js";
 
 const CREATE_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS sync_state (
@@ -10,8 +9,8 @@ const CREATE_TABLE_SQL = `
   )
 `;
 
-const PULL_CURSOR = "pull_cursor";
-const PUSH_CURSOR = "push_cursor";
+const WATERMARKS = "watermarks";
+const PEER_WATERMARKS = "peer_watermarks";
 const HLC_CLOCK = "hlc_clock";
 
 export interface SqliteSyncStateStoreOptions {
@@ -46,17 +45,17 @@ export function createSqliteSyncStateStore(
   }
 
   return {
-    async getPullCursor(): Promise<HLCTimestamp | null> {
-      return getJson<HLCTimestamp>(PULL_CURSOR);
+    async getWatermarks(): Promise<Watermarks> {
+      return getJson<Watermarks>(WATERMARKS) ?? {};
     },
-    async setPullCursor(ts: HLCTimestamp): Promise<void> {
-      setJson(PULL_CURSOR, ts);
+    async setWatermarks(watermarks: Watermarks): Promise<void> {
+      setJson(WATERMARKS, watermarks);
     },
-    async getPushCursor(): Promise<HLCTimestamp | null> {
-      return getJson<HLCTimestamp>(PUSH_CURSOR);
+    async getPeerWatermarks(): Promise<Watermarks> {
+      return getJson<Watermarks>(PEER_WATERMARKS) ?? {};
     },
-    async setPushCursor(ts: HLCTimestamp): Promise<void> {
-      setJson(PUSH_CURSOR, ts);
+    async setPeerWatermarks(watermarks: Watermarks): Promise<void> {
+      setJson(PEER_WATERMARKS, watermarks);
     },
     async getHlcClockState(): Promise<
       { wallTime: number; counter: number } | null

@@ -1,4 +1,4 @@
-import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/core";
 import type {
   Query,
   QueryResult,
@@ -13,7 +13,12 @@ export interface DatabaseAdapter {
 
   put(record: DataRecord): Promise<void>;
   get(id: StarkeepId): Promise<DataRecord | null>;
-  delete(id: StarkeepId): Promise<void>;
+  /**
+   * Soft-delete: stamps `deleted_at` and bumps `updated_at` to `hlc`.
+   * The row remains so sync deltas can see the tombstone.
+   * No-op if the row does not exist.
+   */
+  delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void>;
   query(query: Query): Promise<QueryResult>;
   batch(operations: BatchOperation[]): Promise<void>;
   transaction<T>(callback: (transaction: Transaction) => Promise<T>): Promise<T>;

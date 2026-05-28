@@ -13,7 +13,6 @@ import type {
   AggregationOptions,
 } from "@starkeep/aggregations";
 import type {
-  ChangeLog,
   ChangeNotifier,
   SyncStateStore,
 } from "@starkeep/sync-engine";
@@ -148,18 +147,10 @@ export interface StarkeepSdk {
   readonly typeRegistrations: TypeRegistrationOperations;
   readonly api: ApiOperations;
   /**
-   * Append-only outbox of local record writes. The local-data-server's sync
-   * supervisor consumes it (filtered per app by `originAppId`) to drive
-   * per-app sync loops. Undefined when the SDK is constructed without a
-   * change log (no sync).
-   */
-  readonly changeLog: ChangeLog | undefined;
-  /**
    * Broadcast channel for record-level events. The SDK emits
    * `local-change-recorded` on every write; the sync supervisor forwards
-   * `local-data-synced` and `conflict-detected` from its per-app engines
-   * onto this same notifier so subscribers (sharedSpaceApi, SSE clients)
-   * see one unified stream.
+   * `local-data-synced` from its per-app engines onto this same notifier so
+   * subscribers (sharedSpaceApi, SSE clients) see one unified stream.
    */
   readonly changeNotifier: ChangeNotifier;
   /** The clock backing this SDK — exposed so the supervisor can share it. */
@@ -183,15 +174,8 @@ export interface StarkeepSdkOptions {
   readonly nodeId: string;
   readonly clock?: HLCClock;
   /**
-   * Optional append-only change log. If provided, every record write is
-   * appended here for the sync supervisor (which lives outside the SDK) to
-   * consume. Omitting it disables write logging — the SDK still works for
-   * pure-local read/write without sync.
-   */
-  readonly changeLog?: ChangeLog;
-  /**
    * Optional state store. The SDK uses it only to seed and persist HLC clock
-   * state (one clock per node). Per-app pull/push cursors are owned by the
+   * state (one clock per node). Per-app watermarks are owned by the
    * supervisor and never touched here.
    */
   readonly syncStateStore?: SyncStateStore;

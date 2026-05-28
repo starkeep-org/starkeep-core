@@ -73,6 +73,11 @@ export function createFileSyncEngine(): FileSyncEngine {
       }
       inFlightKeys.add(key);
       try {
+        // Destination already has it — no-op success. Lets callers fire-and-
+        // forget transferFile without needing to HEAD first.
+        if (await destination.has(key)) {
+          return true;
+        }
         const file = await source.get(key);
         if (!file) {
           return false;

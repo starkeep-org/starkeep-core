@@ -648,6 +648,9 @@ importers:
       '@starkeep/sync-engine':
         specifier: workspace:*
         version: link:../sync-engine
+      kysely:
+        specifier: ^0.27.0
+        version: 0.27.6
     devDependencies:
       '@types/node':
         specifier: ^25.4.0
@@ -723,6 +726,9 @@ importers:
       '@starkeep/storage-adapter':
         specifier: workspace:*
         version: link:../storage-adapter
+      kysely:
+        specifier: ^0.27.0
+        version: 0.27.6
     devDependencies:
       '@types/node':
         specifier: ^25.4.0
