@@ -7,7 +7,12 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts"
+    "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts",
+    "cli:install-photos": "tsx scripts/cli-install-photos.ts",
+    "check:temp-vs-boundary": "tsx scripts/check-temp-vs-boundary.ts",
+    "debug:dsql-inspect": "tsx scripts/debug-dsql-inspect.ts",
+    "debug:dsql-as-app": "tsx scripts/debug-dsql-as-app.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@starkeep/core": "workspace:*",
@@ -20,6 +25,7 @@
     "@aws-sdk/client-cloudwatch-logs": "^3.0.0",
     "@aws-sdk/client-cost-and-usage-report-service": "^3.0.0",
     "@aws-sdk/client-iam": "^3.0.0",
+    "@aws-sdk/client-lambda": "^3.0.0",
     "@aws-sdk/client-s3": "^3.0.0",
     "@aws-sdk/client-ssm": "^3.0.0",
     "@aws-sdk/client-sts": "^3.0.0",
@@ -31,6 +37,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/pg": "^8.0.0",
+    "esbuild": "^0.24.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   },

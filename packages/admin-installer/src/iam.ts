@@ -9,16 +9,19 @@ import {
   DeleteRoleCommand,
   GetRoleCommand,
   GetRolePolicyCommand,
+  ListRolePoliciesCommand,
   PutRolePolicyCommand,
   DeleteRolePolicyCommand,
   UpdateAssumeRolePolicyCommand,
+  EntityAlreadyExistsException,
 } from "@aws-sdk/client-iam";
 import type { AwsCredentials } from "./session";
 import {
   buildRuntimePolicy,
-  buildTempInstallPolicy,
-  buildTempUninstallPolicy,
+  buildTempInstallInfraPolicy,
+  buildTempUninstallInfraPolicy,
   buildTempInstallCloudDataServerPolicy,
+  buildTempInstallDdlPolicy,
 } from "./temp-policies";
 import type { SharedTypeAccess } from "@starkeep/admin-manifest";
 import { CORE_TYPE_REGISTRY } from "@starkeep/admin-manifest";
@@ -76,6 +79,32 @@ export interface CreateAppRoleInput {
  */
 const FOUNDATIONAL_APP_ID = "cloud-data-server";
 
+/**
+ * The cloud-side identity that signs for records originated by the
+ * local-data-server's built-in features (notably the file watcher). LDS is a
+ * built-in; cloud-data-server is its symmetric built-in; this is the cloud
+ * role the cloud-data-server install creates so push requests carrying
+ * `originAppId: "local-data-sync"` can be STS-assumed and authorized.
+ */
+export const LOCAL_DATA_SYNC_APP_ID = "local-data-sync";
+
+/**
+ * Cloud-installable appIds must survive IAM role names, Postgres role names,
+ * S3 prefixes, and URL paths without per-component encoding tricks. The
+ * regex below is the conservative intersection: lowercase, starts with
+ * alnum, no `/`, `@`, `+`, `=`, etc. Mirrored in the cloud handler's
+ * `parseAppPath` regex (see cloud-data-server/src/api-handler.ts).
+ */
+const CLOUD_APP_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
+
+export function assertCloudInstallableAppId(appId: string): void {
+  if (!CLOUD_APP_ID_RE.test(appId)) {
+    throw new Error(
+      `appId ${JSON.stringify(appId)} is not cloud-installable: must match ${CLOUD_APP_ID_RE}`,
+    );
+  }
+}
+
 export async function createAppRole(input: CreateAppRoleInput): Promise<string> {
   const {
     stackPrefix, appId, accountId,
@@ -94,28 +123,29 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
   const typeIds = expanded.map((e) => e.typeId);
   const hasWriteAccess = expanded.some((e) => e.access === "readwrite");
 
-  await iam.send(
-    new CreateRoleCommand({
-      RoleName: roleName,
-      AssumeRolePolicyDocument: JSON.stringify({
-        Version: "2012-10-17",
-        Statement: [
-          {
-            Effect: "Allow",
-            Principal: { Service: "lambda.amazonaws.com" },
-            Action: "sts:AssumeRole",
-          },
-          {
-            Effect: "Allow",
-            Principal: { AWS: `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role` },
-            Action: "sts:AssumeRole",
-          },
-        ],
-      }),
-      PermissionsBoundary: boundaryArn,
-      Tags: [{ Key: "starkeep:appId", Value: appId }, { Key: "starkeep:managed", Value: "true" }],
-    }),
+  const assumeRolePolicy = buildAppRoleTrustPolicy(
+    stackPrefix,
+    accountId,
+    appId !== FOUNDATIONAL_APP_ID,
   );
+  try {
+    await iam.send(
+      new CreateRoleCommand({
+        RoleName: roleName,
+        AssumeRolePolicyDocument: assumeRolePolicy,
+        PermissionsBoundary: boundaryArn,
+        Tags: [{ Key: "starkeep:appId", Value: appId }, { Key: "starkeep:managed", Value: "true" }],
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof EntityAlreadyExistsException)) throw err;
+    await iam.send(
+      new UpdateAssumeRolePolicyCommand({
+        RoleName: roleName,
+        PolicyDocument: assumeRolePolicy,
+      }),
+    );
+  }
 
   const runtimePolicy = buildRuntimePolicy(
     stackPrefix, appId, typeIds, hasWriteAccess, canIngestUnknown, canPromoteFromUnknown,
@@ -151,7 +181,13 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
   return `arn:aws:iam::${accountId}:role/${roleName}`;
 }
 
-export async function attachTempInstallPolicy(
+/**
+ * Attach the per-app temp policy to the install-infra-role. install-infra is
+ * a centralized role; the policy name is keyed by appId so concurrent installs
+ * of different apps cannot clobber each other. Detached after the
+ * compute-stack step completes.
+ */
+export async function attachTempInstallInfraPolicy(
   stackPrefix: string,
   appId: string,
   accountId: string,
@@ -161,14 +197,14 @@ export async function attachTempInstallPolicy(
   const iam = makeIamClient(managerCreds);
   await iam.send(
     new PutRolePolicyCommand({
-      RoleName: `${stackPrefix}-app-${appId}-role`,
-      PolicyName: "temp-install",
-      PolicyDocument: buildTempInstallPolicy(stackPrefix, appId, accountId, region),
+      RoleName: `${stackPrefix}-install-infra-role`,
+      PolicyName: `temp-install-infra-${appId}`,
+      PolicyDocument: buildTempInstallInfraPolicy(stackPrefix, appId, accountId, region),
     }),
   );
 }
 
-export async function detachTempInstallPolicy(
+export async function detachTempInstallInfraPolicy(
   stackPrefix: string,
   appId: string,
   managerCreds: AwsCredentials,
@@ -176,13 +212,13 @@ export async function detachTempInstallPolicy(
   const iam = makeIamClient(managerCreds);
   await iam.send(
     new DeleteRolePolicyCommand({
-      RoleName: `${stackPrefix}-app-${appId}-role`,
-      PolicyName: "temp-install",
+      RoleName: `${stackPrefix}-install-infra-role`,
+      PolicyName: `temp-install-infra-${appId}`,
     }),
   );
 }
 
-export async function attachTempUninstallPolicy(
+export async function attachTempUninstallInfraPolicy(
   stackPrefix: string,
   appId: string,
   accountId: string,
@@ -192,14 +228,14 @@ export async function attachTempUninstallPolicy(
   const iam = makeIamClient(managerCreds);
   await iam.send(
     new PutRolePolicyCommand({
-      RoleName: `${stackPrefix}-app-${appId}-role`,
-      PolicyName: "temp-uninstall",
-      PolicyDocument: buildTempUninstallPolicy(stackPrefix, appId, accountId, region),
+      RoleName: `${stackPrefix}-install-infra-role`,
+      PolicyName: `temp-uninstall-infra-${appId}`,
+      PolicyDocument: buildTempUninstallInfraPolicy(stackPrefix, appId, accountId, region),
     }),
   );
 }
 
-export async function detachTempUninstallPolicy(
+export async function detachTempUninstallInfraPolicy(
   stackPrefix: string,
   appId: string,
   managerCreds: AwsCredentials,
@@ -207,8 +243,37 @@ export async function detachTempUninstallPolicy(
   const iam = makeIamClient(managerCreds);
   await iam.send(
     new DeleteRolePolicyCommand({
-      RoleName: `${stackPrefix}-app-${appId}-role`,
-      PolicyName: "temp-uninstall",
+      RoleName: `${stackPrefix}-install-infra-role`,
+      PolicyName: `temp-uninstall-infra-${appId}`,
+    }),
+  );
+}
+
+export async function attachTempInstallDdlPolicy(
+  stackPrefix: string,
+  appId: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  await iam.send(
+    new PutRolePolicyCommand({
+      RoleName: `${stackPrefix}-install-ddl-role`,
+      PolicyName: `temp-install-ddl-${appId}`,
+      PolicyDocument: buildTempInstallDdlPolicy(stackPrefix),
+    }),
+  );
+}
+
+export async function detachTempInstallDdlPolicy(
+  stackPrefix: string,
+  appId: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  await iam.send(
+    new DeleteRolePolicyCommand({
+      RoleName: `${stackPrefix}-install-ddl-role`,
+      PolicyName: `temp-install-ddl-${appId}`,
     }),
   );
 }
@@ -222,6 +287,27 @@ export async function deleteAppRole(
   await iam.send(
     new DeleteRoleCommand({ RoleName: `${stackPrefix}-app-${appId}-role` }),
   );
+}
+
+/**
+ * Delete all inline policies from an app role then delete the role itself.
+ * `DeleteRole` fails with DeleteConflict when inline policies are present,
+ * so we list and remove them first.
+ */
+export async function deleteAppRoleWithPolicies(
+  stackPrefix: string,
+  appId: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  const roleName = `${stackPrefix}-app-${appId}-role`;
+
+  const { PolicyNames = [] } = await iam.send(new ListRolePoliciesCommand({ RoleName: roleName }));
+  for (const policyName of PolicyNames) {
+    await iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyName }));
+  }
+
+  await iam.send(new DeleteRoleCommand({ RoleName: roleName }));
 }
 
 /** Returns a canonical, key-sorted JSON string for deterministic comparison. */
@@ -310,6 +396,53 @@ export async function detachTempInstallCloudDataServerPolicy(
  * ARN to its current RoleId, healing that drift. Cheap and safe to do
  * regardless.
  */
+/**
+ * Build the standard per-app role trust policy. Up to three trusted
+ * principals:
+ *   1. lambda.amazonaws.com — so the per-app Lambda(s) can assume the role
+ *      as their exec identity.
+ *   2. Manager role — so install/uninstall orchestration can assume the role
+ *      for data-plane setup (S3 .keep marker, sync attribution).
+ *   3. Cloud-data-server role — so the CDS broker can single-hop assume per-app
+ *      roles for runtime data brokering (replaces the older Lambda→Manager→app
+ *      double-hop; see G9a).
+ *
+ * `includeCloudDataServerPrincipal` controls whether (3) is emitted. It must
+ * be false when minting the cloud-data-server role itself (the role does not
+ * yet exist, and AWS rejects Principal AWS ARNs that don't resolve). For
+ * every other app it should be true.
+ */
+export function buildAppRoleTrustPolicy(
+  stackPrefix: string,
+  accountId: string,
+  includeCloudDataServerPrincipal: boolean,
+): string {
+  const statements: object[] = [
+    {
+      Effect: "Allow",
+      Principal: { Service: "lambda.amazonaws.com" },
+      Action: "sts:AssumeRole",
+    },
+    {
+      Effect: "Allow",
+      Principal: {
+        AWS: `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`,
+      },
+      Action: "sts:AssumeRole",
+    },
+  ];
+  if (includeCloudDataServerPrincipal) {
+    statements.push({
+      Effect: "Allow",
+      Principal: {
+        AWS: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-cloud-data-server-role`,
+      },
+      Action: "sts:AssumeRole",
+    });
+  }
+  return JSON.stringify({ Version: "2012-10-17", Statement: statements });
+}
+
 export async function updateAppRoleTrustPolicy(
   stackPrefix: string,
   appId: string,
@@ -320,21 +453,11 @@ export async function updateAppRoleTrustPolicy(
   await iam.send(
     new UpdateAssumeRolePolicyCommand({
       RoleName: `${stackPrefix}-app-${appId}-role`,
-      PolicyDocument: JSON.stringify({
-        Version: "2012-10-17",
-        Statement: [
-          {
-            Effect: "Allow",
-            Principal: { Service: "lambda.amazonaws.com" },
-            Action: "sts:AssumeRole",
-          },
-          {
-            Effect: "Allow",
-            Principal: { AWS: `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role` },
-            Action: "sts:AssumeRole",
-          },
-        ],
-      }),
+      PolicyDocument: buildAppRoleTrustPolicy(
+        stackPrefix,
+        accountId,
+        appId !== FOUNDATIONAL_APP_ID,
+      ),
     }),
   );
 }

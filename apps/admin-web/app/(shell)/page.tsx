@@ -659,7 +659,7 @@ export default function DashboardPage() {
                     )}
                     <div className="flex flex-wrap gap-2">
                       <Button size="sm" variant="outline"
-                        onClick={() => openConfirm("local-deploy", "Redeploy from local", "This will run sst deploy using your current local code. The process may take several minutes.", true)}
+                        onClick={() => openConfirm("local-deploy", "Redeploy from local", "This will run pulumi up using your current local code. The process may take several minutes.", true)}
                       >
                         Redeploy from local
                       </Button>

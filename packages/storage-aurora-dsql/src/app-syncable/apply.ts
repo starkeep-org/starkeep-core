@@ -4,7 +4,10 @@ import type {
   AppSyncableRowEntry,
   AppSyncableNamespaceStore,
   ScanCapableApplier,
-} from "@starkeep/sync-engine";
+  FileRecordRow,
+  FileRecordsApplier,
+} from "@starkeep/shared-space-api";
+import { FILE_RECORDS_TABLE } from "@starkeep/shared-space-api";
 import type { DatabaseClient } from "../types.js";
 
 /**
@@ -16,7 +19,7 @@ import type { DatabaseClient } from "../types.js";
  * the row so that tombstones propagate to other clients via pull.
  */
 export class DsqlAppSyncableApplier
-  implements AppSyncableApplier, ScanCapableApplier
+  implements AppSyncableApplier, ScanCapableApplier, FileRecordsApplier
 {
   constructor(
     private readonly client: DatabaseClient,
@@ -166,6 +169,46 @@ export class DsqlAppSyncableApplier
     return result.rows.map((row) => rowToEntry(appId, table, row));
   }
 
+  /**
+   * Scan the reserved `_starkeep_sync_records` table for rows in the given
+   * sync_status set. Excludes soft-deleted rows. Returns an empty array if
+   * the app's schema doesn't have a reserved table yet.
+   */
+  async scanFileRecordsByStatus(
+    appId: string,
+    statuses: string[],
+  ): Promise<FileRecordRow[]> {
+    if (statuses.length === 0) return [];
+    const schemaTable = `app_${appId.replace(/-/g, "_")}."${FILE_RECORDS_TABLE}"`;
+    const placeholders = statuses.map((_, i) => `$${i + 1}`).join(", ");
+    try {
+      const result = await this.client.query(
+        `SELECT * FROM ${schemaTable}
+         WHERE deleted_at IS NULL AND sync_status IN (${placeholders})`,
+        statuses,
+      );
+      return result.rows.map(rowToFileRecord);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Local-only sync_status update that intentionally does not touch
+   * `updated_at`. See FileRecordsApplier for the why.
+   */
+  async setFileRecordStatus(
+    appId: string,
+    id: string,
+    status: string,
+  ): Promise<void> {
+    const schemaTable = `app_${appId.replace(/-/g, "_")}."${FILE_RECORDS_TABLE}"`;
+    await this.client.query(
+      `UPDATE ${schemaTable} SET sync_status = $1 WHERE id = $2`,
+      [status, id],
+    );
+  }
+
   /** Support read path from the factory's queryRows. */
   async queryRows(
     appId: string,
@@ -183,6 +226,22 @@ export class DsqlAppSyncableApplier
   }
 }
 
+function rowToFileRecord(row: Record<string, unknown>): FileRecordRow {
+  return {
+    id: row["id"] as string,
+    sync_status: row["sync_status"] as string,
+    object_storage_key: row["object_storage_key"] as string,
+    content_hash: row["content_hash"] as string,
+    mime_type: row["mime_type"] as string,
+    size_bytes: Number(row["size_bytes"]),
+    original_filename: (row["original_filename"] as string | null) ?? null,
+    origin_app_id: row["origin_app_id"] as string,
+    created_at: row["created_at"] as string,
+    updated_at: row["updated_at"] as string,
+    deleted_at: (row["deleted_at"] as string | null) ?? null,
+  };
+}
+
 function rowToEntry(
   appId: string,
   table: string,
@@ -191,13 +250,12 @@ function rowToEntry(
   const updatedAtStr = row["updated_at"] as string;
   const deletedAtStr = row["deleted_at"] as string | null | undefined;
   const timestamp = deserializeHLC(updatedAtStr);
-  const op = deletedAtStr ? "delete" : "update";
 
-  return {
-    timestamp,
-    appId,
-    table,
-    op,
-    row,
-  };
+  // Upsert-on-wire: receivers may not yet have this row, so emit op="insert"
+  // for live rows and let the applier's INSERT … ON CONFLICT path do the
+  // right thing in both directions.
+  if (deletedAtStr) {
+    return { timestamp, appId, table, op: "delete", row };
+  }
+  return { timestamp, appId, table, op: "insert", row };
 }

@@ -31,6 +31,7 @@ export const appComputeHandlerSchema = z.object({
   timeoutSeconds: z.number().int().min(1).max(900).default(30),
   routes: z.array(z.string()).default(["$default"]),
   env: z.record(z.string()).default({}),
+  auth: z.enum(["public", "jwt"]).default("jwt"),
 });
 
 const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);

@@ -81,6 +81,21 @@ export function validateManifest(raw: unknown): ValidationResult {
     );
   }
 
+  // The shared.access_grants schema represents (app_id, type_id) → single
+  // access mode. An app declaring both canIngestUnknown (writeable unknown)
+  // and canPromoteFromUnknown (readable unknown) would collapse to one row
+  // during install DDL — whichever block runs second silently wins. If/when
+  // both modes are needed by a single app, the access_grants schema must
+  // grow to represent the combination explicitly.
+  if (
+    manifest.infraRequirements.canIngestUnknown &&
+    manifest.infraRequirements.canPromoteFromUnknown
+  ) {
+    errors.push(
+      "infraRequirements: canIngestUnknown and canPromoteFromUnknown cannot both be true on the same app — the shared.access_grants schema cannot represent a single app holding both ingest (write) and promote (read) access to the `unknown` holding pen.",
+    );
+  }
+
   return {
     valid: errors.length === 0,
     manifest: errors.length === 0 ? manifest : null,

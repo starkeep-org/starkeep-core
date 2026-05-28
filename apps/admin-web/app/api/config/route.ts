@@ -1,10 +1,11 @@
 /**
- * starkeep-config.json read/write endpoint.
+ * ~/.starkeep/config.json read/write endpoint.
  *
- * The file at REPO_ROOT/starkeep-config.json is the single source of truth for
- * cloud setup. The wizard, install routes, deploy routes, and CLI all read it
- * via this endpoint (or by reading the file directly from server code). No
- * region is stored — region is derived from userPoolId at the point of use.
+ * The file at $STARKEEP_DATA_DIR/config.json (default: ~/.starkeep/config.json)
+ * is the single source of truth for cloud setup. The wizard, install routes,
+ * deploy routes, and CLI all read it via this endpoint (or directly from server
+ * code). No region is stored — region is derived from userPoolId at the point
+ * of use.
  *
  * GET   — returns `{ config }` where config is the parsed file or null if
  *         the file does not exist.
@@ -13,11 +14,12 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { NextRequest, NextResponse } from "next/server";
-import { REPO_ROOT } from "../../../src/lib/exec-commands";
 
-const CONFIG_PATH = resolve(REPO_ROOT, "starkeep-config.json");
+const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
 
 function readConfig(): Record<string, unknown> | null {
   if (!existsSync(CONFIG_PATH)) return null;

@@ -8,10 +8,11 @@
  * Pulumi up to create DSQL/S3/Lambda/APIGw, the shared-schema DDL is
  * applied, and the temp policy is detached.
  *
- * Reads starkeep-config.json from the repo root. The admin-web wizard writes
- * this file server-side via /api/config as it advances through setup steps,
- * so it must already exist (with at least userPoolId / userPoolClientId /
- * identityPoolId from the Stack outputs step) before this script runs.
+ * Reads ~/.starkeep/config.json (or $STARKEEP_DATA_DIR/config.json). The
+ * admin-web wizard writes this file server-side via /api/config as it advances
+ * through setup steps, so it must already exist (with at least userPoolId /
+ * userPoolClientId / identityPoolId from the Stack outputs step) before this
+ * script runs.
  *
  * Region is NOT stored in the file — it is derived from `userPoolId` (AWS
  * encodes the region into the pool ID, e.g. `us-east-2_Xxxxx`).
@@ -21,10 +22,20 @@
  *   pnpm tsx scripts/cli-install-cloud-data-server.ts --non-interactive
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
+
+// TEMP (iam-permission-tests POC): if IAM_SDK_TRACE_PATH is set, record
+// every AWS SDK call this process makes to that file. Must run before any
+// AWS SDK client below is constructed. Imported by relative path so
+// admin-installer doesn't take a package-level dep on the POC. Remove
+// when the POC graduates or is dropped.
+if (process.env.IAM_SDK_TRACE_PATH) {
+  const { installSdkTrace } = await import("../../iam-permission-tests/src/sdk-trace");
+  installSdkTrace(process.env.IAM_SDK_TRACE_PATH);
+}
 import {
   CognitoIdentityProviderClient,
   InitiateAuthCommand,
@@ -35,11 +46,12 @@ import {
   GetIdCommand,
   GetCredentialsForIdentityCommand,
 } from "@aws-sdk/client-cognito-identity";
+import { execSync } from "node:child_process";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { installCloudDataServer } from "../src/builtin-installs";
+import { installCloudDataServer, installLocalDataSync } from "../src/builtin-installs";
 
 interface StarkeepConfig {
-  stage: string;
+  stackPrefix: string;
   accountId?: string;
   userPoolId: string;
   userPoolClientId: string;
@@ -51,6 +63,7 @@ interface StarkeepConfig {
   // populated by this script after a successful install:
   apiGatewayUrl?: string;
   apiGatewayId?: string;
+  apiGatewayExecutionArn?: string;
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
@@ -67,23 +80,22 @@ function regionFromUserPoolId(userPoolId: string): string {
   return parts[0];
 }
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..", "..");
-const CONFIG_PATH = resolve(REPO_ROOT, "starkeep-config.json");
+const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
 
 function loadConfig(): StarkeepConfig {
   let raw: string;
   try {
     raw = readFileSync(CONFIG_PATH, "utf-8");
   } catch {
-    console.error(`Error: starkeep-config.json not found at ${CONFIG_PATH}`);
-    console.error('Generate it from admin-web after the bootstrap stack is deployed.');
+    console.error(`Error: ~/.starkeep/config.json not found at ${CONFIG_PATH}`);
+    console.error("Generate it from admin-web after the bootstrap stack is deployed.");
     process.exit(1);
   }
   try {
     return JSON.parse(raw) as StarkeepConfig;
   } catch {
-    console.error("Error: starkeep-config.json is not valid JSON");
+    console.error("Error: ~/.starkeep/config.json is not valid JSON");
     process.exit(1);
   }
 }
@@ -204,7 +216,7 @@ const nonInteractive = flags.includes("--non-interactive");
 
 const config = loadConfig();
 const region = regionFromUserPoolId(config.userPoolId);
-const stackPrefix = config.stage;
+const stackPrefix = config.stackPrefix;
 
 if (nonInteractive) {
   const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
@@ -257,9 +269,18 @@ const pulumiStateBucket =
 
 console.log("\nStarkeep cloud-data-server install");
 console.log(`  Region : ${region}`);
-console.log(`  Stage  : ${config.stage}`);
+console.log(`  Prefix : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log("");
+
+// Rebuild dist.zip before installing. Without this, the install pipeline
+// uploads whatever zip was last built locally — and if its hash matches what
+// Lambda already has, Pulumi silently skips the code update, shipping stale
+// code with no warning. Build is idempotent and fast on incremental runs.
+console.log("\nBuilding cloud-data-server bundle…\n");
+execSync("pnpm --filter @starkeep/builtin-cloud-data-server build", {
+  stdio: "inherit",
+});
 
 console.log("\nInstalling cloud-data-server…\n");
 const outputs = await installCloudDataServer({
@@ -274,6 +295,32 @@ const outputs = await installCloudDataServer({
   userPoolClientId: config.userPoolClientId,
 });
 
+// Install the paired local-data-sync identity. This is the cloud-side
+// counterpart to the local-data-server: it's the IAM role that signs for
+// records originated locally by LDS built-in features (notably the file
+// watcher). Bundled with cloud-data-server install so the two paired
+// identities always exist together.
+const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
+const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
+const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
+await installLocalDataSync({
+  stackPrefix,
+  region,
+  accountId,
+  dsqlHostname: outputs.auroraHostname,
+  filesBucket: outputs.bucketName,
+  artifactsBucket,
+  pulumiStateBucket,
+  apiGatewayId: outputs.apiGatewayId,
+  apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
+  authorizerId: outputs.authorizerId,
+  permissionsBoundaryArn,
+  foundationalPermissionsBoundaryArn,
+  managerRoleArn,
+  installDdlRoleArn,
+  installInfraRoleArn,
+});
+
 const updated: StarkeepConfig = {
   ...config,
   accountId,
@@ -283,13 +330,15 @@ const updated: StarkeepConfig = {
   pulumiStateBucket,
   apiGatewayUrl: outputs.apiGatewayUrl,
   apiGatewayId: outputs.apiGatewayId,
+  apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
   authorizerId: outputs.authorizerId,
   s3Bucket: outputs.bucketName,
   auroraEndpoint: outputs.auroraHostname,
 };
+mkdirSync(STARKEEP_DATA_DIR, { recursive: true });
 writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
 
-console.log("\nInstall complete. Updated starkeep-config.json:");
+console.log("\nInstall complete. Updated ~/.starkeep/config.json:");
 console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
 console.log(`  s3Bucket       : ${outputs.bucketName}`);
 console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);

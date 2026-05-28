@@ -1,0 +1,28 @@
+{
+  "name": "@starkeep/iam-permission-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "simulate": "tsx src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@starkeep/admin-core": "workspace:*",
+    "@starkeep/admin-installer": "workspace:*",
+    "@cloud-copilot/iam-simulate": "^0.1.0",
+    "@smithy/smithy-client": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloud-copilot/iam-data": "^0.19.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

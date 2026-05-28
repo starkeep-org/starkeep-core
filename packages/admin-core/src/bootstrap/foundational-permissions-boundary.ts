@@ -101,6 +101,17 @@ export function foundationalPermissionsBoundaryStatements(
         "s3:PutBucketOwnershipControls",
         "s3:GetEncryptionConfiguration",
         "s3:PutEncryptionConfiguration",
+        "s3:GetBucketWebsite",
+        // Pulumi's aws.s3.BucketV2 reads these on every refresh; without them
+        // every CDS install eats AccessDenied warnings or hard refresh
+        // failures (G6a).
+        "s3:GetAccelerateConfiguration",
+        "s3:GetBucketLogging",
+        "s3:GetBucketRequestPayment",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetBucketNotification",
       ],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-files-*`,
@@ -114,13 +125,17 @@ export function foundationalPermissionsBoundaryStatements(
       Resource: [
         `arn:aws:s3:::${stackPrefix}-files-*/*`,
         `arn:aws:s3:::${stackPrefix}-billing-*/*`,
-        `arn:aws:s3:::${stackPrefix}-artifacts/apps/${cdsAppId}/*`,
+        // cds bundle is shipped via pulumi.asset.FileArchive (Pulumi's own
+        // asset machinery uploads it as part of stack state), not via the
+        // cds role PUTing to the artifacts bucket — so no artifacts grant
+        // is needed here. If cds ever switches to S3-sourced Lambda code,
+        // re-add an `${stackPrefix}-artifacts-*/apps/${cdsAppId}/*` resource.
       ],
     },
     {
       Sid: "FoundationalPulumiState",
       Effect: "Allow",
-      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetAccelerateConfiguration"],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-pulumi-state-*`,
         `arn:aws:s3:::${stackPrefix}-pulumi-state-*/.pulumi/`,
@@ -151,6 +166,14 @@ export function foundationalPermissionsBoundaryStatements(
         "lambda:GetPolicy",
         "lambda:PublishVersion",
         "lambda:InvokeFunction",
+        // Refresh-time reads fired by Pulumi's aws.lambda.Function on every
+        // refresh (G6b, G9k).
+        "lambda:ListVersionsByFunction",
+        "lambda:GetFunctionCodeSigningConfig",
+        "lambda:GetFunctionConcurrency",
+        "lambda:GetFunctionUrlConfig",
+        "lambda:ListFunctionEventInvokeConfigs",
+        "lambda:GetRuntimeManagementConfig",
       ],
       Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-${cdsAppId}-*`,
     },
@@ -189,7 +212,8 @@ export function foundationalPermissionsBoundaryStatements(
       // API Gateway v2 (HTTP APIs) tagging and several create paths still
       // authorize against the legacy `apigateway` IAM service namespace
       // using REST-method action names (apigateway:GET/POST/…), not
-      // apigatewayv2:*. Without this, CreateApi fails on the tag write.
+      // apigatewayv2:*. CreateApi is evaluated against /apis (not /v2/apis),
+      // so both the un-prefixed and v2-prefixed path forms are required.
       Sid: "FoundationalApiGatewayRestActions",
       Effect: "Allow",
       Action: [
@@ -198,8 +222,14 @@ export function foundationalPermissionsBoundaryStatements(
         "apigateway:PATCH",
         "apigateway:PUT",
         "apigateway:DELETE",
+        // v2 tagging on stages/integrations/routes fires under the legacy
+        // namespace (G6c).
+        "apigateway:TagResource",
+        "apigateway:UntagResource",
       ],
       Resource: [
+        "arn:aws:apigateway:*::/apis",
+        "arn:aws:apigateway:*::/apis/*",
         "arn:aws:apigateway:*::/v2/*",
         "arn:aws:apigateway:*::/tags/*",
       ],
@@ -211,8 +241,39 @@ export function foundationalPermissionsBoundaryStatements(
         "cur:PutReportDefinition",
         "cur:DescribeReportDefinitions",
         "cur:DeleteReportDefinition",
+        // Pulumi's CUR resource reads/writes tags on every refresh (G6d).
+        "cur:ListTagsForResource",
+        "cur:TagResource",
+        "cur:UntagResource",
       ],
       Resource: "*",
+    },
+    {
+      // First-ever dsql:CreateCluster in an account often needs the DSQL
+      // service-linked role created. AWS auto-creates SLRs when the caller
+      // holds iam:CreateServiceLinkedRole for the matching service. Scoped
+      // to the DSQL service principal so the FoundationalDenyOtherIam
+      // NotAction carve-out doesn't admit anything else (G9i).
+      Sid: "FoundationalIamCreateServiceLinkedRole",
+      Effect: "Allow",
+      Action: "iam:CreateServiceLinkedRole",
+      Resource: "*",
+      Condition: {
+        StringEquals: {
+          "iam:AWSServiceName": "dsql.amazonaws.com",
+        },
+      },
+    },
+    {
+      // Broker pattern: cloud-data-server assumes the caller's per-app role on
+      // every sync request to act under that app's identity. The role's inline
+      // `broker-power` policy grants the same action; without this matching
+      // statement in the boundary, the intersection cap denies AssumeRole at
+      // runtime and every /apps/{appId}/sync/{pull,push} ends in 403.
+      Sid: "FoundationalBrokerAssumeAppRoles",
+      Effect: "Allow",
+      Action: "sts:AssumeRole",
+      Resource: `arn:aws:iam::*:role/${stackPrefix}-app-*`,
     },
     {
       Sid: "FoundationalPassRoleOwnRoleToLambda",
@@ -226,17 +287,30 @@ export function foundationalPermissionsBoundaryStatements(
       },
     },
     {
-      // Defense-in-depth: deny every mutating IAM verb. PassRole is omitted
-      // from the prefix list, so the Allow above survives. Read-only IAM
-      // verbs (Get*/List*) aren't denied here but are implicitly denied at
-      // the boundary because nothing Allows them.
+      // Defense-in-depth: deny every mutating IAM verb except the two we
+      // explicitly Allow above (iam:PassRole, iam:CreateServiceLinkedRole
+      // gated on dsql.amazonaws.com). iam:Create* is enumerated as the
+      // explicit subverbs rather than the wildcard so CreateServiceLinkedRole
+      // isn't accidentally caught (G9i). Read-only iam:Get*/List* are not
+      // denied — they remain implicitly denied because nothing Allows them.
       Sid: "FoundationalDenyOtherIam",
       Effect: "Deny",
       Action: [
         "iam:Add*",
         "iam:Attach*",
         "iam:Change*",
-        "iam:Create*",
+        "iam:CreateAccessKey",
+        "iam:CreateAccountAlias",
+        "iam:CreateGroup",
+        "iam:CreateInstanceProfile",
+        "iam:CreateLoginProfile",
+        "iam:CreateOpenIDConnectProvider",
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:CreateRole",
+        "iam:CreateSAMLProvider",
+        "iam:CreateUser",
+        "iam:CreateVirtualMFADevice",
         "iam:Deactivate*",
         "iam:Delete*",
         "iam:Detach*",

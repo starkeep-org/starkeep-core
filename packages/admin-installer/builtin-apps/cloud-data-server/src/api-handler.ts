@@ -11,8 +11,12 @@
  *   AURORA_ENDPOINT  — Aurora DSQL cluster hostname
  *   S3_BUCKET        — S3 bucket for object storage (files)
  *   STACK_PREFIX     — e.g. "starkeep"
- *   MANAGER_ROLE_ARN — ARN of the Manager role to hop through for app role assumption
  *   AWS_REGION       — set automatically by Lambda runtime
+ *
+ * The CDS Lambda's broker capability is the cloud-data-server role's
+ * "broker-power" inline policy + each per-app role trusting the CDS role
+ * directly. AssumeRole is a single hop: Lambda exec role → per-app role.
+ * Manager is not involved in the runtime data path.
  */
 
 import { createHash } from "node:crypto";
@@ -40,7 +44,8 @@ import type {
   DatabaseClient,
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
-import { ok, clientErr, type APIGatewayEvent } from "./handler-utils.js";
+import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
+import { loadAccessGrants, canRead, canWrite, type AccessGrants } from "./access-enforcer.js";
 
 // ---------------------------------------------------------------------------
 // Per-app credential cache (STS sessions ~15 min, refreshed at 14 min)
@@ -56,42 +61,25 @@ interface CachedCreds {
 const credentialCache = new Map<string, CachedCreds>();
 const CRED_REFRESH_BUFFER_MS = 60_000; // refresh 60s before expiry
 
-async function getAppCreds(appId: string): Promise<CachedCreds> {
+async function getAppCreds(appId: string, accountId: string): Promise<CachedCreds> {
   const cached = credentialCache.get(appId);
   if (cached && cached.expiresAt - Date.now() > CRED_REFRESH_BUFFER_MS) {
     return cached;
   }
 
   const stackPrefix = process.env.STACK_PREFIX;
-  const managerRoleArn = process.env.MANAGER_ROLE_ARN;
   const region = process.env.AWS_REGION ?? "us-east-1";
-  if (!stackPrefix || !managerRoleArn) {
-    throw new Error("STACK_PREFIX and MANAGER_ROLE_ARN env vars are required");
+  if (!stackPrefix) {
+    throw new Error("STACK_PREFIX env var is required");
   }
 
-  const appRoleArn = `arn:aws:iam::${getAccountId()}:role/${stackPrefix}-app-${appId}-role`;
+  const appRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${appId}-role`;
 
-  // Hop through Manager role first (Lambda exec role → Manager → app role)
+  // Single-hop AssumeRole: the CDS Lambda exec role's broker-power policy
+  // permits sts:AssumeRole on ${prefix}-app-*, and every per-app role's
+  // trust policy lists the CDS role as a principal. No Manager involvement.
   const sts = new STSClient({ region });
-  const managerResult = await sts.send(new AssumeRoleCommand({
-    RoleArn: managerRoleArn,
-    RoleSessionName: `lambda-mgr-${Date.now()}`,
-    DurationSeconds: 900,
-  }));
-  const mc = managerResult.Credentials;
-  if (!mc?.AccessKeyId || !mc.SecretAccessKey || !mc.SessionToken) {
-    throw new Error("Failed to assume Manager role");
-  }
-
-  const managerSts = new STSClient({
-    region,
-    credentials: {
-      accessKeyId: mc.AccessKeyId,
-      secretAccessKey: mc.SecretAccessKey,
-      sessionToken: mc.SessionToken,
-    },
-  });
-  const appResult = await managerSts.send(new AssumeRoleCommand({
+  const appResult = await sts.send(new AssumeRoleCommand({
     RoleArn: appRoleArn,
     RoleSessionName: `lambda-app-${appId}-${Date.now()}`,
     DurationSeconds: 900,
@@ -111,10 +99,16 @@ async function getAppCreds(appId: string): Promise<CachedCreds> {
   return creds;
 }
 
-// Account ID parsed from Lambda ARN (available in every Lambda invocation)
-function getAccountId(): string {
-  const arnParts = (process.env.AWS_LAMBDA_FUNCTION_ARN ?? "").split(":");
-  return arnParts[4] ?? "unknown";
+// Account ID parsed from the Lambda invocation context's ARN. Lambda does not
+// expose the function ARN as an env var — only the invocation context does
+// (`context.invokedFunctionArn`), so the caller must thread it in.
+function getAccountId(invokedFunctionArn: string): string {
+  const arnParts = invokedFunctionArn.split(":");
+  const accountId = arnParts[4];
+  if (!accountId) {
+    throw new Error(`Cannot parse account ID from invokedFunctionArn: ${invokedFunctionArn}`);
+  }
+  return accountId;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +125,6 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
   async createClient(options: AuroraDsqlDatabaseAdapterOptions): Promise<DatabaseClient> {
     const { hostname, region } = options;
     const pgUser = `${this.stackPrefix}_app_${this.appId}`.toLowerCase().replace(/-/g, "_");
-    const appId = this.appId;
     const creds = this.creds;
 
     const createPgClient = async (): Promise<pg.Client> => {
@@ -153,8 +146,16 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
         password: token,
         ssl: { rejectUnauthorized: true },
       });
+      // Without an 'error' listener, an async socket failure (DSQL token
+      // expiry, idle timeout, network blip) emits 'error' on the Client with
+      // no handler → Node throws uncaughtException → the Lambda worker dies
+      // mid-invocation and API Gateway returns its default 500. Attach a
+      // no-op-with-log listener so socket errors stay async failures we can
+      // surface in CloudWatch instead of process-killers.
+      client.on("error", (err) => {
+        console.warn("[cds] pg client async error:", (err as Error).message);
+      });
       await client.connect();
-      await client.query("SET starkeep.app_id = $1", [appId]);
       return client;
     };
 
@@ -222,10 +223,52 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 // Path parsing
 // ---------------------------------------------------------------------------
 
+// Mirrors CLOUD_APP_ID_RE in packages/admin-installer/src/iam.ts. Kept in sync
+// by hand because the cloud handler lives in a separately-deployed artifact
+// and cannot import from the installer package at runtime.
 function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
-  const match = rawPath.match(/^\/apps\/([^/]+)(\/.*)?$/);
+  const match = rawPath.match(/^\/apps\/([a-z0-9][a-z0-9._-]*)(\/.*)?$/);
   if (!match) return null;
   return { appId: match[1]!, subPath: match[2] ?? "/" };
+}
+
+// Authorize an object-storage key against the caller's grants. Keys live in
+// two namespaces (see packages/core/src/storage/object-keys.ts):
+//   shared/<typeId>/<shard>/<hash>   — gated by per-type read/write grants
+//   apps/<appId>/syncable/<...>      — owned by the named app; only that app
+//                                       may touch it via its own files routes
+function parseObjectKey(
+  callerAppId: string,
+  decodedKey: string,
+  grants: AccessGrants,
+  mode: "read" | "write",
+): { ok: true } | { ok: false; status: number; message: string } {
+  if (decodedKey.startsWith("shared/")) {
+    const segments = decodedKey.split("/");
+    if (segments.length < 4 || !segments[1] || !segments[2] || !segments[3]) {
+      return { ok: false, status: 400, message: "Invalid shared key" };
+    }
+    const typeId = segments[1]!;
+    const allowed = mode === "read" ? canRead(grants, typeId) : canWrite(grants, typeId);
+    if (!allowed) return { ok: false, status: 403, message: "Forbidden" };
+    return { ok: true };
+  }
+  if (decodedKey.startsWith("apps/")) {
+    const segments = decodedKey.split("/");
+    if (
+      segments.length < 4 ||
+      !segments[1] ||
+      segments[2] !== "syncable" ||
+      !segments[3]
+    ) {
+      return { ok: false, status: 400, message: "Invalid app-syncable key" };
+    }
+    if (segments[1] !== callerAppId) {
+      return { ok: false, status: 403, message: "Forbidden (cross-app syncable key)" };
+    }
+    return { ok: true };
+  }
+  return { ok: false, status: 400, message: "Unknown key namespace" };
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +297,13 @@ function recordToResponse(record: DataRecord) {
 // Handler
 // ---------------------------------------------------------------------------
 
-export async function handler(event: APIGatewayEvent) {
+export async function handler(event: APIGatewayEvent, context: LambdaContext) {
+  // Track every DB client opened during this request so we can close them in
+  // the finally below. Leaving clients open across Lambda freeze/thaw causes
+  // their underlying TCP socket to fire 'error' on a later invocation, which
+  // — combined with pg.Client's emit-or-throw default — has killed workers
+  // mid-handler and made API Gateway return a default 500.
+  const toClose: Array<() => Promise<void>> = [];
   try {
     const method = event.requestContext.http.method.toUpperCase();
     const rawPath = event.rawPath;
@@ -273,10 +322,23 @@ export async function handler(event: APIGatewayEvent) {
     if (!parsed) return clientErr("Not found", 404);
     const { appId, subPath } = parsed;
 
-    const creds = await getAppCreds(appId);
+    const accountId = getAccountId(context.invokedFunctionArn);
+    const creds = await getAppCreds(appId, accountId);
     const { db, storage, clock, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
 
     await db.init();
+    toClose.push(() => db.close());
+
+    // Per-type read/write enforcement on shared.records. DSQL has no RLS and
+    // the table is shared across every type, so we load the caller app's
+    // grants once per request and gate both the records and sync paths below.
+    const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+    let grants: AccessGrants;
+    try {
+      grants = await loadAccessGrants(grantClient, appId);
+    } finally {
+      await grantClient.end();
+    }
 
     const query = event.queryStringParameters ?? {};
     const claims = event.requestContext.authorizer?.jwt?.claims;
@@ -291,7 +353,11 @@ export async function handler(event: APIGatewayEvent) {
 
     // GET /apps/{appId}/data/types
     if (method === "GET" && subPath === "/data/types") {
-      const result = await db.query({ limit: 10000 });
+      if (grants.readableTypes.size === 0) return ok({ types: [], total: 0 });
+      const result = await db.query({
+        filters: [{ field: "type", operator: "in", value: [...grants.readableTypes] }],
+        limit: 10000,
+      });
       const counts = new Map<string, number>();
       for (const record of result.records) {
         counts.set(record.type, (counts.get(record.type) ?? 0) + 1);
@@ -307,7 +373,15 @@ export async function handler(event: APIGatewayEvent) {
       const cursor = query["cursor"];
       const updatedAfter = query["updated_after"];
 
-      const filters: { field: string; operator: "gt"; value: string }[] = [];
+      // Per-type read enforcement. An explicit ?type= must be in the caller's
+      // readable set; otherwise constrain the scan to readable types.
+      if (type !== undefined) {
+        if (!canRead(grants, type)) return clientErr("Forbidden", 403);
+      } else if (grants.readableTypes.size === 0) {
+        return ok({ records: [], hasMore: false, nextCursor: null });
+      }
+
+      const filters: { field: string; operator: "gt" | "in"; value: string | string[] }[] = [];
       if (updatedAfter) {
         const ms = new Date(updatedAfter).getTime();
         if (!isNaN(ms)) {
@@ -318,6 +392,9 @@ export async function handler(event: APIGatewayEvent) {
           });
         }
       }
+      if (type === undefined) {
+        filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
+      }
 
       const result = await db.query({ type, filters: filters.length > 0 ? filters : undefined, limit: limit + 1, cursor });
       const hasMore = result.records.length > limit;
@@ -326,6 +403,12 @@ export async function handler(event: APIGatewayEvent) {
     }
 
     // POST /apps/{appId}/data/records
+    //
+    // Body (key-ref form):
+    //   { type, contentType, contentHash, sizeBytes, fileName?, parentId? }
+    //
+    // The caller PUTs the bytes to S3 via a presigned URL first (see POST
+    // /files/presign), then registers the record by content-addressed key.
     if (method === "POST" && subPath === "/data/records") {
       const rawBody = event.isBase64Encoded && event.body
         ? Buffer.from(event.body, "base64").toString("utf8")
@@ -334,19 +417,37 @@ export async function handler(event: APIGatewayEvent) {
         type?: string;
         fileName?: string;
         contentType?: string;
-        fileBase64?: string;
+        contentHash?: string;
+        sizeBytes?: number;
         parentId?: string;
       };
       if (!body.type) return clientErr("type is required", 400);
-      if (!body.fileBase64) return clientErr("fileBase64 is required — every record must be file-backed", 400);
       if (!body.contentType) return clientErr("contentType is required", 400);
+      if (!canWrite(grants, body.type)) return clientErr("Forbidden", 403);
+      if (!body.contentHash) {
+        return clientErr(
+          "contentHash is required — PUT the bytes via a presigned URL first, then register the record by content-addressed key",
+          400,
+        );
+      }
+      if (!/^[a-f0-9]{64}$/.test(body.contentHash)) {
+        return clientErr("contentHash must be a 64-character lowercase hex sha256", 400);
+      }
+      if (typeof body.sizeBytes !== "number" || !Number.isFinite(body.sizeBytes) || body.sizeBytes < 0) {
+        return clientErr("sizeBytes is required and must be a non-negative number", 400);
+      }
+      const contentHash = body.contentHash;
+      const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
+      const sizeBytes = body.sizeBytes;
+      const exists = await storage.has(objectStorageKey);
+      if (!exists) {
+        return clientErr(
+          "Blob not found at the content-addressed key. PUT it via a presigned URL first.",
+          409,
+        );
+      }
 
       const now = clock.now();
-      const fileBuffer = Buffer.from(body.fileBase64, "base64");
-      const contentHash = createHash("sha256").update(fileBuffer).digest("hex");
-      const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
-      await storage.put(objectStorageKey, fileBuffer, { contentType: body.contentType });
-
       const record: DataRecord = {
         id: generateId(),
         kind: "data",
@@ -361,7 +462,7 @@ export async function handler(event: APIGatewayEvent) {
         contentHash,
         objectStorageKey,
         mimeType: body.contentType,
-        sizeBytes: fileBuffer.length,
+        sizeBytes,
         originalFilename: body.fileName ?? null,
         parentId: (body.parentId as DataRecord["parentId"]) ?? null,
       };
@@ -376,6 +477,7 @@ export async function handler(event: APIGatewayEvent) {
     if (method === "POST" && subPath === "/data/files") {
       const typeId = query["type"];
       if (!typeId) return clientErr("type query param is required", 400);
+      if (!canWrite(grants, typeId)) return clientErr("Forbidden", 403);
       const headers = event.headers ?? {};
       const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
       const mimeType = contentTypeHeader.split(";")[0]!.trim();
@@ -388,6 +490,90 @@ export async function handler(event: APIGatewayEvent) {
       const key = dataRecordObjectKey(typeId, hex);
       await storage.put(key, fileBuffer, { contentType: mimeType });
       return ok({ key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
+    }
+
+    // POST /apps/{appId}/files/presign — issue a presigned S3 PUT URL.
+    // Body: { key, contentType? }. The local-data-server's HttpObjectStorageAdapter
+    // uploads directly to S3 with the returned URL, bypassing API Gateway size limits.
+    if (method === "POST" && subPath === "/files/presign") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as { key?: string; contentType?: string };
+      if (!body.key) return clientErr("key is required", 400);
+      const check = parseObjectKey(appId, body.key, grants, "write");
+      if (!check.ok) return clientErr(check.message, check.status);
+      const url = await storage.getSignedPutUrl!(body.key, {
+        expiresIn: 3600,
+        ...(body.contentType ? { contentType: body.contentType } : {}),
+      });
+      return ok({ url });
+    }
+
+    // POST /apps/{appId}/files/confirm — close the loop after a presigned PUT.
+    // Body: { key }. Verifies the blob is durably in S3 and flips matching
+    // PendingFileDownload records to Synced so downstream pulls can see them
+    // without waiting for the lazy reconcile on the next pullChanges call.
+    // Idempotent: re-calling after rows are already Synced is a no-op 200.
+    if (method === "POST" && subPath === "/files/confirm") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as { key?: string };
+      if (!body.key) return clientErr("key is required", 400);
+      const check = parseObjectKey(appId, body.key, grants, "write");
+      if (!check.ok) return clientErr(check.message, check.status);
+      const exists = await storage.has(body.key);
+      if (!exists) return clientErr("Blob not yet visible at the supplied key", 409);
+      const matches = await db.query({
+        filters: [{ field: "objectStorageKey", operator: "eq", value: body.key }],
+        limit: 100,
+      });
+      let confirmed = 0;
+      for (const record of matches.records) {
+        if (record.syncStatus === SyncStatus.PendingFileDownload) {
+          await db.put({ ...record, syncStatus: SyncStatus.Synced });
+          console.info(
+            `[sync-state] side=server record=${record.id} from=${SyncStatus.PendingFileDownload} to=${SyncStatus.Synced} reason=confirm-endpoint`,
+          );
+          confirmed += 1;
+        }
+      }
+      return ok({ confirmed });
+    }
+
+    // GET /apps/{appId}/files/{encodedKey}/presign — presigned S3 GET URL.
+    // The caller URL-encodes the storage key, but API Gateway HTTP API
+    // normalizes %2F back to "/" before forwarding to Lambda, so the captured
+    // segment must allow embedded slashes (object keys are multi-segment, e.g.
+    // shared/image/<shard>/<hash>).
+    const filePresignGetMatch = subPath.match(/^\/files\/(.+)\/presign$/);
+    if (filePresignGetMatch && method === "GET") {
+      const key = decodeURIComponent(filePresignGetMatch[1]!);
+      const check = parseObjectKey(appId, key, grants, "read");
+      if (!check.ok) return clientErr(check.message, check.status);
+      const exists = await storage.has(key);
+      if (!exists) return clientErr("Not found", 404);
+      const url = await storage.getSignedUrl!(key, { expiresIn: 3600 });
+      return ok({ url });
+    }
+
+    // HEAD|DELETE /apps/{appId}/files/{encodedKey} — same multi-segment key
+    // handling as the presign route above.
+    const fileObjectMatch = subPath.match(/^\/files\/(.+)$/);
+    if (fileObjectMatch && method === "HEAD") {
+      const key = decodeURIComponent(fileObjectMatch[1]!);
+      const check = parseObjectKey(appId, key, grants, "read");
+      if (!check.ok) return { statusCode: check.status, body: "" };
+      const exists = await storage.has(key);
+      return { statusCode: exists ? 200 : 404, body: "" };
+    }
+    if (fileObjectMatch && method === "DELETE") {
+      const key = decodeURIComponent(fileObjectMatch[1]!);
+      const check = parseObjectKey(appId, key, grants, "write");
+      if (!check.ok) return clientErr(check.message, check.status);
+      await storage.delete(key);
+      return ok({ ok: true });
     }
 
     // POST /apps/{appId}/data/records/:id/promote — promote an 'unknown' record to a typed record
@@ -403,6 +589,10 @@ export async function handler(event: APIGatewayEvent) {
       const record = await db.get(recordId as StarkeepId);
       if (!record) return clientErr("Record not found", 404);
       if (record.type !== "unknown") return clientErr("Only 'unknown' records can be promoted", 409);
+      // Promotion is a read of `unknown` (gated by canPromoteFromUnknown) plus
+      // a write of the target type (gated by the normal writable set).
+      if (!canRead(grants, "unknown")) return clientErr("Forbidden", 403);
+      if (!canWrite(grants, body.targetType)) return clientErr("Forbidden", 403);
 
       const now = clock.now();
       const promoted: DataRecord = { ...record, type: body.targetType, updatedAt: now, version: record.version + 1 };
@@ -427,6 +617,9 @@ export async function handler(event: APIGatewayEvent) {
       }
       const coreType = CORE_TYPES.find((t) => t.id === typeId);
       if (!coreType) return clientErr(`Unknown type "${typeId}" — only core types support metadata`, 400);
+      // Writing metadata for a type counts as writing that type — gate on the
+      // caller's writable set. PG GRANTs back this up at the metadata table.
+      if (!canWrite(grants, typeId)) return clientErr("Forbidden", 403);
       const allowedColumns = new Set(coreType.metadataColumns.map((c) => c.name));
       const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
       if (unknownKeys.length > 0) {
@@ -441,6 +634,7 @@ export async function handler(event: APIGatewayEvent) {
     if (metadataReadMatch && method === "GET") {
       const recordId = decodeURIComponent(metadataReadMatch[1]!) as StarkeepId;
       const typeId = decodeURIComponent(metadataReadMatch[2]!);
+      if (!canRead(grants, typeId)) return clientErr("Forbidden", 403);
       const metadata = await db.getMetadata(typeId, recordId);
       return ok({ metadata });
     }
@@ -451,6 +645,7 @@ export async function handler(event: APIGatewayEvent) {
       const id = decodeURIComponent(fileUrlMatch[1]!) as StarkeepId;
       const record = await db.get(id);
       if (!record) return clientErr("Record not found", 404);
+      if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
       if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
       const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
       const url = await storage.getSignedUrl!(record.objectStorageKey, { expiresIn });
@@ -465,6 +660,7 @@ export async function handler(event: APIGatewayEvent) {
       if (method === "GET") {
         const record = await db.get(id);
         if (!record) return clientErr("Record not found", 404);
+        if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
         return ok({ record: recordToResponse(record) });
       }
 
@@ -475,6 +671,7 @@ export async function handler(event: APIGatewayEvent) {
         // parentId for now.
         const existing = await db.get(id);
         if (!existing) return clientErr("Record not found", 404);
+        if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
         const body = event.body
           ? (JSON.parse(event.body) as { originalFilename?: string | null; parentId?: string | null })
           : null;
@@ -492,6 +689,9 @@ export async function handler(event: APIGatewayEvent) {
       }
 
       if (method === "DELETE") {
+        const existing = await db.get(id);
+        if (!existing) return clientErr("Record not found", 404);
+        if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
         await db.delete(id);
         return ok({ deleted: true });
       }
@@ -504,21 +704,148 @@ export async function handler(event: APIGatewayEvent) {
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody);
       const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
-      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
+      toClose.push(() => appSyncableSource.client.end());
+      const transport = createInProcessSyncTransport({
+        databaseAdapter: db,
+        clock,
+        appSyncableSource,
+        objectStorage: storage,
+      });
       const response = await transport.pullChanges(body);
       return ok(response);
     }
 
     // POST /apps/{appId}/sync/push
+    //
+    // Sync push replays records produced by the local data server under the
+    // *originating* app's IAM identity, not the caller's. We group incoming
+    // record changes by `originAppId`, re-assume that role per group via the
+    // broker capability on this Lambda's app role, and apply each group with
+    // its own STS-assumed credentials. Records whose origin app is not
+    // installed in the cloud are rejected with 409 — never silently written
+    // under any other identity. Records of type `unknown` require the origin
+    // role to hold canIngestUnknown (access_grants), otherwise 403.
     if (method === "POST" && subPath === "/sync/push") {
       const rawBody = event.isBase64Encoded && event.body
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
-      const body = JSON.parse(rawBody);
-      const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
-      const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource });
-      const response = await transport.pushChanges(body);
-      return ok(response);
+      const body = JSON.parse(rawBody) as {
+        changes?: Array<{ recordSnapshot: DataRecord } & Record<string, unknown>>;
+        appSyncableRows?: Array<{ appId: string } & Record<string, unknown>>;
+      };
+
+      // Group record changes by originAppId, validate every group, and only
+      // start applying once all groups have been validated. This makes the
+      // 409/403 path observable to callers without partial application.
+      const changesByOrigin = new Map<string, typeof body.changes>();
+      for (const change of body.changes ?? []) {
+        const originAppId = change.recordSnapshot?.originAppId;
+        if (!originAppId) return clientErr("change.recordSnapshot.originAppId is required", 400);
+        const arr = changesByOrigin.get(originAppId) ?? [];
+        arr.push(change);
+        changesByOrigin.set(originAppId, arr);
+      }
+
+      // Validate each origin can be assumed and has the needed grants.
+      type OriginContext = {
+        creds: CachedCreds;
+        grants: AccessGrants;
+      };
+      const originContexts = new Map<string, OriginContext>();
+      for (const [originAppId, group] of changesByOrigin) {
+        let originCreds: CachedCreds;
+        try {
+          originCreds = await getAppCreds(originAppId, accountId);
+        } catch (err) {
+          if (isUninstalledOriginError(err)) {
+            return clientErr(`originAppId "${originAppId}" is not installed`, 409);
+          }
+          throw err;
+        }
+        const originAdapters = makeAdapters(originAppId, originCreds);
+        const grantClient = await originAdapters.clientFactory.createClient({
+          hostname: originAdapters.auroraEndpoint,
+          region: originAdapters.region,
+        });
+        let originGrants: AccessGrants;
+        try {
+          originGrants = await loadAccessGrants(grantClient, originAppId);
+        } finally {
+          await grantClient.end();
+        }
+        // Type=unknown records require canIngestUnknown on the origin role.
+        for (const change of group ?? []) {
+          const recordType = change.recordSnapshot?.type;
+          if (recordType === "unknown" && !canWrite(originGrants, "unknown")) {
+            return clientErr(
+              `originAppId "${originAppId}" cannot ingest type=unknown`,
+              403,
+            );
+          }
+          // Defense-in-depth: every record's type must be writable for its origin.
+          if (typeof recordType === "string" && !canWrite(originGrants, recordType)) {
+            return clientErr(
+              `originAppId "${originAppId}" is not writable for type "${recordType}"`,
+              403,
+            );
+          }
+        }
+        originContexts.set(originAppId, { creds: originCreds, grants: originGrants });
+      }
+
+      // Apply per-origin record changes under each origin's STS-assumed db.
+      // App-syncable rows ride along with their declared appId; we keep them
+      // on the caller-scoped transport since they're already gated by the
+      // applier's namespace check (see in-process-transport.ts).
+      const accepted: string[] = [];
+      const rejected: unknown[] = [];
+      let latestTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
+      for (const [originAppId, group] of changesByOrigin) {
+        const ctx = originContexts.get(originAppId)!;
+        const originAdapters = makeAdapters(originAppId, ctx.creds);
+        await originAdapters.db.init();
+        toClose.push(() => originAdapters.db.close());
+        const originAppSyncableSource = await buildAppSyncableSource(
+          originAdapters.clientFactory,
+          originAdapters.auroraEndpoint,
+          originAdapters.region,
+        );
+        toClose.push(() => originAppSyncableSource.client.end());
+        const originTransport = createInProcessSyncTransport({
+          databaseAdapter: originAdapters.db,
+          clock: originAdapters.clock,
+          appSyncableSource: originAppSyncableSource,
+          objectStorage: originAdapters.storage,
+        });
+        const partial = await originTransport.pushChanges({ changes: group ?? [] } as never);
+        accepted.push(...(partial.accepted as unknown as string[]));
+        rejected.push(...(partial.rejected as unknown as unknown[]));
+        if (
+          partial.latestTimestamp.wallTime > latestTimestamp.wallTime ||
+          (partial.latestTimestamp.wallTime === latestTimestamp.wallTime &&
+            partial.latestTimestamp.counter > latestTimestamp.counter)
+        ) {
+          latestTimestamp = partial.latestTimestamp;
+        }
+      }
+
+      // App-syncable rows still go via the caller's db (cheap path); the
+      // applier enforces per-app namespace membership.
+      if ((body.appSyncableRows ?? []).length > 0) {
+        const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+        toClose.push(() => appSyncableSource.client.end());
+        const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource, objectStorage: storage });
+        const partial = await transport.pushChanges({ changes: [], appSyncableRows: body.appSyncableRows } as never);
+        if (
+          partial.latestTimestamp.wallTime > latestTimestamp.wallTime ||
+          (partial.latestTimestamp.wallTime === latestTimestamp.wallTime &&
+            partial.latestTimestamp.counter > latestTimestamp.counter)
+        ) {
+          latestTimestamp = partial.latestTimestamp;
+        }
+      }
+
+      return ok({ accepted, rejected, latestTimestamp });
     }
 
     return clientErr("Not found", 404);
@@ -537,6 +864,13 @@ export async function handler(event: APIGatewayEvent) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ error: "Internal server error" }),
     };
+  } finally {
+    // Close every pg client we opened. Without this, sockets outlive the
+    // handler, DSQL eventually closes them, and the resulting async 'error'
+    // event arrives on a future invocation. Errors during close are
+    // intentionally swallowed — at this point the handler has already
+    // returned a response, and a failed .end() should not corrupt that.
+    await Promise.allSettled(toClose.map((close) => close()));
   }
 }
 
@@ -544,12 +878,29 @@ async function buildAppSyncableSource(
   clientFactory: AppDsqlClientFactory,
   hostname: string,
   region: string,
-): Promise<{ namespaces: DsqlAppSyncableNamespaceStore; applier: DsqlAppSyncableApplier }> {
+): Promise<{
+  namespaces: DsqlAppSyncableNamespaceStore;
+  applier: DsqlAppSyncableApplier;
+  client: DatabaseClient;
+}> {
   const client = await clientFactory.createClient({ hostname, region });
   const namespaces = new DsqlAppSyncableNamespaceStore(client);
   await namespaces.load();
   const applier = new DsqlAppSyncableApplier(client, namespaces);
-  return { namespaces, applier };
+  return { namespaces, applier, client };
+}
+
+/**
+ * AssumeRole on a non-existent app role surfaces as a STS error. The local
+ * data server may push records whose `originAppId` refers to an app that has
+ * been uninstalled (or never installed in the cloud) — see the "Registered
+ * but not deployed" section of permissions-gaps.md. We map those to 409 so
+ * callers can distinguish them from a real auth failure on an existing role.
+ */
+function isUninstalledOriginError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const name = err.name;
+  return name === "NoSuchEntityException" || name === "NoSuchEntity";
 }
 
 function isAccessDenied(err: unknown): boolean {

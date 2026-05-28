@@ -21,10 +21,13 @@ export interface StarkeepConfig {
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
+  installDdlRoleArn?: string;
+  installInfraRoleArn?: string;
   pulumiStateBucket?: string;
   // Populated by the cloud-data-server install:
   apiGatewayUrl?: string;
   apiGatewayId?: string;
+  apiGatewayExecutionArn?: string;
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;

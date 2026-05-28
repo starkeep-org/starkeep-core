@@ -4,46 +4,60 @@ import type { IamStatement } from "../iam-utils.js";
  * Policy statements for the ${StackPrefix}-app-permissions-boundary managed policy.
  *
  * This boundary is attached to every Manager-minted per-app role (NOT admin-app,
- * whose bootstrap-time operational grants exceed it). The boundary caps what any
- * per-app role can ever do: S3 scoped to its own prefix, DSQL DbConnect (not Admin),
- * log writes, and an explicit Deny on all IAM actions.
+ * whose bootstrap-time operational grants exceed it). It caps what any per-app
+ * role can ever do at *runtime*: per-app S3 prefix on the files bucket, shared
+ * S3 root, DSQL DbConnect (not Admin), log writes to the app's own log group,
+ * and lambda:InvokeFunction on the app's own functions. All install-time
+ * provisioning power (Lambda admin, log-group admin, API Gateway admin,
+ * Pulumi state write, iam:PassRole) lives on the install-infra-role instead;
+ * Manager grants it ephemerally during install/uninstall via temp policies on
+ * that role, never on this one.
  *
- * All strings are plain values (no Fn::Sub) — stackPrefix is resolved at generation
- * time, and IAM policy variables like ${aws:PrincipalTag/starkeep:appId} must remain
- * literal (Fn::Sub rejects the slash in the variable name).
+ * All strings are plain values (no Fn::Sub) — stackPrefix is resolved at
+ * generation time, and IAM policy variables like
+ * ${aws:PrincipalTag/starkeep:appId} must remain literal (Fn::Sub rejects the
+ * slash in the variable name).
  */
 export function appPermissionsBoundaryStatements(stackPrefix: string): IamStatement[] {
   return [
     {
+      // Per-object verbs scoped to apps/<appId>/* on any files bucket.
       Sid: "AppS3OwnPrefix",
       Effect: "Allow",
-      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
-      Resource: [
-        `arn:aws:s3:::${stackPrefix}-files-*`,
-        `arn:aws:s3:::${stackPrefix}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
+      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
+    },
+    {
+      // ListBucket is a bucket-level action — AWS evaluates it against the
+      // bucket ARN, not the object key. We add an s3:prefix Condition so a
+      // per-app role cannot enumerate other apps' keys (G9g). Two prefixes
+      // are permitted: the app's own prefix and the shared root.
+      Sid: "AppS3ListOwnAndShared",
+      Effect: "Allow",
+      Action: "s3:ListBucket",
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*`,
+      Condition: {
+        StringLike: {
+          "s3:prefix": [
+            `apps/\${aws:PrincipalTag/starkeep:appId}/*`,
+            "shared/*",
+          ],
+        },
+      },
+    },
+    {
+      // Shared-data root. Per-typeId narrowing lives in buildRuntimePolicy's
+      // AppS3SharedData Sid; the boundary just permits the shared/* root so
+      // the runtime grants are reachable through the ceiling (G2).
+      Sid: "AppS3SharedData",
+      Effect: "Allow",
+      Action: [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:CopyObject",
       ],
-    },
-    {
-      Sid: "AppPulumiState",
-      Effect: "Allow",
-      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
-      Resource: [
-        `arn:aws:s3:::${stackPrefix}-pulumi-state-*/.pulumi/stacks/${stackPrefix}-app-\${aws:PrincipalTag/starkeep:appId}.json`,
-        `arn:aws:s3:::${stackPrefix}-pulumi-state-*/.pulumi/`,
-        `arn:aws:s3:::${stackPrefix}-pulumi-state-*/.pulumi/*`,
-      ],
-    },
-    {
-      Sid: "AppArtifactsOwnPrefix",
-      Effect: "Allow",
-      Action: ["s3:GetObject", "s3:PutObject"],
-      Resource: `arn:aws:s3:::${stackPrefix}-artifacts/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
-    },
-    {
-      Sid: "AppPulumiPassphrase",
-      Effect: "Allow",
-      Action: "ssm:GetParameter",
-      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/shared/*`,
     },
     {
       Sid: "AppDsqlConnect",
@@ -58,24 +72,19 @@ export function appPermissionsBoundaryStatements(stackPrefix: string): IamStatem
       Resource: `arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-*`,
     },
     {
-      // Pulumi's lambda CreateFunction call runs under the app's STS session,
-      // so AWS evaluates iam:PassRole on the app session. Resource is
-      // restricted to ${prefix}-app-* (the role's own ARN is enforced by the
-      // temp-install policy at install time).
-      Sid: "AppPassRoleOwnRoleToLambda",
+      // Per-app Lambdas may invoke each other (e.g. an app's API handler
+      // fanning out to its static handler). Scoped to the same app's
+      // function ARNs at runtime via the inline runtime policy; the boundary
+      // permits any same-prefix invocation as the ceiling.
+      Sid: "AppInvokeOwnLambdas",
       Effect: "Allow",
-      Action: "iam:PassRole",
-      Resource: `arn:aws:iam::*:role/${stackPrefix}-app-*`,
-      Condition: {
-        StringEquals: {
-          "iam:PassedToService": "lambda.amazonaws.com",
-        },
-      },
+      Action: "lambda:InvokeFunction",
+      Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-*`,
     },
     {
-      // Defense-in-depth: deny every mutating IAM verb. PassRole is omitted
-      // so the Allow above survives. Read-only IAM verbs aren't denied but
-      // are implicitly denied at the boundary because nothing Allows them.
+      // Defense-in-depth: deny every mutating IAM verb. Read-only IAM verbs
+      // aren't denied but are implicitly denied at the boundary because
+      // nothing Allows them.
       Sid: "DenyOtherIam",
       Effect: "Deny",
       Action: [

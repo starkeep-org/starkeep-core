@@ -4,7 +4,6 @@ export type {
   DataOperations,
   IndexOperations,
   AggregationOperations,
-  SyncOperations,
   AccessControlOperations,
   ApiOperations,
 } from "./types.js";

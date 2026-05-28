@@ -1,0 +1,137 @@
+# Starkeep — System Design Overview
+
+This document describes the intended high-level design of Starkeep: what the major parts are, what kinds of data they handle, and how that data moves through the system. It is a companion to `roles-and-permissions.md`, which covers the trust boundaries between these same parts. Where this doc says "the app's data operations are mediated by the cloud-data-server," that doc explains *why* — and what stops the admin user, an app, or the broker itself from stepping outside the lane.
+
+This is intentionally high-level. Wire formats, table layouts, and manifest schemas live in code and in the package READMEs.
+
+---
+
+## Stance
+
+Three properties drive the design.
+
+1. **Data is the user's, not the app's.** Apps are tenants on top of a user-owned data plane. Shared data items have an identity and a lifetime that is independent of any one app: they outlive uninstalls, can be operated on by multiple apps simultaneously, and are typed against a global registry that the platform — not any one app — owns.
+2. **One service touches cloud data; everything else goes through it.** The cloud-data-server is the sole writer/reader of shared bytes in the cloud. Apps in the cloud do not hold direct credentials for the data store; they invoke the broker, which performs the operation under the *calling app's* identity. This is what makes the per-app attribution property in `roles-and-permissions.md` real at the data plane.
+3. **Local and cloud share code paths.** The local-data-server is the on-device analog of the cloud-data-server, and the same SDK runs against both. A manifest grant that is wrong, or a type-level filter that is missing, fails in the same shape locally as in the cloud.
+
+A consequence: the admin app, which the human user drives, never appears on the data path. It mints, installs, and uninstalls — and stops there.
+
+---
+
+## The major parts
+
+### Bootstrap stack
+
+A one-shot CloudFormation stack that creates the identities, permission boundaries, and supporting resources used by the rest of the system (Cognito pools, Manager, install-ddl, install-infra, the Pulumi state bucket, the foundational + per-app + install-time permissions boundaries, and the reserved User-Data-Owner role). It runs once, in the user's AWS account, before anything else exists. It produces no data-plane resources — those come from the cloud-data-server deploy in the next phase.
+
+`roles-and-permissions.md` covers what each identity is and why.
+
+### Admin app
+
+A platform component that the human user logs into. Its job is to drive **deployment, install, and uninstall** — not data access. The admin app:
+
+- Deploys the cloud-data-server (the "Phase 2" deploy in the roles doc) by delegating to Manager.
+- Installs and uninstalls apps by orchestrating Manager's chain of role assumptions through install-ddl (for per-app PG roles, schemas, and grants) and install-infra (for per-app Lambdas, log groups, API Gateway routes).
+- Surfaces install state, grant state, and configuration to the user.
+
+The admin app **cannot read or write user data in the cloud**. It has no standing data-plane permissions, and the temporary install-time policies it triggers are attached to dedicated install-time roles, never to the admin role itself. If a user wants to view their photos, they do that through the photos app, not through admin.
+
+### Cloud-data-server
+
+A platform component, deployed as a built-in app during Phase 2. It is the data broker — the analog of the local-data-server, but for cloud-side data.
+
+- It is the **only service in the cloud that directly touches shared data** (the records table, the per-type metadata tables, the files bucket).
+- It necessarily holds broad type-level capability to do its job, but it does **not** use its own identity for shared-data reads and writes. For every data request it assumes the calling app's per-app role and runs the operation under those credentials, so every shared byte is attributable to a specific app.
+- It enforces type-level filtering at the application layer for the shared records table (since DSQL has no row-level security), in addition to the PG GRANTs that govern per-metadata-table access.
+- It exposes a uniform request shape that covers both **shared-data** operations (records + type metadata + files) and **app-specific syncable** operations on behalf of the calling app.
+
+### Apps (e.g. photos)
+
+Apps are installed by the admin app on a user's deployment. From the data plane's point of view, an app is:
+
+- A **manifest** declaring its appId, the shared data types it needs (and read vs read/write), any per-type metadata it owns, and any **app-specific syncable** schema and filespace it wants.
+- A **per-app IAM role**, minted at install, that the app's Lambda(s) run as. The role has no install-time verbs; its ceiling is exactly its runtime job.
+- A **per-app PG role and schema**, created at install with type-level grants matching the manifest.
+- A **shared API Gateway route** that the app's Lambda is reachable on.
+
+Apps do not touch cloud data directly. All shared and app-specific data operations they perform go through the cloud-data-server, which assumes the app's role and runs the operation under that identity. This is the same code path that the SDK uses locally against the local-data-server.
+
+Install grants the app-specific schema, the app's filespace prefix, and the declared shared-type grants. Uninstall reverses install: it drops the per-app PG role and schema (so app-specific DB rows are removed), clears the app's filespace prefix (so app-specific files are removed), and tears down the app's Lambda + routes. **Shared records and shared files are not deleted** by uninstall — they are owned by the user, not the app, and other apps with grants on those types continue to see them.
+
+### Local-data-server
+
+A platform component that runs **outside the cloud**, on the user's machine. It is the local analog of the cloud-data-server: it mediates SDK access to local SQLite and the local filesystem using the same code paths the cloud uses.
+
+- It holds no AWS credentials and never talks to S3 or DSQL directly.
+- It is the sole local writer/reader of the local data plane.
+- It runs the **sync engine**, which replicates the local data plane to and from the cloud-data-server. Because it carries data for *every* installed app on the device, it ultimately needs broader data-type capability than any single app does — but, mirroring the cloud-data-server's role on the cloud side, it does not expose that breadth to apps; apps talk to it through the SDK and are filtered to their declared grants.
+
+Because local and cloud share the SDK code paths, a misconfigured grant denies in development the same way it denies in production.
+
+---
+
+## How data is classified
+
+Starkeep recognises two categories of user data, with very different lifetimes, sharing rules, and storage layouts. The distinction is enforced structurally — by where the bytes live and which schema/prefix owns them — not by convention.
+
+### Shared data
+
+Shared data is the user's content, typed against a registry that the platform owns. Defining properties:
+
+- **One item per file.** Each shared-data item is stored as a single file under the `shared/<type>/...` prefix in object storage. This makes items portable (they map cleanly onto a filesystem) and makes large items cheap (the database does not carry their bytes).
+- **Indexed by `shared.records`.** A single records table holds one row per item — id, type, path, timestamps, OCC version, common bookkeeping. The records table is the index; the file is the content.
+- **Typed against a globally registered type set, declared upfront by the bootstrap.** Apps cannot invent new shared types ad hoc; the type registry is platform-owned so multiple apps can interoperate on the same items with shared semantics.
+- **Per-type metadata, deterministic.** Each shared type may have an associated per-type metadata table (e.g. for images: width, height, format). These tables are caches/indices of properties that are **deterministically derivable from the file itself** — they are not a place to hang app-specific commentary. Two apps reading the same image see the same width and height.
+- **Shareable across apps.** Multiple apps may hold grants on the same type, and operate on the same items. The type system, the records table, and the per-type metadata tables are the contact surface they share through.
+- **Outlives uninstall.** Uninstalling an app does not delete shared records or shared files anywhere — including at the location where the app was uninstalled. The records belong to the user; another app with a grant on that type continues to see them, and reinstalling the app re-exposes them.
+- **Synced across locations.** Shared data is replicated by the local-data-server ↔ cloud-data-server sync. Because shared items are typed at the platform level, sync is inherently cross-app: a photo written by photos on one device shows up on another device even if the only app installed there is something else that declares a grant on images.
+
+#### Sync semantics for shared data
+
+Records are versioned with optimistic-concurrency-control (`baseVersion`) and synced through a client-side change-log outbox of pending local writes. The cloud has no server-side WAL; pulls synthesize change entries inline by scanning the records table on `updatedAt > cursor`. On the cloud side, sync replays each record under its **originating app's** identity (by re-assuming that app's role inside the cloud-data-server), not under any fallback or broker identity. Records whose origin app has been uninstalled are rejected rather than silently written under the broker's credentials.
+
+### App-specific data
+
+App-specific data is the app's own state — captions on a photo, layout preferences, the photos app's tag taxonomy. It does not interoperate across apps. It exists because apps need to keep state that the shared data plane is intentionally not the right home for.
+
+- **Declared by the app, in a namespaced schema and filespace.** A manifest may declare app-specific syncable tables (`app_<appId>.<table>` in the cloud, `<appId>_syncable_<table>` in SQLite) and an app-specific filespace (`apps/<appId>/syncable/...`). The shapes of those tables and the layout of files inside that prefix are entirely up to the app.
+- **Structurally segregated from shared data.** App-specific data lives under its own schema/prefix, not in `shared.records` or `shared/...`. No app can write to another app's namespace, and shared-data tables and prefixes are off-limits to app-specific writes.
+- **Synced only between instances of the same app.** Replication is conditional on the app being installed at the destination: an app-specific row written by photos on device A appears on device B only if photos is also installed on B. There is no cross-app fan-out and no orphan replay.
+- **Does not survive uninstall *at that location*.** Uninstalling an app on a device deletes its app-specific schema, tables, and filespace on that device. Other devices that still have the app installed are unaffected — their copy continues to exist and continues to sync among themselves.
+- **No platform-managed scratch space.** The system does not provide a managed non-syncable namespace for apps. The `apps/<appId>/` prefix is reserved for `apps/<appId>/syncable/...` and nothing else. Apps that need non-syncable scratch storage handle it themselves; it must stay out of `shared/...` and `apps/<appId>/syncable/...` and is not visible to the data plane.
+
+#### Sync semantics for app-specific data
+
+App-specific syncable rows are last-write-wins on `updated_at` (an HLC timestamp), with no OCC and no conflict ledger. The row's `updated_at` column **is** the durable change marker — the client-side change-log outbox is not used for app-syncable rows. Both push and pull synthesize transient app-syncable entries inline by scanning the per-app tables on `updated_at > cursor`. App-syncable rows ride alongside record changes on the wire as a separate top-level field in the sync request/response, sharing the same HLC cursors but never mixed into the record change stream.
+
+The cloud's push handler rejects app-syncable rows whose `appId` is not present in the app-syncable namespaces registry — i.e., rows for an app that is not installed in the cloud. Pull is symmetric: app-specific rows for an app not installed at the destination are not delivered there.
+
+### Type metadata vs app-specific metadata
+
+The split between per-type metadata (a property of the shared data plane) and app-specific metadata (a property of an app) is important and easy to confuse:
+
+- **Per-type metadata** lives in a platform-owned per-type table, must be deterministically derivable from the file, and is visible to every app with a grant on that type. For example, image width and height belong here.
+- **App-specific metadata** lives in the app's own schema, is not constrained to be derivable from the file, and is invisible to other apps. A photo caption entered into an app by a user belongs here, even though it is "about" a shared image.
+
+If a property is intrinsic to the bytes, it is per-type metadata. If it is something the app or the user (using an app) decided about the item, it is app-specific data.
+
+---
+
+## How a data operation actually flows
+
+A request from an app's client to read or write a shared item, in steady state, looks like this:
+
+1. The client calls the **shared API Gateway** with a Cognito JWT (the user) and an app identification (the calling app).
+2. The **cloud-data-server Lambda** authorizes the user, identifies the calling app, and **assumes the calling app's per-app role** for the duration of the request. The per-app role's trust policy names the cloud-data-server as a principal, so this is a single hop.
+3. Under those assumed credentials, the cloud-data-server constructs DSQL + S3 adapters and runs the operation. The app's grants — declared in its manifest and enforced both by PG GRANTs and by application-layer type filtering on `shared.records` — determine what it can see and change.
+4. Writes update `shared.records`, the relevant per-type metadata table, and the file in `shared/<type>/...`. Reads return a record + metadata + file URL/contents tuple.
+
+For an **app-specific** operation the same shape applies, but the operation targets the app's own schema and filespace: `app_<appId>.<table>` and `apps/<appId>/syncable/...`. No other app can see the result; sync only carries it to other locations where the same app is installed.
+
+For **sync**, the local-data-server pushes record changes (from its client-side change-log) and app-syncable rows (synthesized by scanning per-app tables) to the cloud-data-server, and pulls the symmetric streams back. Per-record origin-app re-attribution happens inside the cloud-data-server, not at the sync API boundary — the local-data-server does not carry AWS credentials and is not the writer of cloud bytes.
+
+---
+
+## Why this layout, in one paragraph
+
+The user owns the data; the platform owns the type system, the broker, and the install/uninstall mechanism; apps are tenants with declared, narrow access. Shared data is structurally cross-app and outlives any one app, so it lives in a single platform-owned records table and a typed file layout that the cloud-data-server brokers access to. App-specific data is structurally per-app and dies with the app at a location, so it lives in a namespaced schema and filespace that is invisible to other apps and is torn down on uninstall. The cloud-data-server is the only service in the cloud that touches data, and it does so under the calling app's identity rather than its own, so every byte is attributable. The local-data-server is its on-device twin and runs the same SDK code paths, so authorization and typing mistakes surface in the same shape during development as they do in production. The admin app, which the human user drives, never appears on the data path — it deploys, installs, and uninstalls, and stops there.

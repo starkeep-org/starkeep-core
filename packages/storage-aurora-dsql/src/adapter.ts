@@ -21,32 +21,6 @@ import {
 } from "./serialization.js";
 import { buildPostgresQuery } from "./query-builder.js";
 
-const CREATE_TABLE_SQL = `
-  CREATE TABLE IF NOT EXISTS records (
-    id TEXT PRIMARY KEY,
-    type TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    owner_id TEXT NOT NULL,
-    sync_status TEXT NOT NULL DEFAULT 'pending_push',
-    deleted_at TEXT,
-    version INTEGER NOT NULL DEFAULT 1,
-    content_hash TEXT NOT NULL,
-    object_storage_key TEXT NOT NULL,
-    mime_type TEXT NOT NULL,
-    size_bytes BIGINT NOT NULL,
-    original_filename TEXT,
-    origin_app_id TEXT NOT NULL,
-    parent_id TEXT
-  )
-`;
-
-const CREATE_INDEXES_SQL = [
-  "CREATE INDEX ASYNC IF NOT EXISTS idx_records_type ON records(type)",
-  "CREATE INDEX ASYNC IF NOT EXISTS idx_records_sync_status ON records(sync_status)",
-  "CREATE INDEX ASYNC IF NOT EXISTS idx_records_updated_at ON records(updated_at)",
-  "CREATE INDEX ASYNC IF NOT EXISTS idx_records_parent_id ON records(parent_id)",
-];
 
 export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private client: DatabaseClient | null = null;
@@ -63,10 +37,6 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   async init(): Promise<void> {
     this.client = await this.clientFactory.createClient(this.options);
-    await this.client.query(CREATE_TABLE_SQL);
-    for (const sql of CREATE_INDEXES_SQL) {
-      await this.client.query(sql);
-    }
   }
 
   async close(): Promise<void> {
@@ -103,13 +73,13 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       .map((column) => `${column} = EXCLUDED.${column}`)
       .join(", ");
 
-    const text = `INSERT INTO records (${columns.join(", ")}) VALUES (${placeholders.join(", ")}) ON CONFLICT(id) DO UPDATE SET ${updates}`;
+    const text = `INSERT INTO shared.records (${columns.join(", ")}) VALUES (${placeholders.join(", ")}) ON CONFLICT(id) DO UPDATE SET ${updates}`;
     await this.getClient().query(text, values);
   }
 
   async get(id: StarkeepId): Promise<DataRecord | null> {
     const result = await this.getClient().query(
-      "SELECT * FROM records WHERE id = $1",
+      "SELECT * FROM shared.records WHERE id = $1",
       [id],
     );
     if (result.rows.length === 0) return null;
@@ -117,7 +87,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async delete(id: StarkeepId): Promise<void> {
-    await this.getClient().query("DELETE FROM records WHERE id = $1", [id]);
+    await this.getClient().query("DELETE FROM shared.records WHERE id = $1", [id]);
   }
 
   async query(query: Query): Promise<QueryResult> {
