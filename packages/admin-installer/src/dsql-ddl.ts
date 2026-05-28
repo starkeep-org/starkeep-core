@@ -2,8 +2,9 @@
  * DSQL / PostgreSQL DDL for the shared schema and per-app install/uninstall.
  *
  * All SQL is composed with Kysely (schema-builder API or sql`...` template
- * literals for statements Kysely doesn't model). Existing SQL in
- * packages/storage-aurora-dsql stays as-is — Kysely is adopted only here.
+ * literals for statements Kysely doesn't model). The records-table query
+ * builder in packages/storage-aurora-dsql also uses Kysely (compile-only,
+ * DummyDriver) so the two sites share a single SQL builder.
  *
  * IAM→PG mapping: ${StackPrefix}-app-<appId>-role → ${stackPrefix}_app_<appId>
  * (lowercased, hyphens → underscores).
@@ -250,11 +251,6 @@ export async function runAppInstallDdl(
       await sql
         .raw(
           `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_updated_at" ON ${schemaName}."${FILE_RECORDS_TABLE}"("updated_at")`,
-        )
-        .execute(db);
-      await sql
-        .raw(
-          `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_sync_status" ON ${schemaName}."${FILE_RECORDS_TABLE}"("sync_status")`,
         )
         .execute(db);
       await sql

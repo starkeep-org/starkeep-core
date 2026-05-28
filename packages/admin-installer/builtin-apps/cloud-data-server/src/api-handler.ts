@@ -28,12 +28,12 @@ import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import {
   generateId,
   createHLCClock,
-  SyncStatus,
   serializeHLC,
+  deserializeHLC,
   dataRecordObjectKey,
   CORE_TYPES,
 } from "@starkeep/core";
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, StarkeepId, HLCClock } from "@starkeep/core";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import {
   DsqlAppSyncableNamespaceStore,
@@ -44,6 +44,7 @@ import type {
   DatabaseClient,
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
+import type { Filter } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
 import { loadAccessGrants, canRead, canWrite, type AccessGrants } from "./access-enforcer.js";
 
@@ -214,9 +215,30 @@ function makeAdapters(appId: string, creds: CachedCreds) {
     },
   });
 
-  const clock = createHLCClock({ nodeId: appId, wallClockFunction: Date.now });
+  return { db, storage, clientFactory, auroraEndpoint, region };
+}
 
-  return { db, storage, clock, clientFactory, auroraEndpoint, region };
+// Seed the cloud HLC clock from the highest cloud-stamped timestamp visible
+// to this request's app role. Serialized HLCs sort lexically because the
+// wall-time and counter components are zero-padded hex (see serializeHLC).
+// Records with no cloud-stamped row return ZERO state; the wall clock will
+// dominate going forward.
+async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
+  const result = await client.query(
+    "SELECT updated_at FROM shared.records WHERE updated_at LIKE $1 ORDER BY updated_at DESC LIMIT 1",
+    ["%:cloud"],
+  );
+  let initialState: { wallTime: number; counter: number } | undefined;
+  if (result.rows.length > 0) {
+    const row = result.rows[0] as { updated_at: string };
+    const parsed = deserializeHLC(row.updated_at);
+    initialState = { wallTime: parsed.wallTime, counter: parsed.counter };
+  }
+  return createHLCClock({
+    nodeId: "cloud",
+    wallClockFunction: Date.now,
+    ...(initialState ? { initialState } : {}),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +304,6 @@ function recordToResponse(record: DataRecord) {
     created_at: new Date(record.createdAt.wallTime).toISOString(),
     updated_at: new Date(record.updatedAt.wallTime).toISOString(),
     owner_id: record.ownerId,
-    sync_status: record.syncStatus,
     version: record.version,
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
@@ -324,7 +345,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     const accountId = getAccountId(context.invokedFunctionArn);
     const creds = await getAppCreds(appId, accountId);
-    const { db, storage, clock, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
+    const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
 
     await db.init();
     toClose.push(() => db.close());
@@ -332,10 +353,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // Per-type read/write enforcement on shared.records. DSQL has no RLS and
     // the table is shared across every type, so we load the caller app's
     // grants once per request and gate both the records and sync paths below.
+    // Also seed the cloud HLC clock from the highest cloud-stamped timestamp
+    // visible on this request — same connection, one extra query.
     const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
     let grants: AccessGrants;
+    let clock: HLCClock;
     try {
       grants = await loadAccessGrants(grantClient, appId);
+      clock = await makeCloudClock(grantClient);
     } finally {
       await grantClient.end();
     }
@@ -355,7 +380,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (method === "GET" && subPath === "/data/types") {
       if (grants.readableTypes.size === 0) return ok({ types: [], total: 0 });
       const result = await db.query({
-        filters: [{ field: "type", operator: "in", value: [...grants.readableTypes] }],
+        filters: [
+          { field: "type", operator: "in", value: [...grants.readableTypes] },
+          { field: "deletedAt", operator: "isNull" },
+        ],
         limit: 10000,
       });
       const counts = new Map<string, number>();
@@ -381,7 +409,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         return ok({ records: [], hasMore: false, nextCursor: null });
       }
 
-      const filters: { field: string; operator: "gt" | "in"; value: string | string[] }[] = [];
+      const filters: Filter[] = [{ field: "deletedAt", operator: "isNull" }];
       if (updatedAfter) {
         const ms = new Date(updatedAfter).getTime();
         if (!isNaN(ms)) {
@@ -396,7 +424,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
       }
 
-      const result = await db.query({ type, filters: filters.length > 0 ? filters : undefined, limit: limit + 1, cursor });
+      const result = await db.query({ type, filters, limit: limit + 1, cursor });
       const hasMore = result.records.length > limit;
       const records = hasMore ? result.records.slice(0, limit) : result.records;
       return ok({ records: records.map(recordToResponse), hasMore, nextCursor: hasMore ? records[records.length - 1].id : null });
@@ -456,7 +484,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         originAppId: appId,
         createdAt: now,
         updatedAt: now,
-        syncStatus: SyncStatus.Synced,
         deletedAt: null,
         version: 1,
         contentHash,
@@ -510,38 +537,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return ok({ url });
     }
 
-    // POST /apps/{appId}/files/confirm — close the loop after a presigned PUT.
-    // Body: { key }. Verifies the blob is durably in S3 and flips matching
-    // PendingFileDownload records to Synced so downstream pulls can see them
-    // without waiting for the lazy reconcile on the next pullChanges call.
-    // Idempotent: re-calling after rows are already Synced is a no-op 200.
-    if (method === "POST" && subPath === "/files/confirm") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
-      const body = JSON.parse(rawBody) as { key?: string };
-      if (!body.key) return clientErr("key is required", 400);
-      const check = parseObjectKey(appId, body.key, grants, "write");
-      if (!check.ok) return clientErr(check.message, check.status);
-      const exists = await storage.has(body.key);
-      if (!exists) return clientErr("Blob not yet visible at the supplied key", 409);
-      const matches = await db.query({
-        filters: [{ field: "objectStorageKey", operator: "eq", value: body.key }],
-        limit: 100,
-      });
-      let confirmed = 0;
-      for (const record of matches.records) {
-        if (record.syncStatus === SyncStatus.PendingFileDownload) {
-          await db.put({ ...record, syncStatus: SyncStatus.Synced });
-          console.info(
-            `[sync-state] side=server record=${record.id} from=${SyncStatus.PendingFileDownload} to=${SyncStatus.Synced} reason=confirm-endpoint`,
-          );
-          confirmed += 1;
-        }
-      }
-      return ok({ confirmed });
-    }
-
     // GET /apps/{appId}/files/{encodedKey}/presign — presigned S3 GET URL.
     // The caller URL-encodes the storage key, but API Gateway HTTP API
     // normalizes %2F back to "/" before forwarding to Lambda, so the captured
@@ -587,7 +582,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!body.targetType) return clientErr("targetType is required", 400);
 
       const record = await db.get(recordId as StarkeepId);
-      if (!record) return clientErr("Record not found", 404);
+      if (!record || record.deletedAt) return clientErr("Record not found", 404);
       if (record.type !== "unknown") return clientErr("Only 'unknown' records can be promoted", 409);
       // Promotion is a read of `unknown` (gated by canPromoteFromUnknown) plus
       // a write of the target type (gated by the normal writable set).
@@ -644,7 +639,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (fileUrlMatch && method === "GET") {
       const id = decodeURIComponent(fileUrlMatch[1]!) as StarkeepId;
       const record = await db.get(id);
-      if (!record) return clientErr("Record not found", 404);
+      if (!record || record.deletedAt) return clientErr("Record not found", 404);
       if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
       if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
       const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
@@ -659,7 +654,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
       if (method === "GET") {
         const record = await db.get(id);
-        if (!record) return clientErr("Record not found", 404);
+        if (!record || record.deletedAt) return clientErr("Record not found", 404);
         if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
         return ok({ record: recordToResponse(record) });
       }
@@ -670,7 +665,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         // out of scope; the PUT endpoint accepts only originalFilename and
         // parentId for now.
         const existing = await db.get(id);
-        if (!existing) return clientErr("Record not found", 404);
+        if (!existing || existing.deletedAt) return clientErr("Record not found", 404);
         if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
         const body = event.body
           ? (JSON.parse(event.body) as { originalFilename?: string | null; parentId?: string | null })
@@ -690,15 +685,18 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
       if (method === "DELETE") {
         const existing = await db.get(id);
-        if (!existing) return clientErr("Record not found", 404);
+        if (!existing || existing.deletedAt) return clientErr("Record not found", 404);
         if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
-        await db.delete(id);
+        await db.delete(id, clock.now());
         return ok({ deleted: true });
       }
     }
 
-    // POST /apps/{appId}/sync/pull
-    if (method === "POST" && subPath === "/sync/pull") {
+    // POST /apps/{appId}/sync/exchange — version-vector exchange.
+    // Body: SyncExchangeRequest. Writes go under the calling channel's
+    // identity; PG GRANTs gate which types this channel can write. No
+    // originAppId-grouping (deprecated under the exchange protocol).
+    if (method === "POST" && subPath === "/sync/exchange") {
       const rawBody = event.isBase64Encoded && event.body
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
@@ -711,141 +709,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         appSyncableSource,
         objectStorage: storage,
       });
-      const response = await transport.pullChanges(body);
+      const response = await transport.exchange(body);
       return ok(response);
-    }
-
-    // POST /apps/{appId}/sync/push
-    //
-    // Sync push replays records produced by the local data server under the
-    // *originating* app's IAM identity, not the caller's. We group incoming
-    // record changes by `originAppId`, re-assume that role per group via the
-    // broker capability on this Lambda's app role, and apply each group with
-    // its own STS-assumed credentials. Records whose origin app is not
-    // installed in the cloud are rejected with 409 — never silently written
-    // under any other identity. Records of type `unknown` require the origin
-    // role to hold canIngestUnknown (access_grants), otherwise 403.
-    if (method === "POST" && subPath === "/sync/push") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
-      const body = JSON.parse(rawBody) as {
-        changes?: Array<{ recordSnapshot: DataRecord } & Record<string, unknown>>;
-        appSyncableRows?: Array<{ appId: string } & Record<string, unknown>>;
-      };
-
-      // Group record changes by originAppId, validate every group, and only
-      // start applying once all groups have been validated. This makes the
-      // 409/403 path observable to callers without partial application.
-      const changesByOrigin = new Map<string, typeof body.changes>();
-      for (const change of body.changes ?? []) {
-        const originAppId = change.recordSnapshot?.originAppId;
-        if (!originAppId) return clientErr("change.recordSnapshot.originAppId is required", 400);
-        const arr = changesByOrigin.get(originAppId) ?? [];
-        arr.push(change);
-        changesByOrigin.set(originAppId, arr);
-      }
-
-      // Validate each origin can be assumed and has the needed grants.
-      type OriginContext = {
-        creds: CachedCreds;
-        grants: AccessGrants;
-      };
-      const originContexts = new Map<string, OriginContext>();
-      for (const [originAppId, group] of changesByOrigin) {
-        let originCreds: CachedCreds;
-        try {
-          originCreds = await getAppCreds(originAppId, accountId);
-        } catch (err) {
-          if (isUninstalledOriginError(err)) {
-            return clientErr(`originAppId "${originAppId}" is not installed`, 409);
-          }
-          throw err;
-        }
-        const originAdapters = makeAdapters(originAppId, originCreds);
-        const grantClient = await originAdapters.clientFactory.createClient({
-          hostname: originAdapters.auroraEndpoint,
-          region: originAdapters.region,
-        });
-        let originGrants: AccessGrants;
-        try {
-          originGrants = await loadAccessGrants(grantClient, originAppId);
-        } finally {
-          await grantClient.end();
-        }
-        // Type=unknown records require canIngestUnknown on the origin role.
-        for (const change of group ?? []) {
-          const recordType = change.recordSnapshot?.type;
-          if (recordType === "unknown" && !canWrite(originGrants, "unknown")) {
-            return clientErr(
-              `originAppId "${originAppId}" cannot ingest type=unknown`,
-              403,
-            );
-          }
-          // Defense-in-depth: every record's type must be writable for its origin.
-          if (typeof recordType === "string" && !canWrite(originGrants, recordType)) {
-            return clientErr(
-              `originAppId "${originAppId}" is not writable for type "${recordType}"`,
-              403,
-            );
-          }
-        }
-        originContexts.set(originAppId, { creds: originCreds, grants: originGrants });
-      }
-
-      // Apply per-origin record changes under each origin's STS-assumed db.
-      // App-syncable rows ride along with their declared appId; we keep them
-      // on the caller-scoped transport since they're already gated by the
-      // applier's namespace check (see in-process-transport.ts).
-      const accepted: string[] = [];
-      const rejected: unknown[] = [];
-      let latestTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
-      for (const [originAppId, group] of changesByOrigin) {
-        const ctx = originContexts.get(originAppId)!;
-        const originAdapters = makeAdapters(originAppId, ctx.creds);
-        await originAdapters.db.init();
-        toClose.push(() => originAdapters.db.close());
-        const originAppSyncableSource = await buildAppSyncableSource(
-          originAdapters.clientFactory,
-          originAdapters.auroraEndpoint,
-          originAdapters.region,
-        );
-        toClose.push(() => originAppSyncableSource.client.end());
-        const originTransport = createInProcessSyncTransport({
-          databaseAdapter: originAdapters.db,
-          clock: originAdapters.clock,
-          appSyncableSource: originAppSyncableSource,
-          objectStorage: originAdapters.storage,
-        });
-        const partial = await originTransport.pushChanges({ changes: group ?? [] } as never);
-        accepted.push(...(partial.accepted as unknown as string[]));
-        rejected.push(...(partial.rejected as unknown as unknown[]));
-        if (
-          partial.latestTimestamp.wallTime > latestTimestamp.wallTime ||
-          (partial.latestTimestamp.wallTime === latestTimestamp.wallTime &&
-            partial.latestTimestamp.counter > latestTimestamp.counter)
-        ) {
-          latestTimestamp = partial.latestTimestamp;
-        }
-      }
-
-      // App-syncable rows still go via the caller's db (cheap path); the
-      // applier enforces per-app namespace membership.
-      if ((body.appSyncableRows ?? []).length > 0) {
-        const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
-        toClose.push(() => appSyncableSource.client.end());
-        const transport = createInProcessSyncTransport({ databaseAdapter: db, clock, appSyncableSource, objectStorage: storage });
-        const partial = await transport.pushChanges({ changes: [], appSyncableRows: body.appSyncableRows } as never);
-        if (
-          partial.latestTimestamp.wallTime > latestTimestamp.wallTime ||
-          (partial.latestTimestamp.wallTime === latestTimestamp.wallTime &&
-            partial.latestTimestamp.counter > latestTimestamp.counter)
-        ) {
-          latestTimestamp = partial.latestTimestamp;
-        }
-      }
-
-      return ok({ accepted, rejected, latestTimestamp });
     }
 
     return clientErr("Not found", 404);
@@ -888,19 +753,6 @@ async function buildAppSyncableSource(
   await namespaces.load();
   const applier = new DsqlAppSyncableApplier(client, namespaces);
   return { namespaces, applier, client };
-}
-
-/**
- * AssumeRole on a non-existent app role surfaces as a STS error. The local
- * data server may push records whose `originAppId` refers to an app that has
- * been uninstalled (or never installed in the cloud) — see the "Registered
- * but not deployed" section of permissions-gaps.md. We map those to 409 so
- * callers can distinguish them from a real auth failure on an existing role.
- */
-function isUninstalledOriginError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const name = err.name;
-  return name === "NoSuchEntityException" || name === "NoSuchEntity";
 }
 
 function isAccessDenied(err: unknown): boolean {

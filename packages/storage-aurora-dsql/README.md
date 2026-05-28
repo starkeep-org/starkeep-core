@@ -51,7 +51,7 @@ await databaseAdapter.close();
 | Export | Description |
 |---|---|
 | `AuroraDsqlDatabaseAdapter` | Class implementing `DatabaseAdapter` for Aurora DSQL |
-| `buildPostgresQuery(query)` | Convert a `Query` object into a parameterized PostgreSQL query |
+| `buildPostgresQuery(query)` | Compile a `Query` object into parameterized PostgreSQL via Kysely |
 | `AuroraDsqlDatabaseAdapterOptions` | Options: `hostname`, `region`, optional `database` |
 | `DatabaseClient` | Interface: `query(text, values)` and `end()` |
 | `DatabaseClientFactory` | Factory interface for creating `DatabaseClient` instances |

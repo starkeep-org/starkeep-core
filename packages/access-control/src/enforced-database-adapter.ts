@@ -1,4 +1,4 @@
-import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -61,11 +61,11 @@ export function createEnforcedDatabaseAdapter(options: {
     return databaseAdapter.put(record);
   }
 
-  async function deleteRecord(id: StarkeepId): Promise<void> {
+  async function deleteRecord(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     const record = await databaseAdapter.get(id);
     if (!record) return;
     await assertTypeAccess(record.type, record.id, "delete");
-    return databaseAdapter.delete(id);
+    return databaseAdapter.delete(id, hlc);
   }
 
   async function query(queryInput: Query): Promise<QueryResult> {

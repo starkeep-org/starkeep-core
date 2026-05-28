@@ -1,4 +1,4 @@
-import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/core";
 import type { DatabaseAdapter } from "../database/adapter.js";
 import type {
   Query,
@@ -33,8 +33,10 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     return record ? structuredClone(record) : null;
   }
 
-  async delete(id: StarkeepId): Promise<void> {
-    this.store.delete(id);
+  async delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
+    const existing = this.store.get(id);
+    if (!existing) return;
+    this.store.set(id, { ...existing, deletedAt: hlc, updatedAt: hlc });
   }
 
   async query(query: Query): Promise<QueryResult> {
@@ -97,7 +99,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
       if (operation.type === "put") {
         await this.put(operation.record);
       } else {
-        await this.delete(operation.id);
+        await this.delete(operation.id, operation.hlc);
       }
     }
   }

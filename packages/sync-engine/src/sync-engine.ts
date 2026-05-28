@@ -1,33 +1,41 @@
 import {
   compareHLC,
-  maxHLC,
   serializeHLC,
-  SyncStatus,
-  type StarkeepId,
+  ZERO_HLC,
   type AnyRecord,
   type HLCTimestamp,
+  type StarkeepId,
 } from "@starkeep/core";
+import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type {
+  AppSyncableRowEntry,
+  ExchangeResult,
+  FileSyncEngine,
+  FileSyncManifest,
   SyncEngine,
   SyncEngineOptions,
-  SyncPullResponse,
-  SyncPushResponse,
-  ChangeLogEntry,
-  SyncConflict,
-  RecordChangeOptions,
+  Watermarks,
 } from "./types.js";
-import { createChangeLog } from "./change-log.js";
 import { createChangeNotifier } from "./change-notifier.js";
 import { createFileSyncEngine } from "./file-sync-engine.js";
-import { decidePullApply } from "./conflict-resolver.js";
 import {
-  countNonTerminal,
-  logNonTerminalCounts,
-  logTransition,
-} from "./observability.js";
+  advanceWatermark,
+  selectUnseen,
+  selectUnseenAppSyncable,
+} from "./watermarks.js";
 
-const ZERO_HLC: HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
-
+/**
+ * Sync engine: drives one version-vector exchange round per tick.
+ *
+ * Blob transfer is gated on the same watermark that drives metadata transfer.
+ * A record's blob is pushed before its metadata ships; a record's blob is
+ * pulled before its receipt is acknowledged. If either fails, the watermark
+ * doesn't advance past it, and the next round naturally retries.
+ *
+ * There is no scan-everything reconciliation pass. There is no `sync_status`.
+ * Steady state issues zero storage HEAD requests: the watermark delta tells
+ * us exactly which records (and therefore which blobs) need attention.
+ */
 export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   const {
     localDatabaseAdapter,
@@ -35,7 +43,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     remoteObjectStorage,
     transport,
     clock,
-    changeLog = createChangeLog(),
     syncState,
     appSyncableSource,
   } = options;
@@ -43,196 +50,180 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   const changeNotifier = createChangeNotifier();
   const fileSyncEngine = createFileSyncEngine();
 
-  // In-memory conflict cache. Each entry means the local record has unsynced
-  // edits that collide with the server's version. The app must resolve
-  // before sync continues on this record.
-  const conflicts = new Map<StarkeepId, SyncConflict>();
-
-  // Cursors are lazy-loaded from syncState on first use.
-  let pullCursor: HLCTimestamp | null = null;
-  let pushCursor: HLCTimestamp | null = null;
-  let cursorsLoaded = false;
-
-  async function loadCursors(): Promise<void> {
-    if (cursorsLoaded) return;
-    if (syncState) {
-      pullCursor = await syncState.getPullCursor();
-      pushCursor = await syncState.getPushCursor();
-    }
-    cursorsLoaded = true;
+  async function loadOwnWatermarks(): Promise<Watermarks> {
+    if (!syncState) return {};
+    return syncState.getWatermarks();
   }
 
-  async function savePullCursor(ts: HLCTimestamp): Promise<void> {
-    pullCursor = ts;
-    if (syncState) await syncState.setPullCursor(ts);
-  }
-
-  async function savePushCursor(ts: HLCTimestamp): Promise<void> {
-    pushCursor = ts;
-    if (syncState) await syncState.setPushCursor(ts);
-  }
-
-  function markConflict(
-    recordId: StarkeepId,
-    local: AnyRecord,
-    server: AnyRecord | null,
-    source: "pull" | "push",
-  ): void {
-    conflicts.set(recordId, {
-      recordId,
-      local,
-      server,
-      source,
-      detectedAt: clock.now(),
-    });
-  }
-
-  async function markRecordConflictStatus(
-    record: AnyRecord,
-  ): Promise<void> {
-    const updated = { ...record, syncStatus: SyncStatus.Conflict };
-    await localDatabaseAdapter.put(updated);
-    logTransition("client", record.id, record.syncStatus, SyncStatus.Conflict, "conflict-detected");
+  async function loadPeerWatermarks(): Promise<Watermarks> {
+    if (!syncState) return {};
+    return syncState.getPeerWatermarks();
   }
 
   return {
-    async recordChange(
-      operation: "create" | "update" | "delete",
-      record: AnyRecord,
-      changeOptions: RecordChangeOptions = {},
-    ): Promise<void> {
-      const baseVersion =
-        operation === "create"
-          ? null
-          : changeOptions.baseVersion ?? record.version - 1;
+    async exchange(): Promise<ExchangeResult> {
+      const ownWatermarks = await loadOwnWatermarks();
+      const peerWatermarks = await loadPeerWatermarks();
 
-      const ts = clock.now();
-      await changeLog.append({
-        recordId: record.id,
-        operation,
-        timestamp: ts,
-        recordSnapshot: record,
-        baseVersion,
-      });
-      changeNotifier.emit({
-        eventType: "local-change-recorded",
-        recordIds: [record.id],
-        timestamp: ts,
-      });
-    },
+      // ---------------------------------------------------------------------
+      // Outbound: ship records (and their blobs) the peer hasn't seen.
+      // ---------------------------------------------------------------------
+      //
+      // App-layer per-nodeId filter over a chunked scan — sufficient at
+      // current poll volumes; per-nodeId SQL indexes are a follow-up if
+      // scans get hot. Same caveat applies to the responder-side scan in
+      // in-process-transport.ts.
+      const localScan = await localDatabaseAdapter.query({ limit: 2000 });
+      const outboundCandidates = selectUnseen(localScan.records, peerWatermarks);
 
-    async pull(): Promise<SyncPullResponse> {
-      await loadCursors();
-      const since = pullCursor ?? ZERO_HLC;
+      // Strict per-nodeId contiguous-prefix shipping: as soon as a blob
+      // upload fails for a record, stop shipping later-HLC records for that
+      // same nodeId in this round. Otherwise we'd create a gap in the peer
+      // (peer has r0 + r2 but not r1) — and any third client pulling from
+      // the peer would advance its own watermark past r2, never receiving
+      // r1 when it finally lands. Retry happens automatically next round.
+      const candidatesByNode = groupByNodeId(outboundCandidates);
+      const outboundRecords: AnyRecord[] = [];
+      const peerSafeAdvance = new Map<string, HLCTimestamp>();
 
-      const response = await transport.pullChanges({
-        sinceTimestamp: since,
-        limit: 1000,
-      });
-
-      const conflictIds: StarkeepId[] = [];
-      const appliedIds: StarkeepId[] = [];
-
-      // Fetch local unsynced record changes in bulk so dirty-conflict detection
-      // is O(1) per remote record change.
-      const localUnsyncedBoundary = pushCursor ?? ZERO_HLC;
-      const localUnsynced = await changeLog.getChangesSince(
-        localUnsyncedBoundary,
-      );
-      const localUnsyncedByRecord = new Map<StarkeepId, ChangeLogEntry>();
-      for (const entry of localUnsynced) {
-        localUnsyncedByRecord.set(entry.recordId, entry);
+      for (const [nodeId, records] of candidatesByNode) {
+        for (const r of records) {
+          const blobOk = await pushBlobIfNeeded(
+            r,
+            localObjectStorage,
+            remoteObjectStorage,
+            fileSyncEngine,
+          );
+          if (!blobOk) break;
+          outboundRecords.push(r);
+          peerSafeAdvance.set(nodeId, r.updatedAt);
+        }
       }
 
-      for (const remoteChange of response.changes) {
-        // Keep our HLC causally ahead of anything we observe.
-        clock.receive(remoteChange.timestamp);
-
-        const localRecord = await localDatabaseAdapter.get(
-          remoteChange.recordId,
-        );
-
-        const decision = decidePullApply(
-          localRecord,
-          remoteChange,
-          localUnsyncedByRecord.get(remoteChange.recordId),
-        );
-
-        if (decision.kind === "local-dirty-conflict") {
-          if (localRecord) {
-            markConflict(
-              remoteChange.recordId,
-              localRecord,
-              remoteChange.recordSnapshot,
-              "pull",
-            );
-            await markRecordConflictStatus(localRecord);
-            conflictIds.push(remoteChange.recordId);
-          }
-          continue;
-        }
-
-        if (decision.kind === "skip-already-current") {
-          continue;
-        }
-
-        // apply-clean
-        if (remoteChange.operation === "delete") {
-          await localDatabaseAdapter.delete(remoteChange.recordId);
-          logTransition(
-            "client",
-            remoteChange.recordId,
-            localRecord?.syncStatus ?? null,
-            SyncStatus.Synced,
-            "pull-apply-delete",
-          );
-        } else {
-          // Receiver: if the record carries a blob, mark PendingFileDownload —
-          // the file retry pass will fetch the blob and flip to Synced. Records
-          // without a blob go straight to Synced.
-          const snapshot = remoteChange.recordSnapshot;
-          const needsBlob = !!snapshot.objectStorageKey;
-          const nextStatus = needsBlob
-            ? SyncStatus.PendingFileDownload
-            : SyncStatus.Synced;
-          await localDatabaseAdapter.put({ ...snapshot, syncStatus: nextStatus });
-          logTransition(
-            "client",
-            remoteChange.recordId,
-            localRecord?.syncStatus ?? null,
-            nextStatus,
-            "pull-apply",
-          );
-        }
-        appliedIds.push(remoteChange.recordId);
-      }
-
-      // Apply incoming app-syncable rows (LWW, no OCC).
-      if (response.appSyncableRows.length > 0) {
-        if (appSyncableSource) {
-          for (const entry of response.appSyncableRows) {
-            clock.receive(entry.timestamp);
+      // Outbound app-syncable rows. Same per-nodeId contiguous rule. These
+      // rows don't carry their own blobs at the protocol level — file blobs
+      // for reserved file-records ride the regular records path above.
+      const outboundAppRows: AppSyncableRowEntry[] = [];
+      if (appSyncableSource) {
+        const zeroStr = serializeHLC(ZERO_HLC);
+        for (const ns of appSyncableSource.namespaces.list()) {
+          for (const tableInfo of ns.tables) {
             try {
-              await appSyncableSource.applier.apply(entry);
+              const rows = await appSyncableSource.applier.scanSince(
+                ns.appId,
+                tableInfo.name,
+                zeroStr,
+              );
+              for (const r of selectUnseenAppSyncable(rows, peerWatermarks)) {
+                outboundAppRows.push(r);
+                // App-syncable rows have no per-row failure case at this
+                // layer, so they always contribute to peerSafeAdvance.
+                const existing = peerSafeAdvance.get(r.timestamp.nodeId);
+                if (!existing || compareHLC(r.timestamp, existing) > 0) {
+                  peerSafeAdvance.set(r.timestamp.nodeId, r.timestamp);
+                }
+              }
             } catch (err) {
               console.warn(
-                `[sync] appSyncableRow apply failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}`,
+                `[sync] exchange scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
               );
             }
           }
-        } else {
-          console.warn("[sync] appSyncableRows received but no appSyncableSource configured — skipping");
         }
       }
 
-      await savePullCursor(response.latestTimestamp);
+      const response = await transport.exchange({
+        watermarks: ownWatermarks,
+        records: outboundRecords.length > 0 ? outboundRecords : undefined,
+        appSyncableRows: outboundAppRows.length > 0 ? outboundAppRows : undefined,
+        limit: 1000,
+      });
 
-      // Sweep PendingFileDownload / PendingFileUpload — including records just
-      // applied this pull and any that have been waiting from prior ticks.
-      try {
-        await this.runFileTransferPass();
-      } catch (err) {
-        console.warn(`[sync] file-transfer pass failed: ${(err as Error).message}`);
+      // ---------------------------------------------------------------------
+      // Inbound: apply records (and pull their blobs) per nodeId in HLC order.
+      // Own watermark advances only past records that fully landed locally;
+      // peerWatermarks also advances past *every* record we received — the
+      // peer demonstrated it has them by shipping them — which prevents us
+      // re-shipping records that originated on the peer's side.
+      // ---------------------------------------------------------------------
+      const inboundByNode = groupByNodeId(response.records);
+      const appliedIds: StarkeepId[] = [];
+      const ownSafeAdvance = new Map<string, HLCTimestamp>();
+
+      for (const [nodeId, records] of inboundByNode) {
+        let contiguous = true;
+        for (const snapshot of records) {
+          // The peer has this snapshot (it sent it to us) — peerWatermarks
+          // can advance past it regardless of our local blob fetch outcome.
+          const existing = peerSafeAdvance.get(nodeId);
+          if (!existing || compareHLC(snapshot.updatedAt, existing) > 0) {
+            peerSafeAdvance.set(nodeId, snapshot.updatedAt);
+          }
+
+          const current = await localDatabaseAdapter.get(snapshot.id);
+          if (current && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0) {
+            // Already at-or-ahead locally — counts as "landed" for watermark
+            // purposes, so still contiguous.
+            if (contiguous) ownSafeAdvance.set(nodeId, snapshot.updatedAt);
+            continue;
+          }
+          clock.receive(snapshot.updatedAt);
+          await localDatabaseAdapter.put(snapshot);
+
+          const blobOk = await pullBlobIfNeeded(
+            snapshot,
+            remoteObjectStorage,
+            localObjectStorage,
+            fileSyncEngine,
+          );
+          if (!blobOk) {
+            // Metadata applied, but blob fetch failed. Don't advance own
+            // watermark past this record — next round the responder still
+            // ships it (because our advertised watermarks haven't moved past
+            // it) and we'll retry the blob.
+            contiguous = false;
+            continue;
+          }
+
+          appliedIds.push(snapshot.id);
+          if (contiguous) ownSafeAdvance.set(nodeId, snapshot.updatedAt);
+        }
+      }
+
+      // Apply incoming app-syncable rows. No per-row blob handling at this
+      // layer; the applier is LWW. Advance own watermark for each.
+      if (response.appSyncableRows.length > 0 && appSyncableSource) {
+        for (const entry of response.appSyncableRows) {
+          clock.receive(entry.timestamp);
+          try {
+            await appSyncableSource.applier.apply(entry);
+            const existing = ownSafeAdvance.get(entry.timestamp.nodeId);
+            if (!existing || compareHLC(entry.timestamp, existing) > 0) {
+              ownSafeAdvance.set(entry.timestamp.nodeId, entry.timestamp);
+            }
+          } catch (err) {
+            console.warn(
+              `[sync] appSyncableRow apply failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}`,
+            );
+          }
+        }
+      }
+
+      // ---------------------------------------------------------------------
+      // Persist updated watermarks.
+      // ---------------------------------------------------------------------
+      if (syncState) {
+        const nextOwnWatermarks: Watermarks = { ...ownWatermarks };
+        for (const hlc of ownSafeAdvance.values()) {
+          advanceWatermark(nextOwnWatermarks, hlc);
+        }
+        await syncState.setWatermarks(nextOwnWatermarks);
+
+        const nextPeerWatermarks: Watermarks = { ...peerWatermarks };
+        for (const hlc of peerSafeAdvance.values()) {
+          advanceWatermark(nextPeerWatermarks, hlc);
+        }
+        await syncState.setPeerWatermarks(nextPeerWatermarks);
       }
 
       if (appliedIds.length > 0) {
@@ -242,363 +233,92 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           timestamp: clock.now(),
         });
       }
-      if (conflictIds.length > 0) {
-        changeNotifier.emit({
-          eventType: "conflict-detected",
-          recordIds: conflictIds,
-          timestamp: clock.now(),
-        });
-      }
-
-      return response;
-    },
-
-    async push(): Promise<SyncPushResponse> {
-      await loadCursors();
-      const since = pushCursor ?? ZERO_HLC;
-
-      const localChanges = await changeLog.getChangesSince(since);
-
-      // Skip records already known to be in conflict — they need manual
-      // resolution before we push anything new for them.
-      const pushable = localChanges.filter(
-        (change) => !conflicts.has(change.recordId),
-      );
-
-      // Scan app-syncable tables for rows updated since the push cursor.
-      const appSyncableRows: import("./types.js").AppSyncableRowEntry[] = [];
-      if (appSyncableSource) {
-        const sinceStr = serializeHLC(since);
-        for (const ns of appSyncableSource.namespaces.list()) {
-          for (const tableInfo of ns.tables) {
-            try {
-              const rows = await appSyncableSource.applier.scanSince(
-                ns.appId,
-                tableInfo.name,
-                sinceStr,
-              );
-              for (const row of rows) appSyncableRows.push(row);
-            } catch (err) {
-              console.warn(
-                `[sync] push: scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
-              );
-            }
-          }
-        }
-      }
-
-      if (pushable.length === 0 && appSyncableRows.length === 0) {
-        return {
-          accepted: [],
-          rejected: [],
-          latestTimestamp: since,
-        };
-      }
-
-      // Metadata first. The blob upload happens in the file-transfer pass
-      // after the server has durably acknowledged the metadata — that's the
-      // PendingPush → PendingFileUpload → Synced state machine.
-      const response = await transport.pushChanges({
-        changes: pushable,
-        appSyncableRows: appSyncableRows.length > 0 ? appSyncableRows : undefined,
-      });
-
-      // Accepted: move records carrying a blob into PendingFileUpload so the
-      // file-transfer pass picks them up. Records without a blob skip straight
-      // to Synced.
-      const acceptedSet = new Set(response.accepted);
-      for (const change of pushable) {
-        if (acceptedSet.has(change.recordId)) {
-          const localRecord = await localDatabaseAdapter.get(change.recordId);
-          if (
-            localRecord &&
-            localRecord.version === change.recordSnapshot.version
-          ) {
-            const needsBlob = !!localRecord.objectStorageKey;
-            const nextStatus = needsBlob
-              ? SyncStatus.PendingFileUpload
-              : SyncStatus.Synced;
-            await localDatabaseAdapter.put({ ...localRecord, syncStatus: nextStatus });
-            logTransition(
-              "client",
-              change.recordId,
-              localRecord.syncStatus,
-              nextStatus,
-              "push-accepted",
-            );
-          }
-        }
-      }
-
-      // Rejected: mark as Conflict, stash server version.
-      const conflictIds: StarkeepId[] = [];
-      for (const rejection of response.rejected) {
-        const localRecord = await localDatabaseAdapter.get(rejection.recordId);
-        if (!localRecord) continue;
-        markConflict(
-          rejection.recordId,
-          localRecord,
-          rejection.serverRecord,
-          "push",
-        );
-        await markRecordConflictStatus(localRecord);
-        conflictIds.push(rejection.recordId);
-      }
-
-      if (conflictIds.length > 0) {
-        changeNotifier.emit({
-          eventType: "conflict-detected",
-          recordIds: conflictIds,
-          timestamp: clock.now(),
-        });
-      }
-
-      // Advance push cursor to max timestamp across both records and app rows.
-      const recordsMax = pushable.reduce(
-        (acc, entry) => maxHLC(acc, entry.timestamp),
-        since,
-      );
-      const appRowsMax = appSyncableRows.reduce(
-        (acc, entry) => maxHLC(acc, entry.timestamp),
-        since,
-      );
-      const maxTimestamp = maxHLC(recordsMax, appRowsMax);
-      if (compareHLC(maxTimestamp, since) > 0) {
-        await savePushCursor(maxTimestamp);
-      }
-
-      // Sweep blobs the sender owes (PendingFileUpload), plus any pending
-      // downloads still owed from prior pulls.
-      try {
-        await this.runFileTransferPass();
-      } catch (err) {
-        console.warn(`[sync] file-transfer pass failed: ${(err as Error).message}`);
-      }
-
-      return response;
-    },
-
-    async runFileTransferPass(): Promise<{
-      uploaded: number;
-      downloaded: number;
-      failed: number;
-    }> {
-      let uploaded = 0;
-      let downloaded = 0;
-      let failed = 0;
-
-      // Records the sender owes to the server: upload blob, then mark Synced.
-      const uploadResult = await localDatabaseAdapter.query({
-        filters: [
-          { field: "syncStatus", operator: "eq", value: SyncStatus.PendingFileUpload },
-        ],
-        limit: 1000,
-      });
-      for (const record of uploadResult.records) {
-        if (!record.objectStorageKey) {
-          // No blob to upload — should not normally happen in this state.
-          await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
-          logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "upload-skipped-no-key");
-          continue;
-        }
-        if (fileSyncEngine.isTransferInFlight(record.objectStorageKey)) {
-          continue;
-        }
-        try {
-          const ok = await fileSyncEngine.transferFile(
-            {
-              fileHash: record.objectStorageKey,
-              objectStorageKey: record.objectStorageKey,
-              sizeBytes: record.sizeBytes,
-              mimeType: record.mimeType ?? undefined,
-            },
-            localObjectStorage,
-            remoteObjectStorage,
-          );
-          if (ok) {
-            await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
-            logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "upload-complete");
-            uploaded += 1;
-          }
-        } catch (err) {
-          console.warn(
-            `[sync] upload failed for ${record.objectStorageKey}: ${(err as Error).message}`,
-          );
-          failed += 1;
-        }
-      }
-
-      // Records the receiver still needs the blob for: download then mark Synced.
-      const downloadResult = await localDatabaseAdapter.query({
-        filters: [
-          { field: "syncStatus", operator: "eq", value: SyncStatus.PendingFileDownload },
-        ],
-        limit: 1000,
-      });
-      for (const record of downloadResult.records) {
-        if (!record.objectStorageKey) {
-          await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
-          logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "download-skipped-no-key");
-          continue;
-        }
-        if (fileSyncEngine.isTransferInFlight(record.objectStorageKey)) {
-          continue;
-        }
-        try {
-          // Short-circuit if the file is already present locally.
-          if (await localObjectStorage.has(record.objectStorageKey)) {
-            await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
-            logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "download-already-local");
-            downloaded += 1;
-            continue;
-          }
-          const ok = await fileSyncEngine.transferFile(
-            {
-              fileHash: record.objectStorageKey,
-              objectStorageKey: record.objectStorageKey,
-              sizeBytes: record.sizeBytes,
-              mimeType: record.mimeType ?? undefined,
-            },
-            remoteObjectStorage,
-            localObjectStorage,
-          );
-          if (ok) {
-            await localDatabaseAdapter.put({ ...record, syncStatus: SyncStatus.Synced });
-            logTransition("client", record.id, record.syncStatus, SyncStatus.Synced, "download-complete");
-            downloaded += 1;
-          }
-        } catch (err) {
-          console.warn(
-            `[sync] download failed for ${record.objectStorageKey}: ${(err as Error).message}`,
-          );
-          failed += 1;
-        }
-      }
-
-      // Reserved-table file records for filesEnabled apps. Same state machine
-      // as shared_records, scoped by the per-app `_starkeep_sync_records`
-      // table the framework manages. Decision driver is blob location, not
-      // the stored sync_status (which can be stale from the producer's view).
-      if (appSyncableSource) {
-        for (const ns of appSyncableSource.namespaces.list()) {
-          if (!ns.filesEnabled) continue;
-          let rows;
-          try {
-            rows = await appSyncableSource.applier.scanFileRecordsByStatus(
-              ns.appId,
-              [SyncStatus.PendingFileUpload, SyncStatus.PendingFileDownload],
-            );
-          } catch (err) {
-            console.warn(
-              `[sync] scan reserved file-records failed (app=${ns.appId}): ${(err as Error).message}`,
-            );
-            continue;
-          }
-          for (const row of rows) {
-            if (!row.object_storage_key) continue;
-            if (fileSyncEngine.isTransferInFlight(row.object_storage_key)) continue;
-            const manifest = {
-              fileHash: row.content_hash || row.object_storage_key,
-              objectStorageKey: row.object_storage_key,
-              sizeBytes: row.size_bytes,
-              mimeType: row.mime_type || undefined,
-            };
-            const haveLocal = await localObjectStorage.has(row.object_storage_key);
-            try {
-              if (haveLocal) {
-                // Producer side or already-downloaded receiver: ensure remote
-                // has the blob, then mark synced. transferFile short-circuits
-                // when the destination already holds the key.
-                const ok = await fileSyncEngine.transferFile(
-                  manifest,
-                  localObjectStorage,
-                  remoteObjectStorage,
-                );
-                if (ok) {
-                  await appSyncableSource.applier.setFileRecordStatus(
-                    ns.appId,
-                    row.id,
-                    SyncStatus.Synced,
-                  );
-                  logTransition(
-                    "client",
-                    `${ns.appId}/${row.id}`,
-                    row.sync_status as SyncStatus,
-                    SyncStatus.Synced,
-                    "app-file-upload-or-noop",
-                  );
-                  uploaded += 1;
-                }
-              } else {
-                // Receiver: blob isn't local yet. Try to fetch from remote.
-                const ok = await fileSyncEngine.transferFile(
-                  manifest,
-                  remoteObjectStorage,
-                  localObjectStorage,
-                );
-                if (ok) {
-                  await appSyncableSource.applier.setFileRecordStatus(
-                    ns.appId,
-                    row.id,
-                    SyncStatus.Synced,
-                  );
-                  logTransition(
-                    "client",
-                    `${ns.appId}/${row.id}`,
-                    row.sync_status as SyncStatus,
-                    SyncStatus.Synced,
-                    "app-file-download-complete",
-                  );
-                  downloaded += 1;
-                }
-                // If !ok the sender hasn't uploaded yet; stay pending and try
-                // again on the next pass.
-              }
-            } catch (err) {
-              console.warn(
-                `[sync] app-file transfer failed (app=${ns.appId} key=${row.object_storage_key}): ${(err as Error).message}`,
-              );
-              failed += 1;
-            }
-          }
-        }
-      }
-
-      try {
-        const counts = await countNonTerminal(localDatabaseAdapter);
-        logNonTerminalCounts("client", counts);
-      } catch (err) {
-        console.warn(`[sync-state] non-terminal count failed: ${(err as Error).message}`);
-      }
-
-      return { uploaded, downloaded, failed };
-    },
-
-    async fullSync(): Promise<{
-      pulled: number;
-      pushed: number;
-      rejected: number;
-    }> {
-      const pullResult = await this.pull();
-      const pushResult = await this.push();
-      await this.runFileTransferPass();
 
       return {
-        pulled: pullResult.changes.length,
-        pushed: pushResult.accepted.length,
-        rejected: pushResult.rejected.length,
+        applied: appliedIds.length,
+        shipped: outboundRecords.length + outboundAppRows.length,
+        hasMore: response.hasMore,
       };
     },
 
-    getConflicts(): SyncConflict[] {
-      return Array.from(conflicts.values());
-    },
-
-    clearConflict(recordId: StarkeepId): void {
-      conflicts.delete(recordId);
-    },
-
-    changeLog,
     changeNotifier,
   };
+}
+
+/**
+ * Group records by their `updatedAt.nodeId` and sort each bucket in HLC order.
+ * Per-nodeId ordering is what makes the contiguous-prefix watermark rule work.
+ */
+function groupByNodeId(records: AnyRecord[]): Map<string, AnyRecord[]> {
+  const out = new Map<string, AnyRecord[]>();
+  for (const r of records) {
+    const arr = out.get(r.updatedAt.nodeId) ?? [];
+    arr.push(r);
+    out.set(r.updatedAt.nodeId, arr);
+  }
+  for (const arr of out.values()) {
+    arr.sort((a, b) => compareHLC(a.updatedAt, b.updatedAt));
+  }
+  return out;
+}
+
+/**
+ * If the record carries a blob, ensure it's at the destination. Returns true
+ * if there's nothing to push (no blob, or tombstone) or the transfer
+ * succeeded; false if the source is missing the blob entirely (no metadata
+ * push allowed in that case — we'd be advertising metadata for a blob the
+ * peer can never fetch).
+ *
+ * `transferFile` short-circuits to true if destination already has the key,
+ * so calling this repeatedly across exchange ticks costs at most one HEAD
+ * per record per tick — and only for records that are in the outbound delta.
+ */
+async function pushBlobIfNeeded(
+  record: AnyRecord,
+  source: ObjectStorageAdapter,
+  destination: ObjectStorageAdapter,
+  fileSyncEngine: FileSyncEngine,
+): Promise<boolean> {
+  if (!record.objectStorageKey || record.deletedAt) return true;
+  const manifest: FileSyncManifest = {
+    fileHash: record.contentHash || record.objectStorageKey,
+    objectStorageKey: record.objectStorageKey,
+    sizeBytes: record.sizeBytes,
+    mimeType: record.mimeType,
+  };
+  try {
+    return await fileSyncEngine.transferFile(manifest, source, destination);
+  } catch (err) {
+    console.warn(
+      `[sync] blob upload failed for ${record.id} (${record.objectStorageKey}): ${(err as Error).message}`,
+    );
+    return false;
+  }
+}
+
+/**
+ * If the incoming record carries a blob, pull it from `source` (remote) to
+ * `destination` (local). Same short-circuit semantics as the push path.
+ */
+async function pullBlobIfNeeded(
+  record: AnyRecord,
+  source: ObjectStorageAdapter,
+  destination: ObjectStorageAdapter,
+  fileSyncEngine: FileSyncEngine,
+): Promise<boolean> {
+  if (!record.objectStorageKey || record.deletedAt) return true;
+  const manifest: FileSyncManifest = {
+    fileHash: record.contentHash || record.objectStorageKey,
+    objectStorageKey: record.objectStorageKey,
+    sizeBytes: record.sizeBytes,
+    mimeType: record.mimeType,
+  };
+  try {
+    return await fileSyncEngine.transferFile(manifest, source, destination);
+  } catch (err) {
+    console.warn(
+      `[sync] blob download failed for ${record.id} (${record.objectStorageKey}): ${(err as Error).message}`,
+    );
+    return false;
+  }
 }

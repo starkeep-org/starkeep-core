@@ -1,49 +1,40 @@
 import {
   compareHLC,
-  maxHLC,
   serializeHLC,
-  SyncStatus,
-  type AnyRecord,
+  ZERO_HLC,
   type HLCClock,
-  type HLCTimestamp,
 } from "@starkeep/core";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type {
   SyncTransport,
-  SyncPullRequest,
-  SyncPullResponse,
-  SyncPushRequest,
-  SyncPushResponse,
-  ChangeLogEntry,
+  SyncExchangeRequest,
+  SyncExchangeResponse,
   AppSyncableRowEntry,
-  RejectedChange,
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
 } from "../types.js";
-import { decidePushAccept } from "../conflict-resolver.js";
 import {
-  countNonTerminal,
-  logNonTerminalCounts,
-  logTransition,
-} from "../observability.js";
+  selectUnseen,
+  selectUnseenAppSyncable,
+} from "../watermarks.js";
 
 export interface InProcessTransportOptions {
   readonly databaseAdapter: DatabaseAdapter;
   readonly clock: HLCClock;
   /**
-   * When provided, the transport synthesizes app-syncable row entries on pull
-   * (by scanning updated_at per table) and applies them on push (LWW UPSERT).
+   * When provided, the transport synthesizes app-syncable row entries on
+   * exchange (by scanning updated_at per table) and applies incoming rows on
+   * apply (LWW UPSERT).
    */
   readonly appSyncableSource?: {
     readonly namespaces: AppSyncableNamespaceStore;
     readonly applier: AppSyncableApplier;
   };
   /**
-   * Object storage backing the records this transport serves. Pull lazily flips
-   * PendingFileDownload records whose blob has landed to Synced, and push
-   * writes incoming records as PendingFileDownload (or Synced if the blob is
-   * already present).
+   * Object storage backing the records this transport serves. Used only as a
+   * reference for the file-transfer pass elsewhere; the exchange protocol
+   * itself does no blob inspection.
    */
   readonly objectStorage: ObjectStorageAdapter;
 }
@@ -52,226 +43,83 @@ export interface InProcessTransportOptions {
  * `SyncTransport` that talks directly to an in-process database adapter.
  * Used for tests and for running a "cloud" side in the same Node process.
  *
- * Pull: queries the adapter for records whose `updatedAt` is after the
- * requested cursor and returns them as change-log entries. App-syncable rows
- * are returned in a separate `appSyncableRows` field.
- * Push: for each incoming change, applies the OCC rule via decidePushAccept.
- * App-syncable rows in `appSyncableRows` are applied with LWW.
+ * Exchange semantics:
+ *   - Apply incoming records via `put(snapshot)` with HLC LWW.
+ *   - Scan local records the caller hasn't seen (per-nodeId watermark filter).
+ *   - Return `responderWatermarks` = MAX(updated_at) per nodeId.
+ *
+ * Conflict resolution is pure HLC LWW — no rejected[], no OCC.
  */
 export function createInProcessSyncTransport(
   options: InProcessTransportOptions,
 ): SyncTransport {
-  const { databaseAdapter, clock, appSyncableSource, objectStorage } = options;
+  const { databaseAdapter, clock, appSyncableSource } = options;
 
   return {
-    async pullChanges(request: SyncPullRequest): Promise<SyncPullResponse> {
-      const result = await databaseAdapter.query({
-        limit: Math.max(request.limit, 1000),
-      });
-
-      const changes: ChangeLogEntry[] = [];
-      const appSyncableRows: AppSyncableRowEntry[] = [];
-      let latest: HLCTimestamp = request.sinceTimestamp;
-
-      for (const candidate of result.records) {
-        if (compareHLC(candidate.updatedAt, request.sinceTimestamp) <= 0) continue;
-        let record = candidate;
-        if (
-          record.syncStatus === SyncStatus.PendingFileDownload &&
-          record.objectStorageKey
-        ) {
-          if (await objectStorage.has(record.objectStorageKey)) {
-            record = { ...record, syncStatus: SyncStatus.Synced };
-            await databaseAdapter.put(record);
-            logTransition(
-              "server",
-              record.id,
-              SyncStatus.PendingFileDownload,
-              SyncStatus.Synced,
-              "pull-lazy-reconcile",
-            );
-          }
+    async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
+      // 1. Apply incoming records — pure put(snapshot). HLC LWW: skip if local
+      //    copy is at-or-ahead of incoming.
+      for (const snapshot of request.records ?? []) {
+        const current = await databaseAdapter.get(snapshot.id);
+        if (current && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0) {
+          continue;
         }
-        // Only expose records whose blob is durably here.
-        if (record.syncStatus !== SyncStatus.Synced) continue;
-        changes.push(recordToChangeLogEntry(record));
-        latest = maxHLC(latest, record.updatedAt);
-        if (changes.length >= request.limit) break;
+        clock.receive(snapshot.updatedAt);
+        await databaseAdapter.put(snapshot);
       }
 
-      // Synthesize appSyncableRow entries from per-table scans.
-      if (appSyncableSource && changes.length < request.limit) {
-        const namespaces = appSyncableSource.namespaces.list();
-        const sinceStr = serializeHLC(request.sinceTimestamp);
+      // 2. Apply incoming app-syncable rows.
+      for (const entry of request.appSyncableRows ?? []) {
+        if (!appSyncableSource) continue;
+        const ns = appSyncableSource.namespaces.get(entry.appId);
+        if (!ns) continue;
+        clock.receive(entry.timestamp);
+        try {
+          await appSyncableSource.applier.apply(entry);
+        } catch (err) {
+          console.warn(
+            `[sync] exchange apply appSyncableRow failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}`,
+          );
+        }
+      }
+
+      // 3. Scan local records the caller hasn't seen yet. App-layer filter
+      //    over a chunked scan — sufficient at current poll volumes;
+      //    per-nodeId SQL indexes are a follow-up if scans get hot.
+      const limit = request.limit ?? 1000;
+      const scanResult = await databaseAdapter.query({ limit: limit * 2 });
+      const candidates = selectUnseen(scanResult.records, request.watermarks);
+      const records = candidates.slice(0, limit);
+
+      // 4. App-syncable rows: same per-nodeId filtering across known tables.
+      const appSyncableRows: AppSyncableRowEntry[] = [];
+      if (appSyncableSource && records.length < limit) {
         const scanCapable = appSyncableSource.applier as ScanCapableApplier;
         if (typeof scanCapable.scanSince === "function") {
-          for (const ns of namespaces) {
+          const zeroStr = serializeHLC(ZERO_HLC);
+          for (const ns of appSyncableSource.namespaces.list()) {
             for (const tableInfo of ns.tables) {
-              const rows = await scanCapable.scanSince(ns.appId, tableInfo.name, sinceStr);
-              for (const row of rows) {
-                appSyncableRows.push(row);
-                latest = maxHLC(latest, row.timestamp);
-                if (changes.length + appSyncableRows.length >= request.limit) break;
+              let rows: AppSyncableRowEntry[];
+              try {
+                rows = await scanCapable.scanSince(ns.appId, tableInfo.name, zeroStr);
+              } catch {
+                rows = [];
               }
-              if (changes.length + appSyncableRows.length >= request.limit) break;
+              const unseen = selectUnseenAppSyncable(rows, request.watermarks);
+              for (const r of unseen) {
+                appSyncableRows.push(r);
+                if (records.length + appSyncableRows.length >= limit) break;
+              }
+              if (records.length + appSyncableRows.length >= limit) break;
             }
-            if (changes.length + appSyncableRows.length >= request.limit) break;
+            if (records.length + appSyncableRows.length >= limit) break;
           }
         }
       }
 
-      try {
-        const counts = await countNonTerminal(databaseAdapter);
-        logNonTerminalCounts("server", counts);
-      } catch (err) {
-        console.warn(`[sync-state] non-terminal count failed: ${(err as Error).message}`);
-      }
+      const hasMore = candidates.length > limit || scanResult.hasMore;
 
-      return {
-        changes,
-        appSyncableRows,
-        latestTimestamp: latest,
-        hasMore: changes.length >= request.limit && result.hasMore,
-      };
+      return { records, appSyncableRows, hasMore };
     },
-
-    async pushChanges(request: SyncPushRequest): Promise<SyncPushResponse> {
-      const accepted: string[] = [];
-      const rejected: RejectedChange[] = [];
-      let latest: HLCTimestamp = { wallTime: 0, counter: 0, nodeId: "" };
-
-      // Record changes: apply OCC.
-      for (const change of request.changes) {
-        const current = await databaseAdapter.get(change.recordId);
-        const decision = decidePushAccept(current, change);
-
-        if (decision.kind === "accept" || decision.kind === "accept-noop") {
-          if (decision.kind === "accept") {
-            if (change.operation === "delete") {
-              await databaseAdapter.delete(change.recordId);
-              logTransition(
-                "server",
-                change.recordId,
-                current?.syncStatus ?? null,
-                SyncStatus.Synced,
-                "push-accept-delete",
-              );
-            } else {
-              // Server-side state machine: write as PendingFileDownload until
-              // the blob lands. If the blob is already on the server (re-push
-              // after a successful upload), short-circuit to Synced.
-              const snapshot = change.recordSnapshot;
-              const needsBlob = !!snapshot.objectStorageKey;
-              let nextStatus = needsBlob
-                ? SyncStatus.PendingFileDownload
-                : SyncStatus.Synced;
-              if (
-                needsBlob &&
-                (await objectStorage.has(snapshot.objectStorageKey))
-              ) {
-                nextStatus = SyncStatus.Synced;
-              }
-              await databaseAdapter.put({ ...snapshot, syncStatus: nextStatus });
-              logTransition(
-                "server",
-                change.recordId,
-                current?.syncStatus ?? null,
-                nextStatus,
-                "push-accept-write",
-              );
-            }
-          } else if (current && change.operation !== "delete") {
-            // accept-noop: server already holds this exact revision but its
-            // sync_status may have drifted from blob reality (e.g. an older
-            // server build wrote the client's pending_push verbatim, or a
-            // partial upload left the row in PendingFileDownload after the
-            // blob finally landed). Reconcile against object storage so the
-            // row becomes pullable. Without this, a misrecorded status is
-            // permanent — the matching-revision short-circuit means no future
-            // push will revisit it.
-            const needsBlob = !!current.objectStorageKey;
-            let nextStatus = needsBlob
-              ? SyncStatus.PendingFileDownload
-              : SyncStatus.Synced;
-            if (
-              needsBlob &&
-              (await objectStorage.has(current.objectStorageKey))
-            ) {
-              nextStatus = SyncStatus.Synced;
-            }
-            if (current.syncStatus !== nextStatus) {
-              await databaseAdapter.put({ ...current, syncStatus: nextStatus });
-              logTransition(
-                "server",
-                current.id,
-                current.syncStatus,
-                nextStatus,
-                "push-noop-reconcile",
-              );
-            }
-          }
-          // accept-noop: server already has this exact (id, version) — don't
-          // re-apply, but acknowledge so the client advances its state machine.
-          accepted.push(change.recordId);
-          latest = maxHLC(latest, change.timestamp);
-        } else {
-          rejected.push({
-            recordId: change.recordId,
-            clientChange: change,
-            serverRecord: current,
-            reason:
-              decision.kind === "reject-not-found"
-                ? "not-found"
-                : decision.kind === "reject-deleted"
-                  ? "deleted"
-                  : "version-mismatch",
-          });
-        }
-      }
-
-      // App-syncable rows: apply LWW with permission gate.
-      for (const entry of request.appSyncableRows ?? []) {
-        if (!appSyncableSource) {
-          console.warn(
-            `[sync] push: appSyncableRow entry for app "${entry.appId}" ignored — no appSyncableSource configured`,
-          );
-          continue;
-        }
-        const ns = appSyncableSource.namespaces.get(entry.appId);
-        if (!ns) {
-          console.warn(
-            `[sync] push: appSyncableRow rejected — app "${entry.appId}" not installed on this instance`,
-          );
-          continue;
-        }
-        await appSyncableSource.applier.apply(entry);
-        latest = maxHLC(latest, entry.timestamp);
-      }
-
-      // Advance clock to account for the updates we just applied.
-      for (const change of request.changes) {
-        clock.receive(change.timestamp);
-      }
-      for (const entry of request.appSyncableRows ?? []) {
-        clock.receive(entry.timestamp);
-      }
-
-      return {
-        accepted: accepted as SyncPushResponse["accepted"],
-        rejected,
-        latestTimestamp: latest,
-      };
-    },
-  };
-}
-
-function recordToChangeLogEntry(record: AnyRecord): ChangeLogEntry {
-  return {
-    changeId: record.id,
-    recordId: record.id,
-    operation: record.deletedAt ? "delete" : "update",
-    timestamp: record.updatedAt,
-    recordSnapshot: record,
-    baseVersion: record.version > 1 ? record.version - 1 : null,
   };
 }

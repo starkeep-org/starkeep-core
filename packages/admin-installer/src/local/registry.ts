@@ -190,9 +190,6 @@ export function createReservedFileRecordsTable(
   db.exec(
     `CREATE INDEX IF NOT EXISTS "idx_${fullName}_updated_at" ON "${fullName}"("updated_at")`,
   );
-  db.exec(
-    `CREATE INDEX IF NOT EXISTS "idx_${fullName}_sync_status" ON "${fullName}"("sync_status")`,
-  );
 }
 
 export function dropAppSyncableTables(

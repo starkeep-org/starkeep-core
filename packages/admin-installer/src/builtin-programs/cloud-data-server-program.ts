@@ -110,6 +110,20 @@ export function buildCloudDataServerProgram(
       }),
     });
 
+    // Browser uploads/downloads go directly to S3 via presigned URLs from the
+    // photos app served at the API Gateway origin, so the bucket itself must
+    // answer CORS preflights. Mirrors the gateway's `allowOrigins: ["*"]`.
+    new aws.s3.BucketCorsConfigurationV2(`${ctx.stackPrefix}-files-cors`, {
+      bucket: bucket.id,
+      corsRules: [{
+        allowedMethods: ["GET", "PUT", "HEAD"],
+        allowedOrigins: ["*"],
+        allowedHeaders: ["*"],
+        exposeHeaders: ["ETag"],
+        maxAgeSeconds: 3000,
+      }],
+    });
+
     // -----------------------------------------------------------------------
     // Lambda log group
     // -----------------------------------------------------------------------

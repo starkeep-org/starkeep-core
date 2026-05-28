@@ -2,7 +2,6 @@ import {
   createHLCClock,
   createDataRecord,
   dataRecordObjectKey,
-  SyncStatus,
   type DataRecord,
   type MetadataRow,
   type TypeRegistration,
@@ -38,7 +37,6 @@ export async function createStarkeepSdk(
     typeRegistrationStore,
     ownerId,
     nodeId,
-    changeLog,
     syncStateStore,
     subject,
   } = options;
@@ -103,25 +101,16 @@ export async function createStarkeepSdk(
   const unifiedIndex = createUnifiedIndex({ databaseAdapter });
   const aggregationEngine = createAggregationEngine({ databaseAdapter });
 
-  async function logChange(
-    operation: "create" | "update" | "delete",
-    record: DataRecord,
-    baseVersion: number | null,
-  ): Promise<void> {
-    const ts = clock.now();
-    if (changeLog) {
-      await changeLog.append({
-        recordId: record.id,
-        operation,
-        timestamp: ts,
-        recordSnapshot: record,
-        baseVersion,
-      });
-    }
+  /**
+   * Emit a `local-change-recorded` event for a write. The supervisor wakes its
+   * exchange loop in response; the records-table row itself is the durable
+   * source of truth for what to ship (no separate change log).
+   */
+  function logChange(record: DataRecord): void {
     changeNotifier.emit({
       eventType: "local-change-recorded",
       recordIds: [record.id],
-      timestamp: ts,
+      timestamp: clock.now(),
     });
   }
 
@@ -161,7 +150,7 @@ export async function createStarkeepSdk(
         recordId: record.id,
       });
     }
-    await logChange("create", record, null);
+    logChange(record);
     return record;
   }
 
@@ -222,7 +211,7 @@ export async function createStarkeepSdk(
             recordId: record.id,
           });
         }
-        await logChange("create", record, null);
+        logChange(record);
         return record;
       },
 
@@ -238,33 +227,31 @@ export async function createStarkeepSdk(
         if (!existing) {
           throw new Error(`No data record found with id ${recordId}`);
         }
-        const baseVersion = existing.version;
         const updated: DataRecord = {
           ...existing,
           originalFilename: patch.originalFilename ?? existing.originalFilename,
           parentId: patch.parentId ?? existing.parentId,
-          version: baseVersion + 1,
+          version: existing.version + 1,
           updatedAt: clock.now(),
-          syncStatus: SyncStatus.PendingPush,
         };
         await databaseAdapter.put(updated);
-        await logChange("update", updated, baseVersion);
+        logChange(updated);
         return updated;
       },
 
       async delete(recordId) {
         const existing = await databaseAdapter.get(recordId);
         if (!existing) return;
+        const ts = clock.now();
+        await databaseAdapter.delete(recordId, ts);
+        await databaseAdapter.deleteMetadata(existing.type, recordId);
         const tombstone: DataRecord = {
           ...existing,
+          updatedAt: ts,
+          deletedAt: ts,
           version: existing.version + 1,
-          updatedAt: clock.now(),
-          deletedAt: clock.now(),
-          syncStatus: SyncStatus.PendingPush,
         };
-        await databaseAdapter.put(tombstone);
-        await databaseAdapter.deleteMetadata(existing.type, recordId);
-        await logChange("delete", tombstone, existing.version);
+        logChange(tombstone);
       },
 
       async query(params) {
@@ -356,7 +343,6 @@ export async function createStarkeepSdk(
       },
     },
 
-    changeLog,
     changeNotifier,
     clock,
 

@@ -2,11 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { HLCClock } from "@starkeep/core";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createInProcessSyncTransport } from "./in-process-transport.js";
-import type {
-  SyncPullRequest,
-  SyncPushRequest,
-  SyncTransport,
-} from "../types.js";
+import type { SyncExchangeRequest, SyncTransport } from "../types.js";
 
 export interface HttpSyncServerOptions {
   readonly databaseAdapter: DatabaseAdapter;
@@ -14,8 +10,7 @@ export interface HttpSyncServerOptions {
   readonly clock: HLCClock;
   /**
    * Optional transport override — if provided, takes precedence over the
-   * default in-process transport. Useful when the server wants SQL-level
-   * OCC with FOR UPDATE inside a single transaction.
+   * default in-process transport.
    */
   readonly transport?: SyncTransport;
 }
@@ -44,16 +39,9 @@ export function createHttpSyncHandler(
       `http://${req.headers.host ?? "localhost"}`,
     );
 
-    if (req.method === "POST" && url.pathname === "/sync/pull") {
-      const body = await readJson<SyncPullRequest>(req);
-      const response = await transport.pullChanges(body);
-      sendJson(res, 200, response);
-      return true;
-    }
-
-    if (req.method === "POST" && url.pathname === "/sync/push") {
-      const body = await readJson<SyncPushRequest>(req);
-      const response = await transport.pushChanges(body);
+    if (req.method === "POST" && url.pathname === "/sync/exchange") {
+      const body = await readJson<SyncExchangeRequest>(req);
+      const response = await transport.exchange(body);
       sendJson(res, 200, response);
       return true;
     }
