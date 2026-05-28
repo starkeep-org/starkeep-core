@@ -164,46 +164,24 @@ export class SqliteAppSyncableApplier
   }
 
   /**
-   * Scan the reserved `_starkeep_sync_records` table for rows in the given
-   * sync_status set. Excludes soft-deleted rows. Returns an empty array if the
-   * app doesn't have a reserved table (i.e. filesEnabled is false).
+   * Scan the reserved `_starkeep_sync_records` table for live (non-deleted)
+   * rows. The file-transfer pass derives upload/download decisions from blob
+   * presence at the underlying object stores — there is no `sync_status`
+   * column. Returns an empty array if the app doesn't have a reserved table
+   * (filesEnabled is false or the app is uninstalled).
    */
-  async scanFileRecordsByStatus(
-    appId: string,
-    statuses: string[],
-  ): Promise<FileRecordRow[]> {
-    if (statuses.length === 0) return [];
+  async scanFileRecords(appId: string): Promise<FileRecordRow[]> {
     const fullName = appSyncableTableName(appId, FILE_RECORDS_TABLE);
-    const placeholders = statuses.map(() => "?").join(", ");
     try {
       const rows = this.db
         .prepare(
-          `SELECT * FROM ${q(fullName)}
-           WHERE deleted_at IS NULL AND sync_status IN (${placeholders})`,
+          `SELECT * FROM ${q(fullName)} WHERE deleted_at IS NULL`,
         )
-        .all(...(statuses as never[])) as Record<string, unknown>[];
+        .all() as Record<string, unknown>[];
       return rows.map(rowToFileRecord);
     } catch {
-      // Table might not exist (filesEnabled=false or app uninstalled).
       return [];
     }
-  }
-
-  /**
-   * Update sync_status on a single reserved-table row without touching
-   * `updated_at`. The status field is local-only bookkeeping; bumping
-   * `updated_at` here would re-emit the row to remote replicas and trip the
-   * lazy reconciliation into a loop.
-   */
-  async setFileRecordStatus(
-    appId: string,
-    id: string,
-    status: string,
-  ): Promise<void> {
-    const fullName = appSyncableTableName(appId, FILE_RECORDS_TABLE);
-    this.db
-      .prepare(`UPDATE ${q(fullName)} SET sync_status = ? WHERE id = ?`)
-      .run(status, id);
   }
 
   /** Support read path from the factory's queryRows. */
@@ -232,7 +210,6 @@ function q(name: string): string {
 function rowToFileRecord(row: Record<string, unknown>): FileRecordRow {
   return {
     id: row["id"] as string,
-    sync_status: row["sync_status"] as string,
     object_storage_key: row["object_storage_key"] as string,
     content_hash: row["content_hash"] as string,
     mime_type: row["mime_type"] as string,

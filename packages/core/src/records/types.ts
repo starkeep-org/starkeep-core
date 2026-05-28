@@ -1,35 +1,12 @@
 import type { StarkeepId } from "../identifiers/types.js";
 import type { HLCTimestamp } from "../hlc/types.js";
 
-/**
- * Lifecycle state of a DataRecord with respect to the sync pipeline.
- *
- * Sender side (the side that owns the file bytes when the record is created):
- *   PendingPush → PendingFileUpload → Synced
- *                                  ↓
- *                               Conflict (server rejected metadata)
- *
- * Receiver side (the side that pulls metadata for a record originating elsewhere):
- *   PendingFileDownload → Synced
- *
- * Records without an objectStorageKey skip the file-transfer states and go
- * directly to Synced.
- */
-export enum SyncStatus {
-  PendingPush = "pending_push",
-  PendingFileUpload = "pending_file_upload",
-  PendingFileDownload = "pending_file_download",
-  Synced = "synced",
-  Conflict = "conflict",
-}
-
 export interface BaseRecord {
   readonly id: StarkeepId;
   readonly type: string;
   readonly createdAt: HLCTimestamp;
   updatedAt: HLCTimestamp;
   readonly ownerId: string;
-  syncStatus: SyncStatus;
   deletedAt: HLCTimestamp | null;
   version: number;
 }

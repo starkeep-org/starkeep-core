@@ -1,11 +1,24 @@
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, StarkeepId } from "@starkeep/core";
 
 export type SortDirection = "asc" | "desc";
 
+export type FilterOperator =
+  | "eq"
+  | "neq"
+  | "gt"
+  | "gte"
+  | "lt"
+  | "lte"
+  | "in"
+  | "like"
+  | "isNull"
+  | "isNotNull";
+
 export interface Filter {
   field: string;
-  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "like";
-  value: unknown;
+  operator: FilterOperator;
+  /** Ignored for `isNull` and `isNotNull`. */
+  value?: unknown;
 }
 
 export interface SortField {
@@ -29,12 +42,12 @@ export interface QueryResult {
 
 export type BatchOperation =
   | { type: "put"; record: DataRecord }
-  | { type: "delete"; id: StarkeepId };
+  | { type: "delete"; id: StarkeepId; hlc: HLCTimestamp };
 
 export interface Transaction {
   put(record: DataRecord): Promise<void>;
   get(id: StarkeepId): Promise<DataRecord | null>;
-  delete(id: StarkeepId): Promise<void>;
+  delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void>;
   query(query: Query): Promise<QueryResult>;
 }
 

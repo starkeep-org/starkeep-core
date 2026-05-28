@@ -28,7 +28,6 @@ export interface FileRecordsTableColumn {
  */
 export const FILE_RECORDS_COLUMNS: readonly FileRecordsTableColumn[] = [
   { name: "id", type: "text", notNull: true, primaryKey: true },
-  { name: "sync_status", type: "text", notNull: true, primaryKey: false },
   { name: "object_storage_key", type: "text", notNull: true, primaryKey: false },
   { name: "content_hash", type: "text", notNull: true, primaryKey: false },
   { name: "mime_type", type: "text", notNull: true, primaryKey: false },

@@ -31,10 +31,7 @@ import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
-import {
-  createSqliteChangeLog,
-  createSqliteSyncStateStore,
-} from "../../packages/sync-engine/src/index.js";
+import { createSqliteSyncStateStore } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, type SyncSupervisor } from "./sync-supervisor.js";
 import { WILDCARD_EXPANDABLE_TYPE_IDS, CORE_TYPES } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
@@ -338,16 +335,13 @@ async function main() {
 
   const clock = createHLCClock({ nodeId: NODE_ID, wallClockFunction: Date.now });
 
-  // Pre-init so we can hand the raw SQLite handle to the sync change log +
-  // state store, which share the records DB file.
+  // Pre-init so we can hand the raw SQLite handle to the sync state store,
+  // which shares the records DB file.
   await databaseAdapter.init();
 
-  // The change log is the shared local-write outbox. The SDK appends to it
-  // on every record write; the supervisor's per-app sync engines each get a
-  // view filtered by originAppId. The state store here is used by the SDK
-  // for HLC clock state (global, one clock per node); per-app pull/push
-  // cursors are owned by the supervisor's per-app adapters around it.
-  const syncChangeLog = createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() });
+  // The state store is used by the SDK for HLC clock state (global, one clock
+  // per node); per-app watermarks are owned by the supervisor's per-app
+  // adapters around it.
   const syncStateStore = CLOUD_URL
     ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
     : undefined;
@@ -385,7 +379,6 @@ async function main() {
     typeRegistrationStore,
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
-    changeLog: syncChangeLog,
     syncStateStore,
     getAppSpecific: appSpecificFactory,
   });
@@ -423,8 +416,8 @@ async function main() {
       namespaceStore,
       appApplier,
       underlyingSyncStateStore: syncStateStore,
-      pullIntervalMs: PULL_INTERVAL_MS,
-      pushDebounceMs: PUSH_DEBOUNCE_MS,
+      exchangeIntervalMs: PULL_INTERVAL_MS,
+      nudgeDebounceMs: PUSH_DEBOUNCE_MS,
     });
   }
 
@@ -704,12 +697,9 @@ async function main() {
             syncPaused: false,
             cloudUrl: CLOUD_URL ?? null,
             perApp: [],
-            conflictCount: 0,
-            lastPullError: null,
-            lastPushError: null,
-            lastPullAt: null,
-            lastPushAt: null,
-            pullBackoffMs: PULL_INTERVAL_MS,
+            lastError: null,
+            lastExchangeAt: null,
+            backoffMs: PULL_INTERVAL_MS,
           });
           return;
         }
@@ -747,38 +737,8 @@ async function main() {
           json(res, { error: "sync not configured" });
           return;
         }
-        const result = await supervisor.fullSync();
+        const result = await supervisor.exchangeAll();
         json(res, result);
-        return;
-      }
-
-      if (path === "/sync/conflicts" && req.method === "GET") {
-        if (!supervisor) {
-          json(res, { conflicts: [] });
-          return;
-        }
-        json(res, { conflicts: supervisor.conflicts() });
-        return;
-      }
-
-      const resolveMatch = path.match(/^\/sync\/conflicts\/([^/]+)\/resolve$/);
-      if (resolveMatch && req.method === "POST") {
-        if (!supervisor) {
-          res.writeHead(400);
-          json(res, { error: "sync not configured" });
-          return;
-        }
-        const body = JSON.parse(await readBody(req));
-        if (body.keep !== "local" && body.keep !== "server") {
-          res.writeHead(400);
-          json(res, { error: 'body must include { keep: "local" | "server" }' });
-          return;
-        }
-        const record = await supervisor.resolveConflict(
-          resolveMatch[1]! as any,
-          { keep: body.keep },
-        );
-        json(res, { record });
         return;
       }
 
@@ -1006,7 +966,6 @@ async function main() {
               created_at: new Date(r.createdAt.wallTime).toISOString(),
               updated_at: new Date(r.updatedAt.wallTime).toISOString(),
               owner_id: r.ownerId,
-              sync_status: r.syncStatus,
               version: r.version,
               content_hash: r.contentHash,
               object_storage_key: r.objectStorageKey,
@@ -1522,7 +1481,6 @@ async function main() {
             created_at: new Date(record.createdAt.wallTime).toISOString(),
             updated_at: new Date(record.updatedAt.wallTime).toISOString(),
             owner_id: record.ownerId,
-            sync_status: record.syncStatus,
             version: record.version,
             content_hash: record.contentHash,
             object_storage_key: record.objectStorageKey,

@@ -1,9 +1,7 @@
 import type {
   SyncTransport,
-  SyncPullRequest,
-  SyncPullResponse,
-  SyncPushRequest,
-  SyncPushResponse,
+  SyncExchangeRequest,
+  SyncExchangeResponse,
 } from "../types.js";
 import { SyncError } from "../errors.js";
 
@@ -15,9 +13,7 @@ export interface HttpSyncTransportOptions {
 
 /**
  * `SyncTransport` that talks to a remote Starkeep-compatible HTTP server
- * over `fetch`. Endpoints:
- *   POST {baseUrl}/sync/pull  — body SyncPullRequest, returns SyncPullResponse
- *   POST {baseUrl}/sync/push  — body SyncPushRequest, returns SyncPushResponse
+ * over `fetch`. Single endpoint: `POST {baseUrl}/sync/exchange`.
  */
 export function createHttpSyncTransport(
   options: HttpSyncTransportOptions,
@@ -52,11 +48,11 @@ export function createHttpSyncTransport(
   }
 
   return {
-    async pullChanges(request: SyncPullRequest): Promise<SyncPullResponse> {
-      return postJson<SyncPullRequest, SyncPullResponse>("/sync/pull", request);
-    },
-    async pushChanges(request: SyncPushRequest): Promise<SyncPushResponse> {
-      return postJson<SyncPushRequest, SyncPushResponse>("/sync/push", request);
+    async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
+      return postJson<SyncExchangeRequest, SyncExchangeResponse>(
+        "/sync/exchange",
+        request,
+      );
     },
   };
 }

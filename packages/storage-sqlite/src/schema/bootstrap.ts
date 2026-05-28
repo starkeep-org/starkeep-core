@@ -36,7 +36,6 @@ export function initializeLocalSchema(db: DatabaseSync): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       owner_id TEXT NOT NULL,
-      sync_status TEXT NOT NULL DEFAULT 'pending_push',
       deleted_at TEXT,
       version INTEGER NOT NULL DEFAULT 1,
       content_hash TEXT NOT NULL,

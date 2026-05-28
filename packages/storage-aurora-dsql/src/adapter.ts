@@ -1,5 +1,5 @@
-import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
-import { pgMetadataTableName } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/core";
+import { pgMetadataTableName, serializeHLC } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -86,8 +86,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return rowToRecord(result.rows[0] as unknown as PostgresRow);
   }
 
-  async delete(id: StarkeepId): Promise<void> {
-    await this.getClient().query("DELETE FROM shared.records WHERE id = $1", [id]);
+  async delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
+    const ts = serializeHLC(hlc);
+    await this.getClient().query(
+      "UPDATE shared.records SET deleted_at = $1, updated_at = $2 WHERE id = $3",
+      [ts, ts, id],
+    );
   }
 
   async query(query: Query): Promise<QueryResult> {
@@ -113,7 +117,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         if (operation.type === "put") {
           await this.put(operation.record);
         } else {
-          await this.delete(operation.id);
+          await this.delete(operation.id, operation.hlc);
         }
       }
       await this.getClient().query("COMMIT");
@@ -131,7 +135,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       const transaction: Transaction = {
         put: async (record) => this.put(record),
         get: async (id) => this.get(id),
-        delete: async (id) => this.delete(id),
+        delete: async (id, hlc) => this.delete(id, hlc),
         query: async (query) => this.query(query),
       };
       const result = await callback(transaction);

@@ -23,7 +23,8 @@
     "@starkeep/core": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
-    "@starkeep/sync-engine": "workspace:*"
+    "@starkeep/sync-engine": "workspace:*",
+    "kysely": "^0.27.0"
   },
   "devDependencies": {
     "@types/node": "^25.4.0",

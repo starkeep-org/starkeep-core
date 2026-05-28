@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createHLCClock } from "../src/hlc/clock.js";
 import { createDataRecord } from "../src/records/builders.js";
-import { SyncStatus } from "../src/records/types.js";
 
 describe("createDataRecord", () => {
   const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
@@ -27,7 +26,6 @@ describe("createDataRecord", () => {
     expect(record.ownerId).toBe("user-1");
     expect(record.id).toHaveLength(26);
     expect(record.version).toBe(1);
-    expect(record.syncStatus).toBe(SyncStatus.PendingPush);
     expect(record.deletedAt).toBeNull();
     expect(record.contentHash).toBe("sha256:abc123");
     expect(record.objectStorageKey).toBe("shared/@test/photo/ab/sha256:abc123");

@@ -82,7 +82,6 @@ export function createAppSpecificFactory(
       const contentHash = await sha256Hex(bytes);
       const row: Record<string, unknown> = {
         id: key,
-        sync_status: "pending_file_upload",
         object_storage_key: key,
         content_hash: contentHash,
         mime_type: mimeType,

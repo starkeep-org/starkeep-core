@@ -1,8 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
-import { sqliteMetadataTableName } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/core";
+import { serializeHLC, sqliteMetadataTableName } from "@starkeep/core";
 import type {
   DatabaseAdapter,
   Query,
@@ -101,8 +101,14 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     return row ? rowToRecord(row) : null;
   }
 
-  async delete(id: StarkeepId): Promise<void> {
-    this.runStmt("DELETE FROM shared_records WHERE id = ?", id);
+  async delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
+    const ts = serializeHLC(hlc);
+    this.runStmt(
+      "UPDATE shared_records SET deleted_at = ?, updated_at = ? WHERE id = ?",
+      ts,
+      ts,
+      id,
+    );
   }
 
   async query(query: Query): Promise<QueryResult> {
@@ -127,7 +133,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
         if (operation.type === "put") {
           await this.put(operation.record);
         } else {
-          await this.delete(operation.id);
+          await this.delete(operation.id, operation.hlc);
         }
       }
       this.getDatabase().exec("COMMIT");
@@ -143,7 +149,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       const transaction: Transaction = {
         put: async (record) => this.put(record),
         get: async (id) => this.get(id),
-        delete: async (id) => this.delete(id),
+        delete: async (id, hlc) => this.delete(id, hlc),
         query: async (query) => this.query(query),
       };
       const result = await callback(transaction);

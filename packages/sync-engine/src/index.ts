@@ -1,16 +1,7 @@
 export type {
-  ChangeLogEntry,
   AppSyncableRowEntry,
   AppSyncableApplier,
   ScanCapableApplier,
-  ChangeLog,
-  SyncPullRequest,
-  SyncPullResponse,
-  SyncPushRequest,
-  SyncPushResponse,
-  RejectedChange,
-  RejectionReason,
-  SyncConflict,
   SyncTransport,
   FileSyncManifest,
   FileEntry,
@@ -22,26 +13,20 @@ export type {
   SyncEngine,
   SyncEngineOptions,
   SyncStateStore,
-  RecordChangeOptions,
   AppSyncableTableInfo,
   AppSyncableNamespace,
   AppSyncableNamespaceStore,
   FileRecordRow,
   FileRecordsApplier,
+  Watermarks,
+  SyncExchangeRequest,
+  SyncExchangeResponse,
+  ExchangeResult,
 } from "./types.js";
 
-export { createChangeLog } from "./change-log.js";
-export { createSqliteChangeLog } from "./change-log-sqlite.js";
 export { createSqliteSyncStateStore } from "./sync-state-sqlite.js";
-export {
-  decidePullApply,
-  decidePushAccept,
-  type PullApplyDecision,
-  type PullApplyKind,
-  type PushAcceptDecision,
-  type PushAcceptKind,
-} from "./conflict-resolver.js";
 export { createChangeNotifier } from "./change-notifier.js";
+export { advanceWatermark, mergeWatermarks, watermarkFor, selectUnseen } from "./watermarks.js";
 export { createFileSyncEngine } from "./file-sync-engine.js";
 export { createSyncEngine } from "./sync-engine.js";
 export { createInProcessSyncTransport } from "./transports/in-process-transport.js";
