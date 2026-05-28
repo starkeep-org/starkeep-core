@@ -17,11 +17,11 @@ import {
   listAppRegistry,
   appRegistryRow,
 } from "../../packages/admin-installer/src/local/registry.js";
+import { LOCAL_DATA_SYNC_APP_ID } from "../../packages/admin-installer/src/iam.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
   createSqliteAccessPolicyStore,
   createSqliteTypeRegistrationStore,
-  listAppSyncableNamespaces,
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
 } from "../../packages/storage-sqlite/src/index.js";
@@ -29,20 +29,13 @@ import { createAppSpecificFactory } from "../../packages/shared-space-api/src/ap
 import { disabledSharingTokenStore } from "../../packages/access-control/src/stores.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
-import { AuroraDsqlDatabaseAdapter } from "../../packages/storage-aurora-dsql/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
-import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
-import type {
-  DatabaseClientFactory,
-  DatabaseClient,
-  AuroraDsqlDatabaseAdapterOptions,
-} from "../../packages/storage-aurora-dsql/src/types.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import {
-  createHttpSyncTransport,
   createSqliteChangeLog,
   createSqliteSyncStateStore,
 } from "../../packages/sync-engine/src/index.js";
+import { createSyncSupervisor, type SyncSupervisor } from "./sync-supervisor.js";
 import { WILDCARD_EXPANDABLE_TYPE_IDS, CORE_TYPES } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
 import { dataRecordObjectKey } from "../../packages/core/src/storage/object-keys.js";
@@ -50,11 +43,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { createFileWatchManager } from "./watcher.js";
-import { HttpObjectStorageAdapter } from "./http-object-storage.js";
-import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import pg from "pg";
 import {
   type CognitoConfig,
   type STSCredentials,
@@ -66,7 +55,7 @@ import {
 
 // Signing key for self-hosted file tokens — regenerated each startup so
 // all outstanding tokens are invalidated on restart (revocable by design).
-const TOKEN_SECRET = randomBytes(32);
+const TOKEN_SECRET = randomBytes(32) as unknown as Uint8Array;
 
 const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
@@ -140,14 +129,10 @@ function validateAppHmac(db: DatabaseSync, appId: string, body: string, sig: str
   const sigBuf = Buffer.from(sig, "hex");
   const expBuf = Buffer.from(expected, "hex");
   if (sigBuf.length !== expBuf.length) return false;
-  return timingSafeEqual(sigBuf, expBuf);
+  return timingSafeEqual(sigBuf as unknown as Uint8Array, expBuf as unknown as Uint8Array);
 }
 
-// Path to starkeep-config.json — resolved relative to this file so it works
-// regardless of cwd. Override via STARKEEP_CONFIG env var for non-standard layouts.
-const STARKEEP_CONFIG_PATH =
-  process.env.STARKEEP_CONFIG ??
-  fileURLToPath(new URL("../../starkeep-config.json", import.meta.url));
+const STARKEEP_CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 interface StarkeepConfig {
   stage: string;
@@ -208,7 +193,7 @@ async function loadStarkeepConfig(): Promise<StarkeepConfig | null> {
   try {
     return JSON.parse(await readFile(STARKEEP_CONFIG_PATH, "utf8")) as StarkeepConfig;
   } catch {
-    console.warn(`No starkeep-config.json found at ${STARKEEP_CONFIG_PATH} — cloud features disabled`);
+    console.warn(`No config found at ${STARKEEP_CONFIG_PATH} — cloud features disabled`);
     return null;
   }
 }
@@ -262,75 +247,6 @@ async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredent
   };
 }
 
-/**
- * Aurora DSQL client factory that reads STS credentials from the cloud
- * credentials file on each reconnect so rotating tokens are always fresh.
- */
-class CloudCredentialsDsqlClientFactory implements DatabaseClientFactory {
-  private readonly credentialsPath: string;
-
-  constructor() {
-    this.credentialsPath = join(STARKEEP_DIR, "cloud-credentials.json");
-  }
-
-  async createClient(
-    options: AuroraDsqlDatabaseAdapterOptions,
-  ): Promise<DatabaseClient> {
-    const createPgClient = async (): Promise<pg.Client> => {
-      let rawCreds: CloudCredentials;
-      try {
-        rawCreds = JSON.parse(await readFile(this.credentialsPath, "utf8")) as CloudCredentials;
-      } catch {
-        throw new Error("No cloud credentials — sign in to continue");
-      }
-      const signer = new DsqlSigner({
-        hostname: options.hostname,
-        region: options.region,
-        credentials: {
-          accessKeyId: rawCreds.accessKeyId,
-          secretAccessKey: rawCreds.secretAccessKey,
-          sessionToken: rawCreds.sessionToken,
-        },
-      });
-      const token = await signer.getDbConnectAdminAuthToken();
-      const client = new pg.Client({
-        host: options.hostname,
-        port: 5432,
-        database: options.database ?? "postgres",
-        user: "admin",
-        password: token,
-        ssl: { rejectUnauthorized: true },
-      });
-      await client.connect();
-      return client;
-    };
-
-    let inner = await createPgClient();
-
-    return {
-      async query(text, values) {
-        try {
-          const result = await inner.query(text, values);
-          return { rows: result.rows };
-        } catch (err: unknown) {
-          // IAM auth token expired (~15 min) — reconnect with fresh token and retry once
-          const code = (err as { code?: string })?.code;
-          if (code === "28000" || code === "28P01") {
-            await inner.end().catch(() => {});
-            inner = await createPgClient();
-            const result = await inner.query(text, values);
-            return { rows: result.rows };
-          }
-          throw err;
-        }
-      },
-      async end() {
-        await inner.end();
-      },
-    };
-  }
-}
-
 async function main() {
   const databaseAdapter = new SqliteDatabaseAdapter({
     path: join(STARKEEP_DIR, "data.db"),
@@ -342,7 +258,7 @@ async function main() {
     basePath: objectsBasePath,
   });
 
-  // Load cloud config from starkeep-config.json at the repo root
+  // Load cloud config from ~/.starkeep/config.json
   const starkeepConfig = await loadStarkeepConfig();
   const configRegion = starkeepConfig ? regionFromUserPoolId(starkeepConfig.userPoolId) : "";
   if (starkeepConfig) {
@@ -387,7 +303,7 @@ async function main() {
     );
   }
 
-  // S3: use starkeep-config.json values when available, otherwise fall back to env vars
+  // S3: use ~/.starkeep/config.json values when available, otherwise fall back to env vars
   let remoteAdapter: ObjectStorageAdapter | null = null;
   if (starkeepConfig?.s3Bucket) {
     const credentialProvider = await makeCloudCredentialProvider();
@@ -416,22 +332,6 @@ async function main() {
     }
   }
 
-  // Aurora DSQL remote database: initialized from cloud config when available
-  let remoteDatabaseAdapter: DatabaseAdapter | null = null;
-  if (starkeepConfig?.auroraEndpoint) {
-    remoteDatabaseAdapter = new AuroraDsqlDatabaseAdapter(
-      {
-        hostname: starkeepConfig.auroraEndpoint,
-        region: starkeepConfig.s3Region ?? configRegion,
-      },
-      new CloudCredentialsDsqlClientFactory(),
-    );
-    await remoteDatabaseAdapter.init().catch((err: Error) =>
-      console.error("Aurora DSQL init failed (non-fatal):", err.message),
-    );
-    console.log("Remote Aurora DSQL adapter initialized from cloud config");
-  }
-
   // App identities are stored in shared_app_registry; populated by the
   // installer (POST /admin/apps/install). No startup-time auto-discovery —
   // apps appear only after going through install.
@@ -442,18 +342,11 @@ async function main() {
   // state store, which share the records DB file.
   await databaseAdapter.init();
 
-  const syncTransport = CLOUD_URL
-    ? createHttpSyncTransport({
-        baseUrl: CLOUD_URL,
-        getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
-      })
-    : undefined;
-  const syncRemoteStorage: ObjectStorageAdapter | undefined = CLOUD_URL
-    ? new HttpObjectStorageAdapter({
-        baseUrl: `${CLOUD_URL}/files`,
-        getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
-      })
-    : undefined;
+  // The change log is the shared local-write outbox. The SDK appends to it
+  // on every record write; the supervisor's per-app sync engines each get a
+  // view filtered by originAppId. The state store here is used by the SDK
+  // for HLC clock state (global, one clock per node); per-app pull/push
+  // cursors are owned by the supervisor's per-app adapters around it.
   const syncChangeLog = createSqliteChangeLog({ db: databaseAdapter.getRawDatabase() });
   const syncStateStore = CLOUD_URL
     ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
@@ -481,17 +374,6 @@ async function main() {
     clock,
   });
 
-  async function listAppSyncableFiles() {
-    const namespaces = listAppSyncableNamespaces(localDb);
-    const entries: { key: string }[] = [];
-    for (const ns of namespaces) {
-      if (!ns.filesEnabled) continue;
-      const result = await localAdapter.list(`apps/${ns.appId}/syncable/`);
-      for (const key of result.keys) entries.push({ key });
-    }
-    return entries;
-  }
-
   const sdk = await createStarkeepSdk({
     databaseAdapter,
     objectStorageAdapter: localAdapter,
@@ -503,85 +385,57 @@ async function main() {
     typeRegistrationStore,
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
-    syncTransport,
-    remoteObjectStorageAdapter: syncRemoteStorage,
-    syncChangeLog,
+    changeLog: syncChangeLog,
     syncStateStore,
     getAppSpecific: appSpecificFactory,
-    listAppSyncableFiles,
-    appSyncableSource: { namespaces: namespaceStore, applier: appApplier },
   });
-
-  const syncRuntime = {
-    lastPullAt: null as string | null,
-    lastPushAt: null as string | null,
-    lastError: null as string | null,
-    pullBackoffMs: PULL_INTERVAL_MS,
-    syncPaused: false,
-  };
-
-  let pushTimer: NodeJS.Timeout | null = null;
-  function schedulePush(): void {
-    if (!sdk.sync) return;
-    if (syncRuntime.syncPaused) return;
-    if (pushTimer) return;
-    pushTimer = setTimeout(async () => {
-      pushTimer = null;
-      try {
-        await sdk.sync!.push();
-        syncRuntime.lastPushAt = new Date().toISOString();
-        syncRuntime.lastError = null;
-      } catch (err) {
-        syncRuntime.lastError = (err as Error).message;
-        console.error("push failed:", err);
-      }
-    }, PUSH_DEBOUNCE_MS);
-  }
 
   const sseClients = new Set<import("node:http").ServerResponse>();
   setInterval(() => {
     for (const client of sseClients) client.write(": ping\n\n");
   }, 25_000);
 
-  if (sdk.sync) {
-    sdk.sync.onUpdate((event) => {
-      console.log(`[sync] ${event.eventType} records=${event.recordIds.length}`);
-      if (event.eventType === "local-change-recorded") {
-        schedulePush();
-      }
-      const payload = JSON.stringify(event);
-      for (const client of sseClients) client.write(`data: ${payload}\n\n`);
+  // SSE fan-out: every event on the SDK's unified notifier (writes from
+  // local-data-server, plus pull/conflict events forwarded by the supervisor
+  // below) is broadcast to connected SSE clients.
+  sdk.changeNotifier.subscribe((event) => {
+    console.log(`[sync] ${event.eventType} records=${event.recordIds.length}`);
+    const payload = JSON.stringify(event);
+    for (const client of sseClients) client.write(`data: ${payload}\n\n`);
+  });
+
+  // Sync supervisor: owns N SyncEngine instances, one per installed app.
+  // Without a cloud URL or sync state store there's no sync — leave it null.
+  let supervisor: SyncSupervisor | null = null;
+  if (CLOUD_URL && syncStateStore) {
+    supervisor = createSyncSupervisor({
+      sdk,
+      databaseAdapter,
+      localObjectStorage: localAdapter,
+      localDb: databaseAdapter.getRawDatabase(),
+      cloudUrl: CLOUD_URL,
+      getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
+      listInstalledApps: () =>
+        listAppRegistry(localDb).map((row) => ({
+          appId: row.appId,
+          status: row.status,
+        })),
+      namespaceStore,
+      appApplier,
+      underlyingSyncStateStore: syncStateStore,
+      pullIntervalMs: PULL_INTERVAL_MS,
+      pushDebounceMs: PUSH_DEBOUNCE_MS,
     });
   }
 
-  let pullTimer: NodeJS.Timeout | null = null;
-  async function runPull(): Promise<void> {
-    if (!sdk.sync) return;
-    try {
-      await sdk.sync.pull();
-      syncRuntime.lastPullAt = new Date().toISOString();
-      syncRuntime.lastError = null;
-      syncRuntime.pullBackoffMs = PULL_INTERVAL_MS;
-    } catch (err) {
-      syncRuntime.lastError = (err as Error).message;
-      syncRuntime.pullBackoffMs = Math.min(syncRuntime.pullBackoffMs * 2, 5 * 60 * 1000);
-      console.error("pull failed:", err);
-    }
-    if (!syncRuntime.syncPaused) {
-      pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
-    }
-  }
-  if (sdk.sync) {
-    pullTimer = setTimeout(runPull, PULL_INTERVAL_MS);
-  }
-
-  // Built-in watcher identity: register it in shared_app_registry just like an
-  // external app, so its writes have a valid origin_app_id and so its grants
-  // flow through the same access-control path. No user consent — it's part of
-  // the local-data-server itself.
-  const watcherManifest = {
-    id: "@starkeep/watcher",
-    name: "Local Watcher",
+  // Built-in LDS sync identity: the cloud counterpart to the local-data-server.
+  // All records originated by LDS-built-in features (notably the file watcher)
+  // are stamped with this appId, both in the local change log and on the wire
+  // to cloud-data-server. Its grants flow through the same access-control path
+  // as any other app. No user consent — it's part of the LDS itself.
+  const localDataSyncManifest = {
+    id: LOCAL_DATA_SYNC_APP_ID,
+    name: "Local Data Sync",
     version: "1.0.0",
     tier: "official" as const,
     infraRequirements: {
@@ -589,13 +443,20 @@ async function main() {
         {
           typeId: "*",
           access: "readwrite" as const,
-          rationale: "Built-in file watcher ingests arbitrary files into all shared types.",
+          rationale: "Built-in LDS sync identity ingests arbitrary files into all shared types.",
         },
       ],
       canIngestUnknown: true,
     },
   };
-  const { appId: watcherAppId } = installLocal(localDb, watcherManifest);
+  const { appId: watcherAppId } = installLocal(localDb, localDataSyncManifest);
+
+  // Now that the watcher and any other apps are in the registry, start
+  // per-app sync loops. New installs that happen via /admin/apps/install
+  // should call `supervisor.rescan()` to pick up the new app.
+  if (supervisor) {
+    supervisor.start();
+  }
 
   // File watch manager — monitors local directories and syncs to Starkeep
   const watchManager = createFileWatchManager({
@@ -616,7 +477,7 @@ async function main() {
 
   const server = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Starkeep-App-Id, X-Starkeep-App-Sig");
 
     if (req.method === "OPTIONS") {
@@ -639,8 +500,14 @@ async function main() {
      // installed apps), so they intentionally do not require app HMAC headers.
     // `/data/files/:token` is also exempt — the signed token in the path is
     // the authorization, and the URL is meant to be embeddable (e.g. in <img src>).
-    const APP_AUTH_REQUIRED_PREFIXES = ["/data/", "/sync/", "/app-data/"];
-    const APP_AUTH_EXEMPT_PATTERNS = [/^\/data\/files\/[^/]+$/];
+    const APP_AUTH_REQUIRED_PREFIXES = ["/data/", "/sync/", "/app-data/", "/files/"];
+    // Token-authorized routes: the signed token in the path is the auth.
+    //  - GET /data/files/:token         — bearer read of a single blob
+    //  - PUT /data/files/upload/:token  — bearer write of a single blob
+    const APP_AUTH_EXEMPT_PATTERNS = [
+      /^\/data\/files\/upload\/[^/]+$/,
+      /^\/data\/files\/[^/]+$/,
+    ];
     const requiresAppAuth =
       APP_AUTH_REQUIRED_PREFIXES.some((p) =>
         path === p.replace(/\/$/, "") || path.startsWith(p),
@@ -719,7 +586,7 @@ async function main() {
       if (path === "/auth/login" && req.method === "POST") {
         if (!cognitoConfig) {
           res.writeHead(503);
-          json(res, { error: "No starkeep-config.json found — cannot authenticate" });
+          json(res, { error: "No ~/.starkeep/config.json found — cannot authenticate" });
           return;
         }
         const body = JSON.parse(await readBody(req)) as {
@@ -829,80 +696,74 @@ async function main() {
         return;
       }
 
-      // Sync observability + manual trigger
+      // Sync observability + manual trigger — backed by the supervisor.
       if (path === "/sync/status" && req.method === "GET") {
-        json(res, {
-          enabled: sdk.sync !== null,
-          syncPaused: syncRuntime.syncPaused,
-          cloudUrl: CLOUD_URL ?? null,
-          lastPullAt: syncRuntime.lastPullAt,
-          lastPushAt: syncRuntime.lastPushAt,
-          lastError: syncRuntime.lastError,
-          pullBackoffMs: syncRuntime.pullBackoffMs,
-          conflictCount: sdk.sync ? sdk.sync.getConflicts().length : 0,
-        });
+        if (!supervisor) {
+          json(res, {
+            enabled: false,
+            syncPaused: false,
+            cloudUrl: CLOUD_URL ?? null,
+            perApp: [],
+            conflictCount: 0,
+            lastPullError: null,
+            lastPushError: null,
+            lastPullAt: null,
+            lastPushAt: null,
+            pullBackoffMs: PULL_INTERVAL_MS,
+          });
+          return;
+        }
+        json(res, supervisor.status());
         return;
       }
 
       if (path === "/sync/pause" && req.method === "POST") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           res.writeHead(400);
           json(res, { error: "sync not configured" });
           return;
         }
-        syncRuntime.syncPaused = true;
-        if (pullTimer) { clearTimeout(pullTimer); pullTimer = null; }
-        if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+        supervisor.pause();
         json(res, { ok: true });
         return;
       }
 
       if (path === "/sync/resume" && req.method === "POST") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           res.writeHead(400);
           json(res, { error: "sync not configured" });
           return;
         }
-        syncRuntime.syncPaused = false;
-        sdk.sync.fullSync().then(() => {
-          syncRuntime.lastPullAt = new Date().toISOString();
-          syncRuntime.lastPushAt = new Date().toISOString();
-          syncRuntime.lastError = null;
-          syncRuntime.pullBackoffMs = PULL_INTERVAL_MS;
-        }).catch((err: Error) => {
-          syncRuntime.lastError = err.message;
-          console.error("resume fullSync failed:", err);
-        });
-        pullTimer = setTimeout(runPull, syncRuntime.pullBackoffMs);
+        supervisor.resume().catch((err: Error) =>
+          console.error("resume failed:", err),
+        );
         json(res, { ok: true });
         return;
       }
 
       if (path === "/sync/now" && req.method === "POST") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           res.writeHead(400);
           json(res, { error: "sync not configured" });
           return;
         }
-        const result = await sdk.sync.fullSync();
-        syncRuntime.lastPullAt = new Date().toISOString();
-        syncRuntime.lastPushAt = new Date().toISOString();
+        const result = await supervisor.fullSync();
         json(res, result);
         return;
       }
 
       if (path === "/sync/conflicts" && req.method === "GET") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           json(res, { conflicts: [] });
           return;
         }
-        json(res, { conflicts: sdk.sync.getConflicts() });
+        json(res, { conflicts: supervisor.conflicts() });
         return;
       }
 
       const resolveMatch = path.match(/^\/sync\/conflicts\/([^/]+)\/resolve$/);
       if (resolveMatch && req.method === "POST") {
-        if (!sdk.sync) {
+        if (!supervisor) {
           res.writeHead(400);
           json(res, { error: "sync not configured" });
           return;
@@ -913,11 +774,10 @@ async function main() {
           json(res, { error: 'body must include { keep: "local" | "server" }' });
           return;
         }
-        const record = await sdk.data.resolveConflict(
+        const record = await supervisor.resolveConflict(
           resolveMatch[1]! as any,
           { keep: body.keep },
         );
-        schedulePush();
         json(res, { record });
         return;
       }
@@ -1164,20 +1024,36 @@ async function main() {
         return;
       }
 
-      // POST /data/records — create a record, optionally with a file
-      // Body: JSON { type, payload, fileName?, contentType?, fileBase64?, filePath? }
+      // POST /data/records — create a record from a file.
+      // Two body shapes (in preference order):
+      //   key-ref:  { type, contentType, contentHash, sizeBytes, fileName?, parentId? }
+      //             Bytes already PUT via the presigned upload URL. Server
+      //             verifies the blob is at shared/<type>/<shard>/<hash>.
+      //             The path that scales to large files.
+      //   filePath: { type, contentType, filePath, fileName?, parentId? }
+      //             Bytes live on local disk; SDK ingests by path. Same-machine
+      //             only — legit optimization over the network round trip.
       if (path === "/data/records" && req.method === "POST") {
         const body = await readBody(req);
-        const { type, fileName, contentType, fileBase64, filePath, parentId } = JSON.parse(body);
+        const {
+          type,
+          fileName,
+          contentType,
+          filePath,
+          contentHash,
+          sizeBytes,
+          parentId,
+        } = JSON.parse(body);
         if (!type) {
           res.writeHead(400);
           json(res, { error: "type is required" });
           return;
         }
-        if (!filePath && !fileBase64) {
+        if (!filePath && !contentHash) {
           res.writeHead(400);
           json(res, {
-            error: "filePath or fileBase64 is required — every record must be file-backed",
+            error:
+              "contentHash (key-ref) or filePath is required — PUT bytes via a presigned URL first, then register by content-addressed key",
           });
           return;
         }
@@ -1198,42 +1074,48 @@ async function main() {
         }
 
         let record;
-        let uploadedBuffer: Buffer | null = null;
         const baseInput = { type, ownerId: OWNER_ID, originAppId: appId!, parentId: parentId ?? null };
-        if (filePath) {
+        if (contentHash) {
+          if (!/^[a-f0-9]{64}$/.test(contentHash)) {
+            res.writeHead(400);
+            json(res, { error: "contentHash must be a 64-char lowercase hex sha256" });
+            return;
+          }
+          if (typeof sizeBytes !== "number" || !Number.isFinite(sizeBytes) || sizeBytes < 0) {
+            res.writeHead(400);
+            json(res, { error: "sizeBytes is required and must be a non-negative number" });
+            return;
+          }
+          const expectedKey = dataRecordObjectKey(type, contentHash);
+          const exists = await localAdapter.has(expectedKey);
+          if (!exists) {
+            res.writeHead(409);
+            json(res, {
+              error:
+                "Blob not found at the content-addressed key. PUT it via a presigned URL first.",
+            });
+            return;
+          }
+          record = await sdk.data.putWithExistingBlob(
+            { ...baseInput, originalFilename: fileName ?? null },
+            { contentHash, objectStorageKey: expectedKey, sizeBytes, mimeType: contentType },
+          );
+        } else {
           const resolvedName = fileName ?? (filePath as string).split("/").pop() ?? filePath;
           record = await sdk.data.putWithLocalFile(
             { ...baseInput, originalFilename: resolvedName },
             filePath,
             contentType,
           );
-        } else {
-          uploadedBuffer = Buffer.from(fileBase64, "base64");
-          record = await sdk.data.putWithFile(
-            { ...baseInput, originalFilename: fileName ?? null },
-            uploadedBuffer,
-            contentType,
-          );
         }
 
-        // Dual-write to remote S3 + Aurora DSQL when cloud config is present.
-        // S3 write is awaited so the file is available for presigned URLs immediately
-        // after the response is returned (avoids 404 on the first file-url request).
-        if (remoteAdapter && record.objectStorageKey) {
-          const fileData = uploadedBuffer
-            ?? (await localAdapter.get(record.objectStorageKey).catch(() => null))?.data
-            ?? null;
-          if (fileData) {
-            await remoteAdapter
-              .put(record.objectStorageKey, fileData, { contentType: record.mimeType ?? undefined })
-              .catch((err: Error) => console.error("S3 remote write failed (non-fatal):", err.message));
-          }
-        }
-        if (remoteDatabaseAdapter) {
-          remoteDatabaseAdapter
-            .put(record)
-            .catch((err: Error) => console.error("Aurora DSQL write failed (non-fatal):", err.message));
-        }
+        // Cloud propagation happens via the sync engine, not from here. The
+        // engine pushes record metadata through the per-app sync transport and
+        // then uploads the blob via HttpObjectStorageAdapter against
+        // /apps/<originAppId>/files, where the cloud-data-server assumes the
+        // origin app's role to PUT into S3. That's the only path that
+        // attributes the byte to its originating app, per
+        // roles-and-permissions.md.
 
         json(res, {
           record: {
@@ -1252,6 +1134,97 @@ async function main() {
               : null,
           },
         });
+        return;
+      }
+
+      // POST /files/presign — issue a short-lived URL the caller can PUT to.
+      // Mirrors the cloud-data-server API so a single client code path works
+      // against either backend. Body: { key, contentType? }. Response: { url }.
+      //
+      // Auth: requires the caller's app HMAC (same as any /data/ endpoint).
+      // The issued URL itself is bearer-style: anyone holding it can PUT to
+      // that exact key until it expires.
+      if (path === "/files/presign" && req.method === "POST") {
+        const body = JSON.parse(await readBody(req)) as {
+          key?: string;
+          contentType?: string;
+          expiresIn?: number;
+        };
+        if (!body.key) {
+          res.writeHead(400);
+          json(res, { error: "key is required" });
+          return;
+        }
+        // Extract typeId from the canonical shared/<typeId>/<shard>/<hash> key
+        // and enforce that this app can write that type. Mirrors the manifest
+        // check in POST /data/records.
+        const sharedMatch = body.key.match(/^shared\/([^/]+)\//);
+        if (!sharedMatch) {
+          res.writeHead(400);
+          json(res, {
+            error: "presign currently only supports shared/<typeId>/... keys",
+          });
+          return;
+        }
+        const typeId = sharedMatch[1]!;
+        if (!appCanWrite(localDb, appId!, typeId)) {
+          res.writeHead(403);
+          json(res, {
+            error: "AccessDenied",
+            detail: `app "${appId}" has no readwrite grant on type "${typeId}"`,
+          });
+          return;
+        }
+        const mimeType = body.contentType ?? "application/octet-stream";
+        const expiresIn = body.expiresIn ?? 3600;
+        const token = createUploadToken(body.key, mimeType, expiresIn);
+        json(res, {
+          url: `http://127.0.0.1:${PORT}/data/files/upload/${token}`,
+        });
+        return;
+      }
+
+      // PUT /data/files/upload/:token — accept raw bytes for the key encoded
+      // in the upload token. The token is the authorization (issued by the
+      // presign endpoint above), so the request itself doesn't need an app
+      // HMAC — see APP_AUTH_EXEMPT_PATTERNS.
+      const uploadMatch = path.match(/^\/data\/files\/upload\/([^/]+)$/);
+      if (uploadMatch && req.method === "PUT") {
+        const parsed = verifyUploadToken(uploadMatch[1]!);
+        if (!parsed) {
+          res.writeHead(403);
+          json(res, { error: "Invalid or expired upload token" });
+          return;
+        }
+        const fileBuffer = await readBodyBuffer(req);
+        if (fileBuffer.length === 0) {
+          res.writeHead(400);
+          json(res, { error: "Request body must not be empty" });
+          return;
+        }
+        // The token's key is content-addressed (shared/<typeId>/<shard>/<hash>).
+        // Verify the body actually hashes to the expected key, otherwise the
+        // caller is trying to write mismatched bytes under a fixed name.
+        const expectedHash = parsed.key.split("/").pop();
+        const actualHash = createHash("sha256")
+          .update(fileBuffer as unknown as Uint8Array)
+          .digest("hex");
+        if (expectedHash !== actualHash) {
+          res.writeHead(400);
+          json(res, {
+            error: "Upload body hash does not match the key",
+            expected: expectedHash,
+            actual: actualHash,
+          });
+          return;
+        }
+        await localAdapter.put(parsed.key, fileBuffer, { contentType: parsed.mimeType });
+        // Cloud propagation is handled by the sync engine's file-transfer pass
+        // (sync-engine.ts runFileTransferPass), which uploads the blob via the
+        // per-app sync transport so the byte is attributed to the originating
+        // app's role on the cloud side.
+        res.writeHead(204);
+        res.end();
         return;
       }
 
@@ -1291,7 +1264,7 @@ async function main() {
           return;
         }
         const mimeType = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0]!.trim();
-        const hex = createHash("sha256").update(fileBuffer).digest("hex");
+        const hex = createHash("sha256").update(fileBuffer as unknown as Uint8Array).digest("hex");
         const key = dataRecordObjectKey(typeId, hex);
         await localAdapter.put(key, fileBuffer, { contentType: mimeType });
         json(res, { key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
@@ -1377,7 +1350,7 @@ async function main() {
               const mimeType = (req.headers["content-type"] ?? "application/octet-stream")
                 .split(";")[0]!
                 .trim();
-              const result = await view.putFile(subKey, bytes, mimeType);
+              const result = await view.putFile(subKey, bytes as unknown as Uint8Array, mimeType);
               json(res, result);
               return;
             }
@@ -1741,6 +1714,8 @@ async function main() {
         const body = JSON.parse(await readBody(req));
         try {
           const result = installLocal(localDb, body);
+          // Bring up a sync loop for the freshly-installed app.
+          supervisor?.rescan();
           json(res, { appId: result.appId, hmacSecret: result.hmacSecret });
         } catch (err) {
           if (err instanceof ManifestValidationError) {
@@ -1771,6 +1746,8 @@ async function main() {
             await rm(target, { recursive: true, force: true });
           },
         });
+        // Tear down the per-app sync loop.
+        supervisor?.rescan();
         json(res, { ok: true, appId: targetAppId });
         return;
       }
@@ -1824,8 +1801,7 @@ async function main() {
   const shutdown = async () => {
     sseClients.forEach(c => c.end());
     server.close();
-    if (pullTimer) clearTimeout(pullTimer);
-    if (pushTimer) clearTimeout(pushTimer);
+    if (supervisor) await supervisor.stop();
     await watchManager.shutdown();
     await sdk.close();
     process.exit(0);
@@ -1860,7 +1836,7 @@ async function readBodyBufferRaw(req: CachedReq): Promise<Buffer> {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
-      const buf = Buffer.concat(chunks);
+      const buf = Buffer.concat(chunks as unknown as Uint8Array[]);
       req._cachedBody = buf;
       resolve(buf);
     });
@@ -1885,13 +1861,37 @@ function json(res: import("node:http").ServerResponse, body: unknown) {
 /** Encode storage key + mime + expiry into a URL-safe signed token. */
 function createFileToken(key: string, mimeType: string, expiresIn: number): string {
   const expires = Math.floor(Date.now() / 1000) + expiresIn;
-  const payload = `${key}|${mimeType}|${expires}`;
+  const payload = `r|${key}|${mimeType}|${expires}`;
   const sig = createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
   return `${Buffer.from(payload).toString("base64url")}.${sig}`;
 }
 
 /** Verify and decode a file token. Returns null if invalid or expired. */
 function verifyFileToken(token: string): { key: string; mimeType: string } | null {
+  const parsed = decodeSignedToken(token);
+  if (!parsed) return null;
+  if (parsed.scope !== "r") return null;
+  return { key: parsed.key, mimeType: parsed.mimeType };
+}
+
+/** Same shape as createFileToken but scoped to a single PUT upload. */
+function createUploadToken(key: string, mimeType: string, expiresIn: number): string {
+  const expires = Math.floor(Date.now() / 1000) + expiresIn;
+  const payload = `w|${key}|${mimeType}|${expires}`;
+  const sig = createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
+  return `${Buffer.from(payload).toString("base64url")}.${sig}`;
+}
+
+function verifyUploadToken(token: string): { key: string; mimeType: string } | null {
+  const parsed = decodeSignedToken(token);
+  if (!parsed) return null;
+  if (parsed.scope !== "w") return null;
+  return { key: parsed.key, mimeType: parsed.mimeType };
+}
+
+function decodeSignedToken(
+  token: string,
+): { scope: string; key: string; mimeType: string } | null {
   const dotIdx = token.indexOf(".");
   if (dotIdx === -1) return null;
   const payloadB64 = token.slice(0, dotIdx);
@@ -1900,10 +1900,17 @@ function verifyFileToken(token: string): { key: string; mimeType: string } | nul
   const expected = createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
   if (sig !== expected) return null;
   const parts = payload.split("|");
-  if (parts.length !== 3) return null;
-  const expires = parseInt(parts[2]!, 10);
+  // Legacy read-only tokens were `${key}|${mimeType}|${expires}` (3 parts);
+  // new tokens carry a scope prefix making 4. Accept both for the read path.
+  if (parts.length === 3) {
+    const expires = parseInt(parts[2]!, 10);
+    if (Date.now() / 1000 > expires) return null;
+    return { scope: "r", key: parts[0]!, mimeType: parts[1]! };
+  }
+  if (parts.length !== 4) return null;
+  const expires = parseInt(parts[3]!, 10);
   if (Date.now() / 1000 > expires) return null;
-  return { key: parts[0]!, mimeType: parts[1]! };
+  return { scope: parts[0]!, key: parts[1]!, mimeType: parts[2]! };
 }
 
 main().catch((err) => {

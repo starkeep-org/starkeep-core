@@ -14,6 +14,12 @@ export interface APIGatewayEvent {
   queryStringParameters?: Record<string, string>;
 }
 
+// Minimal subset of the Lambda invocation context we rely on. The full type
+// lives in aws-lambda but we don't take a dependency just for one field.
+export interface LambdaContext {
+  invokedFunctionArn: string;
+}
+
 export function ok(body: unknown, status = 200) {
   return {
     statusCode: status,

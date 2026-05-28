@@ -88,6 +88,27 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!s3Res.ok) {
       throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}`);
     }
+
+    // Tell the server the blob has landed so it can eagerly flip matching
+    // PendingFileDownload records to Synced. Best-effort: the server's lazy
+    // reconcile on pull is the correctness-critical path, so a failed confirm
+    // is a warning, not an error — the blob is durably in S3 either way.
+    try {
+      const confirmRes = await this.fetchImpl(`${this.apiBase()}/files/confirm`, {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ key }),
+      });
+      if (!confirmRes.ok) {
+        console.warn(
+          `[http-object-storage] confirm ${key} returned ${confirmRes.status} — relying on lazy reconcile`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[http-object-storage] confirm ${key} failed: ${(err as Error).message} — relying on lazy reconcile`,
+      );
+    }
   }
 
   async get(key: string): Promise<GetResult | null> {

@@ -1,39 +1,64 @@
 #!/usr/bin/env bash
-# Tears down all Starkeep bootstrap resources from AWS, then resets starkeep-config.json.
+# Tears down all Starkeep resources from AWS (apps → cloud-data-server → bootstrap).
+#
+# Calls teardown-cloud-data-server.sh first (which calls teardown-cloud-apps.sh),
+# then removes the bootstrap layer: CloudFormation stack, Pulumi state bucket,
+# SSM passphrase, Cognito pools, and IAM roles/policies.
 #
 # Handles what CloudFormation delete-stack misses:
 #   - Versioned S3 bucket (CF can't delete non-empty buckets)
 #   - Permissions boundary policies attached to roles outside the stack
 #   - Any resources left in ROLLBACK_COMPLETE / partial-delete state
 #
-# Usage: ./teardown-bootstrap.sh [--yes|-y]
+# Usage: ./teardown-bootstrap.sh [--yes|-y] [--prefix <stack-prefix>] [--region <region>]
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/../starkeep-config.json"
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  echo "Error: starkeep-config.json not found at $CONFIG_FILE"
-  exit 1
+STARKEEP_DATA_DIR="${STARKEEP_DATA_DIR:-$HOME/.starkeep}"
+CONFIG_FILE="$STARKEEP_DATA_DIR/config.json"
+
+# ── Parse flags ───────────────────────────────────────────────────────────────
+
+YES=false
+FLAG_PREFIX=""
+FLAG_REGION=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes|-y) YES=true; shift ;;
+    --prefix) FLAG_PREFIX="$2"; shift 2 ;;
+    --region) FLAG_REGION="$2"; shift 2 ;;
+    *) echo "Unknown flag: $1"; exit 1 ;;
+  esac
+done
+
+# ── Load config ───────────────────────────────────────────────────────────────
+
+CONFIG_STACK_PREFIX=""
+USER_POOL_ID=""
+IDENTITY_POOL_ID=""
+
+if [[ -f "$CONFIG_FILE" ]]; then
+  CONFIG_STACK_PREFIX=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('stackPrefix',''))" 2>/dev/null || true)
+  USER_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('userPoolId',''))" 2>/dev/null || true)
+  IDENTITY_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('identityPoolId',''))" 2>/dev/null || true)
 fi
 
-# Parse config
-STACK_PREFIX=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('stackPrefix',''))")
-USER_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('userPoolId',''))")
-IDENTITY_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('identityPoolId',''))")
-
+STACK_PREFIX="${FLAG_PREFIX:-$CONFIG_STACK_PREFIX}"
 if [[ -z "$STACK_PREFIX" ]]; then
-  echo "Error: stackPrefix not found in starkeep-config.json — nothing to tear down."
+  echo "Error: stackPrefix not found in config and --prefix not provided."
+  echo "Usage: $0 [--yes] --prefix <stack-prefix> --region <region>"
   exit 1
 fi
 
 STACK_NAME="${STACK_PREFIX}-bootstrap"
 
-# Resolve region from userPoolId first — it encodes the region authoritatively
-# (e.g. "us-east-2_Xxxxx" -> "us-east-2"). This matches cloud-config.ts's
-# regionFromUserPoolId pattern and avoids drift with `aws configure` defaults.
-if [[ -n "$USER_POOL_ID" ]]; then
+# Resolve region: flag > userPoolId prefix > AWS config
+if [[ -n "$FLAG_REGION" ]]; then
+  REGION="$FLAG_REGION"
+elif [[ -n "$USER_POOL_ID" ]]; then
   REGION="${USER_POOL_ID%%_*}"
 elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
   REGION="$AWS_DEFAULT_REGION"
@@ -42,36 +67,45 @@ elif [[ -n "${AWS_REGION:-}" ]]; then
 elif REGION=$(aws configure get region 2>/dev/null) && [[ -n "$REGION" ]]; then
   : # got it
 else
-  echo "Error: userPoolId not in config and no AWS region configured."
-  echo "Set AWS_DEFAULT_REGION or run 'aws configure set region <region>'."
+  echo "Error: cannot determine region. Supply --region <region> or set AWS_DEFAULT_REGION."
   exit 1
 fi
 
+# Pin every aws subcommand below to the resolved region. The CLI's default
+# region (from ~/.aws/config) may differ from the starkeep config region, and
+# a mismatch silently targets the wrong region.
+export AWS_REGION="$REGION"
+export AWS_DEFAULT_REGION="$REGION"
+
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="${STACK_PREFIX}-pulumi-state-${ACCOUNT_ID}-${REGION}"
+ARTIFACTS_BUCKET="${STACK_PREFIX}-artifacts-${ACCOUNT_ID}-${REGION}"
 SSM_PARAM="/${STACK_PREFIX}/pulumi/passphrase"
 
 # ── Confirmation ────────────────────────────────────────────────────────────
 echo ""
-echo "This will permanently destroy all Starkeep bootstrap resources in AWS:"
+echo "This will permanently destroy ALL Starkeep resources in AWS:"
 echo ""
-echo "  CloudFormation stack : $STACK_NAME  (region: $REGION)"
-echo "  S3 bucket            : $BUCKET"
-echo "  SSM parameter        : $SSM_PARAM"
-echo "  IAM role             : ${STACK_PREFIX}-app-admin-role"
-echo "  IAM role             : ${STACK_PREFIX}-manager-role"
-echo "  IAM policy           : ${STACK_PREFIX}-app-permissions-boundary"
-echo "  IAM policy           : ${STACK_PREFIX}-foundational-permissions-boundary"
-[[ -n "$USER_POOL_ID" ]]      && echo "  Cognito User Pool    : $USER_POOL_ID"
-[[ -n "$IDENTITY_POOL_ID" ]]  && echo "  Cognito Identity Pool: $IDENTITY_POOL_ID"
+echo "  Phase 1 — apps         : all installed apps (photos, etc.)"
+echo "  Phase 2 — cloud-data-server: Lambda, API Gateway, DSQL, S3 app buckets, CUR"
+echo "  Phase 3 — bootstrap    :"
+echo "    CloudFormation stack : $STACK_NAME  (region: $REGION)"
+echo "    S3 bucket            : $BUCKET"
+echo "    S3 bucket            : $ARTIFACTS_BUCKET"
+echo "    SSM parameter        : $SSM_PARAM"
+echo "    IAM role             : ${STACK_PREFIX}-app-admin-role"
+echo "    IAM role             : ${STACK_PREFIX}-manager-role"
+echo "    IAM role             : ${STACK_PREFIX}-install-ddl-role"
+echo "    IAM role             : ${STACK_PREFIX}-install-infra-role"
+echo "    IAM policy           : ${STACK_PREFIX}-app-permissions-boundary"
+echo "    IAM policy           : ${STACK_PREFIX}-foundational-permissions-boundary"
+echo "    IAM policy           : ${STACK_PREFIX}-install-ddl-permissions-boundary"
+echo "    IAM policy           : ${STACK_PREFIX}-install-infra-permissions-boundary"
+[[ -n "$USER_POOL_ID" ]]      && echo "    Cognito User Pool    : $USER_POOL_ID"
+[[ -n "$IDENTITY_POOL_ID" ]]  && echo "    Cognito Identity Pool: $IDENTITY_POOL_ID"
 echo ""
-echo "After all resources are deleted, starkeep-config.json will be reset to {}."
+echo "After all resources are deleted, $CONFIG_FILE will be reset to {}."
 echo ""
-
-YES=false
-for arg in "$@"; do
-  [[ "$arg" == "--yes" || "$arg" == "-y" ]] && YES=true
-done
 
 if [[ "$YES" != "true" ]]; then
   read -r -p "Continue? [y/N] " confirm
@@ -80,6 +114,11 @@ if [[ "$YES" != "true" ]]; then
     exit 0
   fi
 fi
+
+# ── Phase 1 + 2: Cloud apps and cloud-data-server ────────────────────────────
+echo ""
+echo ">>> Running teardown-cloud-data-server.sh (phases 1–2: apps, then cloud-data-server)..."
+"$SCRIPT_DIR/teardown-cloud-data-server.sh" --yes --prefix "$STACK_PREFIX" --region "$REGION"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -215,10 +254,17 @@ PYEOF
   echo "  Deleted."
 }
 
-# ── Step 1: Empty S3 bucket ───────────────────────────────────────────────────
+# ── Step 1: Empty S3 buckets ──────────────────────────────────────────────────
 step "Emptying S3 bucket: $BUCKET"
 if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   empty_versioned_bucket "$BUCKET"
+else
+  skip
+fi
+
+step "Emptying S3 bucket: $ARTIFACTS_BUCKET"
+if aws s3api head-bucket --bucket "$ARTIFACTS_BUCKET" 2>/dev/null; then
+  empty_versioned_bucket "$ARTIFACTS_BUCKET"
 else
   skip
 fi
@@ -238,8 +284,12 @@ fi
 # permissions boundary).
 delete_role "${STACK_PREFIX}-app-admin-role"
 delete_role "${STACK_PREFIX}-manager-role"
+delete_role "${STACK_PREFIX}-install-ddl-role"
+delete_role "${STACK_PREFIX}-install-infra-role"
 delete_managed_policy "${STACK_PREFIX}-app-permissions-boundary"
 delete_managed_policy "${STACK_PREFIX}-foundational-permissions-boundary"
+delete_managed_policy "${STACK_PREFIX}-install-ddl-permissions-boundary"
+delete_managed_policy "${STACK_PREFIX}-install-infra-permissions-boundary"
 
 # ── Step 4: Delete CloudFormation stack ──────────────────────────────────────
 # All resources that CF would trip over are already gone; this is fast and
@@ -257,10 +307,20 @@ else
   skip
 fi
 
-# Delete the bucket itself (should be empty by now)
+# Delete the buckets themselves (should be empty by now). CF stack deletion
+# normally removes them, but if the stack was in CREATE_FAILED / ROLLBACK state
+# the bucket may have been orphaned from the stack — handle that here.
 step "Deleting S3 bucket: $BUCKET"
 if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   aws s3api delete-bucket --bucket "$BUCKET" --region "$REGION"
+  echo "  Deleted."
+else
+  skip
+fi
+
+step "Deleting S3 bucket: $ARTIFACTS_BUCKET"
+if aws s3api head-bucket --bucket "$ARTIFACTS_BUCKET" 2>/dev/null; then
+  aws s3api delete-bucket --bucket "$ARTIFACTS_BUCKET" --region "$REGION"
   echo "  Deleted."
 else
   skip
@@ -291,7 +351,7 @@ if [[ -n "$USER_POOL_ID" ]]; then
 fi
 
 # ── Step 6: Reset config ──────────────────────────────────────────────────────
-step "Resetting starkeep-config.json"
+step "Resetting $CONFIG_FILE"
 python3 -c "
 import json
 with open('$CONFIG_FILE', 'w') as f:

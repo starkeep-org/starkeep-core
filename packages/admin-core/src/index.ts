@@ -12,6 +12,9 @@ export {
   managerPolicyStatements,
   adminAppPolicyStatements,
   appPermissionsBoundaryStatements,
+  foundationalPermissionsBoundaryStatements,
+  installDdlBoundaryStatements,
+  installInfraBoundaryStatements,
   type GenerateBootstrapTemplateInput,
 } from "./bootstrap/index.js";
 

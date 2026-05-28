@@ -8,4 +8,6 @@ export type {
   AppSyncableApplier,
   ScanCapableApplier,
   AppSyncableRowEntry,
+  FileRecordRow,
+  FileRecordsApplier,
 } from "@starkeep/sync-engine";

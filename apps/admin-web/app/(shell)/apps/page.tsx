@@ -4,12 +4,27 @@ import { useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { CommandOutput } from "@/components/CommandOutput";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  readCloudConfig,
+  readCognitoSession,
+  writeCloudCredentials,
+  writeCognitoSession,
+} from "@/lib/cloud-config";
+import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
 
 export default function AppsPage() {
   return (
     <div className="max-w-3xl flex flex-col gap-6">
       <h1 className="text-2xl font-semibold">Apps</h1>
       <LocalAppsSection />
+      <CloudPhotosSection />
     </div>
   );
 }
@@ -351,6 +366,215 @@ function LocalAppsSection() {
         />
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Cloud photos section
+// ---------------------------------------------------------------------------
+
+function CloudPhotosSection() {
+  const [installOpen, setInstallOpen] = useState(false);
+  const [credentials, setCredentials] = useState<STSCredentials | null>(null);
+  const [credError, setCredError] = useState<string | null>(null);
+  const [installed, setInstalled] = useState(false);
+  const [photosUrl, setPhotosUrl] = useState<string | null>(null);
+
+  // Resolve the cloud photos URL from the persisted cloud config so the link
+  // survives a page reload (the install modal shows it once and then closes).
+  // We don't gate this on a per-app "installed" flag — once cloud is set up,
+  // showing the URL is harmless and the link is the answer to "where is my
+  // deployed app?" even before install completes.
+  useEffect(() => {
+    (async () => {
+      const cfg = await readCloudConfig();
+      if (cfg?.apiGatewayUrl) setPhotosUrl(`${cfg.apiGatewayUrl}/apps/photos/`);
+      else setPhotosUrl(null);
+    })();
+  }, [installed]);
+
+  const handleInstall = async () => {
+    setCredError(null);
+    const cfg = await readCloudConfig();
+    if (!cfg) { setCredError("Cloud is not configured. Complete the cloud setup first."); return; }
+
+    const session = await readCognitoSession();
+    if (!session?.refreshToken) { setCredError("Not signed in. Sign in from the dashboard first."); return; }
+
+    let creds: STSCredentials;
+    try {
+      const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
+      creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
+      await writeCloudCredentials(creds);
+      await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
+    } catch (err) {
+      setCredError(err instanceof Error ? err.message : "Failed to get AWS credentials");
+      return;
+    }
+
+    setCredentials({ ...creds, region: cfg.region } as STSCredentials & { region: string });
+    setInstallOpen(true);
+  };
+
+  return (
+    <div className="rounded-lg border p-5 flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold">Photos — cloud install</h2>
+          {installed && (
+            <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+              Installed
+            </Badge>
+          )}
+        </div>
+        {photosUrl && (
+          <a
+            href={photosUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm underline"
+            title={photosUrl}
+          >
+            Open ↗
+          </a>
+        )}
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Deploy the photos app to AWS. Requires cloud infrastructure to be set up and a valid
+        sign-in session.
+      </p>
+      {photosUrl && (
+        <p className="text-xs text-muted-foreground break-all">
+          URL: <a href={photosUrl} target="_blank" rel="noopener noreferrer" className="underline">{photosUrl}</a>
+        </p>
+      )}
+
+      {credError && (
+        <Alert variant="destructive">
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{credError}</AlertDescription>
+        </Alert>
+      )}
+
+      <div className="flex justify-end">
+        <Button size="sm" onClick={handleInstall}>
+          {installed ? "Redeploy" : "Install in cloud"}
+        </Button>
+      </div>
+
+      <CloudPhotosInstallModal
+        opened={installOpen}
+        credentials={credentials}
+        onClose={() => { setInstallOpen(false); setCredentials(null); }}
+        onSuccess={() => setInstalled(true)}
+      />
+    </div>
+  );
+}
+
+function CloudPhotosInstallModal({
+  opened,
+  credentials,
+  onClose,
+  onSuccess,
+}: {
+  opened: boolean;
+  credentials: STSCredentials | null;
+  onClose: () => void;
+  onSuccess?: () => void;
+}) {
+  const [lines, setLines] = useState<string[]>([]);
+  const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
+
+  useEffect(() => {
+    if (!opened || !credentials) return;
+
+    setLines([]);
+    setStatus("running");
+    let aborted = false;
+
+    async function run() {
+      try {
+        const resp = await fetch("/api/apps/photos/cloud-install", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            accessKeyId: credentials!.accessKeyId,
+            secretAccessKey: credentials!.secretAccessKey,
+            sessionToken: credentials!.sessionToken,
+            region: (credentials as STSCredentials & { region?: string }).region ?? "",
+          }),
+        });
+
+        if (!resp.ok || !resp.body) {
+          let errMsg = `${resp.status} ${resp.statusText}`;
+          try {
+            const j = (await resp.json()) as { error?: string };
+            if (j.error) errMsg = j.error;
+          } catch { /* not JSON */ }
+          setLines((l) => [...l, `Error: ${errMsg}`]);
+          setStatus("failure");
+          return;
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done || aborted) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop() ?? "";
+
+          for (const chunk of chunks) {
+            let eventType = "message";
+            let data = "";
+            for (const part of chunk.split("\n")) {
+              if (part.startsWith("event: ")) eventType = part.slice(7);
+              else if (part.startsWith("data: ")) data = part.slice(6);
+            }
+            if (eventType === "done") {
+              setStatus("success");
+              onSuccess?.();
+            } else if (eventType === "error") {
+              try { setLines((l) => [...l, `Error: ${(JSON.parse(data) as { message?: string }).message ?? data}`]); }
+              catch { setLines((l) => [...l, `Error: ${data}`]); }
+              setStatus("failure");
+            } else if (data) {
+              try { setLines((l) => [...l, JSON.parse(data) as string]); }
+              catch { setLines((l) => [...l, data]); }
+            }
+          }
+        }
+      } catch (err) {
+        if (!aborted) {
+          setLines((l) => [...l, `Error: ${err instanceof Error ? err.message : String(err)}`]);
+          setStatus("failure");
+        }
+      }
+    }
+
+    run();
+    return () => { aborted = true; };
+  }, [opened, credentials]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <Dialog open={opened} onOpenChange={(open) => { if (!open && status !== "running") onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Install photos app in cloud</DialogTitle>
+        </DialogHeader>
+        <CommandOutput lines={lines} status={status} />
+        {status !== "running" && (
+          <div className="flex justify-end">
+            <Button variant="outline" onClick={onClose}>Close</Button>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -3,6 +3,8 @@ import { managerPolicyStatements } from "./manager-policy.js";
 import { adminAppPolicyStatements } from "./admin-app-policy.js";
 import { appPermissionsBoundaryStatements } from "./permissions-boundary.js";
 import { foundationalPermissionsBoundaryStatements } from "./foundational-permissions-boundary.js";
+import { installDdlBoundaryStatements } from "./install-ddl-boundary.js";
+import { installInfraBoundaryStatements } from "./install-infra-boundary.js";
 
 export interface GenerateBootstrapTemplateInput {
   stackPrefix?: string;
@@ -39,6 +41,14 @@ export function generateBootstrapTemplate(
   );
   const foundationalBoundaryPolicyYaml = renderStatementsYaml(
     foundationalPermissionsBoundaryStatements(stackPrefix),
+    10,
+  );
+  const installDdlBoundaryPolicyYaml = renderStatementsYaml(
+    installDdlBoundaryStatements(stackPrefix),
+    10,
+  );
+  const installInfraBoundaryPolicyYaml = renderStatementsYaml(
+    installInfraBoundaryStatements(stackPrefix),
     10,
   );
   return `AWSTemplateFormatVersion: '2010-09-09'
@@ -227,12 +237,121 @@ ${managerPolicyYaml}
           Value: !Ref StackPrefix
 
   # ---------------------------------------------------------------------------
+  # Install-DDL Permissions Boundary — ceiling for the install-ddl-role
+  # ---------------------------------------------------------------------------
+  InstallDdlPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '\${StackPrefix}-install-ddl-permissions-boundary'
+      Description: >-
+        Maximum permissions the install-ddl-role may hold. Permits only
+        dsql:DbConnectAdmin (used during app install/uninstall DDL) and
+        explicitly denies all IAM mutations for defense-in-depth.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+${installDdlBoundaryPolicyYaml}
+
+  # ---------------------------------------------------------------------------
+  # Install-DDL Role — the only identity that can connect to DSQL as PG admin.
+  # No standing permissions; Manager attaches a per-app temp policy around DDL.
+  # ---------------------------------------------------------------------------
+  InstallDdlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '\${StackPrefix}-install-ddl-role'
+      Description: >-
+        Dedicated role for running app install/uninstall DDL as DSQL PG admin.
+        Manager temporarily grants dsql:DbConnectAdmin via an inline policy
+        around each install/uninstall; no standing permissions at steady state.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt ManagerRole.Arn
+            Action: sts:AssumeRole
+      PermissionsBoundary: !Ref InstallDdlPermissionsBoundary
+      Tags:
+        - Key: starkeep:managed
+          Value: 'true'
+        - Key: StackPrefix
+          Value: !Ref StackPrefix
+
+  # ---------------------------------------------------------------------------
+  # Install-Infra Permissions Boundary — ceiling for the install-infra-role
+  # ---------------------------------------------------------------------------
+  InstallInfraPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '\${StackPrefix}-install-infra-permissions-boundary'
+      Description: >-
+        Maximum permissions the install-infra-role may hold. Permits per-app
+        Lambda admin, CloudWatch log-group admin, API Gateway v2
+        integration/route admin, Pulumi state bucket access, and PassRole of
+        per-app roles to Lambda. Mutating IAM is denied for defense-in-depth.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+${installInfraBoundaryPolicyYaml}
+
+  # ---------------------------------------------------------------------------
+  # Install-Infra Role — centralized identity that runs per-app Pulumi
+  # provisioning. Manager attaches a temp policy scoped to the app being
+  # installed, then detaches it. No standing permissions at steady state.
+  # ---------------------------------------------------------------------------
+  InstallInfraRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '\${StackPrefix}-install-infra-role'
+      Description: >-
+        Dedicated role for running per-app compute-stack Pulumi provisioning.
+        Manager attaches temp-install-infra-<appId> inline policies for each
+        install/uninstall and detaches them after; no standing permissions.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt ManagerRole.Arn
+            Action: sts:AssumeRole
+      PermissionsBoundary: !Ref InstallInfraPermissionsBoundary
+      Tags:
+        - Key: starkeep:managed
+          Value: 'true'
+        - Key: StackPrefix
+          Value: !Ref StackPrefix
+
+  # ---------------------------------------------------------------------------
   # Pulumi state bucket for per-app stack state
   # ---------------------------------------------------------------------------
   PulumiStateBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub '\${StackPrefix}-pulumi-state-\${AWS::AccountId}-\${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: starkeep:managed
+          Value: 'true'
+        - Key: StackPrefix
+          Value: !Ref StackPrefix
+
+  # ---------------------------------------------------------------------------
+  # Artifacts bucket — deployment-bundle store
+  # ---------------------------------------------------------------------------
+  # Holds each app's compiled Lambda bundle (apps/<appId>/latest/dist.zip).
+  # install-infra uploads here during install; aws.lambda.Function reads from
+  # here at function create/update; install-infra deletes the prefix on
+  # uninstall. Not data-plane — never holds user data.
+  #
+  # Name is suffixed with account+region to keep it globally unique, matching
+  # the PulumiStateBucket pattern. Policies that grant access use a
+  # \`\${StackPrefix}-artifacts-*\` wildcard to absorb the suffix.
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '\${StackPrefix}-artifacts-\${AWS::AccountId}-\${AWS::Region}'
       VersioningConfiguration:
         Status: Enabled
       Tags:
@@ -282,9 +401,21 @@ Outputs:
     Description: ARN of the wider permissions boundary for foundational app roles (cloud-data-server)
     Value: !Ref AppFoundationalPermissionsBoundary
 
+  InstallDdlRoleArn:
+    Description: ARN of the install-DDL role (the only identity that can connect to DSQL as PG admin)
+    Value: !GetAtt InstallDdlRole.Arn
+
+  InstallInfraRoleArn:
+    Description: ARN of the install-infra role (centralized per-app compute provisioning identity)
+    Value: !GetAtt InstallInfraRole.Arn
+
   PulumiStateBucketName:
     Description: S3 bucket for Pulumi per-app stack state
     Value: !Ref PulumiStateBucket
+
+  ArtifactsBucketName:
+    Description: S3 bucket holding compiled Lambda bundles per installed app
+    Value: !Ref ArtifactsBucket
 
   Region:
     Description: AWS region where this stack was deployed

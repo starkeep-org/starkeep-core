@@ -9,18 +9,27 @@
  * admin-app role. The manager role is assumed as the first hop.
  */
 
+import { createHash } from "node:crypto";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import { roleChain, type AwsCredentials } from "./session";
 import {
   createAppRole,
-  attachTempInstallPolicy,
-  detachTempInstallPolicy,
-  attachTempUninstallPolicy,
-  detachTempUninstallPolicy,
+  attachTempInstallInfraPolicy,
+  detachTempInstallInfraPolicy,
+  attachTempUninstallInfraPolicy,
+  detachTempUninstallInfraPolicy,
+  attachTempInstallDdlPolicy,
+  detachTempInstallDdlPolicy,
   deleteAppRole,
+  assertCloudInstallableAppId,
 } from "./iam";
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
-import { putAppKeepFile, uploadAppBundle, deleteAppObjects } from "./s3";
+import {
+  putAppKeepFile,
+  uploadAppBundle,
+  deleteAppFilesObjects,
+  deleteAppArtifactsObjects,
+} from "./s3";
 import {
   installComputeStack,
   uninstallComputeStack,
@@ -45,16 +54,24 @@ export interface InstallerConfig {
   artifactsBucket: string;
   pulumiStateBucket: string;
   apiGatewayId: string;
+  /**
+   * API Gateway execution ARN, used as the source-arn on
+   * aws.lambda.Permission so apigateway.amazonaws.com can invoke per-app
+   * Lambdas. Format: arn:aws:execute-api:<region>:<account>:<apiId>
+   */
+  apiGatewayExecutionArn: string;
   authorizerId: string;
   permissionsBoundaryArn: string;
   foundationalPermissionsBoundaryArn: string;
   managerRoleArn: string;
+  installDdlRoleArn: string;
+  installInfraRoleArn: string;
 }
 
 export interface InstallInput {
   appId: string;
   manifest: AppManifest;
-  zipBuffer: Buffer;
+  zipBuffer?: Buffer;
   version: string;
   config: InstallerConfig;
 }
@@ -91,7 +108,8 @@ async function runStep(
 }
 
 export async function installApp(input: InstallInput): Promise<InstallResult> {
-  const { appId, manifest, zipBuffer, version, config } = input;
+  const { appId, manifest, zipBuffer, config } = input;
+  assertCloudInstallableAppId(appId);
   const ir = manifest.infraRequirements;
   const done = await getCompletedSteps(appId, "install");
 
@@ -114,26 +132,20 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
     });
   });
 
-  await runStep(appId, "install", "attach_temp_install_policy", done, () =>
-    attachTempInstallPolicy(config.stackPrefix, appId, config.accountId, config.region, managerCreds),
+  await runStep(appId, "install", "attach_temp_install_ddl_policy", done, () =>
+    attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
   );
 
-  // App creds: derived fresh (not persisted) — always re-assume on resume
-  const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
-
-  const dsqlOpts: DsqlDdlOptions = {
-    hostname: config.dsqlHostname,
-    region: config.region,
-    stackPrefix: config.stackPrefix,
-    credentials: {
-      accessKeyId: appCreds.accessKeyId,
-      secretAccessKey: appCreds.secretAccessKey,
-      sessionToken: appCreds.sessionToken,
-    },
-  };
-
-  await runStep(appId, "install", "run_dsql_ddl", done, () =>
-    runAppInstallDdl(
+  await runStep(appId, "install", "run_dsql_ddl", done, async () => {
+    const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
+    const dsqlOpts: DsqlDdlOptions = {
+      hostname: config.dsqlHostname,
+      region: config.region,
+      stackPrefix: config.stackPrefix,
+      accountId: config.accountId,
+      credentials: ddlCreds,
+    };
+    await runAppInstallDdl(
       dsqlOpts,
       appId,
       ir.sharedTypeAccess,
@@ -141,38 +153,84 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
       ir.canPromoteFromUnknown,
       ir.appSpecificSyncable.tables,
       ir.appSpecificSyncable.files,
-    ),
+    );
+  });
+
+  await runStep(appId, "install", "detach_temp_install_ddl_policy", done, () =>
+    detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
   );
+
+  // App creds: derived fresh (not persisted) — always re-assume on resume.
+  // The per-app role's runtime policy (attached at createAppRole time) covers
+  // the data-plane writes done by this orchestrator step (put_s3_keep_file).
+  const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
 
   await runStep(appId, "install", "put_s3_keep_file", done, () =>
     putAppKeepFile(config.stackPrefix, appId, config.filesBucket, config.region, appCreds),
   );
 
-  await runStep(appId, "install", "upload_bundle", done, () =>
-    uploadAppBundle(config.stackPrefix, appId, version, config.artifactsBucket, zipBuffer, config.region, appCreds),
-  );
-
   let receipt: InstallReceipt | null = null;
-  if (ir.compute.enabled) {
-    await runStep(appId, "install", "install_compute_stack", done, async () => {
-      const computeCtx: ComputeContext = {
-        stackPrefix: config.stackPrefix,
+  if (zipBuffer || ir.compute.enabled) {
+    // install-infra owns the install-time AWS-provisioning grants (bundle
+    // upload + Pulumi up). Attach the per-app temp policy on install-infra,
+    // run upload + compute stack as install-infra, then detach.
+    await runStep(appId, "install", "attach_temp_install_infra_policy", done, () =>
+      attachTempInstallInfraPolicy(
+        config.stackPrefix,
         appId,
-        appRoleArn,
-        apiGatewayId: config.apiGatewayId,
-        authorizerId: config.authorizerId,
-        region: config.region,
-        accountId: config.accountId,
-        pulumiStateBucket: config.pulumiStateBucket,
-        appCreds,
-      };
-      receipt = await installComputeStack(manifest, computeCtx);
-    });
-  }
+        config.accountId,
+        config.region,
+        managerCreds,
+      ),
+    );
 
-  await runStep(appId, "install", "detach_temp_install_policy", done, () =>
-    detachTempInstallPolicy(config.stackPrefix, appId, managerCreds),
-  );
+    const infraCreds: AwsCredentials = await roleChain([
+      config.managerRoleArn,
+      config.installInfraRoleArn,
+    ]);
+
+    if (zipBuffer) {
+      await runStep(appId, "install", "upload_bundle", done, () =>
+        uploadAppBundle(
+          config.stackPrefix,
+          appId,
+          config.artifactsBucket,
+          zipBuffer,
+          config.region,
+          infraCreds,
+        ),
+      );
+    }
+
+    if (ir.compute.enabled) {
+      await runStep(appId, "install", "install_compute_stack", done, async () => {
+        const bundleHash = zipBuffer
+          ? createHash("sha256").update(zipBuffer).digest("base64")
+          : undefined;
+        const computeCtx: ComputeContext = {
+          stackPrefix: config.stackPrefix,
+          appId,
+          appRoleArn,
+          apiGatewayId: config.apiGatewayId,
+          apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+          authorizerId: config.authorizerId,
+          region: config.region,
+          accountId: config.accountId,
+          pulumiStateBucket: config.pulumiStateBucket,
+          artifactsBucket: config.artifactsBucket,
+          dsqlHostname: config.dsqlHostname,
+          filesBucket: config.filesBucket,
+          infraCreds,
+          bundleHash,
+        };
+        receipt = await installComputeStack(manifest, computeCtx);
+      });
+    }
+
+    await runStep(appId, "install", "detach_temp_install_infra_policy", done, () =>
+      detachTempInstallInfraPolicy(config.stackPrefix, appId, managerCreds),
+    );
+  }
 
   let policyIds: string[] = [];
   await runStep(appId, "install", "create_access_policies", done, async () => {
@@ -194,50 +252,76 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
   const managerCreds = await roleChain([config.managerRoleArn]);
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
 
-  await runStep(appId, "uninstall", "attach_temp_uninstall_policy", done, () =>
-    attachTempUninstallPolicy(config.stackPrefix, appId, config.accountId, config.region, managerCreds),
-  );
-
-  const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
-
   if (ir.compute.enabled) {
+    await runStep(appId, "uninstall", "attach_temp_uninstall_infra_policy", done, () =>
+      attachTempUninstallInfraPolicy(
+        config.stackPrefix,
+        appId,
+        config.accountId,
+        config.region,
+        managerCreds,
+      ),
+    );
+
+    const infraCreds: AwsCredentials = await roleChain([
+      config.managerRoleArn,
+      config.installInfraRoleArn,
+    ]);
+
     await runStep(appId, "uninstall", "uninstall_compute_stack", done, () => {
       const computeCtx: ComputeContext = {
         stackPrefix: config.stackPrefix,
         appId,
         appRoleArn,
         apiGatewayId: config.apiGatewayId,
+        apiGatewayExecutionArn: config.apiGatewayExecutionArn,
         authorizerId: config.authorizerId,
         region: config.region,
         accountId: config.accountId,
         pulumiStateBucket: config.pulumiStateBucket,
-        appCreds,
+        artifactsBucket: config.artifactsBucket,
+        dsqlHostname: config.dsqlHostname,
+        filesBucket: config.filesBucket,
+        infraCreds,
       };
       return uninstallComputeStack(computeCtx);
     });
+
+    await runStep(appId, "uninstall", "delete_s3_artifacts", done, () =>
+      deleteAppArtifactsObjects(appId, config.artifactsBucket, config.region, infraCreds),
+    );
+
+    await runStep(appId, "uninstall", "detach_temp_uninstall_infra_policy", done, () =>
+      detachTempUninstallInfraPolicy(config.stackPrefix, appId, managerCreds),
+    );
   }
 
-  await runStep(appId, "uninstall", "delete_s3_objects", done, () =>
-    deleteAppObjects(appId, config.filesBucket, config.artifactsBucket, config.region, appCreds),
+  // Files-bucket cleanup runs under the app's role (its runtime policy +
+  // permissions boundary scope it to apps/<appId>/*).
+  const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
+
+  await runStep(appId, "uninstall", "delete_s3_files", done, () =>
+    deleteAppFilesObjects(appId, config.filesBucket, config.region, appCreds),
   );
 
-  const dsqlOpts: DsqlDdlOptions = {
-    hostname: config.dsqlHostname,
-    region: config.region,
-    stackPrefix: config.stackPrefix,
-    credentials: {
-      accessKeyId: appCreds.accessKeyId,
-      secretAccessKey: appCreds.secretAccessKey,
-      sessionToken: appCreds.sessionToken,
-    },
-  };
-
-  await runStep(appId, "uninstall", "run_dsql_uninstall_ddl", done, () =>
-    runAppUninstallDdl(dsqlOpts, appId, ir.sharedTypeAccess),
+  await runStep(appId, "uninstall", "attach_temp_install_ddl_policy", done, () =>
+    attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
   );
 
-  await runStep(appId, "uninstall", "detach_temp_uninstall_policy", done, () =>
-    detachTempUninstallPolicy(config.stackPrefix, appId, managerCreds),
+  await runStep(appId, "uninstall", "run_dsql_uninstall_ddl", done, async () => {
+    const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
+    const dsqlOpts: DsqlDdlOptions = {
+      hostname: config.dsqlHostname,
+      region: config.region,
+      stackPrefix: config.stackPrefix,
+      accountId: config.accountId,
+      credentials: ddlCreds,
+    };
+    await runAppUninstallDdl(dsqlOpts, appId, ir.sharedTypeAccess);
+  });
+
+  await runStep(appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>
+    detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
   );
 
   await runStep(appId, "uninstall", "revoke_access_policies", done, () =>

@@ -2,11 +2,12 @@ import {
   compareHLC,
   maxHLC,
   serializeHLC,
+  SyncStatus,
   type AnyRecord,
   type HLCClock,
   type HLCTimestamp,
 } from "@starkeep/core";
-import type { DatabaseAdapter } from "@starkeep/storage-adapter";
+import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type {
   SyncTransport,
   SyncPullRequest,
@@ -21,6 +22,11 @@ import type {
   ScanCapableApplier,
 } from "../types.js";
 import { decidePushAccept } from "../conflict-resolver.js";
+import {
+  countNonTerminal,
+  logNonTerminalCounts,
+  logTransition,
+} from "../observability.js";
 
 export interface InProcessTransportOptions {
   readonly databaseAdapter: DatabaseAdapter;
@@ -33,6 +39,13 @@ export interface InProcessTransportOptions {
     readonly namespaces: AppSyncableNamespaceStore;
     readonly applier: AppSyncableApplier;
   };
+  /**
+   * Object storage backing the records this transport serves. Pull lazily flips
+   * PendingFileDownload records whose blob has landed to Synced, and push
+   * writes incoming records as PendingFileDownload (or Synced if the blob is
+   * already present).
+   */
+  readonly objectStorage: ObjectStorageAdapter;
 }
 
 /**
@@ -48,7 +61,7 @@ export interface InProcessTransportOptions {
 export function createInProcessSyncTransport(
   options: InProcessTransportOptions,
 ): SyncTransport {
-  const { databaseAdapter, clock, appSyncableSource } = options;
+  const { databaseAdapter, clock, appSyncableSource, objectStorage } = options;
 
   return {
     async pullChanges(request: SyncPullRequest): Promise<SyncPullResponse> {
@@ -60,8 +73,27 @@ export function createInProcessSyncTransport(
       const appSyncableRows: AppSyncableRowEntry[] = [];
       let latest: HLCTimestamp = request.sinceTimestamp;
 
-      for (const record of result.records) {
-        if (compareHLC(record.updatedAt, request.sinceTimestamp) <= 0) continue;
+      for (const candidate of result.records) {
+        if (compareHLC(candidate.updatedAt, request.sinceTimestamp) <= 0) continue;
+        let record = candidate;
+        if (
+          record.syncStatus === SyncStatus.PendingFileDownload &&
+          record.objectStorageKey
+        ) {
+          if (await objectStorage.has(record.objectStorageKey)) {
+            record = { ...record, syncStatus: SyncStatus.Synced };
+            await databaseAdapter.put(record);
+            logTransition(
+              "server",
+              record.id,
+              SyncStatus.PendingFileDownload,
+              SyncStatus.Synced,
+              "pull-lazy-reconcile",
+            );
+          }
+        }
+        // Only expose records whose blob is durably here.
+        if (record.syncStatus !== SyncStatus.Synced) continue;
         changes.push(recordToChangeLogEntry(record));
         latest = maxHLC(latest, record.updatedAt);
         if (changes.length >= request.limit) break;
@@ -88,6 +120,13 @@ export function createInProcessSyncTransport(
         }
       }
 
+      try {
+        const counts = await countNonTerminal(databaseAdapter);
+        logNonTerminalCounts("server", counts);
+      } catch (err) {
+        console.warn(`[sync-state] non-terminal count failed: ${(err as Error).message}`);
+      }
+
       return {
         changes,
         appSyncableRows,
@@ -106,12 +145,73 @@ export function createInProcessSyncTransport(
         const current = await databaseAdapter.get(change.recordId);
         const decision = decidePushAccept(current, change);
 
-        if (decision.kind === "accept") {
-          if (change.operation === "delete") {
-            await databaseAdapter.delete(change.recordId);
-          } else {
-            await databaseAdapter.put(change.recordSnapshot);
+        if (decision.kind === "accept" || decision.kind === "accept-noop") {
+          if (decision.kind === "accept") {
+            if (change.operation === "delete") {
+              await databaseAdapter.delete(change.recordId);
+              logTransition(
+                "server",
+                change.recordId,
+                current?.syncStatus ?? null,
+                SyncStatus.Synced,
+                "push-accept-delete",
+              );
+            } else {
+              // Server-side state machine: write as PendingFileDownload until
+              // the blob lands. If the blob is already on the server (re-push
+              // after a successful upload), short-circuit to Synced.
+              const snapshot = change.recordSnapshot;
+              const needsBlob = !!snapshot.objectStorageKey;
+              let nextStatus = needsBlob
+                ? SyncStatus.PendingFileDownload
+                : SyncStatus.Synced;
+              if (
+                needsBlob &&
+                (await objectStorage.has(snapshot.objectStorageKey))
+              ) {
+                nextStatus = SyncStatus.Synced;
+              }
+              await databaseAdapter.put({ ...snapshot, syncStatus: nextStatus });
+              logTransition(
+                "server",
+                change.recordId,
+                current?.syncStatus ?? null,
+                nextStatus,
+                "push-accept-write",
+              );
+            }
+          } else if (current && change.operation !== "delete") {
+            // accept-noop: server already holds this exact revision but its
+            // sync_status may have drifted from blob reality (e.g. an older
+            // server build wrote the client's pending_push verbatim, or a
+            // partial upload left the row in PendingFileDownload after the
+            // blob finally landed). Reconcile against object storage so the
+            // row becomes pullable. Without this, a misrecorded status is
+            // permanent — the matching-revision short-circuit means no future
+            // push will revisit it.
+            const needsBlob = !!current.objectStorageKey;
+            let nextStatus = needsBlob
+              ? SyncStatus.PendingFileDownload
+              : SyncStatus.Synced;
+            if (
+              needsBlob &&
+              (await objectStorage.has(current.objectStorageKey))
+            ) {
+              nextStatus = SyncStatus.Synced;
+            }
+            if (current.syncStatus !== nextStatus) {
+              await databaseAdapter.put({ ...current, syncStatus: nextStatus });
+              logTransition(
+                "server",
+                current.id,
+                current.syncStatus,
+                nextStatus,
+                "push-noop-reconcile",
+              );
+            }
           }
+          // accept-noop: server already has this exact (id, version) — don't
+          // re-apply, but acknowledge so the client advances its state machine.
           accepted.push(change.recordId);
           latest = maxHLC(latest, change.timestamp);
         } else {

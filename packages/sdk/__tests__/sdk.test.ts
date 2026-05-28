@@ -10,7 +10,6 @@ import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,
 } from "@starkeep/storage-adapter";
-import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import {
   type AccessPolicy,
   type AccessPolicyStore,
@@ -53,7 +52,7 @@ function memoryTypeRegistrationStore(): TypeRegistrationStore {
 }
 
 describe("createStarkeepSdk", () => {
-  async function createTestSdk(withSync = false) {
+  async function createTestSdk() {
     const localDatabase = new MockDatabaseAdapter();
     const localObjectStorage = new MockObjectStorageAdapter();
 
@@ -61,21 +60,6 @@ describe("createStarkeepSdk", () => {
       nodeId: "test-node",
       wallClockFunction: () => 1000,
     });
-
-    let syncTransport: Parameters<typeof createStarkeepSdk>[0]["syncTransport"];
-    let remoteObjectStorageAdapter: Parameters<typeof createStarkeepSdk>[0]["remoteObjectStorageAdapter"];
-
-    if (withSync) {
-      const remoteDatabase = new MockDatabaseAdapter();
-      const remoteObjectStorage = new MockObjectStorageAdapter();
-      await remoteDatabase.init();
-      await remoteObjectStorage.init();
-      syncTransport = createInProcessSyncTransport({
-        databaseAdapter: remoteDatabase,
-        clock,
-      });
-      remoteObjectStorageAdapter = remoteObjectStorage;
-    }
 
     const sdk = await createStarkeepSdk({
       databaseAdapter: localDatabase,
@@ -86,8 +70,6 @@ describe("createStarkeepSdk", () => {
       ownerId: "test-owner",
       nodeId: "test-node",
       clock,
-      syncTransport,
-      remoteObjectStorageAdapter,
     });
     return { sdk, localDatabase, localObjectStorage };
   }
@@ -275,31 +257,6 @@ describe("createStarkeepSdk", () => {
       const list = await sdk.typeRegistrations.list();
       expect(list).toHaveLength(1);
       expect(list[0].typeId).toBe("image");
-    });
-  });
-
-  describe("sync operations", () => {
-    it("should be null when no remote adapters configured", async () => {
-      const { sdk } = await createTestSdk(false);
-      expect(sdk.sync).toBeNull();
-    });
-
-    it("should be available when remote adapters configured", async () => {
-      const { sdk } = await createTestSdk(true);
-      expect(sdk.sync).not.toBeNull();
-    });
-
-    it("should sync data between local and remote", async () => {
-      const { sdk } = await createTestSdk(true);
-
-      await sdk.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
-        Buffer.from("x"),
-        "image/jpeg",
-      );
-
-      const result = await sdk.sync!.fullSync();
-      expect(result.pushed).toBeGreaterThanOrEqual(1);
     });
   });
 

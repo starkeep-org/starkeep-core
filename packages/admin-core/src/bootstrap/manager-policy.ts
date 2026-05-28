@@ -70,6 +70,42 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
       Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-app-*`),
     },
     {
+      Sid: "ManagerPutDeleteInstallDdlRolePolicies",
+      Effect: "Allow",
+      Action: [
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        // Enumerating policies on install-ddl-role is needed to sweep any
+        // orphan temp-install-ddl-<appId> left by an interrupted run.
+        "iam:ListRolePolicies",
+      ],
+      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-install-ddl-role`),
+    },
+    {
+      Sid: "ManagerAssumeInstallDdlRole",
+      Effect: "Allow",
+      Action: "sts:AssumeRole",
+      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-install-ddl-role`),
+    },
+    {
+      Sid: "ManagerPutDeleteInstallInfraRolePolicies",
+      Effect: "Allow",
+      Action: [
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+      ],
+      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-install-infra-role`),
+    },
+    {
+      Sid: "ManagerAssumeInstallInfraRole",
+      Effect: "Allow",
+      Action: "sts:AssumeRole",
+      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-install-infra-role`),
+    },
+    {
       Sid: "ManagerGetCallerIdentity",
       Effect: "Allow",
       Action: "sts:GetCallerIdentity",

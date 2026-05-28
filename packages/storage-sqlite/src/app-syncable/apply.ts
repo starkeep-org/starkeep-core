@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { serializeHLC, deserializeHLC } from "@starkeep/core";
-import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier } from "@starkeep/shared-space-api";
+import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, FileRecordRow, FileRecordsApplier } from "@starkeep/shared-space-api";
+import { FILE_RECORDS_TABLE } from "@starkeep/shared-space-api";
 import { appSyncableTableName } from "./namespace.js";
 
 /**
@@ -15,7 +16,7 @@ import { appSyncableTableName } from "./namespace.js";
  * so that the inline-HLC pull path can propagate tombstones to other clients.
  */
 export class SqliteAppSyncableApplier
-  implements AppSyncableApplier, ScanCapableApplier
+  implements AppSyncableApplier, ScanCapableApplier, FileRecordsApplier
 {
   constructor(
     private readonly db: DatabaseSync,
@@ -162,6 +163,49 @@ export class SqliteAppSyncableApplier
     return rows.map((row) => rowToEntry(appId, table, row));
   }
 
+  /**
+   * Scan the reserved `_starkeep_sync_records` table for rows in the given
+   * sync_status set. Excludes soft-deleted rows. Returns an empty array if the
+   * app doesn't have a reserved table (i.e. filesEnabled is false).
+   */
+  async scanFileRecordsByStatus(
+    appId: string,
+    statuses: string[],
+  ): Promise<FileRecordRow[]> {
+    if (statuses.length === 0) return [];
+    const fullName = appSyncableTableName(appId, FILE_RECORDS_TABLE);
+    const placeholders = statuses.map(() => "?").join(", ");
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM ${q(fullName)}
+           WHERE deleted_at IS NULL AND sync_status IN (${placeholders})`,
+        )
+        .all(...(statuses as never[])) as Record<string, unknown>[];
+      return rows.map(rowToFileRecord);
+    } catch {
+      // Table might not exist (filesEnabled=false or app uninstalled).
+      return [];
+    }
+  }
+
+  /**
+   * Update sync_status on a single reserved-table row without touching
+   * `updated_at`. The status field is local-only bookkeeping; bumping
+   * `updated_at` here would re-emit the row to remote replicas and trip the
+   * lazy reconciliation into a loop.
+   */
+  async setFileRecordStatus(
+    appId: string,
+    id: string,
+    status: string,
+  ): Promise<void> {
+    const fullName = appSyncableTableName(appId, FILE_RECORDS_TABLE);
+    this.db
+      .prepare(`UPDATE ${q(fullName)} SET sync_status = ? WHERE id = ?`)
+      .run(status, id);
+  }
+
   /** Support read path from the factory's queryRows. */
   queryRows(
     appId: string,
@@ -185,6 +229,22 @@ function q(name: string): string {
   return `"${name}"`;
 }
 
+function rowToFileRecord(row: Record<string, unknown>): FileRecordRow {
+  return {
+    id: row["id"] as string,
+    sync_status: row["sync_status"] as string,
+    object_storage_key: row["object_storage_key"] as string,
+    content_hash: row["content_hash"] as string,
+    mime_type: row["mime_type"] as string,
+    size_bytes: Number(row["size_bytes"]),
+    original_filename: (row["original_filename"] as string | null) ?? null,
+    origin_app_id: row["origin_app_id"] as string,
+    created_at: row["created_at"] as string,
+    updated_at: row["updated_at"] as string,
+    deleted_at: (row["deleted_at"] as string | null) ?? null,
+  };
+}
+
 function rowToEntry(
   appId: string,
   table: string,
@@ -192,15 +252,14 @@ function rowToEntry(
 ): AppSyncableRowEntry {
   const updatedAtStr = row["updated_at"] as string;
   const deletedAtStr = row["deleted_at"] as string | null | undefined;
-
   const timestamp = deserializeHLC(updatedAtStr);
-  const op = deletedAtStr ? "delete" : "update";
 
-  return {
-    timestamp,
-    appId,
-    table,
-    op,
-    row,
-  };
+  // For wire propagation we emit op="insert" (upsert) for live rows so the
+  // receiver creates the row if it doesn't exist yet. op="update" only
+  // targets existing rows and would silently drop new rows during initial
+  // sync. Tombstones still ride the soft-delete path.
+  if (deletedAtStr) {
+    return { timestamp, appId, table, op: "delete", row };
+  }
+  return { timestamp, appId, table, op: "insert", row };
 }

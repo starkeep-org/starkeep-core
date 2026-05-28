@@ -1047,6 +1047,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolId: null, userPoolClientId: null, identityPoolId: null,
                   accountId: null, permissionsBoundaryArn: null,
                   foundationalPermissionsBoundaryArn: null, managerRoleArn: null,
+                  installDdlRoleArn: null,
                   pulumiStateBucket: null, s3Bucket: null, auroraEndpoint: null,
                   apiGatewayUrl: null, apiGatewayId: null, authorizerId: null,
                 });

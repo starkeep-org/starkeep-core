@@ -87,15 +87,13 @@ describe("HTTP sync transport round-trip", () => {
     });
     const clientADb = new MockDatabaseAdapter();
     const clientALocalObj = new MockObjectStorageAdapter();
-    const clientARemoteObj = new MockObjectStorageAdapter();
     await clientADb.init();
     await clientALocalObj.init();
-    await clientARemoteObj.init();
 
     const engineA = createSyncEngine({
       localDatabaseAdapter: clientADb,
       localObjectStorage: clientALocalObj,
-      remoteObjectStorage: clientARemoteObj,
+      remoteObjectStorage,
       transport: createHttpSyncTransport({ baseUrl }),
       clock: clientAClock,
     });
@@ -105,6 +103,14 @@ describe("HTTP sync transport round-trip", () => {
       clientAClock,
     );
     await clientADb.put(record);
+    // Stage the blob locally so engineA's file-transfer pass can upload it to
+    // shared remote storage — the server only exposes records whose blob has
+    // landed.
+    await clientALocalObj.put(
+      record.objectStorageKey,
+      new TextEncoder().encode("hi"),
+      { contentType: record.mimeType },
+    );
     await engineA.recordChange("create", record, { baseVersion: null });
 
     const pushResult = await engineA.push();
@@ -119,15 +125,13 @@ describe("HTTP sync transport round-trip", () => {
     });
     const clientBDb = new MockDatabaseAdapter();
     const clientBLocalObj = new MockObjectStorageAdapter();
-    const clientBRemoteObj = new MockObjectStorageAdapter();
     await clientBDb.init();
     await clientBLocalObj.init();
-    await clientBRemoteObj.init();
 
     const engineB = createSyncEngine({
       localDatabaseAdapter: clientBDb,
       localObjectStorage: clientBLocalObj,
-      remoteObjectStorage: clientBRemoteObj,
+      remoteObjectStorage,
       transport: createHttpSyncTransport({ baseUrl }),
       clock: clientBClock,
     });

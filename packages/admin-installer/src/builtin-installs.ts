@@ -17,6 +17,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { S3Client, DeleteBucketCommand } from "@aws-sdk/client-s3";
@@ -28,21 +29,29 @@ import {
   CostAndUsageReportServiceClient,
   DeleteReportDefinitionCommand,
 } from "@aws-sdk/client-cost-and-usage-report-service";
+import {
+  LambdaClient,
+  DeleteFunctionCommand,
+} from "@aws-sdk/client-lambda";
 import { roleChain, type AwsCredentials } from "./session";
 import {
   appRoleExists,
   attachTempInstallCloudDataServerPolicy,
   createAppRole,
+  deleteAppRoleWithPolicies,
   detachTempInstallCloudDataServerPolicy,
   updateAppRoleTrustPolicy,
 } from "./iam";
-import { pulumiUpInline } from "./compute-stack";
+import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import {
   logAppRoleSnapshot,
   logCallerIdentity,
 } from "./iam-diagnostics";
+import { LOCAL_DATA_SYNC_APP_ID, assertCloudInstallableAppId } from "./iam";
+import { installApp, uninstallApp, type InstallerConfig } from "./orchestrator";
+import { appManifestSchema } from "@starkeep/admin-manifest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -87,6 +96,7 @@ export interface CloudDataServerInstallOutputs {
   bucketName: string;
   apiGatewayUrl: string;
   apiGatewayId: string;
+  apiGatewayExecutionArn: string;
   authorizerId: string;
   functionArn: string;
   region: string;
@@ -117,6 +127,7 @@ function makeCloudDataServerOrphanCleaner(
 
     const s3 = new S3Client({ region: config.region, credentials });
     const logs = new CloudWatchLogsClient({ region: config.region, credentials });
+    const lambda = new LambdaClient({ region: config.region, credentials });
     // CUR is a global service that only accepts requests to us-east-1.
     const cur = new CostAndUsageReportServiceClient({ region: "us-east-1", credentials });
 
@@ -148,6 +159,16 @@ function makeCloudDataServerOrphanCleaner(
           logs.send(
             new DeleteLogGroupCommand({
               logGroupName: `/aws/lambda/${config.stackPrefix}-app-cloud-data-server-api`,
+            }),
+          ),
+      },
+      {
+        urn: `urn:pulumi:${stackName}::${projectName}::aws:lambda/function:Function::api`,
+        label: `lambda function ${config.stackPrefix}-app-cloud-data-server-api`,
+        cleanup: () =>
+          lambda.send(
+            new DeleteFunctionCommand({
+              FunctionName: `${config.stackPrefix}-app-cloud-data-server-api`,
             }),
           ),
       },
@@ -197,6 +218,8 @@ export async function installCloudDataServer(
   const manifest = loadCloudDataServerManifest();
   const appId = "cloud-data-server";
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
+
+  assertCloudInstallableAppId(appId);
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
@@ -272,12 +295,17 @@ export async function installCloudDataServer(
     // Step 4: Pulumi up — creates DSQL, files bucket, Lambda, API Gateway.
     console.log("Running pulumi up for cloud-data-server…");
     const distZipPath = join(cloudDataServerPackageDir(), "dist.zip");
+    // sourceCodeHash forces Pulumi to detect a Lambda code change on redeploy
+    // even if the on-disk path is unchanged. Mirrors the per-app installer
+    // (pulumi-program.ts) — without it, a fresh dist.zip may not be picked up.
+    const bundleHash = createHash("sha256").update(readFileSync(distZipPath)).digest("base64");
     const program = buildCloudDataServerProgram({
       stackPrefix: config.stackPrefix,
       region: config.region,
       accountId: config.accountId,
       appRoleArn,
       distZipPath,
+      bundleHash,
       userPoolId: config.userPoolId,
       userPoolClientId: config.userPoolClientId,
     });
@@ -289,13 +317,14 @@ export async function installCloudDataServer(
       pulumiStateBucket: config.pulumiStateBucket,
       region: config.region,
       stackPrefix: config.stackPrefix,
-      appCreds,
+      awsCreds: appCreds,
       preCleanupOrphans: makeCloudDataServerOrphanCleaner(config, appCreds),
     });
 
     const auroraHostname = String(outputs.auroraHostname);
     const bucketName = String(outputs.bucketName);
     const apiGatewayId = String(outputs.apiGatewayId);
+    const apiGatewayExecutionArn = String(outputs.apiGatewayExecutionArn);
     const apiGatewayUrl = String(outputs.apiGatewayUrl);
     const authorizerId = String(outputs.authorizerId);
     const functionArn = String(outputs.functionArn);
@@ -342,6 +371,7 @@ export async function installCloudDataServer(
       bucketName,
       apiGatewayUrl,
       apiGatewayId,
+      apiGatewayExecutionArn,
       authorizerId,
       functionArn,
       region,
@@ -354,4 +384,145 @@ export async function installCloudDataServer(
     );
     throw err;
   }
+}
+
+/**
+ * Tear down the cloud-data-server built-in app completely.
+ *
+ * Steps:
+ *   1. Verify the app role exists — if not, there is nothing to do.
+ *   2. Attach the temp-install-cloud-data-server policy (it covers all
+ *      delete-side actions: dsql:DeleteCluster, s3:DeleteBucket, etc.).
+ *   3. Role-chain to the app session.
+ *   4. Run `pulumi destroy` to remove all Pulumi-managed resources (DSQL
+ *      cluster, files bucket, Lambda, API Gateway, CUR report).
+ *   5. Delete all inline policies on the app role, then delete the role.
+ *
+ * Idempotent — safe to re-run if a previous attempt was interrupted.
+ */
+export async function uninstallCloudDataServer(
+  config: CloudDataServerInstallConfig,
+): Promise<void> {
+  const appId = "cloud-data-server";
+  const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
+
+  const managerCreds = await roleChain([config.managerRoleArn]);
+
+  if (!(await appRoleExists(config.stackPrefix, appId, managerCreds))) {
+    console.log(`${config.stackPrefix}-app-${appId}-role not found; nothing to uninstall.`);
+    return;
+  }
+
+  console.log("Attaching temp-install-cloud-data-server policy…");
+  const policyUpdated = await attachTempInstallCloudDataServerPolicy(
+    config.stackPrefix,
+    config.accountId,
+    config.region,
+    managerCreds,
+  );
+
+  if (policyUpdated) {
+    const PROPAGATION_WAIT_MS = 60_000;
+    console.log(
+      `Policy changed — waiting ${PROPAGATION_WAIT_MS / 1000}s for IAM propagation before running Pulumi.`,
+    );
+    await new Promise((r) => setTimeout(r, PROPAGATION_WAIT_MS));
+  }
+
+  const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
+
+  console.log("Running pulumi destroy for cloud-data-server…");
+  await pulumiDestroyInline({
+    stackName: `${config.stackPrefix}-cloud-data-server`,
+    projectName: `${config.stackPrefix}-builtins`,
+    pulumiStateBucket: config.pulumiStateBucket,
+    region: config.region,
+    stackPrefix: config.stackPrefix,
+    awsCreds: appCreds,
+  });
+
+  console.log("Deleting app role…");
+  await deleteAppRoleWithPolicies(config.stackPrefix, appId, managerCreds);
+
+  console.log("cloud-data-server uninstalled.");
+}
+
+/**
+ * Canned manifest for the `local-data-sync` built-in cloud identity.
+ *
+ * The local-data-server has built-in features (notably the file watcher) that
+ * originate shared-type records on behalf of the user. Those records must
+ * round-trip through cloud sync, but LDS itself has no cloud presence — it's a
+ * local process. `local-data-sync` is the cloud-side counterpart: an app role
+ * with write access on the relevant shared types so push requests carrying
+ * `originAppId: "local-data-sync"` can be STS-assumed and authorized.
+ *
+ * Symmetric to cloud-data-server's foundational install: paired built-in
+ * identities, one local and one cloud, that together describe LDS sync.
+ *
+ * No compute, no app-specific syncable tables, no `unknown` ingestion (the
+ * LDS resolves the type locally before write).
+ */
+function loadLocalDataSyncManifest() {
+  return appManifestSchema.parse({
+    id: LOCAL_DATA_SYNC_APP_ID,
+    name: "Local Data Sync",
+    version: "1.0.0",
+    tier: "official",
+    infraRequirements: {
+      sharedTypeAccess: [
+        {
+          typeId: "image",
+          access: "readwrite",
+          rationale: "LDS file watcher ingests image files.",
+        },
+        {
+          typeId: "markdown",
+          access: "readwrite",
+          rationale: "LDS file watcher ingests markdown files.",
+        },
+      ],
+      canIngestUnknown: true,
+    },
+  });
+}
+
+/**
+ * Install (or update) the `local-data-sync` built-in cloud identity.
+ *
+ * Thin wrapper over `installApp` with the canned manifest above. Must be
+ * called after `installCloudDataServer` has provisioned the foundational
+ * infra (DSQL, files bucket, API Gateway, install-ddl / install-infra
+ * roles) — `config` carries those outputs.
+ */
+export async function installLocalDataSync(config: InstallerConfig): Promise<void> {
+  assertCloudInstallableAppId(LOCAL_DATA_SYNC_APP_ID);
+  const manifest = loadLocalDataSyncManifest();
+  console.log(`\nInstalling ${LOCAL_DATA_SYNC_APP_ID}…`);
+  await installApp({
+    appId: LOCAL_DATA_SYNC_APP_ID,
+    manifest,
+    version: manifest.version,
+    config,
+  });
+  console.log(`${LOCAL_DATA_SYNC_APP_ID} installed.`);
+}
+
+/**
+ * Tear down the `local-data-sync` built-in cloud identity. Mirrors
+ * `installLocalDataSync` and is invoked from `uninstallCloudDataServer`
+ * (before the foundational tear-down, so the DSQL cluster still exists).
+ */
+export async function uninstallLocalDataSync(config: InstallerConfig): Promise<void> {
+  const manifest = loadLocalDataSyncManifest();
+  console.log(`\nUninstalling ${LOCAL_DATA_SYNC_APP_ID}…`);
+  // local-data-sync has no compute (it's a cloud-side identity only), so
+  // uninstallApp skips compute teardown and runs only the identity+data
+  // teardown steps.
+  await uninstallApp({
+    appId: LOCAL_DATA_SYNC_APP_ID,
+    manifest,
+    config,
+  });
+  console.log(`${LOCAL_DATA_SYNC_APP_ID} uninstalled.`);
 }

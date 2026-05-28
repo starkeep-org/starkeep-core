@@ -1,19 +1,21 @@
 import { NextResponse } from "next/server";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { REPO_ROOT } from "../../../../src/lib/exec-commands";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
+const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
 
 export async function GET() {
-  const configPath = resolve(REPO_ROOT, "starkeep-config.json");
+  const configPath = join(STARKEEP_DATA_DIR, "config.json");
   if (!existsSync(configPath)) {
-    return NextResponse.json({ error: "starkeep-config.json not found" }, { status: 404 });
+    return NextResponse.json({ error: "~/.starkeep/config.json not found" }, { status: 404 });
   }
 
   let config: Record<string, unknown>;
   try {
     config = JSON.parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
   } catch {
-    return NextResponse.json({ error: "Failed to parse starkeep-config.json" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to parse ~/.starkeep/config.json" }, { status: 500 });
   }
 
   const { s3Bucket, auroraEndpoint, apiGatewayUrl } = config;

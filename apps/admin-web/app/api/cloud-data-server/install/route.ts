@@ -22,13 +22,15 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { createWriteStream, existsSync, readFileSync, type WriteStream } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { NextRequest } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 import { getRegion } from "../../../../src/lib/cloud-config";
 
-const CONFIG_PATH = resolve(REPO_ROOT, "starkeep-config.json");
+const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
 
 // Module-level store for an in-progress install. When the browser suspends
 // (laptop sleep) the SSE connection drops but the child keeps running. A
@@ -56,6 +58,7 @@ interface StarkeepConfig {
   userPoolId: string;
   apiGatewayUrl?: string;
   apiGatewayId?: string;
+  apiGatewayExecutionArn?: string;
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
@@ -83,7 +86,7 @@ export async function POST(req: NextRequest) {
 
   if (!existsSync(CONFIG_PATH)) {
     return new Response(
-      JSON.stringify({ error: `starkeep-config.json not found at ${CONFIG_PATH}` }),
+      JSON.stringify({ error: `~/.starkeep/config.json not found` }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -93,12 +96,23 @@ export async function POST(req: NextRequest) {
     return new Response(
       JSON.stringify({
         error:
-          "starkeep-config.json has no userPoolId — complete the wizard's Stack outputs step first",
+          "~/.starkeep/config.json has no userPoolId — complete the wizard's Stack outputs step first",
       }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
   const region = getRegion(preConfig);
+
+  // TEMP (iam-permission-tests POC): capture two traces during install so
+  // packages/iam-permission-tests can replay every AWS call through
+  // iam-simulate.
+  //   - cds-install.trace: pulumi-aws HTTP traffic (via PULUMI_OPTION_*)
+  //   - cds-install.sdk.trace: Node-side @aws-sdk client calls made by the
+  //     installer itself (IAM CreateRole, STS AssumeRole, DSQL signer, …)
+  // Remove this block, the env vars, and the file-tee in spawnChild when
+  // the POC graduates or is dropped.
+  const traceFilePath = join(STARKEEP_DATA_DIR, "cds-install.trace");
+  const sdkTraceFilePath = join(STARKEEP_DATA_DIR, "cds-install.sdk.trace");
 
   const spawnEnv = {
     ...process.env,
@@ -106,6 +120,12 @@ export async function POST(req: NextRequest) {
     AWS_SECRET_ACCESS_KEY: body.secretAccessKey,
     AWS_SESSION_TOKEN: body.sessionToken,
     AWS_REGION: region,
+    // TEMP (iam-permission-tests POC) — remove with the block above.
+    TF_LOG: "DEBUG",
+    PULUMI_OPTION_LOGFLOW: "true",
+    PULUMI_OPTION_LOGTOSTDERR: "true",
+    PULUMI_OPTION_VERBOSE: "9",
+    IAM_SDK_TRACE_PATH: sdkTraceFilePath,
   };
 
   const encoder = new TextEncoder();
@@ -139,6 +159,7 @@ export async function POST(req: NextRequest) {
             emitEvent("done", {
               apiGatewayUrl: post.apiGatewayUrl,
               apiGatewayId: post.apiGatewayId,
+              apiGatewayExecutionArn: post.apiGatewayExecutionArn,
               authorizerId: post.authorizerId,
               bucketName: post.s3Bucket,
               auroraHostname: post.auroraEndpoint,
@@ -168,6 +189,22 @@ export async function POST(req: NextRequest) {
         );
         runningChild = child;
         runningChildDone = finish;
+
+        // TEMP (iam-permission-tests POC): tee child stdout+stderr to a file
+        // so we have a complete trace after the install regardless of whether
+        // the SSE client stayed connected. Overwrites on each fresh spawn.
+        // Remove with the env-var block in the POST handler when done.
+        let traceFile: WriteStream | null = null;
+        try {
+          traceFile = createWriteStream(traceFilePath, { flags: "w" });
+        } catch (err) {
+          console.warn(`[iam-trace] could not open ${traceFilePath}: ${err}`);
+        }
+        if (traceFile) {
+          child.stdout.pipe(traceFile, { end: false });
+          child.stderr.pipe(traceFile, { end: false });
+          child.on("close", () => traceFile?.end());
+        }
 
         runningChildListeners.set(listenerId, (line) => {
           if (!sawExpiredToken && EXPIRED_TOKEN_SIGNATURES.some((sig) => line.includes(sig))) {

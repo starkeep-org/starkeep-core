@@ -41,6 +41,7 @@ function createTestSetup() {
   const transport = createInProcessSyncTransport({
     databaseAdapter: remoteDatabase,
     clock: localClock,
+    objectStorage: remoteObjectStorage,
   });
 
   const syncEngine = createSyncEngine({
@@ -163,7 +164,10 @@ describe("decidePushAccept (OCC server check)", () => {
     expect(decidePushAccept(null, change).kind).toBe("accept");
   });
 
-  it("rejects create when server already has the record", () => {
+  it("treats create as accept-noop when server already has the exact (id,version)", () => {
+    // Idempotency: a lost ack causes the client to re-push an already-applied
+    // create. Server returns accept-noop so the client can finalize its state
+    // machine without seeing a spurious version mismatch.
     const record = createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
     const change: ChangeLogEntry = {
       changeId: "c1" as StarkeepId,
@@ -173,7 +177,21 @@ describe("decidePushAccept (OCC server check)", () => {
       recordSnapshot: record,
       baseVersion: null,
     };
-    expect(decidePushAccept(record, change).kind).toBe("reject-version-mismatch");
+    expect(decidePushAccept(record, change).kind).toBe("accept-noop");
+  });
+
+  it("rejects create when server has a record at a different version", () => {
+    const record = createDataRecord({ type: "@t/photo", ownerId: "u1", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, clock);
+    const advanced: DataRecord = { ...record, version: 2 };
+    const change: ChangeLogEntry = {
+      changeId: "c1" as StarkeepId,
+      recordId: record.id,
+      operation: "create",
+      timestamp: record.updatedAt,
+      recordSnapshot: record,
+      baseVersion: null,
+    };
+    expect(decidePushAccept(advanced, change).kind).toBe("reject-version-mismatch");
   });
 
   it("accepts update when baseVersion matches server", () => {
@@ -325,6 +343,32 @@ describe("createFileSyncEngine", () => {
     const result = await remoteStorage.get("photo-1.jpg");
     expect(result).not.toBeNull();
   });
+
+  it("declines a concurrent transferFile for the same key", async () => {
+    const fileSyncEngine = createFileSyncEngine();
+    const localStorage = new MockObjectStorageAdapter();
+    const remoteStorage = new MockObjectStorageAdapter();
+    await localStorage.init();
+    await remoteStorage.init();
+    await localStorage.put("photo-1.jpg", new Uint8Array([1, 2, 3]));
+
+    // Kick off the first transfer but don't await it.
+    const first = fileSyncEngine.transferFile(
+      { fileHash: "h", objectStorageKey: "photo-1.jpg", sizeBytes: 3 },
+      localStorage,
+      remoteStorage,
+    );
+    // The second call sees the in-flight set and bails out without doing work.
+    expect(fileSyncEngine.isTransferInFlight("photo-1.jpg")).toBe(true);
+    const second = await fileSyncEngine.transferFile(
+      { fileHash: "h", objectStorageKey: "photo-1.jpg", sizeBytes: 3 },
+      localStorage,
+      remoteStorage,
+    );
+    expect(second).toBe(false);
+    expect(await first).toBe(true);
+    expect(fileSyncEngine.isTransferInFlight("photo-1.jpg")).toBe(false);
+  });
 });
 
 describe("createSyncEngine — OCC round-trip", () => {
@@ -385,20 +429,58 @@ describe("createSyncEngine — OCC round-trip", () => {
     expect(localAfter?.syncStatus).toBe(SyncStatus.Conflict);
   });
 
-  it("pull applies new remote records to local", async () => {
+  it("pull applies new remote records and the file-transfer pass fetches the blob", async () => {
     const setup = createTestSetup();
     await initAll(setup);
-    const { syncEngine, localDatabase, remoteDatabase, remoteClock } = setup;
+    const { syncEngine, localDatabase, remoteDatabase, remoteObjectStorage, localObjectStorage, remoteClock } = setup;
 
-    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock);
+    const remoteRecord: DataRecord = { ...createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock), syncStatus: SyncStatus.Synced };
     await remoteDatabase.put(remoteRecord);
+    // Receiver downloads blobs from remote storage during the file-transfer pass.
+    await remoteObjectStorage.put(remoteRecord.objectStorageKey, new Uint8Array([1, 2, 3, 4]), { contentType: "text/plain" });
 
     const pullResult = await syncEngine.pull();
     expect(pullResult.changes.length).toBeGreaterThan(0);
 
     const localRecord = await localDatabase.get(remoteRecord.id);
     expect(localRecord).not.toBeNull();
+    // After pull + file-transfer pass, the blob is local and status is Synced.
     expect(localRecord?.syncStatus).toBe(SyncStatus.Synced);
+    expect(await localObjectStorage.has(remoteRecord.objectStorageKey)).toBe(true);
+  });
+
+  it("pull leaves the record in PendingFileDownload when the blob is unreachable", async () => {
+    const setup = createTestSetup();
+    await initAll(setup);
+    const { syncEngine, localDatabase, remoteDatabase, remoteClock } = setup;
+
+    const remoteRecord: DataRecord = { ...createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock), syncStatus: SyncStatus.Synced };
+    await remoteDatabase.put(remoteRecord);
+    // Deliberately do NOT put the blob on remote storage.
+
+    await syncEngine.pull();
+
+    const localRecord = await localDatabase.get(remoteRecord.id);
+    expect(localRecord?.syncStatus).toBe(SyncStatus.PendingFileDownload);
+  });
+
+  it("a subsequent file-transfer pass retries the blob and reaches Synced", async () => {
+    const setup = createTestSetup();
+    await initAll(setup);
+    const { syncEngine, localDatabase, remoteDatabase, remoteObjectStorage, remoteClock } = setup;
+
+    const remoteRecord: DataRecord = { ...createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock), syncStatus: SyncStatus.Synced };
+    await remoteDatabase.put(remoteRecord);
+
+    // First pull: blob missing remotely, record stuck in PendingFileDownload.
+    await syncEngine.pull();
+    expect((await localDatabase.get(remoteRecord.id))?.syncStatus).toBe(SyncStatus.PendingFileDownload);
+
+    // Blob arrives upstream; a follow-up pass should pick it up.
+    await remoteObjectStorage.put(remoteRecord.objectStorageKey, new Uint8Array([7, 7, 7]));
+    await syncEngine.runFileTransferPass();
+
+    expect((await localDatabase.get(remoteRecord.id))?.syncStatus).toBe(SyncStatus.Synced);
   });
 
   it("pull flags local-dirty conflict instead of clobbering unpushed change", async () => {
@@ -416,6 +498,7 @@ describe("createSyncEngine — OCC round-trip", () => {
       version: 2,
       updatedAt: remoteClock.now(),
       originalFilename: "remote change",
+      syncStatus: SyncStatus.Synced,
     };
     await remoteDatabase.put(remoteAdvanced);
 
@@ -462,7 +545,7 @@ describe("createSyncEngine — OCC round-trip", () => {
     const listener = vi.fn();
     syncEngine.changeNotifier.subscribe(listener);
 
-    const remoteRecord = createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock);
+    const remoteRecord: DataRecord = { ...createDataRecord({ type: "@t/note", ownerId: "u", originAppId: "@starkeep/sync-engine", contentHash: "sha256:abc", objectStorageKey: "shared/test/ab/abc", mimeType: "text/plain", sizeBytes: 4 }, remoteClock), syncStatus: SyncStatus.Synced };
     await remoteDatabase.put(remoteRecord);
 
     await syncEngine.pull();

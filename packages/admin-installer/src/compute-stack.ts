@@ -12,6 +12,7 @@ import * as pulumi from "@pulumi/pulumi/automation/index.js";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import type { AwsCredentials } from "./session";
 import { buildPulumiProgram } from "./pulumi-program";
+import { retryOnAccessDenied } from "./retry-on-access-denied";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import {
   S3Client,
@@ -48,13 +49,42 @@ async function ensurePulumiCli(): Promise<pulumi.PulumiCommand> {
 export interface ComputeContext {
   stackPrefix: string;
   appId: string;
+  /**
+   * Per-app role ARN. The Pulumi program passes this as the Lambda exec
+   * role; the role itself is created and tagged by Manager before this
+   * context is built.
+   */
   appRoleArn: string;
   apiGatewayId: string;
+  /**
+   * Execution ARN of the shared API Gateway, used as the source-arn on
+   * aws.lambda.Permission so API Gateway is allowed to invoke per-app
+   * Lambdas (replaces the IAM-implicit invoke path which no longer covers
+   * this case under the stripped per-app boundary).
+   */
+  apiGatewayExecutionArn: string;
   authorizerId: string;
   region: string;
   accountId: string;
   pulumiStateBucket: string;
-  appCreds: AwsCredentials;
+  /** Bucket holding apps/<appId>/latest/dist.zip — Lambda code source. */
+  artifactsBucket: string;
+  dsqlHostname: string;
+  filesBucket: string;
+  /**
+   * Base64-encoded SHA-256 of the uploaded dist.zip. Wired to
+   * aws.lambda.Function.sourceCodeHash so Pulumi sees the bundle change
+   * even though s3Key is constant (apps/<appId>/latest/dist.zip).
+   * Optional: not all callers (e.g. uninstall) need to provide it.
+   */
+  bundleHash?: string;
+  /**
+   * install-infra credentials. Per-app Pulumi up/destroy runs as
+   * install-infra (not the per-app role); this carries the install-time
+   * AWS-provisioning power scoped to this app via a temp policy attached
+   * upstream in the orchestrator.
+   */
+  infraCreds: AwsCredentials;
 }
 
 export interface InstallReceipt {
@@ -70,68 +100,19 @@ export interface InstallReceipt {
 export interface PulumiCredsContext {
   stackPrefix: string;
   region: string;
-  appCreds: AwsCredentials;
+  awsCreds: AwsCredentials;
 }
 
-/**
- * Run `fn` with retry on AccessDenied. Used to absorb IAM PutRolePolicy
- * propagation delay after Manager attaches the temp-install policy: AWS
- * docs say propagation can take a couple of minutes worst case, and
- * individual (action, resource) pairs propagate independently — so each
- * fresh action needs its own probe before we hand control to Pulumi.
- *
- * Budget: 12 attempts, exp backoff capped at 10s → ~90s worst case.
- */
-async function retryOnAccessDenied<T>(
-  label: string,
-  fn: () => Promise<T>,
-  opts: { maxAttempts?: number; maxDelayMs?: number } = {},
-): Promise<T> {
-  const maxAttempts = opts.maxAttempts ?? 12;
-  const maxDelayMs = opts.maxDelayMs ?? 10_000;
-  let delay = 1000;
-  const start = Date.now();
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const result = await fn();
-      if (attempt > 1) {
-        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        console.log(`[diag] ${label}: succeeded on attempt ${attempt} after ${elapsed}s`);
-      }
-      return result;
-    } catch (err) {
-      const name = (err as { name?: string })?.name;
-      const message = (err as { message?: string })?.message ?? "";
-      const isAccessDenied =
-        name === "AccessDeniedException" ||
-        name === "AccessDenied" ||
-        message.includes("AccessDenied");
-      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-      if (!isAccessDenied) {
-        console.log(`[diag] ${label}: attempt ${attempt} non-retryable error after ${elapsed}s: ${name ?? "?"}`);
-        throw err;
-      }
-      if (attempt === maxAttempts) {
-        console.log(`[diag] ${label}: gave up after ${attempt} attempts / ${elapsed}s`);
-        throw err;
-      }
-      console.log(
-        `[diag] ${label}: attempt ${attempt} AccessDenied at ${elapsed}s, retrying in ${(delay / 1000).toFixed(1)}s`,
-      );
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, maxDelayMs);
-    }
-  }
-  throw new Error(`unreachable: ${label}`);
-}
+// retryOnAccessDenied lives in ./retry-on-access-denied.ts so dsql-ddl can
+// share it for the dsql:DbConnectAdmin propagation probe.
 
 async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
   const ssm = new SSMClient({
     region: ctx.region,
     credentials: {
-      accessKeyId: ctx.appCreds.accessKeyId,
-      secretAccessKey: ctx.appCreds.secretAccessKey,
-      sessionToken: ctx.appCreds.sessionToken,
+      accessKeyId: ctx.awsCreds.accessKeyId,
+      secretAccessKey: ctx.awsCreds.secretAccessKey,
+      sessionToken: ctx.awsCreds.sessionToken,
     },
   });
 
@@ -170,14 +151,14 @@ async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
 async function probePulumiStateBucket(opts: {
   pulumiStateBucket: string;
   region: string;
-  appCreds: AwsCredentials;
+  awsCreds: AwsCredentials;
 }): Promise<void> {
   const s3 = new S3Client({
     region: opts.region,
     credentials: {
-      accessKeyId: opts.appCreds.accessKeyId,
-      secretAccessKey: opts.appCreds.secretAccessKey,
-      sessionToken: opts.appCreds.sessionToken,
+      accessKeyId: opts.awsCreds.accessKeyId,
+      secretAccessKey: opts.awsCreds.secretAccessKey,
+      sessionToken: opts.awsCreds.sessionToken,
     },
   });
 
@@ -237,7 +218,7 @@ export async function pulumiUpInline(opts: {
   pulumiStateBucket: string;
   region: string;
   stackPrefix: string;
-  appCreds: AwsCredentials;
+  awsCreds: AwsCredentials;
   /** Called after stack selection but before refresh/up, with the set of URNs currently in state. */
   preCleanupOrphans?: (inStateUrns: Set<string>) => Promise<void>;
 }): Promise<Record<string, unknown>> {
@@ -245,13 +226,13 @@ export async function pulumiUpInline(opts: {
     getPulumiPassphrase({
       stackPrefix: opts.stackPrefix,
       region: opts.region,
-      appCreds: opts.appCreds,
+      awsCreds: opts.awsCreds,
     }),
     ensurePulumiCli(),
     probePulumiStateBucket({
       pulumiStateBucket: opts.pulumiStateBucket,
       region: opts.region,
-      appCreds: opts.appCreds,
+      awsCreds: opts.awsCreds,
     }),
   ]);
 
@@ -265,9 +246,9 @@ export async function pulumiUpInline(opts: {
       pulumiCommand,
       workDir: undefined,
       envVars: {
-        AWS_ACCESS_KEY_ID: opts.appCreds.accessKeyId,
-        AWS_SECRET_ACCESS_KEY: opts.appCreds.secretAccessKey,
-        AWS_SESSION_TOKEN: opts.appCreds.sessionToken,
+        AWS_ACCESS_KEY_ID: opts.awsCreds.accessKeyId,
+        AWS_SECRET_ACCESS_KEY: opts.awsCreds.secretAccessKey,
+        AWS_SESSION_TOKEN: opts.awsCreds.sessionToken,
         AWS_REGION: opts.region,
         PULUMI_CONFIG_PASSPHRASE: passphrase,
         PULUMI_BACKEND_URL: `s3://${opts.pulumiStateBucket}`,
@@ -289,15 +270,22 @@ export async function pulumiUpInline(opts: {
     await opts.preCleanupOrphans(inStateUrns);
   }
 
+  // TEMP (iam-permission-tests POC): forward pulumi's stderr to our own
+  // stderr so PULUMI_OPTION_LOGTOSTDERR=true + -v=9 traces (which include
+  // the AWS provider's HTTP requests/responses) reach the install
+  // log-tee in admin-web. Without onError, automation API buffers stderr
+  // internally and only surfaces it on failure. Remove when the POC ends.
+  const onError = (line: string) => process.stderr.write(line);
+
   // Clear any pending operations left by a prior interrupted run before
   // attempting up. refresh is a no-op on a brand-new stack.
   try {
-    await stack.refresh({ onOutput: console.log });
+    await stack.refresh({ onOutput: console.log, onError });
   } catch {
     // Ignore refresh errors (e.g. stack has no state yet).
   }
 
-  const result = await stack.up({ onOutput: console.log });
+  const result = await stack.up({ onOutput: console.log, onError });
 
   const outputs: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(result.outputs)) {
@@ -313,19 +301,19 @@ export async function pulumiDestroyInline(opts: {
   pulumiStateBucket: string;
   region: string;
   stackPrefix: string;
-  appCreds: AwsCredentials;
+  awsCreds: AwsCredentials;
 }): Promise<void> {
   const [passphrase, pulumiCommand] = await Promise.all([
     getPulumiPassphrase({
       stackPrefix: opts.stackPrefix,
       region: opts.region,
-      appCreds: opts.appCreds,
+      awsCreds: opts.awsCreds,
     }),
     ensurePulumiCli(),
     probePulumiStateBucket({
       pulumiStateBucket: opts.pulumiStateBucket,
       region: opts.region,
-      appCreds: opts.appCreds,
+      awsCreds: opts.awsCreds,
     }),
   ]);
 
@@ -341,9 +329,9 @@ export async function pulumiDestroyInline(opts: {
         pulumiCommand,
         workDir: undefined,
         envVars: {
-          AWS_ACCESS_KEY_ID: opts.appCreds.accessKeyId,
-          AWS_SECRET_ACCESS_KEY: opts.appCreds.secretAccessKey,
-          AWS_SESSION_TOKEN: opts.appCreds.sessionToken,
+          AWS_ACCESS_KEY_ID: opts.awsCreds.accessKeyId,
+          AWS_SECRET_ACCESS_KEY: opts.awsCreds.secretAccessKey,
+          AWS_SESSION_TOKEN: opts.awsCreds.sessionToken,
           AWS_REGION: opts.region,
           PULUMI_CONFIG_PASSPHRASE: passphrase,
           PULUMI_BACKEND_URL: `s3://${opts.pulumiStateBucket}`,
@@ -370,7 +358,7 @@ export async function installComputeStack(
     pulumiStateBucket: ctx.pulumiStateBucket,
     region: ctx.region,
     stackPrefix: ctx.stackPrefix,
-    appCreds: ctx.appCreds,
+    awsCreds: ctx.infraCreds,
   });
 
   const functionArns: string[] = [];
@@ -390,6 +378,6 @@ export async function uninstallComputeStack(ctx: ComputeContext): Promise<void> 
     pulumiStateBucket: ctx.pulumiStateBucket,
     region: ctx.region,
     stackPrefix: ctx.stackPrefix,
-    appCreds: ctx.appCreds,
+    awsCreds: ctx.infraCreds,
   });
 }
