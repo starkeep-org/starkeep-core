@@ -315,6 +315,17 @@ export async function runAppUninstallDdl(
       await sql`REVOKE ALL ON ${sql.raw(metaTable)} FROM ${sql.raw(pgRole)}`.execute(db);
     }
 
+    // unknown metadata is granted on install when canPromoteFromUnknown but
+    // is not part of expandedAccess, so the loop above misses it. Revoke
+    // unconditionally — REVOKE on a non-existent grant is a no-op in PG.
+    await sql`REVOKE ALL ON shared.record_unknown_metadata FROM ${sql.raw(pgRole)}`.execute(db);
+
+    // Schema-level USAGE on `shared` is granted on install (line ~157 of the
+    // install DDL). Without this revoke, DROP ROLE trips PG 2BP01
+    // ("privileges for schema shared"). Drop after table-level revokes so
+    // nothing in `shared.*` still depends on the role.
+    await sql`REVOKE USAGE ON SCHEMA shared FROM ${sql.raw(pgRole)}`.execute(db);
+
     await sql`DELETE FROM shared.access_grants WHERE app_id = ${appId}`.execute(db);
     await sql`DELETE FROM shared.app_syncable_namespaces WHERE app_id = ${appId}`.execute(db);
     await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);

@@ -516,6 +516,9 @@ export async function installLocalDataSync(config: InstallerConfig): Promise<voi
 export async function uninstallLocalDataSync(config: InstallerConfig): Promise<void> {
   const manifest = loadLocalDataSyncManifest();
   console.log(`\nUninstalling ${LOCAL_DATA_SYNC_APP_ID}…`);
+  // local-data-sync has no compute (it's a cloud-side identity only), so
+  // uninstallApp skips compute teardown and runs only the identity+data
+  // teardown steps.
   await uninstallApp({
     appId: LOCAL_DATA_SYNC_APP_ID,
     manifest,

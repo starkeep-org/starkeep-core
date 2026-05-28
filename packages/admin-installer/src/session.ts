@@ -16,14 +16,15 @@ export interface AwsCredentials {
 
 /**
  * IAM is eventually consistent: a freshly-created role's trust policy can
- * take several seconds to propagate, during which AssumeRole returns
- * AccessDenied with a "not authorized" message. Retry that specific failure
- * mode with bounded backoff (~30s total worst case). Other failures throw
- * immediately so a real policy bug isn't masked.
+ * take 30–90s to propagate, during which AssumeRole returns AccessDenied
+ * with a "not authorized" message. Retry that specific failure mode with
+ * bounded backoff. Worst-case total: ~3 minutes (~30 attempts × 10s cap),
+ * matching the DSQL connect retry budget. Other failures throw immediately
+ * so a real policy bug isn't masked.
  */
-const ASSUME_ROLE_MAX_ATTEMPTS = 8;
+const ASSUME_ROLE_MAX_ATTEMPTS = 30;
 const ASSUME_ROLE_INITIAL_DELAY_MS = 1000;
-const ASSUME_ROLE_MAX_DELAY_MS = 5000;
+const ASSUME_ROLE_MAX_DELAY_MS = 10_000;
 
 function isPropagationError(err: unknown): boolean {
   const name = (err as { name?: string })?.name;
@@ -36,6 +37,7 @@ async function assumeRoleWithRetry(
   roleArn: string,
 ): Promise<AwsCredentials> {
   let delay = ASSUME_ROLE_INITIAL_DELAY_MS;
+  const start = Date.now();
   for (let attempt = 1; attempt <= ASSUME_ROLE_MAX_ATTEMPTS; attempt++) {
     try {
       const result = await client.send(
@@ -49,6 +51,10 @@ async function assumeRoleWithRetry(
       if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken) {
         throw new Error(`AssumeRole(${roleArn}) returned incomplete credentials`);
       }
+      if (attempt > 1) {
+        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+        console.log(`[diag] sts:AssumeRole ${roleArn}: succeeded on attempt ${attempt} after ${elapsed}s`);
+      }
       return {
         accessKeyId: c.AccessKeyId,
         secretAccessKey: c.SecretAccessKey,
@@ -57,6 +63,10 @@ async function assumeRoleWithRetry(
       };
     } catch (err) {
       if (!isPropagationError(err) || attempt === ASSUME_ROLE_MAX_ATTEMPTS) throw err;
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+      console.log(
+        `[diag] sts:AssumeRole ${roleArn}: attempt ${attempt} AccessDenied at ${elapsed}s, retrying in ${(delay / 1000).toFixed(1)}s`,
+      );
       await new Promise((r) => setTimeout(r, delay));
       delay = Math.min(delay * 2, ASSUME_ROLE_MAX_DELAY_MS);
     }

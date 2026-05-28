@@ -292,7 +292,7 @@ export function buildCloudDataServerProgram(
     });
 
     const curSourceArn = `arn:aws:cur:us-east-1:${ctx.accountId}:definition/*`;
-    new aws.s3.BucketPolicy(`${ctx.stackPrefix}-billing-policy`, {
+    const billingBucketPolicy = new aws.s3.BucketPolicy(`${ctx.stackPrefix}-billing-policy`, {
       bucket: billingBucket.id,
       policy: pulumi.jsonStringify({
         Version: "2012-10-17",
@@ -339,7 +339,7 @@ export function buildCloudDataServerProgram(
       s3Region: ctx.region,
       refreshClosedReports: true,
       reportVersioning: "OVERWRITE_REPORT",
-    }, { provider: usEast1Provider, dependsOn: [billingBucket] });
+    }, { provider: usEast1Provider, dependsOn: [billingBucket, billingBucketPolicy] });
 
     // -----------------------------------------------------------------------
     // Stack outputs — matches what per-app installs read to attach their

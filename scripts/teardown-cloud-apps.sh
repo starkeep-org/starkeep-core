@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Tears down all per-app installs (photos, etc.) from AWS.
 #
-# Removes, for each discovered app (excluding cloud-data-server):
+# Removes, for each discovered app (excluding bootstrap-owned roles):
 #   - Lambda functions
 #   - CloudWatch log groups
 #   - IAM app role (inline policies removed first)
 #
-# cloud-data-server is NOT touched here — run teardown-cloud-data-server.sh
-# to remove it (which calls this script first).
+# Excluded: cloud-data-server, admin, local-data-sync. The first is torn down
+# by teardown-cloud-data-server.sh (which calls this script first); admin
+# backs the Cognito Identity Pool's authenticated-role attachment; and
+# local-data-sync is a built-in cloud identity owned by cloud-data-server,
+# not a stand-alone app.
 #
 # Config is read from ~/.starkeep/config.json. If the file has been reset
 # to {} (e.g. by teardown-bootstrap.sh), supply --prefix and --region:
@@ -161,7 +164,12 @@ while True:
         #   - admin: created by the bootstrap stack and wired into the Cognito
         #     Identity Pool's authenticated role attachment. Deleting it breaks
         #     bootstrap-user sign-in with "Invalid identity pool configuration".
-        if app_id in ("cloud-data-server", "admin"):
+        #   - local-data-sync: built-in cloud-side identity that pairs with the
+        #     local-data-server (file watcher pushes round-trip through it).
+        #     It's installed/torn down by teardown-cloud-data-server.sh in the
+        #     same step as cloud-data-server, not by per-app teardown. Removing
+        #     it here leaves cloud-data-server in a broken, half-installed state.
+        if app_id in ("cloud-data-server", "admin", "local-data-sync"):
             continue
         tags_r = subprocess.run(
             ["aws", "iam", "list-role-tags", "--role-name", name, "--output", "json"],
@@ -196,7 +204,7 @@ ORPHAN_LAMBDAS=$(aws lambda list-functions \
   --query "Functions[?starts_with(FunctionName, '${STACK_PREFIX}-app-')].FunctionName" \
   --output text 2>/dev/null \
   | tr '\t' '\n' \
-  | grep -Ev "^${STACK_PREFIX}-app-(cloud-data-server|admin)-" \
+  | grep -Ev "^${STACK_PREFIX}-app-(cloud-data-server|admin|local-data-sync)-" \
   || true)
 
 if [[ -n "$ORPHAN_LAMBDAS" ]]; then
@@ -210,7 +218,7 @@ ORPHAN_LOG_GROUPS=$(aws logs describe-log-groups \
   --log-group-name-prefix "/aws/lambda/${STACK_PREFIX}-app-" \
   --query 'logGroups[].logGroupName' --output text 2>/dev/null \
   | tr '\t' '\n' \
-  | grep -Ev "^/aws/lambda/${STACK_PREFIX}-app-(cloud-data-server|admin)-" \
+  | grep -Ev "^/aws/lambda/${STACK_PREFIX}-app-(cloud-data-server|admin|local-data-sync)-" \
   || true)
 
 if [[ -n "$ORPHAN_LOG_GROUPS" ]]; then
