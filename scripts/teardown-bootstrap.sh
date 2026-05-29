@@ -129,7 +129,7 @@ skip() { echo "  Not found, skipping."; }
 empty_versioned_bucket() {
   local bucket="$1"
   python3 << PYEOF
-import json, subprocess, sys
+import json, os, subprocess, sys, tempfile
 
 bucket = "$bucket"
 
@@ -139,10 +139,26 @@ def aws_json(*args):
         raise RuntimeError(r.stderr.strip())
     return json.loads(r.stdout) if r.stdout.strip() else {}
 
-def aws_cmd(*args):
-    r = subprocess.run(["aws"] + list(args), capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip())
+def delete_batch(objs):
+    """Batch-delete up to 1000 objects in one call.
+
+    The payload is written to a temp file and passed as --delete file://...,
+    not as an inline JSON argument. Inline JSON is what produced the
+    'MalformedXML' errors (shell/CLI mangling of the argument); file:// hands
+    the bytes to the CLI verbatim. S3's delete-objects also caps each call at
+    1000 keys, so callers must chunk to that limit."""
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump({"Objects": objs, "Quiet": True}, f)
+        path = f.name
+    try:
+        r = subprocess.run(
+            ["aws", "s3api", "delete-objects", "--bucket", bucket,
+             "--delete", "file://" + path],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip())
+    finally:
+        os.unlink(path)
 
 deleted = 0
 while True:
@@ -152,10 +168,10 @@ while True:
             for o in data.get("Versions", []) + data.get("DeleteMarkers", [])]
     if not objs:
         break
-    payload = json.dumps({"Objects": objs, "Quiet": True})
-    aws_cmd("s3api", "delete-objects", "--bucket", bucket, "--delete", payload)
+    for i in range(0, len(objs), 1000):
+        delete_batch(objs[i:i + 1000])
     deleted += len(objs)
-    print(f"  Deleted {deleted} versions/markers so far...")
+    print(f"  Deleted {deleted} versions/markers so far...", flush=True)
 
 print("  Bucket empty." if deleted == 0 else f"  Emptied {deleted} total versions/markers.")
 PYEOF
