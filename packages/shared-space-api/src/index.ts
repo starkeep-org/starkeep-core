@@ -29,6 +29,8 @@ export type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
+  ScanSinceOptions,
+  ScanSincePage,
   AppSyncableRowEntry,
   FileRecordRow,
   FileRecordsApplier,
