@@ -88,7 +88,7 @@ Shared data is the user's content, typed against a registry that the platform ow
 
 #### Sync semantics for shared data
 
-Records are versioned with optimistic-concurrency-control (`baseVersion`) and synced through a client-side change-log outbox of pending local writes. The cloud has no server-side WAL; pulls synthesize change entries inline by scanning the records table on `updatedAt > cursor`. On the cloud side, sync replays each record under its **originating app's** identity (by re-assuming that app's role inside the cloud-data-server), not under any fallback or broker identity. Records whose origin app has been uninstalled are rejected rather than silently written under the broker's credentials.
+Records are conflict-resolved by last-writer-wins on a Hybrid Logical Clock `updated_at`; there is no `baseVersion`, no OCC, and no change-log outbox. Each side maintains a per-channel `{ [nodeId]: HLC }` watermark map — "what I have seen per replica" — and a single `/sync/exchange` round carries both sides' watermarks and the records each believes the other hasn't seen. Both push and pull synthesize record deltas inline by scanning the records table on `updated_at > watermark[nodeId]`. On the cloud side, the exchange replays each record under its **originating app's** identity (by re-assuming that app's role inside the cloud-data-server), not under any fallback or broker identity. Records whose origin app has been uninstalled are rejected rather than silently written under the broker's credentials.
 
 ### App-specific data
 
@@ -115,9 +115,26 @@ The split between per-type metadata (a property of the shared data plane) and ap
 
 If a property is intrinsic to the bytes, it is per-type metadata. If it is something the app or the user (using an app) decided about the item, it is app-specific data.
 
----
+### Per-record residency (a derived state, not a column)
 
-## How a data operation actually flows
+Records that carry a blob (shared records, and app-records whose app stores files) exist in one of four residency states on a given side. **These states are derived at read time from facts already on disk, not stored in a status column.** This is non-obvious enough to be worth stating explicitly, because the absence of a `sync_status` column has historically misled both humans and code-reading agents into thinking the state isn't tracked.
+
+The four states:
+
+- **Absent** — no row for this id on this side.
+- **Staged** — the metadata row is present and references an `objectStorageKey`, but the blob is not yet present in this side's object storage. The side knows it is *expecting* the file. Equivalently: own-side watermark does not yet cover this record's `updated_at`.
+- **Resident** — the metadata row is present AND (the record carries no blob, OR the blob is present in this side's object storage). Own-side watermark covers this record's `updated_at`.
+- **Tombstoned** — `deletedAt` is set on the metadata row. Treated identically to Resident by the sync protocol; the tombstone propagates the same way an update does. Blob garbage collection is a separate concern not handled by sync.
+
+The state is derived from three persisted facts together:
+
+1. Presence of the metadata row in the appropriate records table.
+2. Presence of the blob in this side's object storage (`localObjectStorage.has(key)`).
+3. This side's own watermark position relative to this record's `updated_at`.
+
+**The watermark is what makes Staged durable across restarts.** If a record's blob hasn't been received, this side's watermark does not advance past that record's `updated_at`. The next exchange round naturally surfaces it again because the gap is still there. No retry queue, no scan-everything reconciliation pass, no `sync_status` column — the watermark gap *is* the work queue. Steady state issues zero storage HEAD requests, because there is no gap to drive any.
+
+Records that never carry a blob (app-syncable rows; shared records would not exist in this category, but app-records may opt out per record) skip the Staged state entirely: row-present implies Resident.
 
 A request from an app's client to read or write a shared item, in steady state, looks like this:
 
@@ -128,7 +145,7 @@ A request from an app's client to read or write a shared item, in steady state, 
 
 For an **app-specific** operation the same shape applies, but the operation targets the app's own schema and filespace: `app_<appId>.<table>` and `apps/<appId>/syncable/...`. No other app can see the result; sync only carries it to other locations where the same app is installed.
 
-For **sync**, the local-data-server pushes record changes (from its client-side change-log) and app-syncable rows (synthesized by scanning per-app tables) to the cloud-data-server, and pulls the symmetric streams back. Per-record origin-app re-attribution happens inside the cloud-data-server, not at the sync API boundary — the local-data-server does not carry AWS credentials and is not the writer of cloud bytes.
+For **sync**, the local-data-server and cloud-data-server perform a single `/sync/exchange` round per channel: each side advertises its per-replica HLC watermarks and ships the records and app-syncable rows it believes the other hasn't seen. Both record changes and app-syncable rows are synthesized inline by scanning the respective tables on `updated_at > watermark[nodeId]` — no client-side change-log outbox is involved. Per-record origin-app re-attribution happens inside the cloud-data-server, not at the sync API boundary — the local-data-server does not carry AWS credentials and is not the writer of cloud bytes.
 
 ---
 

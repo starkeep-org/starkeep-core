@@ -59,7 +59,9 @@ export interface ScanCapableApplier extends AppSyncableApplier {
  * `FILE_RECORDS_COLUMNS` plus the always-appended HLC bookkeeping columns.
  * The sync engine's file-transfer pass derives upload/download decisions
  * from blob presence (`localObjectStorage.has(key)`), not from any stored
- * status — there is no `sync_status` column on this row.
+ * status — there is no `sync_status` column on this row. See
+ * `residency.ts` (`RecordResidency`, `residencyOf`) for the named derived
+ * state, and `system-design.md` "Per-record residency" for the rationale.
  */
 export interface FileRecordRow {
   readonly id: string;
@@ -224,4 +226,11 @@ export interface SyncEngineOptions {
     readonly namespaces: AppSyncableNamespaceStore;
     readonly applier: AppSyncableApplier & ScanCapableApplier & FileRecordsApplier;
   };
+  /**
+   * Max items per exchange round, applied to both the outbound local scan and
+   * the inbound request limit. Default 1000. Tests use small values (e.g. 5)
+   * to exercise multi-round pagination without seeding thousands of records;
+   * production callers may tune this against poll frequency / throughput.
+   */
+  readonly pageLimit?: number;
 }

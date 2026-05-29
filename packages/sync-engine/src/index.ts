@@ -29,6 +29,7 @@ export { createChangeNotifier } from "./change-notifier.js";
 export { advanceWatermark, mergeWatermarks, watermarkFor, selectUnseen } from "./watermarks.js";
 export { createFileSyncEngine } from "./file-sync-engine.js";
 export { createSyncEngine } from "./sync-engine.js";
+export { residencyOf, type RecordResidency } from "./residency.js";
 export { createInProcessSyncTransport } from "./transports/in-process-transport.js";
 export {
   createHttpSyncTransport,
