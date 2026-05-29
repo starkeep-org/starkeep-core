@@ -17,7 +17,7 @@ import {
   listAppRegistry,
   appRegistryRow,
 } from "../../packages/admin-installer/src/local/registry.js";
-import { LOCAL_DATA_SYNC_APP_ID } from "../../packages/admin-installer/src/iam.js";
+import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
   createSqliteAccessPolicyStore,
@@ -32,7 +32,7 @@ import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore } from "../../packages/sync-engine/src/index.js";
-import { createSyncSupervisor, type SyncSupervisor } from "./sync-supervisor.js";
+import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
 import { WILDCARD_EXPANDABLE_TYPE_IDS, CORE_TYPES } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
 import { dataRecordObjectKey } from "../../packages/core/src/storage/object-keys.js";
@@ -421,14 +421,17 @@ async function main() {
     });
   }
 
-  // Built-in LDS sync identity: the cloud counterpart to the local-data-server.
-  // All records originated by LDS-built-in features (notably the file watcher)
-  // are stamped with this appId, both in the local change log and on the wire
-  // to cloud-data-server. Its grants flow through the same access-control path
-  // as any other app. No user consent — it's part of the LDS itself.
-  const localDataSyncManifest = {
-    id: LOCAL_DATA_SYNC_APP_ID,
-    name: "Local Data Sync",
+  // Built-in local file-watcher identity. All records originated by LDS
+  // built-in features (notably the file watcher) are stamped with this appId
+  // as their immutable origin_app_id, both in the local change log and on the
+  // wire. Under Shape A this is a *local-only* identity: its records are shared
+  // records that sync to the cloud via the Starkeep Drive channel under Drive's
+  // role — there is no dedicated cloud write-role for it. Its grants flow
+  // through the same local access-control path as any other app. No user
+  // consent — it's part of the LDS itself.
+  const localWatcherManifest = {
+    id: LOCAL_WATCHER_APP_ID,
+    name: "Local Watcher",
     version: "1.0.0",
     tier: "official" as const,
     infraRequirements: {
@@ -436,17 +439,47 @@ async function main() {
         {
           typeId: "*",
           access: "readwrite" as const,
-          rationale: "Built-in LDS sync identity ingests arbitrary files into all shared types.",
+          rationale: "Built-in local watcher ingests arbitrary files into all shared types.",
         },
       ],
       canIngestUnknown: true,
     },
   };
-  const { appId: watcherAppId } = installLocal(localDb, localDataSyncManifest);
+  const { appId: watcherAppId } = installLocal(localDb, localWatcherManifest);
 
-  // Now that the watcher and any other apps are in the registry, start
-  // per-app sync loops. New installs that happen via /admin/apps/install
-  // should call `supervisor.rescan()` to pick up the new app.
+  // Built-in Starkeep Drive identity (the User-Data-Owner). Installing it
+  // locally writes Drive's hmac_secret + wildcard ("*") grants into the local
+  // shared_app_registry / shared_access_grants tables, so:
+  //   - the always-on Drive sync engine (Shape A) is the legitimate "*"-granted
+  //     identity that scans all shared records for the single Drive channel;
+  //   - the Drive UI authenticates as `starkeep-drive` over HMAC and reads all
+  //     shared data through the same appCanRead path as any app — no bypass.
+  // Mirrors the cloud Drive manifest (metadataWrite so Drive can sync shared
+  // metadata for every type). No cloud credentials live here; the cloud-side
+  // write identity for shared data is always Drive, assumed inside cloud-data-
+  // server based on the channel path.
+  const driveManifest = {
+    id: DRIVE_APP_ID,
+    name: "Starkeep Drive",
+    version: "0.1.0",
+    tier: "official" as const,
+    infraRequirements: {
+      sharedTypeAccess: [
+        {
+          typeId: "*",
+          access: "readwrite" as const,
+          metadataWrite: true,
+          rationale:
+            "Drive owns cross-cutting custody of all shared user data, including syncing shared metadata for every type.",
+        },
+      ],
+    },
+  };
+  installLocal(localDb, driveManifest);
+
+  // Now that the watcher, Drive, and any other apps are in the registry, start
+  // sync loops (the always-on Drive channel + per-app channels). New installs
+  // via /admin/apps/install call `supervisor.rescan()` to pick up the new app.
   if (supervisor) {
     supervisor.start();
   }
@@ -963,6 +996,10 @@ async function main() {
               id: r.id,
               kind: r.kind,
               type: r.type,
+              // Immutable provenance: which app created the record. Surfaced so
+              // the Drive UI can show "this came from photos" even when photos
+              // isn't cloud-installed.
+              origin_app_id: r.originAppId,
               created_at: new Date(r.createdAt.wallTime).toISOString(),
               updated_at: new Date(r.updatedAt.wallTime).toISOString(),
               owner_id: r.ownerId,

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts",
+    "cli:install-drive": "tsx scripts/cli-install-drive.ts",
     "cli:install-photos": "tsx scripts/cli-install-photos.ts",
     "check:temp-vs-boundary": "tsx scripts/check-temp-vs-boundary.ts",
     "debug:dsql-inspect": "tsx scripts/debug-dsql-inspect.ts",

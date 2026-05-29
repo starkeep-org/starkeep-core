@@ -1,23 +1,16 @@
-#!/usr/bin/env tsx
 /**
- * Uninstall the cloud-data-server built-in app and all of its AWS resources.
+ * Install (or re-install / update) the Starkeep Drive built-in app — the
+ * User-Data-Owner identity for all shared-record sync.
  *
- * Runs `pulumi destroy` on the cloud-data-server Pulumi stack (removes the
- * DSQL cluster, files bucket, billing bucket, Lambda, API Gateway, and CUR
- * report definition), then deletes the cloud-data-server IAM role.
+ * Mirrors cli-install-cloud-data-server.ts (same Cognito auth + STS flow) but
+ * delegates to `installDrive`, a thin `installApp` wrapper. Drive has no
+ * compute: the install mints `...-app-starkeep-drive-role` (user-data-owner
+ * boundary), runs the per-app DDL (PG role + wildcard-expanded shared-type
+ * `access_grants`), and registers the app.
  *
- * Use this before re-running the bootstrap installer when you need a clean
- * slate — for example, after tearing down and redeploying the CloudFormation
- * bootstrap stack.
- *
- * Reads ~/.starkeep/config.json (or $STARKEEP_DATA_DIR/config.json). The
- * file must contain at least userPoolId, userPoolClientId, and identityPoolId.
- *
- * Region is NOT stored in the file — it is derived from `userPoolId`.
- *
- * Usage:
- *   pnpm tsx scripts/cli-uninstall-cloud-data-server.ts
- *   pnpm tsx scripts/cli-uninstall-cloud-data-server.ts --non-interactive
+ * Must run AFTER cloud-data-server install, which provisions the foundational
+ * infra (DSQL cluster, files bucket, API Gateway) whose coordinates this script
+ * reads from ~/.starkeep/config.json.
  */
 
 import { readFileSync } from "node:fs";
@@ -35,7 +28,7 @@ import {
   GetCredentialsForIdentityCommand,
 } from "@aws-sdk/client-cognito-identity";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { uninstallCloudDataServer, uninstallDrive } from "../src/builtin-installs";
+import { installDrive } from "../src/builtin-installs";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -48,10 +41,8 @@ interface StarkeepConfig {
   userDataOwnerPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   pulumiStateBucket?: string;
-  // Populated by the install script after a successful run. Needed here so
-  // we can uninstall Starkeep Drive (a per-app-shaped uninstall, which depends
-  // on DSQL/files-bucket existing) before tearing down cloud-data-server's
-  // foundational infra.
+  // Populated by the cloud-data-server install — required here:
+  apiGatewayUrl?: string;
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
@@ -64,7 +55,7 @@ function regionFromUserPoolId(userPoolId: string): string {
   if (parts.length < 2 || !parts[0]) {
     throw new Error(
       `userPoolId "${userPoolId}" is not in the expected format <region>_<id>. ` +
-      `Region is derived from userPoolId, so this prevents the uninstaller from running.`,
+        `Region is derived from userPoolId, so this prevents the installer from running.`,
     );
   }
   return parts[0];
@@ -79,7 +70,7 @@ function loadConfig(): StarkeepConfig {
     raw = readFileSync(CONFIG_PATH, "utf-8");
   } catch {
     console.error(`Error: ~/.starkeep/config.json not found at ${CONFIG_PATH}`);
-    console.error("The config file is required to locate the AWS resources to remove.");
+    console.error("Generate it from admin-web after the bootstrap stack is deployed.");
     process.exit(1);
   }
   try {
@@ -93,23 +84,21 @@ function loadConfig(): StarkeepConfig {
 function prompt(question: string, hidden = false): Promise<string> {
   return new Promise((resolveFn) => {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
-
     if (hidden) {
       process.stdout.write(question);
       process.stdin.setRawMode?.(true);
       let value = "";
       process.stdin.resume();
       process.stdin.setEncoding("utf8");
-
       const onData = (char: string) => {
-        if (char === "\n" || char === "\r" || char === "") {
+        if (char === "\n" || char === "\r" || char === "") {
           process.stdin.setRawMode?.(false);
           process.stdin.pause();
           process.stdin.removeListener("data", onData);
           process.stdout.write("\n");
           rl.close();
           resolveFn(value);
-        } else if (char === "" || char === "\b") {
+        } else if (char === "" || char === "\b") {
           value = value.slice(0, -1);
         } else {
           value += char;
@@ -132,7 +121,6 @@ async function authenticate(
 ): Promise<string> {
   const region = regionFromUserPoolId(config.userPoolId);
   const client = new CognitoIdentityProviderClient({ region });
-
   const initResponse = await client.send(
     new InitiateAuthCommand({
       AuthFlow: "USER_PASSWORD_AUTH",
@@ -140,11 +128,9 @@ async function authenticate(
       AuthParameters: { USERNAME: email, PASSWORD: password },
     }),
   );
-
   if (initResponse.AuthenticationResult?.IdToken) {
     return initResponse.AuthenticationResult.IdToken;
   }
-
   if (initResponse.ChallengeName === "NEW_PASSWORD_REQUIRED") {
     console.log("\nThis account requires a new password (first login).");
     const newPassword = await prompt("New password: ", true);
@@ -153,7 +139,6 @@ async function authenticate(
       console.error("Passwords do not match.");
       process.exit(1);
     }
-
     const challengeResponse = await client.send(
       new RespondToAuthChallengeCommand({
         ChallengeName: "NEW_PASSWORD_REQUIRED",
@@ -162,12 +147,10 @@ async function authenticate(
         ChallengeResponses: { USERNAME: email, NEW_PASSWORD: newPassword },
       }),
     );
-
     const idToken = challengeResponse.AuthenticationResult?.IdToken;
     if (!idToken) throw new Error("No ID token returned after password challenge");
     return idToken;
   }
-
   throw new Error(`Unexpected Cognito challenge: ${initResponse.ChallengeName}`);
 }
 
@@ -179,21 +162,17 @@ async function getSTSCredentials(
   const client = new CognitoIdentityClient({ region });
   const loginKey = `cognito-idp.${region}.amazonaws.com/${config.userPoolId}`;
   const logins = { [loginKey]: idToken };
-
   const idResponse = await client.send(
     new GetIdCommand({ IdentityPoolId: config.identityPoolId, Logins: logins }),
   );
   if (!idResponse.IdentityId) throw new Error("Failed to get Cognito Identity ID");
-
   const credsResponse = await client.send(
     new GetCredentialsForIdentityCommand({ IdentityId: idResponse.IdentityId, Logins: logins }),
   );
-
   const c = credsResponse.Credentials;
   if (!c?.AccessKeyId || !c.SecretKey || !c.SessionToken) {
     throw new Error("Incomplete credentials from Identity Pool");
   }
-
   return {
     accessKeyId: c.AccessKeyId,
     secretAccessKey: c.SecretKey,
@@ -208,6 +187,16 @@ const config = loadConfig();
 const region = regionFromUserPoolId(config.userPoolId);
 const stackPrefix = config.stackPrefix;
 
+// Drive's install depends on cloud-data-server's foundational outputs.
+if (!config.auroraEndpoint || !config.s3Bucket || !config.apiGatewayId || !config.authorizerId) {
+  console.error(
+    "Error: cloud-data-server outputs missing from ~/.starkeep/config.json " +
+      "(auroraEndpoint, s3Bucket, apiGatewayId, authorizerId). " +
+      "Install cloud-data-server first.",
+  );
+  process.exit(1);
+}
+
 if (nonInteractive) {
   const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
   if (!AWS_ACCESS_KEY_ID || !AWS_SECRET_ACCESS_KEY || !AWS_SESSION_TOKEN) {
@@ -219,13 +208,10 @@ if (nonInteractive) {
 } else {
   const email = await prompt("Email: ");
   const password = await prompt("Password: ", true);
-
   console.log("\nAuthenticating with Cognito…");
   const idToken = await authenticate(config, email, password);
-
   console.log("Fetching temporary AWS credentials…");
   const creds = await getSTSCredentials(config, idToken);
-
   process.env.AWS_ACCESS_KEY_ID = creds.accessKeyId;
   process.env.AWS_SECRET_ACCESS_KEY = creds.secretAccessKey;
   process.env.AWS_SESSION_TOKEN = creds.sessionToken;
@@ -258,73 +244,35 @@ const userDataOwnerPermissionsBoundaryArn =
   ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
+const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
+const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
+const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
+const apiGatewayExecutionArn =
+  config.apiGatewayExecutionArn ?? `arn:aws:execute-api:${region}:${accountId}:${config.apiGatewayId}`;
 
-console.log("\nStarkeep cloud-data-server uninstall");
+console.log("\nStarkeep Drive install");
 console.log(`  Region : ${region}`);
-console.log(`  Stage  : ${stackPrefix}`);
+console.log(`  Prefix : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log("");
-console.log("WARNING: This will permanently destroy the DSQL cluster, files bucket,");
-console.log("         billing bucket, Lambda, API Gateway, and the app IAM role.");
-console.log("");
 
-if (!nonInteractive) {
-  const confirm = await prompt('Type "yes" to continue: ');
-  if (confirm.trim() !== "yes") {
-    console.log("Aborted.");
-    process.exit(0);
-  }
-}
-
-// Uninstall Starkeep Drive first (while DSQL/files-bucket still exist), since
-// Drive's role + PG role + access_grants are torn down via the foundational
-// install-ddl/install-infra roles. Skipped if the previous install never
-// recorded its outputs (e.g. it failed before reaching this step), since we
-// can't issue the per-app uninstall without the foundational infra coordinates.
-if (config.apiGatewayId && config.authorizerId && config.s3Bucket && config.auroraEndpoint && config.apiGatewayExecutionArn) {
-  const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
-  const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
-  const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
-  try {
-    await uninstallDrive({
-      stackPrefix,
-      region,
-      accountId,
-      dsqlHostname: config.auroraEndpoint,
-      filesBucket: config.s3Bucket,
-      artifactsBucket,
-      pulumiStateBucket,
-      apiGatewayId: config.apiGatewayId,
-      apiGatewayExecutionArn: config.apiGatewayExecutionArn,
-      authorizerId: config.authorizerId,
-      permissionsBoundaryArn,
-      foundationalPermissionsBoundaryArn,
-      userDataOwnerPermissionsBoundaryArn,
-      managerRoleArn,
-      installDdlRoleArn,
-      installInfraRoleArn,
-    });
-  } catch (err) {
-    console.warn(
-      `Starkeep Drive uninstall failed: ${err instanceof Error ? err.message : String(err)}\n` +
-        "Continuing with cloud-data-server tear-down — manual cleanup of the role may be needed.",
-    );
-  }
-} else {
-  console.log("Skipping Starkeep Drive uninstall (config missing post-install outputs).");
-}
-
-await uninstallCloudDataServer({
+await installDrive({
   stackPrefix,
   region,
   accountId,
+  dsqlHostname: config.auroraEndpoint,
+  filesBucket: config.s3Bucket,
+  artifactsBucket,
+  pulumiStateBucket,
+  apiGatewayId: config.apiGatewayId,
+  apiGatewayExecutionArn,
+  authorizerId: config.authorizerId,
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
   userDataOwnerPermissionsBoundaryArn,
   managerRoleArn,
-  pulumiStateBucket,
-  userPoolId: config.userPoolId,
-  userPoolClientId: config.userPoolClientId,
+  installDdlRoleArn,
+  installInfraRoleArn,
 });
 
-console.log("\nUninstall complete.");
+console.log("\nStarkeep Drive install complete.");

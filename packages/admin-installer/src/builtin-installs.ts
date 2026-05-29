@@ -49,7 +49,7 @@ import {
   logAppRoleSnapshot,
   logCallerIdentity,
 } from "./iam-diagnostics";
-import { LOCAL_DATA_SYNC_APP_ID, assertCloudInstallableAppId } from "./iam";
+import { USER_DATA_OWNER_APP_ID, assertCloudInstallableAppId } from "./iam";
 import { installApp, uninstallApp, type InstallerConfig } from "./orchestrator";
 import { appManifestSchema } from "@starkeep/admin-manifest";
 
@@ -83,6 +83,7 @@ export interface CloudDataServerInstallConfig {
   accountId: string;
   permissionsBoundaryArn: string;
   foundationalPermissionsBoundaryArn: string;
+  userDataOwnerPermissionsBoundaryArn: string;
   managerRoleArn: string;
   pulumiStateBucket: string;
   /** Cognito user-pool resources from the bootstrap CFN stack. */
@@ -232,6 +233,7 @@ export async function installCloudDataServer(
       accountId: config.accountId,
       permissionsBoundaryArn: config.permissionsBoundaryArn,
       foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
+      userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
       sharedTypeAccess: [],
       canIngestUnknown: false,
       canPromoteFromUnknown: false,
@@ -447,82 +449,62 @@ export async function uninstallCloudDataServer(
   console.log("cloud-data-server uninstalled.");
 }
 
-/**
- * Canned manifest for the `local-data-sync` built-in cloud identity.
- *
- * The local-data-server has built-in features (notably the file watcher) that
- * originate shared-type records on behalf of the user. Those records must
- * round-trip through cloud sync, but LDS itself has no cloud presence — it's a
- * local process. `local-data-sync` is the cloud-side counterpart: an app role
- * with write access on the relevant shared types so push requests carrying
- * `originAppId: "local-data-sync"` can be STS-assumed and authorized.
- *
- * Symmetric to cloud-data-server's foundational install: paired built-in
- * identities, one local and one cloud, that together describe LDS sync.
- *
- * No compute, no app-specific syncable tables, no `unknown` ingestion (the
- * LDS resolves the type locally before write).
- */
-function loadLocalDataSyncManifest() {
-  return appManifestSchema.parse({
-    id: LOCAL_DATA_SYNC_APP_ID,
-    name: "Local Data Sync",
-    version: "1.0.0",
-    tier: "official",
-    infraRequirements: {
-      sharedTypeAccess: [
-        {
-          typeId: "image",
-          access: "readwrite",
-          rationale: "LDS file watcher ingests image files.",
-        },
-        {
-          typeId: "markdown",
-          access: "readwrite",
-          rationale: "LDS file watcher ingests markdown files.",
-        },
-      ],
-      canIngestUnknown: true,
-    },
-  });
+/** Path to the Starkeep Drive built-in app directory (manifest only — no compute). */
+function drivePackageDir(): string {
+  // src/ → ../builtin-apps/starkeep-drive/
+  return resolve(__dirname, "..", "builtin-apps", "starkeep-drive");
 }
 
 /**
- * Install (or update) the `local-data-sync` built-in cloud identity.
- *
- * Thin wrapper over `installApp` with the canned manifest above. Must be
- * called after `installCloudDataServer` has provisioned the foundational
- * infra (DSQL, files bucket, API Gateway, install-ddl / install-infra
- * roles) — `config` carries those outputs.
+ * Load and validate the Starkeep Drive manifest. Parsing through
+ * `appManifestSchema` fills the schema defaults (compute disabled, no
+ * app-specific syncable tables) so `installApp` sees a fully-shaped manifest.
  */
-export async function installLocalDataSync(config: InstallerConfig): Promise<void> {
-  assertCloudInstallableAppId(LOCAL_DATA_SYNC_APP_ID);
-  const manifest = loadLocalDataSyncManifest();
-  console.log(`\nInstalling ${LOCAL_DATA_SYNC_APP_ID}…`);
+function loadDriveManifest() {
+  const path = join(drivePackageDir(), "manifest.json");
+  return appManifestSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+}
+
+/**
+ * Install (or update) the Starkeep Drive built-in app — the User-Data-Owner.
+ *
+ * Thin wrapper over `installApp` (not the heavyweight `installCloudDataServer`):
+ * the orchestrator's existing stages
+ * mint `...-app-starkeep-drive-role` with the user-data-owner boundary (routed
+ * by the magic-string check in `createAppRole`), run the per-app DDL (PG role +
+ * wildcard-expanded shared-type `access_grants`), skip compute
+ * (`compute.enabled: false`), and register the app. No Lambda, no API Gateway.
+ *
+ * Must be called after `installCloudDataServer` has provisioned the foundational
+ * infra (DSQL, files bucket, install-ddl / install-infra roles) — `config`
+ * carries those outputs.
+ */
+export async function installDrive(config: InstallerConfig): Promise<void> {
+  const manifest = loadDriveManifest();
+  console.log(`\nInstalling ${USER_DATA_OWNER_APP_ID}…`);
   await installApp({
-    appId: LOCAL_DATA_SYNC_APP_ID,
+    appId: USER_DATA_OWNER_APP_ID,
     manifest,
     version: manifest.version,
     config,
+    allowReservedAppId: true,
   });
-  console.log(`${LOCAL_DATA_SYNC_APP_ID} installed.`);
+  console.log(`${USER_DATA_OWNER_APP_ID} installed.`);
 }
 
 /**
- * Tear down the `local-data-sync` built-in cloud identity. Mirrors
- * `installLocalDataSync` and is invoked from `uninstallCloudDataServer`
- * (before the foundational tear-down, so the DSQL cluster still exists).
+ * Tear down the Starkeep Drive built-in app. Mirrors `installDrive`; invoked
+ * from `uninstallCloudDataServer` (before the foundational tear-down, so the
+ * DSQL cluster still exists). Drive has no compute, so `uninstallApp` runs only
+ * the identity + data teardown steps.
  */
-export async function uninstallLocalDataSync(config: InstallerConfig): Promise<void> {
-  const manifest = loadLocalDataSyncManifest();
-  console.log(`\nUninstalling ${LOCAL_DATA_SYNC_APP_ID}…`);
-  // local-data-sync has no compute (it's a cloud-side identity only), so
-  // uninstallApp skips compute teardown and runs only the identity+data
-  // teardown steps.
+export async function uninstallDrive(config: InstallerConfig): Promise<void> {
+  const manifest = loadDriveManifest();
+  console.log(`\nUninstalling ${USER_DATA_OWNER_APP_ID}…`);
   await uninstallApp({
-    appId: LOCAL_DATA_SYNC_APP_ID,
+    appId: USER_DATA_OWNER_APP_ID,
     manifest,
     config,
   });
-  console.log(`${LOCAL_DATA_SYNC_APP_ID} uninstalled.`);
+  console.log(`${USER_DATA_OWNER_APP_ID} uninstalled.`);
 }

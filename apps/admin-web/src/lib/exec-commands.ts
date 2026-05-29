@@ -1,7 +1,7 @@
 import "server-only";
 import { resolve } from "node:path";
 
-export type DaemonId = "local-data-server";
+export type DaemonId = "local-data-server" | "drive";
 export type StreamCommandId = "reset-local-data" | "local-deploy";
 
 // Next.js runs from apps/admin-web; ../../ is the repo root
@@ -9,6 +9,10 @@ export const REPO_ROOT = resolve(process.cwd(), "../..");
 
 export const DAEMON_COMMANDS: Record<DaemonId, { args: string[]; port?: number }> = {
   "local-data-server": { args: ["pnpm", "--filter", "@starkeep/local-data-server", "start"], port: 9820 },
+  // Starkeep Drive UI — a core workspace app (not a starkeep-apps app), fixed
+  // port. Spawned from the repo root via the workspace filter, like the data
+  // server. `dev` mode (no prior build needed) suits the local-admin context.
+  drive: { args: ["pnpm", "--filter", "@starkeep/drive", "dev"], port: 9830 },
 };
 
 // Installed local apps that can be started/stopped from admin-web. Keyed by

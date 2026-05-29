@@ -20,6 +20,7 @@ export interface StarkeepConfig {
   accountId?: string;
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
+  userDataOwnerPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   installDdlRoleArn?: string;
   installInfraRoleArn?: string;

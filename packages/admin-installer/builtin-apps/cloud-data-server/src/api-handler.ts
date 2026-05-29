@@ -248,6 +248,12 @@ async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
 // Mirrors CLOUD_APP_ID_RE in packages/admin-installer/src/iam.ts. Kept in sync
 // by hand because the cloud handler lives in a separately-deployed artifact
 // and cannot import from the installer package at runtime.
+// The reserved app id of the Starkeep Drive (User-Data-Owner) channel — the
+// single channel that carries all shared records under Shape A. Mirrors
+// USER_DATA_OWNER_APP_ID in packages/admin-installer/src/iam.ts; kept in sync by
+// hand because this handler is a separately-deployed artifact.
+const DRIVE_APP_ID = "starkeep-drive";
+
 function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
   const match = rawPath.match(/^\/apps\/([a-z0-9][a-z0-9._-]*)(\/.*)?$/);
   if (!match) return null;
@@ -701,14 +707,33 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody);
-      const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
-      toClose.push(() => appSyncableSource.client.end());
-      const transport = createInProcessSyncTransport({
-        databaseAdapter: db,
-        clock,
-        appSyncableSource,
-        objectStorage: storage,
-      });
+
+      // Shape A channel split. The Starkeep Drive channel carries *all* shared
+      // records (and nothing app-specific); every per-app channel carries only
+      // that app's app-specific rows (and no shared records). This makes
+      // shared-record sync identical regardless of which apps are cloud-
+      // installed: the Drive channel always exists, so shared data always has
+      // an authorized cloud writer.
+      const isDriveChannel = appId === DRIVE_APP_ID;
+      let transport;
+      if (isDriveChannel) {
+        transport = createInProcessSyncTransport({
+          databaseAdapter: db,
+          clock,
+          objectStorage: storage,
+          syncSharedRecords: true,
+        });
+      } else {
+        const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+        toClose.push(() => appSyncableSource.client.end());
+        transport = createInProcessSyncTransport({
+          databaseAdapter: db,
+          clock,
+          appSyncableSource,
+          objectStorage: storage,
+          syncSharedRecords: false,
+        });
+      }
       const response = await transport.exchange(body);
       return ok(response);
     }

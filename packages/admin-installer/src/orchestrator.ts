@@ -22,6 +22,7 @@ import {
   detachTempInstallDdlPolicy,
   deleteAppRole,
   assertCloudInstallableAppId,
+  assertNotReservedAppId,
 } from "./iam";
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
 import {
@@ -63,6 +64,7 @@ export interface InstallerConfig {
   authorizerId: string;
   permissionsBoundaryArn: string;
   foundationalPermissionsBoundaryArn: string;
+  userDataOwnerPermissionsBoundaryArn: string;
   managerRoleArn: string;
   installDdlRoleArn: string;
   installInfraRoleArn: string;
@@ -74,6 +76,12 @@ export interface InstallInput {
   zipBuffer?: Buffer;
   version: string;
   config: InstallerConfig;
+  /**
+   * Set by built-in install wrappers (currently Starkeep Drive) to claim a
+   * reserved app id. Third-party installs leave it unset and are rejected on
+   * reserved ids.
+   */
+  allowReservedAppId?: boolean;
 }
 
 export interface UninstallInput {
@@ -110,6 +118,7 @@ async function runStep(
 export async function installApp(input: InstallInput): Promise<InstallResult> {
   const { appId, manifest, zipBuffer, config } = input;
   assertCloudInstallableAppId(appId);
+  if (!input.allowReservedAppId) assertNotReservedAppId(appId);
   const ir = manifest.infraRequirements;
   const done = await getCompletedSteps(appId, "install");
 
@@ -124,6 +133,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
       accountId: config.accountId,
       permissionsBoundaryArn: config.permissionsBoundaryArn,
       foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
+      userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
       sharedTypeAccess: ir.sharedTypeAccess,
       canIngestUnknown: ir.canIngestUnknown,
       canPromoteFromUnknown: ir.canPromoteFromUnknown,

@@ -52,6 +52,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     clock,
     syncState,
     appSyncableSource,
+    syncSharedRecords = true,
     pageLimit = 1000,
     scanPageSize = 500,
   } = options;
@@ -95,23 +96,28 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // current poll volumes; revisit if scans get hot. Same caveat applies
       // to the responder-side scan in in-process-transport.ts.
       const recordCandidates: AnyRecord[] = [];
-      let scanCursor: string | undefined = undefined;
-      let scanHasMore = true;
-      while (recordCandidates.length < pageLimit && scanHasMore) {
-        const page = await localDatabaseAdapter.query({
-          limit: scanPageSize,
-          ...(scanCursor !== undefined ? { cursor: scanCursor } : {}),
-        });
-        if (page.records.length === 0) break;
-        for (const r of page.records) {
-          const peerHlc = peerWatermarks[r.updatedAt.nodeId];
-          if (!peerHlc || compareHLC(r.updatedAt, peerHlc) > 0) {
-            recordCandidates.push(r);
-            if (recordCandidates.length >= pageLimit) break;
+      // Shape A: only the Drive channel ships shared records. Per-app channels
+      // set syncSharedRecords=false and leave this scan empty — they carry only
+      // app-specific rows.
+      if (syncSharedRecords) {
+        let scanCursor: string | undefined = undefined;
+        let scanHasMore = true;
+        while (recordCandidates.length < pageLimit && scanHasMore) {
+          const page = await localDatabaseAdapter.query({
+            limit: scanPageSize,
+            ...(scanCursor !== undefined ? { cursor: scanCursor } : {}),
+          });
+          if (page.records.length === 0) break;
+          for (const r of page.records) {
+            const peerHlc = peerWatermarks[r.updatedAt.nodeId];
+            if (!peerHlc || compareHLC(r.updatedAt, peerHlc) > 0) {
+              recordCandidates.push(r);
+              if (recordCandidates.length >= pageLimit) break;
+            }
           }
+          scanHasMore = page.hasMore;
+          scanCursor = page.nextCursor ?? undefined;
         }
-        scanHasMore = page.hasMore;
-        scanCursor = page.nextCursor ?? undefined;
       }
 
       // AR/AW scan: same cursor pattern as the SR loop above. scanSince
@@ -251,8 +257,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // shipping them — which prevents us re-shipping items that originated
       // on the peer's side.
       // ---------------------------------------------------------------------
+      // Shape A: a per-app channel (syncSharedRecords=false) must never apply
+      // shared records. The responder shouldn't ship them, but guard inbound
+      // too so the channel split holds even if a peer over-ships.
       const inboundByNode = groupInboundByNodeId(
-        response.records,
+        syncSharedRecords ? response.records : [],
         response.appSyncableRows,
       );
       const appliedIds: StarkeepId[] = [];

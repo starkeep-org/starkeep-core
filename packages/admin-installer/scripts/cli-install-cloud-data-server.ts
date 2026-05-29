@@ -48,7 +48,7 @@ import {
 } from "@aws-sdk/client-cognito-identity";
 import { execSync } from "node:child_process";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { installCloudDataServer, installLocalDataSync } from "../src/builtin-installs";
+import { installCloudDataServer } from "../src/builtin-installs";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -58,6 +58,7 @@ interface StarkeepConfig {
   identityPoolId: string;
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
+  userDataOwnerPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   pulumiStateBucket?: string;
   // populated by this script after a successful install:
@@ -264,6 +265,9 @@ const permissionsBoundaryArn =
 const foundationalPermissionsBoundaryArn =
   config.foundationalPermissionsBoundaryArn
   ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
+const userDataOwnerPermissionsBoundaryArn =
+  config.userDataOwnerPermissionsBoundaryArn
+  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
 
@@ -289,43 +293,25 @@ const outputs = await installCloudDataServer({
   accountId,
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
+  userDataOwnerPermissionsBoundaryArn,
   managerRoleArn,
   pulumiStateBucket,
   userPoolId: config.userPoolId,
   userPoolClientId: config.userPoolClientId,
 });
 
-// Install the paired local-data-sync identity. This is the cloud-side
-// counterpart to the local-data-server: it's the IAM role that signs for
-// records originated locally by LDS built-in features (notably the file
-// watcher). Bundled with cloud-data-server install so the two paired
-// identities always exist together.
-const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
-const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
-const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
-await installLocalDataSync({
-  stackPrefix,
-  region,
-  accountId,
-  dsqlHostname: outputs.auroraHostname,
-  filesBucket: outputs.bucketName,
-  artifactsBucket,
-  pulumiStateBucket,
-  apiGatewayId: outputs.apiGatewayId,
-  apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
-  authorizerId: outputs.authorizerId,
-  permissionsBoundaryArn,
-  foundationalPermissionsBoundaryArn,
-  managerRoleArn,
-  installDdlRoleArn,
-  installInfraRoleArn,
-});
+// Under Shape A there is no separate cloud sync identity to install here:
+// shared-record sync (including watcher-originated records, origin_app_id =
+// "local-watcher") flows through the Starkeep Drive channel under Drive's role.
+// Drive is installed as its own pass — `pnpm cli:install-drive` (or the admin
+// wizard's second deploy pass) — after this cloud-data-server install completes.
 
 const updated: StarkeepConfig = {
   ...config,
   accountId,
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
+  userDataOwnerPermissionsBoundaryArn,
   managerRoleArn,
   pulumiStateBucket,
   apiGatewayUrl: outputs.apiGatewayUrl,
