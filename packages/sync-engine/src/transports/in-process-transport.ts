@@ -2,6 +2,7 @@ import {
   compareHLC,
   serializeHLC,
   ZERO_HLC,
+  type AnyRecord,
   type HLCClock,
 } from "@starkeep/core";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
@@ -14,10 +15,6 @@ import type {
   AppSyncableApplier,
   ScanCapableApplier,
 } from "../types.js";
-import {
-  selectUnseen,
-  selectUnseenAppSyncable,
-} from "../watermarks.js";
 
 export interface InProcessTransportOptions {
   readonly databaseAdapter: DatabaseAdapter;
@@ -83,41 +80,95 @@ export function createInProcessSyncTransport(
         }
       }
 
-      // 3. Scan local records the caller hasn't seen yet. App-layer filter
-      //    over a chunked scan — sufficient at current poll volumes;
-      //    per-nodeId SQL indexes are a follow-up if scans get hot.
+      // 3. Scan local records the caller hasn't seen yet, paginated by
+      //    cursor so records past any fixed scan window are still reachable.
+      //    Collect up to `limit + 1` matches so we can set `hasMore`
+      //    correctly without an additional probe. Same performance follow-up
+      //    as the outbound scan in sync-engine.ts: production should push
+      //    the per-nodeId watermark filter into the query.
       const limit = request.limit ?? 1000;
-      const scanResult = await databaseAdapter.query({ limit: limit * 2 });
-      const candidates = selectUnseen(scanResult.records, request.watermarks);
-      const records = candidates.slice(0, limit);
+      const SCAN_PAGE = 500;
+      const collected: AnyRecord[] = [];
+      let cursor: string | undefined = undefined;
+      let scanHasMore = true;
+      let overflowed = false;
+      while (!overflowed && scanHasMore) {
+        const page = await databaseAdapter.query({
+          limit: SCAN_PAGE,
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        if (page.records.length === 0) break;
+        for (const r of page.records) {
+          const peerHlc = request.watermarks[r.updatedAt.nodeId];
+          if (!peerHlc || compareHLC(r.updatedAt, peerHlc) > 0) {
+            if (collected.length >= limit) {
+              overflowed = true;
+              break;
+            }
+            collected.push(r);
+          }
+        }
+        if (overflowed) break;
+        scanHasMore = page.hasMore;
+        cursor = page.nextCursor ?? undefined;
+      }
+      const records = collected;
 
-      // 4. App-syncable rows: same per-nodeId filtering across known tables.
+      // 4. App-syncable rows: same per-nodeId filtering across known tables,
+      //    cursor-paginated for the same reason as the SR scan above —
+      //    records past any fixed scan window stay reachable.
       const appSyncableRows: AppSyncableRowEntry[] = [];
       if (appSyncableSource && records.length < limit) {
         const scanCapable = appSyncableSource.applier as ScanCapableApplier;
         if (typeof scanCapable.scanSince === "function") {
           const zeroStr = serializeHLC(ZERO_HLC);
-          for (const ns of appSyncableSource.namespaces.list()) {
+          outer: for (const ns of appSyncableSource.namespaces.list()) {
             for (const tableInfo of ns.tables) {
-              let rows: AppSyncableRowEntry[];
-              try {
-                rows = await scanCapable.scanSince(ns.appId, tableInfo.name, zeroStr);
-              } catch {
-                rows = [];
+              let appCursor: string | undefined = undefined;
+              let appHasMore = true;
+              while (
+                records.length + appSyncableRows.length < limit &&
+                appHasMore
+              ) {
+                let page: { rows: AppSyncableRowEntry[]; nextCursor: string | null; hasMore: boolean };
+                try {
+                  page = await scanCapable.scanSince(
+                    ns.appId,
+                    tableInfo.name,
+                    zeroStr,
+                    {
+                      limit: SCAN_PAGE,
+                      ...(appCursor !== undefined ? { cursor: appCursor } : {}),
+                    },
+                  );
+                } catch {
+                  break;
+                }
+                if (page.rows.length === 0) break;
+                for (const r of page.rows) {
+                  const peerHlc = request.watermarks[r.timestamp.nodeId];
+                  if (!peerHlc || compareHLC(r.timestamp, peerHlc) > 0) {
+                    appSyncableRows.push(r);
+                    if (records.length + appSyncableRows.length >= limit) break;
+                  }
+                }
+                appHasMore = page.hasMore;
+                appCursor = page.nextCursor ?? undefined;
               }
-              const unseen = selectUnseenAppSyncable(rows, request.watermarks);
-              for (const r of unseen) {
-                appSyncableRows.push(r);
-                if (records.length + appSyncableRows.length >= limit) break;
-              }
-              if (records.length + appSyncableRows.length >= limit) break;
+              if (records.length + appSyncableRows.length >= limit) break outer;
             }
-            if (records.length + appSyncableRows.length >= limit) break;
           }
         }
       }
 
-      const hasMore = candidates.length > limit || scanResult.hasMore;
+      // hasMore reflects: (a) the SR scan overflowed past `limit`, or
+      // (b) the combined SR + app-syncable payload hit `limit` and there
+      // are still untraversed app rows. (a) is captured by `overflowed`;
+      // (b) is approximated by the app-syncable collection loop breaking
+      // out early — i.e. records.length + appSyncableRows.length >= limit.
+      const hasMore =
+        overflowed ||
+        records.length + appSyncableRows.length >= limit;
 
       return { records, appSyncableRows, hasMore };
     },

@@ -64,13 +64,27 @@ export function makeMockAppSource(
       }
       rows.set(key, entry);
     },
-    async scanSince(scanAppId, table, sinceHlcStr) {
-      const out: AppSyncableRowEntry[] = [];
+    async scanSince(scanAppId, table, sinceHlcStr, options) {
+      const floor =
+        options?.cursor !== undefined && options.cursor > sinceHlcStr
+          ? options.cursor
+          : sinceHlcStr;
+      const matches: AppSyncableRowEntry[] = [];
       for (const e of rows.values()) {
         if (e.appId !== scanAppId || e.table !== table) continue;
-        if (serializeHLC(e.timestamp) > sinceHlcStr) out.push(e);
+        if (serializeHLC(e.timestamp) > floor) matches.push(e);
       }
-      return out;
+      matches.sort((a, b) =>
+        serializeHLC(a.timestamp).localeCompare(serializeHLC(b.timestamp)),
+      );
+      const limit = options?.limit;
+      const hasMore = limit !== undefined && matches.length > limit;
+      const pageRows = hasMore ? matches.slice(0, limit) : matches;
+      const nextCursor =
+        hasMore && pageRows.length > 0
+          ? serializeHLC(pageRows[pageRows.length - 1]!.timestamp)
+          : null;
+      return { rows: pageRows, nextCursor, hasMore };
     },
   };
 

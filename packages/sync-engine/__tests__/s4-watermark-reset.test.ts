@@ -99,6 +99,24 @@ describe("S4 — watermark reset (SR)", () => {
     expect(localAfter?.contentHash).toBe(cloudBefore!.contentHash);
   });
 
+  it("S4-010: lR + both-same + multi-homogeneous + 1r — first round picks up some but not all (hasMore semantics)", async () => {
+    // Cap pageLimit at 2 so 5 records straddle multiple rounds. After lR
+    // local has no watermarks; cloud's responder ships 2 records and signals
+    // hasMore=true. We verify the single-round result rather than fully
+    // converging.
+    const w = await setupCase({
+      dt: "SR",
+      presence: "both-same",
+      blob: "bb",
+      wm: "lR",
+      batch: "multi-homogeneous",
+      batchCount: 5,
+      pageLimit: 2,
+    });
+    const [result] = await w.exchange({ rounds: 1 });
+    expect(result!.hasMore).toBe(true);
+  });
+
   it("S4-011: cR + local-only — fresh-install full first sync", async () => {
     const w = await setupCase({
       dt: "SR",

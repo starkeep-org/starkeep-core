@@ -2,6 +2,8 @@ export type {
   AppSyncableRowEntry,
   AppSyncableApplier,
   ScanCapableApplier,
+  ScanSinceOptions,
+  ScanSincePage,
   SyncTransport,
   FileSyncManifest,
   FileEntry,

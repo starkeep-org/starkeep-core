@@ -66,13 +66,27 @@ function makeMockAppSource(
       }
       rows.set(key, entry);
     },
-    async scanSince(scanAppId, table, sinceHlcStr) {
-      const out: AppSyncableRowEntry[] = [];
+    async scanSince(scanAppId, table, sinceHlcStr, options) {
+      const floor =
+        options?.cursor !== undefined && options.cursor > sinceHlcStr
+          ? options.cursor
+          : sinceHlcStr;
+      const matches: AppSyncableRowEntry[] = [];
       for (const e of rows.values()) {
         if (e.appId !== scanAppId || e.table !== table) continue;
-        if (serializeHLC(e.timestamp) > sinceHlcStr) out.push(e);
+        if (serializeHLC(e.timestamp) > floor) matches.push(e);
       }
-      return out;
+      matches.sort((a, b) =>
+        serializeHLC(a.timestamp).localeCompare(serializeHLC(b.timestamp)),
+      );
+      const limit = options?.limit;
+      const hasMore = limit !== undefined && matches.length > limit;
+      const pageRows = hasMore ? matches.slice(0, limit) : matches;
+      const nextCursor =
+        hasMore && pageRows.length > 0
+          ? serializeHLC(pageRows[pageRows.length - 1]!.timestamp)
+          : null;
+      return { rows: pageRows, nextCursor, hasMore };
     },
   };
   return { applier, namespaces, rows };
@@ -520,13 +534,13 @@ describe("version-vector exchange", () => {
     expect(result.shipped).toBe(1);
 
     // Cloud's AR row landed via the appSyncable apply path...
-    const cloudRows = await cloudApp.applier.scanSince(
+    const cloudPage = await cloudApp.applier.scanSince(
       "test-app",
       FILE_RECORDS_TABLE,
       "",
     );
-    expect(cloudRows).toHaveLength(1);
-    expect(cloudRows[0]!.row?.["id"]).toBe("local-photo-1");
+    expect(cloudPage.rows).toHaveLength(1);
+    expect(cloudPage.rows[0]!.row?.["id"]).toBe("local-photo-1");
 
     // ...and the blob transferred to the cloud's app-namespace storage.
     expect(await cloudStorage.has(key)).toBe(true);
@@ -642,12 +656,12 @@ describe("version-vector exchange", () => {
     // SR early ships (blob present, comes first in HLC order).
     expect(await cloudDb.get(srEarly.id)).not.toBeNull();
     // AR row in middle is blocked (its blob can't be pushed).
-    const cloudArRows = await cloudApp.applier.scanSince(
+    const cloudArPage = await cloudApp.applier.scanSince(
       "test-app",
       FILE_RECORDS_TABLE,
       "",
     );
-    expect(cloudArRows).toHaveLength(0);
+    expect(cloudArPage.rows).toHaveLength(0);
     // SR late MUST NOT ship even though its blob is fine — otherwise the
     // peerWatermark would leapfrog the AR row and lose it forever.
     expect(await cloudDb.get(srLate.id)).toBeNull();
@@ -662,13 +676,114 @@ describe("version-vector exchange", () => {
     });
     await engine.exchange();
 
-    const afterRows = await cloudApp.applier.scanSince(
+    const afterPage = await cloudApp.applier.scanSince(
       "test-app",
       FILE_RECORDS_TABLE,
       "",
     );
-    expect(afterRows).toHaveLength(1);
+    expect(afterPage.rows).toHaveLength(1);
     expect(await cloudStorage.has(arKey)).toBe(true);
     expect(await cloudDb.get(srLate.id)).not.toBeNull();
+  });
+
+  it("AR/AW pagination: backlog exceeds a single scanSince page — cursor advances across pages so no rows strand", async () => {
+    // Mirror of the SR regression test in s6-pagination.test.ts, exercising
+    // the AR/AW outbound scan loop. With the pre-cursor code (`scanSince`
+    // returned everything in one go), this passed trivially because the
+    // entire table fit in memory; with cursor pagination, the engine has to
+    // advance across multiple pages within a single round. If the cursor
+    // logic regresses, rows past page 1 strand forever.
+    let time = 1000;
+    const localClock = createHLCClock({
+      nodeId: "local",
+      wallClockFunction: () => time++,
+    });
+    const cloudClock = createHLCClock({
+      nodeId: "cloud",
+      wallClockFunction: () => time++,
+    });
+
+    const localDb = new MockDatabaseAdapter();
+    const cloudDb = new MockDatabaseAdapter();
+    const localStorage = new MockObjectStorageAdapter();
+    const cloudStorage = new MockObjectStorageAdapter();
+    await localDb.init();
+    await cloudDb.init();
+    await localStorage.init();
+    await cloudStorage.init();
+
+    // Plain AW table (no blobs) so we can focus on row pagination, not blob
+    // transfer. Seed 10 rows; pageLimit=3 and scanPageSize=2 force the
+    // cursor to traverse multiple scanSince pages per round.
+    const ROW_COUNT = 10;
+    const localApp = makeMockAppSource("test-app", [
+      { name: "items", pkColumns: ["id"] },
+    ]);
+    const cloudApp = makeMockAppSource("test-app", [
+      { name: "items", pkColumns: ["id"] },
+    ]);
+
+    for (let i = 0; i < ROW_COUNT; i++) {
+      const hlc = localClock.now();
+      const hlcStr = serializeHLC(hlc);
+      await localApp.applier.apply({
+        timestamp: hlc,
+        appId: "test-app",
+        table: "items",
+        op: "insert",
+        row: {
+          id: `row-${i}`,
+          payload: `v${i}`,
+          created_at: hlcStr,
+          updated_at: hlcStr,
+          deleted_at: null,
+        },
+      });
+    }
+
+    const syncState = makeMockSyncState();
+    const cloudTransport = createInProcessSyncTransport({
+      databaseAdapter: cloudDb,
+      clock: cloudClock,
+      objectStorage: cloudStorage,
+      appSyncableSource: {
+        namespaces: cloudApp.namespaces,
+        applier: cloudApp.applier,
+      },
+    });
+    const engine = createSyncEngine({
+      localDatabaseAdapter: localDb,
+      localObjectStorage: localStorage,
+      remoteObjectStorage: cloudStorage,
+      transport: cloudTransport,
+      clock: localClock,
+      syncState,
+      appSyncableSource: {
+        namespaces: localApp.namespaces,
+        applier: localApp.applier as never,
+      },
+      pageLimit: 3,
+      scanPageSize: 2,
+    });
+
+    // Drive rounds until convergence (bounded to avoid hangs on regression).
+    for (let round = 0; round < 20; round++) {
+      const r = await engine.exchange();
+      if (r.shipped === 0 && !r.hasMore) break;
+    }
+
+    // All rows should have made it to the cloud.
+    const cloudPage = await cloudApp.applier.scanSince(
+      "test-app",
+      "items",
+      "",
+    );
+    expect(cloudPage.rows).toHaveLength(ROW_COUNT);
+    const cloudIds = cloudPage.rows
+      .map((r) => r.row?.["id"] as string)
+      .sort();
+    expect(cloudIds).toEqual(
+      Array.from({ length: ROW_COUNT }, (_, i) => `row-${i}`).sort(),
+    );
   });
 });

@@ -50,6 +50,7 @@ export interface CaseSpec {
   readonly batch?: BatchShape;
   readonly batchCount?: number;
   readonly pageLimit?: number;
+  readonly scanPageSize?: number;
   readonly appId?: string;
   readonly nodeIds?: { local: string; cloud: string };
 }
@@ -155,6 +156,7 @@ export interface ResolvedSpec {
   readonly batch: BatchShape;
   readonly batchCount: number;
   readonly pageLimit: number;
+  readonly scanPageSize: number;
   readonly appId: string;
   readonly nodeIds: { local: string; cloud: string };
 }

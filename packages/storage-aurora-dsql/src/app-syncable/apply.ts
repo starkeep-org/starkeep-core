@@ -4,6 +4,8 @@ import type {
   AppSyncableRowEntry,
   AppSyncableNamespaceStore,
   ScanCapableApplier,
+  ScanSinceOptions,
+  ScanSincePage,
   FileRecordRow,
   FileRecordsApplier,
 } from "@starkeep/shared-space-api";
@@ -150,23 +152,48 @@ export class DsqlAppSyncableApplier
     );
   }
 
-  /** Scan rows updated after `sinceHlcStr` for pull synthesis. */
+  /**
+   * Scan rows updated after `sinceHlcStr` (or `cursor` if higher) in HLC
+   * order, paginated. `updated_at` is a serialized HLC whose lexicographic
+   * order matches HLC order, and each row's HLC is unique per node, so it
+   * doubles as the cursor — no separate tiebreaker column is needed.
+   */
   async scanSince(
     appId: string,
     table: string,
     sinceHlcStr: string,
-  ): Promise<AppSyncableRowEntry[]> {
+    options?: ScanSinceOptions,
+  ): Promise<ScanSincePage> {
     const schemaTable = `app_${appId.replace(/-/g, "_")}."${table}"`;
+    const floor =
+      options?.cursor !== undefined && options.cursor > sinceHlcStr
+        ? options.cursor
+        : sinceHlcStr;
+    const limit = options?.limit;
     let result: { rows: Record<string, unknown>[] };
     try {
-      result = await this.client.query(
-        `SELECT * FROM ${schemaTable} WHERE updated_at > $1`,
-        [sinceHlcStr],
-      );
+      if (limit !== undefined) {
+        result = await this.client.query(
+          `SELECT * FROM ${schemaTable} WHERE updated_at > $1 ORDER BY updated_at ASC LIMIT $2`,
+          [floor, limit + 1],
+        );
+      } else {
+        result = await this.client.query(
+          `SELECT * FROM ${schemaTable} WHERE updated_at > $1 ORDER BY updated_at ASC`,
+          [floor],
+        );
+      }
     } catch {
-      return [];
+      return { rows: [], nextCursor: null, hasMore: false };
     }
-    return result.rows.map((row) => rowToEntry(appId, table, row));
+    const hasMore = limit !== undefined && result.rows.length > limit;
+    const pageRows = hasMore ? result.rows.slice(0, limit) : result.rows;
+    const entries = pageRows.map((row) => rowToEntry(appId, table, row));
+    const nextCursor =
+      hasMore && pageRows.length > 0
+        ? (pageRows[pageRows.length - 1]!["updated_at"] as string)
+        : null;
+    return { rows: entries, nextCursor, hasMore };
   }
 
   /**

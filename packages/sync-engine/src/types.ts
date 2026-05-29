@@ -44,13 +44,42 @@ export interface AppSyncableApplier {
   apply(entry: AppSyncableRowEntry): Promise<void> | void;
 }
 
-/** Optional capability that appliers can implement to support exchange synthesis. */
+/** Pagination options for `ScanCapableApplier.scanSince`. */
+export interface ScanSinceOptions {
+  /** Max rows to return in this page. */
+  readonly limit?: number;
+  /**
+   * Serialized HLC of the last row returned by the previous page. The next
+   * page returns rows with `updated_at > cursor`. When omitted, the page
+   * starts from `sinceHlcStr`.
+   */
+  readonly cursor?: string;
+}
+
+/** Page returned by `ScanCapableApplier.scanSince`. */
+export interface ScanSincePage {
+  readonly rows: AppSyncableRowEntry[];
+  /**
+   * Cursor to pass on the next call to continue the scan. `null` when no
+   * further rows exist past this page.
+   */
+  readonly nextCursor: string | null;
+  readonly hasMore: boolean;
+}
+
+/**
+ * Optional capability that appliers can implement to support exchange
+ * synthesis. Scans rows with `updated_at > sinceHlcStr` (the global floor)
+ * in HLC order, paginated by cursor so the engine can stop after `limit`
+ * matches without buffering the whole table.
+ */
 export interface ScanCapableApplier extends AppSyncableApplier {
   scanSince(
     appId: string,
     table: string,
     sinceHlcStr: string,
-  ): Promise<AppSyncableRowEntry[]>;
+    options?: ScanSinceOptions,
+  ): Promise<ScanSincePage>;
 }
 
 /**
@@ -233,4 +262,11 @@ export interface SyncEngineOptions {
    * production callers may tune this against poll frequency / throughput.
    */
   readonly pageLimit?: number;
+  /**
+   * Internal page size for the cursor-paginated outbound scan loop. Default
+   * 500. Tests can set this small to force the cursor to advance across
+   * multiple DB queries within one exchange round (otherwise a small test
+   * dataset fits in a single page and the cursor never moves).
+   */
+  readonly scanPageSize?: number;
 }

@@ -3,6 +3,7 @@ import { createSyncEngine } from "../../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../../src/transports/in-process-transport.js";
 import { residencyOf, type RecordResidency } from "../../src/residency.js";
 import type {
+  AppSyncableRowEntry,
   ExchangeResult,
   SyncStateStore,
   Watermarks,
@@ -11,6 +12,7 @@ import {
   buildKeyMatcher,
   FailingObjectStorageAdapter,
 } from "./failure-injection.js";
+import { FILE_RECORDS_TABLE } from "./mock-app-source.js";
 import { buildSide } from "./side.js";
 import {
   applyWatermarkState,
@@ -61,6 +63,7 @@ function resolveSpec(spec: CaseSpec): ResolvedSpec {
     batch,
     batchCount,
     pageLimit: spec.pageLimit ?? (batch === "exceeds-page-limit" ? 5 : 1000),
+    scanPageSize: spec.scanPageSize ?? 500,
     appId: spec.appId ?? "test-app",
     nodeIds: spec.nodeIds ?? { local: "local", cloud: "cloud" },
   };
@@ -136,6 +139,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
       applier: local.applier as never,
     },
     pageLimit: resolved.pageLimit,
+    scanPageSize: resolved.scanPageSize,
   });
 
   const subjectIds: StarkeepId[] = [...seeded.subjectIds];
@@ -147,8 +151,9 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     const target = id ?? subjectIds[0];
     if (!target) throw new Error("[harness] no subject id available");
     const k = objectKeyById.get(target);
-    if (!k)
+    if (k === undefined)
       throw new Error(`[harness] no object key tracked for ${target}`);
+    // Empty string is a valid value (AR no-blob convention).
     return k;
   }
 
@@ -166,33 +171,54 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     return role === "local" ? local : cloud;
   }
 
+  function appRowTable(): string {
+    return resolved.dt === "AR" ? FILE_RECORDS_TABLE : "test_rows";
+  }
+
+  function lookupAppRow(
+    role: "local" | "cloud",
+    id: StarkeepId,
+  ): AppSyncableRowEntry | null {
+    const key = `${resolved.appId}::${appRowTable()}::${id}`;
+    return side(role).appRows.get(key) ?? null;
+  }
+
   async function recordExists(
     role: "local" | "cloud",
     id?: StarkeepId,
   ): Promise<boolean> {
-    const r = await side(role).db.get(id ?? subjectIds[0]!);
-    return r !== null;
+    const target = id ?? subjectIds[0];
+    if (!target) return false;
+    if (resolved.dt === "SR") {
+      return (await side(role).db.get(target)) !== null;
+    }
+    return lookupAppRow(role, target) !== null;
   }
 
   async function blobExists(
     role: "local" | "cloud",
     key?: string,
   ): Promise<boolean> {
-    return side(role).storage.has(key ?? objectKey());
+    const resolved = key ?? objectKey();
+    if (resolved === "") return false;
+    return side(role).storage.has(resolved);
   }
 
   async function getRecord(role: "local" | "cloud", id?: StarkeepId) {
+    if (resolved.dt !== "SR") return null;
     return side(role).db.get(id ?? subjectIds[0]!);
   }
 
   async function getAppRow(
-    _role: "local" | "cloud",
-    _id?: StarkeepId,
-  ): ReturnType<World["getAppRow"]> {
-    // AR/AW assertion path not implemented yet — single-row lookup needs the
-    // spec's appId + table to disambiguate; surface a clear error rather than
-    // silently returning null until tests need it.
-    throw new Error("[harness] getAppRow not implemented yet (AR/AW pending)");
+    role: "local" | "cloud",
+    id?: StarkeepId,
+  ): Promise<AppSyncableRowEntry | null> {
+    const target = id ?? subjectIds[0];
+    if (!target) return null;
+    if (resolved.dt === "SR") {
+      throw new Error("[harness] getAppRow not valid for dt=SR");
+    }
+    return lookupAppRow(role, target);
   }
 
   async function residency(
@@ -200,26 +226,44 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     id?: StarkeepId,
   ): Promise<RecordResidency> {
     const target = id ?? subjectIds[0];
-    if (!target) throw new Error("[harness] no subject id for residency");
-    const rec = await side(role).db.get(target);
-    if (!rec) return "absent";
-    // Reshape SR DataRecord into the FileRecordRow snake_case form residencyOf
-    // expects.
-    return residencyOf(
-      {
-        id: rec.id,
-        object_storage_key: rec.objectStorageKey,
-        content_hash: rec.contentHash,
-        mime_type: rec.mimeType,
-        size_bytes: rec.sizeBytes,
-        original_filename: rec.originalFilename ?? null,
-        origin_app_id: rec.originAppId,
-        created_at: "",
-        updated_at: "",
-        deleted_at: rec.deletedAt ? "deleted" : null,
-      },
-      side(role).storage,
-    );
+    if (!target) return "absent";
+
+    if (resolved.dt === "SR") {
+      const rec = await side(role).db.get(target);
+      if (!rec) return "absent";
+      // Reshape SR DataRecord into the FileRecordRow snake_case form
+      // residencyOf expects.
+      return residencyOf(
+        {
+          id: rec.id,
+          object_storage_key: rec.objectStorageKey,
+          content_hash: rec.contentHash,
+          mime_type: rec.mimeType,
+          size_bytes: rec.sizeBytes,
+          original_filename: rec.originalFilename ?? null,
+          origin_app_id: rec.originAppId,
+          created_at: "",
+          updated_at: "",
+          deleted_at: rec.deletedAt ? "deleted" : null,
+        },
+        side(role).storage,
+      );
+    }
+
+    if (resolved.dt === "AW") {
+      const row = lookupAppRow(role, target);
+      if (!row) return "absent";
+      if (row.op === "delete" || row.row?.["deleted_at"]) return "tombstoned";
+      return "resident";
+    }
+
+    // AR
+    const row = lookupAppRow(role, target);
+    if (!row) return "absent";
+    if (row.op === "delete" || row.row?.["deleted_at"]) return "tombstoned";
+    const key = (row.row?.["object_storage_key"] ?? "") as string;
+    if (!key) return "resident";
+    return (await side(role).storage.has(key)) ? "resident" : "staged";
   }
 
   async function watermarks(): Promise<{ own: Watermarks; peer: Watermarks }> {
@@ -315,21 +359,20 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     cloudHlc: seeded.cloudHlc,
     expectedWinnerHlc: seeded.expectedWinnerHlc,
     async driveOperation(op) {
-      const ctx = {
-        objectKeyById,
-        subjectIds,
-      };
+      const ctx = { objectKeyById, subjectIds };
       const result = await driveOperation(op, resolved, local, cloud, ctx);
       if (result.insertedId) {
-        // First insert in a "neither" case becomes the subject; later inserts
-        // append to subjectIds without disturbing index 0.
-        if (subjectIds.length === 1 && subjectIds[0] === result.insertedId) {
-          // Already first; nothing to do.
+        let newHlc: HLCTimestamp | undefined;
+        if (resolved.dt === "SR") {
+          newHlc = (await side(op.side).db.get(result.insertedId))?.updatedAt;
+        } else {
+          const row = lookupAppRow(op.side, result.insertedId);
+          newHlc = row?.timestamp;
         }
-        const newHlc = (await side(op.side).db.get(result.insertedId))!
-          .updatedAt;
-        if (op.side === "local") hlcByLocal.set(result.insertedId, newHlc);
-        else hlcByCloud.set(result.insertedId, newHlc);
+        if (newHlc) {
+          if (op.side === "local") hlcByLocal.set(result.insertedId, newHlc);
+          else hlcByCloud.set(result.insertedId, newHlc);
+        }
       }
     },
     exchange,

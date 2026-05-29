@@ -23,11 +23,7 @@ import type {
 } from "./types.js";
 import { createChangeNotifier } from "./change-notifier.js";
 import { createFileSyncEngine } from "./file-sync-engine.js";
-import {
-  advanceWatermark,
-  selectUnseen,
-  selectUnseenAppSyncable,
-} from "./watermarks.js";
+import { advanceWatermark } from "./watermarks.js";
 
 /**
  * Sync engine: drives one version-vector exchange round per tick.
@@ -57,6 +53,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     syncState,
     appSyncableSource,
     pageLimit = 1000,
+    scanPageSize = 500,
   } = options;
 
   const changeNotifier = createChangeNotifier();
@@ -83,39 +80,132 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // (SR or AR) are pushed before their owning item is allowed to ship.
       // ---------------------------------------------------------------------
       //
-      // App-layer per-nodeId filter over a chunked scan — sufficient at
-      // current poll volumes; per-nodeId SQL indexes are a follow-up if
-      // scans get hot. Same caveat applies to the responder-side scan in
-      // in-process-transport.ts.
-      const localScan = await localDatabaseAdapter.query({ limit: pageLimit });
-      const recordCandidates = selectUnseen(localScan.records, peerWatermarks);
+      // Both the SR scan and the AR/AW scanSince path below are cursor-
+      // paginated so records past any fixed window are reachable: we iterate
+      // the DB in its default order and apply the per-nodeId watermark
+      // filter inline, advancing the cursor across all rows (even the ones
+      // we skip). This means future rounds don't get stuck re-scanning a
+      // head-of-table window that's already been shipped.
+      //
+      // Performance follow-up: production storage adapters should push the
+      // watermark filter into the query — e.g. a per-nodeId index plus
+      // `WHERE updated_at > peerWatermark[nodeId]` — so steady-state syncs
+      // don't read every row to find nothing. The current loop is O(N) per
+      // round when the watermark is at the latest record. Acceptable for
+      // current poll volumes; revisit if scans get hot. Same caveat applies
+      // to the responder-side scan in in-process-transport.ts.
+      const recordCandidates: AnyRecord[] = [];
+      let scanCursor: string | undefined = undefined;
+      let scanHasMore = true;
+      while (recordCandidates.length < pageLimit && scanHasMore) {
+        const page = await localDatabaseAdapter.query({
+          limit: scanPageSize,
+          ...(scanCursor !== undefined ? { cursor: scanCursor } : {}),
+        });
+        if (page.records.length === 0) break;
+        for (const r of page.records) {
+          const peerHlc = peerWatermarks[r.updatedAt.nodeId];
+          if (!peerHlc || compareHLC(r.updatedAt, peerHlc) > 0) {
+            recordCandidates.push(r);
+            if (recordCandidates.length >= pageLimit) break;
+          }
+        }
+        scanHasMore = page.hasMore;
+        scanCursor = page.nextCursor ?? undefined;
+      }
 
+      // AR/AW scan: same cursor pattern as the SR loop above. scanSince
+      // paginates by `updated_at` (serialized HLC), so each page advances
+      // the cursor across both filtered and selected rows. Combined cap of
+      // `pageLimit` is enforced across all (namespace, table) pairs.
       const appRowCandidates: AppSyncableRowEntry[] = [];
       if (appSyncableSource) {
         const zeroStr = serializeHLC(ZERO_HLC);
-        for (const ns of appSyncableSource.namespaces.list()) {
+        outer: for (const ns of appSyncableSource.namespaces.list()) {
           for (const tableInfo of ns.tables) {
-            try {
-              const rows = await appSyncableSource.applier.scanSince(
-                ns.appId,
-                tableInfo.name,
-                zeroStr,
-              );
-              for (const r of selectUnseenAppSyncable(rows, peerWatermarks)) {
-                appRowCandidates.push(r);
+            let appScanCursor: string | undefined = undefined;
+            let appScanHasMore = true;
+            while (
+              recordCandidates.length + appRowCandidates.length < pageLimit &&
+              appScanHasMore
+            ) {
+              let page: { rows: AppSyncableRowEntry[]; nextCursor: string | null; hasMore: boolean };
+              try {
+                page = await appSyncableSource.applier.scanSince(
+                  ns.appId,
+                  tableInfo.name,
+                  zeroStr,
+                  {
+                    limit: scanPageSize,
+                    ...(appScanCursor !== undefined ? { cursor: appScanCursor } : {}),
+                  },
+                );
+              } catch (err) {
+                console.warn(
+                  `[sync] exchange scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
+                );
+                break;
               }
-            } catch (err) {
-              console.warn(
-                `[sync] exchange scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
-              );
+              if (page.rows.length === 0) break;
+              for (const r of page.rows) {
+                const peerHlc = peerWatermarks[r.timestamp.nodeId];
+                if (!peerHlc || compareHLC(r.timestamp, peerHlc) > 0) {
+                  appRowCandidates.push(r);
+                  if (
+                    recordCandidates.length + appRowCandidates.length >=
+                    pageLimit
+                  ) {
+                    break;
+                  }
+                }
+              }
+              appScanHasMore = page.hasMore;
+              appScanCursor = page.nextCursor ?? undefined;
+            }
+            if (
+              recordCandidates.length + appRowCandidates.length >=
+              pageLimit
+            ) {
+              break outer;
             }
           }
         }
       }
 
+      // SR side is already capped at pageLimit by the cursor loop above.
+      // If we also collected AR/AW rows, the combined set may exceed
+      // pageLimit, so take the globally-earliest-HLC pageLimit items.
+      // Items deferred here ship next round because the peer's watermarks
+      // won't have advanced past them.
+      const cappedRecords: AnyRecord[] = [];
+      const cappedAppRows: AppSyncableRowEntry[] = [];
+      if (
+        recordCandidates.length + appRowCandidates.length <= pageLimit
+      ) {
+        cappedRecords.push(...recordCandidates);
+        cappedAppRows.push(...appRowCandidates);
+      } else {
+        type Tagged =
+          | { kind: "r"; rec: AnyRecord; hlc: HLCTimestamp }
+          | { kind: "a"; row: AppSyncableRowEntry; hlc: HLCTimestamp };
+        const tagged: Tagged[] = [
+          ...recordCandidates.map(
+            (r): Tagged => ({ kind: "r", rec: r, hlc: r.updatedAt }),
+          ),
+          ...appRowCandidates.map(
+            (e): Tagged => ({ kind: "a", row: e, hlc: e.timestamp }),
+          ),
+        ];
+        tagged.sort((a, b) => compareHLC(a.hlc, b.hlc));
+        for (const t of tagged.slice(0, pageLimit)) {
+          if (t.kind === "r") cappedRecords.push(t.rec);
+          else cappedAppRows.push(t.row);
+        }
+      }
+
       const outboundByNode = groupOutboundByNodeId(
-        recordCandidates,
-        appRowCandidates,
+        cappedRecords,
+        cappedAppRows,
       );
 
       const outboundRecords: AnyRecord[] = [];
