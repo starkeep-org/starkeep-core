@@ -44,13 +44,42 @@ export interface AppSyncableApplier {
   apply(entry: AppSyncableRowEntry): Promise<void> | void;
 }
 
-/** Optional capability that appliers can implement to support exchange synthesis. */
+/** Pagination options for `ScanCapableApplier.scanSince`. */
+export interface ScanSinceOptions {
+  /** Max rows to return in this page. */
+  readonly limit?: number;
+  /**
+   * Serialized HLC of the last row returned by the previous page. The next
+   * page returns rows with `updated_at > cursor`. When omitted, the page
+   * starts from `sinceHlcStr`.
+   */
+  readonly cursor?: string;
+}
+
+/** Page returned by `ScanCapableApplier.scanSince`. */
+export interface ScanSincePage {
+  readonly rows: AppSyncableRowEntry[];
+  /**
+   * Cursor to pass on the next call to continue the scan. `null` when no
+   * further rows exist past this page.
+   */
+  readonly nextCursor: string | null;
+  readonly hasMore: boolean;
+}
+
+/**
+ * Optional capability that appliers can implement to support exchange
+ * synthesis. Scans rows with `updated_at > sinceHlcStr` (the global floor)
+ * in HLC order, paginated by cursor so the engine can stop after `limit`
+ * matches without buffering the whole table.
+ */
 export interface ScanCapableApplier extends AppSyncableApplier {
   scanSince(
     appId: string,
     table: string,
     sinceHlcStr: string,
-  ): Promise<AppSyncableRowEntry[]>;
+    options?: ScanSinceOptions,
+  ): Promise<ScanSincePage>;
 }
 
 /**
@@ -59,7 +88,9 @@ export interface ScanCapableApplier extends AppSyncableApplier {
  * `FILE_RECORDS_COLUMNS` plus the always-appended HLC bookkeeping columns.
  * The sync engine's file-transfer pass derives upload/download decisions
  * from blob presence (`localObjectStorage.has(key)`), not from any stored
- * status — there is no `sync_status` column on this row.
+ * status — there is no `sync_status` column on this row. See
+ * `residency.ts` (`RecordResidency`, `residencyOf`) for the named derived
+ * state, and `system-design.md` "Per-record residency" for the rationale.
  */
 export interface FileRecordRow {
   readonly id: string;
@@ -224,4 +255,18 @@ export interface SyncEngineOptions {
     readonly namespaces: AppSyncableNamespaceStore;
     readonly applier: AppSyncableApplier & ScanCapableApplier & FileRecordsApplier;
   };
+  /**
+   * Max items per exchange round, applied to both the outbound local scan and
+   * the inbound request limit. Default 1000. Tests use small values (e.g. 5)
+   * to exercise multi-round pagination without seeding thousands of records;
+   * production callers may tune this against poll frequency / throughput.
+   */
+  readonly pageLimit?: number;
+  /**
+   * Internal page size for the cursor-paginated outbound scan loop. Default
+   * 500. Tests can set this small to force the cursor to advance across
+   * multiple DB queries within one exchange round (otherwise a small test
+   * dataset fits in a single page and the cursor never moves).
+   */
+  readonly scanPageSize?: number;
 }

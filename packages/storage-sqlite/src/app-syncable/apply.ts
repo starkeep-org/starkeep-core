@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { serializeHLC, deserializeHLC } from "@starkeep/core";
-import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, FileRecordRow, FileRecordsApplier } from "@starkeep/shared-space-api";
+import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSinceOptions, ScanSincePage, FileRecordRow, FileRecordsApplier } from "@starkeep/shared-space-api";
 import { FILE_RECORDS_TABLE } from "@starkeep/shared-space-api";
 import { appSyncableTableName } from "./namespace.js";
 
@@ -144,23 +144,52 @@ export class SqliteAppSyncableApplier
       .run(...(params as never[]));
   }
 
-  /** Support pull-side synthesis: return rows updated after `sinceHlcStr`. */
+  /**
+   * Pull-side synthesis: return rows updated after `sinceHlcStr` (or `cursor`
+   * if higher) in HLC order, paginated. `updated_at` is a serialized HLC
+   * whose lexicographic order matches HLC order (fixed-width hex), and each
+   * row's HLC is unique per node, so it doubles as the cursor — no separate
+   * tiebreaker column is needed.
+   */
   async scanSince(
     appId: string,
     table: string,
     sinceHlcStr: string,
-  ): Promise<AppSyncableRowEntry[]> {
+    options?: ScanSinceOptions,
+  ): Promise<ScanSincePage> {
     const fullName = appSyncableTableName(appId, table);
+    const floor =
+      options?.cursor !== undefined && options.cursor > sinceHlcStr
+        ? options.cursor
+        : sinceHlcStr;
+    const limit = options?.limit;
     let rows: Record<string, unknown>[];
     try {
-      rows = this.db
-        .prepare(`SELECT * FROM ${q(fullName)} WHERE updated_at > ?`)
-        .all(sinceHlcStr) as Record<string, unknown>[];
+      if (limit !== undefined) {
+        rows = this.db
+          .prepare(
+            `SELECT * FROM ${q(fullName)} WHERE updated_at > ? ORDER BY updated_at ASC LIMIT ?`,
+          )
+          .all(floor, limit + 1) as Record<string, unknown>[];
+      } else {
+        rows = this.db
+          .prepare(
+            `SELECT * FROM ${q(fullName)} WHERE updated_at > ? ORDER BY updated_at ASC`,
+          )
+          .all(floor) as Record<string, unknown>[];
+      }
     } catch {
       // Table might not exist yet (app not installed locally).
-      return [];
+      return { rows: [], nextCursor: null, hasMore: false };
     }
-    return rows.map((row) => rowToEntry(appId, table, row));
+    const hasMore = limit !== undefined && rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const entries = pageRows.map((row) => rowToEntry(appId, table, row));
+    const nextCursor =
+      hasMore && pageRows.length > 0
+        ? (pageRows[pageRows.length - 1]!["updated_at"] as string)
+        : null;
+    return { rows: entries, nextCursor, hasMore };
   }
 
   /**
