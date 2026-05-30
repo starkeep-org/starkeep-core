@@ -2,6 +2,10 @@ import { z } from "zod";
 
 export const appTierSchema = z.enum(["official", "verified", "community"]);
 
+// Where an app can be installed. An app may target local, cloud, or both. The
+// Apps page derives its Local / Cloud lists from this field.
+export const appTargetSchema = z.enum(["local", "cloud"]);
+
 /**
  * An app's grant over a set of file extensions. Installable apps enumerate the
  * exact lowercase extensions they handle (no dot, alphanumeric). Validation
@@ -100,6 +104,10 @@ export const appManifestSchema = z.object({
   version: z.string().min(1),
   protocolMinVersion: z.string().default("1.0.0"),
   tier: appTierSchema,
+  // Install targets. Default ["local"] preserves prior behavior (every
+  // discovered app appeared in the local list). A "cloud" app may be static
+  // (S3/CloudFront, or just hitting cloud-data-server) or compute-backed.
+  targets: z.array(appTargetSchema).default(["local"]),
   requiredPermissions: z.array(permissionEntrySchema).default([]),
   optionalPermissions: z.array(permissionEntrySchema).default([]),
   infraRequirements: infraRequirementsSchema.default({}),
@@ -113,6 +121,7 @@ export const appManifestSchema = z.object({
 });
 
 export type AppTier = z.infer<typeof appTierSchema>;
+export type AppTarget = z.infer<typeof appTargetSchema>;
 export type FileAccess = z.infer<typeof fileAccessSchema>;
 export type SharedResourceRequirement = z.infer<typeof sharedResourceRequirementSchema>;
 export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;

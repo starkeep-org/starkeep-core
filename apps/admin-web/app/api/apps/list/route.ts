@@ -1,28 +1,61 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { NextResponse } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 
 const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
-const APPS_DIR = resolve(REPO_ROOT, "..", "starkeep-apps");
+const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
+// Default app parent dir: the sibling-of-starkeep-core `starkeep-apps/` checkout.
+const DEFAULT_APPS_DIR = resolve(REPO_ROOT, "..", "starkeep-apps");
 
 interface InstalledApp {
   appId: string;
   status: string;
 }
 
+// Expand a leading "~" to the user's home dir. Other "~user" forms are left
+// untouched (we only support the current user's home).
+function expandHome(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+// App parent dirs come from ~/.starkeep/config.json `appParentDirs`. When unset
+// or empty we fall back to the default sibling `starkeep-apps/` dir.
+function appParentDirs(): string[] {
+  let configured: string[] = [];
+  try {
+    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as { appParentDirs?: unknown };
+    if (Array.isArray(raw.appParentDirs)) {
+      configured = raw.appParentDirs.filter((d): d is string => typeof d === "string" && d.length > 0);
+    }
+  } catch {
+    // No config file or malformed — fall back to the default below.
+  }
+  const dirs = configured.length > 0 ? configured : [DEFAULT_APPS_DIR];
+  return dirs.map(expandHome);
+}
+
 export async function GET() {
-  // 1. Scan the local checkout for apps with a manifest.
+  // 1. Scan each configured parent dir for apps with a manifest. De-dupe by
+  //    appId across dirs, first-wins (earlier dirs take precedence).
   const scanned: Array<{ appId: string; manifestPath: string; manifest: Record<string, unknown> }> = [];
-  if (existsSync(APPS_DIR)) {
-    for (const name of readdirSync(APPS_DIR)) {
-      const appDir = resolve(APPS_DIR, name);
+  const seenIds = new Set<string>();
+  for (const parentDir of appParentDirs()) {
+    if (!existsSync(parentDir)) continue;
+    for (const name of readdirSync(parentDir)) {
+      const appDir = resolve(parentDir, name);
       if (!statSync(appDir).isDirectory()) continue;
       const manifestPath = resolve(appDir, "starkeep.manifest.json");
       if (!existsSync(manifestPath)) continue;
       try {
         const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;
         const appId = typeof manifest.id === "string" ? manifest.id : name;
+        if (seenIds.has(appId)) continue;
+        seenIds.add(appId);
         scanned.push({ appId, manifestPath, manifest });
       } catch {
         // Skip malformed manifests — they'll fail validation on install anyway.
