@@ -1,7 +1,7 @@
 export {
   appManifestSchema,
   appTierSchema,
-  sharedTypeAccessSchema,
+  fileAccessSchema,
   sharedResourceRequirementSchema,
   appComputeHandlerSchema,
   appSpecificSyncableSchema,
@@ -11,7 +11,7 @@ export {
   permissionEntrySchema,
   type AppManifest,
   type AppTier,
-  type SharedTypeAccess,
+  type FileAccess,
   type SharedResourceRequirement,
   type AppComputeHandler,
   type AppSpecificSyncable,
@@ -24,7 +24,7 @@ export {
 export {
   validateManifest,
   checkTypeConflicts,
-  CORE_TYPE_REGISTRY,
+  KNOWN_EXTENSIONS,
   type ValidationResult,
   type TypeConflict,
 } from "./validate.js";

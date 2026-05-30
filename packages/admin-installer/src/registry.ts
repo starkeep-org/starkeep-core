@@ -9,7 +9,7 @@
  * app registration are lossy — no resume on retry, no access grants recorded.
  */
 
-import type { AppManifest, SharedTypeAccess } from "@starkeep/admin-manifest";
+import type { AppManifest, FileAccess } from "@starkeep/admin-manifest";
 
 export type StepStatus = "pending" | "done" | "failed";
 
@@ -40,7 +40,7 @@ export async function registerApp(
 
 export async function createAccessPolicies(
   _appId: string,
-  _sharedTypeAccess: SharedTypeAccess[],
+  _fileAccess: FileAccess[],
 ): Promise<string[]> {
   return [];
 }

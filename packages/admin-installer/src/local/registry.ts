@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AppManifest, SharedTypeAccess, SyncableTable } from "@starkeep/admin-manifest";
+import type { AppManifest, FileAccess, SyncableTable } from "@starkeep/admin-manifest";
 import { appSyncableTableName } from "@starkeep/storage-sqlite";
 import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
 
@@ -106,10 +106,16 @@ export function deleteAppRegistry(db: DatabaseSync, appId: string): void {
   db.prepare("DELETE FROM shared_app_registry WHERE app_id = ?").run(appId);
 }
 
+/**
+ * Writes one `shared_access_grants` row per declared extension (type_id =
+ * extension). Apps with `fileAccessAll` (only Starkeep Drive) write no rows —
+ * the local data-server grants Drive all-access by app id (it cannot enumerate
+ * unmapped/`other` extensions). Mirrors the cloud `runAppInstallDdl` rule.
+ */
 export function insertAccessGrants(
   db: DatabaseSync,
   appId: string,
-  sharedTypeAccess: SharedTypeAccess[],
+  fileAccess: FileAccess[],
 ): void {
   const stmt = db.prepare(
     `INSERT INTO shared_access_grants (app_id, type_id, access, metadata_write)
@@ -118,8 +124,10 @@ export function insertAccessGrants(
        access = excluded.access,
        metadata_write = excluded.metadata_write`,
   );
-  for (const entry of sharedTypeAccess) {
-    stmt.run(appId, entry.typeId, entry.access, entry.metadataWrite ? 1 : 0);
+  for (const entry of fileAccess) {
+    for (const ext of entry.extensions) {
+      stmt.run(appId, ext, entry.access, entry.metadataWrite ? 1 : 0);
+    }
   }
 }
 

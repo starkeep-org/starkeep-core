@@ -1,31 +1,31 @@
 import type { AppManifest } from "./schema.js";
 import { appManifestSchema } from "./schema.js";
-import {
-  WILDCARD_EXPANDABLE_TYPE_IDS,
-  RESTRICTED_CORE_TYPE_IDS,
-} from "@starkeep/core";
+import { KNOWN_EXTENSIONS, categoryOf } from "@starkeep/core";
 
 export interface ValidationResult {
   valid: boolean;
   manifest: AppManifest | null;
   errors: string[];
   warnings: string[];
+  /** Distinct categories implied by the manifest's declared extensions. */
+  impliedCategories: string[];
 }
 
 const RESERVED_PREFIX = "@starkeep/";
 
-// Core shared-type registry — derived from @starkeep/core's CORE_TYPES.
-// Apps cannot register new types; adding a type requires editing core-types.ts.
-// Restricted types (e.g. "unknown") are excluded — access is gated via
-// canIngestUnknown / canPromoteFromUnknown instead.
-export const CORE_TYPE_REGISTRY = new Set(WILDCARD_EXPANDABLE_TYPE_IDS);
+// The set of platform-known extensions an installable app may declare. Apps
+// cannot register new types; adding an extension requires editing
+// @starkeep/core's core-types.ts. Re-exported for callers that want the set.
+export { KNOWN_EXTENSIONS };
 
-const BUILTIN_RESTRICTED_TYPES = new Set(RESTRICTED_CORE_TYPE_IDS);
+// Only the User-Data-Owner app (Starkeep Drive) may claim all-access.
+const FILE_ACCESS_ALL_APP_ID = "starkeep-drive";
 
 export function validateManifest(raw: unknown): ValidationResult {
   const result = appManifestSchema.safeParse(raw);
   const errors: string[] = [];
   const warnings: string[] = [];
+  const impliedCategories = new Set<string>();
 
   if (!result.success) {
     return {
@@ -33,6 +33,7 @@ export function validateManifest(raw: unknown): ValidationResult {
       manifest: null,
       errors: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
       warnings: [],
+      impliedCategories: [],
     };
   }
 
@@ -42,28 +43,34 @@ export function validateManifest(raw: unknown): ValidationResult {
     errors.push(`Community apps cannot use the "${RESERVED_PREFIX}" ID prefix`);
   }
 
-  for (const entry of manifest.infraRequirements.sharedTypeAccess) {
-    if (BUILTIN_RESTRICTED_TYPES.has(entry.typeId)) {
-      errors.push(
-        `sharedTypeAccess: typeId "${entry.typeId}" is restricted. Use canIngestUnknown or canPromoteFromUnknown instead.`,
-      );
-      continue;
-    }
-
-    // Wildcard is valid — installer expands it, always excluding "unknown"
-    if (entry.typeId === "*") continue;
-
-    if (!CORE_TYPE_REGISTRY.has(entry.typeId)) {
-      errors.push(
-        `sharedTypeAccess: typeId "${entry.typeId}" is not in the core type registry. Valid types: ${[...CORE_TYPE_REGISTRY].join(", ")}`,
-      );
+  for (const entry of manifest.infraRequirements.fileAccess) {
+    for (const ext of entry.extensions) {
+      if (!KNOWN_EXTENSIONS.has(ext)) {
+        errors.push(
+          `fileAccess: extension "${ext}" is not in the platform extension map. Apps may only declare known, mapped extensions; unmapped files belong to the Drive-only "other" category.`,
+        );
+        continue;
+      }
+      impliedCategories.add(categoryOf(ext));
     }
 
     if (entry.metadataWrite && entry.access === "readwrite") {
       warnings.push(
-        `sharedTypeAccess[${entry.typeId}]: metadataWrite is redundant when access is "readwrite"`,
+        `fileAccess[${entry.extensions.join(",")}]: metadataWrite is redundant when access is "readwrite"`,
       );
     }
+  }
+
+  // All-access is reserved to Starkeep Drive (the User-Data-Owner). It is the
+  // only grant that reaches the `other` catch-all; installable apps enumerate
+  // extensions instead.
+  if (
+    manifest.infraRequirements.fileAccessAll &&
+    manifest.id !== FILE_ACCESS_ALL_APP_ID
+  ) {
+    errors.push(
+      `infraRequirements.fileAccessAll may only be true for the "${FILE_ACCESS_ALL_APP_ID}" app (got "${manifest.id}")`,
+    );
   }
 
   if (
@@ -81,26 +88,12 @@ export function validateManifest(raw: unknown): ValidationResult {
     );
   }
 
-  // The shared.access_grants schema represents (app_id, type_id) → single
-  // access mode. An app declaring both canIngestUnknown (writeable unknown)
-  // and canPromoteFromUnknown (readable unknown) would collapse to one row
-  // during install DDL — whichever block runs second silently wins. If/when
-  // both modes are needed by a single app, the access_grants schema must
-  // grow to represent the combination explicitly.
-  if (
-    manifest.infraRequirements.canIngestUnknown &&
-    manifest.infraRequirements.canPromoteFromUnknown
-  ) {
-    errors.push(
-      "infraRequirements: canIngestUnknown and canPromoteFromUnknown cannot both be true on the same app — the shared.access_grants schema cannot represent a single app holding both ingest (write) and promote (read) access to the `unknown` holding pen.",
-    );
-  }
-
   return {
     valid: errors.length === 0,
     manifest: errors.length === 0 ? manifest : null,
     errors,
     warnings,
+    impliedCategories: [...impliedCategories],
   };
 }
 

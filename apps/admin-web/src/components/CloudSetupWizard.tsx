@@ -613,106 +613,151 @@ function Step5Deploy({
     setTokenExpired(false);
     let aborted = false;
 
+    // One SSE install pass. Streams stdout/stderr lines into the shared log and
+    // resolves with a discriminated outcome so the two-pass driver can decide
+    // whether to continue. `done` carries the pass's `event: done` data payload
+    // (cloud-data-server returns its outputs; Drive returns `{}`).
+    type PassResult =
+      | { kind: "done"; data: string }
+      | { kind: "error"; message: string; tokenExpired: boolean };
+
+    async function runPass(url: string, creds: STSCredentials): Promise<PassResult> {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accessKeyId: creds.accessKeyId,
+          secretAccessKey: creds.secretAccessKey,
+          sessionToken: creds.sessionToken,
+        }),
+      });
+
+      if (!resp.ok || !resp.body) {
+        let errMsg = `${resp.status} ${resp.statusText}`;
+        try {
+          const j = (await resp.json()) as { error?: string };
+          if (j.error) errMsg = j.error;
+        } catch { /* not JSON */ }
+        return { kind: "error", message: errMsg, tokenExpired: false };
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done || aborted) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split("\n\n");
+        buffer = chunks.pop() ?? "";
+
+        for (const chunk of chunks) {
+          let eventType = "message";
+          let data = "";
+          for (const part of chunk.split("\n")) {
+            if (part.startsWith("event: ")) eventType = part.slice(7);
+            else if (part.startsWith("data: ")) data = part.slice(6);
+          }
+          if (eventType === "done") {
+            return { kind: "done", data };
+          } else if (eventType === "error") {
+            // Server emits structured `{ message, code? }` JSON; keep the
+            // older bare-string form working too.
+            let message = data;
+            let code: string | undefined;
+            try {
+              const parsed = JSON.parse(data);
+              if (typeof parsed === "string") {
+                message = parsed;
+              } else if (parsed && typeof parsed === "object") {
+                if (typeof parsed.message === "string") message = parsed.message;
+                if (typeof parsed.code === "string") code = parsed.code;
+              }
+            } catch {
+              /* not JSON — leave message as-is */
+            }
+            return { kind: "error", message, tokenExpired: code === "EXPIRED_TOKEN" };
+          } else if (data) {
+            try { setLines((l) => [...l, JSON.parse(data) as string]); }
+            catch { setLines((l) => [...l, data]); }
+          }
+        }
+      }
+      // Stream ended without a terminal done/error event.
+      return { kind: "error", message: "Install stream ended unexpectedly", tokenExpired: false };
+    }
+
+    function failPass(r: { message: string; tokenExpired: boolean }): void {
+      setLines((l) => [...l, `Error: ${r.message}`]);
+      if (r.tokenExpired) setTokenExpired(true);
+      setStatus("failure");
+    }
+
+    // Mint fresh STS creds right before each pass so a long pause (or a slow
+    // cloud-data-server install) doesn't ExpiredToken the next pass.
+    async function freshCreds(): Promise<STSCredentials | null> {
+      try {
+        const fresh = await refreshCredentials();
+        return fresh ?? credentials;
+      } catch {
+        return null;
+      }
+    }
+
     async function run() {
       try {
-        // Mint fresh STS creds right before the install so a long pause
-        // between Sign In and Deploy doesn't expire us mid-run. Failure
-        // here means the Cognito refresh token is also dead — route back
-        // to Sign In rather than starting a doomed install.
-        let creds: STSCredentials = credentials;
-        try {
-          const fresh = await refreshCredentials();
-          if (fresh) creds = fresh;
-        } catch {
+        // ---- Pass 1: cloud-data-server (foundational infra) ----------------
+        const creds1 = await freshCreds();
+        if (!creds1) {
           setTokenExpired(true);
           setStatus("failure");
           return;
         }
-
-        const resp = await fetch("/api/cloud-data-server/install", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            accessKeyId: creds.accessKeyId,
-            secretAccessKey: creds.secretAccessKey,
-            sessionToken: creds.sessionToken,
-          }),
-        });
-
-        if (!resp.ok || !resp.body) {
-          let errMsg = `${resp.status} ${resp.statusText}`;
-          try {
-            const j = (await resp.json()) as { error?: string };
-            if (j.error) errMsg = j.error;
-          } catch { /* not JSON */ }
-          setLines((l) => [...l, `Error: ${errMsg}`]);
+        setLines((l) => [...l, "── Deploying cloud-data-server ──"]);
+        const r1 = await runPass("/api/cloud-data-server/install", creds1);
+        if (aborted) return;
+        if (r1.kind !== "done") {
+          failPass(r1);
+          return;
+        }
+        let result: DeployOutputs;
+        try {
+          const outputs = JSON.parse(r1.data) as {
+            auroraHostname: string;
+            bucketName: string;
+            apiGatewayUrl: string;
+          };
+          result = {
+            s3Bucket: outputs.bucketName,
+            auroraEndpoint: outputs.auroraHostname,
+            apiGatewayUrl: outputs.apiGatewayUrl,
+          };
+        } catch {
+          setLines((l) => [...l, `Error: malformed done event: ${r1.data}`]);
           setStatus("failure");
           return;
         }
 
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done || aborted) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const chunks = buffer.split("\n\n");
-          buffer = chunks.pop() ?? "";
-
-          for (const chunk of chunks) {
-            let eventType = "message";
-            let data = "";
-            for (const part of chunk.split("\n")) {
-              if (part.startsWith("event: ")) eventType = part.slice(7);
-              else if (part.startsWith("data: ")) data = part.slice(6);
-            }
-            if (eventType === "done") {
-              try {
-                const outputs = JSON.parse(data) as {
-                  auroraHostname: string;
-                  bucketName: string;
-                  apiGatewayUrl: string;
-                };
-                const result: DeployOutputs = {
-                  s3Bucket: outputs.bucketName,
-                  auroraEndpoint: outputs.auroraHostname,
-                  apiGatewayUrl: outputs.apiGatewayUrl,
-                };
-                setDeployResult(result);
-                setStatus("success");
-              } catch {
-                setLines((l) => [...l, `Error: malformed done event: ${data}`]);
-                setStatus("failure");
-              }
-            } else if (eventType === "error") {
-              // Server now emits structured `{ message, code? }` JSON for
-              // error events; keep the older bare-string form working too
-              // in case anything else (e.g. a network proxy) injects one.
-              let message = data;
-              let code: string | undefined;
-              try {
-                const parsed = JSON.parse(data);
-                if (typeof parsed === "string") {
-                  message = parsed;
-                } else if (parsed && typeof parsed === "object") {
-                  if (typeof parsed.message === "string") message = parsed.message;
-                  if (typeof parsed.code === "string") code = parsed.code;
-                }
-              } catch {
-                /* not JSON — leave message as-is */
-              }
-              setLines((l) => [...l, `Error: ${message}`]);
-              if (code === "EXPIRED_TOKEN") setTokenExpired(true);
-              setStatus("failure");
-            } else if (data) {
-              try { setLines((l) => [...l, JSON.parse(data) as string]); }
-              catch { setLines((l) => [...l, data]); }
-            }
-          }
+        // ---- Pass 2: Starkeep Drive (User-Data-Owner identity) -------------
+        const creds2 = await freshCreds();
+        if (!creds2) {
+          setTokenExpired(true);
+          setStatus("failure");
+          return;
         }
+        setLines((l) => [...l, "", "── Deploying Starkeep Drive ──"]);
+        const r2 = await runPass("/api/drive/install", creds2);
+        if (aborted) return;
+        if (r2.kind !== "done") {
+          failPass(r2);
+          return;
+        }
+
+        // Both passes succeeded.
+        setDeployResult(result);
+        setStatus("success");
       } catch (err) {
         if (!aborted) {
           setLines((l) => [...l, `Error: ${err instanceof Error ? err.message : String(err)}`]);
@@ -805,19 +850,17 @@ function Step5Deploy({
     <div className="flex flex-col gap-5">
       <div className="flex flex-col gap-2">
         <p className="text-sm text-muted-foreground">
-          Install the <strong>cloud-data-server</strong> built-in app. This provisions:
+          Deploy the Starkeep cloud. This runs two passes in sequence:
         </p>
         <ul className="text-sm text-muted-foreground flex flex-col gap-0.5 pl-4">
-          <li>• Aurora DSQL cluster for shared metadata</li>
-          <li>• S3 bucket for file storage</li>
-          <li>• Lambda function + API Gateway with Cognito JWT authorizer</li>
-          <li>• Shared-schema migrations applied under the installer PG role</li>
+          <li>• <strong>cloud-data-server</strong> — Aurora DSQL cluster, S3 file bucket, Lambda + API Gateway (Cognito JWT authorizer), shared-schema migrations</li>
+          <li>• <strong>Starkeep Drive</strong> — the User-Data-Owner identity that owns shared-record sync (IAM role + grants; no compute)</li>
         </ul>
       </div>
 
       {status === "idle" && !deployResult && (
         <Button onClick={handleInstall} disabled={installing}>
-          Install cloud-data-server
+          Deploy Starkeep cloud
         </Button>
       )}
 
@@ -828,7 +871,7 @@ function Step5Deploy({
       {deployResult && status === "success" && (
         <>
           <Alert>
-            <AlertDescription>cloud-data-server is installed in your AWS account.</AlertDescription>
+            <AlertDescription>cloud-data-server and Starkeep Drive are installed in your AWS account.</AlertDescription>
           </Alert>
           <div className="flex justify-end">
             <Button onClick={() => onSuccess(deployResult)}>Continue →</Button>
@@ -1001,7 +1044,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
     2: "Stack Outputs",
     3: "Create User",
     4: "Sign In",
-    5: "Deploy cloud-data-server",
+    5: "Deploy Starkeep cloud",
   };
 
   const cogCfg = fullCognitoConfig();
@@ -1046,7 +1089,8 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   stage: prefix,
                   userPoolId: null, userPoolClientId: null, identityPoolId: null,
                   accountId: null, permissionsBoundaryArn: null,
-                  foundationalPermissionsBoundaryArn: null, managerRoleArn: null,
+                  foundationalPermissionsBoundaryArn: null,
+                  userDataOwnerPermissionsBoundaryArn: null, managerRoleArn: null,
                   installDdlRoleArn: null,
                   pulumiStateBucket: null, s3Bucket: null, auroraEndpoint: null,
                   apiGatewayUrl: null, apiGatewayId: null, authorizerId: null,

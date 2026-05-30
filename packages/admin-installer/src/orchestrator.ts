@@ -22,6 +22,7 @@ import {
   detachTempInstallDdlPolicy,
   deleteAppRole,
   assertCloudInstallableAppId,
+  assertNotReservedAppId,
 } from "./iam";
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
 import {
@@ -63,6 +64,7 @@ export interface InstallerConfig {
   authorizerId: string;
   permissionsBoundaryArn: string;
   foundationalPermissionsBoundaryArn: string;
+  userDataOwnerPermissionsBoundaryArn: string;
   managerRoleArn: string;
   installDdlRoleArn: string;
   installInfraRoleArn: string;
@@ -74,6 +76,12 @@ export interface InstallInput {
   zipBuffer?: Buffer;
   version: string;
   config: InstallerConfig;
+  /**
+   * Set by built-in install wrappers (currently Starkeep Drive) to claim a
+   * reserved app id. Third-party installs leave it unset and are rejected on
+   * reserved ids.
+   */
+  allowReservedAppId?: boolean;
 }
 
 export interface UninstallInput {
@@ -110,6 +118,7 @@ async function runStep(
 export async function installApp(input: InstallInput): Promise<InstallResult> {
   const { appId, manifest, zipBuffer, config } = input;
   assertCloudInstallableAppId(appId);
+  if (!input.allowReservedAppId) assertNotReservedAppId(appId);
   const ir = manifest.infraRequirements;
   const done = await getCompletedSteps(appId, "install");
 
@@ -124,9 +133,9 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
       accountId: config.accountId,
       permissionsBoundaryArn: config.permissionsBoundaryArn,
       foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
-      sharedTypeAccess: ir.sharedTypeAccess,
-      canIngestUnknown: ir.canIngestUnknown,
-      canPromoteFromUnknown: ir.canPromoteFromUnknown,
+      userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
+      fileAccess: ir.fileAccess,
+      fileAccessAll: ir.fileAccessAll,
       brokerPower: ir.brokerPower,
       managerCreds,
     });
@@ -148,9 +157,8 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
     await runAppInstallDdl(
       dsqlOpts,
       appId,
-      ir.sharedTypeAccess,
-      ir.canIngestUnknown,
-      ir.canPromoteFromUnknown,
+      ir.fileAccess,
+      ir.fileAccessAll,
       ir.appSpecificSyncable.tables,
       ir.appSpecificSyncable.files,
     );
@@ -234,7 +242,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
 
   let policyIds: string[] = [];
   await runStep(appId, "install", "create_access_policies", done, async () => {
-    policyIds = await createAccessPolicies(appId, ir.sharedTypeAccess);
+    policyIds = await createAccessPolicies(appId, ir.fileAccess);
   });
 
   await runStep(appId, "install", "register_app", done, () =>
@@ -317,7 +325,7 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
       accountId: config.accountId,
       credentials: ddlCreds,
     };
-    await runAppUninstallDdl(dsqlOpts, appId, ir.sharedTypeAccess);
+    await runAppUninstallDdl(dsqlOpts, appId, ir.fileAccess, ir.fileAccessAll);
   });
 
   await runStep(appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>

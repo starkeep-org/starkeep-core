@@ -5,23 +5,33 @@ import {
 } from "../src/storage/object-keys.js";
 
 describe("dataRecordObjectKey", () => {
-  it("places data record blobs under shared/<typeId>/<shard>/<hash>", () => {
+  it("places data record blobs under shared/<category>/<shard>/<hash>", () => {
     const hash = "abcd1234".padEnd(64, "0");
-    expect(dataRecordObjectKey("image-jpeg", hash)).toBe(
-      `shared/image-jpeg/ab/${hash}`,
+    // The key is bucketed by the derived category, not the raw extension.
+    expect(dataRecordObjectKey("jpg", hash)).toBe(
+      `shared/image/ab/${hash}`,
     );
+    expect(dataRecordObjectKey("md", hash)).toBe(
+      `shared/document/ab/${hash}`,
+    );
+  });
+
+  it("buckets unmapped or extension-less files under shared/other", () => {
+    const hash = "abcd1234".padEnd(64, "0");
+    expect(dataRecordObjectKey("xyz", hash)).toBe(`shared/other/ab/${hash}`);
+    expect(dataRecordObjectKey("", hash)).toBe(`shared/other/ab/${hash}`);
   });
 
   it("does not include any app identifier in the key", () => {
     const hash = "f".repeat(64);
-    const key = dataRecordObjectKey("text-note", hash);
+    const key = dataRecordObjectKey("txt", hash);
     expect(key).not.toMatch(/apps\//);
   });
 
   it("produces deterministic keys for the same type+hash", () => {
     const hash = "1".repeat(64);
-    expect(dataRecordObjectKey("markdown", hash)).toBe(
-      dataRecordObjectKey("markdown", hash),
+    expect(dataRecordObjectKey("md", hash)).toBe(
+      dataRecordObjectKey("md", hash),
     );
   });
 });

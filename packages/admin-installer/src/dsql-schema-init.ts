@@ -25,7 +25,7 @@
  *      → SQLSTATE 0A000 "FOREIGN KEY constraint not supported". DSQL has no
  *      cross-row referential integrity. Cascade/SET NULL semantics that we
  *      relied on FK declarations for must be enforced in application code
- *      (cloud-data-server's delete paths, the reclassification flow, etc.).
+ *      (cloud-data-server's delete paths, etc.).
  *
  * If you add to this file, keep every entry to a single non-PL/pgSQL
  * statement with no FK constraints, and use the role-step pattern (or a
@@ -36,7 +36,7 @@
 import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import { CORE_TYPES, pgMetadataDdl } from "@starkeep/core";
+import { CATEGORIES, pgMetadataDdl } from "@starkeep/core";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -150,26 +150,12 @@ export async function initializeSharedSchema(
       `GRANT SELECT ON shared.access_grants TO PUBLIC`,
       `GRANT INSERT, UPDATE, DELETE ON shared.access_grants TO "${installer}"`,
 
-      // shared.reclassifications — audit log for unknown→typed promotions
-      `CREATE TABLE IF NOT EXISTS shared.reclassifications (
-         record_id    text        NOT NULL,
-         from_type    text        NOT NULL,
-         to_type      text        NOT NULL,
-         actor_app_id text        NOT NULL,
-         at           timestamptz NOT NULL DEFAULT now()
-       )`,
-
-      // shared.s3_orphans — cleanup queue for post-promotion S3 DELETE failures
-      `CREATE TABLE IF NOT EXISTS shared.s3_orphans (
-         s3_key      text        PRIMARY KEY,
-         detected_at timestamptz NOT NULL DEFAULT now()
-       )`,
-
-      // Per-type metadata tables, generated from @starkeep/core's CORE_TYPES.
+      // Per-category metadata tables, generated from @starkeep/core's
+      // CATEGORIES. `other` has no metadata columns and gets no table.
       // record_id is logically an FK to shared.records(id); DSQL has no FK
       // constraints or ON DELETE CASCADE, so deletes must be performed in
       // application code (delete the metadata row alongside the records row).
-      ...CORE_TYPES.map(pgMetadataDdl),
+      ...CATEGORIES.filter((c) => c.id !== "other").map((c) => pgMetadataDdl(c)),
 
       // app_install_steps — per-step state for idempotent install/uninstall.
       `CREATE TABLE IF NOT EXISTS shared.app_install_steps (

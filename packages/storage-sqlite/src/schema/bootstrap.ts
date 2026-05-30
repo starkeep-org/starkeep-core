@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { CORE_TYPES, sqliteMetadataDdl } from "@starkeep/core";
+import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/core";
 
 /**
  * Local sqlite schema bootstrap.
@@ -11,8 +11,8 @@ import { CORE_TYPES, sqliteMetadataDdl } from "@starkeep/core";
  * land as separate workstreams with their own DDL.
  *
  *   - shared_records           — all shared data, all types (file-backed only)
- *   - shared_record_<t>_metadata — per-type metadata rows (typed columns)
- *   - shared_access_grants     — per-app, per-type permissions
+ *   - shared_record_<category>_metadata — per-category metadata rows (typed columns)
+ *   - shared_access_grants     — per-app, per-extension permissions
  *   - shared_app_registry      — installed apps + HMAC secrets
  *   - shared_app_install_steps — idempotent install/uninstall ledger
  *   - access_policies          — control-plane: AccessControlEngine policies
@@ -132,9 +132,11 @@ export function initializeLocalSchema(db: DatabaseSync): void {
     )
   `);
 
-  // Per-type metadata tables on parity with DSQL. Generated from CORE_TYPES so
-  // adding a type or a column is a single edit in @starkeep/core's core-types.ts.
-  for (const t of CORE_TYPES) {
-    db.exec(sqliteMetadataDdl(t));
+  // Per-category metadata tables on parity with DSQL. Generated from CATEGORIES
+  // so adding a category or a column is a single edit in @starkeep/core's
+  // core-types.ts. `other` has no metadata columns and gets no table.
+  for (const c of CATEGORIES) {
+    if (c.id === "other") continue;
+    db.exec(sqliteMetadataDdl(c));
   }
 }
