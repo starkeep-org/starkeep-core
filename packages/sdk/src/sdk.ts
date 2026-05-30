@@ -2,6 +2,8 @@ import {
   createHLCClock,
   createDataRecord,
   dataRecordObjectKey,
+  categoryOf,
+  isCategoryId,
   type DataRecord,
   type MetadataRow,
   type TypeRegistration,
@@ -25,6 +27,12 @@ import type {
   StarkeepSdkOptions,
   DataPutInput,
 } from "./types.js";
+
+// Resolve a record's type/extension (or a category id) to its metadata
+// category. `other` has no metadata table, so callers skip persistence for it.
+function metadataCategory(typeOrCategory: string): string {
+  return isCategoryId(typeOrCategory) ? typeOrCategory : categoryOf(typeOrCategory);
+}
 
 export async function createStarkeepSdk(
   options: StarkeepSdkOptions,
@@ -144,7 +152,7 @@ export async function createStarkeepSdk(
       clock,
     );
     await databaseAdapter.put(record);
-    if (input.metadata) {
+    if (input.metadata && metadataCategory(input.type) !== "other") {
       await databaseAdapter.putMetadata(input.type, {
         ...input.metadata,
         recordId: record.id,
@@ -259,15 +267,21 @@ export async function createStarkeepSdk(
         return result.records;
       },
 
+      // `typeId` may be a record's extension or a category id; the adapter
+      // derives the per-category metadata table. The `other` category has no
+      // metadata table, so these are no-ops for it.
       async putMetadata(typeId: string, row: MetadataRow) {
+        if (metadataCategory(typeId) === "other") return;
         await databaseAdapter.putMetadata(typeId, row);
       },
 
       async getMetadata(typeId, recordId) {
+        if (metadataCategory(typeId) === "other") return null;
         return databaseAdapter.getMetadata(typeId, recordId);
       },
 
       async getMetadataByIds(typeId, recordIds) {
+        if (metadataCategory(typeId) === "other") return new Map();
         return databaseAdapter.getMetadataByIds(typeId, recordIds);
       },
     },

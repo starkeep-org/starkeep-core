@@ -86,7 +86,7 @@ export function installLocal(db: DatabaseSync, rawManifest: unknown): InstallLoc
   });
 
   runStep(db, appId, "install", "create_access_grants", done, () => {
-    insertAccessGrants(db, appId, manifest.infraRequirements.sharedTypeAccess);
+    insertAccessGrants(db, appId, manifest.infraRequirements.fileAccess);
   });
 
   const syncable = manifest.infraRequirements.appSpecificSyncable;

@@ -78,11 +78,11 @@ Starkeep recognises two categories of user data, with very different lifetimes, 
 
 Shared data is the user's content, typed against a registry that the platform owns. Defining properties:
 
-- **One item per file.** Each shared-data item is stored as a single file under the `shared/<type>/...` prefix in object storage. This makes items portable (they map cleanly onto a filesystem) and makes large items cheap (the database does not carry their bytes).
-- **Indexed by `shared.records`.** A single records table holds one row per item — id, type, path, timestamps, OCC version, common bookkeeping. The records table is the index; the file is the content.
-- **Typed against a globally registered type set, declared upfront by the bootstrap.** Apps cannot invent new shared types ad hoc; the type registry is platform-owned so multiple apps can interoperate on the same items with shared semantics.
-- **Per-type metadata, deterministic.** Each shared type may have an associated per-type metadata table (e.g. for images: width, height, format). These tables are caches/indices of properties that are **deterministically derivable from the file itself** — they are not a place to hang app-specific commentary. Two apps reading the same image see the same width and height.
-- **Shareable across apps.** Multiple apps may hold grants on the same type, and operate on the same items. The type system, the records table, and the per-type metadata tables are the contact surface they share through.
+- **One item per file.** Each shared-data item is stored as a single file under the `shared/<category>/...` prefix in object storage. This makes items portable (they map cleanly onto a filesystem) and makes large items cheap (the database does not carry their bytes).
+- **Indexed by `shared.records`.** A single records table holds one row per item — id, type (the lowercase file extension), path, timestamps, OCC version, common bookkeeping. The records table is the index; the file is the content.
+- **Identified by extension, organized by category.** An item's `type` is its lowercase file extension; the platform owns a hardcoded `extension → category` map (Images, Videos, Documents, …). Apps cannot invent new types; they declare the exact extensions they handle, and may only declare extensions the platform knows. Unmapped or extension-less files fall into a terminal **`other`** category — visible only to Starkeep Drive (the User-Data-Owner), never to an installable app, since an app could only reach a file by declaring its extension and `other` is exactly the set of extensions no app can declare.
+- **Per-category metadata, deterministic.** Each mapped category has an associated metadata table (e.g. for images: width, height, format). These tables are caches/indices of properties that are **deterministically derivable from the file itself** — not a place to hang app-specific commentary. Two apps reading the same image see the same width and height. `other` has no metadata table.
+- **Shareable across apps.** Multiple apps may hold grants on the same extensions, and operate on the same items. The extension/category system, the records table, and the per-category metadata tables are the contact surface they share through.
 - **Outlives uninstall.** Uninstalling an app does not delete shared records or shared files anywhere — including at the location where the app was uninstalled. The records belong to the user; another app with a grant on that type continues to see them, and reinstalling the app re-exposes them.
 - **Synced across locations.** Shared data is replicated by the local-data-server ↔ cloud-data-server sync. Because shared items are typed at the platform level, sync is inherently cross-app: a photo written by photos on one device shows up on another device even if the only app installed there is something else that declares a grant on images.
 
@@ -108,9 +108,9 @@ The cloud's push handler rejects app-syncable rows whose `appId` is not present 
 
 ### Type metadata vs app-specific metadata
 
-The split between per-type metadata (a property of the shared data plane) and app-specific metadata (a property of an app) is important and easy to confuse:
+The split between per-category metadata (a property of the shared data plane) and app-specific metadata (a property of an app) is important and easy to confuse:
 
-- **Per-type metadata** lives in a platform-owned per-type table, must be deterministically derivable from the file, and is visible to every app with a grant on that type. For example, image width and height belong here.
+- **Per-category metadata** lives in a platform-owned per-category table, must be deterministically derivable from the file, and is visible to every app with a grant on a matching extension. For example, image width and height belong here.
 - **App-specific metadata** lives in the app's own schema, is not constrained to be derivable from the file, and is invisible to other apps. A photo caption entered into an app by a user belongs here, even though it is "about" a shared image.
 
 If a property is intrinsic to the bytes, it is per-type metadata. If it is something the app or the user (using an app) decided about the item, it is app-specific data.

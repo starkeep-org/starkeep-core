@@ -5,8 +5,9 @@
  * these server-side helpers: read Drive's `hmac_secret` from the local-data-
  * server's SQLite registry, sign each request, and call the LDS `/data/*`
  * endpoints. The LDS then enforces `appCanRead(starkeep-drive)` — which, via
- * Drive's `"*"` grant, spans every shared type. No bypass: Drive reads through
- * the exact same per-app access path as any installed app.
+ * Drive's all-access (User-Data-Owner) grant, spans every extension plus the
+ * Drive-only `other` catch-all. No bypass: Drive reads through the exact same
+ * per-app access path as any installed app.
  */
 
 import { createHmac } from "node:crypto";
@@ -77,7 +78,10 @@ async function ldsGet<T>(path: string): Promise<T> {
 export interface DriveRecord {
   id: string;
   kind: string;
+  /** The record's file extension (e.g. "jpg", "md", "xyz"). */
   type: string;
+  /** Derived organizational category (e.g. "image", "document", "other"). */
+  category: string;
   origin_app_id: string;
   created_at: string;
   updated_at: string;

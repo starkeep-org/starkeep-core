@@ -619,26 +619,31 @@ export function buildTempInstallCloudDataServerPolicy(
   });
 }
 
-/** Runtime policy attached permanently to a per-app role (not temp). */
+/**
+ * Runtime policy attached permanently to a per-app role (not temp).
+ *
+ * Shared-data S3 access is keyed by **category** (D3): one `shared/<category>/*`
+ * resource per granted category, or `shared/*` for Drive (`fileAccessAll`),
+ * which covers the `other` catch-all. The per-extension app-layer check
+ * (access_grants) is the exact confinement; this IAM ceiling is intentionally
+ * category-granular.
+ */
 export function buildRuntimePolicy(
   stackPrefix: string,
   appId: string,
-  sharedTypeIds: string[],
+  categories: string[],
   hasWriteAccess: boolean,
-  canIngestUnknown: boolean,
-  canPromoteFromUnknown: boolean,
+  fileAccessAll: boolean,
 ): string {
   const s3SharedResources: string[] = [];
-  for (const typeId of sharedTypeIds) {
-    s3SharedResources.push(
-      `arn:aws:s3:::${stackPrefix}-files-*/shared/${typeId}/*`,
-    );
-  }
-  if (canIngestUnknown) {
-    s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/unknown/*`);
-  }
-  if (canPromoteFromUnknown) {
-    s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/unknown/*`);
+  if (fileAccessAll) {
+    s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/*`);
+  } else {
+    for (const category of categories) {
+      s3SharedResources.push(
+        `arn:aws:s3:::${stackPrefix}-files-*/shared/${category}/*`,
+      );
+    }
   }
 
   const statements: object[] = [
@@ -682,8 +687,7 @@ export function buildRuntimePolicy(
 
   if (s3SharedResources.length > 0) {
     const s3Actions: string[] = ["s3:GetObject"];
-    if (hasWriteAccess || canIngestUnknown) s3Actions.push("s3:PutObject", "s3:DeleteObject");
-    if (canPromoteFromUnknown) s3Actions.push("s3:GetObject", "s3:DeleteObject", "s3:CopyObject");
+    if (hasWriteAccess || fileAccessAll) s3Actions.push("s3:PutObject", "s3:DeleteObject");
     statements.push({
       Sid: "AppS3SharedData",
       Effect: "Allow",

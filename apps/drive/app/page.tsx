@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 interface DriveRecord {
   id: string;
   type: string;
+  category: string;
   origin_app_id: string;
   updated_at: string;
   size_bytes: number | null;
@@ -96,6 +97,7 @@ export default function DrivePage() {
         <table>
           <thead>
             <tr>
+              <th>Category</th>
               <th>Type</th>
               <th>Name</th>
               <th>From (origin app)</th>
@@ -106,7 +108,8 @@ export default function DrivePage() {
           <tbody>
             {records.map((r) => (
               <tr key={r.id}>
-                <td>{r.type}</td>
+                <td>{r.category}</td>
+                <td>{r.type || "—"}</td>
                 <td title={r.original_filename ?? r.id}>
                   {r.original_filename ?? r.id}
                 </td>

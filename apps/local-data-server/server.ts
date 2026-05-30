@@ -15,7 +15,6 @@ import {
 } from "../../packages/admin-installer/src/local/installer.js";
 import {
   listAppRegistry,
-  appRegistryRow,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
@@ -33,7 +32,7 @@ import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/ob
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
-import { WILDCARD_EXPANDABLE_TYPE_IDS, CORE_TYPES } from "../../packages/core/src/types/core-types.js";
+import { getCategory, categoryOf, isCategoryId } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
 import { dataRecordObjectKey } from "../../packages/core/src/storage/object-keys.js";
 import { join } from "node:path";
@@ -73,41 +72,55 @@ interface AppGrantRow {
   metadata_write: number;
 }
 
-function expandGrantsForApp(db: DatabaseSync, appId: string): AppGrantRow[] {
-  const rows = db
+function grantsForApp(db: DatabaseSync, appId: string): AppGrantRow[] {
+  // access_grants are keyed by extension (type_id = extension); one row per
+  // declared extension. Drive (the User-Data-Owner) writes no rows — it is
+  // granted all-access by app id below — so this is a plain lookup.
+  return db
     .prepare(
       "SELECT type_id, access, metadata_write FROM shared_access_grants WHERE app_id = ?",
     )
     .all(appId) as unknown as AppGrantRow[];
-  // Wildcard expansion: '*' grants the access level on every registered core type
-  // except 'unknown' (which is gated by canIngestUnknown / canPromoteFromUnknown
-  // and lives on the manifest, not access_grants).
-  const out: AppGrantRow[] = [];
-  for (const row of rows) {
-    if (row.type_id === "*") {
-      for (const t of WILDCARD_EXPANDABLE_TYPE_IDS) {
-        out.push({ type_id: t, access: row.access, metadata_write: row.metadata_write });
-      }
-    } else {
-      out.push(row);
-    }
-  }
-  return out;
 }
 
+// All-access local identities: Starkeep Drive (the User-Data-Owner) and the
+// local watcher. Both operate on all shared data — every extension plus the
+// Drive-only `other` catch-all — which cannot be represented as a finite set of
+// extension grant rows, so they are authorized by app id (matching the cloud
+// access-enforcer for Drive). `type` is the record's extension.
+const ALL_ACCESS_APP_IDS = new Set<string>([DRIVE_APP_ID, LOCAL_WATCHER_APP_ID]);
+
 function appCanRead(db: DatabaseSync, appId: string, type: string): boolean {
-  const grants = expandGrantsForApp(db, appId);
-  return grants.some((g) => g.type_id === type);
+  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
+  return grantsForApp(db, appId).some((g) => g.type_id === type);
 }
 
 function appCanWrite(db: DatabaseSync, appId: string, type: string): boolean {
-  const grants = expandGrantsForApp(db, appId);
-  return grants.some((g) => g.type_id === type && g.access === "readwrite");
+  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
+  return grantsForApp(db, appId).some((g) => g.type_id === type && g.access === "readwrite");
 }
 
-function appCanWriteMetadata(db: DatabaseSync, appId: string, type: string): boolean {
-  const grants = expandGrantsForApp(db, appId);
-  return grants.some((g) => g.type_id === type && g.metadata_write === 1);
+// Category-level access. Object-storage keys (`shared/<category>/…`) and the
+// per-category metadata tables are category-namespaced (so is the IAM ceiling),
+// so they authorize against the categories the app's extension grants map to —
+// a category is accessible when at least one granted extension maps to it.
+function appCanReadCategory(db: DatabaseSync, appId: string, category: string): boolean {
+  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
+  return grantsForApp(db, appId).some((g) => categoryOf(g.type_id) === category);
+}
+
+function appCanWriteCategory(db: DatabaseSync, appId: string, category: string): boolean {
+  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
+  return grantsForApp(db, appId).some(
+    (g) => categoryOf(g.type_id) === category && g.access === "readwrite",
+  );
+}
+
+function appCanWriteMetadataCategory(db: DatabaseSync, appId: string, category: string): boolean {
+  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
+  return grantsForApp(db, appId).some(
+    (g) => categoryOf(g.type_id) === category && g.metadata_write === 1,
+  );
 }
 
 function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
@@ -435,44 +448,37 @@ async function main() {
     version: "1.0.0",
     tier: "official" as const,
     infraRequirements: {
-      sharedTypeAccess: [
-        {
-          typeId: "*",
-          access: "readwrite" as const,
-          rationale: "Built-in local watcher ingests arbitrary files into all shared types.",
-        },
-      ],
-      canIngestUnknown: true,
+      // The watcher ingests via the in-process SDK, not the HTTP access path,
+      // so it needs no grant rows. It is additionally granted all-access by app
+      // id in the access functions (it stamps arbitrary files, including the
+      // Drive-only `other` category). fileAccessAll is reserved to Drive, so it
+      // is not set here.
+      fileAccess: [],
     },
   };
   const { appId: watcherAppId } = installLocal(localDb, localWatcherManifest);
 
   // Built-in Starkeep Drive identity (the User-Data-Owner). Installing it
-  // locally writes Drive's hmac_secret + wildcard ("*") grants into the local
-  // shared_app_registry / shared_access_grants tables, so:
-  //   - the always-on Drive sync engine (Shape A) is the legitimate "*"-granted
+  // locally writes Drive's hmac_secret into shared_app_registry. Drive declares
+  // `fileAccessAll` (the only app permitted to) rather than enumerated
+  // extensions — it cannot enumerate unmapped/`other` extensions — so it writes
+  // no access_grants rows; the access functions grant it all-access by app id.
+  // Thus:
+  //   - the always-on Drive sync engine (Shape A) is the legitimate all-access
   //     identity that scans all shared records for the single Drive channel;
   //   - the Drive UI authenticates as `starkeep-drive` over HMAC and reads all
   //     shared data through the same appCanRead path as any app — no bypass.
-  // Mirrors the cloud Drive manifest (metadataWrite so Drive can sync shared
-  // metadata for every type). No cloud credentials live here; the cloud-side
-  // write identity for shared data is always Drive, assumed inside cloud-data-
-  // server based on the channel path.
+  // No cloud credentials live here; the cloud-side write identity for shared
+  // data is always Drive, assumed inside cloud-data-server based on the channel
+  // path.
   const driveManifest = {
     id: DRIVE_APP_ID,
     name: "Starkeep Drive",
     version: "0.1.0",
     tier: "official" as const,
     infraRequirements: {
-      sharedTypeAccess: [
-        {
-          typeId: "*",
-          access: "readwrite" as const,
-          metadataWrite: true,
-          rationale:
-            "Drive owns cross-cutting custody of all shared user data, including syncing shared metadata for every type.",
-        },
-      ],
+      fileAccess: [],
+      fileAccessAll: true,
     },
   };
   installLocal(localDb, driveManifest);
@@ -996,6 +1002,7 @@ async function main() {
               id: r.id,
               kind: r.kind,
               type: r.type,
+              category: categoryOf(r.type),
               // Immutable provenance: which app created the record. Surfaced so
               // the Drive UI can show "this came from photos" even when photos
               // isn't cloud-installed.
@@ -1092,6 +1099,44 @@ async function main() {
             });
             return;
           }
+          // Dedup derived children (thumbnails) by (parentId, contentHash).
+          // A byte-identical child of the same parent is a duplicate — e.g.
+          // two concurrent /api/resize calls for one original. We key on
+          // contentHash too so distinct crops of the same source (same parent,
+          // different bytes) are NOT collapsed. Idempotent: return the
+          // existing record instead of registering a second row.
+          if (parentId) {
+            const dup = await databaseAdapter.query({
+              filters: [
+                { field: "parentId", operator: "eq", value: parentId },
+                { field: "contentHash", operator: "eq", value: contentHash },
+                { field: "deletedAt", operator: "isNull" },
+              ],
+              limit: 1,
+            });
+            const existing = dup.records[0];
+            if (existing) {
+              json(res, {
+                record: {
+                  id: existing.id,
+                  type: existing.type,
+                  created_at: new Date(existing.createdAt.wallTime).toISOString(),
+                  updated_at: new Date(existing.updatedAt.wallTime).toISOString(),
+                  owner_id: existing.ownerId,
+                  mime_type: existing.mimeType,
+                  size_bytes: existing.sizeBytes,
+                  object_storage_key: existing.objectStorageKey,
+                  original_filename: existing.originalFilename,
+                  parent_id: existing.parentId,
+                  path: existing.objectStorageKey
+                    ? await localAdapter.resolvePath(existing.objectStorageKey)
+                    : null,
+                },
+                deduped: true,
+              });
+              return;
+            }
+          }
           record = await sdk.data.putWithExistingBlob(
             { ...baseInput, originalFilename: fileName ?? null },
             { contentHash, objectStorageKey: expectedKey, sizeBytes, mimeType: contentType },
@@ -1151,23 +1196,23 @@ async function main() {
           json(res, { error: "key is required" });
           return;
         }
-        // Extract typeId from the canonical shared/<typeId>/<shard>/<hash> key
-        // and enforce that this app can write that type. Mirrors the manifest
-        // check in POST /data/records.
+        // Extract the category from the canonical shared/<category>/<shard>/<hash>
+        // key and enforce that this app can write that category. Object keys are
+        // category-namespaced (see object-keys.ts), so this is a category check.
         const sharedMatch = body.key.match(/^shared\/([^/]+)\//);
         if (!sharedMatch) {
           res.writeHead(400);
           json(res, {
-            error: "presign currently only supports shared/<typeId>/... keys",
+            error: "presign currently only supports shared/<category>/... keys",
           });
           return;
         }
-        const typeId = sharedMatch[1]!;
-        if (!appCanWrite(localDb, appId!, typeId)) {
+        const category = sharedMatch[1]!;
+        if (!appCanWriteCategory(localDb, appId!, category)) {
           res.writeHead(403);
           json(res, {
             error: "AccessDenied",
-            detail: `app "${appId}" has no readwrite grant on type "${typeId}"`,
+            detail: `app "${appId}" has no readwrite grant on category "${category}"`,
           });
           return;
         }
@@ -1238,14 +1283,12 @@ async function main() {
           json(res, { error: "type query param is required" });
           return;
         }
-        const registered = appRegistryRow(localDb, appId!);
-        const access = registered?.manifest.infraRequirements.sharedTypeAccess ?? [];
-        const granted = access.some(
-          (e) => e.access === "readwrite" && (e.typeId === typeId || e.typeId === "*"),
-        );
-        if (!granted) {
+        // Bytes land at shared/<category>/…, so authorize the derived category
+        // (the type param is normally an extension).
+        const fileCategory = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+        if (!appCanWriteCategory(localDb, appId!, fileCategory)) {
           res.writeHead(403);
-          json(res, { error: `App does not have readwrite access to type "${typeId}"` });
+          json(res, { error: `App does not have readwrite access to category "${fileCategory}"` });
           return;
         }
         const fileBuffer = await readBodyBuffer(req);
@@ -1443,10 +1486,12 @@ async function main() {
         return;
       }
 
-      // POST /data/records/:id/metadata — write type-specific metadata for a record.
-      // The app is responsible for extracting metadata values (e.g. EXIF from image
-      // bytes); the server validates keys against the declared type schema and persists.
-      // Requires readwrite access to the type.
+      // POST /data/records/:id/metadata — write metadata for a record.
+      // The app is responsible for extracting metadata values (e.g. EXIF from
+      // image bytes); the server validates keys against the per-category schema
+      // and persists. `typeId` is the record's extension (or a category id);
+      // the metadata table is the derived category's. Requires metadataWrite
+      // access to the extension.
       const metadataWriteMatch = path.match(/^\/data\/records\/([^/]+)\/metadata$/);
       if (metadataWriteMatch && req.method === "POST") {
         const recordId = metadataWriteMatch[1]!;
@@ -1462,25 +1507,26 @@ async function main() {
           json(res, { error: "metadata must be an object" });
           return;
         }
-        if (!appCanWriteMetadata(localDb, appId!, typeId)) {
+        const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+        if (!appCanWriteMetadataCategory(localDb, appId!, category)) {
           res.writeHead(403);
-          json(res, { error: "AccessDenied", detail: `app "${appId}" has no metadataWrite grant on type "${typeId}"` });
+          json(res, { error: "AccessDenied", detail: `app "${appId}" has no metadataWrite grant on category "${category}"` });
           return;
         }
-        const coreType = CORE_TYPES.find((t) => t.id === typeId);
-        if (!coreType) {
+        if (category === "other") {
           res.writeHead(400);
-          json(res, { error: `Unknown type "${typeId}" — only core types support metadata` });
+          json(res, { error: `Category "other" has no metadata table — only mapped categories support metadata` });
           return;
         }
-        const allowedColumns = new Set(coreType.metadataColumns.map((c) => c.name));
+        const categoryDef = getCategory(category)!;
+        const allowedColumns = new Set(categoryDef.metadataColumns.map((c) => c.name));
         const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
         if (unknownKeys.length > 0) {
           res.writeHead(400);
           json(res, { error: `Unknown metadata columns: ${unknownKeys.join(", ")}` });
           return;
         }
-        await sdk.data.putMetadata(typeId, { recordId: recordId as any, ...metadata });
+        await sdk.data.putMetadata(category, { recordId: recordId as any, ...metadata });
         json(res, { ok: true });
         return;
       }
@@ -1491,12 +1537,18 @@ async function main() {
       if (metadataReadMatch && req.method === "GET") {
         const recordId = metadataReadMatch[1]!;
         const typeId = metadataReadMatch[2]!;
-        if (!appCanRead(localDb, appId!, typeId)) {
+        const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+        if (!appCanReadCategory(localDb, appId!, category)) {
           res.writeHead(403);
-          json(res, { error: "AccessDenied", detail: `app "${appId}" has no read grant on type "${typeId}"` });
+          json(res, { error: "AccessDenied", detail: `app "${appId}" has no read grant on category "${category}"` });
           return;
         }
-        const metadata = await sdk.data.getMetadata(typeId, recordId as any);
+        if (category === "other") {
+          // `other` has no metadata table; nothing to read.
+          json(res, { metadata: null });
+          return;
+        }
+        const metadata = await sdk.data.getMetadata(category, recordId as any);
         json(res, { metadata });
         return;
       }
@@ -1515,6 +1567,7 @@ async function main() {
             id: record.id,
             kind: record.kind,
             type: record.type,
+            category: categoryOf(record.type),
             created_at: new Date(record.createdAt.wallTime).toISOString(),
             updated_at: new Date(record.updatedAt.wallTime).toISOString(),
             owner_id: record.ownerId,
@@ -1658,49 +1711,6 @@ async function main() {
         return;
       }
 
-      // POST /data/records/:id/promote — promote an 'unknown' record to a typed record
-      // Requires X-Starkeep-App-Id header from an app with canPromoteFromUnknown
-      const promoteMatch = path.match(/^\/data\/records\/([^/]+)\/promote$/);
-      if (promoteMatch && req.method === "POST") {
-        const recordId = decodeURIComponent(promoteMatch[1]!);
-        const body = JSON.parse(await readBody(req)) as { targetType?: string };
-        if (!body.targetType) {
-          res.writeHead(400);
-          json(res, { error: "targetType is required" });
-          return;
-        }
-        const registered = appRegistryRow(localDb, appId!);
-        if (!registered?.manifest.infraRequirements.canPromoteFromUnknown) {
-          res.writeHead(403);
-          json(res, { error: "App does not have canPromoteFromUnknown permission" });
-          return;
-        }
-        const record = await sdk.data.get(recordId as any);
-        if (!record) {
-          res.writeHead(404);
-          json(res, { error: "Record not found" });
-          return;
-        }
-        if (record.type !== "unknown") {
-          res.writeHead(409);
-          json(res, { error: "Only 'unknown' records can be promoted" });
-          return;
-        }
-        // Promotion changes the type — that's an admin-level mutation rather
-        // than a data-plane update, so we write to the underlying adapter
-        // directly and bump version. No metadata changes; the file already
-        // sits at its canonical objectStorageKey.
-        const promoted = {
-          ...record,
-          type: body.targetType,
-          version: record.version + 1,
-          updatedAt: { wallTime: Date.now(), counter: 0, nodeId: NODE_ID },
-        };
-        await databaseAdapter.put(promoted);
-        json(res, { record: { id: promoted.id, type: promoted.type, promoted_from: "unknown" } });
-        return;
-      }
-
       // POST /admin/apps/install — run the local installer for a manifest.
       // Body: the app's manifest.json. Returns { appId, hmacSecret } on success.
       // Called by admin-web on user-initiated install. Localhost-only, no HMAC
@@ -1758,9 +1768,8 @@ async function main() {
           tier: row.tier,
           status: row.status,
           installedAt: row.installedAt,
-          sharedTypeAccess: row.manifest.infraRequirements.sharedTypeAccess,
-          canIngestUnknown: row.manifest.infraRequirements.canIngestUnknown,
-          canPromoteFromUnknown: row.manifest.infraRequirements.canPromoteFromUnknown,
+          fileAccess: row.manifest.infraRequirements.fileAccess,
+          fileAccessAll: row.manifest.infraRequirements.fileAccessAll,
         }));
         json(res, { apps });
         return;

@@ -4,14 +4,8 @@
   "version": "0.1.0",
   "tier": "official",
   "infraRequirements": {
-    "sharedTypeAccess": [
-      {
-        "typeId": "*",
-        "access": "readwrite",
-        "metadataWrite": true,
-        "rationale": "Drive owns cross-cutting custody of all shared user data, including syncing shared metadata for every type."
-      }
-    ],
+    "fileAccess": [],
+    "fileAccessAll": true,
     "compute": { "enabled": false },
     "brokerPower": false,
     "appSpecificSyncable": { "tables": [], "files": false }

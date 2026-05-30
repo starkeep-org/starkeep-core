@@ -61,27 +61,34 @@ export interface FileWatchManager {
 }
 
 // ---------------------------------------------------------------------------
-// MIME detection
+// Identification
 // ---------------------------------------------------------------------------
 
-const EXT_MIME: Record<string, string> = {
-  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-  ".gif": "image/gif", ".webp": "image/webp", ".heic": "image/heic",
-  ".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo",
-  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
-  ".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown",
-  ".json": "application/json", ".csv": "text/csv",
-  ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-};
-
-function mimeFromPath(filePath: string): string {
-  return EXT_MIME[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+// The record's `type` is the lowercase file extension (no dot); "" for
+// extension-less files. The category is derived downstream via
+// `categoryOf(type)` — unmapped/empty extensions become the Drive-only
+// "other" category. The watcher never skips: every file is ingested.
+function extensionOf(filePath: string): string {
+  const ext = extname(filePath).toLowerCase();
+  return ext.startsWith(".") ? ext.slice(1) : ext;
 }
 
-function typeFromMime(mime: string): string {
-  if (mime.startsWith("image/")) return "image";
-  if (mime === "text/markdown") return "markdown";
-  return "unknown";
+// Incidental MIME for the stored blob's Content-Type. Not authoritative and
+// never decides the type. A small table covers common cases; everything else
+// is the generic octet-stream.
+const EXT_MIME: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+  gif: "image/gif", webp: "image/webp", heic: "image/heic",
+  mp4: "video/mp4", mov: "video/quicktime", avi: "video/x-msvideo",
+  mp3: "audio/mpeg", wav: "audio/wav", flac: "audio/flac",
+  pdf: "application/pdf", txt: "text/plain", md: "text/markdown",
+  json: "application/json", csv: "text/csv",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+};
+
+function mimeFromExtension(ext: string): string {
+  return EXT_MIME[ext] ?? "application/octet-stream";
 }
 
 // ---------------------------------------------------------------------------
@@ -279,12 +286,13 @@ export function createFileWatchManager(opts: {
       let dataRecordId = await findExistingByHash(contentHash);
 
       if (!dataRecordId) {
-        const contentType = mimeFromPath(filePath);
+        const type = extensionOf(filePath);
+        const contentType = mimeFromExtension(type);
         const title = basename(filePath, extname(filePath));
 
         const record = await sdk.data.putWithLocalFile(
           {
-            type: typeFromMime(contentType),
+            type,
             ownerId,
             originAppId: appId,
             content: { title, fileName: filename, sourcePath: relativePath },

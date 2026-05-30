@@ -134,9 +134,8 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
       permissionsBoundaryArn: config.permissionsBoundaryArn,
       foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
       userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
-      sharedTypeAccess: ir.sharedTypeAccess,
-      canIngestUnknown: ir.canIngestUnknown,
-      canPromoteFromUnknown: ir.canPromoteFromUnknown,
+      fileAccess: ir.fileAccess,
+      fileAccessAll: ir.fileAccessAll,
       brokerPower: ir.brokerPower,
       managerCreds,
     });
@@ -158,9 +157,8 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
     await runAppInstallDdl(
       dsqlOpts,
       appId,
-      ir.sharedTypeAccess,
-      ir.canIngestUnknown,
-      ir.canPromoteFromUnknown,
+      ir.fileAccess,
+      ir.fileAccessAll,
       ir.appSpecificSyncable.tables,
       ir.appSpecificSyncable.files,
     );
@@ -244,7 +242,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
 
   let policyIds: string[] = [];
   await runStep(appId, "install", "create_access_policies", done, async () => {
-    policyIds = await createAccessPolicies(appId, ir.sharedTypeAccess);
+    policyIds = await createAccessPolicies(appId, ir.fileAccess);
   });
 
   await runStep(appId, "install", "register_app", done, () =>
@@ -327,7 +325,7 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
       accountId: config.accountId,
       credentials: ddlCreds,
     };
-    await runAppUninstallDdl(dsqlOpts, appId, ir.sharedTypeAccess);
+    await runAppUninstallDdl(dsqlOpts, appId, ir.fileAccess, ir.fileAccessAll);
   });
 
   await runStep(appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>

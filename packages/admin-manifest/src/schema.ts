@@ -2,8 +2,15 @@ import { z } from "zod";
 
 export const appTierSchema = z.enum(["official", "verified", "community"]);
 
-export const sharedTypeAccessSchema = z.object({
-  typeId: z.string().min(1),
+/**
+ * An app's grant over a set of file extensions. Installable apps enumerate the
+ * exact lowercase extensions they handle (no dot, alphanumeric). Validation
+ * rejects any extension not in the platform map, so the unmapped (`other`) set
+ * is unreachable by apps. Category-level and wildcard grants are not expressible
+ * here — Drive's all-access uses `fileAccessAll` instead.
+ */
+export const fileAccessSchema = z.object({
+  extensions: z.array(z.string().regex(/^[a-z0-9]+$/)).min(1),
   access: z.enum(["read", "readwrite"]),
   metadataWrite: z.boolean().default(false),
   rationale: z.string(),
@@ -60,7 +67,12 @@ export const appSpecificSyncableSchema = z.object({
 });
 
 export const infraRequirementsSchema = z.object({
-  sharedTypeAccess: z.array(sharedTypeAccessSchema).default([]),
+  fileAccess: z.array(fileAccessSchema).default([]),
+  // All-access over every extension + the `other` catch-all. Only the
+  // `starkeep-drive` (User-Data-Owner) app may set this true; the validator
+  // enforces that. Grants Drive the `shared/*` IAM ceiling. Installable apps
+  // must enumerate extensions in `fileAccess` instead.
+  fileAccessAll: z.boolean().default(false),
   compute: z
     .object({
       enabled: z.boolean().default(false),
@@ -70,10 +82,6 @@ export const infraRequirementsSchema = z.object({
   additionalResources: z.array(sharedResourceRequirementSchema).default([]),
   // sts:AssumeRole on ${StackPrefix}-app-* roles — only allowed for the cloud-data-server built-in app.
   brokerPower: z.boolean().default(false),
-  // Write access to the built-in `unknown` holding-pen type.
-  canIngestUnknown: z.boolean().default(false),
-  // Read access to `unknown` plus the right to call promoteFromUnknown.
-  canPromoteFromUnknown: z.boolean().default(false),
   appSpecificSyncable: appSpecificSyncableSchema.default({}),
   sharedResources: z.array(sharedResourceRequirementSchema).default([]),
 });
@@ -105,7 +113,7 @@ export const appManifestSchema = z.object({
 });
 
 export type AppTier = z.infer<typeof appTierSchema>;
-export type SharedTypeAccess = z.infer<typeof sharedTypeAccessSchema>;
+export type FileAccess = z.infer<typeof fileAccessSchema>;
 export type SharedResourceRequirement = z.infer<typeof sharedResourceRequirementSchema>;
 export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;
 export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;

@@ -17,10 +17,11 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
       // role-management verbs don't populate it, so gating them with this
       // condition would always deny. CreateRole alone is the actual security
       // bar: it ensures every Manager-minted role is born with one of the
-      // two known boundaries (regular per-app or foundational). The choice
-      // between them is centralized in createAppRole — IAM accepts either,
-      // but only one code path (the magic-string check on appId) can pick
-      // the foundational one.
+      // three known boundaries (regular per-app, foundational, or
+      // user-data-owner). The choice between them is centralized in
+      // createAppRole — IAM accepts any of them, but only one code path (the
+      // magic-string check on appId) can pick the foundational or
+      // user-data-owner one.
       Sid: "ManagerCreateAppRoleWithBoundary",
       Effect: "Allow",
       Action: "iam:CreateRole",
@@ -35,6 +36,7 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
           "iam:PermissionsBoundary": [
             SUB(`arn:aws:iam::*:policy/${stackPrefix}-app-permissions-boundary`),
             SUB(`arn:aws:iam::*:policy/${stackPrefix}-foundational-permissions-boundary`),
+            SUB(`arn:aws:iam::*:policy/${stackPrefix}-user-data-owner-permissions-boundary`),
           ],
         },
       },

@@ -23,8 +23,8 @@ import {
   buildTempInstallCloudDataServerPolicy,
   buildTempInstallDdlPolicy,
 } from "./temp-policies";
-import type { SharedTypeAccess } from "@starkeep/admin-manifest";
-import { CORE_TYPE_REGISTRY } from "@starkeep/admin-manifest";
+import type { FileAccess } from "@starkeep/admin-manifest";
+import { APP_GRANTABLE_CATEGORIES, categoryOf } from "@starkeep/core";
 
 function makeIamClient(creds: AwsCredentials): IAMClient {
   return new IAMClient({
@@ -36,18 +36,21 @@ function makeIamClient(creds: AwsCredentials): IAMClient {
   });
 }
 
-function expandWildcard(access: SharedTypeAccess[]): SharedTypeAccess[] {
-  const result: SharedTypeAccess[] = [];
-  for (const entry of access) {
-    if (entry.typeId === "*") {
-      for (const typeId of CORE_TYPE_REGISTRY) {
-        result.push({ ...entry, typeId });
-      }
-    } else {
-      result.push(entry);
+/**
+ * The distinct categories implied by a manifest's fileAccess, for the
+ * category-granular S3 IAM ceiling (D3). Drive (fileAccessAll) gets the
+ * `shared/*` ceiling instead (handled in buildRuntimePolicy), but we still
+ * pass every grantable category for completeness.
+ */
+function categoriesOf(fileAccess: FileAccess[]): string[] {
+  const set = new Set<string>();
+  for (const entry of fileAccess) {
+    for (const ext of entry.extensions) {
+      const category = categoryOf(ext);
+      if (category !== "other") set.add(category);
     }
   }
-  return result;
+  return [...set];
 }
 
 export interface CreateAppRoleInput {
@@ -68,9 +71,8 @@ export interface CreateAppRoleInput {
    * the cross-cutting `shared/*` ceiling.
    */
   userDataOwnerPermissionsBoundaryArn: string;
-  sharedTypeAccess: SharedTypeAccess[];
-  canIngestUnknown: boolean;
-  canPromoteFromUnknown: boolean;
+  fileAccess: FileAccess[];
+  fileAccessAll: boolean;
   brokerPower: boolean;
   managerCreds: AwsCredentials;
 }
@@ -154,7 +156,7 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
     stackPrefix, appId, accountId,
     permissionsBoundaryArn, foundationalPermissionsBoundaryArn,
     userDataOwnerPermissionsBoundaryArn,
-    sharedTypeAccess, canIngestUnknown, canPromoteFromUnknown,
+    fileAccess, fileAccessAll,
     brokerPower, managerCreds,
   } = input;
   const iam = makeIamClient(managerCreds);
@@ -167,9 +169,10 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
         ? userDataOwnerPermissionsBoundaryArn
         : permissionsBoundaryArn;
 
-  const expanded = expandWildcard(sharedTypeAccess);
-  const typeIds = expanded.map((e) => e.typeId);
-  const hasWriteAccess = expanded.some((e) => e.access === "readwrite");
+  const categories = fileAccessAll
+    ? [...APP_GRANTABLE_CATEGORIES]
+    : categoriesOf(fileAccess);
+  const hasWriteAccess = fileAccessAll || fileAccess.some((e) => e.access === "readwrite");
 
   const assumeRolePolicy = buildAppRoleTrustPolicy(
     stackPrefix,
@@ -196,7 +199,7 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
   }
 
   const runtimePolicy = buildRuntimePolicy(
-    stackPrefix, appId, typeIds, hasWriteAccess, canIngestUnknown, canPromoteFromUnknown,
+    stackPrefix, appId, categories, hasWriteAccess, fileAccessAll,
   );
   await iam.send(
     new PutRolePolicyCommand({

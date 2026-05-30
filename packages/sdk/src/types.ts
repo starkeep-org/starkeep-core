@@ -46,9 +46,10 @@ export type DataPutInput = Omit<
   "contentHash" | "objectStorageKey" | "mimeType" | "sizeBytes"
 > & {
   /**
-   * Optional per-type metadata row to write atomically with the records-table
-   * row. Columns are defined by the type's entry in `CORE_TYPES`. The SDK
-   * supplies the `recordId` itself — callers omit it.
+   * Optional per-category metadata row to write atomically with the
+   * records-table row. Columns are defined by the record's category entry in
+   * `CATEGORIES` (category = `categoryOf(type)`); `other` records have no
+   * metadata table. The SDK supplies the `recordId` itself — callers omit it.
    */
   metadata?: Omit<MetadataRow, "recordId">;
 };

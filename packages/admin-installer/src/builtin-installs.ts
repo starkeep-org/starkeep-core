@@ -68,7 +68,7 @@ interface CloudDataServerManifest {
   tier: string;
   infraRequirements: {
     brokerPower: boolean;
-    sharedTypeAccess: unknown[];
+    fileAccess: unknown[];
   };
 }
 
@@ -234,9 +234,8 @@ export async function installCloudDataServer(
       permissionsBoundaryArn: config.permissionsBoundaryArn,
       foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
       userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
-      sharedTypeAccess: [],
-      canIngestUnknown: false,
-      canPromoteFromUnknown: false,
+      fileAccess: [],
+      fileAccessAll: false,
       brokerPower: manifest.infraRequirements.brokerPower,
       managerCreds,
     });
