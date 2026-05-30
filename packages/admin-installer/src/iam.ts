@@ -23,8 +23,8 @@ import {
   buildTempInstallCloudDataServerPolicy,
   buildTempInstallDdlPolicy,
 } from "./temp-policies";
-import type { SharedTypeAccess } from "@starkeep/admin-manifest";
-import { CORE_TYPE_REGISTRY } from "@starkeep/admin-manifest";
+import type { FileAccess } from "@starkeep/admin-manifest";
+import { APP_GRANTABLE_CATEGORIES, categoryOf } from "@starkeep/core";
 
 function makeIamClient(creds: AwsCredentials): IAMClient {
   return new IAMClient({
@@ -36,18 +36,21 @@ function makeIamClient(creds: AwsCredentials): IAMClient {
   });
 }
 
-function expandWildcard(access: SharedTypeAccess[]): SharedTypeAccess[] {
-  const result: SharedTypeAccess[] = [];
-  for (const entry of access) {
-    if (entry.typeId === "*") {
-      for (const typeId of CORE_TYPE_REGISTRY) {
-        result.push({ ...entry, typeId });
-      }
-    } else {
-      result.push(entry);
+/**
+ * The distinct categories implied by a manifest's fileAccess, for the
+ * category-granular S3 IAM ceiling (D3). Drive (fileAccessAll) gets the
+ * `shared/*` ceiling instead (handled in buildRuntimePolicy), but we still
+ * pass every grantable category for completeness.
+ */
+function categoriesOf(fileAccess: FileAccess[]): string[] {
+  const set = new Set<string>();
+  for (const entry of fileAccess) {
+    for (const ext of entry.extensions) {
+      const category = categoryOf(ext);
+      if (category !== "other") set.add(category);
     }
   }
-  return result;
+  return [...set];
 }
 
 export interface CreateAppRoleInput {
@@ -62,9 +65,14 @@ export interface CreateAppRoleInput {
    * future code path — can request this wider ceiling for any other app.
    */
   foundationalPermissionsBoundaryArn: string;
-  sharedTypeAccess: SharedTypeAccess[];
-  canIngestUnknown: boolean;
-  canPromoteFromUnknown: boolean;
+  /**
+   * Boundary ARN for the User-Data-Owner app (Starkeep Drive). Routed via the
+   * same magic-string check below so only the `starkeep-drive` app id can claim
+   * the cross-cutting `shared/*` ceiling.
+   */
+  userDataOwnerPermissionsBoundaryArn: string;
+  fileAccess: FileAccess[];
+  fileAccessAll: boolean;
   brokerPower: boolean;
   managerCreds: AwsCredentials;
 }
@@ -80,13 +88,51 @@ export interface CreateAppRoleInput {
 const FOUNDATIONAL_APP_ID = "cloud-data-server";
 
 /**
- * The cloud-side identity that signs for records originated by the
- * local-data-server's built-in features (notably the file watcher). LDS is a
- * built-in; cloud-data-server is its symmetric built-in; this is the cloud
- * role the cloud-data-server install creates so push requests carrying
- * `originAppId: "local-data-sync"` can be STS-assumed and authorized.
+ * The single app id permitted to use the user-data-owner permissions boundary.
+ * Starkeep Drive owns the cross-cutting `shared/*` write ceiling that powers all
+ * shared-record sync. Centralizing the choice here (rather than letting callers
+ * pass the boundary they want) guarantees a third-party app cannot escape the
+ * regular per-app boundary even if a future code path forgets to enforce it.
  */
-export const LOCAL_DATA_SYNC_APP_ID = "local-data-sync";
+export const USER_DATA_OWNER_APP_ID = "starkeep-drive";
+
+/**
+ * The local-data-server's built-in file-watcher identity. Under Shape A this is
+ * a *local-only* identity and an immutable `origin_app_id` data tag: records the
+ * watcher creates are shared records that sync to the cloud via the Starkeep
+ * Drive channel under Drive's role, carrying `origin_app_id = "local-watcher"`.
+ * There is no dedicated cloud write-role for it (the retired `local-data-sync`
+ * cloud identity). It is reserved here only so no third-party app can claim the
+ * name and impersonate watcher-originated data.
+ */
+export const LOCAL_WATCHER_APP_ID = "local-watcher";
+
+/**
+ * App ids that only built-in installs may claim. Third-party installs are
+ * rejected on these so no manifest can impersonate cloud-data-server, Starkeep
+ * Drive (the User-Data-Owner), or the local watcher. Built-in install paths opt
+ * out of this guard explicitly (see `installApp`'s `allowReservedAppId`).
+ * `local-data-sync` is the retired cloud sync identity — kept reserved so the
+ * name cannot be reclaimed.
+ */
+export const RESERVED_APP_IDS: ReadonlySet<string> = new Set([
+  FOUNDATIONAL_APP_ID,
+  USER_DATA_OWNER_APP_ID,
+  LOCAL_WATCHER_APP_ID,
+  "local-data-sync",
+]);
+
+/**
+ * Reject reserved built-in app ids for third-party installs. Format validity
+ * is a separate concern (`assertCloudInstallableAppId`).
+ */
+export function assertNotReservedAppId(appId: string): void {
+  if (RESERVED_APP_IDS.has(appId)) {
+    throw new Error(
+      `appId ${JSON.stringify(appId)} is reserved for a built-in app and cannot be installed by a third-party manifest`,
+    );
+  }
+}
 
 /**
  * Cloud-installable appIds must survive IAM role names, Postgres role names,
@@ -109,19 +155,24 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
   const {
     stackPrefix, appId, accountId,
     permissionsBoundaryArn, foundationalPermissionsBoundaryArn,
-    sharedTypeAccess, canIngestUnknown, canPromoteFromUnknown,
+    userDataOwnerPermissionsBoundaryArn,
+    fileAccess, fileAccessAll,
     brokerPower, managerCreds,
   } = input;
   const iam = makeIamClient(managerCreds);
   const roleName = `${stackPrefix}-app-${appId}-role`;
 
-  const boundaryArn = appId === FOUNDATIONAL_APP_ID
-    ? foundationalPermissionsBoundaryArn
-    : permissionsBoundaryArn;
+  const boundaryArn =
+    appId === FOUNDATIONAL_APP_ID
+      ? foundationalPermissionsBoundaryArn
+      : appId === USER_DATA_OWNER_APP_ID
+        ? userDataOwnerPermissionsBoundaryArn
+        : permissionsBoundaryArn;
 
-  const expanded = expandWildcard(sharedTypeAccess);
-  const typeIds = expanded.map((e) => e.typeId);
-  const hasWriteAccess = expanded.some((e) => e.access === "readwrite");
+  const categories = fileAccessAll
+    ? [...APP_GRANTABLE_CATEGORIES]
+    : categoriesOf(fileAccess);
+  const hasWriteAccess = fileAccessAll || fileAccess.some((e) => e.access === "readwrite");
 
   const assumeRolePolicy = buildAppRoleTrustPolicy(
     stackPrefix,
@@ -148,7 +199,7 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
   }
 
   const runtimePolicy = buildRuntimePolicy(
-    stackPrefix, appId, typeIds, hasWriteAccess, canIngestUnknown, canPromoteFromUnknown,
+    stackPrefix, appId, categories, hasWriteAccess, fileAccessAll,
   );
   await iam.send(
     new PutRolePolicyCommand({

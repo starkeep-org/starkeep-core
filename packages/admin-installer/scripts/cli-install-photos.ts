@@ -82,6 +82,7 @@ interface StarkeepConfig {
   identityPoolId: string;
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
+  userDataOwnerPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   installDdlRoleArn?: string;
   installInfraRoleArn?: string;
@@ -495,6 +496,8 @@ const permissionsBoundaryArn =
   config.permissionsBoundaryArn ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
 const foundationalPermissionsBoundaryArn =
   config.foundationalPermissionsBoundaryArn ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
+const userDataOwnerPermissionsBoundaryArn =
+  config.userDataOwnerPermissionsBoundaryArn ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
 // Suffixed with account+region to keep the bucket globally unique (the
@@ -546,6 +549,7 @@ await installApp({
     authorizerId: config.authorizerId,
     permissionsBoundaryArn,
     foundationalPermissionsBoundaryArn,
+    userDataOwnerPermissionsBoundaryArn,
     managerRoleArn,
     installDdlRoleArn,
     installInfraRoleArn,

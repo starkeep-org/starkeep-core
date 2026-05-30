@@ -92,7 +92,7 @@ skip() { echo "  Not found, skipping."; }
 empty_bucket() {
   local bucket="$1"
   python3 << PYEOF
-import json, subprocess
+import json, os, subprocess, tempfile
 
 bucket = "$bucket"
 
@@ -102,11 +102,25 @@ def aws_json(*args):
         raise RuntimeError(r.stderr.strip())
     return json.loads(r.stdout) if r.stdout.strip() else {}
 
-def aws_cmd(*args):
-    r = subprocess.run(["aws"] + list(args), capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip())
-    return r.stdout
+def delete_objects(objs):
+    """Batch-delete up to 1000 objects in one call, returning the raw stdout.
+
+    The payload goes through a temp file (--delete file://...) rather than an
+    inline JSON argument — inline JSON is what triggered the 'MalformedXML'
+    errors. Callers must chunk to delete-objects' 1000-key-per-call limit."""
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump({"Objects": objs, "Quiet": False}, f)
+        path = f.name
+    try:
+        r = subprocess.run(
+            ["aws", "s3api", "delete-objects", "--bucket", bucket,
+             "--delete", "file://" + path],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip())
+        return r.stdout
+    finally:
+        os.unlink(path)
 
 def report_delete_response(stdout):
     if not stdout.strip():
@@ -124,6 +138,14 @@ def report_delete_response(stdout):
         print(f"  ... and {len(errors) - 10} more errors")
     return len(errors)
 
+def delete_in_batches(objs):
+    """Delete an arbitrary number of objects, chunked to the 1000-key limit.
+    Returns the total number of per-object errors reported."""
+    n_errors = 0
+    for i in range(0, len(objs), 1000):
+        n_errors += report_delete_response(delete_objects(objs[i:i + 1000]))
+    return n_errors
+
 deleted = 0
 stalled = 0
 while True:
@@ -133,9 +155,7 @@ while True:
             for o in data.get("Versions", []) + data.get("DeleteMarkers", [])]
     if not objs:
         break
-    payload = json.dumps({"Objects": objs, "Quiet": False})
-    out = aws_cmd("s3api", "delete-objects", "--bucket", bucket, "--delete", payload)
-    n_errors = report_delete_response(out)
+    n_errors = delete_in_batches(objs)
     deleted += len(objs)
     print(f"  Attempted {len(objs)} (errors: {n_errors}); {deleted} versions/markers processed so far...")
     if n_errors == len(objs):
@@ -152,9 +172,7 @@ while True:
     objs = [{"Key": o["Key"]} for o in data.get("Contents", [])]
     if not objs:
         break
-    payload = json.dumps({"Objects": objs, "Quiet": False})
-    out = aws_cmd("s3api", "delete-objects", "--bucket", bucket, "--delete", payload)
-    report_delete_response(out)
+    delete_in_batches(objs)
     deleted += len(objs)
     print(f"  Deleted {deleted} objects so far...")
 

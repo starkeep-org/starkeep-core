@@ -29,8 +29,8 @@ export default function AppsPage() {
   );
 }
 
-interface SharedTypeAccess {
-  typeId: string;
+interface FileAccess {
+  extensions: string[];
   access: "read" | "readwrite";
   metadataWrite?: boolean;
   rationale: string;
@@ -42,9 +42,8 @@ interface ManifestSummary {
   version?: string;
   description?: string;
   infraRequirements?: {
-    sharedTypeAccess?: SharedTypeAccess[];
-    canIngestUnknown?: boolean;
-    canPromoteFromUnknown?: boolean;
+    fileAccess?: FileAccess[];
+    fileAccessAll?: boolean;
   };
 }
 
@@ -241,7 +240,8 @@ function LocalAppsSection() {
       )}
 
       {apps?.map((entry) => {
-        const grants = entry.manifest.infraRequirements?.sharedTypeAccess ?? [];
+        const grants = entry.manifest.infraRequirements?.fileAccess ?? [];
+        const allAccess = entry.manifest.infraRequirements?.fileAccessAll ?? false;
         const installed = entry.status === "active";
         const status = runStatus[entry.appId];
         const want = pending[entry.appId];
@@ -344,11 +344,16 @@ function LocalAppsSection() {
             {entry.manifest.description && (
               <p className="text-sm text-muted-foreground">{entry.manifest.description}</p>
             )}
+            {allAccess && (
+              <p className="text-xs text-muted-foreground">
+                <span className="font-mono">all files</span> (User-Data-Owner): read + write
+              </p>
+            )}
             {grants.length > 0 && (
               <ul className="text-xs text-muted-foreground flex flex-col gap-0.5">
-                {grants.map((g) => (
-                  <li key={g.typeId}>
-                    <span className="font-mono">{g.typeId}</span>: {g.access}
+                {grants.map((g, i) => (
+                  <li key={i}>
+                    <span className="font-mono">{g.extensions.join(", ")}</span>: {g.access}
                     {g.metadataWrite ? " + metadata:write" : ""}
                   </li>
                 ))}
@@ -587,9 +592,8 @@ function ConsentModal({
   onApprove: () => void;
   onCancel: () => void;
 }) {
-  const grants = entry.manifest.infraRequirements?.sharedTypeAccess ?? [];
-  const canIngestUnknown = entry.manifest.infraRequirements?.canIngestUnknown;
-  const canPromoteFromUnknown = entry.manifest.infraRequirements?.canPromoteFromUnknown;
+  const grants = entry.manifest.infraRequirements?.fileAccess ?? [];
+  const allAccess = entry.manifest.infraRequirements?.fileAccessAll ?? false;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -599,23 +603,30 @@ function ConsentModal({
         </h3>
         <p className="text-sm text-muted-foreground">
           This app is requesting the following access to your shared data. Other apps with grants on
-          the same types will see records this app creates; records persist if the app is uninstalled.
+          the same file types will see records this app creates; records persist if the app is uninstalled.
         </p>
 
+        {allAccess && (
+          <div className="text-sm">
+            This app is the <span className="font-medium">User-Data-Owner</span>: read + write access to
+            <span className="font-mono"> all files</span>, including unclassified ones.
+          </div>
+        )}
+
         {grants.length === 0 ? (
-          <p className="text-sm">No shared-type grants requested.</p>
+          !allAccess && <p className="text-sm">No file-type grants requested.</p>
         ) : (
           <ul className="flex flex-col gap-3">
-            {grants.map((g) => {
+            {grants.map((g, i) => {
               // Per design: any access (read or readwrite) implicitly grants
-              // SELECT on the per-type metadata table. metadataWrite adds
+              // SELECT on the per-category metadata table. metadataWrite adds
               // INSERT/UPDATE on top of that read.
               const dataPermissions = g.access === "readwrite" ? "read + write" : "read";
               const metadataPermissions = g.metadataWrite ? "read + write" : "read";
               return (
-                <li key={g.typeId} className="border rounded-md p-3 flex flex-col gap-1">
+                <li key={i} className="border rounded-md p-3 flex flex-col gap-1">
                   <div className="flex items-center gap-2 text-sm flex-wrap">
-                    <span className="font-mono">{g.typeId}</span>
+                    <span className="font-mono">{g.extensions.join(", ")}</span>
                     <Badge variant="secondary" className="text-xs">records: {dataPermissions}</Badge>
                     <Badge variant="secondary" className="text-xs">metadata: {metadataPermissions}</Badge>
                   </div>
@@ -624,13 +635,6 @@ function ConsentModal({
               );
             })}
           </ul>
-        )}
-
-        {(canIngestUnknown || canPromoteFromUnknown) && (
-          <div className="text-xs text-muted-foreground">
-            Additionally: {canIngestUnknown ? "ingest unknown-type files; " : ""}
-            {canPromoteFromUnknown ? "promote unknown records to typed records" : ""}
-          </div>
         )}
 
         <div className="flex justify-end gap-2 pt-1">

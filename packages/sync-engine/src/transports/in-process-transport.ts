@@ -34,6 +34,14 @@ export interface InProcessTransportOptions {
    * itself does no blob inspection.
    */
   readonly objectStorage: ObjectStorageAdapter;
+  /**
+   * Shape A channel split (responder side). When true (default), this transport
+   * applies and scans shared records (the `shared.records` table). The
+   * cloud-side Drive channel sets this true with no `appSyncableSource`; per-app
+   * channels set it false and serve only that app's app-specific rows. Mirrors
+   * `SyncEngineOptions.syncSharedRecords` on the requester side.
+   */
+  readonly syncSharedRecords?: boolean;
 }
 
 /**
@@ -50,19 +58,22 @@ export interface InProcessTransportOptions {
 export function createInProcessSyncTransport(
   options: InProcessTransportOptions,
 ): SyncTransport {
-  const { databaseAdapter, clock, appSyncableSource } = options;
+  const { databaseAdapter, clock, appSyncableSource, syncSharedRecords = true } = options;
 
   return {
     async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
       // 1. Apply incoming records — pure put(snapshot). HLC LWW: skip if local
-      //    copy is at-or-ahead of incoming.
-      for (const snapshot of request.records ?? []) {
-        const current = await databaseAdapter.get(snapshot.id);
-        if (current && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0) {
-          continue;
+      //    copy is at-or-ahead of incoming. Shape A: only the Drive channel
+      //    (syncSharedRecords=true) applies shared records.
+      if (syncSharedRecords) {
+        for (const snapshot of request.records ?? []) {
+          const current = await databaseAdapter.get(snapshot.id);
+          if (current && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0) {
+            continue;
+          }
+          clock.receive(snapshot.updatedAt);
+          await databaseAdapter.put(snapshot);
         }
-        clock.receive(snapshot.updatedAt);
-        await databaseAdapter.put(snapshot);
       }
 
       // 2. Apply incoming app-syncable rows.
@@ -90,7 +101,9 @@ export function createInProcessSyncTransport(
       const SCAN_PAGE = 500;
       const collected: AnyRecord[] = [];
       let cursor: string | undefined = undefined;
-      let scanHasMore = true;
+      // Shape A: per-app channels (syncSharedRecords=false) never scan or ship
+      // shared records.
+      let scanHasMore = syncSharedRecords;
       let overflowed = false;
       while (!overflowed && scanHasMore) {
         const page = await databaseAdapter.query({

@@ -35,10 +35,7 @@ import {
   GetCredentialsForIdentityCommand,
 } from "@aws-sdk/client-cognito-identity";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import {
-  uninstallCloudDataServer,
-  uninstallLocalDataSync,
-} from "../src/builtin-installs";
+import { uninstallCloudDataServer, uninstallDrive } from "../src/builtin-installs";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -48,12 +45,13 @@ interface StarkeepConfig {
   identityPoolId: string;
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
+  userDataOwnerPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   pulumiStateBucket?: string;
   // Populated by the install script after a successful run. Needed here so
-  // we can uninstall local-data-sync (a regular per-app uninstall, which
-  // depends on DSQL/files-bucket existing) before tearing down cloud-data-
-  // server's foundational infra.
+  // we can uninstall Starkeep Drive (a per-app-shaped uninstall, which depends
+  // on DSQL/files-bucket existing) before tearing down cloud-data-server's
+  // foundational infra.
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
@@ -255,6 +253,9 @@ const permissionsBoundaryArn =
 const foundationalPermissionsBoundaryArn =
   config.foundationalPermissionsBoundaryArn
   ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
+const userDataOwnerPermissionsBoundaryArn =
+  config.userDataOwnerPermissionsBoundaryArn
+  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
 
@@ -275,16 +276,17 @@ if (!nonInteractive) {
   }
 }
 
-// Uninstall local-data-sync first (while DSQL/files-bucket still exist).
-// Skipped if the previous install never recorded its outputs (e.g. it
-// failed before reaching this step), since we can't issue the per-app
-// uninstall without the foundational infra coordinates.
+// Uninstall Starkeep Drive first (while DSQL/files-bucket still exist), since
+// Drive's role + PG role + access_grants are torn down via the foundational
+// install-ddl/install-infra roles. Skipped if the previous install never
+// recorded its outputs (e.g. it failed before reaching this step), since we
+// can't issue the per-app uninstall without the foundational infra coordinates.
 if (config.apiGatewayId && config.authorizerId && config.s3Bucket && config.auroraEndpoint && config.apiGatewayExecutionArn) {
   const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
   const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
   const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
   try {
-    await uninstallLocalDataSync({
+    await uninstallDrive({
       stackPrefix,
       region,
       accountId,
@@ -297,18 +299,19 @@ if (config.apiGatewayId && config.authorizerId && config.s3Bucket && config.auro
       authorizerId: config.authorizerId,
       permissionsBoundaryArn,
       foundationalPermissionsBoundaryArn,
+      userDataOwnerPermissionsBoundaryArn,
       managerRoleArn,
       installDdlRoleArn,
       installInfraRoleArn,
     });
   } catch (err) {
     console.warn(
-      `local-data-sync uninstall failed: ${err instanceof Error ? err.message : String(err)}\n` +
+      `Starkeep Drive uninstall failed: ${err instanceof Error ? err.message : String(err)}\n` +
         "Continuing with cloud-data-server tear-down — manual cleanup of the role may be needed.",
     );
   }
 } else {
-  console.log("Skipping local-data-sync uninstall (config missing post-install outputs).");
+  console.log("Skipping Starkeep Drive uninstall (config missing post-install outputs).");
 }
 
 await uninstallCloudDataServer({
@@ -317,6 +320,7 @@ await uninstallCloudDataServer({
   accountId,
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
+  userDataOwnerPermissionsBoundaryArn,
   managerRoleArn,
   pulumiStateBucket,
   userPoolId: config.userPoolId,

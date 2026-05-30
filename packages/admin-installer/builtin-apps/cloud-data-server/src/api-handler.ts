@@ -31,7 +31,9 @@ import {
   serializeHLC,
   deserializeHLC,
   dataRecordObjectKey,
-  CORE_TYPES,
+  categoryOf,
+  getCategory,
+  isCategoryId,
 } from "@starkeep/core";
 import type { DataRecord, StarkeepId, HLCClock } from "@starkeep/core";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
@@ -46,7 +48,14 @@ import type {
 } from "@starkeep/storage-aurora-dsql";
 import type { Filter } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
-import { loadAccessGrants, canRead, canWrite, type AccessGrants } from "./access-enforcer.js";
+import {
+  loadAccessGrants,
+  canRead,
+  canWrite,
+  canReadCategory,
+  canWriteCategory,
+  type AccessGrants,
+} from "./access-enforcer.js";
 
 // ---------------------------------------------------------------------------
 // Per-app credential cache (STS sessions ~15 min, refreshed at 14 min)
@@ -248,6 +257,12 @@ async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
 // Mirrors CLOUD_APP_ID_RE in packages/admin-installer/src/iam.ts. Kept in sync
 // by hand because the cloud handler lives in a separately-deployed artifact
 // and cannot import from the installer package at runtime.
+// The reserved app id of the Starkeep Drive (User-Data-Owner) channel — the
+// single channel that carries all shared records under Shape A. Mirrors
+// USER_DATA_OWNER_APP_ID in packages/admin-installer/src/iam.ts; kept in sync by
+// hand because this handler is a separately-deployed artifact.
+const DRIVE_APP_ID = "starkeep-drive";
+
 function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
   const match = rawPath.match(/^\/apps\/([a-z0-9][a-z0-9._-]*)(\/.*)?$/);
   if (!match) return null;
@@ -270,8 +285,11 @@ function parseObjectKey(
     if (segments.length < 4 || !segments[1] || !segments[2] || !segments[3]) {
       return { ok: false, status: 400, message: "Invalid shared key" };
     }
-    const typeId = segments[1]!;
-    const allowed = mode === "read" ? canRead(grants, typeId) : canWrite(grants, typeId);
+    // shared/<category>/<shard>/<hash> — the first segment is the derived
+    // category (see object-keys.ts), so authorize at the category level.
+    const category = segments[1]!;
+    const allowed =
+      mode === "read" ? canReadCategory(grants, category) : canWriteCategory(grants, category);
     if (!allowed) return { ok: false, status: 403, message: "Forbidden" };
     return { ok: true };
   }
@@ -301,6 +319,7 @@ function recordToResponse(record: DataRecord) {
   return {
     id: record.id,
     type: record.type,
+    category: categoryOf(record.type),
     created_at: new Date(record.createdAt.wallTime).toISOString(),
     updated_at: new Date(record.updatedAt.wallTime).toISOString(),
     owner_id: record.ownerId,
@@ -378,14 +397,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     // GET /apps/{appId}/data/types
     if (method === "GET" && subPath === "/data/types") {
-      if (grants.readableTypes.size === 0) return ok({ types: [], total: 0 });
-      const result = await db.query({
-        filters: [
-          { field: "type", operator: "in", value: [...grants.readableTypes] },
-          { field: "deletedAt", operator: "isNull" },
-        ],
-        limit: 10000,
-      });
+      if (!grants.allAccess && grants.readableTypes.size === 0) return ok({ types: [], total: 0 });
+      const filters: Filter[] = [{ field: "deletedAt", operator: "isNull" }];
+      // Drive (allAccess) scans every type; others are constrained to their
+      // readable extensions.
+      if (!grants.allAccess) {
+        filters.unshift({ field: "type", operator: "in", value: [...grants.readableTypes] });
+      }
+      const result = await db.query({ filters, limit: 10000 });
       const counts = new Map<string, number>();
       for (const record of result.records) {
         counts.set(record.type, (counts.get(record.type) ?? 0) + 1);
@@ -405,7 +424,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // readable set; otherwise constrain the scan to readable types.
       if (type !== undefined) {
         if (!canRead(grants, type)) return clientErr("Forbidden", 403);
-      } else if (grants.readableTypes.size === 0) {
+      } else if (!grants.allAccess && grants.readableTypes.size === 0) {
         return ok({ records: [], hasMore: false, nextCursor: null });
       }
 
@@ -420,7 +439,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           });
         }
       }
-      if (type === undefined) {
+      if (type === undefined && !grants.allAccess) {
         filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
       }
 
@@ -475,6 +494,26 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         );
       }
 
+      // Dedup derived children (thumbnails) by (parentId, contentHash). A
+      // byte-identical child of the same parent is a duplicate — e.g. two
+      // concurrent /api/resize calls for one original. contentHash is part of
+      // the key so distinct crops of the same source (same parent, different
+      // bytes) are not collapsed. Idempotent: return the existing record.
+      if (body.parentId) {
+        const dup = await db.query({
+          filters: [
+            { field: "parentId", operator: "eq", value: body.parentId },
+            { field: "contentHash", operator: "eq", value: contentHash },
+            { field: "deletedAt", operator: "isNull" },
+          ],
+          limit: 1,
+        });
+        const existing = dup.records[0];
+        if (existing) {
+          return ok({ record: recordToResponse(existing) });
+        }
+      }
+
       const now = clock.now();
       const record: DataRecord = {
         id: generateId(),
@@ -504,7 +543,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (method === "POST" && subPath === "/data/files") {
       const typeId = query["type"];
       if (!typeId) return clientErr("type query param is required", 400);
-      if (!canWrite(grants, typeId)) return clientErr("Forbidden", 403);
+      // The blob lands at shared/<category>/…, so authorize the derived
+      // category (the type param is normally an extension).
+      const fileCategory = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+      if (!canWriteCategory(grants, fileCategory)) return clientErr("Forbidden", 403);
       const headers = event.headers ?? {};
       const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
       const mimeType = contentTypeHeader.split(";")[0]!.trim();
@@ -571,34 +613,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return ok({ ok: true });
     }
 
-    // POST /apps/{appId}/data/records/:id/promote — promote an 'unknown' record to a typed record
-    const promoteMatch = subPath.match(/^\/data\/records\/([^/]+)\/promote$/);
-    if (promoteMatch && method === "POST") {
-      const recordId = decodeURIComponent(promoteMatch[1]!);
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
-      const body = JSON.parse(rawBody) as { targetType?: string };
-      if (!body.targetType) return clientErr("targetType is required", 400);
-
-      const record = await db.get(recordId as StarkeepId);
-      if (!record || record.deletedAt) return clientErr("Record not found", 404);
-      if (record.type !== "unknown") return clientErr("Only 'unknown' records can be promoted", 409);
-      // Promotion is a read of `unknown` (gated by canPromoteFromUnknown) plus
-      // a write of the target type (gated by the normal writable set).
-      if (!canRead(grants, "unknown")) return clientErr("Forbidden", 403);
-      if (!canWrite(grants, body.targetType)) return clientErr("Forbidden", 403);
-
-      const now = clock.now();
-      const promoted: DataRecord = { ...record, type: body.targetType, updatedAt: now, version: record.version + 1 };
-      await db.put(promoted);
-
-      return ok({ record: recordToResponse(promoted) });
-    }
-
-    // POST /apps/{appId}/data/records/:id/metadata — write type-specific metadata.
+    // POST /apps/{appId}/data/records/:id/metadata — write metadata.
     // The calling app does the extraction (e.g. EXIF); the server validates keys
-    // against the declared type schema and persists via the database adapter.
+    // against the per-category schema and persists via the database adapter.
+    // `typeId` is the record's extension (or a category id); the metadata table
+    // is the derived category's. `other` has no metadata table.
     const metadataWriteMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata$/);
     if (metadataWriteMatch && method === "POST") {
       const recordId = decodeURIComponent(metadataWriteMatch[1]!) as StarkeepId;
@@ -610,27 +629,33 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
         return clientErr("metadata must be an object", 400);
       }
-      const coreType = CORE_TYPES.find((t) => t.id === typeId);
-      if (!coreType) return clientErr(`Unknown type "${typeId}" — only core types support metadata`, 400);
-      // Writing metadata for a type counts as writing that type — gate on the
-      // caller's writable set. PG GRANTs back this up at the metadata table.
-      if (!canWrite(grants, typeId)) return clientErr("Forbidden", 403);
-      const allowedColumns = new Set(coreType.metadataColumns.map((c) => c.name));
+      // Metadata tables are per-category, so gate on the caller's writable
+      // categories (derived from its extension grants). PG GRANTs back this up
+      // at the per-category metadata table.
+      const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+      if (!canWriteCategory(grants, category)) return clientErr("Forbidden", 403);
+      if (category === "other") {
+        return clientErr(`Category "other" has no metadata table`, 400);
+      }
+      const categoryDef = getCategory(category)!;
+      const allowedColumns = new Set(categoryDef.metadataColumns.map((c) => c.name));
       const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
       if (unknownKeys.length > 0) {
         return clientErr(`Unknown metadata columns: ${unknownKeys.join(", ")}`, 400);
       }
-      await db.putMetadata(typeId, { recordId, ...metadata });
+      await db.putMetadata(category, { recordId, ...metadata });
       return ok({ ok: true });
     }
 
-    // GET /apps/{appId}/data/records/:id/metadata/:typeId — read type-specific metadata.
+    // GET /apps/{appId}/data/records/:id/metadata/:typeId — read metadata.
     const metadataReadMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata\/([^/]+)$/);
     if (metadataReadMatch && method === "GET") {
       const recordId = decodeURIComponent(metadataReadMatch[1]!) as StarkeepId;
       const typeId = decodeURIComponent(metadataReadMatch[2]!);
-      if (!canRead(grants, typeId)) return clientErr("Forbidden", 403);
-      const metadata = await db.getMetadata(typeId, recordId);
+      const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+      if (!canReadCategory(grants, category)) return clientErr("Forbidden", 403);
+      if (category === "other") return ok({ metadata: null });
+      const metadata = await db.getMetadata(category, recordId);
       return ok({ metadata });
     }
 
@@ -701,14 +726,33 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody);
-      const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
-      toClose.push(() => appSyncableSource.client.end());
-      const transport = createInProcessSyncTransport({
-        databaseAdapter: db,
-        clock,
-        appSyncableSource,
-        objectStorage: storage,
-      });
+
+      // Shape A channel split. The Starkeep Drive channel carries *all* shared
+      // records (and nothing app-specific); every per-app channel carries only
+      // that app's app-specific rows (and no shared records). This makes
+      // shared-record sync identical regardless of which apps are cloud-
+      // installed: the Drive channel always exists, so shared data always has
+      // an authorized cloud writer.
+      const isDriveChannel = appId === DRIVE_APP_ID;
+      let transport;
+      if (isDriveChannel) {
+        transport = createInProcessSyncTransport({
+          databaseAdapter: db,
+          clock,
+          objectStorage: storage,
+          syncSharedRecords: true,
+        });
+      } else {
+        const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+        toClose.push(() => appSyncableSource.client.end());
+        transport = createInProcessSyncTransport({
+          databaseAdapter: db,
+          clock,
+          appSyncableSource,
+          objectStorage: storage,
+          syncSharedRecords: false,
+        });
+      }
       const response = await transport.exchange(body);
       return ok(response);
     }

@@ -1,0 +1,13 @@
+{
+  "id": "starkeep-drive",
+  "name": "Starkeep Drive",
+  "version": "0.1.0",
+  "tier": "official",
+  "infraRequirements": {
+    "fileAccess": [],
+    "fileAccessAll": true,
+    "compute": { "enabled": false },
+    "brokerPower": false,
+    "appSpecificSyncable": { "tables": [], "files": false }
+  }
+}

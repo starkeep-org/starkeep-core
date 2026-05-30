@@ -80,7 +80,7 @@ describe("createStarkeepSdk", () => {
 
       const fileData = Buffer.from("fake image data");
       const record = await sdk.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        { type: "jpg", ownerId: "test-owner", originAppId: "test" },
         fileData,
         "image/jpeg",
       );
@@ -90,16 +90,16 @@ describe("createStarkeepSdk", () => {
       expect(record.mimeType).toBe("image/jpeg");
       expect(record.sizeBytes).toBe(fileData.length);
 
-      // Key must live under shared/<typeId>/... so that any app with read
-      // access to the type can resolve it under its own IAM grants — the
-      // key MUST NOT carry the writing app's identifier.
-      expect(record.objectStorageKey).toMatch(/^shared\/@test\/photo\/[0-9a-f]{2}\/[0-9a-f]{64}$/);
+      // Key must live under shared/<category>/... (jpg → image) so that any app
+      // with read access to the category can resolve it under its own IAM
+      // grants — the key MUST NOT carry the writing app's identifier.
+      expect(record.objectStorageKey).toMatch(/^shared\/image\/[0-9a-f]{2}\/[0-9a-f]{64}$/);
 
       const stored = await localObjectStorage.get(record.objectStorageKey);
       expect(stored).not.toBeNull();
     });
 
-    it("writes the same shared/<type> key regardless of which client wrote the file", async () => {
+    it("writes the same shared/<category> key regardless of which client wrote the file", async () => {
       const localDatabase = new MockDatabaseAdapter();
       const localObjectStorage = new MockObjectStorageAdapter();
       const clock = createHLCClock({
@@ -129,7 +129,7 @@ describe("createStarkeepSdk", () => {
 
       const fileData = Buffer.from("shared bytes");
       const written = await sdkA.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        { type: "jpg", ownerId: "test-owner", originAppId: "test" },
         fileData,
         "image/jpeg",
       );
@@ -137,7 +137,7 @@ describe("createStarkeepSdk", () => {
       const readBack = await sdkB.data.get(written.id);
       expect(readBack).not.toBeNull();
       expect(readBack!.objectStorageKey).toBe(written.objectStorageKey);
-      expect(written.objectStorageKey).toMatch(/^shared\/@test\/photo\//);
+      expect(written.objectStorageKey).toMatch(/^shared\/image\//);
 
       const fileFromB = await localObjectStorage.get(readBack!.objectStorageKey);
       expect(fileFromB).not.toBeNull();
@@ -158,14 +158,15 @@ describe("createStarkeepSdk", () => {
       expect(retrieved).toBeNull();
     });
 
-    it("writes and reads a per-type metadata row", async () => {
+    it("writes and reads a per-category metadata row", async () => {
       const { sdk } = await createTestSdk();
       const record = await sdk.data.putWithFile(
-        { type: "image", ownerId: "test-owner", originAppId: "test" },
+        { type: "jpg", ownerId: "test-owner", originAppId: "test" },
         Buffer.from("x"),
         "image/jpeg",
       );
 
+      // Metadata is keyed by category (jpg → image).
       await sdk.data.putMetadata("image", {
         recordId: record.id,
         width: 800,

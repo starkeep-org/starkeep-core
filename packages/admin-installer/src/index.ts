@@ -10,7 +10,7 @@ export {
 } from "./dsql-schema-init";
 export type { SchemaInitOptions } from "./dsql-schema-init";
 
-export { installCloudDataServer } from "./builtin-installs";
+export { installCloudDataServer, installDrive, uninstallDrive } from "./builtin-installs";
 export type {
   CloudDataServerInstallConfig,
   CloudDataServerInstallOutputs,

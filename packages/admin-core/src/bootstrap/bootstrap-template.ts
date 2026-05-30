@@ -3,6 +3,7 @@ import { managerPolicyStatements } from "./manager-policy.js";
 import { adminAppPolicyStatements } from "./admin-app-policy.js";
 import { appPermissionsBoundaryStatements } from "./permissions-boundary.js";
 import { foundationalPermissionsBoundaryStatements } from "./foundational-permissions-boundary.js";
+import { userDataOwnerPermissionsBoundaryStatements } from "./user-data-owner-permissions-boundary.js";
 import { installDdlBoundaryStatements } from "./install-ddl-boundary.js";
 import { installInfraBoundaryStatements } from "./install-infra-boundary.js";
 
@@ -41,6 +42,10 @@ export function generateBootstrapTemplate(
   );
   const foundationalBoundaryPolicyYaml = renderStatementsYaml(
     foundationalPermissionsBoundaryStatements(stackPrefix),
+    10,
+  );
+  const userDataOwnerBoundaryPolicyYaml = renderStatementsYaml(
+    userDataOwnerPermissionsBoundaryStatements(stackPrefix),
     10,
   );
   const installDdlBoundaryPolicyYaml = renderStatementsYaml(
@@ -165,6 +170,28 @@ ${boundaryPolicyYaml}
         Version: '2012-10-17'
         Statement:
 ${foundationalBoundaryPolicyYaml}
+
+  # ---------------------------------------------------------------------------
+  # User-Data-Owner Permissions Boundary — attached only to the Starkeep Drive
+  # role (app id \`starkeep-drive\`), minted at Drive install (not at bootstrap).
+  # Wider than the per-app boundary only in that it permits read/write across
+  # the whole shared-data prefix (shared/*) — the layer-2 hard floor for
+  # shared-record custody. No Lambda, no API Gateway, no per-app schema, no DSQL
+  # cluster admin, no IAM mutation. A magic-string check in the installer routes
+  # only the \`starkeep-drive\` app id to this boundary.
+  # ---------------------------------------------------------------------------
+  UserDataOwnerPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '\${StackPrefix}-user-data-owner-permissions-boundary'
+      Description: >-
+        Maximum permissions for the User-Data-Owner (Starkeep Drive) role.
+        Permits dsql:DbConnect and S3 read/write/list on ${stackPrefix}-files-*
+        under the shared/* prefix only. No Lambda, API Gateway, or IAM mutation.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+${userDataOwnerBoundaryPolicyYaml}
 
   # ---------------------------------------------------------------------------
   # Admin App Role — federated entry point + admin-app runtime identity
@@ -400,6 +427,10 @@ Outputs:
   AppFoundationalPermissionsBoundaryArn:
     Description: ARN of the wider permissions boundary for foundational app roles (cloud-data-server)
     Value: !Ref AppFoundationalPermissionsBoundary
+
+  UserDataOwnerPermissionsBoundaryArn:
+    Description: ARN of the permissions boundary for the User-Data-Owner (Starkeep Drive) role
+    Value: !Ref UserDataOwnerPermissionsBoundary
 
   InstallDdlRoleArn:
     Description: ARN of the install-DDL role (the only identity that can connect to DSQL as PG admin)

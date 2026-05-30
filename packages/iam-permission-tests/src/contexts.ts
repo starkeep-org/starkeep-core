@@ -248,12 +248,12 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const roleName = `${stackPrefix}-app-cloud-data-server-role`;
       const runtime: PolicyDoc = {
         name: "runtime",
-        // CDS is installed with sharedTypeAccess=[] (see
-        // builtin-installs.ts:229) — runtime data access happens under the
-        // assumed app creds, not the broker's exec creds, so AppS3SharedData
-        // isn't needed on the CDS role itself.
+        // CDS is installed with fileAccess=[] (see builtin-installs.ts) —
+        // runtime data access happens under the assumed app creds, not the
+        // broker's exec creds, so AppS3SharedData isn't needed on the CDS role
+        // itself.
         policy: JSON.parse(
-          buildRuntimePolicy(stackPrefix, "cloud-data-server", [], false, false, false),
+          buildRuntimePolicy(stackPrefix, "cloud-data-server", [], false, false),
         ),
       };
       return {
@@ -612,12 +612,11 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const roleName = `${stackPrefix}-app-${id}-role`;
       const runtime: PolicyDoc = {
         name: "runtime",
-        // sharedTypeAccess/canIngestUnknown/canPromoteFromUnknown shape the
-        // policy, but the .keep write uses only AppS3OwnPrefix, which is
-        // unconditional — so an empty-shared-types policy is sufficient for
-        // modeling the install-time call.
+        // fileAccess/fileAccessAll shape the policy, but the .keep write uses
+        // only AppS3OwnPrefix, which is unconditional — so an empty-categories
+        // policy is sufficient for modeling the install-time call.
         policy: JSON.parse(
-          buildRuntimePolicy(stackPrefix, id, [], false, false, false),
+          buildRuntimePolicy(stackPrefix, id, [], false, false),
         ),
       };
       return {

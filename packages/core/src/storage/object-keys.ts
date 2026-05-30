@@ -2,22 +2,32 @@
 // local SDK and the cloud Lambda handler so the two stay aligned.
 //
 // Two namespaces:
-//   shared/<typeId>/<2-char>/<hash>      data record blobs, governed by
-//                                        shared.access_grants / shared_access_grants
+//   shared/<category>/<2-char>/<hash>    data record blobs, bucketed by the
+//                                        derived category (image, document, …,
+//                                        other). Governed by the per-app
+//                                        access path + the per-category IAM
+//                                        ceiling (shared/<category>/* per
+//                                        granted category; Drive gets shared/*).
 //   apps/<appId>/syncable/<...>          app-specific syncable files, owned by
 //                                        the named app, synced as a unit with
 //                                        the rest of that app's syncable data
 //
 // The prefix is determined by what is being stored, NOT by who is writing it.
-// A `kind:"data"` record blob always lives under `shared/<typeId>/...`, even
-// when an app with `readwrite` access produced it — that's how a different
-// app with read access to the same type can resolve the key under its own
-// IAM grants. The system does not provide an app-private non-syncable
+// A `kind:"data"` record blob always lives under `shared/<category>/...`, even
+// when an app with `readwrite` access produced it — that's how a different app
+// with read access to the same category can resolve the key under its own IAM
+// grants, and it keeps the prefix set bounded (~11) so `other`/unmapped files
+// are enumerable. The system does not provide an app-private non-syncable
 // namespace; apps that want such storage handle it themselves.
 
-export function dataRecordObjectKey(typeId: string, contentHash: string): string {
+import { categoryOf } from "../types/core-types.js";
+
+// `typeOrExt` is the record's `type` (lowercase extension). The category is
+// derived here so the key stays category-bucketed and unmapped/extension-less
+// records land under `shared/other/...`.
+export function dataRecordObjectKey(typeOrExt: string, contentHash: string): string {
   const shard = contentHash.slice(0, 2);
-  return `shared/${typeId}/${shard}/${contentHash}`;
+  return `shared/${categoryOf(typeOrExt)}/${shard}/${contentHash}`;
 }
 
 // Build the canonical object key for an app's syncable file. `subKey` is the

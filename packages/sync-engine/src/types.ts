@@ -256,6 +256,15 @@ export interface SyncEngineOptions {
     readonly applier: AppSyncableApplier & ScanCapableApplier & FileRecordsApplier;
   };
   /**
+   * Shape A channel split. When true (default), this engine ships and applies
+   * shared records (SR — the `shared.records` table). The always-on Starkeep
+   * Drive channel sets this true and provides no `appSyncableSource`, so it is
+   * the *only* channel that carries shared records. Per-app channels set this
+   * false and carry only their own app-specific (`appSyncableSource`) rows, so
+   * shared-record sync is identical regardless of which apps are cloud-installed.
+   */
+  readonly syncSharedRecords?: boolean;
+  /**
    * Max items per exchange round, applied to both the outbound local scan and
    * the inbound request limit. Default 1000. Tests use small values (e.g. 5)
    * to exercise multi-round pagination without seeding thousands of records;

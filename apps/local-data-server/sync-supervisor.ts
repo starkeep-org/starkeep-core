@@ -17,6 +17,13 @@ import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
 
+/**
+ * The reserved app id of the always-on Starkeep Drive channel — the single
+ * channel that carries all shared records under Shape A. Mirrors
+ * USER_DATA_OWNER_APP_ID in packages/admin-installer/src/iam.ts.
+ */
+export const DRIVE_APP_ID = "starkeep-drive";
+
 export interface AppRegistryEntry {
   readonly appId: string;
   readonly status: string;
@@ -132,6 +139,61 @@ export function createSyncSupervisor(
   let paused = false;
   const cloudUrlBase = cloudUrl.replace(/\/+$/, "");
 
+  function makeEngineEntry(
+    appId: string,
+    engine: SyncEngine,
+    baseUrl: string,
+  ): void {
+    const entry: EngineEntry = {
+      appId,
+      engine,
+      tickTimer: null,
+      nudgeTimer: null,
+      lastExchangeAt: null,
+      lastError: null,
+      backoffMs: exchangeIntervalMs,
+    };
+    engines.set(appId, entry);
+    scheduleTick(entry);
+    // Drain any pending local writes that accumulated before this engine
+    // existed (server restart, install race).
+    scheduleNudge(appId);
+    console.log(`[sync] started loop for app=${appId} at ${baseUrl}`);
+  }
+
+  /**
+   * Shape A: the always-on Drive channel. It ships and applies *all* shared
+   * records and nothing app-specific (no appSyncableSource, syncSharedRecords
+   * true). It runs independently of the installed-app set — started in start()
+   * and never torn down by rescan() — so shared-data sync is identical before
+   * and after any app's cloud install.
+   */
+  function startDriveEngine(): void {
+    if (engines.has(DRIVE_APP_ID)) return;
+    const baseUrl = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}`;
+    const transport = createHttpSyncTransport({ baseUrl, getAuthHeader });
+    const remoteStorage = new HttpObjectStorageAdapter({
+      baseUrl: `${baseUrl}/files`,
+      getAuthHeader,
+    });
+    const syncState = createPerAppSyncStateStore(
+      localDb,
+      underlyingSyncStateStore,
+      DRIVE_APP_ID,
+    );
+    const engine = createSyncEngine({
+      localDatabaseAdapter: databaseAdapter,
+      localObjectStorage,
+      remoteObjectStorage: remoteStorage,
+      transport,
+      clock: sdk.clock,
+      syncState,
+      syncSharedRecords: true,
+      // No appSyncableSource: the Drive channel never carries app-specific rows.
+    });
+    makeEngineEntry(DRIVE_APP_ID, engine, baseUrl);
+  }
+
   function startEngineFor(appId: string): void {
     if (engines.has(appId)) return;
 
@@ -155,6 +217,9 @@ export function createSyncSupervisor(
 
     const narrowedNamespaces = narrowNamespaceStore(namespaceStore, appId);
 
+    // Shape A: per-app channels carry only this app's app-specific rows. Shared
+    // records sync exclusively via the Drive channel, so syncSharedRecords is
+    // false here.
     const engine = createSyncEngine({
       localDatabaseAdapter: databaseAdapter,
       localObjectStorage,
@@ -162,27 +227,14 @@ export function createSyncSupervisor(
       transport,
       clock: sdk.clock,
       syncState,
+      syncSharedRecords: false,
       appSyncableSource: {
         namespaces: narrowedNamespaces,
         applier: appApplier,
       },
     });
 
-    const entry: EngineEntry = {
-      appId,
-      engine,
-      tickTimer: null,
-      nudgeTimer: null,
-      lastExchangeAt: null,
-      lastError: null,
-      backoffMs: exchangeIntervalMs,
-    };
-    engines.set(appId, entry);
-    scheduleTick(entry);
-    // Drain any pending local writes that accumulated before this engine
-    // existed (server restart, install race).
-    scheduleNudge(appId);
-    console.log(`[sync] started loop for app=${appId} at ${perAppBaseUrl}`);
+    makeEngineEntry(appId, engine, perAppBaseUrl);
   }
 
   function stopEngineFor(appId: string): void {
@@ -241,21 +293,28 @@ export function createSyncSupervisor(
   });
 
   function rescan(): void {
+    // The Drive channel is always-on and not driven by the installed-app set:
+    // exclude it from the per-app desired set so it is neither double-started
+    // as an AR-only per-app engine nor torn down here.
     const desired = new Set(
       listInstalledApps()
         .filter((a) => a.status === "active")
-        .map((a) => a.appId),
+        .map((a) => a.appId)
+        .filter((appId) => appId !== DRIVE_APP_ID),
     );
     for (const appId of desired) {
       if (!engines.has(appId)) startEngineFor(appId);
     }
     for (const appId of Array.from(engines.keys())) {
+      if (appId === DRIVE_APP_ID) continue;
       if (!desired.has(appId)) stopEngineFor(appId);
     }
   }
 
   return {
     start() {
+      // Always-on Drive channel first, then reconcile per-app channels.
+      startDriveEngine();
       rescan();
     },
 

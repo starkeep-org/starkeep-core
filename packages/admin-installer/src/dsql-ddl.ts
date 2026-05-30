@@ -17,13 +17,74 @@
 import { Kysely, PostgresDialect, sql } from "kysely";
 import pg from "pg";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import type { SharedTypeAccess, SyncableTable } from "@starkeep/admin-manifest";
-import { CORE_TYPE_REGISTRY } from "@starkeep/admin-manifest";
+import type { FileAccess, SyncableTable } from "@starkeep/admin-manifest";
+import {
+  APP_GRANTABLE_CATEGORIES,
+  categoryOf,
+  type Category,
+} from "@starkeep/core";
 import {
   FILE_RECORDS_TABLE,
   FILE_RECORDS_COLUMNS,
 } from "@starkeep/shared-space-api";
 import { retryOnAccessDenied } from "./retry-on-access-denied";
+
+/**
+ * Flattens a manifest's fileAccess (+ fileAccessAll) into the per-extension
+ * grants written to `shared.access_grants`, and the distinct categories those
+ * grants imply (used for metadata-table GRANTs). Drive's `fileAccessAll`
+ * cannot enumerate unmapped extensions, so it writes no per-extension grant
+ * rows — its read/write authority is granted in the runtime path by app-id —
+ * but it does imply every grantable category for metadata-table GRANTs.
+ */
+interface ExtensionGrant {
+  extension: string;
+  access: "read" | "readwrite";
+  metadataWrite: boolean;
+}
+
+function flattenFileAccess(fileAccess: FileAccess[]): ExtensionGrant[] {
+  const out: ExtensionGrant[] = [];
+  for (const entry of fileAccess) {
+    for (const extension of entry.extensions) {
+      out.push({ extension, access: entry.access, metadataWrite: entry.metadataWrite });
+    }
+  }
+  return out;
+}
+
+interface CategoryGrant {
+  category: Category;
+  /** True if any extension in this category is writable. */
+  write: boolean;
+  /** True if any extension in this category grants metadata write. */
+  metadataWrite: boolean;
+}
+
+function categoriesFromGrants(
+  grants: ExtensionGrant[],
+  fileAccessAll: boolean,
+): CategoryGrant[] {
+  if (fileAccessAll) {
+    // Drive: every grantable category, full access. `other` has no metadata
+    // table so it is not in APP_GRANTABLE_CATEGORIES and needs no GRANT.
+    return APP_GRANTABLE_CATEGORIES.map((category) => ({
+      category,
+      write: true,
+      metadataWrite: true,
+    }));
+  }
+  const byCategory = new Map<Category, CategoryGrant>();
+  for (const g of grants) {
+    const category = categoryOf(g.extension);
+    if (category === "other") continue; // no metadata table
+    const existing = byCategory.get(category) ?? { category, write: false, metadataWrite: false };
+    existing.write ||= g.access === "readwrite";
+    existing.metadataWrite ||= g.metadataWrite || g.access === "readwrite";
+    byCategory.set(category, existing);
+  }
+  return [...byCategory.values()];
+}
 
 export interface DsqlDdlOptions {
   hostname: string;
@@ -90,9 +151,8 @@ async function makeDb(opts: DsqlDdlOptions): Promise<Kysely<any>> {
 export async function runAppInstallDdl(
   opts: DsqlDdlOptions,
   appId: string,
-  sharedTypeAccess: SharedTypeAccess[],
-  canIngestUnknown: boolean,
-  canPromoteFromUnknown: boolean,
+  fileAccess: FileAccess[],
+  fileAccessAll: boolean,
   appSyncableTables: SyncableTable[] = [],
   appSyncableFilesEnabled: boolean = false,
 ): Promise<void> {
@@ -158,45 +218,32 @@ export async function runAppInstallDdl(
     await sql`GRANT USAGE ON SCHEMA shared TO ${sql.raw(pgRole)}`.execute(db);
     await sql`GRANT SELECT ON shared.records TO ${sql.raw(pgRole)}`.execute(db);
 
-    const hasWriteAccess = sharedTypeAccess.some((e) => e.access === "readwrite");
-    if (hasWriteAccess || canIngestUnknown) {
+    const grants = flattenFileAccess(fileAccess);
+    const hasWriteAccess = fileAccessAll || grants.some((g) => g.access === "readwrite");
+    if (hasWriteAccess) {
       await sql`GRANT INSERT, UPDATE, DELETE ON shared.records TO ${sql.raw(pgRole)}`.execute(db);
     }
 
-    // Per-type metadata table grants
-    const expandedAccess = expandWildcard(sharedTypeAccess);
-    for (const entry of expandedAccess) {
-      const metaTable = `shared.record_${entry.typeId.replace(/-/g, "_")}_metadata`;
+    // Per-category metadata table grants. access_grants stays extension-keyed
+    // (below); the metadata tables and the IAM ceiling are category-granular
+    // (D3). `other` has no metadata table.
+    const categoryGrants = categoriesFromGrants(grants, fileAccessAll);
+    for (const cg of categoryGrants) {
+      const metaTable = `shared.record_${cg.category}_metadata`;
       await sql`GRANT SELECT ON ${sql.raw(metaTable)} TO ${sql.raw(pgRole)}`.execute(db);
-      if (entry.access === "readwrite" || entry.metadataWrite) {
+      if (cg.write || cg.metadataWrite) {
         await sql`GRANT INSERT, UPDATE ON ${sql.raw(metaTable)} TO ${sql.raw(pgRole)}`.execute(db);
       }
     }
 
-    // unknown type grants (ingest = write-only, promote = read-only)
-    if (canIngestUnknown) {
-      // INSERT access is already granted above via hasWriteAccess||canIngestUnknown
-      // INSERT into access_grants
+    // access_grants rows — one per declared extension (the exact app-layer
+    // check). Drive (fileAccessAll) writes none: it cannot enumerate unmapped
+    // extensions, and its read/write authority is granted by app-id in the
+    // runtime access path (see access-enforcer.ts).
+    for (const g of grants) {
       await sql`
         INSERT INTO shared.access_grants (app_id, type_id, access, metadata_write)
-        VALUES (${appId}, 'unknown', 'readwrite', false)
-        ON CONFLICT (app_id, type_id) DO UPDATE SET access = 'readwrite'
-      `.execute(db);
-    }
-    if (canPromoteFromUnknown) {
-      await sql`GRANT SELECT ON shared.record_unknown_metadata TO ${sql.raw(pgRole)}`.execute(db);
-      await sql`
-        INSERT INTO shared.access_grants (app_id, type_id, access, metadata_write)
-        VALUES (${appId}, 'unknown', 'read', false)
-        ON CONFLICT (app_id, type_id) DO UPDATE SET access = 'read'
-      `.execute(db);
-    }
-
-    // access_grants rows for declared sharedTypeAccess
-    for (const entry of expandedAccess) {
-      await sql`
-        INSERT INTO shared.access_grants (app_id, type_id, access, metadata_write)
-        VALUES (${appId}, ${entry.typeId}, ${entry.access}, ${entry.metadataWrite})
+        VALUES (${appId}, ${g.extension}, ${g.access}, ${g.metadataWrite})
         ON CONFLICT (app_id, type_id) DO UPDATE
           SET access = EXCLUDED.access, metadata_write = EXCLUDED.metadata_write
       `.execute(db);
@@ -297,7 +344,8 @@ const DSQL_COLUMN_TYPES: Record<string, string> = {
 export async function runAppUninstallDdl(
   opts: DsqlDdlOptions,
   appId: string,
-  sharedTypeAccess: SharedTypeAccess[],
+  fileAccess: FileAccess[],
+  fileAccessAll: boolean,
 ): Promise<void> {
   const pgRole = appIdToPgRole(opts.stackPrefix, appId);
   const schemaName = `app_${appId.replace(/-/g, "_")}`;
@@ -305,16 +353,11 @@ export async function runAppUninstallDdl(
   try {
     await sql`REVOKE ALL ON shared.records FROM ${sql.raw(pgRole)}`.execute(db);
 
-    const expandedAccess = expandWildcard(sharedTypeAccess);
-    for (const entry of expandedAccess) {
-      const metaTable = `shared.record_${entry.typeId.replace(/-/g, "_")}_metadata`;
+    const categoryGrants = categoriesFromGrants(flattenFileAccess(fileAccess), fileAccessAll);
+    for (const cg of categoryGrants) {
+      const metaTable = `shared.record_${cg.category}_metadata`;
       await sql`REVOKE ALL ON ${sql.raw(metaTable)} FROM ${sql.raw(pgRole)}`.execute(db);
     }
-
-    // unknown metadata is granted on install when canPromoteFromUnknown but
-    // is not part of expandedAccess, so the loop above misses it. Revoke
-    // unconditionally — REVOKE on a non-existent grant is a no-op in PG.
-    await sql`REVOKE ALL ON shared.record_unknown_metadata FROM ${sql.raw(pgRole)}`.execute(db);
 
     // Schema-level USAGE on `shared` is granted on install (line ~157 of the
     // install DDL). Without this revoke, DROP ROLE trips PG 2BP01
@@ -354,19 +397,4 @@ export async function runAppUninstallDdl(
 
 function appIdToPgRole(stackPrefix: string, appId: string): string {
   return `${stackPrefix}_app_${appId}`.toLowerCase().replace(/-/g, "_");
-}
-
-function expandWildcard(access: SharedTypeAccess[]): SharedTypeAccess[] {
-  const result: SharedTypeAccess[] = [];
-  for (const entry of access) {
-    if (entry.typeId === "*") {
-      for (const typeId of CORE_TYPE_REGISTRY) {
-        result.push({ ...entry, typeId });
-      }
-      // "unknown" is explicitly excluded from wildcard expansion
-    } else {
-      result.push(entry);
-    }
-  }
-  return result;
 }

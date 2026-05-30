@@ -109,6 +109,8 @@ export default function DashboardPage() {
 
   // Local apps
   const [localFileBrowser, setLocalFileBrowser] = useState<boolean | null>(null);
+  // Starkeep Drive UI (core app, fixed port 9830)
+  const [driveOnline, setDriveOnline] = useState<boolean | null>(null);
 
   // Remote
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null | undefined>(undefined);
@@ -174,6 +176,11 @@ export default function DashboardPage() {
       setDaemonLoading((l) => ({ ...l, "file-browser": false }));
     }
   }, [localFileBrowser]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (daemonLoading["drive"] && driveOnline === true) {
+      setDaemonLoading((l) => ({ ...l, drive: false }));
+    }
+  }, [driveOnline]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function startDaemon(id: string) {
     // Defense in depth: if the data server is already reachable, refuse to
@@ -291,6 +298,12 @@ export default function DashboardPage() {
   useEffect(() => {
     setLocalFileBrowser(null);
     checkUrl("http://localhost:5173").then(setLocalFileBrowser);
+  }, [refreshKey, localRefreshKey]);
+
+  // Starkeep Drive UI status (fixed port 9830)
+  useEffect(() => {
+    setDriveOnline(null);
+    checkUrl("http://localhost:9830").then(setDriveOnline);
   }, [refreshKey, localRefreshKey]);
 
   // Read cloud config + cognito session
@@ -589,8 +602,16 @@ export default function DashboardPage() {
           </div>
 
           {localOnline !== false && (
-            <div className="rounded-lg border p-4">
-              <h3 className="font-medium mb-3">Apps</h3>
+            <div className="rounded-lg border p-4 flex flex-col gap-3">
+              <h3 className="font-medium">Apps</h3>
+              <LocalAppRow
+                name="Starkeep Drive"
+                online={driveOnline}
+                url="http://localhost:9830"
+                loading={!!daemonLoading["drive"]}
+                onStart={() => startDaemon("drive")}
+                onStop={() => stopDaemon("drive")}
+              />
               <LocalAppRow
                 name="File Browser"
                 online={localFileBrowser}
