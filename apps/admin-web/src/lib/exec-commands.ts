@@ -31,7 +31,6 @@ export const APP_DAEMONS: Record<string, AppDaemonConfig> = {
   // next/vite then interpret `--` as a positional (e.g. project directory),
   // breaking the run.
   photos: { cwd: "photos", args: (p) => ["pnpm", "dev", "-p", String(p)] },
-  "file-browser": { cwd: "file-browser", args: (p) => ["pnpm", "dev", "--port", String(p)] },
 };
 
 // Cloud-side install/reset is no longer a shelled-out stream — it runs in-

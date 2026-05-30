@@ -108,7 +108,6 @@ export default function DashboardPage() {
   const [typesExpanded, setTypesExpanded] = useState(false);
 
   // Local apps
-  const [localFileBrowser, setLocalFileBrowser] = useState<boolean | null>(null);
   // Starkeep Drive UI (core app, fixed port 9830)
   const [driveOnline, setDriveOnline] = useState<boolean | null>(null);
 
@@ -171,11 +170,6 @@ export default function DashboardPage() {
       setDaemonLoading((l) => ({ ...l, "local-data-server": false }));
     }
   }, [localOnline]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (daemonLoading["file-browser"] && localFileBrowser === true) {
-      setDaemonLoading((l) => ({ ...l, "file-browser": false }));
-    }
-  }, [localFileBrowser]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (daemonLoading["drive"] && driveOnline === true) {
       setDaemonLoading((l) => ({ ...l, drive: false }));
@@ -292,12 +286,6 @@ export default function DashboardPage() {
 
     fetchLocal();
     return () => controller.abort();
-  }, [refreshKey, localRefreshKey]);
-
-  // Fetch local app status
-  useEffect(() => {
-    setLocalFileBrowser(null);
-    checkUrl("http://localhost:5173").then(setLocalFileBrowser);
   }, [refreshKey, localRefreshKey]);
 
   // Starkeep Drive UI status (fixed port 9830)
@@ -612,14 +600,6 @@ export default function DashboardPage() {
                 onStart={() => startDaemon("drive")}
                 onStop={() => stopDaemon("drive")}
               />
-              <LocalAppRow
-                name="File Browser"
-                online={localFileBrowser}
-                url="http://localhost:5173"
-                loading={!!daemonLoading["file-browser"]}
-                onStart={() => startDaemon("file-browser")}
-                onStop={() => stopDaemon("file-browser")}
-              />
             </div>
           )}
         </div>
@@ -692,11 +672,6 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 )}
-              </div>
-
-              <div className="rounded-lg border p-4">
-                <h3 className="font-medium mb-3">Apps</h3>
-                <RemoteAppRow name="File Browser" url={null} online={null} />
               </div>
 
               <div className="rounded-lg border p-4 flex flex-col gap-3">
@@ -922,28 +897,6 @@ function LocalAppRow({
           </Button>
         )}
       </div>
-    </div>
-  );
-}
-
-function RemoteAppRow({ name, url, online }: { name: string; url: string | null | undefined; online: boolean | null }) {
-  return (
-    <div className="flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-medium">{name}</span>
-        {url === undefined ? (
-          <span className="size-4 animate-spin rounded-full border-2 border-border border-t-foreground" />
-        ) : url === null ? (
-          <Badge variant="secondary" className="text-xs">Not deployed</Badge>
-        ) : online === null ? (
-          <span className="size-4 animate-spin rounded-full border-2 border-border border-t-foreground" />
-        ) : (
-          <StatusBadge online={online} />
-        )}
-      </div>
-      {url !== null && url !== undefined && online === true && (
-        <a href={url} target="_blank" rel="noopener noreferrer" className="text-sm underline">Open ↗</a>
-      )}
     </div>
   );
 }
