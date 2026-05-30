@@ -111,3 +111,43 @@ tr:last-child td {
   border-color: #5a2730;
   color: #f0a8b0;
 }
+
+.notice.warn {
+  border-color: #5a4a27;
+  color: #e6c98a;
+  margin-bottom: 16px;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.badge.synced {
+  color: #7fd6a0;
+  border-color: #2c4a37;
+  background: #15241b;
+}
+
+.badge.local-only {
+  color: #e6c98a;
+  border-color: #4a3f27;
+  background: #241f15;
+}
+
+.badge.modified-locally {
+  color: #f0b48a;
+  border-color: #4a3327;
+  background: #241a15;
+}
+
+.badge.cloud-only {
+  color: #8ab6f0;
+  border-color: #27384a;
+  background: #152130;
+}

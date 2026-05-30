@@ -114,3 +114,80 @@ export async function listTypes(): Promise<DriveTypeSummary[]> {
   const { types } = await ldsGet<{ types: DriveTypeSummary[] }>("/data/types");
   return types;
 }
+
+/**
+ * The cloud-data-server's record shape is a subset of the local one — notably
+ * it omits `origin_app_id`, `kind` and the local file `path`. For a merge we
+ * only rely on the fields both sides share (`id`, `type`, sizes, hashes).
+ */
+export type CloudRecord = Pick<
+  DriveRecord,
+  | "id"
+  | "type"
+  | "category"
+  | "created_at"
+  | "updated_at"
+  | "owner_id"
+  | "version"
+  | "content_hash"
+  | "object_storage_key"
+  | "mime_type"
+  | "size_bytes"
+  | "original_filename"
+  | "parent_id"
+>;
+
+/** Thrown when the cloud is unreachable/unconfigured (LDS replied 5xx). */
+export class CloudUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CloudUnavailableError";
+  }
+}
+
+async function ldsGetCloud<T>(path: string): Promise<T> {
+  const secret = readDriveSecret();
+  if (!secret) throw new DriveNotInstalledError();
+  const sig = createHmac("sha256", secret).update(`${DRIVE_APP_ID}:`).digest("hex");
+  const res = await fetch(`${LDS_URL}${path}`, {
+    headers: {
+      "X-Starkeep-App-Id": DRIVE_APP_ID,
+      "X-Starkeep-App-Sig": sig,
+    },
+    cache: "no-store",
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const parsed = JSON.parse(body) as { error?: string };
+      if (parsed.error) message = parsed.error;
+    } catch {
+      /* non-JSON body */
+    }
+    // 5xx here means "cloud not configured / not signed in / unreachable" —
+    // surface it softly so the caller can still render the local view.
+    if (res.status >= 500) throw new CloudUnavailableError(message);
+    throw new Error(message);
+  }
+  return JSON.parse(body) as T;
+}
+
+export async function listCloudRecords(type?: string): Promise<CloudRecord[]> {
+  const qs = new URLSearchParams({ limit: "1000" });
+  if (type) qs.set("type", type);
+  const { records } = await ldsGetCloud<{ records: CloudRecord[] }>(
+    `/cloud/data/records?${qs.toString()}`,
+  );
+  return records;
+}
+
+/** The cloud type summary omits `latest_updated` that the local one carries. */
+export type CloudTypeSummary = Pick<DriveTypeSummary, "record_type" | "count">;
+
+export async function listCloudTypes(): Promise<CloudTypeSummary[]> {
+  const { types } = await ldsGetCloud<{ types: CloudTypeSummary[] }>(
+    "/cloud/data/types",
+  );
+  return types;
+}

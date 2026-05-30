@@ -532,7 +532,7 @@ async function main() {
      // installed apps), so they intentionally do not require app HMAC headers.
     // `/data/files/:token` is also exempt — the signed token in the path is
     // the authorization, and the URL is meant to be embeddable (e.g. in <img src>).
-    const APP_AUTH_REQUIRED_PREFIXES = ["/data/", "/sync/", "/app-data/", "/files/"];
+    const APP_AUTH_REQUIRED_PREFIXES = ["/data/", "/cloud/", "/sync/", "/app-data/", "/files/"];
     // Token-authorized routes: the signed token in the path is the auth.
     //  - GET /data/files/:token         — bearer read of a single blob
     //  - PUT /data/files/upload/:token  — bearer write of a single blob
@@ -935,6 +935,47 @@ async function main() {
 
         res.writeHead(404);
         json(res, { error: "Browse path not found" });
+        return;
+      }
+
+      // GET /cloud/data/types and /cloud/data/records — read-only proxy to the
+      // cloud-data-server, signed with the local-data-server's live Cognito id
+      // token. The calling app (e.g. starkeep-drive) authenticates to *us* with
+      // its HMAC as usual; we then re-auth to the cloud as the signed-in user.
+      // The cloud enforces the same per-app grants for /apps/{appId}/data/*, so
+      // this exposes no data the app couldn't already sync. Lets the Drive UI
+      // show the cloud-side view (what actually pushed) next to the local view.
+      if (path === "/cloud/data/types" || path === "/cloud/data/records") {
+        if (req.method !== "GET") {
+          res.writeHead(405);
+          json(res, { error: "Method not allowed" });
+          return;
+        }
+        if (!CLOUD_URL) {
+          res.writeHead(503);
+          json(res, { error: "Cloud is not configured (no apiGatewayUrl / STARKEEP_CLOUD_URL)" });
+          return;
+        }
+        if (!currentIdToken) {
+          res.writeHead(503);
+          json(res, { error: "Not signed in to the cloud (no id token)" });
+          return;
+        }
+        const subPath = path.slice("/cloud".length); // "/data/types" | "/data/records"
+        const cloudUrl = `${CLOUD_URL.replace(/\/+$/, "")}/apps/${encodeURIComponent(appId!)}${subPath}${url.search}`;
+        try {
+          const cloudRes = await fetch(cloudUrl, {
+            headers: { Authorization: `Bearer ${currentIdToken}` },
+          });
+          const text = await cloudRes.text();
+          res.writeHead(cloudRes.status, {
+            "Content-Type": cloudRes.headers.get("content-type") ?? "application/json",
+          });
+          res.end(text);
+        } catch (err) {
+          res.writeHead(502);
+          json(res, { error: `cloud request failed: ${err instanceof Error ? err.message : String(err)}` });
+        }
         return;
       }
 

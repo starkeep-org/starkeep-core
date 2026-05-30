@@ -2,21 +2,40 @@
 
 import { useEffect, useState } from "react";
 
+type SyncStatus =
+  | "local-only"
+  | "synced"
+  | "modified-locally"
+  | "cloud-only";
+
 interface DriveRecord {
   id: string;
-  type: string;
-  category: string;
-  origin_app_id: string;
-  updated_at: string;
-  size_bytes: number | null;
-  original_filename: string | null;
-  mime_type: string | null;
+  type?: string;
+  category?: string;
+  origin_app_id?: string;
+  updated_at?: string;
+  size_bytes?: number | null;
+  original_filename?: string | null;
+  mime_type?: string | null;
+  sync_status: SyncStatus;
 }
 
 interface DriveTypeSummary {
   record_type: string;
   count: number;
 }
+
+interface CloudInfo {
+  available: boolean;
+  error?: string | null;
+}
+
+const SYNC_LABEL: Record<SyncStatus, string> = {
+  "local-only": "Local only",
+  synced: "Synced",
+  "modified-locally": "Modified locally",
+  "cloud-only": "Cloud only",
+};
 
 function formatBytes(n: number | null): string {
   if (n == null) return "—";
@@ -29,6 +48,7 @@ export default function DrivePage() {
   const [types, setTypes] = useState<DriveTypeSummary[]>([]);
   const [records, setRecords] = useState<DriveRecord[]>([]);
   const [activeType, setActiveType] = useState<string | null>(null);
+  const [cloud, setCloud] = useState<CloudInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -47,9 +67,14 @@ export default function DrivePage() {
     const qs = activeType ? `?type=${encodeURIComponent(activeType)}` : "";
     fetch(`/api/records${qs}`)
       .then(async (r) => {
-        const d = (await r.json()) as { records?: DriveRecord[]; error?: string };
+        const d = (await r.json()) as {
+          records?: DriveRecord[];
+          cloud?: CloudInfo;
+          error?: string;
+        };
         if (!r.ok) throw new Error(d.error ?? `${r.status}`);
         setRecords(d.records ?? []);
+        setCloud(d.cloud ?? null);
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
@@ -60,8 +85,16 @@ export default function DrivePage() {
       <h1>Starkeep Drive</h1>
       <p className="subtitle">
         Everything you own across all your apps — including data from apps that
-        aren&apos;t cloud-installed. Read-only.
+        aren&apos;t cloud-installed. Read-only. Each row shows whether it lives
+        only on this device, only in the cloud, or is synced to both.
       </p>
+
+      {cloud && !cloud.available && (
+        <div className="notice warn">
+          Showing local data only — cloud view unavailable
+          {cloud.error ? `: ${cloud.error}` : "."}
+        </div>
+      )}
 
       <div className="toolbar">
         <button
@@ -97,6 +130,7 @@ export default function DrivePage() {
         <table>
           <thead>
             <tr>
+              <th>Sync</th>
               <th>Category</th>
               <th>Type</th>
               <th>Name</th>
@@ -108,16 +142,23 @@ export default function DrivePage() {
           <tbody>
             {records.map((r) => (
               <tr key={r.id}>
-                <td>{r.category}</td>
+                <td>
+                  <span className={`badge ${r.sync_status}`}>
+                    {SYNC_LABEL[r.sync_status]}
+                  </span>
+                </td>
+                <td>{r.category ?? "—"}</td>
                 <td>{r.type || "—"}</td>
                 <td title={r.original_filename ?? r.id}>
                   {r.original_filename ?? r.id}
                 </td>
                 <td>
-                  <span className="origin">{r.origin_app_id}</span>
+                  <span className="origin">{r.origin_app_id ?? "—"}</span>
                 </td>
-                <td>{formatBytes(r.size_bytes)}</td>
-                <td>{new Date(r.updated_at).toLocaleString()}</td>
+                <td>{formatBytes(r.size_bytes ?? null)}</td>
+                <td>
+                  {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
+                </td>
               </tr>
             ))}
           </tbody>
