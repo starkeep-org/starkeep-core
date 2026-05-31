@@ -38,6 +38,7 @@ import {
   respondNewPasswordChallenge,
   refreshTokens,
   getIdentityPoolCredentials,
+  extractEmailFromIdToken,
   type CognitoConfig,
   type STSCredentials,
 } from "../../src/lib/cognito-auth";
@@ -66,19 +67,6 @@ interface Watch {
   state: string;
   totalFiles: number;
   syncedFiles: number;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function extractEmail(idToken: string): string | null {
-  try {
-    const payload = JSON.parse(atob(idToken.split(".")[1]));
-    return (payload.email as string) ?? null;
-  } catch {
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +307,7 @@ export default function DashboardPage() {
         const resp = await fetch("/api/costs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ credentials: creds, stackPrefix: cfg.stackPrefix }),
+          body: JSON.stringify({ credentials: creds, stackPrefix: cfg.stackPrefix, region: cfg.region }),
         });
         if (!resp.ok) {
           const body = await resp.json().catch(() => ({})) as { error?: string; code?: string };
@@ -344,7 +332,7 @@ export default function DashboardPage() {
     try {
       const result = await initiateAuth(cognitoConfig, signInEmail, signInPassword);
       if (result.tokens) {
-        const email = extractEmail(result.tokens.idToken);
+        const email = extractEmailFromIdToken(result.tokens.idToken);
         await fetch("http://127.0.0.1:9820/auth/tokens", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -373,7 +361,7 @@ export default function DashboardPage() {
     setSignInError(null);
     try {
       const tokens = await respondNewPasswordChallenge(cognitoConfig, signInChallenge.session, signInEmail, signInNewPassword);
-      const email = extractEmail(tokens.idToken);
+      const email = extractEmailFromIdToken(tokens.idToken);
       await fetch("http://127.0.0.1:9820/auth/tokens", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

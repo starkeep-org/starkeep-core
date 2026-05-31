@@ -57,6 +57,18 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
       Resource: SUB(`arn:aws:s3:::${stackPrefix}-files-*/apps/admin/*`),
     },
     {
+      Sid: "AdminAppS3ListBilling",
+      Effect: "Allow",
+      Action: "s3:ListBucket",
+      Resource: SUB(`arn:aws:s3:::${stackPrefix}-billing-*`),
+    },
+    {
+      Sid: "AdminAppS3ReadBilling",
+      Effect: "Allow",
+      Action: "s3:GetObject",
+      Resource: SUB(`arn:aws:s3:::${stackPrefix}-billing-*/*`),
+    },
+    {
       Sid: "AdminAppDsqlConnect",
       Effect: "Allow",
       Action: "dsql:DbConnect",

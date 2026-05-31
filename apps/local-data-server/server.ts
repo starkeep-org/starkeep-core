@@ -287,6 +287,26 @@ async function main() {
   let currentIdToken: string | null = await loadIdToken();
   let stopCredentialRefresh: (() => void) | null = null;
 
+  /**
+   * Local JWT exp check (no network). Cognito id tokens are standard JWTs
+   * with an `exp` claim in seconds. We treat a token within 5s of expiry as
+   * unusable so the supervisor doesn't start an exchange that will 401
+   * mid-flight.
+   */
+  function idTokenIsLive(): boolean {
+    if (!currentIdToken) return false;
+    const parts = currentIdToken.split(".");
+    if (parts.length !== 3) return false;
+    try {
+      const payload = JSON.parse(
+        Buffer.from(parts[1], "base64url").toString("utf8"),
+      ) as { exp?: number };
+      return typeof payload.exp === "number" && payload.exp * 1000 > Date.now() + 5_000;
+    } catch {
+      return false;
+    }
+  }
+
   const cognitoConfig: CognitoConfig | null = starkeepConfig
     ? {
         region: configRegion,
@@ -309,6 +329,7 @@ async function main() {
       async (idToken) => {
         currentIdToken = idToken;
         await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
+        startOrKickSupervisor();
       },
     );
   }
@@ -486,9 +507,25 @@ async function main() {
   // Now that the watcher, Drive, and any other apps are in the registry, start
   // sync loops (the always-on Drive channel + per-app channels). New installs
   // via /admin/apps/install call `supervisor.rescan()` to pick up the new app.
-  if (supervisor) {
-    supervisor.start();
+  //
+  // Gating on a live id token avoids the failure mode where startup ticks fire
+  // before the credential-refresh callback has minted a fresh token: each
+  // would 401 and bump the per-engine backoff up to the 5-min cap, and nothing
+  // would wake them once auth finally lands. If we have no live token at boot
+  // we defer start to whichever event delivers one first (refresh callback,
+  // /auth/login, /auth/tokens) via startOrKickSupervisor().
+  let supervisorStarted = false;
+  function startOrKickSupervisor(): void {
+    if (!supervisor) return;
+    if (!idTokenIsLive()) return;
+    if (!supervisorStarted) {
+      supervisor.start();
+      supervisorStarted = true;
+      return;
+    }
+    supervisor.kick();
   }
+  startOrKickSupervisor();
 
   // File watch manager — monitors local directories and syncs to Starkeep
   const watchManager = createFileWatchManager({
@@ -673,9 +710,11 @@ async function main() {
           async (idToken) => {
             currentIdToken = idToken;
             await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
+            startOrKickSupervisor();
           },
         );
 
+        startOrKickSupervisor();
         json(res, { ok: true });
         return;
       }
@@ -709,8 +748,10 @@ async function main() {
           async (idToken) => {
             currentIdToken = idToken;
             await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
+            startOrKickSupervisor();
           },
         );
+        startOrKickSupervisor();
         json(res, { ok: true });
         return;
       }

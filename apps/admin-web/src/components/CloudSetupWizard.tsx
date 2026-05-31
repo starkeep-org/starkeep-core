@@ -29,9 +29,33 @@ import {
   respondNewPasswordChallenge,
   refreshTokens,
   getIdentityPoolCredentials,
+  extractEmailFromIdToken,
   type CognitoConfig,
   type STSCredentials,
 } from "../lib/cognito-auth";
+
+const LOCAL_DATA_SERVER_URL = "http://127.0.0.1:9820";
+
+async function isLocalDataServerOnline(): Promise<boolean> {
+  try {
+    const resp = await fetch(`${LOCAL_DATA_SERVER_URL}/health`, { signal: AbortSignal.timeout(1500) });
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function pushAuthToLocalDataServer(tokens: { idToken: string; refreshToken: string }): Promise<void> {
+  const resp = await fetch(`${LOCAL_DATA_SERVER_URL}/auth/tokens`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({})) as { error?: string };
+    throw new Error(body.error ?? `Local data server rejected tokens (HTTP ${resp.status})`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -412,7 +436,11 @@ function Step4SignIn({
   onBack,
 }: {
   cognitoConfig: CognitoConfig;
-  onSuccess: (tokens: { idToken: string; refreshToken: string }, creds: STSCredentials) => void;
+  onSuccess: (
+    tokens: { idToken: string; refreshToken: string },
+    creds: STSCredentials,
+    userEmail: string | null,
+  ) => void;
   onBack: () => void;
 }) {
   const [email, setEmail] = useState("");
@@ -422,6 +450,38 @@ function Step4SignIn({
   const [session, setSession] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [serverOnline, setServerOnline] = useState<boolean | null>(null);
+  const [serverStarting, setServerStarting] = useState(false);
+
+  // Poll the local data server's reachability. Sign-in pushes the resulting
+  // tokens to it (so the data server, the browser, and the cloud all agree on
+  // who's signed in), so we require it to be up before allowing sign-in.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      const online = await isLocalDataServerOnline();
+      if (!cancelled) setServerOnline(online);
+    };
+    tick();
+    const id = setInterval(tick, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const handleStartServer = async () => {
+    setServerStarting(true);
+    setError(null);
+    try {
+      await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "start", id: "local-data-server" }),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setServerStarting(false);
+    }
+  };
 
   const handleSignIn = async () => {
     setLoading(true);
@@ -430,7 +490,13 @@ function Step4SignIn({
       const result = await initiateAuth(cognitoConfig, email, password);
       if (result.tokens) {
         const creds = await getIdentityPoolCredentials(cognitoConfig, result.tokens.idToken);
-        onSuccess({ idToken: result.tokens.idToken, refreshToken: result.tokens.refreshToken }, creds);
+        await pushAuthToLocalDataServer(result.tokens);
+        const userEmail = extractEmailFromIdToken(result.tokens.idToken);
+        onSuccess(
+          { idToken: result.tokens.idToken, refreshToken: result.tokens.refreshToken },
+          creds,
+          userEmail,
+        );
       } else if (result.challengeName === "NEW_PASSWORD_REQUIRED") {
         setSession(result.session ?? null);
       } else {
@@ -458,7 +524,9 @@ function Step4SignIn({
     try {
       const tokens = await respondNewPasswordChallenge(cognitoConfig, session, email, newPassword);
       const creds = await getIdentityPoolCredentials(cognitoConfig, tokens.idToken);
-      onSuccess({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }, creds);
+      await pushAuthToLocalDataServer(tokens);
+      const userEmail = extractEmailFromIdToken(tokens.idToken);
+      onSuccess({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }, creds, userEmail);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -466,12 +534,29 @@ function Step4SignIn({
     }
   };
 
+  const serverGate = serverOnline === false ? (
+    <Alert>
+      <AlertDescription className="flex items-center justify-between gap-3">
+        <span>
+          The local data server isn&apos;t running. It needs to be running so sign-in tokens can be
+          handed to it — otherwise sync will use whatever stale tokens it last had.
+        </span>
+        <Button size="sm" variant="outline" onClick={handleStartServer} disabled={serverStarting}>
+          {serverStarting && <span className="mr-2 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+          Start
+        </Button>
+      </AlertDescription>
+    </Alert>
+  ) : null;
+  const signInDisabled = loading || serverOnline !== true;
+
   if (session) {
     return (
       <div className="flex flex-col gap-5">
         <p className="text-sm text-muted-foreground">
           Your temporary password has expired. Please set a new permanent password.
         </p>
+        {serverGate}
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
@@ -504,7 +589,7 @@ function Step4SignIn({
           <Button variant="ghost" onClick={() => setSession(null)} disabled={loading}>Back</Button>
           <Button
             onClick={handleSetNewPassword}
-            disabled={loading || !newPassword || newPassword.length < 8}
+            disabled={signInDisabled || !newPassword || newPassword.length < 8}
           >
             {loading && <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
             Set password and sign in
@@ -519,6 +604,7 @@ function Step4SignIn({
       <p className="text-sm text-muted-foreground">
         Sign in with your email and the temporary password from Cognito.
       </p>
+      {serverGate}
       {error && (
         <Alert variant="destructive">
           <AlertDescription>{error}</AlertDescription>
@@ -552,7 +638,7 @@ function Step4SignIn({
       </div>
       <div className="flex justify-between">
         <Button variant="ghost" onClick={onBack} disabled={loading}>Back</Button>
-        <Button onClick={handleSignIn} disabled={loading || !email || !password}>
+        <Button onClick={handleSignIn} disabled={signInDisabled || !email || !password}>
           {loading && <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
           Sign in
         </Button>
@@ -1160,10 +1246,10 @@ export function CloudSetupWizard({ onComplete }: Props) {
         {currentStep === 4 && cogCfg && (
           <Step4SignIn
             cognitoConfig={cogCfg}
-            onSuccess={async (tokens, creds) => {
+            onSuccess={async (tokens, creds, userEmail) => {
               setSignInResult(tokens);
               setCredentials(creds);
-              await writeCognitoSession({ refreshToken: tokens.refreshToken });
+              await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: userEmail ?? undefined });
               await writeCloudCredentials(creds);
               markDone(4);
             }}
@@ -1180,7 +1266,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
               const fresh = await getIdentityPoolCredentials(cogCfg, tokens.idToken);
               setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
               setCredentials(fresh);
-              await writeCognitoSession({ refreshToken: tokens.refreshToken });
+              await pushAuthToLocalDataServer({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
+              const userEmail = extractEmailFromIdToken(tokens.idToken);
+              await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: userEmail ?? undefined });
               await writeCloudCredentials(fresh);
               return fresh;
             }}
