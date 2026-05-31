@@ -5,7 +5,6 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import {
@@ -22,17 +21,20 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { cn } from "@/lib/utils";
 import {
   readCloudConfig,
   readCloudCredentials,
   writeCloudCredentials,
   readCognitoSession,
   writeCognitoSession,
+  clearCloudCredentials,
   credentialsNearExpiry,
   type CloudConfig,
+  type CognitoSession,
 } from "../../src/lib/cloud-config";
 import { CommandOutputModal } from "../../src/components/CommandOutputModal";
+import { CloudDataServerStatus } from "../../src/components/CloudDataServerStatus";
+import { StatusBadge } from "../../src/components/StatusBadge";
 import {
   initiateAuth,
   respondNewPasswordChallenge,
@@ -50,16 +52,6 @@ import {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-interface TypeSummary {
-  record_type: string;
-  count: number;
-}
-
-interface DataTypesResponse {
-  types: TypeSummary[];
-  total: number;
-}
 
 interface Watch {
   id: string;
@@ -80,18 +72,12 @@ export default function DashboardPage() {
 
   // Local data server
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
-  const [localTypes, setLocalTypes] = useState<DataTypesResponse | null>(null);
   const [localCognitoConfig, setLocalCognitoConfig] = useState<CognitoConfig | null>(null);
-  const [localAuthAuthenticated, setLocalAuthAuthenticated] = useState<boolean | null>(null);
   const [watches, setWatches] = useState<Watch[] | null>(null);
-  const [typesExpanded, setTypesExpanded] = useState(false);
 
   // Remote
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null | undefined>(undefined);
-  const [cognitoSession, setCognitoSession] = useState<{ refreshToken: string; userEmail?: string } | null>(null);
-  const [remoteOnline, setRemoteOnline] = useState<boolean | null>(null);
-  const [remoteTypes, setRemoteTypes] = useState<DataTypesResponse | null>(null);
-  const [remoteTypesExpanded, setRemoteTypesExpanded] = useState(false);
+  const [cognitoSession, setCognitoSession] = useState<CognitoSession | null>(null);
 
   // Costs
   const [costs, setCosts] = useState<ServiceCost[] | "loading" | "error" | "no-data" | "not-signed-in">("loading");
@@ -218,7 +204,6 @@ export default function DashboardPage() {
   // Fetch local server data
   useEffect(() => {
     setLocalOnline(null);
-    setLocalTypes(null);
     setWatches(null);
     const controller = new AbortController();
 
@@ -231,25 +216,18 @@ export default function DashboardPage() {
         if (!controller.signal.aborted) setLocalOnline(false);
         return;
       }
-      // Server is reachable. Data-bearing endpoints require app-auth headers
-      // that admin-web doesn't currently send, so a non-2xx here doesn't mean
-      // the server is offline — just that we can't read that view.
+      // Server is reachable. /watches and /config are admin endpoints exempt
+      // from app-auth. The per-app /data/* routes require an HMAC identity
+      // admin-web doesn't have, so we don't probe them from here.
       try {
-        const [typesResp, watchesResp, configResp, authStatusResp] = await Promise.all([
-          fetch("http://127.0.0.1:9820/data/types", { signal: controller.signal }),
+        const [watchesResp, configResp] = await Promise.all([
           fetch("http://127.0.0.1:9820/watches", { signal: controller.signal }),
           fetch("http://127.0.0.1:9820/config", { signal: controller.signal }),
-          fetch("http://127.0.0.1:9820/auth/status", { signal: controller.signal }),
         ]);
-        if (typesResp.ok) setLocalTypes(await typesResp.json());
         if (watchesResp.ok) setWatches((await watchesResp.json()).watches);
         if (configResp.ok) {
           const cfg = await configResp.json();
           if (cfg.cognitoConfig) setLocalCognitoConfig(cfg.cognitoConfig as CognitoConfig);
-        }
-        if (authStatusResp.ok) {
-          const status = await authStatusResp.json();
-          setLocalAuthAuthenticated(status.authenticated as boolean);
         }
       } catch { /* leave per-section state null */ }
     }
@@ -262,27 +240,6 @@ export default function DashboardPage() {
   useEffect(() => {
     readCloudConfig().then(setCloudConfig);
     readCognitoSession().then(setCognitoSession);
-  }, [refreshKey]);
-
-  // Fetch remote data
-  useEffect(() => {
-    setRemoteOnline(null);
-    setRemoteTypes(null);
-    async function fetchRemote() {
-      const cfg = await readCloudConfig();
-      const session = await readCognitoSession();
-      if (!cfg?.apiGatewayUrl || !session?.refreshToken) return;
-      try {
-        const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-        const resp = await fetch(`${cfg.apiGatewayUrl}/data/types`, {
-          signal: AbortSignal.timeout(8000),
-          headers: { Authorization: `Bearer ${tokens.accessToken}` },
-        });
-        if (resp.ok) { setRemoteTypes(await resp.json()); setRemoteOnline(true); }
-        else setRemoteOnline(false);
-      } catch { setRemoteOnline(false); }
-    }
-    fetchRemote();
   }, [refreshKey]);
 
   // Fetch costs
@@ -416,11 +373,10 @@ export default function DashboardPage() {
     } catch { /* server offline */ }
   }
 
-  const signedIn = localAuthAuthenticated ?? false;
-  const authStale = signedIn && !cognitoSession?.userEmail;
-
   async function handleSignOut() {
     await fetch("http://127.0.0.1:9820/auth/logout", { method: "POST" }).catch(() => {});
+    await clearCloudCredentials();
+    setCognitoSession(null);
     bumpAll();
   }
 
@@ -473,36 +429,6 @@ export default function DashboardPage() {
 
             {localOnline === true && (
               <div className="flex flex-col gap-3">
-                {localTypes && (
-                  <>
-                    <button
-                      className="text-sm text-left underline decoration-dotted underline-offset-2"
-                      onClick={() => setTypesExpanded((e) => !e)}
-                    >
-                      {localTypes.types.length} type{localTypes.types.length !== 1 ? "s" : ""} registered
-                      &nbsp;·&nbsp;
-                      {localTypes.total} record{localTypes.total !== 1 ? "s" : ""} total
-                    </button>
-
-                    {typesExpanded && (
-                      <div className="flex flex-col gap-1 pl-2">
-                        {localTypes.types.length === 0 ? (
-                          <span className="text-xs text-muted-foreground">No records yet</span>
-                        ) : (
-                          localTypes.types.map((t) => (
-                            <div key={t.record_type} className="flex items-center justify-between">
-                              <code className="font-mono text-xs">{t.record_type}</code>
-                              <Badge variant="secondary" className="text-xs">{t.count}</Badge>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    )}
-
-                    <Separator />
-                  </>
-                )}
-
                 <p className="text-xs font-medium text-muted-foreground">Watches</p>
 
                 {watches && watches.length > 0 ? (
@@ -572,97 +498,13 @@ export default function DashboardPage() {
             </div>
           ) : (
             <>
-              <div className="rounded-lg border p-4 flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-medium">Data Server</h3>
-                  {cloudConfig.apiGatewayUrl ? (
-                    <StatusBadge online={remoteOnline} />
-                  ) : (
-                    <Badge variant="secondary" className="text-xs">Not configured</Badge>
-                  )}
-                </div>
-
-                {!cloudConfig.apiGatewayUrl ? (
-                  <p className="text-sm text-muted-foreground">Complete cloud setup to enable remote features.</p>
-                ) : (
-                  <div className="flex flex-col gap-3">
-                    {remoteOnline === true && remoteTypes && (
-                      <>
-                        <button
-                          className="text-sm text-left underline decoration-dotted underline-offset-2"
-                          onClick={() => setRemoteTypesExpanded((e) => !e)}
-                        >
-                          {remoteTypes.types.length} type{remoteTypes.types.length !== 1 ? "s" : ""} registered
-                          &nbsp;·&nbsp;
-                          {remoteTypes.total} record{remoteTypes.total !== 1 ? "s" : ""} total
-                        </button>
-                        {remoteTypesExpanded && (
-                          <div className="flex flex-col gap-1 pl-2">
-                            {remoteTypes.types.map((t) => (
-                              <div key={t.record_type} className="flex items-center justify-between">
-                                <code className="font-mono text-xs">{t.record_type}</code>
-                                <Badge variant="secondary" className="text-xs">{t.count}</Badge>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </>
-                    )}
-                    <div className="flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline"
-                        onClick={() => openConfirm("local-deploy", "Redeploy from local", "This will run pulumi up using your current local code. The process may take several minutes.", true)}
-                      >
-                        Redeploy from local
-                      </Button>
-                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
-                        onClick={() => openConfirm("reset-cloud-data", "Clear all cloud data", "This will permanently delete all files from S3 and all records from the Aurora DSQL database.", true)}
-                      >
-                        Clear all cloud data
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="rounded-lg border p-4 flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-medium">Authentication</h3>
-                  {signedIn ? (
-                    <div className="flex items-center gap-2">
-                      <Badge
-                        variant="secondary"
-                        className={cn("text-xs", authStale
-                          ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
-                          : "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200")}
-                      >
-                        {authStale ? "Stale session" : "Signed in"}
-                      </Badge>
-                      {cognitoSession?.userEmail && (
-                        <span className="text-sm text-muted-foreground">{cognitoSession.userEmail}</span>
-                      )}
-                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={handleSignOut}>
-                        Sign out
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <Badge variant="secondary" className="text-xs">Not signed in</Badge>
-                      {(localCognitoConfig ?? cloudConfig.cognitoConfig) && (
-                        <Button size="sm" variant="outline" onClick={openSignIn}>Sign in</Button>
-                      )}
-                    </div>
-                  )}
-                </div>
-                {authStale && (
-                  <Alert>
-                    <AlertTitle>Auth config may be invalid</AlertTitle>
-                    <AlertDescription>
-                      The local data server has a stored session but no confirmed username — this can happen after recreating the bootstrap stack.
-                      Sign out to clear the stale session, then sign in again.
-                    </AlertDescription>
-                  </Alert>
-                )}
-              </div>
+              <CloudDataServerStatus
+                cloudConfig={cloudConfig}
+                cognitoSession={cognitoSession}
+                refreshKey={refreshKey}
+                onSignIn={openSignIn}
+                onSignOut={handleSignOut}
+              />
 
               <div className="rounded-lg border p-4">
                 <h3 className="font-medium mb-3">Costs</h3>
@@ -796,20 +638,3 @@ export default function DashboardPage() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
-
-function StatusBadge({ online }: { online: boolean | null }) {
-  if (online === null) return <span className="size-4 animate-spin rounded-full border-2 border-border border-t-foreground" />;
-  return (
-    <Badge
-      variant="secondary"
-      className={cn("text-xs", online
-        ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-        : "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200")}
-    >
-      {online ? "Online" : "Offline"}
-    </Badge>
-  );
-}

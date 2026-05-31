@@ -9,6 +9,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { CommandOutput } from "./CommandOutput";
+import { CloudDataServerStatus } from "./CloudDataServerStatus";
 import { cn } from "@/lib/utils";
 import {
   generateBootstrapTemplate,
@@ -660,6 +661,10 @@ interface DeployOutputs {
 function Step5Deploy({
   credentials,
   refreshCredentials,
+  cloudConfig,
+  refreshCloudConfig,
+  signInRefreshToken,
+  signInUserEmail,
   onSuccess,
   onBack,
   onTokenExpired,
@@ -674,6 +679,10 @@ function Step5Deploy({
    * whether to send the user back to Sign In).
    */
   refreshCredentials: () => Promise<STSCredentials | null>;
+  cloudConfig: CloudConfig | null;
+  refreshCloudConfig: () => Promise<void>;
+  signInRefreshToken: string;
+  signInUserEmail: string | null;
   onSuccess: (result: DeployOutputs) => void;
   onBack: () => void;
   /** Called when the installer reports EXPIRED_TOKEN — wizard sends the user back to Step 4. */
@@ -683,19 +692,16 @@ function Step5Deploy({
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
   const [deployResult, setDeployResult] = useState<DeployOutputs | null>(null);
-  const [showManualEntry, setShowManualEntry] = useState(false);
-  const [manualBucket, setManualBucket] = useState("");
-  const [manualAurora, setManualAurora] = useState("");
-  const [manualApi, setManualApi] = useState("");
-  const [readConfigError, setReadConfigError] = useState<string | null>(null);
-  const [readingConfig, setReadingConfig] = useState(false);
   const [tokenExpired, setTokenExpired] = useState(false);
+  const [statusRefreshKey, setStatusRefreshKey] = useState(0);
+
+  const alreadyDeployed = !!(cloudConfig?.s3Bucket && cloudConfig?.auroraEndpoint);
+  const showStatusCard = status !== "running" && (deployResult !== null || alreadyDeployed);
 
   function handleInstall() {
     setInstalling(true);
     setLines([]);
     setStatus("running");
-    setReadConfigError(null);
     setTokenExpired(false);
     let aborted = false;
 
@@ -841,9 +847,12 @@ function Step5Deploy({
           return;
         }
 
-        // Both passes succeeded.
+        // Both passes succeeded — re-read the config so the status card sees
+        // the just-written s3Bucket / auroraEndpoint / apiGatewayUrl.
+        await refreshCloudConfig();
         setDeployResult(result);
         setStatus("success");
+        setStatusRefreshKey((k) => k + 1);
       } catch (err) {
         if (!aborted) {
           setLines((l) => [...l, `Error: ${err instanceof Error ? err.message : String(err)}`]);
@@ -858,79 +867,9 @@ function Step5Deploy({
     return () => { aborted = true; };
   }
 
-  async function handleAlreadyInstalled() {
-    setReadingConfig(true);
-    setReadConfigError(null);
-    try {
-      const res = await fetch("/api/exec/deploy-outputs");
-      const data = (await res.json()) as {
-        s3Bucket?: string;
-        auroraEndpoint?: string;
-        apiGatewayUrl?: string;
-        error?: string;
-      };
-      if (!res.ok) throw new Error(data.error ?? "Failed to read deploy outputs");
-      onSuccess({
-        s3Bucket: data.s3Bucket!,
-        auroraEndpoint: data.auroraEndpoint!,
-        apiGatewayUrl: data.apiGatewayUrl,
-      });
-    } catch (err) {
-      setReadConfigError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setReadingConfig(false);
-    }
-  }
-
-  function handleManualSubmit() {
-    if (!manualBucket || !manualAurora) return;
-    onSuccess({
-      s3Bucket: manualBucket.trim(),
-      auroraEndpoint: manualAurora.trim(),
-      apiGatewayUrl: manualApi.trim() || undefined,
-    });
-  }
-
-  if (showManualEntry) {
-    return (
-      <div className="flex flex-col gap-5">
-        <p className="text-sm font-medium">Enter deployment outputs manually</p>
-        <p className="text-sm text-muted-foreground">Find these values in the AWS console — the infrastructure was deployed successfully.</p>
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium">S3 Bucket Name</label>
-            <Input
-              placeholder="starkeep-files-starkeep-abc123"
-              value={manualBucket}
-              onChange={(e) => setManualBucket(e.currentTarget.value)}
-            />
-            <p className="text-xs text-muted-foreground">S3 console → find the bucket starting with your stack prefix</p>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium">Aurora DSQL Hostname</label>
-            <Input
-              placeholder="abc123.dsql.us-east-1.on.aws"
-              value={manualAurora}
-              onChange={(e) => setManualAurora(e.currentTarget.value)}
-            />
-            <p className="text-xs text-muted-foreground">Aurora DSQL console → your cluster → copy the endpoint hostname</p>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium">API Gateway URL <span className="text-muted-foreground font-normal">(optional)</span></label>
-            <Input
-              placeholder="https://abc123.execute-api.us-east-1.amazonaws.com"
-              value={manualApi}
-              onChange={(e) => setManualApi(e.currentTarget.value)}
-            />
-          </div>
-        </div>
-        <div className="flex justify-between">
-          <Button variant="ghost" onClick={() => setShowManualEntry(false)}>Back</Button>
-          <Button onClick={handleManualSubmit} disabled={!manualBucket || !manualAurora}>Continue</Button>
-        </div>
-      </div>
-    );
-  }
+  const sessionForStatus = signInRefreshToken
+    ? { refreshToken: signInRefreshToken, userEmail: signInUserEmail ?? undefined }
+    : null;
 
   return (
     <div className="flex flex-col gap-5">
@@ -944,25 +883,33 @@ function Step5Deploy({
         </ul>
       </div>
 
-      {status === "idle" && !deployResult && (
+      {status === "idle" && !alreadyDeployed && (
         <Button onClick={handleInstall} disabled={installing}>
           Deploy Starkeep cloud
         </Button>
       )}
 
-      {(status !== "idle" || lines.length > 0) && (
+      {(status === "running" || lines.length > 0) && (
         <CommandOutput lines={lines} status={status} />
       )}
 
-      {deployResult && status === "success" && (
-        <>
-          <Alert>
-            <AlertDescription>cloud-data-server and Starkeep Drive are installed in your AWS account.</AlertDescription>
-          </Alert>
-          <div className="flex justify-end">
-            <Button onClick={() => onSuccess(deployResult)}>Continue →</Button>
-          </div>
-        </>
+      {showStatusCard && (
+        <CloudDataServerStatus
+          cloudConfig={cloudConfig}
+          cognitoSession={sessionForStatus}
+          refreshKey={statusRefreshKey}
+        >
+          <Button size="sm" variant="outline" onClick={handleInstall} disabled={installing}>
+            {installing && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+            Redeploy
+          </Button>
+        </CloudDataServerStatus>
+      )}
+
+      {status === "success" && deployResult && (
+        <div className="flex justify-end">
+          <Button onClick={() => onSuccess(deployResult)}>Continue →</Button>
+        </div>
       )}
 
       {status === "failure" && tokenExpired && (
@@ -979,24 +926,6 @@ function Step5Deploy({
 
       {status === "failure" && !tokenExpired && (
         <Button onClick={handleInstall} variant="outline">Retry install</Button>
-      )}
-
-      {readConfigError && (
-        <Alert variant="destructive">
-          <AlertDescription>{readConfigError}</AlertDescription>
-        </Alert>
-      )}
-
-      {status === "idle" && !deployResult && (
-        <div className="flex gap-2">
-          <Button variant="ghost" size="sm" onClick={handleAlreadyInstalled} disabled={readingConfig}>
-            {readingConfig && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-            Already installed
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => setShowManualEntry(true)}>
-            Enter outputs manually
-          </Button>
-        </div>
       )}
 
       <div className="flex justify-start">
@@ -1035,6 +964,11 @@ export function CloudSetupWizard({ onComplete }: Props) {
   // Session state — lives in localStorage, not in the config file.
   const [signInResult, setSignInResult] = useState<{ idToken: string; refreshToken: string } | null>(null);
   const [credentials, setCredentials] = useState<STSCredentials | null>(null);
+
+  const refreshCloudConfig = useCallback(async () => {
+    const cfg = await readCloudConfig();
+    setCloudConfig(cfg);
+  }, []);
 
   // Mark a step done and optionally advance
   const markDone = useCallback((step: StepId, advance = true) => {
@@ -1272,6 +1206,10 @@ export function CloudSetupWizard({ onComplete }: Props) {
               await writeCloudCredentials(fresh);
               return fresh;
             }}
+            cloudConfig={cloudConfig}
+            refreshCloudConfig={refreshCloudConfig}
+            signInRefreshToken={signInResult.refreshToken}
+            signInUserEmail={extractEmailFromIdToken(signInResult.idToken)}
             onSuccess={handleComplete}
             onBack={() => handleNavigate(4)}
             onTokenExpired={() => handleNavigate(4)}
