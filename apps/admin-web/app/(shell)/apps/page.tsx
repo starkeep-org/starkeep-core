@@ -257,10 +257,8 @@ function DriveSection() {
   const busy = pending !== null;
 
   return (
-    <div className="rounded-lg border p-5 flex flex-col gap-4">
-      <p className="text-sm text-muted-foreground">
-        Built-in apps installed with the core.
-      </p>
+    <div className="flex flex-col gap-3">
+      <h3 className="text-sm font-medium">Built-ins</h3>
 
       <div className="rounded-md border p-3 flex flex-col gap-2">
         <div className="flex items-center justify-between gap-3">
@@ -451,12 +449,9 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
   };
 
   return (
-    <div className="rounded-lg border p-5 flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-sm text-muted-foreground">
-          Installing wires the app into the local data server with its declared per-type
-          permissions.
-        </p>
+        <h3 className="text-sm font-medium">Installed apps</h3>
         <Button variant="outline" size="sm" onClick={refresh}>Refresh</Button>
       </div>
 
@@ -655,11 +650,7 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
   };
 
   return (
-    <div className="rounded-lg border p-5 flex flex-col gap-4">
-      <p className="text-sm text-muted-foreground">
-        Deploy apps to AWS. Requires cloud infrastructure to be set up and a valid sign-in session.
-      </p>
-
+    <div className="flex flex-col gap-3">
       {credError && (
         <Alert variant="destructive">
           <AlertTitle>Error</AlertTitle>
