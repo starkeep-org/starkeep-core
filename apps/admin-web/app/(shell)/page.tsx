@@ -72,15 +72,6 @@ interface Watch {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function checkUrl(url: string): Promise<boolean> {
-  try {
-    await fetch(url, { mode: "no-cors", signal: AbortSignal.timeout(2000) });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function extractEmail(idToken: string): string | null {
   try {
     const payload = JSON.parse(atob(idToken.split(".")[1]));
@@ -106,10 +97,6 @@ export default function DashboardPage() {
   const [localAuthAuthenticated, setLocalAuthAuthenticated] = useState<boolean | null>(null);
   const [watches, setWatches] = useState<Watch[] | null>(null);
   const [typesExpanded, setTypesExpanded] = useState(false);
-
-  // Local apps
-  // Starkeep Drive UI (core app, fixed port 9830)
-  const [driveOnline, setDriveOnline] = useState<boolean | null>(null);
 
   // Remote
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null | undefined>(undefined);
@@ -170,11 +157,6 @@ export default function DashboardPage() {
       setDaemonLoading((l) => ({ ...l, "local-data-server": false }));
     }
   }, [localOnline]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (daemonLoading["drive"] && driveOnline === true) {
-      setDaemonLoading((l) => ({ ...l, drive: false }));
-    }
-  }, [driveOnline]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function startDaemon(id: string) {
     // Defense in depth: if the data server is already reachable, refuse to
@@ -286,12 +268,6 @@ export default function DashboardPage() {
 
     fetchLocal();
     return () => controller.abort();
-  }, [refreshKey, localRefreshKey]);
-
-  // Starkeep Drive UI status (fixed port 9830)
-  useEffect(() => {
-    setDriveOnline(null);
-    checkUrl("http://localhost:9830").then(setDriveOnline);
   }, [refreshKey, localRefreshKey]);
 
   // Read cloud config + cognito session
@@ -588,20 +564,6 @@ export default function DashboardPage() {
               Clear local data
             </Button>
           </div>
-
-          {localOnline !== false && (
-            <div className="rounded-lg border p-4 flex flex-col gap-3">
-              <h3 className="font-medium">Apps</h3>
-              <LocalAppRow
-                name="Starkeep Drive"
-                online={driveOnline}
-                url="http://localhost:9830"
-                loading={!!daemonLoading["drive"]}
-                onStart={() => startDaemon("drive")}
-                onStop={() => stopDaemon("drive")}
-              />
-            </div>
-          )}
         </div>
 
         {/* ── REMOTE ── */}
@@ -861,42 +823,5 @@ function StatusBadge({ online }: { online: boolean | null }) {
     >
       {online ? "Online" : "Offline"}
     </Badge>
-  );
-}
-
-function LocalAppRow({
-  name, online, url, loading, onStart, onStop,
-}: {
-  name: string;
-  online: boolean | null;
-  url: string;
-  loading: boolean;
-  onStart: () => void;
-  onStop: () => void;
-}) {
-  return (
-    <div className="flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-medium">{name}</span>
-        <StatusBadge online={online} />
-      </div>
-      <div className="flex items-center gap-2">
-        {online === true && (
-          <a href={url} target="_blank" rel="noopener noreferrer" className="text-sm underline">Open ↗</a>
-        )}
-        {online === true && (
-          <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" disabled={loading} onClick={onStop}>
-            {loading && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-            Stop
-          </Button>
-        )}
-        {online === false && (
-          <Button size="sm" variant="outline" disabled={loading} onClick={onStart}>
-            {loading && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-            Start
-          </Button>
-        )}
-      </div>
-    </div>
   );
 }

@@ -20,14 +20,6 @@ import {
 } from "@/lib/cloud-config";
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
 
-// Per-app cloud installers. Discovery makes the *list* of cloud apps dynamic,
-// but the actual install pipeline remains per-app: only Photos has a real
-// installer today (it builds an app-specific OpenNext bundle). An app that
-// targets "cloud" but isn't registered here renders a disabled button.
-const CLOUD_INSTALLERS: Record<string, string> = {
-  photos: "/api/apps/photos/cloud-install",
-};
-
 type AppTarget = "local" | "cloud";
 
 export default function AppsPage() {
@@ -70,6 +62,7 @@ export default function AppsPage() {
 
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-semibold">Local</h2>
+        <DriveSection />
         <LocalAppsSection apps={localApps} refresh={refresh} />
       </section>
 
@@ -163,11 +156,11 @@ function AppDirsEditor({ onSaved }: { onSaved: () => void }) {
 
   return (
     <div className="rounded-lg border p-5 flex flex-col gap-3">
-      <h2 className="text-base font-semibold">App directories</h2>
+      <h2 className="text-base font-semibold">App discovery</h2>
       <p className="text-sm text-muted-foreground">
         Parent directories scanned for apps (each subdir with a{" "}
-        <code className="text-xs">starkeep.manifest.json</code>). When empty, the default
-        sibling <code className="text-xs">starkeep-apps/</code> directory is used.
+        <code className="text-xs">starkeep.manifest.json</code>).
+        Parent app directories should be added as siblings to starkeep-core.
       </p>
 
       {error && (
@@ -180,7 +173,7 @@ function AppDirsEditor({ onSaved }: { onSaved: () => void }) {
       {dirs === null ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : dirs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No custom directories — using the default.</p>
+        <p className="text-sm text-muted-foreground">No directories — no apps will be discovered.</p>
       ) : (
         <ul className="flex flex-col gap-1">
           {dirs.map((d) => (
@@ -203,6 +196,112 @@ function AppDirsEditor({ onSaved }: { onSaved: () => void }) {
           disabled={saving}
         />
         <Button onClick={add} disabled={saving || newDir.trim().length === 0}>Add</Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Starkeep Drive — built-in app installed with the core. Not manifest-discovered;
+// it runs on a fixed port (9830) under the daemon id "drive".
+// ---------------------------------------------------------------------------
+
+const DRIVE_URL = "http://localhost:9830";
+
+async function checkUrl(url: string): Promise<boolean> {
+  try {
+    await fetch(url, { mode: "no-cors", signal: AbortSignal.timeout(2000) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function DriveSection() {
+  const [online, setOnline] = useState<boolean | null>(null);
+  const [pending, setPending] = useState<"start" | "stop" | null>(null);
+
+  useEffect(() => {
+    setOnline(null);
+    checkUrl(DRIVE_URL).then(setOnline);
+  }, []);
+
+  // Poll the URL until it matches the requested transition, with a hard cap.
+  const waitForTransition = useCallback(async (want: "start" | "stop") => {
+    const MAX_ATTEMPTS = 20; // 20 × 1s = 20s
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const up = await checkUrl(DRIVE_URL);
+      setOnline(up);
+      if ((want === "start" && up) || (want === "stop" && !up)) return;
+    }
+  }, []);
+
+  const transition = async (action: "start" | "stop") => {
+    setPending(action);
+    try {
+      await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, id: "drive" }),
+      });
+      await waitForTransition(action);
+    } catch {
+      /* leave status to the next check */
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const running = online === true;
+  const busy = pending !== null;
+
+  return (
+    <div className="rounded-lg border p-5 flex flex-col gap-4">
+      <p className="text-sm text-muted-foreground">
+        Built-in apps installed with the core.
+      </p>
+
+      <div className="rounded-md border p-3 flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="font-medium">Starkeep Drive</span>
+            <Badge variant="secondary" className="text-xs">Built-in</Badge>
+            {running && (
+              <a href={DRIVE_URL} target="_blank" rel="noopener noreferrer" title={`Open ${DRIVE_URL}`}>
+                <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 hover:bg-blue-200 dark:hover:bg-blue-800 cursor-pointer">
+                  Running ↗
+                </Badge>
+              </a>
+            )}
+          </div>
+          <div className="flex gap-2 items-center">
+            {running && (
+              <a href={DRIVE_URL} target="_blank" rel="noopener noreferrer" className="text-sm underline">
+                Open ↗
+              </a>
+            )}
+            {online === false && (
+              <Button size="sm" variant="outline" onClick={() => transition("start")} disabled={busy}>
+                {pending === "start" && (
+                  <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                )}
+                {pending === "start" ? "Starting…" : "Start"}
+              </Button>
+            )}
+            {running && (
+              <Button size="sm" variant="outline" onClick={() => transition("stop")} disabled={busy}>
+                {pending === "stop" && (
+                  <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                )}
+                {pending === "stop" ? "Stopping…" : "Stop"}
+              </Button>
+            )}
+          </div>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          File browser and shared-data UI, installed with the core.
+        </p>
       </div>
     </div>
   );
@@ -575,9 +674,10 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
 
       {apps?.map((entry) => {
         const name = entry.manifest.name ?? entry.appId;
-        // Cloud install is per-app: only registered installers exist (Photos
-        // today). An unregistered cloud app shows a disabled button.
-        const endpoint = CLOUD_INSTALLERS[entry.appId];
+        // Cloud install is generic: any app discovered with a "cloud" target is
+        // installable via the per-appId route, which drives the app's own
+        // `bundle` script. No hardcoded installer registry.
+        const endpoint = `/api/apps/${entry.appId}/cloud-install`;
         const url = apiGatewayUrl ? `${apiGatewayUrl}/apps/${entry.appId}/` : null;
         const installed = installedIds.has(entry.appId);
         return (
@@ -598,22 +698,13 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
                     Open ↗
                   </a>
                 )}
-                {endpoint ? (
-                  <Button size="sm" onClick={() => handleInstall(entry.appId, name, endpoint)}>
-                    {installed ? "Redeploy" : "Install in cloud"}
-                  </Button>
-                ) : (
-                  <Button size="sm" disabled title="No cloud installer available for this app">
-                    Install in cloud
-                  </Button>
-                )}
+                <Button size="sm" onClick={() => handleInstall(entry.appId, name, endpoint)}>
+                  {installed ? "Redeploy" : "Install in cloud"}
+                </Button>
               </div>
             </div>
             {entry.manifest.description && (
               <p className="text-sm text-muted-foreground">{entry.manifest.description}</p>
-            )}
-            {!endpoint && (
-              <p className="text-xs text-muted-foreground">No cloud installer available for this app.</p>
             )}
             {url && (
               <p className="text-xs text-muted-foreground break-all">

@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { NextRequest, NextResponse } from "next/server";
+import { DEFAULT_APPS_DIR } from "../../../src/lib/exec-commands";
 
 const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
 const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
@@ -35,8 +36,18 @@ function writeConfig(config: Record<string, unknown>): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
 
+// Seed `appParentDirs` with the default sibling `starkeep-apps/` dir the first
+// time the config is read without one. A defined empty array means the user
+// explicitly cleared the list and is left alone.
+function seedAppParentDirs(config: Record<string, unknown> | null): Record<string, unknown> {
+  if (config && Array.isArray(config.appParentDirs)) return config;
+  const seeded = { ...(config ?? {}), appParentDirs: [DEFAULT_APPS_DIR] };
+  writeConfig(seeded);
+  return seeded;
+}
+
 export async function GET() {
-  return NextResponse.json({ config: readConfig() });
+  return NextResponse.json({ config: seedAppParentDirs(readConfig()) });
 }
 
 export async function PATCH(req: NextRequest) {

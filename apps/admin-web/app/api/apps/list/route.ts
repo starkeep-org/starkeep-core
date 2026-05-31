@@ -2,13 +2,10 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { NextResponse } from "next/server";
-import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 
 const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
 const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
 const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
-// Default app parent dir: the sibling-of-starkeep-core `starkeep-apps/` checkout.
-const DEFAULT_APPS_DIR = resolve(REPO_ROOT, "..", "starkeep-apps");
 
 interface InstalledApp {
   appId: string;
@@ -23,20 +20,22 @@ function expandHome(p: string): string {
   return p;
 }
 
-// App parent dirs come from ~/.starkeep/config.json `appParentDirs`. When unset
-// or empty we fall back to the default sibling `starkeep-apps/` dir.
+// App parent dirs come from ~/.starkeep/config.json `appParentDirs`. The
+// config route seeds this list with the default sibling `starkeep-apps/` dir
+// on first read, so an empty/missing list here means the user explicitly
+// cleared it — we honor that and scan nothing.
 function appParentDirs(): string[] {
-  let configured: string[] = [];
   try {
     const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as { appParentDirs?: unknown };
     if (Array.isArray(raw.appParentDirs)) {
-      configured = raw.appParentDirs.filter((d): d is string => typeof d === "string" && d.length > 0);
+      return raw.appParentDirs
+        .filter((d): d is string => typeof d === "string" && d.length > 0)
+        .map(expandHome);
     }
   } catch {
-    // No config file or malformed — fall back to the default below.
+    // No config file or malformed — nothing to scan.
   }
-  const dirs = configured.length > 0 ? configured : [DEFAULT_APPS_DIR];
-  return dirs.map(expandHome);
+  return [];
 }
 
 export async function GET() {
