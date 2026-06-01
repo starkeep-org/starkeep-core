@@ -31,7 +31,7 @@ export interface ChangeSetChange {
   physicalResourceId?: string;
   replacement?: "True" | "False" | "Conditional";
   scope?: string[];
-  details?: any[];
+  details?: unknown[];
 }
 
 export interface PlanDeploymentInput {

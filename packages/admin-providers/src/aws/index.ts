@@ -9,7 +9,6 @@ import {
   type StackEvent,
   type Output,
 } from "@aws-sdk/client-cloudformation";
-import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { fromTemporaryCredentials } from "@aws-sdk/credential-providers";
 import type {
   Provider,
@@ -163,10 +162,11 @@ export class AwsProvider implements Provider {
       }
 
       return "UPDATE";
-    } catch (error: any) {
+    } catch (error) {
       // Check for ValidationError (AWS SDK v3 sets error.name to the error code)
-      if ((error.name === "ValidationError" || error.Code === "ValidationError") &&
-          error.message.includes("does not exist")) {
+      const e = error as { name?: string; Code?: string; message?: string };
+      if ((e.name === "ValidationError" || e.Code === "ValidationError") &&
+          e.message?.includes("does not exist")) {
         return "CREATE";
       }
       throw error;
@@ -175,11 +175,11 @@ export class AwsProvider implements Provider {
 
   private transformChanges(changes: Change[]): ChangeSetChange[] {
     return changes.map((change) => ({
-      action: change.ResourceChange?.Action as any || "Dynamic",
+      action: (change.ResourceChange?.Action as ChangeSetChange["action"]) || "Dynamic",
       resourceType: change.ResourceChange?.ResourceType || "Unknown",
       logicalResourceId: change.ResourceChange?.LogicalResourceId || "",
       physicalResourceId: change.ResourceChange?.PhysicalResourceId,
-      replacement: change.ResourceChange?.Replacement as any,
+      replacement: change.ResourceChange?.Replacement as ChangeSetChange["replacement"],
       scope: change.ResourceChange?.Scope,
       details: change.ResourceChange?.Details,
     }));
@@ -257,11 +257,12 @@ export class AwsProvider implements Provider {
         status: stack?.StackStatus || "UNKNOWN",
         statusReason: stack?.StackStatusReason,
       };
-    } catch (error: any) {
+    } catch (error) {
       // Only return DELETED if the stack actually doesn't exist
       // Don't mask other validation errors
-      if ((error.name === "ValidationError" || error.Code === "ValidationError") &&
-          error.message && error.message.includes("does not exist")) {
+      const e = error as { name?: string; Code?: string; message?: string };
+      if ((e.name === "ValidationError" || e.Code === "ValidationError") &&
+          e.message && e.message.includes("does not exist")) {
         return { status: "DELETED" };
       }
       throw error;
@@ -338,11 +339,12 @@ export class AwsProvider implements Provider {
         description: output.Description,
         exportName: output.ExportName,
       }));
-    } catch (error: any) {
+    } catch (error) {
       // Only return empty array if stack doesn't exist
       // Don't mask other validation errors
-      if ((error.name === "ValidationError" || error.Code === "ValidationError") &&
-          error.message && error.message.includes("does not exist")) {
+      const e = error as { name?: string; Code?: string; message?: string };
+      if ((e.name === "ValidationError" || e.Code === "ValidationError") &&
+          e.message && e.message.includes("does not exist")) {
         return [];
       }
       throw error;

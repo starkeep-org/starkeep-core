@@ -45,7 +45,7 @@ export function appRegistryRow(db: DatabaseSync, appId: string): RegisteredApp |
       `SELECT app_id, name, version, tier, manifest, status, hmac_secret, installed_at, updated_at
        FROM shared_app_registry WHERE app_id = ?`,
     )
-    .get(appId) as RegisteredAppRow | undefined;
+    .get(appId) as unknown as RegisteredAppRow | undefined;
   if (!row) return null;
   return {
     appId: row.app_id,
@@ -66,7 +66,7 @@ export function listAppRegistry(db: DatabaseSync): RegisteredApp[] {
       `SELECT app_id, name, version, tier, manifest, status, hmac_secret, installed_at, updated_at
        FROM shared_app_registry ORDER BY installed_at ASC`,
     )
-    .all() as RegisteredAppRow[];
+    .all() as unknown as RegisteredAppRow[];
   return rows.map((row) => ({
     appId: row.app_id,
     name: row.name,

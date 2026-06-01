@@ -35,6 +35,7 @@ import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-
 import { getCategory, categoryOf, isCategoryId } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
 import { dataRecordObjectKey } from "../../packages/core/src/storage/object-keys.js";
+import { createStarkeepId } from "@starkeep/core";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
@@ -852,7 +853,6 @@ async function main() {
 
           // Check for records not in any watch (Library)
           const allData = await databaseAdapter.query({ limit: 100000 });
-          const watchFileIds = new Set<string>();
           const unwatchedRecords: typeof allData.records = [];
           for (const r of allData.records) {
             if (r.deletedAt) continue;
@@ -878,7 +878,6 @@ async function main() {
           const watchId = watchMatch[1]!;
           const subPath = (watchMatch[2] || "").replace(/^\//, "");
           const allFiles = watchManager.getWatchFiles(watchId);
-          const status = watchManager.getStatus(watchId);
 
           // Collect immediate children at this subpath level
           const folders = new Set<string>();
@@ -912,7 +911,7 @@ async function main() {
           const fileList = [];
           for (const f of files) {
             try {
-              const record = await sdk.data.get(f.recordId as any);
+              const record = await sdk.data.get(createStarkeepId(f.recordId));
               if (record) {
                 fileList.push({
                   id: record.id,
@@ -975,9 +974,9 @@ async function main() {
             })
             .map(r => ({
               id: r.id,
-              name: ((r as any).payload?.title || (r as any).payload?.name || (r as any).payload?.fileName || r.id) + (extensionForMime((r as any).mimeType) || ""),
-              mime_type: (r as any).mimeType,
-              size_bytes: (r as any).sizeBytes,
+              name: (r.originalFilename || r.id) + (extensionForMime(r.mimeType) || ""),
+              mime_type: r.mimeType,
+              size_bytes: r.sizeBytes,
               updated_at: new Date(r.updatedAt.wallTime).toISOString(),
               created_at: new Date(r.createdAt.wallTime).toISOString(),
             }));
@@ -1553,7 +1552,7 @@ async function main() {
       // GET /data/records/:id/file-url — time-limited URL for file access
       const fileUrlMatch = path.match(/^\/data\/records\/([^/]+)\/file-url$/);
       if (fileUrlMatch && req.method === "GET") {
-        const record = await sdk.data.get(fileUrlMatch[1]! as any);
+        const record = await sdk.data.get(createStarkeepId(fileUrlMatch[1]!));
         if (!record) {
           res.writeHead(404);
           json(res, { error: "Record not found" });
@@ -1655,7 +1654,7 @@ async function main() {
           json(res, { error: `Unknown metadata columns: ${unknownKeys.join(", ")}` });
           return;
         }
-        await sdk.data.putMetadata(category, { recordId: recordId as any, ...metadata });
+        await sdk.data.putMetadata(category, { recordId: createStarkeepId(recordId), ...metadata });
         json(res, { ok: true });
         return;
       }
@@ -1677,7 +1676,7 @@ async function main() {
           json(res, { metadata: null });
           return;
         }
-        const metadata = await sdk.data.getMetadata(category, recordId as any);
+        const metadata = await sdk.data.getMetadata(category, createStarkeepId(recordId));
         json(res, { metadata });
         return;
       }
@@ -1685,7 +1684,7 @@ async function main() {
       // GET /data/records/:id
       const recordMatch = path.match(/^\/data\/records\/([^/]+)$/);
       if (recordMatch && req.method === "GET") {
-        const record = await sdk.data.get(recordMatch[1]! as any);
+        const record = await sdk.data.get(createStarkeepId(recordMatch[1]!));
         if (!record) {
           res.writeHead(404);
           json(res, { error: "Record not found" });

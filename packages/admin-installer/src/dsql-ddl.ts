@@ -98,7 +98,7 @@ export interface DsqlDdlOptions {
   };
 }
 
-async function makeDb(opts: DsqlDdlOptions): Promise<Kysely<any>> {
+async function makeDb(opts: DsqlDdlOptions): Promise<Kysely<Record<string, never>>> {
   // dsql:DbConnectAdmin is exercised at connect time when DSQL validates the
   // signed token against the caller's IAM policy. Manager has just attached
   // the temp-install-ddl-<appId> policy moments before this runs, and IAM

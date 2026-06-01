@@ -76,7 +76,7 @@ export const changeSetChangeSchema = z.object({
   physicalResourceId: z.string().optional(),
   replacement: z.enum(["True", "False", "Conditional"]).optional(),
   scope: z.array(z.string()).optional(),
-  details: z.array(z.any()).optional(),
+  details: z.array(z.unknown()).optional(),
 });
 
 export const planSchema = z.object({

@@ -57,7 +57,7 @@ export function installerPgUser(stackPrefix: string): string {
   return `${stackPrefix}_installer`.toLowerCase().replace(/-/g, "_");
 }
 
-async function makeDb(opts: SchemaInitOptions): Promise<Kysely<any>> {
+async function makeDb(opts: SchemaInitOptions): Promise<Kysely<Record<string, never>>> {
   const signer = new DsqlSigner({
     hostname: opts.hostname,
     region: opts.region,
@@ -82,7 +82,7 @@ async function makeDb(opts: SchemaInitOptions): Promise<Kysely<any>> {
  * single statement (no trailing semicolon, no PL/pgSQL).
  */
 async function ensureRole(
-  db: Kysely<any>,
+  db: Kysely<Record<string, never>>,
   rolname: string,
   createSql: string,
 ): Promise<void> {
