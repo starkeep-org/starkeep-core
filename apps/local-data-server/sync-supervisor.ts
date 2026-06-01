@@ -300,15 +300,18 @@ export function createSyncSupervisor(
     }, nudgeDebounceMs);
   }
 
-  // Local-write fan-out: any record write nudges every engine to exchange
-  // soon. Engines individually decide whether they have anything new to ship
-  // (records-table delta scan; empty for apps with no new rows).
+  // Local-write routing: nudge only the engine that owns the affected data
+  // plane. Shape-A convention:
+  //   - `local-change-recorded` with no originAppId → shared-record write,
+  //     owned by the always-on Drive channel.
+  //   - `local-change-recorded` with originAppId set → app-specific write,
+  //     owned by that app's per-app engine (no-op if the app has no engine,
+  //     e.g. Drive / watcher whose writes ride the Drive channel).
   sdk.changeNotifier.subscribe((event) => {
     if (event.eventType !== "local-change-recorded") return;
     if (paused) return;
-    for (const entry of engines.values()) {
-      scheduleNudge(entry.appId);
-    }
+    const targetAppId = event.originAppId ?? DRIVE_APP_ID;
+    scheduleNudge(targetAppId);
   });
 
   function rescan(): void {

@@ -180,6 +180,13 @@ export interface StarkeepSdkOptions {
    * supervisor and never touched here.
    */
   readonly syncStateStore?: SyncStateStore;
+  /**
+   * Optional change-notifier to inject. When omitted the SDK creates its own.
+   * Callers inject when they want a sibling component (e.g. the local-data-
+   * server's app-specific factory) to emit `local-change-recorded` events
+   * onto the same channel the supervisor subscribes to.
+   */
+  readonly changeNotifier?: ChangeNotifier;
   readonly subject?: {
     readonly subjectType: SubjectType;
     readonly subjectId: string;

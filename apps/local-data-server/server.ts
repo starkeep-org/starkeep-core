@@ -30,7 +30,7 @@ import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
-import { createSqliteSyncStateStore } from "../../packages/sync-engine/src/index.js";
+import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
 import { getCategory, categoryOf, isCategoryId } from "../../packages/core/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
@@ -56,6 +56,13 @@ const TOKEN_SECRET = randomBytes(32) as unknown as Uint8Array;
 
 const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
+// Intentionally not configurable. The request-auth model in this server treats
+// the loopback bind as the boundary for administrative and host-level routes
+// (see LOOPBACK_AUTHORIZED_PATTERNS below). Changing this address without
+// also revisiting which routes skip app HMAC would silently de-authenticate
+// the admin surface, the watch CRUD, /events, and /auth/*.
+const LISTEN_HOST = "127.0.0.1";
+const BIND_IS_LOOPBACK = LISTEN_HOST === "127.0.0.1" || LISTEN_HOST === "::1";
 const OWNER_ID = process.env.STARKEEP_OWNER_ID || "craig";
 const NODE_ID = process.env.STARKEEP_NODE_ID || "admin-desktop";
 const PULL_INTERVAL_MS = parseInt(process.env.STARKEEP_PULL_INTERVAL_MS || "30000", 10);
@@ -404,6 +411,13 @@ async function main() {
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
   const appApplier = new SqliteAppSyncableApplier(localDb, namespaceStore);
 
+  // Hoisted so the app-specific factory and the SDK share one notifier:
+  // app-specific writes (via the factory) emit `local-change-recorded` tagged
+  // with the writing app's id, and the supervisor subscribes once to route
+  // nudges to the owning per-app engine. The SDK's own shared-record writes
+  // emit on the same notifier without an originAppId (Drive owns them).
+  const changeNotifier = createChangeNotifier();
+
   const appSpecificFactory = createAppSpecificFactory({
     namespace: namespaceStore,
     applier: appApplier,
@@ -413,6 +427,7 @@ async function main() {
       return `http://127.0.0.1:${PORT}/data/files/${token}`;
     },
     clock,
+    changeNotifier,
   });
 
   const sdk = await createStarkeepSdk({
@@ -427,6 +442,7 @@ async function main() {
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
     syncStateStore,
+    changeNotifier,
     getAppSpecific: appSpecificFactory,
   });
 
@@ -437,11 +453,15 @@ async function main() {
 
   // SSE fan-out: every event on the SDK's unified notifier (writes from
   // local-data-server, plus pull/conflict events forwarded by the supervisor
-  // below) is broadcast to connected SSE clients.
+  // below) emits a payload-less kick to connected SSE clients. The kick tells
+  // clients "something changed, go re-fetch through your normal data plane" —
+  // we deliberately do not put record ids or event types on the wire, because
+  // /events is loopback-authorized with no per-app filtering and the data
+  // plane (which is HMAC-authenticated and grant-checked) is the only place
+  // record-shaped information should leave this process.
   sdk.changeNotifier.subscribe((event) => {
     console.log(`[sync] ${event.eventType} records=${event.recordIds.length}`);
-    const payload = JSON.stringify(event);
-    for (const client of sseClients) client.write(`data: ${payload}\n\n`);
+    for (const client of sseClients) client.write(`data: \n\n`);
   });
 
   // Sync supervisor: owns N SyncEngine instances, one per installed app.
@@ -571,29 +591,46 @@ async function main() {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);
     const path = url.pathname;
 
-    // Per-request app identity. Required for every data/sync/watches request:
-    // the local-data-server enforces app-scoped access on top of the same
-    // (currently unused) cloud identity flow. Admin & system endpoints that
-    // belong to admin-web rather than an installed app are exempt below.
+    // Per-request app identity. Required for every route that touches the
+    // per-app data plane. Two narrow categories of route are gated differently:
+    //   - LOOPBACK_AUTHORIZED_PATTERNS: administrative / host-level routes,
+    //     gated by the 127.0.0.1 bind rather than by app HMAC. Adding a new
+    //     route here is a deliberate assertion that the route is safe to
+    //     expose to any loopback caller (configures the server, brokers the
+    //     user's own cloud session, manages watches, or is already tracked
+    //     in the functional review as a known leak). If LISTEN_HOST is ever
+    //     changed away from loopback these routes fail closed.
+    //   - TOKEN_AUTHORIZED_PATTERNS: the signed token in the URL is the auth,
+    //     and the URL is meant to be embeddable (e.g. in <img src>).
+    // Every other route requires X-Starkeep-App-Id and a valid HMAC body sig.
     const appId = req.headers["x-starkeep-app-id"] as string | undefined;
     const appSig = req.headers["x-starkeep-app-sig"] as string | undefined;
 
-    // Watches are an admin/host concern (configured via admin-web, not by
-     // installed apps), so they intentionally do not require app HMAC headers.
-    // `/data/files/:token` is also exempt — the signed token in the path is
-    // the authorization, and the URL is meant to be embeddable (e.g. in <img src>).
-    const APP_AUTH_REQUIRED_PREFIXES = ["/data/", "/cloud/", "/sync/", "/app-data/", "/files/"];
-    // Token-authorized routes: the signed token in the path is the auth.
-    //  - GET /data/files/:token         — bearer read of a single blob
-    //  - PUT /data/files/upload/:token  — bearer write of a single blob
-    const APP_AUTH_EXEMPT_PATTERNS = [
+    const LOOPBACK_AUTHORIZED_PATTERNS = [
+      /^\/health$/,
+      /^\/config$/,
+      /^\/auth(\/|$)/,
+      /^\/admin(\/|$)/,
+      /^\/watches(\/|$)/,
+      /^\/events$/,
+    ];
+    const TOKEN_AUTHORIZED_PATTERNS = [
       /^\/data\/files\/upload\/[^/]+$/,
       /^\/data\/files\/[^/]+$/,
     ];
-    const requiresAppAuth =
-      APP_AUTH_REQUIRED_PREFIXES.some((p) =>
-        path === p.replace(/\/$/, "") || path.startsWith(p),
-      ) && !APP_AUTH_EXEMPT_PATTERNS.some((re) => re.test(path));
+
+    const isLoopbackAuthorized = LOOPBACK_AUTHORIZED_PATTERNS.some((re) => re.test(path));
+    const isTokenAuthorized = TOKEN_AUTHORIZED_PATTERNS.some((re) => re.test(path));
+
+    // Fail closed: if the server is not bound to loopback, every route that
+    // relied on the loopback boundary for its authorization must refuse.
+    if (isLoopbackAuthorized && !BIND_IS_LOOPBACK) {
+      res.writeHead(403);
+      json(res, { error: "Loopback-authorized route disabled: server is not bound to loopback" });
+      return;
+    }
+
+    const requiresAppAuth = !isLoopbackAuthorized && !isTokenAuthorized;
 
     if (requiresAppAuth) {
       if (!appId) {
@@ -832,161 +869,6 @@ async function main() {
         }
         const result = await supervisor.exchangeAll();
         json(res, result);
-        return;
-      }
-
-      // GET /browse?path=/ — hierarchical folder view for File Provider
-      // Root shows: watched directories as folders + "Library" for untracked records
-      // Subpaths show: actual subfolder structure from watched directories
-      if (path === "/browse" && req.method === "GET") {
-        const browsePath = url.searchParams.get("path") || "/";
-
-        if (browsePath === "/") {
-          // Root: list watched directories as folders + Library folder
-          const watches = watchManager.getAllStatuses();
-          const folders: { name: string; id: string; type: "watch" | "virtual"; itemCount: number }[] = [];
-
-          for (const w of watches) {
-            const dirName = w.directoryPath.split("/").pop() || w.directoryPath;
-            folders.push({ name: dirName, id: `watch:${w.id}`, type: "watch", itemCount: w.syncedFiles });
-          }
-
-          // Check for records not in any watch (Library)
-          const allData = await databaseAdapter.query({ limit: 100000 });
-          const unwatchedRecords: typeof allData.records = [];
-          for (const r of allData.records) {
-            if (r.deletedAt) continue;
-            // Check if this record is referenced by a watch-file
-            const isWatched = watchManager.getAllStatuses().some(w => {
-              const files = watchManager.getWatchFiles(w.id);
-              return files.some(f => f.dataRecordId === r.id);
-            });
-            if (!isWatched) unwatchedRecords.push(r);
-          }
-
-          if (unwatchedRecords.length > 0) {
-            folders.push({ name: "Library", id: "virtual:library", type: "virtual", itemCount: unwatchedRecords.length });
-          }
-
-          json(res, { path: "/", folders, files: [] });
-          return;
-        }
-
-        // /watch:<watchId> or /watch:<watchId>/subfolder/path
-        const watchMatch = browsePath.match(/^\/watch:([^/]+)(\/.*)?$/);
-        if (watchMatch) {
-          const watchId = watchMatch[1]!;
-          const subPath = (watchMatch[2] || "").replace(/^\//, "");
-          const allFiles = watchManager.getWatchFiles(watchId);
-
-          // Collect immediate children at this subpath level
-          const folders = new Set<string>();
-          const files: { name: string; relativePath: string; recordId: string; contentHash: string }[] = [];
-
-          for (const f of allFiles) {
-            const rel = f.relativePath;
-            // Check if this file is within the subpath
-            if (subPath && !rel.startsWith(subPath + "/") && rel !== subPath) continue;
-            const remainder = subPath ? rel.slice(subPath.length + 1) : rel;
-            if (!remainder) continue;
-
-            const slashIdx = remainder.indexOf("/");
-            if (slashIdx === -1) {
-              // Direct child file
-              files.push({ name: remainder, relativePath: rel, recordId: f.dataRecordId, contentHash: f.contentHash });
-            } else {
-              // Subfolder
-              folders.add(remainder.slice(0, slashIdx));
-            }
-          }
-
-          const folderList = Array.from(folders).sort().map(name => ({
-            name,
-            id: `watch:${watchId}/${subPath ? subPath + "/" : ""}${name}`,
-            type: "folder" as const,
-            itemCount: allFiles.filter(f => f.relativePath.startsWith((subPath ? subPath + "/" : "") + name + "/")).length,
-          }));
-
-          // Fetch record details for files
-          const fileList = [];
-          for (const f of files) {
-            try {
-              const record = await sdk.data.get(createStarkeepId(f.recordId));
-              if (record) {
-                fileList.push({
-                  id: record.id,
-                  name: f.name,
-                  relativePath: f.relativePath,
-                  mime_type: record.mimeType,
-                  size_bytes: record.sizeBytes,
-                  updated_at: new Date(record.updatedAt.wallTime).toISOString(),
-                  created_at: new Date(record.createdAt.wallTime).toISOString(),
-                });
-              }
-            } catch {}
-          }
-
-          json(res, { path: browsePath, watchId, folders: folderList, files: fileList });
-          return;
-        }
-
-        // /Library — untracked records grouped by type
-        if (browsePath === "/virtual:library") {
-          const allData = await databaseAdapter.query({ limit: 100000 });
-          const typeCounts = new Map<string, number>();
-
-          for (const r of allData.records) {
-            if (r.deletedAt) continue;
-            const isWatched = watchManager.getAllStatuses().some(w => {
-              return watchManager.getWatchFiles(w.id).some(f => f.dataRecordId === r.id);
-            });
-            if (!isWatched) {
-              typeCounts.set(r.type, (typeCounts.get(r.type) || 0) + 1);
-            }
-          }
-
-          const folders = Array.from(typeCounts.entries()).map(([type, count]) => ({
-            name: type,
-            id: `library-type:${type}`,
-            type: "virtual" as const,
-            itemCount: count,
-          }));
-
-          json(res, { path: browsePath, folders, files: [] });
-          return;
-        }
-
-        // /library-type:<type> — flat list of untracked records of a type
-        const libraryTypeMatch = browsePath.match(/^\/library-type:(.+)$/);
-        if (libraryTypeMatch) {
-          const recordType = libraryTypeMatch[1]!;
-          const result = await databaseAdapter.query({
-            filters: [{ field: "type" as const, operator: "eq" as const, value: recordType }],
-            limit: 10000,
-          });
-
-          const files = result.records
-            .filter(r => !r.deletedAt)
-            .filter(r => {
-              return !watchManager.getAllStatuses().some(w => {
-                return watchManager.getWatchFiles(w.id).some(f => f.dataRecordId === r.id);
-              });
-            })
-            .map(r => ({
-              id: r.id,
-              name: (r.originalFilename || r.id) + (extensionForMime(r.mimeType) || ""),
-              mime_type: r.mimeType,
-              size_bytes: r.sizeBytes,
-              updated_at: new Date(r.updatedAt.wallTime).toISOString(),
-              created_at: new Date(r.createdAt.wallTime).toISOString(),
-            }));
-
-          json(res, { path: browsePath, folders: [], files });
-          return;
-        }
-
-        res.writeHead(404);
-        json(res, { error: "Browse path not found" });
         return;
       }
 
@@ -1926,8 +1808,8 @@ async function main() {
     }
   });
 
-  server.listen(PORT, "127.0.0.1", () => {
-    console.log(`Starkeep data server listening on http://127.0.0.1:${PORT}`);
+  server.listen(PORT, LISTEN_HOST, () => {
+    console.log(`Starkeep data server listening on http://${LISTEN_HOST}:${PORT}`);
   });
 
   const shutdown = async () => {
@@ -1943,16 +1825,6 @@ async function main() {
     // Reuse shutdown so Ctrl-C on a dev process drains cleanly.
     await shutdown();
   });
-}
-
-function extensionForMime(mime: string | null): string {
-  if (!mime) return "";
-  const map: Record<string, string> = {
-    "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
-    "image/heic": ".heic", "application/pdf": ".pdf", "text/plain": ".txt",
-    "text/markdown": ".md", "application/json": ".json", "video/mp4": ".mp4",
-  };
-  return map[mime] ?? "";
 }
 
 // We cache the raw bytes (not the utf-8 string), so a handler called after the
