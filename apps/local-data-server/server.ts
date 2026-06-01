@@ -155,6 +155,18 @@ interface StarkeepConfig {
   apiGatewayUrl?: string;
 }
 
+// Detects the unique-violation from the (owner_id, original_filename,
+// content_hash) index added in storage-sqlite bootstrap and mirrored in DSQL.
+// SQLite surfaces "UNIQUE constraint failed: ..." and Postgres surfaces
+// SQLSTATE 23505; matching the index name covers both without a driver dep.
+function isDuplicateFileError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes("uq_shared_records_owner_filename_hash") ||
+    message.includes("uq_records_owner_filename_hash")
+  );
+}
+
 function regionFromUserPoolId(userPoolId: string): string {
   const parts = userPoolId.split("_");
   return parts.length > 1 ? parts[0] : "";
@@ -1158,6 +1170,56 @@ async function main() {
           return;
         }
 
+        // Render a record into the API response shape. Used for both the
+        // freshly-created and dedup-existing paths.
+        const renderRecord = async (r: {
+          id: string;
+          type: string;
+          createdAt: { wallTime: number };
+          updatedAt: { wallTime: number };
+          ownerId: string;
+          mimeType: string;
+          sizeBytes: number;
+          objectStorageKey: string | null;
+          originalFilename: string | null;
+          parentId: string | null;
+        }) => ({
+          id: r.id,
+          type: r.type,
+          created_at: new Date(r.createdAt.wallTime).toISOString(),
+          updated_at: new Date(r.updatedAt.wallTime).toISOString(),
+          owner_id: r.ownerId,
+          mime_type: r.mimeType,
+          size_bytes: r.sizeBytes,
+          object_storage_key: r.objectStorageKey,
+          original_filename: r.originalFilename,
+          parent_id: r.parentId,
+          path: r.objectStorageKey ? await localAdapter.resolvePath(r.objectStorageKey) : null,
+        });
+
+        // Owner-scoped duplicate check: (owner, filename, content) is unique
+        // among live records. Same bytes under the same filename → return the
+        // existing record with deduped:true, matching the response shape this
+        // endpoint already uses. Enforced at the DB layer too — this pre-check
+        // turns the would-be unique-violation into an idempotent success.
+        const dedupFilename = fileName ?? null;
+        if (contentHash && dedupFilename && /^[a-f0-9]{64}$/.test(contentHash)) {
+          const dup = await databaseAdapter.query({
+            filters: [
+              { field: "ownerId", operator: "eq", value: OWNER_ID },
+              { field: "originalFilename", operator: "eq", value: dedupFilename },
+              { field: "contentHash", operator: "eq", value: contentHash },
+              { field: "deletedAt", operator: "isNull" },
+            ],
+            limit: 1,
+          });
+          const existing = dup.records[0];
+          if (existing) {
+            json(res, { record: await renderRecord(existing), deduped: true });
+            return;
+          }
+        }
+
         let record;
         const baseInput = { type, ownerId: OWNER_ID, originAppId: appId!, parentId: parentId ?? null };
         if (contentHash) {
@@ -1198,38 +1260,39 @@ async function main() {
             });
             const existing = dup.records[0];
             if (existing) {
-              json(res, {
-                record: {
-                  id: existing.id,
-                  type: existing.type,
-                  created_at: new Date(existing.createdAt.wallTime).toISOString(),
-                  updated_at: new Date(existing.updatedAt.wallTime).toISOString(),
-                  owner_id: existing.ownerId,
-                  mime_type: existing.mimeType,
-                  size_bytes: existing.sizeBytes,
-                  object_storage_key: existing.objectStorageKey,
-                  original_filename: existing.originalFilename,
-                  parent_id: existing.parentId,
-                  path: existing.objectStorageKey
-                    ? await localAdapter.resolvePath(existing.objectStorageKey)
-                    : null,
-                },
-                deduped: true,
-              });
+              json(res, { record: await renderRecord(existing), deduped: true });
               return;
             }
           }
-          record = await sdk.data.putWithExistingBlob(
-            { ...baseInput, originalFilename: fileName ?? null },
-            { contentHash, objectStorageKey: expectedKey, sizeBytes, mimeType: contentType },
-          );
+          try {
+            record = await sdk.data.putWithExistingBlob(
+              { ...baseInput, originalFilename: fileName ?? null },
+              { contentHash, objectStorageKey: expectedKey, sizeBytes, mimeType: contentType },
+            );
+          } catch (err) {
+            if (isDuplicateFileError(err)) {
+              res.writeHead(409);
+              json(res, { error: "Duplicate file" });
+              return;
+            }
+            throw err;
+          }
         } else {
           const resolvedName = fileName ?? (filePath as string).split("/").pop() ?? filePath;
-          record = await sdk.data.putWithLocalFile(
-            { ...baseInput, originalFilename: resolvedName },
-            filePath,
-            contentType,
-          );
+          try {
+            record = await sdk.data.putWithLocalFile(
+              { ...baseInput, originalFilename: resolvedName },
+              filePath,
+              contentType,
+            );
+          } catch (err) {
+            if (isDuplicateFileError(err)) {
+              res.writeHead(409);
+              json(res, { error: "Duplicate file" });
+              return;
+            }
+            throw err;
+          }
         }
 
         // Cloud propagation happens via the sync engine, not from here. The
@@ -1240,23 +1303,7 @@ async function main() {
         // attributes the byte to its originating app, per
         // roles-and-permissions.md.
 
-        json(res, {
-          record: {
-            id: record.id,
-            type: record.type,
-            created_at: new Date(record.createdAt.wallTime).toISOString(),
-            updated_at: new Date(record.updatedAt.wallTime).toISOString(),
-            owner_id: record.ownerId,
-            mime_type: record.mimeType,
-            size_bytes: record.sizeBytes,
-            object_storage_key: record.objectStorageKey,
-            original_filename: record.originalFilename,
-            parent_id: record.parentId,
-            path: record.objectStorageKey
-              ? await localAdapter.resolvePath(record.objectStorageKey)
-              : null,
-          },
-        });
+        json(res, { record: await renderRecord(record) });
         return;
       }
 
