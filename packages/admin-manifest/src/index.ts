@@ -23,8 +23,6 @@ export {
 
 export {
   validateManifest,
-  checkTypeConflicts,
   KNOWN_EXTENSIONS,
   type ValidationResult,
-  type TypeConflict,
 } from "./validate.js";

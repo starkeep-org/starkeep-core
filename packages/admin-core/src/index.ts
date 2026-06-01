@@ -1,7 +1,4 @@
 // Core domain logic for the Starkeep control plane
-export * from "./aws-settings.js";
-export * from "./deployments.js";
-export * from "./plans.js";
 export * from "./template-generator.js";
 
 // Unified bootstrap (replaces self-hosted + SaaS distinction)
