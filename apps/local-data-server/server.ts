@@ -21,7 +21,6 @@ import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js"
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
   createSqliteAccessPolicyStore,
-  createSqliteTypeRegistrationStore,
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
 } from "../../packages/storage-sqlite/src/index.js";
@@ -407,7 +406,6 @@ async function main() {
   const localDb = databaseAdapter.getRawDatabase();
 
   const accessPolicyStore = createSqliteAccessPolicyStore(localDb);
-  const typeRegistrationStore = createSqliteTypeRegistrationStore(localDb);
 
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
   const appApplier = new SqliteAppSyncableApplier(localDb, namespaceStore);
@@ -439,7 +437,6 @@ async function main() {
     // sharing_tokens table. This stub throws on every call so anything that
     // tries to issue locally fails loudly.
     sharingTokenStore: disabledSharingTokenStore(),
-    typeRegistrationStore,
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
     syncStateStore,

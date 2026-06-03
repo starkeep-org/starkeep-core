@@ -204,18 +204,6 @@ export async function initializeSharedSchema(
        )`,
       `CREATE INDEX ASYNC IF NOT EXISTS idx_sharing_tokens_token_hash ON shared.sharing_tokens(token_hash)`,
 
-      // type_registrations declare which app handles which shared type id.
-      // Instance-local control plane; both local and cloud bootstrap their
-      // own from app manifests on startup.
-      `CREATE TABLE IF NOT EXISTS shared.type_registrations (
-         type_id              text NOT NULL PRIMARY KEY,
-         schema_json          text NOT NULL,
-         schema_version       text NOT NULL,
-         description          text NOT NULL,
-         registered_by_app_id text NOT NULL,
-         registered_at        text NOT NULL
-       )`,
-
       // App-specific syncable namespace registry. Mirrors the local SQLite
       // app_syncable_namespaces table. One row per installed app that declared
       // infraRequirements.appSpecificSyncable. The tables_json column is a JSON

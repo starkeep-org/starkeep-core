@@ -4,8 +4,6 @@ import {
   serializeHLC,
   type HLCTimestamp,
   type StarkeepId,
-  type TypeRegistration,
-  type TypeRegistrationStore,
 } from "@starkeep/protocol-primitives";
 import type {
   AccessPolicy,
@@ -175,75 +173,3 @@ function rowToToken(row: TokenRow): SharingToken {
   };
 }
 
-/**
- * Aurora DSQL-backed TypeRegistrationStore.
- */
-export function createDsqlTypeRegistrationStore(
-  client: DatabaseClient,
-): TypeRegistrationStore {
-  return {
-    async put(registration: TypeRegistration): Promise<void> {
-      await client.query(
-        `INSERT INTO shared.type_registrations (
-           type_id, schema_json, schema_version, description,
-           registered_by_app_id, registered_at
-         ) VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (type_id) DO UPDATE SET
-           schema_json = EXCLUDED.schema_json,
-           schema_version = EXCLUDED.schema_version,
-           description = EXCLUDED.description,
-           registered_by_app_id = EXCLUDED.registered_by_app_id,
-           registered_at = EXCLUDED.registered_at`,
-        [
-          registration.typeId,
-          JSON.stringify(registration.schema),
-          registration.schemaVersion,
-          registration.description,
-          registration.registeredByAppId,
-          serializeHLC(registration.registeredAt),
-        ],
-      );
-    },
-
-    async get(typeId: string): Promise<TypeRegistration | null> {
-      const result = await client.query(
-        "SELECT * FROM shared.type_registrations WHERE type_id = $1",
-        [typeId],
-      );
-      if (result.rows.length === 0) return null;
-      return rowToTypeRegistration(result.rows[0] as unknown as TypeRegistrationRow);
-    },
-
-    async list(): Promise<TypeRegistration[]> {
-      const result = await client.query("SELECT * FROM shared.type_registrations");
-      return (result.rows as unknown as TypeRegistrationRow[]).map(rowToTypeRegistration);
-    },
-
-    async delete(typeId: string): Promise<void> {
-      await client.query(
-        "DELETE FROM shared.type_registrations WHERE type_id = $1",
-        [typeId],
-      );
-    },
-  };
-}
-
-interface TypeRegistrationRow {
-  type_id: string;
-  schema_json: string;
-  schema_version: string;
-  description: string;
-  registered_by_app_id: string;
-  registered_at: string;
-}
-
-function rowToTypeRegistration(row: TypeRegistrationRow): TypeRegistration {
-  return {
-    typeId: row.type_id,
-    schema: JSON.parse(row.schema_json) as object,
-    schemaVersion: row.schema_version,
-    description: row.description,
-    registeredByAppId: row.registered_by_app_id,
-    registeredAt: deserializeHLC(row.registered_at),
-  };
-}

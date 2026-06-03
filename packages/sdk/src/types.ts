@@ -4,7 +4,6 @@ import type {
   HLCClock,
   CreateDataRecordInput,
   MetadataRow,
-  TypeRegistration,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { IndexQuery, IndexResult } from "@starkeep/query-orchestrator";
@@ -25,7 +24,6 @@ import type {
   AccessPolicyStore,
   SharingTokenStore,
 } from "@starkeep/access-control";
-import type { TypeRegistrationStore } from "@starkeep/protocol-primitives";
 import type {
   ApiRequest,
   ApiResponse,
@@ -124,13 +122,6 @@ export interface AccessControlOperations {
   checkAccess(request: AccessCheckRequest): Promise<AccessCheckResult>;
 }
 
-export interface TypeRegistrationOperations {
-  /** Idempotent register-or-update. */
-  register(registration: Omit<TypeRegistration, "registeredAt">): Promise<TypeRegistration>;
-  get(typeId: string): Promise<TypeRegistration | null>;
-  list(): Promise<TypeRegistration[]>;
-}
-
 export interface ApiOperations {
   readonly router: ApiRouter;
   handleRequest(request: ApiRequest): Promise<ApiResponse>;
@@ -145,7 +136,6 @@ export interface StarkeepSdk {
   readonly index: IndexOperations;
   readonly aggregations: AggregationOperations;
   readonly accessControl: AccessControlOperations;
-  readonly typeRegistrations: TypeRegistrationOperations;
   readonly api: ApiOperations;
   /**
    * Broadcast channel for record-level events. The SDK emits
@@ -169,8 +159,6 @@ export interface StarkeepSdkOptions {
    * the local-data-server — tokens are issued and validated cloud-side.
    */
   readonly sharingTokenStore: SharingTokenStore;
-  /** Backing store for TypeRegistration rows (instance-local). */
-  readonly typeRegistrationStore: TypeRegistrationStore;
   readonly ownerId: string;
   readonly nodeId: string;
   readonly clock?: HLCClock;

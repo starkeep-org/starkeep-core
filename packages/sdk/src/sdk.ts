@@ -6,7 +6,6 @@ import {
   isCategoryId,
   type DataRecord,
   type MetadataRow,
-  type TypeRegistration,
 } from "@starkeep/protocol-primitives";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -42,7 +41,6 @@ export async function createStarkeepSdk(
     objectStorageAdapter,
     accessPolicyStore,
     sharingTokenStore,
-    typeRegistrationStore,
     ownerId,
     nodeId,
     syncStateStore,
@@ -325,25 +323,6 @@ export async function createStarkeepSdk(
 
       async checkAccess(request) {
         return accessControlEngine.checkAccess(request);
-      },
-    },
-
-    typeRegistrations: {
-      async register(registration) {
-        const full: TypeRegistration = {
-          ...registration,
-          registeredAt: clock.now(),
-        };
-        await typeRegistrationStore.put(full);
-        return full;
-      },
-
-      async get(typeId) {
-        return typeRegistrationStore.get(typeId);
-      },
-
-      async list() {
-        return typeRegistrationStore.list();
       },
     },
 
