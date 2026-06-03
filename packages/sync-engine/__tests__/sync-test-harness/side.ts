@@ -1,4 +1,4 @@
-import { createHLCClock } from "@starkeep/core";
+import { createHLCClock } from "@starkeep/protocol-primitives";
 import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,

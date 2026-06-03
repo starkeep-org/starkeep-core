@@ -1,4 +1,4 @@
-import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "../database/adapter.js";
 import type {
   Query,

@@ -8,7 +8,7 @@
     "build": "node build.mjs"
   },
   "dependencies": {
-    "@starkeep/core": "workspace:*",
+    "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/storage-aurora-dsql": "workspace:*",
     "@starkeep/storage-s3": "workspace:*",

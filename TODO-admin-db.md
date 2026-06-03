@@ -36,7 +36,7 @@ path for non-built-in app install/uninstall and should be kept.
 Other admin-db symbols (`getPool`, `AwsSettingsRepository`,
 `AppRegistryRepository`, `AccessPoliciesRepository`): zero consumers outside
 admin-db itself. Two `@deprecated` comments in
-`packages/admin-core/src/aws-settings.ts` mention `AwsSettingsRepository` but
+`packages/aws-bootstrap/src/aws-settings.ts` mention `AwsSettingsRepository` but
 don't import it.
 
 ## Options for replacing admin-db
@@ -64,4 +64,4 @@ first before tackling this.
   delete `packages/admin-db/` and the workspace dependency in
   `packages/admin-installer/package.json`.
 - Either way: clean up the two `@deprecated` `AwsSettingsRepository` comments
-  in `packages/admin-core/src/aws-settings.ts`.
+  in `packages/aws-bootstrap/src/aws-settings.ts`.

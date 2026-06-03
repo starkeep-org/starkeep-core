@@ -1,4 +1,4 @@
-import { serializeHLC, deserializeHLC } from "@starkeep/core";
+import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableApplier,
   AppSyncableRowEntry,

@@ -3,7 +3,7 @@ import type {
   HLCClock,
   HLCTimestamp,
   StarkeepId,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import type {
   DatabaseAdapter,
   ObjectStorageAdapter,

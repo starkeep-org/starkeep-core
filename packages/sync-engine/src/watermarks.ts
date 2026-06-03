@@ -1,5 +1,5 @@
-import { ZERO_HLC, compareHLC, maxHLC, type HLCTimestamp } from "@starkeep/core";
-import type { AnyRecord } from "@starkeep/core";
+import { ZERO_HLC, compareHLC, maxHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
+import type { AnyRecord } from "@starkeep/protocol-primitives";
 import type { Watermarks, AppSyncableRowEntry } from "./types.js";
 
 /**

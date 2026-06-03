@@ -1,4 +1,4 @@
-import type { StarkeepId } from "@starkeep/core";
+import type { StarkeepId } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 import type { UnifiedIndex, IndexQuery, IndexItem, IndexResult } from "./types.js";
 import { planQuery } from "./query-planner.js";

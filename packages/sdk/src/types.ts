@@ -5,9 +5,9 @@ import type {
   CreateDataRecordInput,
   MetadataRow,
   TypeRegistration,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import type { IndexQuery, IndexResult } from "@starkeep/index";
+import type { IndexQuery, IndexResult } from "@starkeep/query-orchestrator";
 import type {
   AggregationResult,
   AggregationOptions,
@@ -25,7 +25,7 @@ import type {
   AccessPolicyStore,
   SharingTokenStore,
 } from "@starkeep/access-control";
-import type { TypeRegistrationStore } from "@starkeep/core";
+import type { TypeRegistrationStore } from "@starkeep/protocol-primitives";
 import type {
   ApiRequest,
   ApiResponse,

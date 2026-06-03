@@ -11,7 +11,7 @@ BROWSER_PACKAGES=(
   "packages/metadata-engine/src"
   "packages/shared-space-api/src"
   "packages/storage-adapter/src"
-  "packages/core/src"
+  "packages/protocol-primitives/src"
   "apps/tasks-packages/tasks-lib/src"
   "apps/tasks-packages/tasks-ui/src"
 )

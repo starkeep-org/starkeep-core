@@ -7,7 +7,7 @@ import {
   type StarkeepId,
   type TypeRegistration,
   type TypeRegistrationStore,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import type {
   AccessPolicy,
   AccessPolicyStore,

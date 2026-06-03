@@ -1,5 +1,5 @@
-import type { StarkeepId, HLCClock } from "@starkeep/core";
-import { generateId } from "@starkeep/core";
+import type { StarkeepId, HLCClock } from "@starkeep/protocol-primitives";
+import { generateId } from "@starkeep/protocol-primitives";
 import type {
   AccessControlEngine,
   AccessPolicy,

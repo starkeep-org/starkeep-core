@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createHLCClock, createDataRecord } from "@starkeep/core";
+import { createHLCClock, createDataRecord } from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import { createAggregationEngine } from "../src/aggregation-engine.js";
 

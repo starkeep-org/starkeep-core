@@ -150,7 +150,7 @@ server) so the stuck case is visible.
 
 Confirmed by stashing all my edits and re-running tests.
 
-- `@starkeep/admin-core` — tests fail to import `../src/quick-create` and
+- `@starkeep/aws-bootstrap` — tests fail to import `../src/quick-create` and
   `../src/self-hosted-deploy-policy` (files missing from `src/`).
 - `@starkeep/admin-manifest`, `@starkeep/admin-shared`,
   `@starkeep/admin-providers` — no test files; vitest exits with code 1.

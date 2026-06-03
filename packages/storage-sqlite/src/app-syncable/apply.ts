@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { serializeHLC, deserializeHLC } from "@starkeep/core";
+import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSinceOptions, ScanSincePage, FileRecordRow, FileRecordsApplier } from "@starkeep/shared-space-api";
 import { FILE_RECORDS_TABLE } from "@starkeep/shared-space-api";
 import { appSyncableTableName } from "./namespace.js";

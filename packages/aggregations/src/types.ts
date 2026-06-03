@@ -1,4 +1,4 @@
-import type { StarkeepId } from "@starkeep/core";
+import type { StarkeepId } from "@starkeep/protocol-primitives";
 
 export type DateGranularity = "day" | "week" | "month" | "year";
 

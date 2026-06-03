@@ -33,10 +33,10 @@ import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/ob
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
-import { getCategory, categoryOf, isCategoryId } from "../../packages/core/src/types/core-types.js";
-import { createHLCClock, serializeHLC } from "../../packages/core/src/hlc/index.js";
-import { dataRecordObjectKey } from "../../packages/core/src/storage/object-keys.js";
-import { createStarkeepId } from "@starkeep/core";
+import { getCategory, categoryOf, isCategoryId } from "../../packages/protocol-primitives/src/types/core-types.js";
+import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
+import { dataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
+import { createStarkeepId } from "@starkeep/protocol-primitives";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";

@@ -1,4 +1,4 @@
-import type { StarkeepId, HLCTimestamp, AnyRecord } from "@starkeep/core";
+import type { StarkeepId, HLCTimestamp, AnyRecord } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 
 // ---------------------------------------------------------------------------
@@ -252,7 +252,7 @@ export interface SyncEngineOptions {
   readonly localObjectStorage: ObjectStorageAdapter;
   readonly remoteObjectStorage: ObjectStorageAdapter;
   readonly transport: SyncTransport;
-  readonly clock: import("@starkeep/core").HLCClock;
+  readonly clock: import("@starkeep/protocol-primitives").HLCClock;
   readonly syncState?: SyncStateStore;
   /**
    * Provides the applier (for applying incoming exchange rows) and namespace

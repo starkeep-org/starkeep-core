@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@starkeep/access-control": "workspace:*",
-    "@starkeep/core": "workspace:*",
+    "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",

@@ -1,4 +1,4 @@
-import type { DataRecord, HLCTimestamp, StarkeepId } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, StarkeepId } from "@starkeep/protocol-primitives";
 
 export type SortDirection = "asc" | "desc";
 

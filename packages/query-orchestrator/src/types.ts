@@ -1,4 +1,4 @@
-import type { StarkeepId, HLCTimestamp, DataRecord } from "@starkeep/core";
+import type { StarkeepId, HLCTimestamp, DataRecord } from "@starkeep/protocol-primitives";
 
 export interface IndexQuery {
   readonly types?: string[];

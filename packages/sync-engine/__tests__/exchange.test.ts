@@ -5,7 +5,7 @@ import {
   compareHLC,
   serializeHLC,
   type HLCTimestamp,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,

@@ -6,7 +6,7 @@ import {
   type CreateDataRecordInput,
   type StarkeepId,
   type HLCTimestamp,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import { createAccessControlEngine } from "../src/access-control-engine.js";
 import { createEnforcedDatabaseAdapter } from "../src/enforced-database-adapter.js";

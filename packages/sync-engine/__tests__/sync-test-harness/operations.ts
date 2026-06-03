@@ -5,7 +5,7 @@ import {
   type DataRecord,
   type HLCTimestamp,
   type StarkeepId,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import type { AppSyncableRowEntry } from "../../src/types.js";
 import { FILE_RECORDS_TABLE } from "./mock-app-source.js";
 import type { Operation, ResolvedSpec, Side } from "./types.js";
