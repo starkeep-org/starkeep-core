@@ -121,7 +121,7 @@ await starkeepSdk.close();
 
 ### Re-exported Types
 
-The SDK re-exports commonly used types from `@starkeep/core` for convenience: `StarkeepId`, `DataRecord`, `MetadataRecord`, `HLCTimestamp`, `CreateDataRecordInput`, `CreateMetadataRecordInput`.
+The SDK re-exports commonly used types from `@starkeep/protocol-primitives` for convenience: `StarkeepId`, `DataRecord`, `MetadataRecord`, `HLCTimestamp`, `CreateDataRecordInput`, `CreateMetadataRecordInput`.
 
 ## Testing
 

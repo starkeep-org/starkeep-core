@@ -20,7 +20,7 @@
     "lint": "eslint src/"
   },
   "dependencies": {
-    "@starkeep/core": "workspace:*",
+    "@starkeep/protocol-primitives": "workspace:*",
     "zod": "^3.22.4"
   },
   "devDependencies": {

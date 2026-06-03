@@ -1,8 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/core";
-import { serializeHLC, sqliteMetadataTableName } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
+import { serializeHLC, sqliteMetadataTableName } from "@starkeep/protocol-primitives";
 import type {
   DatabaseAdapter,
   Query,

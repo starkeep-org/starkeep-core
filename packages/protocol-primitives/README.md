@@ -1,11 +1,11 @@
-# @starkeep/core
+# @starkeep/protocol-primitives
 
 Protocol core for Starkeep: ULID-based identifiers, hybrid logical clocks (HLC), record builders, schema validation (valibot), and a type registry.
 
 ## Installation
 
 ```bash
-pnpm add @starkeep/core
+pnpm add @starkeep/protocol-primitives
 ```
 
 ## Usage
@@ -17,7 +17,7 @@ import {
   createDataRecord,
   createTypeRegistry,
   validateDataRecord,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 
 // Generate a ULID-based identifier
 const identifier = generateId();
@@ -103,5 +103,5 @@ registry.register({ name: "photo", kind: "data" });
 ## Testing
 
 ```bash
-pnpm --filter @starkeep/core test
+pnpm --filter @starkeep/protocol-primitives test
 ```

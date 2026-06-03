@@ -1,5 +1,5 @@
-import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/core";
-import { serializeHLC, deserializeHLC, createStarkeepId } from "@starkeep/core";
+import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
+import { serializeHLC, deserializeHLC, createStarkeepId } from "@starkeep/protocol-primitives";
 
 export interface PostgresRow {
   id: string;

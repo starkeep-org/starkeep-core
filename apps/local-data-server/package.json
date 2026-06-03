@@ -14,7 +14,7 @@
     "lint": "eslint *.ts"
   },
   "dependencies": {
-    "@starkeep/core": "workspace:*",
+    "@starkeep/protocol-primitives": "workspace:*",
     "valibot": "^1.2.0",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/storage-sqlite": "workspace:*",
@@ -23,7 +23,7 @@
     "@starkeep/storage-aurora-dsql": "workspace:*",
     "@starkeep/sdk": "workspace:*",
     "@starkeep/access-control": "workspace:*",
-    "@starkeep/index": "workspace:*",
+    "@starkeep/query-orchestrator": "workspace:*",
     "@starkeep/aggregations": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",

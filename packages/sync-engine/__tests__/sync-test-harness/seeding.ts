@@ -7,7 +7,7 @@ import {
   type DataRecord,
   type HLCTimestamp,
   type StarkeepId,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import {
   advanceWatermark,
 } from "../../src/watermarks.js";

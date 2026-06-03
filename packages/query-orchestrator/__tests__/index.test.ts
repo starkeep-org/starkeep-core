@@ -4,7 +4,7 @@ import {
   createDataRecord,
   createStarkeepId,
   type CreateDataRecordInput,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import { createUnifiedIndex } from "../src/unified-index.js";
 import type { UnifiedIndex } from "../src/types.js";

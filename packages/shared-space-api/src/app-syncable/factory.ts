@@ -1,7 +1,7 @@
-import type { HLCClock } from "@starkeep/core";
-import { serializeHLC } from "@starkeep/core";
+import type { HLCClock } from "@starkeep/protocol-primitives";
+import { serializeHLC } from "@starkeep/protocol-primitives";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import { appSyncableObjectKey } from "@starkeep/core";
+import { appSyncableObjectKey } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,

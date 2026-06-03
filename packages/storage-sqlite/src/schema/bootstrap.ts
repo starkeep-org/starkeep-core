@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/core";
+import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/protocol-primitives";
 
 /**
  * Local sqlite schema bootstrap.
@@ -142,7 +142,7 @@ export function initializeLocalSchema(db: DatabaseSync): void {
   `);
 
   // Per-category metadata tables on parity with DSQL. Generated from CATEGORIES
-  // so adding a category or a column is a single edit in @starkeep/core's
+  // so adding a category or a column is a single edit in @starkeep/protocol-primitives's
   // core-types.ts. `other` has no metadata columns and gets no table.
   for (const c of CATEGORIES) {
     if (c.id === "other") continue;

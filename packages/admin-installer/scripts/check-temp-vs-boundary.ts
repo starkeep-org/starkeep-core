@@ -16,8 +16,8 @@ import {
   foundationalPermissionsBoundaryStatements,
   installDdlBoundaryStatements,
   installInfraBoundaryStatements,
-} from "../../admin-core/src/bootstrap/index.js";
-import type { IamStatement } from "../../admin-core/src/iam-utils.js";
+} from "../../aws-bootstrap/src/bootstrap/index.js";
+import type { IamStatement } from "../../aws-bootstrap/src/iam-utils.js";
 import {
   buildTempInstallDdlPolicy,
   buildTempInstallInfraPolicy,

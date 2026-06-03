@@ -36,7 +36,7 @@ const outputZip = join(pkgDir, "dist.zip");
 
 // Workspace packages the Lambda depends on, in dependency order.
 const WS_PACKAGES = [
-  "@starkeep/core",
+  "@starkeep/protocol-primitives",
   "@starkeep/storage-adapter",
   "@starkeep/storage-s3",
   "@starkeep/storage-aurora-dsql",

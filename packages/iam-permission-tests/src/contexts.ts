@@ -24,11 +24,11 @@ import {
   buildTempInstallInfraPolicy,
   buildRuntimePolicy,
 } from "../../admin-installer/src/temp-policies";
-import { foundationalPermissionsBoundaryStatements } from "../../admin-core/src/bootstrap/foundational-permissions-boundary";
-import { installDdlBoundaryStatements } from "../../admin-core/src/bootstrap/install-ddl-boundary";
-import { installInfraBoundaryStatements } from "../../admin-core/src/bootstrap/install-infra-boundary";
-import { managerPolicyStatements } from "../../admin-core/src/bootstrap/manager-policy";
-import { appPermissionsBoundaryStatements } from "../../admin-core/src/bootstrap/permissions-boundary";
+import { foundationalPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/foundational-permissions-boundary";
+import { installDdlBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/install-ddl-boundary";
+import { installInfraBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/install-infra-boundary";
+import { managerPolicyStatements } from "../../aws-bootstrap/src/bootstrap/manager-policy";
+import { appPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/permissions-boundary";
 
 export interface ContextInput {
   stackPrefix: string;

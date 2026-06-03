@@ -1,6 +1,6 @@
 import type { AppManifest } from "./schema.js";
 import { appManifestSchema } from "./schema.js";
-import { KNOWN_EXTENSIONS, categoryOf } from "@starkeep/core";
+import { KNOWN_EXTENSIONS, categoryOf } from "@starkeep/protocol-primitives";
 
 export interface ValidationResult {
   valid: boolean;
@@ -15,7 +15,7 @@ const RESERVED_PREFIX = "@starkeep/";
 
 // The set of platform-known extensions an installable app may declare. Apps
 // cannot register new types; adding an extension requires editing
-// @starkeep/core's core-types.ts. Re-exported for callers that want the set.
+// @starkeep/protocol-primitives's core-types.ts. Re-exported for callers that want the set.
 export { KNOWN_EXTENSIONS };
 
 // Only the User-Data-Owner app (Starkeep Drive) may claim all-access.

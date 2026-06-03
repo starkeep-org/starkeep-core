@@ -1,17 +1,17 @@
-# @starkeep/index
+# @starkeep/query-orchestrator
 
 Unified query orchestrator that joins data records with their metadata and manages sync boundaries for selective synchronization.
 
 ## Installation
 
 ```bash
-pnpm add @starkeep/index
+pnpm add @starkeep/query-orchestrator
 ```
 
 ## Usage
 
 ```ts
-import { createUnifiedIndex } from "@starkeep/index";
+import { createUnifiedIndex } from "@starkeep/query-orchestrator";
 
 const unifiedIndex = createUnifiedIndex({
   databaseAdapter: myDatabaseAdapter,
@@ -78,5 +78,5 @@ const eligibleIds = await unifiedIndex.syncBoundary.getSyncEligibleIds();
 ## Testing
 
 ```bash
-pnpm --filter @starkeep/index test
+pnpm --filter @starkeep/query-orchestrator test
 ```

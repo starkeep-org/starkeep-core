@@ -16,4 +16,4 @@ export type {
   DataRecord,
   HLCTimestamp,
   CreateDataRecordInput,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";

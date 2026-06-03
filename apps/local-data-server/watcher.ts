@@ -17,7 +17,7 @@ import { pipeline } from "node:stream/promises";
 import type { DatabaseSync } from "node:sqlite";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
-import { createStarkeepId } from "@starkeep/core";
+import { createStarkeepId } from "@starkeep/protocol-primitives";
 
 // ---------------------------------------------------------------------------
 // Types

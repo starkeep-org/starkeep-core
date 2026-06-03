@@ -34,8 +34,8 @@ import {
   categoryOf,
   getCategory,
   isCategoryId,
-} from "@starkeep/core";
-import type { DataRecord, StarkeepId, HLCClock } from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
+import type { DataRecord, StarkeepId, HLCClock } from "@starkeep/protocol-primitives";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import {
   DsqlAppSyncableNamespaceStore,
@@ -270,7 +270,7 @@ function parseAppPath(rawPath: string): { appId: string; subPath: string } | nul
 }
 
 // Authorize an object-storage key against the caller's grants. Keys live in
-// two namespaces (see packages/core/src/storage/object-keys.ts):
+// two namespaces (see packages/protocol-primitives/src/storage/object-keys.ts):
 //   shared/<typeId>/<shard>/<hash>   — gated by per-type read/write grants
 //   apps/<appId>/syncable/<...>      — owned by the named app; only that app
 //                                       may touch it via its own files routes

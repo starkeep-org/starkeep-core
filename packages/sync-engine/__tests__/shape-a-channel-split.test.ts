@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createDataRecord, generateId, type StarkeepId } from "@starkeep/core";
+import { createDataRecord, generateId, type StarkeepId } from "@starkeep/protocol-primitives";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { buildSide } from "./sync-test-harness/side.js";

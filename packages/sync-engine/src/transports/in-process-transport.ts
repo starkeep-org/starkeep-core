@@ -4,7 +4,7 @@ import {
   ZERO_HLC,
   type AnyRecord,
   type HLCClock,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type {
   SyncTransport,

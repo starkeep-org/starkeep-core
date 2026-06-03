@@ -7,7 +7,7 @@ import {
   type DataRecord,
   type MetadataRow,
   type TypeRegistration,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
@@ -17,7 +17,7 @@ async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
-import { createUnifiedIndex } from "@starkeep/index";
+import { createUnifiedIndex } from "@starkeep/query-orchestrator";
 import { createAggregationEngine } from "@starkeep/aggregations";
 import { createChangeNotifier } from "@starkeep/sync-engine";
 import { createAccessControlEngine, createEnforcedDatabaseAdapter } from "@starkeep/access-control";

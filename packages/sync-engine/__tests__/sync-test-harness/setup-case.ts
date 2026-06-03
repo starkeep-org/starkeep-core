@@ -1,4 +1,4 @@
-import { compareHLC, type HLCTimestamp, type StarkeepId } from "@starkeep/core";
+import { compareHLC, type HLCTimestamp, type StarkeepId } from "@starkeep/protocol-primitives";
 import { createSyncEngine } from "../../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../../src/transports/in-process-transport.js";
 import { residencyOf, type RecordResidency } from "../../src/residency.js";

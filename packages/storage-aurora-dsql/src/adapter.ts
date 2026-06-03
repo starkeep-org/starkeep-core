@@ -1,5 +1,5 @@
-import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/core";
-import { pgMetadataTableName, serializeHLC } from "@starkeep/core";
+import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
+import { pgMetadataTableName, serializeHLC } from "@starkeep/protocol-primitives";
 import type {
   DatabaseAdapter,
   Query,
