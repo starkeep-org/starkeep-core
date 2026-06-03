@@ -1,4 +1,4 @@
-import type { StarkeepId, HLCTimestamp } from "@starkeep/core";
+import type { StarkeepId, HLCTimestamp } from "@starkeep/protocol-primitives";
 import type {
   AccessPolicy,
   Permission,

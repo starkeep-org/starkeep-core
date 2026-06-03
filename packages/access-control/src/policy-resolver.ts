@@ -1,4 +1,4 @@
-import type { StarkeepId } from "@starkeep/core";
+import type { StarkeepId } from "@starkeep/protocol-primitives";
 import type { AccessPolicy, AccessCheckResult, Permission } from "./types.js";
 
 export function resolvePolicy(

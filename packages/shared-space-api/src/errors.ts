@@ -1,4 +1,4 @@
-import { StarkeepError } from "@starkeep/core";
+import { StarkeepError } from "@starkeep/protocol-primitives";
 
 export class ApiError extends StarkeepError {
   constructor(

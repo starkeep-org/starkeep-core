@@ -41,7 +41,7 @@ A user-owned data platform where app users control their own cloud instance and 
 
 | Package | Description |
 |---------|-------------|
-| `@starkeep/core` | Identifiers (ULID), HLC, records, schema validation, type registry |
+| `@starkeep/protocol-primitives` | Identifiers (ULID), HLC, records, schema validation, type registry |
 | `@starkeep/storage-adapter` | Abstract `DatabaseAdapter` and `ObjectStorageAdapter` interfaces + mocks |
 | `@starkeep/storage-sqlite` | SQLite adapter using `node:sqlite` (Node.js 22+) |
 | `@starkeep/storage-aurora-dsql` | Aurora DSQL adapter for AWS cloud deployments |
@@ -49,7 +49,7 @@ A user-owned data platform where app users control their own cloud instance and 
 | `@starkeep/storage-fs` | Local filesystem object storage adapter |
 | `@starkeep/metadata-engine` | Generator registry, dependency graph, input hashing, generation queue |
 | `@starkeep/metadata-core` | Built-in generators: image dimensions, file properties, text preview |
-| `@starkeep/index` | Unified query orchestrator over data + metadata |
+| `@starkeep/query-orchestrator` | Unified query orchestrator over data + metadata |
 | `@starkeep/aggregations` | Counts, sizes, date histograms |
 | `@starkeep/sync-engine` | Change log, conflict resolution, file sync, change notifications |
 | `@starkeep/access-control` | Policy model, enforced adapter wrapper, sharing tokens |
@@ -97,7 +97,7 @@ pnpm typecheck      # Type-check all packages
 pnpm lint           # Lint all packages
 pnpm format         # Format with Prettier
 pnpm format:check   # Check formatting
-pnpm --filter @starkeep/admin-core build  # Rebuild the bootstrap CloudFormation template
+pnpm --filter @starkeep/aws-bootstrap build  # Rebuild the bootstrap CloudFormation template
 ```
 
 ## Tooling

@@ -5,7 +5,7 @@ import {
   type HLCTimestamp,
   type TypeRegistration,
   type TypeRegistrationStore,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,

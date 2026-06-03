@@ -4,7 +4,7 @@ import {
   createDataRecord,
   createStarkeepId,
   type CreateDataRecordInput,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import { SqliteDatabaseAdapter } from "../src/adapter.js";
 
 // Every DataRecord is now file-backed; tests must supply the file fields.

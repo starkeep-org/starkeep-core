@@ -36,7 +36,7 @@
 import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import { CATEGORIES, pgMetadataDdl } from "@starkeep/core";
+import { CATEGORIES, pgMetadataDdl } from "@starkeep/protocol-primitives";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -158,7 +158,7 @@ export async function initializeSharedSchema(
       `GRANT SELECT ON shared.access_grants TO PUBLIC`,
       `GRANT INSERT, UPDATE, DELETE ON shared.access_grants TO "${installer}"`,
 
-      // Per-category metadata tables, generated from @starkeep/core's
+      // Per-category metadata tables, generated from @starkeep/protocol-primitives's
       // CATEGORIES. `other` has no metadata columns and gets no table.
       // record_id is logically an FK to shared.records(id); DSQL has no FK
       // constraints or ON DELETE CASCADE, so deletes must be performed in

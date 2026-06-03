@@ -22,7 +22,7 @@ import {
   APP_GRANTABLE_CATEGORIES,
   categoryOf,
   type Category,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import {
   FILE_RECORDS_TABLE,
   FILE_RECORDS_COLUMNS,

@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { HLCClock } from "@starkeep/core";
+import type { HLCClock } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createInProcessSyncTransport } from "./in-process-transport.js";
 import type { SyncExchangeRequest, SyncTransport } from "../types.js";

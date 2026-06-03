@@ -15,7 +15,7 @@ import {
   generateBootstrapTemplate,
   getCloudFormationCreateStackUrl,
   getBootstrapStackOutputsUrl,
-} from "@starkeep/admin-core";
+} from "@starkeep/aws-bootstrap";
 import {
   readCloudConfig,
   patchCloudConfig,

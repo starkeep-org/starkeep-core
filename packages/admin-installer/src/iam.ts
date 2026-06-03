@@ -24,7 +24,7 @@ import {
   buildTempInstallDdlPolicy,
 } from "./temp-policies";
 import type { FileAccess } from "@starkeep/admin-manifest";
-import { APP_GRANTABLE_CATEGORIES, categoryOf } from "@starkeep/core";
+import { APP_GRANTABLE_CATEGORIES, categoryOf } from "@starkeep/protocol-primitives";
 
 function makeIamClient(creds: AwsCredentials): IAMClient {
   return new IAMClient({

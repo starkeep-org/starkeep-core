@@ -1,4 +1,4 @@
-import type { DataRecord, StarkeepId } from "@starkeep/core";
+import type { DataRecord, StarkeepId } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 import { buildDateHistogram, type DateHistogramEntry } from "./date-histogram.js";
 import type {

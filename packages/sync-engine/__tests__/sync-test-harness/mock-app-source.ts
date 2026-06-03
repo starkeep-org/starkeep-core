@@ -1,4 +1,4 @@
-import { compareHLC, serializeHLC } from "@starkeep/core";
+import { compareHLC, serializeHLC } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableApplier,
   AppSyncableNamespace,

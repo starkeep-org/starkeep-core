@@ -1,4 +1,4 @@
-import { StarkeepError } from "@starkeep/core";
+import { StarkeepError } from "@starkeep/protocol-primitives";
 
 export class SyncError extends StarkeepError {
   constructor(message: string, cause?: unknown) {

@@ -1,4 +1,4 @@
-import type { StarkeepId, HLCTimestamp } from "@starkeep/core";
+import type { StarkeepId, HLCTimestamp } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 
 export type Permission = "read" | "write" | "delete" | "admin";

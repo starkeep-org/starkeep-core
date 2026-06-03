@@ -1,4 +1,4 @@
-import type { HLCClock } from "@starkeep/core";
+import type { HLCClock } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { ChangeEvent, ChangeNotifier } from "@starkeep/sync-engine";
 

@@ -16,7 +16,7 @@
  *                     data-server's all-access check).
  */
 
-import { categoryOf } from "@starkeep/core";
+import { categoryOf } from "@starkeep/protocol-primitives";
 import type { DatabaseClient } from "@starkeep/storage-aurora-dsql";
 
 /** The User-Data-Owner app id — granted all-access by id, not by grant rows. */

@@ -5,7 +5,7 @@ import {
   type AnyRecord,
   type HLCTimestamp,
   type StarkeepId,
-} from "@starkeep/core";
+} from "@starkeep/protocol-primitives";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 
 // Mirror of `FILE_RECORDS_TABLE` from `@starkeep/shared-space-api`. The sync
