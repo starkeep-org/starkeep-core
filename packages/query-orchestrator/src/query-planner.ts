@@ -28,10 +28,6 @@ export async function planQuery(
     });
   }
 
-  if (query.fullTextSearch) {
-    filters.push({ field: "type", operator: "like", value: query.fullTextSearch });
-  }
-
   const dataQuery: Query = {
     filters: filters.length > 0 ? filters : undefined,
     limit: query.limit,

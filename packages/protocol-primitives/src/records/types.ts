@@ -40,8 +40,9 @@ export interface DataRecord extends BaseRecord {
    */
   originAppId: string;
   /**
-   * Optional parent record id (e.g. an `image` thumbnail's parent is its
-   * original). Same type as the parent — typed-to-typed relations only.
+   * Optional parent record id linking this record to another shared record
+   * (e.g. a thumbnail's parent is its original). The parent may be of any
+   * type; cross-type parent links are permitted.
    */
   parentId: StarkeepId | null;
 }
