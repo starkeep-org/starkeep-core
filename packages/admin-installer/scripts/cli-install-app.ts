@@ -1,19 +1,27 @@
 #!/usr/bin/env tsx
 /**
- * Install (or re-install / update) the photos app in the cloud.
+ * Install (or re-install / update) a Starkeep app in the cloud.
  *
- * Replaces the old SST-based deploy. Builds the Next.js static export,
- * bundles the Lambda handlers, and runs the standard admin-installer
- * pipeline: Manager attaches temp policy, app role runs DSQL DDL + S3
- * setup + Pulumi compute stack, temp policy is detached.
+ * Generic across cloud apps: this script owns the platform-side orchestration
+ * (Cognito auth, config load, ARN derivation, manifest validation, the
+ * installApp state machine). The app-specific bundle build lives in the app
+ * itself — this script invokes it via the convention:
+ *
+ *   pnpm bundle   (run in the app's source dir)
+ *     env in:  STARKEEP_APP_BASE_PATH = /apps/<appId>
+ *              STARKEEP_BUNDLE_OUT    = <abs path to write dist.zip>
+ *     out:     app writes dist.zip to STARKEEP_BUNDLE_OUT
+ *
+ * The app is located by scanning the configured app parent dirs (same
+ * discovery as admin-web's /api/apps/list) for the manifest whose id matches.
  *
  * Reads ~/.starkeep/config.json. Requires apiGatewayUrl, apiGatewayId,
  * authorizerId, s3Bucket, and auroraEndpoint to be present (written by
  * cli-install-cloud-data-server after the core infrastructure is installed).
  *
  * Usage:
- *   pnpm --filter @starkeep/admin-installer cli:install-photos
- *   pnpm --filter @starkeep/admin-installer cli:install-photos --non-interactive
+ *   pnpm --filter @starkeep/admin-installer cli:install-app <appId>
+ *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --non-interactive
  */
 
 // TEMP (iam-permission-tests POC): if IAM_SDK_TRACE_PATH is set, record
@@ -25,17 +33,14 @@ if (process.env.IAM_SDK_TRACE_PATH) {
   const { installSdkTrace } = await import("../../iam-permission-tests/src/sdk-trace");
   installSdkTrace(process.env.IAM_SDK_TRACE_PATH);
 }
+import { spawnSync } from "node:child_process";
 import {
-  execSync,
-  spawnSync,
-} from "node:child_process";
-import {
-  cpSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
-  writeFileSync,
+  statSync,
 } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -52,7 +57,6 @@ import {
   GetCredentialsForIdentityCommand,
 } from "@aws-sdk/client-cognito-identity";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { build } from "esbuild";
 import { appManifestSchema } from "@starkeep/admin-manifest";
 import { installApp } from "../src/orchestrator";
 
@@ -62,10 +66,11 @@ import { installApp } from "../src/orchestrator";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const INSTALLER_DIR = resolve(SCRIPT_DIR, "..");
+// packages/admin-installer -> packages -> starkeep-core -> workspace root
 const REPO_ROOT = resolve(INSTALLER_DIR, "..", "..", "..");
-const PHOTOS_DIR = resolve(REPO_ROOT, "starkeep-apps", "photos");
-const INFRA_DIR = resolve(PHOTOS_DIR, "infra");
-const MANIFEST_PATH = resolve(PHOTOS_DIR, "starkeep.manifest.json");
+// Default app parent dir: the sibling `starkeep-apps/` checkout. Matches the
+// default in admin-web's /api/apps/list route.
+const DEFAULT_APPS_DIR = resolve(REPO_ROOT, "starkeep-apps");
 
 const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
 const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
@@ -93,6 +98,7 @@ interface StarkeepConfig {
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
+  appParentDirs?: string[];
 }
 
 function regionFromUserPoolId(userPoolId: string): string {
@@ -118,6 +124,51 @@ function loadConfig(): StarkeepConfig {
     console.error("Error: ~/.starkeep/config.json is not valid JSON");
     process.exit(1);
   }
+}
+
+// ---------------------------------------------------------------------------
+// App discovery
+// ---------------------------------------------------------------------------
+
+// Expand a leading "~" to the user's home dir (mirrors /api/apps/list).
+function expandHome(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+function appParentDirs(config: StarkeepConfig): string[] {
+  const configured = (config.appParentDirs ?? []).filter(
+    (d): d is string => typeof d === "string" && d.length > 0,
+  );
+  const dirs = configured.length > 0 ? configured : [DEFAULT_APPS_DIR];
+  return dirs.map(expandHome);
+}
+
+/**
+ * Find the source dir of the app whose manifest id === appId by scanning the
+ * configured app parent dirs (first match wins, earlier dirs take precedence).
+ */
+function resolveAppDir(config: StarkeepConfig, appId: string): string {
+  for (const parentDir of appParentDirs(config)) {
+    if (!existsSync(parentDir)) continue;
+    for (const name of readdirSync(parentDir)) {
+      const appDir = resolve(parentDir, name);
+      if (!statSync(appDir).isDirectory()) continue;
+      const manifestPath = resolve(appDir, "starkeep.manifest.json");
+      if (!existsSync(manifestPath)) continue;
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as { id?: unknown };
+        if (manifest.id === appId) return appDir;
+      } catch {
+        // Skip malformed manifests.
+      }
+    }
+  }
+  console.error(
+    `Error: no app with manifest id "${appId}" found in ${appParentDirs(config).join(", ")}`,
+  );
+  process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,226 +253,36 @@ async function getSTSCredentials(config: StarkeepConfig, idToken: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Build + bundle
+// App bundle build (delegated to the app via the `pnpm bundle` convention)
 // ---------------------------------------------------------------------------
 
-async function buildPhotosBundle(): Promise<Buffer> {
-  const stagingDir = join(tmpdir(), `starkeep-photos-bundle-${Date.now()}`);
+function buildAppBundle(appDir: string, appBasePath: string): Buffer {
+  const stagingDir = join(tmpdir(), `starkeep-app-bundle-${Date.now()}`);
   const distZip = join(stagingDir, "dist.zip");
-
   try {
     mkdirSync(stagingDir, { recursive: true });
-
-    // 1. Build workspace packages the Lambda handler depends on.
-    const WS_PACKAGES = [
-      "@starkeep/core",
-      "@starkeep/storage-adapter",
-      "@starkeep/storage-s3",
-      "@starkeep/storage-aurora-dsql",
-    ];
-    console.log("\nBuilding workspace packages…");
-    for (const pkg of WS_PACKAGES) {
-      console.log(`  pnpm build: ${pkg}`);
-      execSync(`pnpm --filter "${pkg}" build`, { cwd: REPO_ROOT, stdio: "inherit" });
-    }
-
-    // 2. Build with OpenNext (runs `open-next build` via pnpm build script).
-    //    STARKEEP_APP_BASE_PATH bakes Next's basePath into the build so all
-    //    asset URLs and routes are emitted under /apps/<appId>, matching how
-    //    the shared API Gateway forwards requests.
-    console.log("\nBuilding photos app with OpenNext…");
-    const buildResult = spawnSync("pnpm", ["build"], {
-      cwd: PHOTOS_DIR,
+    console.log(`\nBuilding app bundle (pnpm bundle in ${appDir})…`);
+    const result = spawnSync("pnpm", ["bundle"], {
+      cwd: appDir,
       stdio: "inherit",
       env: {
         ...process.env,
-        NEXT_PUBLIC_FORCE_REMOTE: "true",
-        NODE_ENV: "production",
-        STARKEEP_APP_BASE_PATH: "/apps/photos",
-        // basePath isn't exposed to client JS by Next.js; mirror it as a
-        // NEXT_PUBLIC_* var so client fetch() calls can prepend it.
-        NEXT_PUBLIC_STARKEEP_APP_BASE_PATH: "/apps/photos",
+        STARKEEP_APP_BASE_PATH: appBasePath,
+        STARKEEP_BUNDLE_OUT: distZip,
       },
     });
-    if (buildResult.status !== 0) {
-      console.error("photos OpenNext build failed.");
-      process.exit(buildResult.status ?? 1);
+    if (result.status !== 0) {
+      console.error(
+        `App bundle build failed (pnpm bundle exited ${result.status}). ` +
+        `Cloud-installable apps must provide a "bundle" script that writes ` +
+        `dist.zip to STARKEEP_BUNDLE_OUT.`,
+      );
+      process.exit(result.status ?? 1);
     }
-
-    // 3. Copy the OpenNext server function output to the staging root.
-    //    The server function is the Next.js Lambda handler (index.handler).
-    const serverFnDir = resolve(PHOTOS_DIR, ".open-next", "server-functions", "default");
-    if (!existsSync(serverFnDir)) {
-      console.error(`OpenNext server-function dir not found at ${serverFnDir}.`);
+    if (!existsSync(distZip)) {
+      console.error(`App bundle build did not produce a dist.zip at ${distZip}.`);
       process.exit(1);
     }
-    console.log("\nCopying OpenNext server function…");
-    // verbatimSymlinks preserves the original relative symlink targets.
-    // OpenNext's output relies on pnpm-style relative links (e.g.
-    // photos/node_modules/next -> ../../node_modules/.pnpm/...); without this
-    // flag Node rewrites them to absolute paths pointing at the local dev
-    // machine, which obviously don't resolve inside the Lambda sandbox.
-    cpSync(serverFnDir, stagingDir, { recursive: true, verbatimSymlinks: true });
-
-    // 3b. Bundle Next.js static assets into the Lambda zip and overwrite
-    //     the OpenNext entry with a wrapper that serves /_next/* and
-    //     BUILD_ID from local disk before delegating to OpenNext. OpenNext
-    //     normally expects these to live on a CDN/S3 origin (see
-    //     open-next.output.json `behaviors`), but this installer ships the
-    //     server function as the only origin — so without this wrapper every
-    //     /apps/photos/_next/static/* request 404s and the page renders
-    //     blank (CSR bailout with no chunks).
-    const assetsSrc = resolve(PHOTOS_DIR, ".open-next", "assets");
-    if (!existsSync(assetsSrc)) {
-      console.error(`OpenNext assets dir not found at ${assetsSrc}.`);
-      process.exit(1);
-    }
-    console.log("Copying OpenNext static assets…");
-    cpSync(assetsSrc, join(stagingDir, "assets"), { recursive: true });
-
-    const APP_BASE_PATH = "/apps/photos";
-    const wrapper = `import { readFile, stat } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import { dirname, join, normalize } from "node:path";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ASSETS_DIR = join(__dirname, "assets");
-const BASE_PATH = ${JSON.stringify(APP_BASE_PATH)};
-
-const MIME = {
-  ".js": "application/javascript; charset=utf-8",
-  ".mjs": "application/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".map": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".ico": "image/x-icon",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-  ".otf": "font/otf",
-  ".txt": "text/plain; charset=utf-8",
-  ".html": "text/html; charset=utf-8",
-};
-
-const TEXT_EXT = new Set([".js", ".mjs", ".css", ".json", ".map", ".svg", ".txt", ".html"]);
-
-function contentTypeFor(path) {
-  const dot = path.lastIndexOf(".");
-  if (dot < 0) return "application/octet-stream";
-  return MIME[path.slice(dot).toLowerCase()] ?? "application/octet-stream";
-}
-
-function isStaticAssetPath(rest) {
-  // Only _next/static/* and BUILD_ID live on disk in .open-next/assets.
-  // _next/data/* and _next/image* are handled by the OpenNext server.
-  return rest === "BUILD_ID" || rest.startsWith("_next/static/");
-}
-
-let upstreamHandler;
-async function getUpstream() {
-  if (!upstreamHandler) {
-    const mod = await import("./photos/index.mjs");
-    upstreamHandler = mod.handler;
-  }
-  return upstreamHandler;
-}
-
-export async function handler(event, context) {
-  const rawPath = event?.rawPath ?? "";
-  if (rawPath.startsWith(BASE_PATH + "/")) {
-    const rest = rawPath.slice(BASE_PATH.length + 1);
-    if (isStaticAssetPath(rest)) {
-      // normalize() collapses any "../" segments before we touch the FS;
-      // we then explicitly reject anything that still escapes ASSETS_DIR.
-      const safeRest = normalize(rest);
-      const filePath = join(ASSETS_DIR, safeRest);
-      if (!filePath.startsWith(ASSETS_DIR + "/") && filePath !== ASSETS_DIR) {
-        return { statusCode: 400, headers: { "content-type": "text/plain" }, body: "Bad path" };
-      }
-      try {
-        const s = await stat(filePath);
-        if (s.isFile()) {
-          const ct = contentTypeFor(filePath);
-          const ext = filePath.slice(filePath.lastIndexOf("."));
-          const isImmutable = rest.startsWith("_next/static/");
-          const cacheControl = isImmutable
-            ? "public, max-age=31536000, immutable"
-            : "public, max-age=0, must-revalidate";
-          if (TEXT_EXT.has(ext.toLowerCase())) {
-            const body = await readFile(filePath, "utf8");
-            return {
-              statusCode: 200,
-              headers: { "content-type": ct, "cache-control": cacheControl },
-              body,
-            };
-          }
-          const buf = await readFile(filePath);
-          return {
-            statusCode: 200,
-            headers: { "content-type": ct, "cache-control": cacheControl },
-            body: buf.toString("base64"),
-            isBase64Encoded: true,
-          };
-        }
-      } catch (e) {
-        if (e?.code !== "ENOENT") {
-          console.error("Static asset read error:", e);
-        }
-        // fall through to upstream on miss
-      }
-    }
-  }
-  const up = await getUpstream();
-  return up(event, context);
-}
-`;
-    writeFileSync(join(stagingDir, "index.mjs"), wrapper, "utf8");
-
-    // 4. Bundle the backend Lambda handler with esbuild. sharp is external —
-    //    it needs native binaries installed for the Lambda (linux) platform.
-    console.log("\nBundling resize-handler with esbuild…");
-    const handlersDir = join(stagingDir, "infra", "src");
-    mkdirSync(handlersDir, { recursive: true });
-
-    await build({
-      entryPoints: [
-        join(INFRA_DIR, "src", "resize-handler.ts"),
-      ],
-      bundle: true,
-      platform: "node",
-      target: "node22",
-      format: "cjs",
-      outdir: handlersDir,
-      external: ["sharp"],
-      allowOverwrite: true,
-    });
-
-    // 5. Install sharp for the Lambda (linux x64 glibc) platform. --libc=glibc
-    //    is required when installing from a non-glibc host (e.g. macOS): without
-    //    it npm's libc filter silently drops @img/sharp-linux-x64 and
-    //    @img/sharp-libvips-linux-x64, leaving the bundle with sharp's JS but
-    //    no native binary, and the Lambda fails at require("sharp") with
-    //    "Could not load the sharp module using the linux-x64 runtime".
-    console.log("\nInstalling sharp for linux/x64 (glibc)…");
-    execSync(
-      "npm install --os=linux --cpu=x64 --libc=glibc --no-package-lock --no-save sharp",
-      { cwd: stagingDir, stdio: "inherit" },
-    );
-
-    // 6. Zip everything in staging dir.
-    console.log("\nCreating dist.zip…");
-    // -y preserves symlinks: OpenNext's output uses pnpm's virtual-store layout
-    // (e.g. photos/node_modules/next -> ../../node_modules/.pnpm/next@.../...),
-    // and dereferencing them collapses next into a real copy that can no longer
-    // resolve peer deps like @swc/helpers through the .pnpm sibling tree.
-    execSync(`zip -ry "${distZip}" . -q`, { cwd: stagingDir, stdio: "inherit" });
-
     return readFileSync(distZip);
   } finally {
     rmSync(stagingDir, { recursive: true, force: true });
@@ -434,6 +295,12 @@ export async function handler(event, context) {
 
 const flags = process.argv.slice(2);
 const nonInteractive = flags.includes("--non-interactive");
+const appId = flags.find((f) => !f.startsWith("--"));
+
+if (!appId) {
+  console.error("Usage: cli:install-app <appId> [--non-interactive]");
+  process.exit(1);
+}
 
 const config = loadConfig();
 const region = regionFromUserPoolId(config.userPoolId);
@@ -504,35 +371,46 @@ const pulumiStateBucket =
 // bootstrap ArtifactsBucket has the same name shape).
 const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
 
-console.log("\nStarkeep photos cloud install");
+// Locate the app and load its manifest.
+const appDir = resolveAppDir(config, appId);
+const manifestPath = resolve(appDir, "starkeep.manifest.json");
+const rawManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+const manifest = appManifestSchema.parse(rawManifest);
+
+console.log(`\nStarkeep ${appId} cloud install`);
 console.log(`  Region : ${region}`);
 console.log(`  Stage  : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
+console.log(`  App dir: ${appDir}`);
 console.log("");
 
-// Load and validate manifest.
-const rawManifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf-8"));
-const manifest = appManifestSchema.parse(rawManifest);
-
-// Patch the static handler's env with live config values. These are
-// placeholder-empty in the manifest file; the CLI fills them at install time.
-const staticHandler = manifest.infraRequirements.compute.handlers.find((h) => h.name === "static");
-if (staticHandler) {
-  staticHandler.env = {
-    STARKEEP_API_GATEWAY_URL: config.apiGatewayUrl ?? "",
-    STARKEEP_USER_POOL_ID: config.userPoolId,
-    STARKEEP_USER_POOL_CLIENT_ID: config.userPoolClientId,
-    STARKEEP_IDENTITY_POOL_ID: config.identityPoolId,
-  };
+// Patch handler env with live platform config. Handlers declare the keys they
+// want by listing them (placeholder-empty) in the manifest; the installer fills
+// any empty value whose key it recognizes. App-agnostic: no handler-name or
+// app-name coupling.
+const platformEnv: Record<string, string> = {
+  STARKEEP_API_GATEWAY_URL: config.apiGatewayUrl ?? "",
+  STARKEEP_USER_POOL_ID: config.userPoolId,
+  STARKEEP_USER_POOL_CLIENT_ID: config.userPoolClientId,
+  STARKEEP_IDENTITY_POOL_ID: config.identityPoolId,
+};
+for (const handler of manifest.infraRequirements.compute.handlers) {
+  for (const key of Object.keys(handler.env)) {
+    if (handler.env[key] === "" && key in platformEnv) {
+      handler.env[key] = platformEnv[key];
+    }
+  }
 }
 
-// Build and bundle the app.
-const zipBuffer = await buildPhotosBundle();
+// Build the app bundle via the app's own `pnpm bundle` script. The base path
+// /apps/<appId> is the platform's routing convention (the shared API Gateway
+// forwards requests under it; see pulumi-program).
+const zipBuffer = buildAppBundle(appDir, `/apps/${appId}`);
 console.log(`\nBundle size: ${(zipBuffer.length / 1024 / 1024).toFixed(1)} MB`);
 
-console.log("\nInstalling photos app…\n");
+console.log(`\nInstalling ${appId} app…\n`);
 await installApp({
-  appId: "photos",
+  appId,
   manifest,
   zipBuffer,
   version: manifest.version,
@@ -556,5 +434,5 @@ await installApp({
   },
 });
 
-console.log(`\nInstall complete. Photos app available at:`);
-console.log(`  ${config.apiGatewayUrl ?? ""}${config.apiGatewayUrl ? "/apps/photos/" : "(apiGatewayUrl not in config)"}`);
+console.log(`\nInstall complete. ${appId} app available at:`);
+console.log(`  ${config.apiGatewayUrl ?? ""}${config.apiGatewayUrl ? `/apps/${appId}/` : "(apiGatewayUrl not in config)"}`);

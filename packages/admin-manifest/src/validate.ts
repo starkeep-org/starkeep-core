@@ -97,13 +97,3 @@ export function validateManifest(raw: unknown): ValidationResult {
   };
 }
 
-export interface TypeConflict {
-  typeId: string;
-  reason: string;
-}
-
-// Apps no longer define shared types — all types are declared in core system code.
-// This function is kept for API compatibility but always returns an empty array.
-export function checkTypeConflicts(): TypeConflict[] {
-  return [];
-}

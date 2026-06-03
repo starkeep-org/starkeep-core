@@ -24,6 +24,7 @@ const FIELD_MAP: Record<string, string> = {
   sizeBytes: "size_bytes",
   originAppId: "origin_app_id",
   parentId: "parent_id",
+  originalFilename: "original_filename",
 };
 
 function mapField(field: string): string {

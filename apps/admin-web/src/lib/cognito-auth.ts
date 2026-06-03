@@ -37,6 +37,15 @@ export interface STSCredentials {
   expiration: string;
 }
 
+export function extractEmailFromIdToken(idToken: string): string | null {
+  try {
+    const payload = JSON.parse(atob(idToken.split(".")[1]));
+    return (payload.email as string) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function makeTokens(result: AuthenticationResultType): AuthTokens {
   if (!result.AccessToken || !result.IdToken || !result.RefreshToken) {
     throw new Error("Incomplete auth result from Cognito");

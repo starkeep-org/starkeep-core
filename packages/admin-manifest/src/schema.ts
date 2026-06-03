@@ -2,6 +2,10 @@ import { z } from "zod";
 
 export const appTierSchema = z.enum(["official", "verified", "community"]);
 
+// Where an app can be installed. An app may target local, cloud, or both. The
+// Apps page derives its Local / Cloud lists from this field.
+export const appTargetSchema = z.enum(["local", "cloud"]);
+
 /**
  * An app's grant over a set of file extensions. Installable apps enumerate the
  * exact lowercase extensions they handle (no dot, alphanumeric). Validation
@@ -62,7 +66,10 @@ export const syncableTableSchema = z.object({
 
 export const appSpecificSyncableSchema = z.object({
   tables: z.array(syncableTableSchema).default([]),
-  // Opt-in for apps/<appId>/syncable/ object-storage prefix.
+  // Opt-in for apps/<appId>/syncable/ object-storage prefix. App-specific
+  // (private) data is not necessarily file-backed — apps with row-only
+  // app-specific data leave this false. (Shared data is always file-backed
+  // and is not controlled by this flag.)
   files: z.boolean().default(false),
 });
 
@@ -94,15 +101,32 @@ export const permissionEntrySchema = z.object({
   rationale: z.string(),
 });
 
+// How admin-web should spawn this app's local dev/serve process. Optional —
+// apps without a localRun block cannot be started from the admin UI. When
+// `portFlag` is set, admin-web allocates a free TCP port at start time and
+// appends `[portFlag, <port>]` to args; apps that pick their own port omit it.
+export const localRunSchema = z.object({
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  portFlag: z.string().optional(),
+  // Working directory relative to the manifest's directory. Defaults to ".".
+  cwd: z.string().default("."),
+});
+
 export const appManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   version: z.string().min(1),
   protocolMinVersion: z.string().default("1.0.0"),
   tier: appTierSchema,
+  // Install targets. Default ["local"] preserves prior behavior (every
+  // discovered app appeared in the local list). A "cloud" app may be static
+  // (S3/CloudFront, or just hitting cloud-data-server) or compute-backed.
+  targets: z.array(appTargetSchema).default(["local"]),
   requiredPermissions: z.array(permissionEntrySchema).default([]),
   optionalPermissions: z.array(permissionEntrySchema).default([]),
   infraRequirements: infraRequirementsSchema.default({}),
+  localRun: localRunSchema.optional(),
   // Ordered ids of shared-schema migrations that belong to this release.
   // Resolved by the installer to .sql files alongside the manifest. Empty for
   // user apps that don't ship shared-schema migrations (the typical case).
@@ -113,12 +137,14 @@ export const appManifestSchema = z.object({
 });
 
 export type AppTier = z.infer<typeof appTierSchema>;
+export type AppTarget = z.infer<typeof appTargetSchema>;
 export type FileAccess = z.infer<typeof fileAccessSchema>;
 export type SharedResourceRequirement = z.infer<typeof sharedResourceRequirementSchema>;
 export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;
 export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;
 export type SyncableTable = z.infer<typeof syncableTableSchema>;
 export type AppSpecificSyncable = z.infer<typeof appSpecificSyncableSchema>;
+export type LocalRun = z.infer<typeof localRunSchema>;
 export type PermissionEntry = z.infer<typeof permissionEntrySchema>;
 export type InfraRequirements = z.infer<typeof infraRequirementsSchema>;
 export type AppManifest = z.infer<typeof appManifestSchema>;

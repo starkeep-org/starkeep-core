@@ -3,11 +3,11 @@ import { fetchMtdCostsByService } from "../../../src/lib/cost-usage-report";
 import type { STSCredentials } from "../../../src/lib/cognito-auth";
 
 export async function POST(req: NextRequest) {
-  const body = await req.json() as { credentials: STSCredentials; stackPrefix: string };
-  const { credentials, stackPrefix } = body;
+  const body = await req.json() as { credentials: STSCredentials; stackPrefix: string; region: string };
+  const { credentials, stackPrefix, region } = body;
 
   try {
-    const costs = await fetchMtdCostsByService(credentials, stackPrefix);
+    const costs = await fetchMtdCostsByService(credentials, stackPrefix, region);
     return NextResponse.json({ costs });
   } catch (err) {
     const name = err instanceof Error ? err.name : "unknown";

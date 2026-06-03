@@ -9,6 +9,8 @@ export {
   syncableTableColumnSchema,
   infraRequirementsSchema,
   permissionEntrySchema,
+  localRunSchema,
+  type LocalRun,
   type AppManifest,
   type AppTier,
   type FileAccess,
@@ -23,8 +25,6 @@ export {
 
 export {
   validateManifest,
-  checkTypeConflicts,
   KNOWN_EXTENSIONS,
   type ValidationResult,
-  type TypeConflict,
 } from "./validate.js";

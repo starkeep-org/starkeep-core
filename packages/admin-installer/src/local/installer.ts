@@ -2,7 +2,6 @@ import type { DatabaseSync } from "node:sqlite";
 import { randomBytes } from "node:crypto";
 import {
   validateManifest,
-  checkTypeConflicts,
   type AppManifest,
 } from "@starkeep/admin-manifest";
 import {
@@ -61,13 +60,6 @@ export function installLocal(db: DatabaseSync, rawManifest: unknown): InstallLoc
   }
   const manifest = validation.manifest;
   const appId = manifest.id;
-
-  const conflicts = checkTypeConflicts();
-  if (conflicts.length > 0) {
-    throw new LocalInstallError(
-      `Type conflicts: ${conflicts.map((c) => `${c.typeId} (${c.reason})`).join("; ")}`,
-    );
-  }
 
   const existing = appRegistryRow(db, appId);
   if (existing && existing.status === "active") {

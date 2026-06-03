@@ -6,6 +6,7 @@ import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   AppSyncableRowEntry,
+  ChangeNotifier,
 } from "@starkeep/sync-engine";
 import type { AppSpecificOperations, ApiSubject } from "../types.js";
 import { validateTableName } from "./validation.js";
@@ -32,6 +33,14 @@ export interface AppSpecificFactoryOptions {
    */
   buildFileUrl?: (key: string, mimeType: string, expiresIn: number) => string;
   clock: HLCClock;
+  /**
+   * Optional notifier. When provided, every successful app-specific write
+   * (row insert/update/delete, file put/delete) emits a `local-change-recorded`
+   * event tagged with the calling app's id so the sync supervisor can nudge
+   * the owning per-app engine. Omit if you don't want app-specific writes to
+   * wake the sync loop (e.g. cloud-server use where there is no supervisor).
+   */
+  changeNotifier?: ChangeNotifier;
 }
 
 /**
@@ -46,13 +55,22 @@ export interface AppSpecificFactoryOptions {
 export function createAppSpecificFactory(
   options: AppSpecificFactoryOptions,
 ): (subject: ApiSubject) => AppSpecificOperations | null {
-  const { namespace, applier, fileStorage, buildFileUrl, clock } = options;
+  const { namespace, applier, fileStorage, buildFileUrl, clock, changeNotifier } = options;
 
   return (subject) => {
     if (subject.subjectType !== "app") return null;
     const appId = subject.subjectId;
     const ns = namespace.get(appId);
     if (!ns) return null;
+
+    function emitLocalChange(): void {
+      changeNotifier?.emit({
+        eventType: "local-change-recorded",
+        recordIds: [],
+        timestamp: clock.now(),
+        originAppId: appId,
+      });
+    }
     // Framework-reserved tables (e.g. `_starkeep_sync_records`) live in
     // ns.tables so the applier and pull scanner see them, but apps must not
     // be able to address them through insertRow/updateRow/etc.
@@ -136,6 +154,7 @@ export function createAppSpecificFactory(
           row: { ...row, updated_at: serializeHLC(ts), deleted_at: null },
         };
         await applier.apply(entry);
+        emitLocalChange();
       },
 
       async updateRow(table, where, patch) {
@@ -150,6 +169,7 @@ export function createAppSpecificFactory(
           where,
         };
         await applier.apply(entry);
+        emitLocalChange();
         // Return 1 as best-effort signal that the operation was dispatched.
         return 1;
       },
@@ -165,6 +185,7 @@ export function createAppSpecificFactory(
           where,
         };
         await applier.apply(entry);
+        emitLocalChange();
         return 1;
       },
 
@@ -183,6 +204,7 @@ export function createAppSpecificFactory(
         const key = appSyncableObjectKey(appId, subKey);
         await fileStorage.put(key, bytes, { contentType: mimeType });
         await upsertFileRecord(key, bytes, mimeType);
+        emitLocalChange();
         return { key };
       },
 
@@ -203,6 +225,7 @@ export function createAppSpecificFactory(
         const key = appSyncableObjectKey(appId, subKey);
         await fileStorage.delete(key);
         await tombstoneFileRecord(key);
+        emitLocalChange();
       },
 
       async fileUrl(subKey, opts) {

@@ -9,7 +9,9 @@
   "scripts": {
     "start": "tsx server.ts",
     "dev": "tsx --watch server.ts",
-    "cli": "tsx cli.ts"
+    "cli": "tsx cli.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint *.ts"
   },
   "dependencies": {
     "@starkeep/core": "workspace:*",
@@ -32,6 +34,8 @@
   },
   "devDependencies": {
     "tsx": "^4.21.0",
-    "@types/pg": "^8.11.0"
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.0",
+    "typescript": "^5.7.0"
   }
 }

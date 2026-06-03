@@ -25,7 +25,11 @@ const EXPIRED_TOKEN_SIGNATURES = [
   "The security token included in the request is expired",
 ];
 
-export async function POST(req: NextRequest) {
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ appId: string }> },
+) {
+  const { appId } = await params;
   const body = (await req.json()) as {
     accessKeyId: string;
     secretAccessKey: string;
@@ -43,12 +47,12 @@ export async function POST(req: NextRequest) {
   // TEMP (iam-permission-tests POC): capture two traces during install so
   // packages/iam-permission-tests can replay every AWS call through
   // iam-simulate against the install-app context.
-  //   - photos-install.trace:     pulumi-aws HTTP traffic (via PULUMI_OPTION_*)
-  //   - photos-install.sdk.trace: Node-side @aws-sdk client calls
+  //   - <appId>-install.trace:     pulumi-aws HTTP traffic (via PULUMI_OPTION_*)
+  //   - <appId>-install.sdk.trace: Node-side @aws-sdk client calls
   // Remove this block, the env vars, and the file-tee in spawnChild when
   // the POC graduates or is dropped.
-  const traceFilePath = join(STARKEEP_DATA_DIR, "photos-install.trace");
-  const sdkTraceFilePath = join(STARKEEP_DATA_DIR, "photos-install.sdk.trace");
+  const traceFilePath = join(STARKEEP_DATA_DIR, `${appId}-install.trace`);
+  const sdkTraceFilePath = join(STARKEEP_DATA_DIR, `${appId}-install.sdk.trace`);
 
   const spawnEnv = {
     ...process.env,
@@ -87,7 +91,7 @@ export async function POST(req: NextRequest) {
 
       const finish = (code: number | null) => {
         if (code === 0) {
-          emitEvent("done", { appId: "photos" });
+          emitEvent("done", { appId });
         } else if (sawExpiredToken) {
           emitEvent("error", {
             message:
@@ -103,7 +107,7 @@ export async function POST(req: NextRequest) {
       const spawnChild = () => {
         const child = spawn(
           "pnpm",
-          ["--filter", "@starkeep/admin-installer", "cli:install-photos", "--non-interactive"],
+          ["--filter", "@starkeep/admin-installer", "cli:install-app", appId, "--non-interactive"],
           { cwd: REPO_ROOT, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] },
         );
         runningChild = child;

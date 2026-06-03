@@ -16,6 +16,7 @@ import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-ad
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
+import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
 
 /**
  * The reserved app id of the always-on Starkeep Drive channel — the single
@@ -23,6 +24,17 @@ import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
  * USER_DATA_OWNER_APP_ID in packages/admin-installer/src/iam.ts.
  */
 export const DRIVE_APP_ID = "starkeep-drive";
+
+/**
+ * App ids that have no per-app cloud channel and therefore must never get a
+ * per-app sync engine. The always-on Drive engine carries their (shared-data
+ * only) writes; spinning a per-app channel for them would just produce a
+ * permanent 403 loop because the cloud-side per-app IAM role doesn't exist.
+ */
+const NO_PER_APP_CHANNEL_APP_IDS: ReadonlySet<string> = new Set([
+  DRIVE_APP_ID,
+  LOCAL_WATCHER_APP_ID,
+]);
 
 export interface AppRegistryEntry {
   readonly appId: string;
@@ -86,6 +98,13 @@ export interface SyncSupervisor {
   resume(): Promise<void>;
   /** Trigger an immediate exchange across every engine. */
   exchangeAll(): Promise<{ applied: number; shipped: number }>;
+  /**
+   * Reset per-app backoff and trigger an immediate exchange across every
+   * engine. Use after a recoverable external state change (most notably an
+   * id-token refresh) so engines sitting in long backoff after auth failures
+   * resume their normal cadence right away instead of waiting up to 5 min.
+   */
+  kick(): void;
   /** Nudge a specific app's exchange to fire on the debounce window. */
   schedulePushFor(appId: string): void;
   status(): SyncSupervisorStatus;
@@ -281,32 +300,35 @@ export function createSyncSupervisor(
     }, nudgeDebounceMs);
   }
 
-  // Local-write fan-out: any record write nudges every engine to exchange
-  // soon. Engines individually decide whether they have anything new to ship
-  // (records-table delta scan; empty for apps with no new rows).
+  // Local-write routing: nudge only the engine that owns the affected data
+  // plane. Shape-A convention:
+  //   - `local-change-recorded` with no originAppId → shared-record write,
+  //     owned by the always-on Drive channel.
+  //   - `local-change-recorded` with originAppId set → app-specific write,
+  //     owned by that app's per-app engine (no-op if the app has no engine,
+  //     e.g. Drive / watcher whose writes ride the Drive channel).
   sdk.changeNotifier.subscribe((event) => {
     if (event.eventType !== "local-change-recorded") return;
     if (paused) return;
-    for (const entry of engines.values()) {
-      scheduleNudge(entry.appId);
-    }
+    const targetAppId = event.originAppId ?? DRIVE_APP_ID;
+    scheduleNudge(targetAppId);
   });
 
   function rescan(): void {
-    // The Drive channel is always-on and not driven by the installed-app set:
-    // exclude it from the per-app desired set so it is neither double-started
-    // as an AR-only per-app engine nor torn down here.
+    // Exclude apps that have no per-app cloud channel (Drive and the built-in
+    // local-watcher): their writes ride the always-on Drive engine, and
+    // spinning a per-app engine for them would just 403 forever.
     const desired = new Set(
       listInstalledApps()
         .filter((a) => a.status === "active")
         .map((a) => a.appId)
-        .filter((appId) => appId !== DRIVE_APP_ID),
+        .filter((appId) => !NO_PER_APP_CHANNEL_APP_IDS.has(appId)),
     );
     for (const appId of desired) {
       if (!engines.has(appId)) startEngineFor(appId);
     }
     for (const appId of Array.from(engines.keys())) {
-      if (appId === DRIVE_APP_ID) continue;
+      if (NO_PER_APP_CHANNEL_APP_IDS.has(appId)) continue;
       if (!desired.has(appId)) stopEngineFor(appId);
     }
   }
@@ -372,6 +394,19 @@ export function createSyncSupervisor(
         }
       }
       return { applied, shipped };
+    },
+
+    kick() {
+      if (paused) return;
+      for (const entry of engines.values()) {
+        if (entry.tickTimer) {
+          clearTimeout(entry.tickTimer);
+          entry.tickTimer = null;
+        }
+        entry.backoffMs = exchangeIntervalMs;
+        // Fire-and-forget; runExchangeOnce reschedules the next tick itself.
+        void runExchangeOnce(entry);
+      }
     },
 
     schedulePushFor: scheduleNudge,

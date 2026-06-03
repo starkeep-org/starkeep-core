@@ -5,7 +5,7 @@
 
 export interface TemplateParams {
   environment: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface GenerateTemplateInput {

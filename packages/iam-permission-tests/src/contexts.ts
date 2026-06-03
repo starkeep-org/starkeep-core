@@ -595,7 +595,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         {
           action: "sts:GetCallerIdentity",
           resource: "*",
-          why: "cli-install-photos resolves the AWS account ID up front when not in config.",
+          why: "cli-install-app resolves the AWS account ID up front when not in config.",
         },
       ];
     },
