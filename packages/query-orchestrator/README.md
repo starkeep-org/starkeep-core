@@ -1,6 +1,6 @@
 # @starkeep/query-orchestrator
 
-Unified query orchestrator that joins data records with their metadata and manages sync boundaries for selective synchronization.
+Search shared data records via a thin orchestrator over the storage adapter. Today's surface covers type filtering, a `createdAt` date range, and cursor pagination; metadata joins, full-text search, and sync-eligibility filtering are not implemented.
 
 ## Installation
 
@@ -17,63 +17,44 @@ const unifiedIndex = createUnifiedIndex({
   databaseAdapter: myDatabaseAdapter,
 });
 
-// Search with filters across data and metadata
+// Filter by type and/or date range, paginate with cursor.
 const searchResult = await unifiedIndex.search({
-  types: ["photo"],
-  metadataFilters: [
-    { generatorId: "image-dimensions", field: "width", operator: "gte", value: 1920 },
-  ],
+  types: ["jpg", "png"],
+  dateRange: { start: someHlc, end: laterHlc },
   limit: 50,
 });
 
 for (const item of searchResult.items) {
-  console.log(item.dataRecord.id, item.metadata);
+  console.log(item.dataRecord.id);
 }
 
-// Fetch a single record with all its metadata
+// Fetch a single record by id.
 const singleItem = await unifiedIndex.getWithMetadata(recordId);
-
-// Manage sync boundaries
-await unifiedIndex.syncBoundary.markSyncEligible(recordId);
-const eligibleIds = await unifiedIndex.syncBoundary.getSyncEligibleIds();
 ```
 
 ## API
 
-### Factory Functions
+### Factory
 
 | Function | Description |
 |---|---|
-| `createUnifiedIndex(options)` | Creates a `UnifiedIndex` with search and sync boundary support |
-| `createSyncBoundary(databaseAdapter)` | Creates a standalone `SyncBoundary` instance |
-| `planQuery(query, databaseAdapter)` | Translates an `IndexQuery` into planned database queries |
+| `createUnifiedIndex(options)` | Creates a `UnifiedIndex` over a `DatabaseAdapter`. |
+| `planQuery(query, databaseAdapter)` | Translates an `IndexQuery` into a planned `Query` for the adapter. |
 
 ### `UnifiedIndex`
 
 | Method | Description |
 |---|---|
-| `search(query)` | Query data records with optional metadata filters, date ranges, full-text search, and pagination |
-| `getWithMetadata(recordId)` | Retrieve a single data record alongside all its metadata |
-| `syncBoundary` | Access the `SyncBoundary` for marking records as sync-eligible or local-only |
-
-### `SyncBoundary`
-
-| Method | Description |
-|---|---|
-| `markSyncEligible(recordId)` | Mark a record for synchronization |
-| `markLocalOnly(recordId)` | Mark a record as local-only (excluded from sync) |
-| `isSyncEligible(recordId)` | Check whether a record is eligible for sync |
-| `getSyncEligibleIds(since?)` | List all sync-eligible record IDs, optionally since a given timestamp |
+| `search(query)` | Query data records with type filter, date range, and pagination. |
+| `getWithMetadata(recordId)` | Retrieve a single data record by id. Returns `{ dataRecord }` — no metadata is joined in today's implementation. |
 
 ### Key Types
 
 | Type | Description |
 |---|---|
-| `IndexQuery` | Query parameters: types, date range, metadata filters, full-text search, sync boundary, pagination |
-| `IndexItem` | A data record paired with its metadata map |
-| `IndexResult` | Paginated search result with items, cursor, and `hasMore` flag |
-| `MetadataFilter` | Filter on a specific metadata generator's field |
-| `SyncBoundaryFilter` | `"sync-eligible"`, `"local-only"`, or `"all"` |
+| `IndexQuery` | `{ types?, dateRange?, limit?, cursor? }`. |
+| `IndexItem` | `{ dataRecord }`. |
+| `IndexResult` | Paginated search result with `items`, `nextCursor`, and `hasMore`. |
 
 ## Testing
 

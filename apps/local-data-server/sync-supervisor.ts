@@ -10,7 +10,6 @@ import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
-  FileRecordsApplier,
 } from "../../packages/sync-engine/src/types.js";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
@@ -54,7 +53,7 @@ export interface SyncSupervisorOptions {
    */
   readonly listInstalledApps: () => AppRegistryEntry[];
   readonly namespaceStore: AppSyncableNamespaceStore;
-  readonly appApplier: AppSyncableApplier & ScanCapableApplier & FileRecordsApplier;
+  readonly appApplier: AppSyncableApplier & ScanCapableApplier;
   readonly underlyingSyncStateStore: SyncStateStore;
   /** Idle interval between exchange ticks. A local write nudges an early tick. */
   readonly exchangeIntervalMs: number;

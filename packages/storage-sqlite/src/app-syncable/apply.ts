@@ -1,7 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
-import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSinceOptions, ScanSincePage, FileRecordRow, FileRecordsApplier } from "@starkeep/shared-space-api";
-import { FILE_RECORDS_TABLE } from "@starkeep/shared-space-api";
+import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSinceOptions, ScanSincePage } from "@starkeep/shared-space-api";
 import { appSyncableTableName } from "./namespace.js";
 
 /**
@@ -16,7 +15,7 @@ import { appSyncableTableName } from "./namespace.js";
  * so that the inline-HLC pull path can propagate tombstones to other clients.
  */
 export class SqliteAppSyncableApplier
-  implements AppSyncableApplier, ScanCapableApplier, FileRecordsApplier
+  implements AppSyncableApplier, ScanCapableApplier
 {
   constructor(
     private readonly db: DatabaseSync,
@@ -192,27 +191,6 @@ export class SqliteAppSyncableApplier
     return { rows: entries, nextCursor, hasMore };
   }
 
-  /**
-   * Scan the reserved `_starkeep_sync_records` table for live (non-deleted)
-   * rows. The file-transfer pass derives upload/download decisions from blob
-   * presence at the underlying object stores — there is no `sync_status`
-   * column. Returns an empty array if the app doesn't have a reserved table
-   * (filesEnabled is false or the app is uninstalled).
-   */
-  async scanFileRecords(appId: string): Promise<FileRecordRow[]> {
-    const fullName = appSyncableTableName(appId, FILE_RECORDS_TABLE);
-    try {
-      const rows = this.db
-        .prepare(
-          `SELECT * FROM ${q(fullName)} WHERE deleted_at IS NULL`,
-        )
-        .all() as Record<string, unknown>[];
-      return rows.map(rowToFileRecord);
-    } catch {
-      return [];
-    }
-  }
-
   /** Support read path from the factory's queryRows. */
   queryRows(
     appId: string,
@@ -234,21 +212,6 @@ export class SqliteAppSyncableApplier
 
 function q(name: string): string {
   return `"${name}"`;
-}
-
-function rowToFileRecord(row: Record<string, unknown>): FileRecordRow {
-  return {
-    id: row["id"] as string,
-    object_storage_key: row["object_storage_key"] as string,
-    content_hash: row["content_hash"] as string,
-    mime_type: row["mime_type"] as string,
-    size_bytes: Number(row["size_bytes"]),
-    original_filename: (row["original_filename"] as string | null) ?? null,
-    origin_app_id: row["origin_app_id"] as string,
-    created_at: row["created_at"] as string,
-    updated_at: row["updated_at"] as string,
-    deleted_at: (row["deleted_at"] as string | null) ?? null,
-  };
 }
 
 function rowToEntry(

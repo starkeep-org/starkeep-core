@@ -19,7 +19,6 @@ export type {
   AppSyncableNamespace,
   AppSyncableNamespaceStore,
   FileRecordRow,
-  FileRecordsApplier,
   Watermarks,
   SyncExchangeRequest,
   SyncExchangeResponse,

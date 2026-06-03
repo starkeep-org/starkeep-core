@@ -33,7 +33,6 @@ export type {
   ScanSincePage,
   AppSyncableRowEntry,
   FileRecordRow,
-  FileRecordsApplier,
 } from "./app-syncable/types.js";
 export {
   createAppSpecificFactory,

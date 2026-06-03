@@ -105,15 +105,6 @@ export interface FileRecordRow {
   readonly deleted_at: string | null;
 }
 
-/**
- * Reserved-table file-records source for the file-transfer pass. Scans rows
- * the channel knows about; the pass then decides upload/download based on
- * blob presence on each side.
- */
-export interface FileRecordsApplier {
-  scanFileRecords(appId: string): Promise<FileRecordRow[]>;
-}
-
 // ---------------------------------------------------------------------------
 // Version-vector exchange protocol — each side maintains a per-channel
 // { [nodeId]: HLC } map of "what I've seen per replica" and ships records the
@@ -261,7 +252,7 @@ export interface SyncEngineOptions {
    */
   readonly appSyncableSource?: {
     readonly namespaces: AppSyncableNamespaceStore;
-    readonly applier: AppSyncableApplier & ScanCapableApplier & FileRecordsApplier;
+    readonly applier: AppSyncableApplier & ScanCapableApplier;
   };
   /**
    * Shape A channel split. When true (default), this engine ships and applies

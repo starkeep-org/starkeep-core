@@ -524,9 +524,7 @@ describe("version-vector exchange", () => {
       syncState,
       appSyncableSource: {
         namespaces: localApp.namespaces,
-        // FileRecordsApplier face isn't exercised by exchange(); cast through
-        // unknown for the test mock which only implements scan/apply.
-        applier: localApp.applier as never,
+        applier: localApp.applier,
       },
     });
 
