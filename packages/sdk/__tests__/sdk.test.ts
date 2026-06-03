@@ -185,27 +185,6 @@ describe("createStarkeepSdk", () => {
     });
   });
 
-  describe("aggregation operations", () => {
-    it("should compute aggregations", async () => {
-      const { sdk } = await createTestSdk();
-
-      await sdk.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
-        Buffer.alloc(1000),
-        "image/jpeg",
-      );
-      await sdk.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
-        Buffer.alloc(2000),
-        "image/png",
-      );
-
-      const result = await sdk.aggregations.compute();
-      expect(result.totalCount).toBe(2);
-      expect(result.totalSizeBytes).toBe(3000);
-    });
-  });
-
   describe("access control operations", () => {
     it("should create and list policies", async () => {
       const { sdk } = await createTestSdk();

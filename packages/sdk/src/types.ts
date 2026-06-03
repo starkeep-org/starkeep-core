@@ -8,10 +8,6 @@ import type {
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { IndexQuery, IndexResult } from "@starkeep/query-orchestrator";
 import type {
-  AggregationResult,
-  AggregationOptions,
-} from "@starkeep/aggregations";
-import type {
   ChangeNotifier,
   SyncStateStore,
 } from "@starkeep/sync-engine";
@@ -108,10 +104,6 @@ export interface IndexOperations {
   search(query: IndexQuery): Promise<IndexResult>;
 }
 
-export interface AggregationOperations {
-  compute(options?: AggregationOptions): Promise<AggregationResult>;
-}
-
 export interface AccessControlOperations {
   createPolicy(input: CreatePolicyInput): Promise<AccessPolicy>;
   revokePolicy(policyId: StarkeepId): Promise<void>;
@@ -134,7 +126,6 @@ export type { WebSocketConnection };
 export interface StarkeepSdk {
   readonly data: DataOperations;
   readonly index: IndexOperations;
-  readonly aggregations: AggregationOperations;
   readonly accessControl: AccessControlOperations;
   readonly api: ApiOperations;
   /**

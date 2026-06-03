@@ -22,7 +22,6 @@
     "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/query-orchestrator": "workspace:*",
-    "@starkeep/aggregations": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",
     "@starkeep/access-control": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*"

@@ -17,7 +17,6 @@ async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
     .join("");
 }
 import { createUnifiedIndex } from "@starkeep/query-orchestrator";
-import { createAggregationEngine } from "@starkeep/aggregations";
 import { createChangeNotifier } from "@starkeep/sync-engine";
 import { createAccessControlEngine, createEnforcedDatabaseAdapter } from "@starkeep/access-control";
 import { createSharedSpaceApi } from "@starkeep/shared-space-api";
@@ -107,7 +106,6 @@ export async function createStarkeepSdk(
     : rawDatabaseAdapter;
 
   const unifiedIndex = createUnifiedIndex({ databaseAdapter });
-  const aggregationEngine = createAggregationEngine({ databaseAdapter });
 
   /**
    * Emit a `local-change-recorded` event for a write. The supervisor wakes its
@@ -289,12 +287,6 @@ export async function createStarkeepSdk(
     index: {
       async search(query) {
         return unifiedIndex.search(query);
-      },
-    },
-
-    aggregations: {
-      async compute(aggregationOptions) {
-        return aggregationEngine.compute(aggregationOptions);
       },
     },
 
