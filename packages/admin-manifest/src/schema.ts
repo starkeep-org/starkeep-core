@@ -66,7 +66,10 @@ export const syncableTableSchema = z.object({
 
 export const appSpecificSyncableSchema = z.object({
   tables: z.array(syncableTableSchema).default([]),
-  // Opt-in for apps/<appId>/syncable/ object-storage prefix.
+  // Opt-in for apps/<appId>/syncable/ object-storage prefix. App-specific
+  // (private) data is not necessarily file-backed — apps with row-only
+  // app-specific data leave this false. (Shared data is always file-backed
+  // and is not controlled by this flag.)
   files: z.boolean().default(false),
 });
 
@@ -98,6 +101,18 @@ export const permissionEntrySchema = z.object({
   rationale: z.string(),
 });
 
+// How admin-web should spawn this app's local dev/serve process. Optional —
+// apps without a localRun block cannot be started from the admin UI. When
+// `portFlag` is set, admin-web allocates a free TCP port at start time and
+// appends `[portFlag, <port>]` to args; apps that pick their own port omit it.
+export const localRunSchema = z.object({
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  portFlag: z.string().optional(),
+  // Working directory relative to the manifest's directory. Defaults to ".".
+  cwd: z.string().default("."),
+});
+
 export const appManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -111,6 +126,7 @@ export const appManifestSchema = z.object({
   requiredPermissions: z.array(permissionEntrySchema).default([]),
   optionalPermissions: z.array(permissionEntrySchema).default([]),
   infraRequirements: infraRequirementsSchema.default({}),
+  localRun: localRunSchema.optional(),
   // Ordered ids of shared-schema migrations that belong to this release.
   // Resolved by the installer to .sql files alongside the manifest. Empty for
   // user apps that don't ship shared-schema migrations (the typical case).
@@ -128,6 +144,7 @@ export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;
 export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;
 export type SyncableTable = z.infer<typeof syncableTableSchema>;
 export type AppSpecificSyncable = z.infer<typeof appSpecificSyncableSchema>;
+export type LocalRun = z.infer<typeof localRunSchema>;
 export type PermissionEntry = z.infer<typeof permissionEntrySchema>;
 export type InfraRequirements = z.infer<typeof infraRequirementsSchema>;
 export type AppManifest = z.infer<typeof appManifestSchema>;

@@ -102,6 +102,14 @@ interface LocalAppEntry {
 
 interface DaemonStatus { running: boolean; pid?: number; port?: number; }
 
+interface InstallStep {
+  operation: "install" | "uninstall";
+  step: string;
+  status: "pending" | "done" | "failed";
+  error: string | null;
+  updatedAt: string;
+}
+
 // ---------------------------------------------------------------------------
 // App parent directories editor
 // ---------------------------------------------------------------------------
@@ -310,6 +318,8 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
   const [pendingConsent, setPendingConsent] = useState<LocalAppEntry | null>(null);
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<Record<string, DaemonStatus>>({});
+  // App whose install-step ledger is currently displayed (null when closed).
+  const [stepsOpenFor, setStepsOpenFor] = useState<string | null>(null);
   // Per-app pending transition. We keep this set until the polled status
   // reflects the target state (running for "start", not-running for "stop"),
   // so the spinner survives the first poll round.
@@ -416,6 +426,9 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        // Pop the step ledger so the operator can see which step failed
+        // without having to crack open the sqlite DB.
+        setStepsOpenFor(entry.appId);
         throw new Error(data?.error ?? `install failed: ${res.status}`);
       }
       await refresh();
@@ -567,6 +580,14 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
                     {busyAppId === entry.appId ? "Uninstalling…" : "Uninstall"}
                   </Button>
                 )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setStepsOpenFor(entry.appId)}
+                  title="Show install/uninstall step history"
+                >
+                  Steps
+                </Button>
               </div>
             </div>
             {entry.manifest.description && (
@@ -598,7 +619,124 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
           onCancel={() => setPendingConsent(null)}
         />
       )}
+
+      <InstallStepsDialog
+        appId={stepsOpenFor}
+        onClose={() => setStepsOpenFor(null)}
+      />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Install-step ledger dialog. Reads from /api/apps/[appId]/install-status,
+// which proxies the local-data-server's step ledger. Opens on demand (Steps
+// button) and automatically when an install fails so the operator can see
+// which step the installer got stuck on.
+// ---------------------------------------------------------------------------
+
+function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose: () => void }) {
+  const [steps, setSteps] = useState<InstallStep[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async (id: string) => {
+    setLoading(true);
+    setError(null);
+    setSteps(null);
+    try {
+      const res = await fetch(`/api/apps/${encodeURIComponent(id)}/install-status`);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `install-status failed: ${res.status}`);
+      }
+      const body = (await res.json()) as { appId: string; steps: InstallStep[] };
+      setSteps(body.steps);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (appId) load(appId);
+  }, [appId, load]);
+
+  const opened = appId !== null;
+
+  return (
+    <Dialog open={opened} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Install steps for {appId ?? "app"}</DialogTitle>
+        </DialogHeader>
+
+        {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
+
+        {error && (
+          <Alert variant="destructive">
+            <AlertTitle>Error</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        {!loading && !error && steps !== null && steps.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            No install or uninstall steps recorded for this app.
+          </p>
+        )}
+
+        {!loading && !error && steps !== null && steps.length > 0 && (
+          <div className="flex flex-col gap-2 max-h-96 overflow-y-auto">
+            {steps.map((s, i) => (
+              <div
+                key={`${s.operation}-${s.step}-${i}`}
+                className="flex flex-col gap-1 border rounded-md p-2 text-sm"
+              >
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Badge variant="secondary" className="text-xs">
+                    {s.operation}
+                  </Badge>
+                  <span className="font-mono text-xs">{s.step}</span>
+                  <Badge
+                    variant="secondary"
+                    className={
+                      "text-xs " +
+                      (s.status === "done"
+                        ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                        : s.status === "failed"
+                          ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+                          : "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200")
+                    }
+                  >
+                    {s.status}
+                  </Badge>
+                  <span className="text-xs text-muted-foreground ml-auto">{s.updatedAt}</span>
+                </div>
+                {s.error && (
+                  <pre className="text-xs whitespace-pre-wrap break-words text-red-700 dark:text-red-300">
+                    {s.error}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex justify-between gap-2 pt-1">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { if (appId) load(appId); }}
+            disabled={!appId || loading}
+          >
+            Refresh
+          </Button>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

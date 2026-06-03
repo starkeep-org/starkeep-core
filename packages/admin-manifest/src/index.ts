@@ -9,6 +9,8 @@ export {
   syncableTableColumnSchema,
   infraRequirementsSchema,
   permissionEntrySchema,
+  localRunSchema,
+  type LocalRun,
   type AppManifest,
   type AppTier,
   type FileAccess,

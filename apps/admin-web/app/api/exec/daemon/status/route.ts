@@ -2,32 +2,9 @@ import { createConnection } from "node:net";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
-import { APP_DAEMONS, DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "../../../../../src/lib/exec-commands";
+import { PIDS_DIR, isAlive, pidFile } from "../../../../../src/lib/daemon-control";
 
 interface DaemonMeta { pid: number; port: number; }
-
-const PIDS_DIR = resolve(REPO_ROOT, ".pids");
-
-// Daemon IDs that are managed via PID file but not in DAEMON_COMMANDS — the
-// installed-app dev servers spawned by /api/exec/daemon with a per-app cwd
-// and a dynamically-allocated port.
-type ExternalDaemonId = keyof typeof APP_DAEMONS;
-function isExternalDaemonId(id: string): id is ExternalDaemonId {
-  return Object.prototype.hasOwnProperty.call(APP_DAEMONS, id);
-}
-
-function pidFile(id: DaemonId | ExternalDaemonId) {
-  return resolve(PIDS_DIR, `${id}.pid`);
-}
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function tryHost(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -44,10 +21,9 @@ function isPortBound(port: number): Promise<boolean> {
 }
 
 export async function GET(req: NextRequest) {
-  const id = req.nextUrl.searchParams.get("id") as DaemonId | ExternalDaemonId | null;
-  const isKnown = !!id && (!!DAEMON_COMMANDS[id as DaemonId] || isExternalDaemonId(id));
-  if (!isKnown) {
-    return NextResponse.json({ error: "Unknown daemon ID" }, { status: 400 });
+  const id = req.nextUrl.searchParams.get("id");
+  if (!id) {
+    return NextResponse.json({ error: "id is required" }, { status: 400 });
   }
 
   const pf = pidFile(id);

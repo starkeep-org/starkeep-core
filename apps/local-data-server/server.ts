@@ -15,6 +15,7 @@ import {
 } from "../../packages/admin-installer/src/local/installer.js";
 import {
   listAppRegistry,
+  listInstallSteps,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
@@ -63,8 +64,8 @@ const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
 // the admin surface, the watch CRUD, /events, and /auth/*.
 const LISTEN_HOST = "127.0.0.1";
 const BIND_IS_LOOPBACK = LISTEN_HOST === "127.0.0.1" || LISTEN_HOST === "::1";
-const OWNER_ID = process.env.STARKEEP_OWNER_ID || "craig";
-const NODE_ID = process.env.STARKEEP_NODE_ID || "admin-desktop";
+const OWNER_ID = process.env.STARKEEP_OWNER_ID || "starkeep-user";
+const NODE_ID = process.env.STARKEEP_NODE_ID || "starkeep-local";
 const PULL_INTERVAL_MS = parseInt(process.env.STARKEEP_PULL_INTERVAL_MS || "30000", 10);
 const PUSH_DEBOUNCE_MS = parseInt(process.env.STARKEEP_PUSH_DEBOUNCE_MS || "500", 10);
 // ---------------------------------------------------------------------------
@@ -1764,6 +1765,20 @@ async function main() {
         // Tear down the per-app sync loop.
         supervisor?.rescan();
         json(res, { ok: true, appId: targetAppId });
+        return;
+      }
+
+      // GET /admin/apps/:appId/install-steps — read the install/uninstall
+      // step ledger for an app. Lets admin-web surface failed install state
+      // (which step, what error) instead of forcing the operator to crack
+      // open the sqlite DB. Returns rows even for apps with no registry row,
+      // so a half-installed app whose ledger lingers after a crash is still
+      // visible.
+      const stepsMatch = path.match(/^\/admin\/apps\/([^/]+)\/install-steps$/);
+      if (stepsMatch && req.method === "GET") {
+        const targetAppId = decodeURIComponent(stepsMatch[1]!);
+        const steps = listInstallSteps(localDb, targetAppId);
+        json(res, { appId: targetAppId, steps });
         return;
       }
 

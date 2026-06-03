@@ -32,6 +32,12 @@ The current "owner" field on data records is a legacy concept that we need to re
 
 ## The photos app has multiple divergent paths for adding photos, consolidate.
 
+## Stop reading env variables
+
+Currently server.ts reads STARKEEP_OWNER_ID and STARKEEP_NODE_ID from env, we should not be reading anything from env.
+
+Possibly we should move OWNER_ID to starkeep config. Not sure about NODE ID. But they shouldn't be in ENV.
+
 ## The photos app structure is messy and probably contains legacy leftovers.
 
 this repo has two top-level Photos components:
