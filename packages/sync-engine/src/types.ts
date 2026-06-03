@@ -191,6 +191,14 @@ export interface ChangeEvent {
   readonly eventType: ChangeEventType;
   readonly recordIds: StarkeepId[];
   readonly timestamp: HLCTimestamp;
+  /**
+   * For `local-change-recorded`: the appId whose sync channel owns this write.
+   * Set when an app-specific data write happens (the calling app); left unset
+   * for shared-record writes (those are owned by the always-on Drive channel
+   * by Shape-A convention, which is a deployment fact the SDK doesn't name).
+   * The sync supervisor uses this to nudge only the affected engine.
+   */
+  readonly originAppId?: string;
 }
 
 export type ChangeListener = (event: ChangeEvent) => void;

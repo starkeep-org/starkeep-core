@@ -29,5 +29,6 @@ export type { InstallLocalResult, UninstallLocalOptions } from "./local/installe
 export {
   listAppRegistry,
   appRegistryRow,
+  listInstallSteps,
 } from "./local/registry";
-export type { RegisteredApp } from "./local/registry";
+export type { RegisteredApp, InstallStepRow } from "./local/registry";

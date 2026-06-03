@@ -33,6 +33,19 @@ export async function POST(req: NextRequest) {
   }
   const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;
 
+  // Reject directory-name vs manifest-id mismatch up front. Without this the
+  // installer would register the app under `manifest.id` while admin-web would
+  // write `.starkeep-local.json` under the directory `appId`, leaving the two
+  // bookkeeping records pointing at different keys.
+  if (manifest.id !== appId) {
+    return NextResponse.json(
+      {
+        error: `Manifest id (${String(manifest.id)}) does not match install directory (${appId}). Rename the directory or fix the manifest before installing.`,
+      },
+      { status: 400 },
+    );
+  }
+
   let installResp: Response;
   try {
     installResp = await fetch(`${LOCAL_DATA_SERVER}/admin/apps/install`, {

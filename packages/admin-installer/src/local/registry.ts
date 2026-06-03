@@ -39,13 +39,45 @@ export function clearStepLedger(db: DatabaseSync, appId: string): void {
   db.prepare("DELETE FROM shared_app_install_steps WHERE app_id = ?").run(appId);
 }
 
+export interface InstallStepRow {
+  operation: Operation;
+  step: string;
+  status: StepStatus;
+  error: string | null;
+  updatedAt: string;
+}
+
+export function listInstallSteps(db: DatabaseSync, appId: string): InstallStepRow[] {
+  const rows = db
+    .prepare(
+      `SELECT operation, step, status, error, updated_at
+       FROM shared_app_install_steps
+       WHERE app_id = ?
+       ORDER BY updated_at ASC, operation ASC, step ASC`,
+    )
+    .all(appId) as Array<{
+      operation: string;
+      step: string;
+      status: string;
+      error: string | null;
+      updated_at: string;
+    }>;
+  return rows.map((r) => ({
+    operation: r.operation as Operation,
+    step: r.step,
+    status: r.status as StepStatus,
+    error: r.error,
+    updatedAt: r.updated_at,
+  }));
+}
+
 export function appRegistryRow(db: DatabaseSync, appId: string): RegisteredApp | null {
   const row = db
     .prepare(
       `SELECT app_id, name, version, tier, manifest, status, hmac_secret, installed_at, updated_at
        FROM shared_app_registry WHERE app_id = ?`,
     )
-    .get(appId) as RegisteredAppRow | undefined;
+    .get(appId) as unknown as RegisteredAppRow | undefined;
   if (!row) return null;
   return {
     appId: row.app_id,
@@ -66,7 +98,7 @@ export function listAppRegistry(db: DatabaseSync): RegisteredApp[] {
       `SELECT app_id, name, version, tier, manifest, status, hmac_secret, installed_at, updated_at
        FROM shared_app_registry ORDER BY installed_at ASC`,
     )
-    .all() as RegisteredAppRow[];
+    .all() as unknown as RegisteredAppRow[];
   return rows.map((row) => ({
     appId: row.app_id,
     name: row.name,

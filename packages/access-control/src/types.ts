@@ -65,6 +65,5 @@ export interface AccessControlEngine {
   validateSharingToken(token: string): Promise<AccessPolicy | null>;
 }
 
-export interface EnforcedDatabaseAdapter extends DatabaseAdapter {
-  // Same interface as DatabaseAdapter but with access checks
-}
+// Same interface as DatabaseAdapter but with access checks
+export type EnforcedDatabaseAdapter = DatabaseAdapter;

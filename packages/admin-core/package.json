@@ -19,10 +19,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/"
   },
-  "dependencies": {
-    "@starkeep/admin-shared": "workspace:*",
-    "@starkeep/admin-providers": "workspace:*"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "^3.645.0",
     "@aws-sdk/client-sts": "^3.645.0",

@@ -92,7 +92,7 @@ async function watchAdd(dirPath: string, recursive: boolean): Promise<void> {
   }) as { id: string; content?: { directoryPath?: string; recursive?: boolean } };
 
   const id = watch.id ?? "?";
-  const content = (watch as any).content ?? {};
+  const content = watch.content ?? {};
   console.log("Watch added:");
   console.log(`  id:        ${id}`);
   console.log(`  path:      ${content.directoryPath ?? dirPath}`);

@@ -17,6 +17,7 @@ import { pipeline } from "node:stream/promises";
 import type { DatabaseSync } from "node:sqlite";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
+import { createStarkeepId } from "@starkeep/core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -172,9 +173,8 @@ export function createFileWatchManager(opts: {
 
   async function findExistingByHash(contentHash: string): Promise<string | null> {
     const result = await databaseAdapter.query({
-      kind: "data",
       filters: [
-        { field: "content_hash" as any, operator: "eq" as any, value: contentHash },
+        { field: "content_hash", operator: "eq", value: contentHash },
       ],
       limit: 1,
     });
@@ -248,11 +248,11 @@ export function createFileWatchManager(opts: {
       let fileStat;
       try {
         fileStat = await stat(filePath);
-      } catch (err: any) {
-        if (err.code === "ENOENT") {
+      } catch (err) {
+        if ((err as { code?: string }).code === "ENOENT") {
           const tracked = active.files.get(filePath);
           if (tracked?.dataRecordId) {
-            await sdk.data.delete(tracked.dataRecordId as any);
+            await sdk.data.delete(createStarkeepId(tracked.dataRecordId));
           }
           deleteTrackingRecord(filePath);
           active.files.delete(filePath);
@@ -288,14 +288,13 @@ export function createFileWatchManager(opts: {
       if (!dataRecordId) {
         const type = extensionOf(filePath);
         const contentType = mimeFromExtension(type);
-        const title = basename(filePath, extname(filePath));
 
         const record = await sdk.data.putWithLocalFile(
           {
             type,
             ownerId,
             originAppId: appId,
-            content: { title, fileName: filename, sourcePath: relativePath },
+            originalFilename: filename,
           },
           filePath,
           contentType,

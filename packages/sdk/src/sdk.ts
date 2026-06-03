@@ -81,11 +81,13 @@ export async function createStarkeepSdk(
         : undefined,
     });
 
-  // The SDK owns one shared change notifier. Writes emit
-  // `local-change-recorded`; the supervisor's per-app sync engines forward
-  // their own pull/conflict events onto this same notifier so consumers
-  // (sharedSpaceApi, SSE clients) see one unified stream.
-  const changeNotifier = createChangeNotifier();
+  // One shared change notifier. Writes emit `local-change-recorded`; the
+  // supervisor's per-app sync engines forward their own pull/conflict events
+  // onto this same notifier so consumers (sharedSpaceApi, SSE clients) see
+  // one unified stream. Callers may inject a notifier (e.g. the local-data-
+  // server hoists it to share with the app-specific factory, which emits
+  // its own local-change events tagged with the writing app's id).
+  const changeNotifier = options.changeNotifier ?? createChangeNotifier();
 
   // When a subject is provided, wrap the adapter so every operation is
   // gated by access control and the private-storage structural rule.

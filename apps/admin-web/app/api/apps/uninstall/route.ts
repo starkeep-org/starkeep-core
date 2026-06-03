@@ -2,6 +2,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
+import { stopById } from "../../../../src/lib/daemon-control";
 
 const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
 const APPS_DIR = resolve(REPO_ROOT, "..", "starkeep-apps");
@@ -12,6 +13,13 @@ export async function POST(req: NextRequest) {
   if (!appId) {
     return NextResponse.json({ error: "appId is required" }, { status: 400 });
   }
+
+  // Stop the app's dev server before tearing down its registry row. Otherwise
+  // the running process keeps calling the data-server with a secret that no
+  // longer authenticates, and the operator sees a stream of 401s. Best-effort:
+  // a "not running" result is fine; we only care that nothing keeps signing in
+  // as this app after uninstall.
+  stopById(appId);
 
   let resp: Response;
   try {

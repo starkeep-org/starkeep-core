@@ -5,8 +5,17 @@
  * are skipped on retry. Steps are recorded before execution (pending) and after
  * (done or failed).
  *
- * This runs inside the admin-app Lambda — ambient AWS credentials are the
- * admin-app role. The manager role is assumed as the first hop.
+ * This runs in a local pnpm CLI subprocess that admin-web spawns from its
+ * Next.js API routes (see apps/admin-web/app/api/.../install/route.ts). The
+ * caller passes credentials it obtained by signing the operator in to Cognito
+ * and assuming the admin-app role in the operator's AWS account; the manager
+ * role is assumed from there as the first hop of the role chain.
+ *
+ * Built-in apps (cloud-data-server, starkeep-drive) follow a parallel install
+ * path in ./builtin-installs.ts. They use hardcoded Pulumi programs instead of
+ * the manifest-driven flow here because they provision foundational resources
+ * (DSQL cluster, shared bucket, API Gateway) that the per-app shape can't
+ * express, and they bootstrap the shared step ledger rather than reading it.
  */
 
 import { createHash } from "node:crypto";

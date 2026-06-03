@@ -57,7 +57,7 @@ export function installerPgUser(stackPrefix: string): string {
   return `${stackPrefix}_installer`.toLowerCase().replace(/-/g, "_");
 }
 
-async function makeDb(opts: SchemaInitOptions): Promise<Kysely<any>> {
+async function makeDb(opts: SchemaInitOptions): Promise<Kysely<Record<string, never>>> {
   const signer = new DsqlSigner({
     hostname: opts.hostname,
     region: opts.region,
@@ -82,7 +82,7 @@ async function makeDb(opts: SchemaInitOptions): Promise<Kysely<any>> {
  * single statement (no trailing semicolon, no PL/pgSQL).
  */
 async function ensureRole(
-  db: Kysely<any>,
+  db: Kysely<Record<string, never>>,
   rolname: string,
   createSql: string,
 ): Promise<void> {
@@ -135,6 +135,14 @@ export async function initializeSharedSchema(
          origin_app_id      text        NOT NULL,
          parent_id          text
        )`,
+
+      // Duplicate-file prevention: (filename + bytes) is unique per owner
+      // among live records. Tombstoned rows are excluded so re-upload after
+      // delete is allowed. NULL filenames are not constrained — the rule
+      // requires both filename and content to match.
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_records_owner_filename_hash
+         ON shared.records (owner_id, original_filename, content_hash)
+         WHERE deleted_at IS NULL AND original_filename IS NOT NULL`,
 
       `ALTER DEFAULT PRIVILEGES IN SCHEMA shared GRANT ALL ON TABLES TO user_data_owner`,
       `GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA shared TO user_data_owner`,
