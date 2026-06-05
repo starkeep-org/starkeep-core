@@ -465,8 +465,13 @@ Outputs:
 `;
 }
 
-export function getCloudFormationCreateStackUrl(region: string): string {
-  return `https://${region}.console.aws.amazon.com/cloudformation/home?region=${region}#/stacks/create/template`;
+export function getCloudFormationCreateStackUrl(
+  region: string,
+  opts?: { stackName?: string },
+): string {
+  const base = `https://${region}.console.aws.amazon.com/cloudformation/home?region=${region}#/stacks/create/template`;
+  const stackName = opts?.stackName;
+  return stackName ? `${base}?stackName=${encodeURIComponent(stackName)}` : base;
 }
 
 export function getBootstrapStackOutputsUrl(
