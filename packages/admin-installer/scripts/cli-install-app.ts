@@ -409,11 +409,22 @@ const zipBuffer = buildAppBundle(appDir, `/apps/${appId}`);
 console.log(`\nBundle size: ${(zipBuffer.length / 1024 / 1024).toFixed(1)} MB`);
 
 console.log(`\nInstalling ${appId} app…\n`);
+// Registry writes authenticate to DSQL as the admin-app IAM role (mapped to
+// `${stackPrefix}_installer` PG role at schema-init time). The ambient
+// AWS_* env vars are that role's session credentials, set above either
+// from getSTSCredentials (interactive) or by the caller (--non-interactive).
+const registryCredentials = {
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  sessionToken: process.env.AWS_SESSION_TOKEN!,
+};
+
 await installApp({
   appId,
   manifest,
   zipBuffer,
   version: manifest.version,
+  registryCredentials,
   config: {
     stackPrefix,
     region,

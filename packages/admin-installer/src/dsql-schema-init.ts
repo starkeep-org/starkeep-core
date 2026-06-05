@@ -42,6 +42,7 @@ export interface SchemaInitOptions {
   hostname: string;
   region: string;
   stackPrefix: string;
+  accountId: string;
   credentials: {
     accessKeyId: string;
     secretAccessKey: string;
@@ -166,15 +167,33 @@ export async function initializeSharedSchema(
       ...CATEGORIES.filter((c) => c.id !== "other").map((c) => pgMetadataDdl(c)),
 
       // app_install_steps — per-step state for idempotent install/uninstall.
+      // PK is (app_id, operation, step): the same step name appears under
+      // both `install` and `uninstall` (e.g. `attach_temp_install_ddl_policy`
+      // is reused symmetrically by uninstall), so the operation must be part
+      // of the key. Mirrors local/registry.ts's shared_app_install_steps in
+      // sqlite.
       `CREATE TABLE IF NOT EXISTS shared.app_install_steps (
          app_id     text        NOT NULL,
+         operation  text        NOT NULL,
          step       text        NOT NULL,
          status     text        NOT NULL,
          updated_at timestamptz NOT NULL DEFAULT now(),
          error      text,
-         PRIMARY KEY (app_id, step)
+         PRIMARY KEY (app_id, operation, step)
        )`,
-      `GRANT INSERT, UPDATE, SELECT ON shared.app_install_steps TO "${installer}"`,
+      `GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_install_steps TO "${installer}"`,
+
+      // app_registry — one row per installed cloud app. Source of truth for
+      // "which apps are currently installed in this cloud stack" so the UI
+      // can surface install state without probing AWS resources.
+      `CREATE TABLE IF NOT EXISTS shared.app_registry (
+         app_id       text        NOT NULL PRIMARY KEY,
+         version      text        NOT NULL,
+         name         text,
+         installed_at timestamptz NOT NULL DEFAULT now(),
+         updated_at   timestamptz NOT NULL DEFAULT now()
+       )`,
+      `GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_registry TO "${installer}"`,
 
       // App-specific syncable namespace registry. Mirrors the local SQLite
       // app_syncable_namespaces table. One row per installed app that declared
@@ -192,6 +211,29 @@ export async function initializeSharedSchema(
 
     for (const stmt of statements) {
       await sql.raw(stmt).execute(db);
+    }
+
+    // DSQL-side IAM-to-PG mapping for the cloud install registry. The
+    // orchestrator opens its registry connection as the admin-app IAM role
+    // (federated entry point — the same identity the human admin used to
+    // start the install) and authenticates to PG as `<stackPrefix>_installer`.
+    // This is the only IAM-to-PG mapping the schema initializer sets up; the
+    // per-app mappings are added by run_dsql_ddl during install.
+    //
+    // Probe sys.iam_pg_role_mappings first — AWS IAM GRANT is not idempotent
+    // in DSQL (re-granting an existing mapping errors).
+    const adminAppRoleArn =
+      `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-admin-role`;
+    const existingMapping = await sql<{ exists: boolean }>`
+      SELECT EXISTS (
+        SELECT 1 FROM sys.iam_pg_role_mappings
+        WHERE pg_role_name = ${installer} AND arn = ${adminAppRoleArn}
+      ) AS exists
+    `.execute(db);
+    if (!existingMapping.rows[0]?.exists) {
+      await sql
+        .raw(`AWS IAM GRANT "${installer}" TO '${adminAppRoleArn}'`)
+        .execute(db);
     }
   } finally {
     await db.destroy();

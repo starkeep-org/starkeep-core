@@ -46,14 +46,7 @@ import {
   type ComputeContext,
   type InstallReceipt,
 } from "./compute-stack";
-import {
-  recordStep,
-  getCompletedSteps,
-  registerApp,
-  createAccessPolicies,
-  revokeAccessPolicies,
-  deleteAppRegistryEntry,
-} from "./registry";
+import { createDsqlRegistry, type Registry } from "./registry";
 
 export interface InstallerConfig {
   stackPrefix: string;
@@ -86,6 +79,15 @@ export interface InstallInput {
   version: string;
   config: InstallerConfig;
   /**
+   * Admin-app credentials used by the registry to authenticate to DSQL as
+   * `${stackPrefix}_installer` (see registry.ts). These are the same ambient
+   * creds the orchestrator inherits via roleChain — the federated session the
+   * human admin established when they invoked the install. Doesn't carry
+   * `expiration` because DSQL signing only needs the static fields; the
+   * orchestrator's role-chained creds carry it but this surface is broader.
+   */
+  registryCredentials: RegistryCredentials;
+  /**
    * Set by built-in install wrappers (currently Starkeep Drive) to claim a
    * reserved app id. Third-party installs leave it unset and are rejected on
    * reserved ids.
@@ -93,10 +95,17 @@ export interface InstallInput {
   allowReservedAppId?: boolean;
 }
 
+export interface RegistryCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
 export interface UninstallInput {
   appId: string;
   manifest: AppManifest;
   config: InstallerConfig;
+  registryCredentials: RegistryCredentials;
 }
 
 export interface InstallResult {
@@ -105,6 +114,7 @@ export interface InstallResult {
 }
 
 async function runStep(
+  registry: Registry,
   appId: string,
   operation: "install" | "uninstall",
   stepName: string,
@@ -112,30 +122,48 @@ async function runStep(
   fn: () => Promise<void>,
 ): Promise<void> {
   if (done.has(stepName)) return;
-  await recordStep(appId, operation, stepName, "pending");
+  await registry.recordStep(appId, operation, stepName, "pending");
   try {
     await fn();
-    await recordStep(appId, operation, stepName, "done");
+    await registry.recordStep(appId, operation, stepName, "done");
     done.add(stepName);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await recordStep(appId, operation, stepName, "failed", msg);
+    await registry.recordStep(appId, operation, stepName, "failed", msg);
     throw err;
   }
 }
 
 export async function installApp(input: InstallInput): Promise<InstallResult> {
+  assertCloudInstallableAppId(input.appId);
+  if (!input.allowReservedAppId) assertNotReservedAppId(input.appId);
+  const { config } = input;
+  const registry = createDsqlRegistry({
+    hostname: config.dsqlHostname,
+    region: config.region,
+    stackPrefix: config.stackPrefix,
+    credentials: input.registryCredentials,
+  });
+  try {
+    return await installAppInner(input, registry);
+  } finally {
+    await registry.close();
+  }
+}
+
+async function installAppInner(
+  input: InstallInput,
+  registry: Registry,
+): Promise<InstallResult> {
   const { appId, manifest, zipBuffer, config } = input;
-  assertCloudInstallableAppId(appId);
-  if (!input.allowReservedAppId) assertNotReservedAppId(appId);
   const ir = manifest.infraRequirements;
-  const done = await getCompletedSteps(appId, "install");
+  const done = await registry.getCompletedSteps(appId, "install");
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
 
-  await runStep(appId, "install", "create_iam_role", done, async () => {
+  await runStep(registry, appId, "install", "create_iam_role", done, async () => {
     await createAppRole({
       stackPrefix: config.stackPrefix,
       appId,
@@ -150,11 +178,11 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
     });
   });
 
-  await runStep(appId, "install", "attach_temp_install_ddl_policy", done, () =>
+  await runStep(registry, appId, "install", "attach_temp_install_ddl_policy", done, () =>
     attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
   );
 
-  await runStep(appId, "install", "run_dsql_ddl", done, async () => {
+  await runStep(registry, appId, "install", "run_dsql_ddl", done, async () => {
     const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
     const dsqlOpts: DsqlDdlOptions = {
       hostname: config.dsqlHostname,
@@ -173,7 +201,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
     );
   });
 
-  await runStep(appId, "install", "detach_temp_install_ddl_policy", done, () =>
+  await runStep(registry, appId, "install", "detach_temp_install_ddl_policy", done, () =>
     detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
   );
 
@@ -182,7 +210,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
   // the data-plane writes done by this orchestrator step (put_s3_keep_file).
   const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
 
-  await runStep(appId, "install", "put_s3_keep_file", done, () =>
+  await runStep(registry, appId, "install", "put_s3_keep_file", done, () =>
     putAppKeepFile(config.stackPrefix, appId, config.filesBucket, config.region, appCreds),
   );
 
@@ -191,7 +219,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
     // install-infra owns the install-time AWS-provisioning grants (bundle
     // upload + Pulumi up). Attach the per-app temp policy on install-infra,
     // run upload + compute stack as install-infra, then detach.
-    await runStep(appId, "install", "attach_temp_install_infra_policy", done, () =>
+    await runStep(registry, appId, "install", "attach_temp_install_infra_policy", done, () =>
       attachTempInstallInfraPolicy(
         config.stackPrefix,
         appId,
@@ -207,7 +235,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
     ]);
 
     if (zipBuffer) {
-      await runStep(appId, "install", "upload_bundle", done, () =>
+      await runStep(registry, appId, "install", "upload_bundle", done, () =>
         uploadAppBundle(
           config.stackPrefix,
           appId,
@@ -220,7 +248,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
     }
 
     if (ir.compute.enabled) {
-      await runStep(appId, "install", "install_compute_stack", done, async () => {
+      await runStep(registry, appId, "install", "install_compute_stack", done, async () => {
         const bundleHash = zipBuffer
           ? createHash("sha256").update(zipBuffer).digest("base64")
           : undefined;
@@ -244,33 +272,46 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
       });
     }
 
-    await runStep(appId, "install", "detach_temp_install_infra_policy", done, () =>
+    await runStep(registry, appId, "install", "detach_temp_install_infra_policy", done, () =>
       detachTempInstallInfraPolicy(config.stackPrefix, appId, managerCreds),
     );
   }
 
-  let policyIds: string[] = [];
-  await runStep(appId, "install", "create_access_policies", done, async () => {
-    policyIds = await createAccessPolicies(appId, ir.fileAccess);
-  });
-
-  await runStep(appId, "install", "register_app", done, () =>
-    registerApp(manifest, appId, policyIds),
+  await runStep(registry, appId, "install", "register_app", done, () =>
+    registry.registerApp(manifest, appId),
   );
 
   return { appRoleArn, receipt };
 }
 
 export async function uninstallApp(input: UninstallInput): Promise<void> {
+  const { config } = input;
+  const registry = createDsqlRegistry({
+    hostname: config.dsqlHostname,
+    region: config.region,
+    stackPrefix: config.stackPrefix,
+    credentials: input.registryCredentials,
+  });
+  try {
+    await uninstallAppInner(input, registry);
+  } finally {
+    await registry.close();
+  }
+}
+
+async function uninstallAppInner(
+  input: UninstallInput,
+  registry: Registry,
+): Promise<void> {
   const { appId, manifest, config } = input;
   const ir = manifest.infraRequirements;
-  const done = await getCompletedSteps(appId, "uninstall");
+  const done = await registry.getCompletedSteps(appId, "uninstall");
 
   const managerCreds = await roleChain([config.managerRoleArn]);
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
 
   if (ir.compute.enabled) {
-    await runStep(appId, "uninstall", "attach_temp_uninstall_infra_policy", done, () =>
+    await runStep(registry, appId, "uninstall", "attach_temp_uninstall_infra_policy", done, () =>
       attachTempUninstallInfraPolicy(
         config.stackPrefix,
         appId,
@@ -285,7 +326,7 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
       config.installInfraRoleArn,
     ]);
 
-    await runStep(appId, "uninstall", "uninstall_compute_stack", done, () => {
+    await runStep(registry, appId, "uninstall", "uninstall_compute_stack", done, () => {
       const computeCtx: ComputeContext = {
         stackPrefix: config.stackPrefix,
         appId,
@@ -304,11 +345,11 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
       return uninstallComputeStack(computeCtx);
     });
 
-    await runStep(appId, "uninstall", "delete_s3_artifacts", done, () =>
+    await runStep(registry, appId, "uninstall", "delete_s3_artifacts", done, () =>
       deleteAppArtifactsObjects(appId, config.artifactsBucket, config.region, infraCreds),
     );
 
-    await runStep(appId, "uninstall", "detach_temp_uninstall_infra_policy", done, () =>
+    await runStep(registry, appId, "uninstall", "detach_temp_uninstall_infra_policy", done, () =>
       detachTempUninstallInfraPolicy(config.stackPrefix, appId, managerCreds),
     );
   }
@@ -317,15 +358,15 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
   // permissions boundary scope it to apps/<appId>/*).
   const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
 
-  await runStep(appId, "uninstall", "delete_s3_files", done, () =>
+  await runStep(registry, appId, "uninstall", "delete_s3_files", done, () =>
     deleteAppFilesObjects(appId, config.filesBucket, config.region, appCreds),
   );
 
-  await runStep(appId, "uninstall", "attach_temp_install_ddl_policy", done, () =>
+  await runStep(registry, appId, "uninstall", "attach_temp_install_ddl_policy", done, () =>
     attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
   );
 
-  await runStep(appId, "uninstall", "run_dsql_uninstall_ddl", done, async () => {
+  await runStep(registry, appId, "uninstall", "run_dsql_uninstall_ddl", done, async () => {
     const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
     const dsqlOpts: DsqlDdlOptions = {
       hostname: config.dsqlHostname,
@@ -337,19 +378,15 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
     await runAppUninstallDdl(dsqlOpts, appId, ir.fileAccess, ir.fileAccessAll);
   });
 
-  await runStep(appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>
+  await runStep(registry, appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>
     detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
   );
 
-  await runStep(appId, "uninstall", "revoke_access_policies", done, () =>
-    revokeAccessPolicies(appId),
+  await runStep(registry, appId, "uninstall", "delete_app_registry", done, () =>
+    registry.deleteAppRegistryEntry(appId),
   );
 
-  await runStep(appId, "uninstall", "delete_app_registry", done, () =>
-    deleteAppRegistryEntry(appId),
-  );
-
-  await runStep(appId, "uninstall", "delete_iam_role", done, () =>
+  await runStep(registry, appId, "uninstall", "delete_iam_role", done, () =>
     deleteAppRole(config.stackPrefix, appId, managerCreds),
   );
 }

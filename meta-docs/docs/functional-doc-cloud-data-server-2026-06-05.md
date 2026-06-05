@@ -77,7 +77,8 @@ DSQL is a managed PostgreSQL-compatible serverless cluster — but its surface i
 The schema itself is small. Beyond `shared.records` and the per-category metadata tables, four small tables live in the same schema:
 
 - `shared.access_grants` — one row per (app_id, type_id) carrying `access` (`read` | `readwrite`) and a `metadata_write` flag. The access-enforcer reads this once per request to build the in-memory grants object.
-- `shared.app_install_steps` — the per-step install ledger consumed by the per-app orchestrator.
+- `shared.app_install_steps` — the per-step ledger (one row per `(app_id, operation, step)`) the orchestrator writes during install/uninstall. Drives resume-on-failure: completed steps are skipped on retry.
+- `shared.app_registry` — one row per installed cloud app (`app_id`, `version`, `name`, `installed_at`, `updated_at`). Source of truth for "is this app installed?" — populated by the orchestrator's `register_app` step, removed by `delete_app_registry`.
 - `shared.app_syncable_namespaces` — registry of installed apps' app-specific syncable tables (used by the pull path to enumerate per-app tables).
 
 The DSQL **adapter** (`storage-aurora-dsql`) is a thin `DatabaseAdapter` over `pg`. Records serialize to/from a single row shape; queries compile through Kysely's PostgreSQL dialect (compile-only, against `DummyDriver`) and execute through the per-request client. Transactions are implemented via savepoints because DSQL prohibits nested begin/commit but accepts savepoints.
@@ -134,7 +135,7 @@ Per-app installs (cloud side) are a thin wrapper over the same orchestrator (`in
 
 Uninstall is symmetric and idempotent. For the cloud data server itself, `uninstallCloudDataServer` attaches the temp-install policy (it covers the delete-side verbs too), assumes the cloud-data-server role, runs `pulumi destroy` against the same stack (which deletes DSQL, the bucket, the Lambda, the API Gateway, the CUR report and the billing bucket), then deletes the role plus all its inline policies. Drive uninstall (`uninstallDrive`) is a thin wrapper over `uninstallApp` with no compute teardown.
 
-Per-app uninstall (the standard `uninstallApp` flow) is the symmetric inverse of install: destroy the per-app Pulumi stack as install-infra, delete `apps/<appId>/*` under the app role, revoke and drop everything DSQL-side as install-ddl (revoke all shared-table GRANTs, revoke `USAGE ON SCHEMA shared`, delete the `access_grants` and `app_syncable_namespaces` rows, drop the app schema, revoke the IAM-to-PG mapping, drop the PG role), revoke local access policies, delete the registry entry, delete the app's IAM role. **Shared records persist.** A shared photo created by app A stays in `shared.records` and in S3 after A is uninstalled; its `origin_app_id` continues to point at A's id immutably. The expected next step is some app that still holds matching grants to read it.
+Per-app uninstall (the standard `uninstallApp` flow) is the symmetric inverse of install: destroy the per-app Pulumi stack as install-infra, delete `apps/<appId>/*` under the app role, revoke and drop everything DSQL-side as install-ddl (revoke all shared-table GRANTs, revoke `USAGE ON SCHEMA shared`, delete the `access_grants` and `app_syncable_namespaces` rows, drop the app schema, revoke the IAM-to-PG mapping, drop the PG role), delete the registry entry, delete the app's IAM role. **Shared records persist.** A shared photo created by app A stays in `shared.records` and in S3 after A is uninstalled; its `origin_app_id` continues to point at A's id immutably. The expected next step is some app that still holds matching grants to read it.
 
 ## Why no migrations (and what that means)
 
