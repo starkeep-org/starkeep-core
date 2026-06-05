@@ -433,9 +433,9 @@ async function main() {
     databaseAdapter,
     objectStorageAdapter: localAdapter,
     accessPolicyStore,
-    // Tokens are issued and validated cloud-side only — local has no
-    // sharing_tokens table. This stub throws on every call so anything that
-    // tries to issue locally fails loudly.
+    // Sharing tokens are not wired anywhere today — neither local nor cloud
+    // persists them, and no endpoint redeems them. This stub throws on every
+    // call so anything that tries to issue or validate one fails loudly.
     sharingTokenStore: disabledSharingTokenStore(),
     ownerId: OWNER_ID,
     nodeId: NODE_ID,

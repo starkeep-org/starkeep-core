@@ -34,6 +34,7 @@ import {
   categoryOf,
   getCategory,
   isCategoryId,
+  KNOWN_EXTENSIONS,
 } from "@starkeep/protocol-primitives";
 import type { DataRecord, StarkeepId, HLCClock } from "@starkeep/protocol-primitives";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
@@ -232,6 +233,17 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 // wall-time and counter components are zero-padded hex (see serializeHLC).
 // Records with no cloud-stamped row return ZERO state; the wall clock will
 // dominate going forward.
+//
+// Fragile invariant: the seed query is filtered by the caller's per-extension
+// read grants (rows the assumed app role can SELECT). HLC correctness under
+// LWW relies on "rows this request can affect" ⊆ "rows the seed reads". Today
+// the only cloud-side write path is DELETE /data/records/{id} (tombstone),
+// and an app can only delete rows of types it has write grants on — which
+// implies it can also read them, so the set inclusion holds. If a future
+// cloud write path is added that touches rows the caller cannot also SELECT
+// (e.g. an admin endpoint, a cross-type cleanup pass, a sharing-token op),
+// this seed will underestimate the true cloud max and let the new write
+// mint a stamp lower than an existing cloud stamp on the same record.
 async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
   const result = await client.query(
     "SELECT updated_at FROM shared.records WHERE updated_at LIKE $1 ORDER BY updated_at DESC LIMIT 1",
@@ -544,7 +556,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const typeId = query["type"];
       if (!typeId) return clientErr("type query param is required", 400);
       // The blob lands at shared/<category>/…, so authorize the derived
-      // category (the type param is normally an extension).
+      // category (the type param is normally an extension). Reject unknown
+      // type ids up front rather than letting categoryOf's "other" fallback
+      // silently coerce them — the caller's "other" grants would then gate
+      // a misspelled type, which is a footgun.
+      const normalizedExt = typeId.toLowerCase().replace(/^\./, "");
+      if (!isCategoryId(typeId) && !KNOWN_EXTENSIONS.has(normalizedExt)) {
+        return clientErr(`Unknown type id: ${typeId}`, 400);
+      }
       const fileCategory = isCategoryId(typeId) ? typeId : categoryOf(typeId);
       if (!canWriteCategory(grants, fileCategory)) return clientErr("Forbidden", 403);
       const headers = event.headers ?? {};

@@ -17,11 +17,10 @@ import type { AccessPolicyStore, SharingTokenStore } from "./stores.js";
 export interface CreateAccessControlEngineOptions {
   policyStore: AccessPolicyStore;
   /**
-   * Sharing-token storage. On the cloud-data-server this is a real store
-   * backed by the shared.sharing_tokens table. On the local-data-server pass
-   * `disabledSharingTokenStore()` from "./stores.js" — every method throws,
-   * surfacing the cloud-only design clearly when something tries to issue or
-   * validate a token locally.
+   * Sharing-token storage. No production store exists yet — neither local nor
+   * cloud persists tokens, and no endpoint redeems them. Pass
+   * `disabledSharingTokenStore()` from "./stores.js" so any code that tries
+   * to issue or validate a token fails loudly until a real backend is wired.
    */
   tokenStore: SharingTokenStore;
   clock: HLCClock;

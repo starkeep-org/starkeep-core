@@ -17,8 +17,9 @@ import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/protocol-primitives";
  *   - shared_app_install_steps — idempotent install/uninstall ledger
  *   - access_policies          — control-plane: AccessControlEngine policies
  *
- * `sharing_tokens` lives cloud-side only (tokens are issued and validated by
- * the cloud-data-server against shared resources). See plan.
+ * `sharing_tokens` is not persisted anywhere today — local uses the disabled
+ * stub store and no cloud-side table or endpoint exists. The redemption path
+ * is left for a future workstream.
  *
  * No migration system: this is a fresh-start schema. The user removes
  * ~/.starkeep/data.db (or the local-data-server's STARKEEP_DIR is fresh)

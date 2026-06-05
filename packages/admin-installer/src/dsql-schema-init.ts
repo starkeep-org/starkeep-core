@@ -176,34 +176,6 @@ export async function initializeSharedSchema(
        )`,
       `GRANT INSERT, UPDATE, SELECT ON shared.app_install_steps TO "${installer}"`,
 
-      // Control-plane tables. These are NOT shared across apps the way
-      // shared.records is — they hold per-instance config consumed by the
-      // cloud-data-server and access-control engine. See the refactor plan.
-      `CREATE TABLE IF NOT EXISTS shared.access_policies (
-         policy_id     text NOT NULL PRIMARY KEY,
-         subject_type  text NOT NULL,
-         subject_id    text NOT NULL,
-         resource_type text NOT NULL,
-         resource_id   text NOT NULL,
-         permissions   text NOT NULL,
-         granted_at    text NOT NULL,
-         expires_at    text
-       )`,
-
-      // sharing_tokens lives cloud-side only — bearer credentials that
-      // validate against an access policy. token_hash is the looked-up key;
-      // the unhashed token is never persisted.
-      `CREATE TABLE IF NOT EXISTS shared.sharing_tokens (
-         token_id    text    NOT NULL PRIMARY KEY,
-         token_hash  text    NOT NULL,
-         policy_id   text    NOT NULL,
-         created_at  text    NOT NULL,
-         expires_at  text,
-         max_uses    integer,
-         usage_count integer NOT NULL DEFAULT 0
-       )`,
-      `CREATE INDEX ASYNC IF NOT EXISTS idx_sharing_tokens_token_hash ON shared.sharing_tokens(token_hash)`,
-
       // App-specific syncable namespace registry. Mirrors the local SQLite
       // app_syncable_namespaces table. One row per installed app that declared
       // infraRequirements.appSpecificSyncable. The tables_json column is a JSON
