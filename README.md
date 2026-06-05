@@ -54,7 +54,6 @@ A user-owned data platform where app users control their own cloud instance and 
 | `@starkeep/sync-engine` | Change log, conflict resolution, file sync, change notifications |
 | `@starkeep/access-control` | Policy model, enforced adapter wrapper, sharing tokens |
 | `@starkeep/shared-space-api` | Versioned API router and middleware |
-| `@starkeep/aws-provider` | Pulumi-based per-user AWS provisioning |
 | `@starkeep/sdk` | High-level facade over all packages |
 
 ## Example apps

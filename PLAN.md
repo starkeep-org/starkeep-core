@@ -68,7 +68,6 @@ packages/
   sync-engine/           # Bidirectional local <-> cloud sync with HLC
   access-control/        # Access control policies and enforcement
   shared-space-api/      # Shared Space API framework (versioned, registered endpoints)
-  aws-provider/          # AWS-specific orchestration (Lambda, S3, Aurora DSQL)
 ```
 
 ---
@@ -232,14 +231,6 @@ Implement the cloud layer on AWS.
 - **Aurora DSQL adapter.** Implement the database adapter interface using Aurora DSQL (PostgreSQL-compatible).
 - **S3 adapter.** Implement the object storage adapter interface using S3.
 - **Connection management.** Handle connection pooling, authentication, and error handling for serverless environments.
-
-#### 7.2 AWS Orchestration (`packages/aws-provider`)
-
-- **Lambda-based compute.** Package metadata generation, sync operations, and API endpoints as Lambda functions.
-- **Infrastructure as code.** Provide deployment templates (CDK or similar) for provisioning a user's Starkeep cloud instance on AWS.
-  - Aurora DSQL cluster, S3 buckets, Lambda functions, API Gateway.
-- **Per-user isolation.** Each app user owns their own AWS infrastructure. The provider package handles provisioning and teardown.
-- **Event-driven metadata generation.** Use S3 event notifications or similar to trigger queued metadata generation when new data arrives.
 
 ### Phase 8 — Developer Tooling & Registry
 

@@ -2,7 +2,7 @@
 
 Topic scope: `cloud-overview-and-bootstrap` plus its four children — `cloud-bootstrap-setup`, `cloud-bootstrap-cognito-user` (the admin's Cognito account in the bootstrap user pool — federated login, not an AWS IAM user), `cloud-bootstrap-roles-permissions`, `cloud-bootstrap-cur`.
 
-Module scope: `starkeep-core/packages/aws-bootstrap` (the live bootstrap code), `starkeep-core/packages/aws-provider` (a legacy package — see Part 2).
+Module scope: `starkeep-core/packages/aws-bootstrap` (the live bootstrap code).
 
 Audience: a new contributor familiar with AWS but new to Starkeep's cloud model.
 
@@ -113,30 +113,22 @@ A new reader is most likely to be surprised by what's *missing* from the post-bo
 
 ## Questionable purposes
 
-- **The `aws-provider` package is not on the live path.** A grep for `@starkeep/aws-provider` or imports from that path turns up zero hits in `starkeep-core/packages/**`, `starkeep-core/apps/**`, or `starkeep-apps/**`. Every reference is in `starkeep-core/INSTRUCTIONS.md`, `starkeep-core/README.md`, or `starkeep-core/docs/outdated*/`. The package exports `createAwsProvider`, which builds a `provisionUser` / `deprovisionUser` API atop a pluggable `StackProgram` — a "per-user infrastructure" model where each user gets their own DSQL cluster, S3 bucket, and API Gateway (`aws-provider/src/types.ts:1-29`). That model contradicts the current single-tenant-per-account architecture documented in `roles-and-permissions.md`. The package appears to be a leftover from an earlier SaaS-style design; it is in this topic's module scope only because the codebase-manager index still associates it with `cloud-bootstrap-setup` and `cloud-server-install`.
-
-- **`aws-bootstrap/src/template-generator.ts` is unrelated to bootstrap.** Despite living in the bootstrap package and being re-exported from its top-level `index.ts` (`export * from "./template-generator.js"`), `template-generator.ts` is a generator for end-user "app type" templates — static web app, API service with DynamoDB, Tailscale exit node, OpenClaw AI assistant, etc. None of these are part of Starkeep's bootstrap; none reference the bootstrap roles, boundaries, or buckets. The file looks like residue from a different product surface (note the `ManagedBy: Starkeeper` tag — singular "Starkeeper" — that appears in every template, different from the bootstrap template's `starkeep:managed: 'true'` convention).
+_(no remaining items)_
 
 ## Behavior inconsistent with purpose
 
-- **`starkeep-core/INSTRUCTIONS.md` describes an architecture that no longer exists.** The file states (line 70): *"Starkeep follows a per-user isolation model: each app user gets their own Aurora DSQL cluster, S3 bucket, and API Gateway. The `@starkeep/aws-provider` package orchestrates this via the Pulumi Automation API."* The current model is one DSQL cluster per *deployment* (i.e., per customer AWS account), shared across all apps, with per-app PG roles and S3 prefixes providing isolation. A new contributor who reads `INSTRUCTIONS.md` will form an incorrect mental model. (This is a doc-content issue, not a code-content issue, but the misalignment is severe enough to surface here.)
+_(no remaining items)_
 
 ## Missing behaviors
 
-- **The Pulumi passphrase is a literal placeholder.** `bootstrap-template.ts:395` writes `Value: 'REPLACE_WITH_RANDOM_32_BYTE_VALUE'` into the SSM parameter, and the resource description tells the operator to replace it manually or via a post-deploy custom resource. Bootstrap as it stands does not generate a random value, and there is no custom resource in the template that would do so. Until something rotates it, every freshly-bootstrapped deployment shares the same string, and any actual Pulumi up will encrypt state with that string. Functionally this means *bootstrap completes successfully but the deployment is not safe to run apps in until an operator (or some out-of-band step) replaces the placeholder*.
+_(no remaining items; passphrase rotation tracked in todo 11)_
 
 ## Behavioral bugs
 
-- **`__tests__/quick-create.test.ts` imports from a non-existent source file.** Its imports (`import { generateQuickCreateLink, generateBootstrapQuickCreateLink, generateChangeSetApprovalLink } from "../src/quick-create"`) point at `aws-bootstrap/src/quick-create`, but no such file exists in `src/`. The test would fail at module-load time; either the source file was deleted in a restructure and the test was missed, or the test predates the unification described in `bootstrap/index.ts`'s comment ("replaces self-hosted + SaaS distinction"). Either way it is dead code.
-
-- **`__tests__/bootstrap-template.test.ts` imports from a stale path.** Its import (`from "../src/bootstrap-template"`) refers to a flat layout, but the actual file is at `src/bootstrap/bootstrap-template.ts`. It also imports `generateExternalId` from there, but `generateExternalId` is not exported from the current `bootstrap-template.ts`. Same diagnosis as above: the test was not updated when the bootstrap source moved under `src/bootstrap/` and the external-id surface was removed.
-
-- **`__tests__/bootstrap-flow.integration.test.ts` references `generateExternalId` and an external-id-keyed bootstrap flow** that no longer exists in the source. Sibling to the two above; same root cause.
-
-Net effect of the three: the only `aws-bootstrap` tests likely to run cleanly today are `self-hosted-deploy-policy.test.ts` (not read in detail) and `aws-provider`'s tests. The bootstrap template's behavior is, in practice, currently untested by the package's own test files.
+_(no remaining items; the four stale __tests__ files were deleted and the missing coverage is tracked in todo 13)_
 
 ## Potential gaps
 
-- **There is no automated assertion that the Manager role's `iam:CreateRole` boundary allow-list and the set of boundaries bootstrap actually creates stay in sync.** Manager's policy (`manager-policy.ts:35-40`) names three boundary ARNs by string template. Bootstrap creates five boundaries. If a future change renames a boundary or adds a sixth that Manager should be allowed to mint roles under, only a manual read of both files will catch the mismatch. Given that this is the load-bearing security check that prevents Manager-minted roles from escaping their ceilings (`roles-and-permissions.md` puts substantial weight on it), a unit test that constructs both lists and asserts they agree would be cheap insurance. *High-confidence gap.*
+_(no remaining items; boundary allow-list sync test is part of todo 13)_
 
 - (Other candidate gaps were considered and dropped as not high-confidence enough to include.)
