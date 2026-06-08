@@ -138,11 +138,17 @@ function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
   return row?.hmac_secret ?? null;
 }
 
-function validateAppHmac(db: DatabaseSync, appId: string, body: string, sig: string | undefined): boolean {
+function validateAppHmac(db: DatabaseSync, appId: string, body: Buffer, sig: string | undefined): boolean {
   if (!sig) return false;
   const secret = getAppHmacSecret(db, appId);
   if (!secret) return false;
-  const expected = createHmac("sha256", secret).update(`${appId}:${body}`).digest("hex");
+  // HMAC over raw bytes: `${appId}:` (utf-8) ++ body bytes. Operating on bytes
+  // (not a `${appId}:${body}` string) keeps binary payloads lossless and
+  // removes the asymmetry where the client signs "binary"-decoded bytes while
+  // the server signs the utf-8 decode of the same buffer.
+  const prefix = Buffer.from(`${appId}:`, "utf8");
+  const input = Buffer.concat([prefix as unknown as Uint8Array, body as unknown as Uint8Array]);
+  const expected = createHmac("sha256", secret).update(input as unknown as Uint8Array).digest("hex");
   // timingSafeEqual requires equal-length buffers
   const sigBuf = Buffer.from(sig, "hex");
   const expBuf = Buffer.from(expected, "hex");
@@ -637,7 +643,9 @@ async function main() {
         return;
       }
       const rawBody =
-        req.method === "GET" || req.method === "HEAD" ? "" : await readBody(req);
+        req.method === "GET" || req.method === "HEAD"
+          ? Buffer.alloc(0)
+          : await readBodyBuffer(req);
       if (!validateAppHmac(localDb, appId, rawBody, appSig)) {
         res.writeHead(401);
         json(res, { error: "Invalid X-Starkeep-App-Sig (app not installed or signature mismatch)" });
