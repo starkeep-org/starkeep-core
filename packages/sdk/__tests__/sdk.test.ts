@@ -3,8 +3,6 @@ import {
   createHLCClock,
   type StarkeepId,
   type HLCTimestamp,
-  type TypeRegistration,
-  type TypeRegistrationStore,
 } from "@starkeep/protocol-primitives";
 import {
   MockDatabaseAdapter,
@@ -41,16 +39,6 @@ function memoryTokenStore(): SharingTokenStore {
   };
 }
 
-function memoryTypeRegistrationStore(): TypeRegistrationStore {
-  const regs = new Map<string, TypeRegistration>();
-  return {
-    async put(r) { regs.set(r.typeId, r); },
-    async get(id) { return regs.get(id) ?? null; },
-    async list() { return Array.from(regs.values()); },
-    async delete(id) { regs.delete(id); },
-  };
-}
-
 describe("createStarkeepSdk", () => {
   async function createTestSdk() {
     const localDatabase = new MockDatabaseAdapter();
@@ -66,7 +54,6 @@ describe("createStarkeepSdk", () => {
       objectStorageAdapter: localObjectStorage,
       accessPolicyStore: memoryPolicyStore(),
       sharingTokenStore: memoryTokenStore(),
-      typeRegistrationStore: memoryTypeRegistrationStore(),
       ownerId: "test-owner",
       nodeId: "test-node",
       clock,
@@ -111,7 +98,6 @@ describe("createStarkeepSdk", () => {
         objectStorageAdapter: localObjectStorage,
         accessPolicyStore: memoryPolicyStore(),
         sharingTokenStore: memoryTokenStore(),
-        typeRegistrationStore: memoryTypeRegistrationStore(),
         ownerId: "test-owner",
         nodeId: "app-a",
         clock,
@@ -121,7 +107,6 @@ describe("createStarkeepSdk", () => {
         objectStorageAdapter: localObjectStorage,
         accessPolicyStore: memoryPolicyStore(),
         sharingTokenStore: memoryTokenStore(),
-        typeRegistrationStore: memoryTypeRegistrationStore(),
         ownerId: "test-owner",
         nodeId: "app-b",
         clock,
@@ -200,27 +185,6 @@ describe("createStarkeepSdk", () => {
     });
   });
 
-  describe("aggregation operations", () => {
-    it("should compute aggregations", async () => {
-      const { sdk } = await createTestSdk();
-
-      await sdk.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
-        Buffer.alloc(1000),
-        "image/jpeg",
-      );
-      await sdk.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
-        Buffer.alloc(2000),
-        "image/png",
-      );
-
-      const result = await sdk.aggregations.compute();
-      expect(result.totalCount).toBe(2);
-      expect(result.totalSizeBytes).toBe(3000);
-    });
-  });
-
   describe("access control operations", () => {
     it("should create and list policies", async () => {
       const { sdk } = await createTestSdk();
@@ -239,25 +203,6 @@ describe("createStarkeepSdk", () => {
         subjectId: "user-1",
       });
       expect(policies).toHaveLength(1);
-    });
-  });
-
-  describe("type registrations", () => {
-    it("should register and list types", async () => {
-      const { sdk } = await createTestSdk();
-      const reg = await sdk.typeRegistrations.register({
-        typeId: "image",
-        schema: { type: "object" },
-        schemaVersion: "1.0.0",
-        description: "Image file",
-        registeredByAppId: "photos",
-      });
-      expect(reg.typeId).toBe("image");
-      expect(reg.registeredAt).toBeTruthy();
-
-      const list = await sdk.typeRegistrations.list();
-      expect(list).toHaveLength(1);
-      expect(list[0].typeId).toBe("image");
     });
   });
 

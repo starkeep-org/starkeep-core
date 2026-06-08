@@ -19,7 +19,6 @@ export type {
   AppSyncableNamespace,
   AppSyncableNamespaceStore,
   FileRecordRow,
-  FileRecordsApplier,
   Watermarks,
   SyncExchangeRequest,
   SyncExchangeResponse,
@@ -41,4 +40,4 @@ export {
   createHttpSyncHandler,
   type HttpSyncServerOptions,
 } from "./transports/http-server.js";
-export { SyncError, SyncConflictError } from "./errors.js";
+export { SyncError } from "./errors.js";

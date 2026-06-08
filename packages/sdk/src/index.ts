@@ -3,7 +3,6 @@ export type {
   StarkeepSdkOptions,
   DataOperations,
   IndexOperations,
-  AggregationOperations,
   AccessControlOperations,
   ApiOperations,
 } from "./types.js";

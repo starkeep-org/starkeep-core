@@ -1,6 +1,7 @@
 {
   "name": "@starkeep/storage-s3",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -12,6 +13,19 @@
       "require": "./dist/index.cjs"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/starkeep-dev/starkeep-core.git",
+    "directory": "packages/storage-s3"
+  },
+  "homepage": "https://github.com/starkeep-dev/starkeep-core/tree/main/packages/storage-s3",
   "scripts": {
     "build": "tsup",
     "test": "vitest run",

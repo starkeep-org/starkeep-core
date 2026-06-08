@@ -6,7 +6,6 @@ import {
   isCategoryId,
   type DataRecord,
   type MetadataRow,
-  type TypeRegistration,
 } from "@starkeep/protocol-primitives";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -18,7 +17,6 @@ async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
     .join("");
 }
 import { createUnifiedIndex } from "@starkeep/query-orchestrator";
-import { createAggregationEngine } from "@starkeep/aggregations";
 import { createChangeNotifier } from "@starkeep/sync-engine";
 import { createAccessControlEngine, createEnforcedDatabaseAdapter } from "@starkeep/access-control";
 import { createSharedSpaceApi } from "@starkeep/shared-space-api";
@@ -42,7 +40,6 @@ export async function createStarkeepSdk(
     objectStorageAdapter,
     accessPolicyStore,
     sharingTokenStore,
-    typeRegistrationStore,
     ownerId,
     nodeId,
     syncStateStore,
@@ -109,7 +106,6 @@ export async function createStarkeepSdk(
     : rawDatabaseAdapter;
 
   const unifiedIndex = createUnifiedIndex({ databaseAdapter });
-  const aggregationEngine = createAggregationEngine({ databaseAdapter });
 
   /**
    * Emit a `local-change-recorded` event for a write. The supervisor wakes its
@@ -294,12 +290,6 @@ export async function createStarkeepSdk(
       },
     },
 
-    aggregations: {
-      async compute(aggregationOptions) {
-        return aggregationEngine.compute(aggregationOptions);
-      },
-    },
-
     accessControl: {
       async createPolicy(input) {
         if (subject) {
@@ -325,25 +315,6 @@ export async function createStarkeepSdk(
 
       async checkAccess(request) {
         return accessControlEngine.checkAccess(request);
-      },
-    },
-
-    typeRegistrations: {
-      async register(registration) {
-        const full: TypeRegistration = {
-          ...registration,
-          registeredAt: clock.now(),
-        };
-        await typeRegistrationStore.put(full);
-        return full;
-      },
-
-      async get(typeId) {
-        return typeRegistrationStore.get(typeId);
-      },
-
-      async list() {
-        return typeRegistrationStore.list();
       },
     },
 

@@ -1,10 +1,12 @@
 import "server-only";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { resolve } from "node:path";
-import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "./exec-commands";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { DAEMON_COMMANDS, type DaemonId } from "./exec-commands";
 
-export const PIDS_DIR = resolve(REPO_ROOT, ".pids");
+const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+export const PIDS_DIR = join(STARKEEP_DATA_DIR, "pids");
 
 // Any id not in DAEMON_COMMANDS is treated as an installed-app daemon —
 // admin-web spawned it from a manifest's localRun block and recorded its pid

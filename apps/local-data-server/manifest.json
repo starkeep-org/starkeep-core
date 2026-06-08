@@ -12,6 +12,5 @@
     },
     "brokerPower": false,
     "sharedResources": []
-  },
-  "migrations": []
+  }
 }

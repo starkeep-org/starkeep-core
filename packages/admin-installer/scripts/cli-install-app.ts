@@ -148,6 +148,18 @@ function appParentDirs(config: StarkeepConfig): string[] {
 /**
  * Find the source dir of the app whose manifest id === appId by scanning the
  * configured app parent dirs (first match wins, earlier dirs take precedence).
+ *
+ * TODO: This whole filesystem-scan discovery model needs to be replaced —
+ * not extended — as part of publishing starkeep-core as a package. The
+ * current shape (admin scans configured parent directories on their
+ * workstation for any subdir containing a `starkeep.manifest.json`) only
+ * makes sense while every app lives in a sibling checkout next to
+ * starkeep-core. Once external apps install from their own published
+ * packages (npm, a registry, a URL, etc.), "what is the app's source
+ * dir?" stops being a meaningful question — the manifest and bundle
+ * arrive via the package, not via a directory scan. Don't bolt sibling
+ * checkout support onto this; rethink the discovery + resolution model
+ * end-to-end when that work happens.
  */
 function resolveAppDir(config: StarkeepConfig, appId: string): string {
   for (const parentDir of appParentDirs(config)) {
@@ -409,11 +421,22 @@ const zipBuffer = buildAppBundle(appDir, `/apps/${appId}`);
 console.log(`\nBundle size: ${(zipBuffer.length / 1024 / 1024).toFixed(1)} MB`);
 
 console.log(`\nInstalling ${appId} app…\n`);
+// Registry writes authenticate to DSQL as the admin-app IAM role (mapped to
+// `${stackPrefix}_installer` PG role at schema-init time). The ambient
+// AWS_* env vars are that role's session credentials, set above either
+// from getSTSCredentials (interactive) or by the caller (--non-interactive).
+const registryCredentials = {
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  sessionToken: process.env.AWS_SESSION_TOKEN!,
+};
+
 await installApp({
   appId,
   manifest,
   zipBuffer,
   version: manifest.version,
+  registryCredentials,
   config: {
     stackPrefix,
     region,

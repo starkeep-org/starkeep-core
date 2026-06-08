@@ -1,6 +1,3 @@
-// Core domain logic for the Starkeep control plane
-export * from "./template-generator.js";
-
 // Unified bootstrap (replaces self-hosted + SaaS distinction)
 export {
   generateBootstrapTemplate,

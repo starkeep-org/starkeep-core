@@ -750,9 +750,11 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
   // The app whose install modal is currently open (null when closed).
   const [installing, setInstalling] = useState<{ appId: string; appName: string; endpoint: string } | null>(null);
   const [credentials, setCredentials] = useState<(STSCredentials & { region?: string }) | null>(null);
-  // Apps that completed an install/redeploy this session (drives the badge +
-  // Install→Redeploy label). The deployed URL is shown regardless of this.
-  const [installedIds, setInstalledIds] = useState<Set<string>>(new Set());
+  // Apps that the cloud registry reports as installed. Loaded from
+  // `shared.app_registry` via POST /api/apps/cloud/list; refreshed after
+  // every successful install. null = not yet loaded / cloud not configured.
+  const [installedIds, setInstalledIds] = useState<Set<string> | null>(null);
+  const [registryError, setRegistryError] = useState<string | null>(null);
 
   // Resolve the API Gateway base URL from the persisted cloud config so each
   // app's Open ↗ link (`${apiGatewayUrl}/apps/${appId}/`) survives a reload.
@@ -763,6 +765,43 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
       setApiGatewayUrl(cfg?.apiGatewayUrl ?? null);
     })();
   }, []);
+
+  // Refresh the cloud install registry. Requires signed-in Cognito creds —
+  // skips silently if the user hasn't signed in (registry stays null and the
+  // section falls back to showing no "Installed" badge until they auth).
+  const refreshRegistry = useCallback(async () => {
+    setRegistryError(null);
+    try {
+      const cfg = await readCloudConfig();
+      if (!cfg) return; // cloud not configured
+      const session = await readCognitoSession();
+      if (!session?.refreshToken) return; // not signed in
+      const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
+      const creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
+      await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
+      const res = await fetch("/api/apps/cloud/list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accessKeyId: creds.accessKeyId,
+          secretAccessKey: creds.secretAccessKey,
+          sessionToken: creds.sessionToken,
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? `cloud registry list failed: ${res.status}`);
+      }
+      const body = (await res.json()) as { apps: Array<{ appId: string }> };
+      setInstalledIds(new Set(body.apps.map((a) => a.appId)));
+    } catch (err) {
+      setRegistryError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshRegistry();
+  }, [refreshRegistry]);
 
   const handleInstall = async (appId: string, appName: string, endpoint: string) => {
     setCredError(null);
@@ -796,6 +835,13 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
         </Alert>
       )}
 
+      {registryError && (
+        <Alert variant="destructive">
+          <AlertTitle>Couldn’t load cloud install state</AlertTitle>
+          <AlertDescription>{registryError}</AlertDescription>
+        </Alert>
+      )}
+
       {apps === null && <p className="text-sm text-muted-foreground">Loading…</p>}
       {apps !== null && apps.length === 0 && (
         <p className="text-sm text-muted-foreground">No cloud apps found.</p>
@@ -808,7 +854,10 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
         // `bundle` script. No hardcoded installer registry.
         const endpoint = `/api/apps/${entry.appId}/cloud-install`;
         const url = apiGatewayUrl ? `${apiGatewayUrl}/apps/${entry.appId}/` : null;
-        const installed = installedIds.has(entry.appId);
+        // `installedIds === null` means the registry hasn't been read yet
+        // (user not signed in, cloud not set up, or the read errored). In
+        // that case render no "Installed" badge rather than guessing.
+        const installed = installedIds !== null && installedIds.has(entry.appId);
         return (
           <div key={entry.appId} className="rounded-md border p-3 flex flex-col gap-2">
             <div className="flex items-center justify-between gap-3">
@@ -851,12 +900,7 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
         endpoint={installing?.endpoint ?? null}
         credentials={credentials}
         onClose={() => { setInstalling(null); setCredentials(null); }}
-        onSuccess={() => {
-          if (installing) {
-            const id = installing.appId;
-            setInstalledIds((prev) => new Set(prev).add(id));
-          }
-        }}
+        onSuccess={() => { refreshRegistry(); }}
       />
     </div>
   );

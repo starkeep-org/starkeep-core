@@ -256,23 +256,30 @@ console.log(`  Prefix : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log("");
 
-await installDrive({
-  stackPrefix,
-  region,
-  accountId,
-  dsqlHostname: config.auroraEndpoint,
-  filesBucket: config.s3Bucket,
-  artifactsBucket,
-  pulumiStateBucket,
-  apiGatewayId: config.apiGatewayId,
-  apiGatewayExecutionArn,
-  authorizerId: config.authorizerId,
-  permissionsBoundaryArn,
-  foundationalPermissionsBoundaryArn,
-  userDataOwnerPermissionsBoundaryArn,
-  managerRoleArn,
-  installDdlRoleArn,
-  installInfraRoleArn,
-});
+await installDrive(
+  {
+    stackPrefix,
+    region,
+    accountId,
+    dsqlHostname: config.auroraEndpoint,
+    filesBucket: config.s3Bucket,
+    artifactsBucket,
+    pulumiStateBucket,
+    apiGatewayId: config.apiGatewayId,
+    apiGatewayExecutionArn,
+    authorizerId: config.authorizerId,
+    permissionsBoundaryArn,
+    foundationalPermissionsBoundaryArn,
+    userDataOwnerPermissionsBoundaryArn,
+    managerRoleArn,
+    installDdlRoleArn,
+    installInfraRoleArn,
+  },
+  {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    sessionToken: process.env.AWS_SESSION_TOKEN!,
+  },
+);
 
 console.log("\nStarkeep Drive install complete.");

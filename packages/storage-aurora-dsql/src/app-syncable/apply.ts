@@ -6,10 +6,7 @@ import type {
   ScanCapableApplier,
   ScanSinceOptions,
   ScanSincePage,
-  FileRecordRow,
-  FileRecordsApplier,
 } from "@starkeep/shared-space-api";
-import { FILE_RECORDS_TABLE } from "@starkeep/shared-space-api";
 import type { DatabaseClient } from "../types.js";
 
 /**
@@ -21,7 +18,7 @@ import type { DatabaseClient } from "../types.js";
  * the row so that tombstones propagate to other clients via pull.
  */
 export class DsqlAppSyncableApplier
-  implements AppSyncableApplier, ScanCapableApplier, FileRecordsApplier
+  implements AppSyncableApplier, ScanCapableApplier
 {
   constructor(
     private readonly client: DatabaseClient,
@@ -196,24 +193,6 @@ export class DsqlAppSyncableApplier
     return { rows: entries, nextCursor, hasMore };
   }
 
-  /**
-   * Scan the reserved `_starkeep_sync_records` table for live (non-deleted)
-   * rows. Returns an empty array if the app's schema doesn't have a reserved
-   * table yet.
-   */
-  async scanFileRecords(appId: string): Promise<FileRecordRow[]> {
-    const schemaTable = `app_${appId.replace(/-/g, "_")}."${FILE_RECORDS_TABLE}"`;
-    try {
-      const result = await this.client.query(
-        `SELECT * FROM ${schemaTable} WHERE deleted_at IS NULL`,
-        [],
-      );
-      return result.rows.map(rowToFileRecord);
-    } catch {
-      return [];
-    }
-  }
-
   /** Support read path from the factory's queryRows. */
   async queryRows(
     appId: string,
@@ -229,21 +208,6 @@ export class DsqlAppSyncableApplier
     );
     return result.rows;
   }
-}
-
-function rowToFileRecord(row: Record<string, unknown>): FileRecordRow {
-  return {
-    id: row["id"] as string,
-    object_storage_key: row["object_storage_key"] as string,
-    content_hash: row["content_hash"] as string,
-    mime_type: row["mime_type"] as string,
-    size_bytes: Number(row["size_bytes"]),
-    original_filename: (row["original_filename"] as string | null) ?? null,
-    origin_app_id: row["origin_app_id"] as string,
-    created_at: row["created_at"] as string,
-    updated_at: row["updated_at"] as string,
-    deleted_at: (row["deleted_at"] as string | null) ?? null,
-  };
 }
 
 function rowToEntry(

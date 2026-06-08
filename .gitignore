@@ -26,8 +26,5 @@ infra/user-data/.sst/
 infra/user-data/.ws/
 infra/user-data/sst-env.d.ts
 
-# Daemon PID files written by admin-web exec routes
-.pids/
-
 # Built artifact for the cloud-data-server builtin app
 packages/admin-installer/builtin-apps/cloud-data-server/dist.zip

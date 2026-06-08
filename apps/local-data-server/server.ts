@@ -21,7 +21,6 @@ import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js"
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
   createSqliteAccessPolicyStore,
-  createSqliteTypeRegistrationStore,
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
 } from "../../packages/storage-sqlite/src/index.js";
@@ -139,11 +138,17 @@ function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
   return row?.hmac_secret ?? null;
 }
 
-function validateAppHmac(db: DatabaseSync, appId: string, body: string, sig: string | undefined): boolean {
+function validateAppHmac(db: DatabaseSync, appId: string, body: Buffer, sig: string | undefined): boolean {
   if (!sig) return false;
   const secret = getAppHmacSecret(db, appId);
   if (!secret) return false;
-  const expected = createHmac("sha256", secret).update(`${appId}:${body}`).digest("hex");
+  // HMAC over raw bytes: `${appId}:` (utf-8) ++ body bytes. Operating on bytes
+  // (not a `${appId}:${body}` string) keeps binary payloads lossless and
+  // removes the asymmetry where the client signs "binary"-decoded bytes while
+  // the server signs the utf-8 decode of the same buffer.
+  const prefix = Buffer.from(`${appId}:`, "utf8");
+  const input = Buffer.concat([prefix as unknown as Uint8Array, body as unknown as Uint8Array]);
+  const expected = createHmac("sha256", secret).update(input as unknown as Uint8Array).digest("hex");
   // timingSafeEqual requires equal-length buffers
   const sigBuf = Buffer.from(sig, "hex");
   const expBuf = Buffer.from(expected, "hex");
@@ -407,7 +412,6 @@ async function main() {
   const localDb = databaseAdapter.getRawDatabase();
 
   const accessPolicyStore = createSqliteAccessPolicyStore(localDb);
-  const typeRegistrationStore = createSqliteTypeRegistrationStore(localDb);
 
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
   const appApplier = new SqliteAppSyncableApplier(localDb, namespaceStore);
@@ -435,11 +439,10 @@ async function main() {
     databaseAdapter,
     objectStorageAdapter: localAdapter,
     accessPolicyStore,
-    // Tokens are issued and validated cloud-side only — local has no
-    // sharing_tokens table. This stub throws on every call so anything that
-    // tries to issue locally fails loudly.
+    // Sharing tokens are not wired anywhere today — neither local nor cloud
+    // persists them, and no endpoint redeems them. This stub throws on every
+    // call so anything that tries to issue or validate one fails loudly.
     sharingTokenStore: disabledSharingTokenStore(),
-    typeRegistrationStore,
     ownerId: OWNER_ID,
     nodeId: NODE_ID,
     syncStateStore,
@@ -492,9 +495,9 @@ async function main() {
   // Built-in local file-watcher identity. All records originated by LDS
   // built-in features (notably the file watcher) are stamped with this appId
   // as their immutable origin_app_id, both in the local change log and on the
-  // wire. Under Shape A this is a *local-only* identity: its records are shared
-  // records that sync to the cloud via the Starkeep Drive channel under Drive's
-  // role — there is no dedicated cloud write-role for it. Its grants flow
+  // wire. This is a *local-only* identity: its records are shared records that
+  // sync to the cloud via the Starkeep Drive channel under Drive's role — there
+  // is no dedicated cloud write-role for it. Its grants flow
   // through the same local access-control path as any other app. No user
   // consent — it's part of the LDS itself.
   const localWatcherManifest = {
@@ -519,8 +522,8 @@ async function main() {
   // extensions — it cannot enumerate unmapped/`other` extensions — so it writes
   // no access_grants rows; the access functions grant it all-access by app id.
   // Thus:
-  //   - the always-on Drive sync engine (Shape A) is the legitimate all-access
-  //     identity that scans all shared records for the single Drive channel;
+  //   - the always-on Drive sync engine is the legitimate all-access identity
+  //     that scans all shared records for the single Drive channel;
   //   - the Drive UI authenticates as `starkeep-drive` over HMAC and reads all
   //     shared data through the same appCanRead path as any app — no bypass.
   // No cloud credentials live here; the cloud-side write identity for shared
@@ -640,7 +643,9 @@ async function main() {
         return;
       }
       const rawBody =
-        req.method === "GET" || req.method === "HEAD" ? "" : await readBody(req);
+        req.method === "GET" || req.method === "HEAD"
+          ? Buffer.alloc(0)
+          : await readBodyBuffer(req);
       if (!validateAppHmac(localDb, appId, rawBody, appSig)) {
         res.writeHead(401);
         json(res, { error: "Invalid X-Starkeep-App-Sig (app not installed or signature mismatch)" });

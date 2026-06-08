@@ -1,6 +1,10 @@
 # @starkeep/sync-engine
 
-Bidirectional sync between local and remote storage with change logging, HLC-based conflict resolution, file transfer, and real-time change notifications.
+Cross-cutting sync engine for Starkeep: a single `exchange()` round performs a per-`nodeId` HLC version-vector exchange between a local node and a peer (the cloud data server in production; an in-process peer in tests), transferring shared records and app-specific rows together with their blobs.
+
+The package is data-kind-aware: shared data (always file-backed, no owning app) and app-specific data (owned by exactly one app, optionally file-backed) flow as two first-class streams on each side. Conflict resolution is pure HLC last-write-wins. Partial failures don't corrupt state: a blob failure halts watermark advance for the affected `nodeId` only, so the next round retries naturally.
+
+See `starkeep-core/meta-docs/docs/functional-doc-data-sync-2026-06-08.md` for the full functional description.
 
 ## Installation
 
@@ -11,108 +15,103 @@ pnpm add @starkeep/sync-engine
 ## Usage
 
 ```ts
-import { createSyncEngine } from "@starkeep/sync-engine";
+import {
+  createSyncEngine,
+  createInProcessSyncTransport,
+  createSqliteSyncStateStore,
+} from "@starkeep/sync-engine";
+
+const transport = createInProcessSyncTransport({
+  databaseAdapter: peerDatabase,
+  objectStorage: peerStorage,
+  clock: peerClock,
+  // Channel split: true (default) handles shared records; false handles a
+  // single app's app-specific rows via `appSyncableSource`.
+  syncSharedRecords: true,
+});
 
 const syncEngine = createSyncEngine({
   localDatabaseAdapter: localDatabase,
-  remoteDatabaseAdapter: remoteDatabase,
   localObjectStorage: localStorage,
-  remoteObjectStorage: remoteStorage,
-  clock: hybridLogicalClock,
+  transport,
+  clock: localClock,
+  syncState: createSqliteSyncStateStore(sqliteDb),
+  // Optional: omit for the always-on Drive channel; set for a per-app channel.
+  // appSyncableSource: { namespaces, applier },
+  // syncSharedRecords: true,
 });
 
-// Record a local change
-await syncEngine.recordChange("create", dataRecord);
+// Run one exchange round. The supervisor calls this on its schedule; if
+// result.hasMore is true the supervisor schedules another round immediately.
+const result = await syncEngine.exchange();
+console.log(result.shipped, "shipped,", result.applied, "applied, hasMore:", result.hasMore);
 
-// Pull remote changes
-const pullResponse = await syncEngine.pull();
-console.log(pullResponse.changes.length, "changes pulled");
-
-// Push local changes
-const pushResponse = await syncEngine.push();
-console.log(pushResponse.accepted.length, "changes pushed");
-console.log(pushResponse.conflicts.length, "conflicts resolved");
-
-// Full bidirectional sync
-const syncResult = await syncEngine.fullSync();
-console.log(syncResult.pulled, syncResult.pushed, syncResult.conflicts);
-
-// Subscribe to change notifications
-const unsubscribe = syncEngine.changeNotifier.subscribe((changeEvent) => {
-  console.log(changeEvent.eventType, changeEvent.recordIds);
+// Subscribe to change notifications.
+const unsubscribe = syncEngine.changeNotifier.subscribe((event) => {
+  // event.type: "remote-update-available" | "local-data-synced" | "local-change-recorded"
+  console.log(event.type, event.recordIds);
 });
 ```
 
-### Using individual components
+## API surface
 
-```ts
-import {
-  createChangeLog,
-  createChangeNotifier,
-  createFileSyncEngine,
-  resolveConflict,
-} from "@starkeep/sync-engine";
-
-// Standalone change log
-const changeLog = createChangeLog(databaseAdapter);
-await changeLog.append({ recordId, operation: "update", timestamp, recordSnapshot });
-const recentChanges = await changeLog.getChangesSince(lastSyncTimestamp);
-
-// Conflict resolution
-const resolution = resolveConflict(localChange, remoteChange);
-console.log(resolution.winner); // "local" or "remote"
-
-// Change notifications
-const changeNotifier = createChangeNotifier();
-const unsubscribe = changeNotifier.subscribe((event) => { /* ... */ });
-changeNotifier.emit({ eventType: "remote-update-available", recordIds, timestamp });
-
-// File sync engine
-const fileSyncEngine = createFileSyncEngine();
-const filesToPush = await fileSyncEngine.getFilesToPush(localStorage, remoteStorage, keys);
-```
-
-## API
-
-### Factory Functions
+### Factory functions
 
 | Function | Description |
 |---|---|
-| `createSyncEngine(options)` | Creates a full `SyncEngine` with change logging, push/pull, and conflict resolution |
-| `createChangeLog(databaseAdapter)` | Creates a standalone `ChangeLog` for tracking record mutations |
-| `createChangeNotifier()` | Creates a `ChangeNotifier` pub/sub for real-time sync events |
-| `createFileSyncEngine()` | Creates a `FileSyncEngine` for diffing and transferring files between storage adapters |
-| `resolveConflict(localChange, remoteChange)` | Resolves a conflict between two changes using last-write-wins with HLC |
+| `createSyncEngine(options)` | Creates a `SyncEngine` exposing `exchange()` and `changeNotifier`. |
+| `createInProcessSyncTransport(options)` | Responder-side `SyncTransport` that calls a peer `DatabaseAdapter` directly. Used in tests and for in-process peers. |
+| `createHttpSyncTransport(options)` | Client-side `SyncTransport` that POSTs to `${baseUrl}/sync/exchange`. |
+| `createHttpSyncHandler(options)` | Request handler for the responder side; handles `POST /sync/exchange` and `/files/:key` (`HEAD`/`GET`/`PUT`/`DELETE`). |
+| `createChangeNotifier()` | Standalone synchronous in-memory pub/sub over `ChangeEvent`s. |
+| `createFileSyncEngine()` | Wraps an `ObjectStorageAdapter` with `transferFile` (in-flight dedupe + destination short-circuit). |
+| `createSqliteSyncStateStore(db)` | Built-in `SyncStateStore` over `node:sqlite`; persists watermarks, peer watermarks, and HLC clock state. |
 
 ### `SyncEngine`
 
-| Method | Description |
+| Member | Description |
 |---|---|
-| `recordChange(operation, record)` | Log a local create/update/delete operation |
-| `pull()` | Pull remote changes into local storage |
-| `push()` | Push local changes to remote storage |
-| `fullSync()` | Run a complete bidirectional sync cycle |
-| `changeLog` | Access the underlying `ChangeLog` |
-| `changeNotifier` | Access the underlying `ChangeNotifier` |
+| `exchange()` | Run one version-vector exchange round. Returns `ExchangeResult` with `{ applied, shipped, hasMore }`. |
+| `changeNotifier` | The engine's `ChangeNotifier`. Emits `local-data-synced` after each round; callers emit `remote-update-available` and `local-change-recorded`. |
 
-### Key Types
+### Watermark helpers
+
+| Function | Description |
+|---|---|
+| `advanceWatermark(w, hlc)` | Max-per-`nodeId` advance. |
+| `mergeWatermarks(a, b)` | Per-`nodeId` max merge. |
+| `watermarkFor(w, nodeId)` | Lookup with default. |
+| `selectUnseen(items, w, hlcOf)` | Filter to items whose HLC exceeds the per-`nodeId` watermark. |
+
+### Residency
+
+| Function | Description |
+|---|---|
+| `residencyOf(row, localStorage)` | Canonical derivation of `Absent` / `Staged` / `Resident` / `Tombstoned`. |
+| `RecordResidency` (type) | The four-state enum. |
+
+### Key types
 
 | Type | Description |
 |---|---|
-| `SyncEngineOptions` | Configuration: local/remote database adapters, local/remote object storage, HLC clock |
-| `ChangeLogEntry` | A logged change with ID, record ID, operation, timestamp, and record snapshot |
-| `SyncPullResponse` | Pull result with changes, latest timestamp, and `hasMore` flag |
-| `SyncPushResponse` | Push result with accepted IDs, conflicts, and latest timestamp |
-| `ConflictResolution` | Resolved conflict with local/remote changes, winner, and resolved record |
-| `ChangeEvent` | Notification event: `"remote-update-available"`, `"local-data-synced"`, or `"conflict-detected"` |
-| `ChangeListener` | Callback function for `ChangeNotifier.subscribe()` |
+| `SyncEngineOptions` | Local DB adapter, local object storage, transport, clock, optional `syncState`, `appSyncableSource`, `syncSharedRecords` (default `true`), `pageLimit` (default 1000), `scanPageSize` (default 500). |
+| `SyncTransport` | `{ exchange(request) }`. |
+| `SyncExchangeRequest` / `SyncExchangeResponse` | Wire shape: `watermarks`, `records?` (shared), `appSyncableRows?` (app-specific), `limit?` / `hasMore`. |
+| `ExchangeResult` | `{ applied, shipped, hasMore }`. |
+| `Watermarks` | Per-`nodeId` HLC map. |
+| `AppSyncableNamespace` / `AppSyncableNamespaceStore` | App table descriptors. |
+| `AppSyncableApplier` / `ScanCapableApplier` | Apply incoming rows; scan local rows by HLC. |
+| `AppSyncableRowEntry` | `{ appId, table, op, row, timestamp }`. |
+| `FileRecordRow` | Row shape for the reserved file-backed app table `_starkeep_sync_records`. |
+| `FileSyncEngine` / `FileSyncManifest` / `FileEntry` | Blob transfer surface. |
+| `ChangeEvent` / `ChangeEventType` / `ChangeListener` / `ChangeNotifier` | Pub/sub types. Event types: `"remote-update-available"`, `"local-data-synced"`, `"local-change-recorded"`. |
+| `SyncStateStore` | Watermark + HLC clock persistence interface. |
 
 ### Errors
 
 | Error | Description |
 |---|---|
-| `SyncError` | General sync operation failure |
-| `SyncConflictError` | Unresolvable conflict during sync |
+| `SyncError` | General sync operation failure (e.g. non-2xx HTTP response). |
 
 ## Testing
 

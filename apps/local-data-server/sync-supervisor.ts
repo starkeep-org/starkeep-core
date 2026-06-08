@@ -10,7 +10,6 @@ import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
-  FileRecordsApplier,
 } from "../../packages/sync-engine/src/types.js";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
@@ -20,7 +19,7 @@ import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js"
 
 /**
  * The reserved app id of the always-on Starkeep Drive channel — the single
- * channel that carries all shared records under Shape A. Mirrors
+ * channel that carries all shared records. Mirrors
  * USER_DATA_OWNER_APP_ID in packages/admin-installer/src/iam.ts.
  */
 export const DRIVE_APP_ID = "starkeep-drive";
@@ -54,7 +53,7 @@ export interface SyncSupervisorOptions {
    */
   readonly listInstalledApps: () => AppRegistryEntry[];
   readonly namespaceStore: AppSyncableNamespaceStore;
-  readonly appApplier: AppSyncableApplier & ScanCapableApplier & FileRecordsApplier;
+  readonly appApplier: AppSyncableApplier & ScanCapableApplier;
   readonly underlyingSyncStateStore: SyncStateStore;
   /** Idle interval between exchange ticks. A local write nudges an early tick. */
   readonly exchangeIntervalMs: number;
@@ -181,11 +180,11 @@ export function createSyncSupervisor(
   }
 
   /**
-   * Shape A: the always-on Drive channel. It ships and applies *all* shared
-   * records and nothing app-specific (no appSyncableSource, syncSharedRecords
-   * true). It runs independently of the installed-app set — started in start()
-   * and never torn down by rescan() — so shared-data sync is identical before
-   * and after any app's cloud install.
+   * The always-on Drive channel. It ships and applies *all* shared records and
+   * nothing app-specific (no appSyncableSource, syncSharedRecords true). It
+   * runs independently of the installed-app set — started in start() and never
+   * torn down by rescan() — so shared-data sync is identical before and after
+   * any app's cloud install.
    */
   function startDriveEngine(): void {
     if (engines.has(DRIVE_APP_ID)) return;
@@ -236,9 +235,9 @@ export function createSyncSupervisor(
 
     const narrowedNamespaces = narrowNamespaceStore(namespaceStore, appId);
 
-    // Shape A: per-app channels carry only this app's app-specific rows. Shared
-    // records sync exclusively via the Drive channel, so syncSharedRecords is
-    // false here.
+    // Per-app channels carry only this app's app-specific rows. Shared records
+    // sync exclusively via the Drive channel, so syncSharedRecords is false
+    // here.
     const engine = createSyncEngine({
       localDatabaseAdapter: databaseAdapter,
       localObjectStorage,
