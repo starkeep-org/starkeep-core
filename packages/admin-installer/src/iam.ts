@@ -97,8 +97,8 @@ const FOUNDATIONAL_APP_ID = "cloud-data-server";
 export const USER_DATA_OWNER_APP_ID = "starkeep-drive";
 
 /**
- * The local-data-server's built-in file-watcher identity. Under Shape A this is
- * a *local-only* identity and an immutable `origin_app_id` data tag: records the
+ * The local-data-server's built-in file-watcher identity. This is a
+ * *local-only* identity and an immutable `origin_app_id` data tag: records the
  * watcher creates are shared records that sync to the cloud via the Starkeep
  * Drive channel under Drive's role, carrying `origin_app_id = "local-watcher"`.
  * There is no dedicated cloud write-role for it (the retired `local-data-sync`

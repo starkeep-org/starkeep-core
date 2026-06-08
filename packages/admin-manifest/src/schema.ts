@@ -34,6 +34,10 @@ export const sharedResourceRequirementSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
+// `handler` is the Lambda entry point inside the app's `dist.zip` (e.g.
+// `index.handler` or `infra/src/resize-handler.handler`). The app's
+// `pnpm bundle` script is responsible for producing a zip whose contents
+// resolve this path — the installer does not synthesize handler code.
 export const appComputeHandlerSchema = z.object({
   name: z.string(),
   handler: z.string(),
@@ -127,10 +131,6 @@ export const appManifestSchema = z.object({
   optionalPermissions: z.array(permissionEntrySchema).default([]),
   infraRequirements: infraRequirementsSchema.default({}),
   localRun: localRunSchema.optional(),
-  // Ordered ids of shared-schema migrations that belong to this release.
-  // Resolved by the installer to .sql files alongside the manifest. Empty for
-  // user apps that don't ship shared-schema migrations (the typical case).
-  migrations: z.array(z.string()).default([]),
   homepage: z.string().url().optional(),
   author: z.string().optional(),
   license: z.string().optional(),

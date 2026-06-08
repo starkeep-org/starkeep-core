@@ -16,10 +16,10 @@ import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/protocol-primitives";
  *   - shared_app_registry      — installed apps + HMAC secrets
  *   - shared_app_install_steps — idempotent install/uninstall ledger
  *   - access_policies          — control-plane: AccessControlEngine policies
- *   - type_registrations       — control-plane: app-declared type metadata
  *
- * `sharing_tokens` lives cloud-side only (tokens are issued and validated by
- * the cloud-data-server against shared resources). See plan.
+ * `sharing_tokens` is not persisted anywhere today — local uses the disabled
+ * stub store and no cloud-side table or endpoint exists. The redemption path
+ * is left for a future workstream.
  *
  * No migration system: this is a fresh-start schema. The user removes
  * ~/.starkeep/data.db (or the local-data-server's STARKEEP_DIR is fresh)
@@ -127,19 +127,6 @@ export function initializeLocalSchema(db: DatabaseSync): void {
     )
   `);
   db.exec("CREATE INDEX IF NOT EXISTS idx_access_policies_subject ON access_policies(subject_type, subject_id)");
-
-  // Control-plane: per-app type registrations bootstrapped on app install.
-  // Instance-local; never synced.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS type_registrations (
-      type_id              TEXT PRIMARY KEY,
-      schema_json          TEXT NOT NULL,
-      schema_version       TEXT NOT NULL,
-      description          TEXT NOT NULL,
-      registered_by_app_id TEXT NOT NULL,
-      registered_at        TEXT NOT NULL
-    )
-  `);
 
   // Per-category metadata tables on parity with DSQL. Generated from CATEGORIES
   // so adding a category or a column is a single edit in @starkeep/protocol-primitives's

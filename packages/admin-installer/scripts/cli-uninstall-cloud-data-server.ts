@@ -286,24 +286,31 @@ if (config.apiGatewayId && config.authorizerId && config.s3Bucket && config.auro
   const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
   const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
   try {
-    await uninstallDrive({
-      stackPrefix,
-      region,
-      accountId,
-      dsqlHostname: config.auroraEndpoint,
-      filesBucket: config.s3Bucket,
-      artifactsBucket,
-      pulumiStateBucket,
-      apiGatewayId: config.apiGatewayId,
-      apiGatewayExecutionArn: config.apiGatewayExecutionArn,
-      authorizerId: config.authorizerId,
-      permissionsBoundaryArn,
-      foundationalPermissionsBoundaryArn,
-      userDataOwnerPermissionsBoundaryArn,
-      managerRoleArn,
-      installDdlRoleArn,
-      installInfraRoleArn,
-    });
+    await uninstallDrive(
+      {
+        stackPrefix,
+        region,
+        accountId,
+        dsqlHostname: config.auroraEndpoint,
+        filesBucket: config.s3Bucket,
+        artifactsBucket,
+        pulumiStateBucket,
+        apiGatewayId: config.apiGatewayId,
+        apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+        authorizerId: config.authorizerId,
+        permissionsBoundaryArn,
+        foundationalPermissionsBoundaryArn,
+        userDataOwnerPermissionsBoundaryArn,
+        managerRoleArn,
+        installDdlRoleArn,
+        installInfraRoleArn,
+      },
+      {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+        sessionToken: process.env.AWS_SESSION_TOKEN!,
+      },
+    );
   } catch (err) {
     console.warn(
       `Starkeep Drive uninstall failed: ${err instanceof Error ? err.message : String(err)}\n` +

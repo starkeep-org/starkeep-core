@@ -338,6 +338,7 @@ export async function installCloudDataServer(
       hostname: auroraHostname,
       region: config.region,
       stackPrefix: config.stackPrefix,
+      accountId: config.accountId,
       credentials: {
         accessKeyId: appCreds.accessKeyId,
         secretAccessKey: appCreds.secretAccessKey,
@@ -478,7 +479,10 @@ function loadDriveManifest() {
  * infra (DSQL, files bucket, install-ddl / install-infra roles) — `config`
  * carries those outputs.
  */
-export async function installDrive(config: InstallerConfig): Promise<void> {
+export async function installDrive(
+  config: InstallerConfig,
+  registryCredentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
+): Promise<void> {
   const manifest = loadDriveManifest();
   console.log(`\nInstalling ${USER_DATA_OWNER_APP_ID}…`);
   await installApp({
@@ -486,6 +490,7 @@ export async function installDrive(config: InstallerConfig): Promise<void> {
     manifest,
     version: manifest.version,
     config,
+    registryCredentials,
     allowReservedAppId: true,
   });
   console.log(`${USER_DATA_OWNER_APP_ID} installed.`);
@@ -497,13 +502,17 @@ export async function installDrive(config: InstallerConfig): Promise<void> {
  * DSQL cluster still exists). Drive has no compute, so `uninstallApp` runs only
  * the identity + data teardown steps.
  */
-export async function uninstallDrive(config: InstallerConfig): Promise<void> {
+export async function uninstallDrive(
+  config: InstallerConfig,
+  registryCredentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
+): Promise<void> {
   const manifest = loadDriveManifest();
   console.log(`\nUninstalling ${USER_DATA_OWNER_APP_ID}…`);
   await uninstallApp({
     appId: USER_DATA_OWNER_APP_ID,
     manifest,
     config,
+    registryCredentials,
   });
   console.log(`${USER_DATA_OWNER_APP_ID} uninstalled.`);
 }

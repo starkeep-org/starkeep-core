@@ -1,54 +1,193 @@
 /**
- * Cloud install registry — phase 2 placeholder.
+ * Cloud install registry — durable per-step ledger and app registry in DSQL.
  *
- * The DSQL-backed implementation (shared.app_registry, shared.app_install_steps,
- * shared.access_grants) is tracked in plans/peppy-wondering-metcalfe.md Phase 2.
+ * Mirrors the local installer's shared_app_install_steps / shared_app_registry
+ * (see ./local/registry.ts) in `shared.app_install_steps` and
+ * `shared.app_registry` on the DSQL cluster. The orchestrator uses this to
+ * skip already-completed steps on retry and to record which apps are installed
+ * so admin-web can answer "which cloud apps are installed?" without probing
+ * AWS resources.
  *
- * Until then, functions return empty/no-op defaults so the orchestrator can
- * complete its AWS-side steps (IAM, DSQL DDL, S3, Pulumi). Step tracking and
- * app registration are lossy — no resume on retry, no access grants recorded.
+ * Auth model: registry writes use a DbConnect (non-admin) token authenticated
+ * as the `${stackPrefix}_installer` PG role, mapped from the admin-app IAM
+ * role (the federated entry point — same identity the human admin used to
+ * start the install). The mapping is set up at schema-init time by
+ * dsql-schema-init.ts. The orchestrator passes admin-app credentials through
+ * to createDsqlRegistry; no manager role-chain is involved here.
  */
 
-import type { AppManifest, FileAccess } from "@starkeep/admin-manifest";
+import pg from "pg";
+import { Kysely, PostgresDialect, sql } from "kysely";
+import { DsqlSigner } from "@aws-sdk/dsql-signer";
+import type { AppManifest } from "@starkeep/admin-manifest";
+import { installerPgUser } from "./dsql-schema-init";
 
+export type Operation = "install" | "uninstall";
 export type StepStatus = "pending" | "done" | "failed";
 
-export async function recordStep(
-  appId: string,
-  operation: "install" | "uninstall",
-  step: string,
-  status: StepStatus,
-  _error?: string,
-): Promise<void> {
-  console.log(`[registry] ${appId} ${operation}/${step} → ${status}`);
+export interface RegistryOptions {
+  hostname: string;
+  region: string;
+  stackPrefix: string;
+  credentials: {
+    accessKeyId: string;
+    secretAccessKey: string;
+    sessionToken?: string;
+  };
 }
 
-export async function getCompletedSteps(
-  _appId: string,
-  _operation: "install" | "uninstall",
-): Promise<Set<string>> {
-  return new Set<string>();
+export interface InstalledApp {
+  appId: string;
+  version: string;
+  name: string | null;
+  installedAt: string;
+  updatedAt: string;
 }
 
-export async function registerApp(
-  manifest: AppManifest,
-  appId: string,
-  _policyIds: string[],
-): Promise<void> {
-  console.log(`[registry] registered app ${appId} v${manifest.version}`);
+export interface Registry {
+  recordStep(
+    appId: string,
+    operation: Operation,
+    step: string,
+    status: StepStatus,
+    error?: string,
+  ): Promise<void>;
+  getCompletedSteps(appId: string, operation: Operation): Promise<Set<string>>;
+  registerApp(manifest: AppManifest, appId: string): Promise<void>;
+  deleteAppRegistryEntry(appId: string): Promise<void>;
+  listInstalledApps(): Promise<InstalledApp[]>;
+  close(): Promise<void>;
 }
 
-export async function createAccessPolicies(
-  _appId: string,
-  _fileAccess: FileAccess[],
-): Promise<string[]> {
-  return [];
-}
+export function createDsqlRegistry(opts: RegistryOptions): Registry {
+  const pgUser = installerPgUser(opts.stackPrefix);
+  let dbPromise: Promise<Kysely<Record<string, never>>> | null = null;
 
-export async function revokeAccessPolicies(_appId: string): Promise<void> {
-  console.log(`[registry] revokeAccessPolicies: no-op (phase 2)`);
-}
+  // DSQL DbConnect tokens are valid for 15 minutes. An install run can easily
+  // exceed that (Pulumi up alone is multi-minute, and resume-on-failure may
+  // span longer). We open the connection lazily on first use, and on a
+  // SQLSTATE 28P01 (auth failed — typically expired token), tear down and
+  // reopen. Since the orchestrator writes infrequently per step, the simpler
+  // path is to make every call self-healing.
+  async function open(): Promise<Kysely<Record<string, never>>> {
+    const signer = new DsqlSigner({
+      hostname: opts.hostname,
+      region: opts.region,
+      credentials: opts.credentials,
+    });
+    const token = await signer.getDbConnectAuthToken();
+    const pool = new pg.Pool({
+      host: opts.hostname,
+      port: 5432,
+      database: "postgres",
+      user: pgUser,
+      password: token,
+      ssl: { rejectUnauthorized: true },
+      max: 1,
+    });
+    return new Kysely({ dialect: new PostgresDialect({ pool }) });
+  }
 
-export async function deleteAppRegistryEntry(_appId: string): Promise<void> {
-  console.log(`[registry] deleteAppRegistryEntry: no-op (phase 2)`);
+  async function db(): Promise<Kysely<Record<string, never>>> {
+    if (!dbPromise) dbPromise = open();
+    return dbPromise;
+  }
+
+  async function withRetry<T>(fn: (db: Kysely<Record<string, never>>) => Promise<T>): Promise<T> {
+    try {
+      return await fn(await db());
+    } catch (err) {
+      // 28P01 = invalid_password (typical when the DSQL DbConnect token has
+      // expired mid-run). Drop the cached connection and try once more with a
+      // fresh token.
+      const code = (err as { code?: string } | null)?.code;
+      if (code === "28P01" || code === "28000") {
+        const stale = dbPromise;
+        dbPromise = null;
+        if (stale) await stale.then((k) => k.destroy()).catch(() => {});
+        return await fn(await db());
+      }
+      throw err;
+    }
+  }
+
+  return {
+    async recordStep(appId, operation, step, status, error) {
+      await withRetry(async (k) => {
+        await sql`
+          INSERT INTO shared.app_install_steps
+            (app_id, operation, step, status, error, updated_at)
+          VALUES (${appId}, ${operation}, ${step}, ${status}, ${error ?? null}, now())
+          ON CONFLICT (app_id, operation, step) DO UPDATE
+            SET status = EXCLUDED.status,
+                error = EXCLUDED.error,
+                updated_at = now()
+        `.execute(k);
+      });
+    },
+
+    async getCompletedSteps(appId, operation) {
+      return await withRetry(async (k) => {
+        const result = await sql<{ step: string }>`
+          SELECT step FROM shared.app_install_steps
+          WHERE app_id = ${appId}
+            AND operation = ${operation}
+            AND status = 'done'
+        `.execute(k);
+        return new Set(result.rows.map((r) => r.step));
+      });
+    },
+
+    async registerApp(manifest, appId) {
+      await withRetry(async (k) => {
+        await sql`
+          INSERT INTO shared.app_registry (app_id, version, name)
+          VALUES (${appId}, ${manifest.version}, ${manifest.name ?? null})
+          ON CONFLICT (app_id) DO UPDATE
+            SET version = EXCLUDED.version,
+                name = EXCLUDED.name,
+                updated_at = now()
+        `.execute(k);
+      });
+    },
+
+    async listInstalledApps() {
+      return await withRetry(async (k) => {
+        const result = await sql<{
+          app_id: string;
+          version: string;
+          name: string | null;
+          installed_at: Date | string;
+          updated_at: Date | string;
+        }>`
+          SELECT app_id, version, name, installed_at, updated_at
+          FROM shared.app_registry
+          ORDER BY installed_at ASC
+        `.execute(k);
+        return result.rows.map((r) => ({
+          appId: r.app_id,
+          version: r.version,
+          name: r.name,
+          installedAt:
+            r.installed_at instanceof Date ? r.installed_at.toISOString() : r.installed_at,
+          updatedAt:
+            r.updated_at instanceof Date ? r.updated_at.toISOString() : r.updated_at,
+        }));
+      });
+    },
+
+    async deleteAppRegistryEntry(appId) {
+      await withRetry(async (k) => {
+        await sql`DELETE FROM shared.app_registry WHERE app_id = ${appId}`.execute(k);
+        await sql`DELETE FROM shared.app_install_steps WHERE app_id = ${appId}`.execute(k);
+      });
+    },
+
+    async close() {
+      if (!dbPromise) return;
+      const k = await dbPromise.catch(() => null);
+      dbPromise = null;
+      if (k) await k.destroy().catch(() => {});
+    },
+  };
 }

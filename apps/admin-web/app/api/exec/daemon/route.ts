@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
   if (action === "stop") {
     // Stop tolerates unknown ids — if there's no PID file, stopById returns
     // not-running with a clear error. We don't need to gate by id namespace
-    // here because the id is only meaningful as a key into our .pids/ dir.
+    // here because the id is only meaningful as a key into our pids/ dir.
     const result = stopById(id);
     if (!result.stopped && result.error) {
       return NextResponse.json({ error: result.error }, { status: 404 });

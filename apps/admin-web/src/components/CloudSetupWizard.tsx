@@ -242,7 +242,7 @@ function Step1Bootstrap({
           <Button
             variant="outline"
             size="sm"
-            onClick={() => openUrl(getCloudFormationCreateStackUrl(region))}
+            onClick={() => openUrl(getCloudFormationCreateStackUrl(region, { stackName: `${stackPrefix}-bootstrap` }))}
             disabled={!region}
             className="w-fit"
           >

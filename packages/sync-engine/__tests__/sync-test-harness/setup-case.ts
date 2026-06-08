@@ -134,9 +134,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     syncState,
     appSyncableSource: {
       namespaces: local.namespaces,
-      // FileRecordsApplier face isn't exercised by exchange() today; cast
-      // through unknown for the test mock which only implements scan/apply.
-      applier: local.applier as never,
+      applier: local.applier,
     },
     pageLimit: resolved.pageLimit,
     scanPageSize: resolved.scanPageSize,

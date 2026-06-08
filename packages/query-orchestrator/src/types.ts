@@ -3,7 +3,6 @@ import type { StarkeepId, HLCTimestamp, DataRecord } from "@starkeep/protocol-pr
 export interface IndexQuery {
   readonly types?: string[];
   readonly dateRange?: { readonly start: HLCTimestamp; readonly end: HLCTimestamp };
-  readonly fullTextSearch?: string;
   readonly limit?: number;
   readonly cursor?: string;
 }

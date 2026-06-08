@@ -1,11 +1,12 @@
 import { existsSync, unlinkSync } from "node:fs";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
-import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 import { stopById } from "../../../../src/lib/daemon-control";
 
 const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
-const APPS_DIR = resolve(REPO_ROOT, "..", "starkeep-apps");
+const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+const APP_CREDS_DIR = join(STARKEEP_DATA_DIR, "app-creds");
 
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as { appId?: string };
@@ -43,7 +44,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const secretPath = resolve(APPS_DIR, appId, ".starkeep-local.json");
+  const secretPath = join(APP_CREDS_DIR, `${appId}.json`);
   if (existsSync(secretPath)) {
     unlinkSync(secretPath);
   }

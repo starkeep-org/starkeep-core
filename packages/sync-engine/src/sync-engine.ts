@@ -96,7 +96,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // current poll volumes; revisit if scans get hot. Same caveat applies
       // to the responder-side scan in in-process-transport.ts.
       const recordCandidates: AnyRecord[] = [];
-      // Shape A: only the Drive channel ships shared records. Per-app channels
+      // Only the Drive channel ships shared records. Per-app channels
       // set syncSharedRecords=false and leave this scan empty — they carry only
       // app-specific rows.
       if (syncSharedRecords) {
@@ -257,9 +257,14 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // shipping them — which prevents us re-shipping items that originated
       // on the peer's side.
       // ---------------------------------------------------------------------
-      // Shape A: a per-app channel (syncSharedRecords=false) must never apply
-      // shared records. The responder shouldn't ship them, but guard inbound
-      // too so the channel split holds even if a peer over-ships.
+      // A per-app channel (syncSharedRecords=false) must never apply shared
+      // records. The responder shouldn't ship them, but guard inbound too so
+      // the channel split holds even if a peer over-ships.
+      if (!syncSharedRecords && (response.records?.length ?? 0) > 0) {
+        console.warn(
+          `[sync] dropped ${response.records?.length ?? 0} shared record(s) received on a per-app channel (syncSharedRecords=false)`,
+        );
+      }
       const inboundByNode = groupInboundByNodeId(
         syncSharedRecords ? response.records : [],
         response.appSyncableRows,

@@ -42,6 +42,7 @@ export interface SchemaInitOptions {
   hostname: string;
   region: string;
   stackPrefix: string;
+  accountId: string;
   credentials: {
     accessKeyId: string;
     secretAccessKey: string;
@@ -166,55 +167,33 @@ export async function initializeSharedSchema(
       ...CATEGORIES.filter((c) => c.id !== "other").map((c) => pgMetadataDdl(c)),
 
       // app_install_steps — per-step state for idempotent install/uninstall.
+      // PK is (app_id, operation, step): the same step name appears under
+      // both `install` and `uninstall` (e.g. `attach_temp_install_ddl_policy`
+      // is reused symmetrically by uninstall), so the operation must be part
+      // of the key. Mirrors local/registry.ts's shared_app_install_steps in
+      // sqlite.
       `CREATE TABLE IF NOT EXISTS shared.app_install_steps (
          app_id     text        NOT NULL,
+         operation  text        NOT NULL,
          step       text        NOT NULL,
          status     text        NOT NULL,
          updated_at timestamptz NOT NULL DEFAULT now(),
          error      text,
-         PRIMARY KEY (app_id, step)
+         PRIMARY KEY (app_id, operation, step)
        )`,
-      `GRANT INSERT, UPDATE, SELECT ON shared.app_install_steps TO "${installer}"`,
+      `GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_install_steps TO "${installer}"`,
 
-      // Control-plane tables. These are NOT shared across apps the way
-      // shared.records is — they hold per-instance config consumed by the
-      // cloud-data-server and access-control engine. See the refactor plan.
-      `CREATE TABLE IF NOT EXISTS shared.access_policies (
-         policy_id     text NOT NULL PRIMARY KEY,
-         subject_type  text NOT NULL,
-         subject_id    text NOT NULL,
-         resource_type text NOT NULL,
-         resource_id   text NOT NULL,
-         permissions   text NOT NULL,
-         granted_at    text NOT NULL,
-         expires_at    text
+      // app_registry — one row per installed cloud app. Source of truth for
+      // "which apps are currently installed in this cloud stack" so the UI
+      // can surface install state without probing AWS resources.
+      `CREATE TABLE IF NOT EXISTS shared.app_registry (
+         app_id       text        NOT NULL PRIMARY KEY,
+         version      text        NOT NULL,
+         name         text,
+         installed_at timestamptz NOT NULL DEFAULT now(),
+         updated_at   timestamptz NOT NULL DEFAULT now()
        )`,
-
-      // sharing_tokens lives cloud-side only — bearer credentials that
-      // validate against an access policy. token_hash is the looked-up key;
-      // the unhashed token is never persisted.
-      `CREATE TABLE IF NOT EXISTS shared.sharing_tokens (
-         token_id    text    NOT NULL PRIMARY KEY,
-         token_hash  text    NOT NULL,
-         policy_id   text    NOT NULL,
-         created_at  text    NOT NULL,
-         expires_at  text,
-         max_uses    integer,
-         usage_count integer NOT NULL DEFAULT 0
-       )`,
-      `CREATE INDEX ASYNC IF NOT EXISTS idx_sharing_tokens_token_hash ON shared.sharing_tokens(token_hash)`,
-
-      // type_registrations declare which app handles which shared type id.
-      // Instance-local control plane; both local and cloud bootstrap their
-      // own from app manifests on startup.
-      `CREATE TABLE IF NOT EXISTS shared.type_registrations (
-         type_id              text NOT NULL PRIMARY KEY,
-         schema_json          text NOT NULL,
-         schema_version       text NOT NULL,
-         description          text NOT NULL,
-         registered_by_app_id text NOT NULL,
-         registered_at        text NOT NULL
-       )`,
+      `GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_registry TO "${installer}"`,
 
       // App-specific syncable namespace registry. Mirrors the local SQLite
       // app_syncable_namespaces table. One row per installed app that declared
@@ -232,6 +211,29 @@ export async function initializeSharedSchema(
 
     for (const stmt of statements) {
       await sql.raw(stmt).execute(db);
+    }
+
+    // DSQL-side IAM-to-PG mapping for the cloud install registry. The
+    // orchestrator opens its registry connection as the admin-app IAM role
+    // (federated entry point — the same identity the human admin used to
+    // start the install) and authenticates to PG as `<stackPrefix>_installer`.
+    // This is the only IAM-to-PG mapping the schema initializer sets up; the
+    // per-app mappings are added by run_dsql_ddl during install.
+    //
+    // Probe sys.iam_pg_role_mappings first — AWS IAM GRANT is not idempotent
+    // in DSQL (re-granting an existing mapping errors).
+    const adminAppRoleArn =
+      `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-admin-role`;
+    const existingMapping = await sql<{ exists: boolean }>`
+      SELECT EXISTS (
+        SELECT 1 FROM sys.iam_pg_role_mappings
+        WHERE pg_role_name = ${installer} AND arn = ${adminAppRoleArn}
+      ) AS exists
+    `.execute(db);
+    if (!existingMapping.rows[0]?.exists) {
+      await sql
+        .raw(`AWS IAM GRANT "${installer}" TO '${adminAppRoleArn}'`)
+        .execute(db);
     }
   } finally {
     await db.destroy();

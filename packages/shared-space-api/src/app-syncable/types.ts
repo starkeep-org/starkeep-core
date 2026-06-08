@@ -11,5 +11,4 @@ export type {
   ScanSincePage,
   AppSyncableRowEntry,
   FileRecordRow,
-  FileRecordsApplier,
 } from "@starkeep/sync-engine";
