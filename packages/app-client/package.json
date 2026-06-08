@@ -32,7 +32,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/"
   },
-  "dependencies": [],
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^25.4.0",
     "tsup": "^8.0.0",
