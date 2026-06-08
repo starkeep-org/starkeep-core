@@ -107,6 +107,28 @@ pnpm --filter @starkeep/aws-bootstrap build  # Rebuild the bootstrap CloudFormat
 - **TypeScript** 5.x in strict mode
 - **SST v4** + **Pulumi Automation API** for deployment (platform layer + per-user provisioning)
 
+## Publishing
+
+The SDK surface is published to public npm under `@starkeep/*`. Thirteen packages are public:
+
+- App-facing: `@starkeep/sdk`, `@starkeep/app-client`, `@starkeep/admin-manifest`
+- Transitive: `@starkeep/protocol-primitives`, `@starkeep/storage-adapter`, `@starkeep/access-control`, `@starkeep/shared-space-api`, `@starkeep/sync-engine`, `@starkeep/query-orchestrator`
+- Storage backends: `@starkeep/storage-sqlite`, `@starkeep/storage-s3`, `@starkeep/storage-aurora-dsql`, `@starkeep/storage-fs`
+
+The platform-internal packages (`@starkeep/admin-installer`, `@starkeep/aws-bootstrap`, `@starkeep/iam-permission-tests`) stay `"private": true` and are skipped.
+
+To publish all thirteen:
+
+```bash
+pnpm build
+pnpm publish -r \
+  --filter '!@starkeep/admin-installer' \
+  --filter '!@starkeep/aws-bootstrap' \
+  --filter '!@starkeep/iam-permission-tests'
+```
+
+`pnpm publish` rewrites every `workspace:*` dependency to the current published version, so consumers (e.g. `starkeep-apps/photos`) install from the registry without any workspace leakage. Dry-run with `--dry-run` first.
+
 ## License
 
-Private
+MIT — see [LICENSE](./LICENSE).
