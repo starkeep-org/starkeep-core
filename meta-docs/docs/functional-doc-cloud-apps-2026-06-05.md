@@ -27,8 +27,6 @@ Every cloud-installable app is described by a single `starkeep.manifest.json` va
 - **`infraRequirements.appSpecificSyncable`** — `{ tables: [...], files: boolean }`. Each table becomes a DSQL table `app_<id>.<tableName>` with two reserved sync columns (`updated_at`, `deleted_at`) plus an index on `updated_at`. `files: true` additionally creates the framework-owned `image_records` (FILE_RECORDS_TABLE) bookkeeping table under the same schema and opens the `apps/<appId>/syncable/` S3 prefix for the app. A row in `shared.app_syncable_namespaces` records the resulting table set so the sync pull path can enumerate it.
 - **`infraRequirements.compute`** — `{ enabled, handlers: [...] }`. Each handler entry compiles to one Lambda + one log group + one APIGW v2 integration + one route per declared `routes` entry. Per-handler fields are `name`, `handler` (entry point), `memoryMb` (default 256), `timeoutSeconds` (default 30), `routes` (array of `"<METHOD> <path>"` strings, default `["$default"]`), `env` (map), and `auth` (`"jwt"` default — the route is wired to the gateway's shared Cognito JWT authorizer — or `"public"` — no authorizer, requests reach the Lambda unauthenticated).
 - **`infraRequirements.brokerPower`** — `sts:AssumeRole` on `<stackPrefix>-app-*` roles. Only the `cloud-data-server` built-in may set this; it is the runtime-identity-switch power the broker needs and that nothing else has.
-- **`migrations`** — ordered ids of shared-schema migrations. Empty for typical user apps; intended for system apps that ship shared-schema additions. Functionally inert today because the platform has no migration ledger (see the cloud-data-server doc's "Why no migrations" section).
-
 The manifest is the entire contract between an app and the platform on the cloud side. Apps do not ship Pulumi code, do not declare IAM policies, and do not touch DSQL DDL — the orchestrator generates all of that from the fields above.
 
 ## Registering: how apps become known
@@ -183,8 +181,7 @@ The store grows asymmetrically: cloud-side install + uninstall of the same app m
 
 ## Open questions
 
-- **Static handler bundle.** The Photos manifest declares a `static` handler at `index.handler` but the only handler code in the photos repo is `resize-handler.ts`. The `static` Lambda's contents come from the OpenNext build, packaged by the app's `pnpm bundle`. The convention "the manifest names a handler entry point that the bundle provides" is implicit; first-time app developers may not realize the bundle is their responsibility to assemble correctly.
-- **Cloud install of a *non-builtin* app outside `starkeep-apps/`.** The configured `appParentDirs` is supposed to support this, but there is no in-tree user-app today to confirm the discovery path works end-to-end on a sibling checkout. The script's `expandHome` and per-dir scan suggests it should; not exercised.
+_(no remaining items)_
 
 ---
 
@@ -196,14 +193,12 @@ _(no remaining items)_
 
 ## Behavior inconsistent with purpose
 
-- **`install_compute_stack` step name implies it skips when `compute.enabled: false`, but the *only* check is on `zipBuffer || ir.compute.enabled`.** A future app shape that uploads a bundle for some other reason but has no compute would still attach/detach the temp-install-infra policy. Today no caller does this — `cli-install-app` only builds a bundle when the manifest has compute — but the gate's wording in the orchestrator is loose enough that any change in caller shape could exercise it.
+_(no remaining items)_
 
 ## Behavioral bugs
 
-- **No app-level concurrency guard.** Nothing prevents two `cli-install-app <same-id>` invocations from running side by side against the same DSQL cluster and Pulumi state bucket. The DSQL DDL probes are not transactional across statements, the Pulumi state lock would protect the compute stack but not the temp-policy attach/detach dance, and the registry has no row to lock against. Practically the admin-web SSE endpoint serializes through `runningChild`, so the UI path is single-flight, but a terminal invocation alongside a UI invocation is not. The cloud-data-server doc's parallel claim that "the orchestrator is serialized per app" is true for the UI but not enforced at the platform layer.
-- **Reserved-subpath check operates only on `path` literals, not `{proxy+}` patterns that *could* shadow reserved routes.** If a manifest declares `GET /{proxy+}` plus `GET /data/foo`, the install-time check would reject the second route (the literal collision) but not flag that the first wildcard would silently never match `/data/...`. APIGW v2 specificity makes this actually safe (the broker's more-specific reserved routes win), but the install-time error message says the literal route is "reserved for the cloud-data-server and cannot be claimed by an app handler" — which is true *and* the wildcard pattern is also unable to claim those paths at runtime. Worth surfacing in the error so app developers understand which reserved paths are actually reachable.
+_(no remaining items)_
 
 ## Potential gaps
 
-- **No path for shared-schema additions by an app.** The manifest carries a `migrations` array intended to resolve to `.sql` files alongside the manifest, but nothing in the orchestrator reads it; `initializeSharedSchema` runs the platform's hard-coded DDL only. As a consequence an app cannot ship a new shared-record category or a new metadata column even in the "pure addition" shape that the no-migration-ledger model would technically tolerate. Whether this is a real gap depends on whether apps are *expected* to extend shared schema — the design intent is unclear from the code, but the field is in the schema, so something was envisioned.
-- **No version pinning across install runs.** `installApp` accepts `version` and the registry stub logs it, but nothing stores it. A re-install of an app at a different `version` produces no record of the change. Roll-backs and "what version is currently installed?" queries have no answer in-band.
+_(no remaining items)_

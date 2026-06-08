@@ -148,6 +148,18 @@ function appParentDirs(config: StarkeepConfig): string[] {
 /**
  * Find the source dir of the app whose manifest id === appId by scanning the
  * configured app parent dirs (first match wins, earlier dirs take precedence).
+ *
+ * TODO: This whole filesystem-scan discovery model needs to be replaced —
+ * not extended — as part of publishing starkeep-core as a package. The
+ * current shape (admin scans configured parent directories on their
+ * workstation for any subdir containing a `starkeep.manifest.json`) only
+ * makes sense while every app lives in a sibling checkout next to
+ * starkeep-core. Once external apps install from their own published
+ * packages (npm, a registry, a URL, etc.), "what is the app's source
+ * dir?" stops being a meaningful question — the manifest and bundle
+ * arrive via the package, not via a directory scan. Don't bolt sibling
+ * checkout support onto this; rethink the discovery + resolution model
+ * end-to-end when that work happens.
  */
 function resolveAppDir(config: StarkeepConfig, appId: string): string {
   for (const parentDir of appParentDirs(config)) {

@@ -110,7 +110,10 @@ export function buildPulumiProgram(
                 `App "${ctx.appId}" handler "${handler.name}" declares route "${routes[i]}" ` +
                 `which after prefixing becomes "${prefixedRouteKey}". The sub-paths ` +
                 `/apps/${ctx.appId}/{data,files,sync,health}/... are reserved for the ` +
-                `cloud-data-server and cannot be claimed by an app handler.`,
+                `cloud-data-server and cannot be claimed by an app handler. ` +
+                `Note: these paths are also unreachable via a wildcard like "GET /{proxy+}" — ` +
+                `API Gateway v2 routes the broker's more-specific reserved routes first, ` +
+                `so a wildcard handler will silently never see them.`,
               );
             }
           }

@@ -215,10 +215,12 @@ async function installAppInner(
   );
 
   let receipt: InstallReceipt | null = null;
-  if (zipBuffer || ir.compute.enabled) {
+  if (ir.compute.enabled) {
     // install-infra owns the install-time AWS-provisioning grants (bundle
     // upload + Pulumi up). Attach the per-app temp policy on install-infra,
-    // run upload + compute stack as install-infra, then detach.
+    // run upload + compute stack as install-infra, then detach. A bundle
+    // without compute would have nothing to upload it for, so the gate is
+    // strictly on `compute.enabled`.
     await runStep(registry, appId, "install", "attach_temp_install_infra_policy", done, () =>
       attachTempInstallInfraPolicy(
         config.stackPrefix,
