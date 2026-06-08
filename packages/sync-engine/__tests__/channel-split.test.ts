@@ -6,15 +6,15 @@ import { buildSide } from "./sync-test-harness/side.js";
 import type { AppSyncableRowEntry, SyncStateStore, Watermarks } from "../src/types.js";
 
 /**
- * Shape A — the SR/AR channel split.
+ * Channel split — SR vs. AR/AW.
  *
- * Under Shape A the always-on Starkeep Drive channel (syncSharedRecords=true,
- * no appSyncableSource) carries *all* shared records and nothing app-specific;
+ * The always-on Starkeep Drive channel (syncSharedRecords=true, no
+ * appSyncableSource) carries *all* shared records and nothing app-specific;
  * every per-app channel (syncSharedRecords=false) carries only that app's
  * app-specific rows and no shared records. These tests lock that split in on
  * both the engine (requester) and the in-process transport (responder).
  */
-describe("Shape A — SR/AR channel split", () => {
+describe("channel split — SR vs. AR/AW", () => {
   function makeSyncState(): SyncStateStore {
     // Per-channel in production; a fresh in-memory store per engine here.
     let watermarks: Watermarks = {};

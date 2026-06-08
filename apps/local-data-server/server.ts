@@ -489,9 +489,9 @@ async function main() {
   // Built-in local file-watcher identity. All records originated by LDS
   // built-in features (notably the file watcher) are stamped with this appId
   // as their immutable origin_app_id, both in the local change log and on the
-  // wire. Under Shape A this is a *local-only* identity: its records are shared
-  // records that sync to the cloud via the Starkeep Drive channel under Drive's
-  // role — there is no dedicated cloud write-role for it. Its grants flow
+  // wire. This is a *local-only* identity: its records are shared records that
+  // sync to the cloud via the Starkeep Drive channel under Drive's role — there
+  // is no dedicated cloud write-role for it. Its grants flow
   // through the same local access-control path as any other app. No user
   // consent — it's part of the LDS itself.
   const localWatcherManifest = {
@@ -516,8 +516,8 @@ async function main() {
   // extensions — it cannot enumerate unmapped/`other` extensions — so it writes
   // no access_grants rows; the access functions grant it all-access by app id.
   // Thus:
-  //   - the always-on Drive sync engine (Shape A) is the legitimate all-access
-  //     identity that scans all shared records for the single Drive channel;
+  //   - the always-on Drive sync engine is the legitimate all-access identity
+  //     that scans all shared records for the single Drive channel;
   //   - the Drive UI authenticates as `starkeep-drive` over HMAC and reads all
   //     shared data through the same appCanRead path as any app — no bypass.
   // No cloud credentials live here; the cloud-side write identity for shared

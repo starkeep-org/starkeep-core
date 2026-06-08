@@ -270,7 +270,7 @@ async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
 // by hand because the cloud handler lives in a separately-deployed artifact
 // and cannot import from the installer package at runtime.
 // The reserved app id of the Starkeep Drive (User-Data-Owner) channel — the
-// single channel that carries all shared records under Shape A. Mirrors
+// single channel that carries all shared records. Mirrors
 // USER_DATA_OWNER_APP_ID in packages/admin-installer/src/iam.ts; kept in sync by
 // hand because this handler is a separately-deployed artifact.
 const DRIVE_APP_ID = "starkeep-drive";
@@ -746,7 +746,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody);
 
-      // Shape A channel split. The Starkeep Drive channel carries *all* shared
+      // Channel split. The Starkeep Drive channel carries *all* shared
       // records (and nothing app-specific); every per-app channel carries only
       // that app's app-specific rows (and no shared records). This makes
       // shared-record sync identical regardless of which apps are cloud-

@@ -300,9 +300,9 @@ const outputs = await installCloudDataServer({
   userPoolClientId: config.userPoolClientId,
 });
 
-// Under Shape A there is no separate cloud sync identity to install here:
-// shared-record sync (including watcher-originated records, origin_app_id =
-// "local-watcher") flows through the Starkeep Drive channel under Drive's role.
+// There is no separate cloud sync identity to install here: shared-record sync
+// (including watcher-originated records, origin_app_id = "local-watcher") flows
+// through the Starkeep Drive channel under Drive's role.
 // Drive is installed as its own pass — `pnpm cli:install-drive` (or the admin
 // wizard's second deploy pass) — after this cloud-data-server install completes.
 

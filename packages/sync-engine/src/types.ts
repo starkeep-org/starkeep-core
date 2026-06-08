@@ -255,7 +255,7 @@ export interface SyncEngineOptions {
     readonly applier: AppSyncableApplier & ScanCapableApplier;
   };
   /**
-   * Shape A channel split. When true (default), this engine ships and applies
+   * Channel split. When true (default), this engine ships and applies
    * shared records (SR — the `shared.records` table). The always-on Starkeep
    * Drive channel sets this true and provides no `appSyncableSource`, so it is
    * the *only* channel that carries shared records. Per-app channels set this

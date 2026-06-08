@@ -35,7 +35,7 @@ export interface InProcessTransportOptions {
    */
   readonly objectStorage: ObjectStorageAdapter;
   /**
-   * Shape A channel split (responder side). When true (default), this transport
+   * Channel split (responder side). When true (default), this transport
    * applies and scans shared records (the `shared.records` table). The
    * cloud-side Drive channel sets this true with no `appSyncableSource`; per-app
    * channels set it false and serve only that app's app-specific rows. Mirrors
@@ -63,7 +63,7 @@ export function createInProcessSyncTransport(
   return {
     async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
       // 1. Apply incoming records — pure put(snapshot). HLC LWW: skip if local
-      //    copy is at-or-ahead of incoming. Shape A: only the Drive channel
+      //    copy is at-or-ahead of incoming. Only the Drive channel
       //    (syncSharedRecords=true) applies shared records.
       if (syncSharedRecords) {
         for (const snapshot of request.records ?? []) {
@@ -74,6 +74,13 @@ export function createInProcessSyncTransport(
           clock.receive(snapshot.updatedAt);
           await databaseAdapter.put(snapshot);
         }
+      } else if ((request.records?.length ?? 0) > 0) {
+        // Per-app channel received shared records — a channel-split violation
+        // on the requester side. Drop them (the channel-split guard) but warn
+        // so the misbehaving peer is discoverable.
+        console.warn(
+          `[sync] in-process transport dropped ${request.records?.length ?? 0} shared record(s) on a per-app channel (syncSharedRecords=false)`,
+        );
       }
 
       // 2. Apply incoming app-syncable rows.
@@ -101,8 +108,8 @@ export function createInProcessSyncTransport(
       const SCAN_PAGE = 500;
       const collected: AnyRecord[] = [];
       let cursor: string | undefined = undefined;
-      // Shape A: per-app channels (syncSharedRecords=false) never scan or ship
-      // shared records.
+      // Per-app channels (syncSharedRecords=false) never scan or ship shared
+      // records.
       let scanHasMore = syncSharedRecords;
       let overflowed = false;
       while (!overflowed && scanHasMore) {
@@ -154,7 +161,10 @@ export function createInProcessSyncTransport(
                       ...(appCursor !== undefined ? { cursor: appCursor } : {}),
                     },
                   );
-                } catch {
+                } catch (err) {
+                  console.warn(
+                    `[sync] in-process transport scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
+                  );
                   break;
                 }
                 if (page.rows.length === 0) break;

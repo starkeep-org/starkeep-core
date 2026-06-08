@@ -98,9 +98,9 @@ Per-record residency on a side is named in `residency.ts` and derived from `(row
 
 `compareHLC` orders by `(wallTime, counter, nodeId)` with the larger `nodeId` winning ties. Because `nodeId` is part of the serialized HLC string, cross-side bytewise-identical timestamps cannot occur. With content-addressable storage, a real content change produces a new `object_storage_key`, so "loser-blob discarded" is implicit — the loser's bytes simply sit at the loser's key with no row pointing at them.
 
-### Shape A: Drive is the only channel that carries shared records
+### Drive is the only channel that carries shared records
 
-The deployment splits sync into channels: one per installed cloud app plus the always-on **Starkeep Drive** channel. By convention (Shape A), only the Drive channel ships shared records (`syncSharedRecords: true`, no `appSyncableSource`). Per-app channels set `syncSharedRecords: false` and carry only their own app-specific rows. Both the requester (`sync-engine.ts`) and the responder (`in-process-transport.ts`) guard against an over-shipping peer. The practical consequence: shared-data sync is identical regardless of which other apps the user has cloud-installed.
+The deployment splits sync into channels: one per installed cloud app plus the always-on **Starkeep Drive** channel. By convention, only the Drive channel ships shared records (`syncSharedRecords: true`, no `appSyncableSource`). Per-app channels set `syncSharedRecords: false` and carry only their own app-specific rows. Both the requester (`sync-engine.ts`) and the responder (`in-process-transport.ts`) guard against an over-shipping peer. The practical consequence: shared-data sync is identical regardless of which other apps the user has cloud-installed.
 
 The sync supervisor uses the `originAppId` on a `local-change-recorded` event to nudge the right channel: a shared-record write (no `originAppId`) wakes Drive; an app-specific write wakes that app's channel.
 

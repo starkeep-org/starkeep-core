@@ -101,12 +101,12 @@ The cloud data server's sync surface is exactly one endpoint per app: `POST /app
 
 The cloud sits on the **responder** side of the exchange protocol. It uses `createInProcessSyncTransport` (from `sync-engine`) wrapping the per-request DSQL adapter, which is the same transport used in tests — there's no separate cloud-only sync implementation. The protocol is HLC last-write-wins; conflict resolution is implicit (compare HLCs, drop the older one) and there is no explicit conflict list.
 
-The **channel split** is the cloud-side expression of Shape A:
+The **channel split** is the cloud-side expression of the deployment topology:
 
 - The `starkeep-drive` channel ships **all** shared records and no app-specific rows. The transport is created with `syncSharedRecords: true` and no `appSyncableSource`.
 - Every per-app channel ships only that app's app-specific rows and no shared records. The transport is created with `syncSharedRecords: false` and an `appSyncableSource` built from `DsqlAppSyncableNamespaceStore` + `DsqlAppSyncableApplier` for that connection.
 
-So every shared byte that reaches the cloud is written by the Drive channel under `...-app-starkeep-drive-role`, gated by the User-Data-Owner permissions boundary on `shared/*`. The per-app channels never write shared records — they couldn't, because their per-app PG role doesn't have INSERT on `shared.records` (unless they declared `readwrite` extensions in their manifest, which gates the local pre-ship check; even then, in Shape A those rows would still flow over Drive). The cross-cutting "how IAM, PG GRANTs, and bucket policy together enforce this" reasoning belongs to the bootstrap doc; what this topic enforces in code is: the channel split is a single `if (appId === DRIVE_APP_ID)` in the handler.
+So every shared byte that reaches the cloud is written by the Drive channel under `...-app-starkeep-drive-role`, gated by the User-Data-Owner permissions boundary on `shared/*`. The per-app channels never write shared records — they couldn't, because their per-app PG role doesn't have INSERT on `shared.records` (unless they declared `readwrite` extensions in their manifest, which gates the local pre-ship check; even then, those rows would still flow over the Drive channel). The cross-cutting "how IAM, PG GRANTs, and bucket policy together enforce this" reasoning belongs to the bootstrap doc; what this topic enforces in code is: the channel split is a single `if (appId === DRIVE_APP_ID)` in the handler.
 
 The cloud **HLC clock** is seeded per request from the highest cloud-stamped `updated_at` visible to the assumed role (`WHERE updated_at LIKE '%:cloud'`). New cloud writes (presently only tombstones from `DELETE /data/records/{id}`) get a serialized HLC stamped with `nodeId="cloud"` so they sort consistently across replicas.
 
