@@ -49,6 +49,7 @@ import {
 import { execSync } from "node:child_process";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { installCloudDataServer } from "../src/builtin-installs";
+import { rotatePulumiPassphraseIfPlaceholder } from "../src/pulumi-passphrase";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -285,6 +286,21 @@ console.log("\nBuilding cloud-data-server bundle…\n");
 execSync("pnpm --filter @starkeep/builtin-cloud-data-server build", {
   stdio: "inherit",
 });
+
+// Rotate the bootstrap-time placeholder Pulumi passphrase before any
+// pulumi up runs. Idempotent: subsequent installs see a non-placeholder
+// value and leave it alone — the passphrase must stay stable once any
+// Pulumi state exists or every later up/destroy breaks.
+console.log("\nChecking Pulumi state passphrase…");
+const rotationOutcome = await rotatePulumiPassphraseIfPlaceholder({
+  stackPrefix,
+  region,
+});
+console.log(
+  rotationOutcome === "rotated"
+    ? "  Rotated bootstrap placeholder → random SecureString."
+    : "  Already rotated; leaving as-is.",
+);
 
 console.log("\nInstalling cloud-data-server…\n");
 const outputs = await installCloudDataServer({

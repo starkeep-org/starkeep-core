@@ -391,11 +391,12 @@ ${installInfraBoundaryPolicyYaml}
     Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub '/\${StackPrefix}/pulumi/passphrase'
-      Type: String
+      Type: SecureString
       Value: 'REPLACE_WITH_RANDOM_32_BYTE_VALUE'
       Description: >-
-        Pulumi stack-state encryption passphrase. Replace Value with a random
-        32-byte string before deploying (or use a post-deploy custom resource).
+        Pulumi stack-state encryption passphrase. The placeholder Value is
+        overwritten on first cloud-data-server install by a per-deployment
+        random value (see admin-installer rotatePulumiPassphraseIfPlaceholder).
       Tags:
         starkeep:managed: 'true'
 

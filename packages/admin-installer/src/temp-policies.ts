@@ -72,6 +72,16 @@ export function buildTempInstallInfraPolicy(
         Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`,
       },
       {
+        // SecureString — decrypt via the SSM service key.
+        Sid: "TempInstallInfraSsmPassphraseKmsDecrypt",
+        Effect: "Allow",
+        Action: "kms:Decrypt",
+        Resource: "*",
+        Condition: {
+          StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+        },
+      },
+      {
         // uploadAppBundle writes apps/<appId>/latest/dist.zip;
         // Pulumi's lambda.Function reads the same key as code source.
         Sid: "TempInstallInfraArtifacts",
@@ -234,6 +244,15 @@ export function buildTempUninstallInfraPolicy(
         Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`,
       },
       {
+        Sid: "TempUninstallInfraSsmPassphraseKmsDecrypt",
+        Effect: "Allow",
+        Action: "kms:Decrypt",
+        Resource: "*",
+        Condition: {
+          StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+        },
+      },
+      {
         // Bundle cleanup happens in deleteAppObjects which runs under app
         // creds; install-infra needs read here so Pulumi's destroy-time
         // refresh on aws.lambda.Function can re-resolve the code source.
@@ -366,6 +385,15 @@ export function buildTempInstallCloudDataServerPolicy(
         Effect: "Allow",
         Action: "ssm:GetParameter",
         Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`,
+      },
+      {
+        Sid: "TempInstallSsmPassphraseKmsDecrypt",
+        Effect: "Allow",
+        Action: "kms:Decrypt",
+        Resource: "*",
+        Condition: {
+          StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+        },
       },
       {
         Sid: "TempInstallDsqlAdmin",

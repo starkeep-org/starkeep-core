@@ -149,6 +149,17 @@ export function foundationalPermissionsBoundaryStatements(
       Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
     },
     {
+      // The passphrase parameter is a SecureString; decrypt is via the SSM
+      // service key. Scoped via kms:ViaService.
+      Sid: "FoundationalPulumiPassphraseKmsDecrypt",
+      Effect: "Allow",
+      Action: "kms:Decrypt",
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+      },
+    },
+    {
       Sid: "FoundationalLambda",
       Effect: "Allow",
       Action: [
