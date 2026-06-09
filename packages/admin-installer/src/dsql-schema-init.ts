@@ -125,7 +125,6 @@ export async function initializeSharedSchema(
          type               text        NOT NULL,
          created_at         text        NOT NULL,
          updated_at         text        NOT NULL,
-         owner_id           text        NOT NULL,
          deleted_at         text,
          version            integer     NOT NULL DEFAULT 1,
          content_hash       text        NOT NULL,
@@ -137,12 +136,12 @@ export async function initializeSharedSchema(
          parent_id          text
        )`,
 
-      // Duplicate-file prevention: (filename + bytes) is unique per owner
-      // among live records. Tombstoned rows are excluded so re-upload after
-      // delete is allowed. NULL filenames are not constrained — the rule
-      // requires both filename and content to match.
-      `CREATE UNIQUE INDEX IF NOT EXISTS uq_records_owner_filename_hash
-         ON shared.records (owner_id, original_filename, content_hash)
+      // Duplicate-file prevention: (filename + bytes) is unique among live
+      // records. Tombstoned rows are excluded so re-upload after delete is
+      // allowed. NULL filenames are not constrained — the rule requires both
+      // filename and content to match.
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_records_filename_hash
+         ON shared.records (original_filename, content_hash)
          WHERE deleted_at IS NULL AND original_filename IS NOT NULL`,
 
       `ALTER DEFAULT PRIVILEGES IN SCHEMA shared GRANT ALL ON TABLES TO user_data_owner`,

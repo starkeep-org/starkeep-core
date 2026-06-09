@@ -5,7 +5,7 @@
  */
 
 import { createServer } from "node:http";
-import { createHmac, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import {
   installLocal,
@@ -63,10 +63,6 @@ const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
 // the admin surface, the watch CRUD, /events, and /auth/*.
 const LISTEN_HOST = "127.0.0.1";
 const BIND_IS_LOOPBACK = LISTEN_HOST === "127.0.0.1" || LISTEN_HOST === "::1";
-const OWNER_ID = process.env.STARKEEP_OWNER_ID || "starkeep-user";
-const NODE_ID = process.env.STARKEEP_NODE_ID || "starkeep-local";
-const PULL_INTERVAL_MS = parseInt(process.env.STARKEEP_PULL_INTERVAL_MS || "30000", 10);
-const PUSH_DEBOUNCE_MS = parseInt(process.env.STARKEEP_PUSH_DEBOUNCE_MS || "500", 10);
 // ---------------------------------------------------------------------------
 // Per-app access enforcement — backed by shared_app_registry + shared_access_grants
 // in the local sqlite DB. Populated by the installer (POST /admin/apps/install).
@@ -159,25 +155,33 @@ function validateAppHmac(db: DatabaseSync, appId: string, body: Buffer, sig: str
 const STARKEEP_CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 interface StarkeepConfig {
-  stage: string;
-  userPoolId: string;
-  userPoolClientId: string;
-  identityPoolId: string;
+  // Generated once at first boot, persisted forever. Feeds the HLC clock, so
+  // it must be unique per replica — never read this from env or default it.
+  nodeId: string;
+  pullIntervalMs?: number;
+  pushDebounceMs?: number;
+  // Cloud fields — populated by the admin wizard's PATCH /config, absent
+  // until then. nodeId stands alone so cloud-disabled installs still get a
+  // stable replica identity.
+  stage?: string;
+  userPoolId?: string;
+  userPoolClientId?: string;
+  identityPoolId?: string;
   s3Bucket?: string;
   s3Region?: string;
   auroraEndpoint?: string;
   apiGatewayUrl?: string;
 }
 
-// Detects the unique-violation from the (owner_id, original_filename,
-// content_hash) index added in storage-sqlite bootstrap and mirrored in DSQL.
-// SQLite surfaces "UNIQUE constraint failed: ..." and Postgres surfaces
-// SQLSTATE 23505; matching the index name covers both without a driver dep.
+// Detects the unique-violation from the (original_filename, content_hash)
+// index in storage-sqlite bootstrap and mirrored in DSQL. SQLite surfaces
+// "UNIQUE constraint failed: ..." and Postgres surfaces SQLSTATE 23505;
+// matching the index name covers both without a driver dep.
 function isDuplicateFileError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return (
-    message.includes("uq_shared_records_owner_filename_hash") ||
-    message.includes("uq_records_owner_filename_hash")
+    message.includes("uq_shared_records_filename_hash") ||
+    message.includes("uq_records_filename_hash")
   );
 }
 
@@ -225,13 +229,24 @@ async function saveWatchConfigs(configs: import("./watcher.js").WatchConfig[]): 
   await writeFile(WATCHES_CONFIG_PATH, JSON.stringify(configs, null, 2), "utf8");
 }
 
-async function loadStarkeepConfig(): Promise<StarkeepConfig | null> {
+async function loadStarkeepConfig(): Promise<StarkeepConfig> {
+  // First boot, or a config file written before nodeId existed: synthesize
+  // one and persist. nodeId being absent would let two replicas share the
+  // same HLC identity and corrupt the Drive watermark map, so we never
+  // tolerate a missing or empty value here.
+  let parsed: Partial<StarkeepConfig> = {};
   try {
-    return JSON.parse(await readFile(STARKEEP_CONFIG_PATH, "utf8")) as StarkeepConfig;
+    parsed = JSON.parse(await readFile(STARKEEP_CONFIG_PATH, "utf8"));
   } catch {
-    console.warn(`No config found at ${STARKEEP_CONFIG_PATH} — cloud features disabled`);
-    return null;
+    console.warn(`No config found at ${STARKEEP_CONFIG_PATH} — cloud features disabled until setup`);
   }
+  if (!parsed.nodeId) {
+    parsed.nodeId = randomUUID();
+    await mkdir(STARKEEP_DIR, { recursive: true });
+    await writeFile(STARKEEP_CONFIG_PATH, JSON.stringify(parsed, null, 2), "utf8");
+    console.log(`Generated nodeId ${parsed.nodeId} and wrote ${STARKEEP_CONFIG_PATH}`);
+  }
+  return parsed as StarkeepConfig;
 }
 
 async function loadPersistedAuth(): Promise<PersistedAuth | null> {
@@ -294,18 +309,23 @@ async function main() {
     basePath: objectsBasePath,
   });
 
-  // Load cloud config from ~/.starkeep/config.json
+  // Load runtime config from ~/.starkeep/config.json. nodeId is guaranteed
+  // present (generated and persisted on first boot inside loadStarkeepConfig).
   const starkeepConfig = await loadStarkeepConfig();
-  const configRegion = starkeepConfig ? regionFromUserPoolId(starkeepConfig.userPoolId) : "";
-  if (starkeepConfig) {
+  const NODE_ID = starkeepConfig.nodeId;
+  const PULL_INTERVAL_MS = starkeepConfig.pullIntervalMs ?? 30000;
+  const PUSH_DEBOUNCE_MS = starkeepConfig.pushDebounceMs ?? 500;
+  const configRegion = starkeepConfig.userPoolId
+    ? regionFromUserPoolId(starkeepConfig.userPoolId)
+    : "";
+  if (starkeepConfig.stage) {
     console.log(`Cloud config loaded: stage=${starkeepConfig.stage}, region=${configRegion}`);
     if (starkeepConfig.s3Bucket) console.log(`  S3 bucket=${starkeepConfig.s3Bucket}`);
     if (starkeepConfig.auroraEndpoint) console.log(`  DSQL=${starkeepConfig.auroraEndpoint}`);
     if (starkeepConfig.apiGatewayUrl) console.log(`  API=${starkeepConfig.apiGatewayUrl}`);
   }
 
-  // CLOUD_URL: env var takes precedence, then fall back to apiGatewayUrl from config
-  const CLOUD_URL = process.env.STARKEEP_CLOUD_URL ?? starkeepConfig?.apiGatewayUrl ?? undefined;
+  const CLOUD_URL = starkeepConfig.apiGatewayUrl ?? undefined;
 
   // Persistent auth: if a stored refresh token exists, start credential rotation
   const persistedAuth = await loadPersistedAuth();
@@ -333,14 +353,15 @@ async function main() {
     }
   }
 
-  const cognitoConfig: CognitoConfig | null = starkeepConfig
-    ? {
-        region: configRegion,
-        userPoolId: starkeepConfig.userPoolId,
-        userPoolClientId: starkeepConfig.userPoolClientId,
-        identityPoolId: starkeepConfig.identityPoolId,
-      }
-    : null;
+  const cognitoConfig: CognitoConfig | null =
+    starkeepConfig.userPoolId && starkeepConfig.userPoolClientId && starkeepConfig.identityPoolId
+      ? {
+          region: configRegion,
+          userPoolId: starkeepConfig.userPoolId,
+          userPoolClientId: starkeepConfig.userPoolClientId,
+          identityPoolId: starkeepConfig.identityPoolId,
+        }
+      : null;
 
   if (cognitoConfig && currentRefreshToken) {
     console.log("Stored auth found — starting credential refresh timer");
@@ -360,9 +381,8 @@ async function main() {
     );
   }
 
-  // S3: use ~/.starkeep/config.json values when available, otherwise fall back to env vars
   let remoteAdapter: ObjectStorageAdapter | null = null;
-  if (starkeepConfig?.s3Bucket) {
+  if (starkeepConfig.s3Bucket) {
     const credentialProvider = await makeCloudCredentialProvider();
     remoteAdapter = new S3ObjectStorageAdapter({
       bucketName: starkeepConfig.s3Bucket,
@@ -370,23 +390,6 @@ async function main() {
       credentialProvider,
     });
     console.log("Remote S3 adapter initialized from cloud config");
-  } else {
-    const s3Bucket = process.env.STARKEEP_S3_BUCKET;
-    if (s3Bucket) {
-      remoteAdapter = new S3ObjectStorageAdapter({
-        bucketName: s3Bucket,
-        region: process.env.STARKEEP_S3_REGION || "us-east-1",
-        keyPrefix: process.env.STARKEEP_S3_KEY_PREFIX || undefined,
-        credentials:
-          process.env.STARKEEP_S3_ACCESS_KEY_ID &&
-          process.env.STARKEEP_S3_SECRET_ACCESS_KEY
-            ? {
-                accessKeyId: process.env.STARKEEP_S3_ACCESS_KEY_ID,
-                secretAccessKey: process.env.STARKEEP_S3_SECRET_ACCESS_KEY,
-              }
-            : undefined,
-      });
-    }
   }
 
   // App identities are stored in shared_app_registry; populated by the
@@ -443,7 +446,6 @@ async function main() {
     // persists them, and no endpoint redeems them. This stub throws on every
     // call so anything that tries to issue or validate one fails loudly.
     sharingTokenStore: disabledSharingTokenStore(),
-    ownerId: OWNER_ID,
     nodeId: NODE_ID,
     syncStateStore,
     changeNotifier,
@@ -569,7 +571,6 @@ async function main() {
     sdk,
     db: databaseAdapter.getRawDatabase(),
     databaseAdapter,
-    ownerId: OWNER_ID,
     appId: watcherAppId,
   });
 
@@ -663,35 +664,31 @@ async function main() {
 
       if (path === "/config" && req.method === "GET") {
         const freshConfig = await loadStarkeepConfig();
-        if (!freshConfig) {
-          res.writeHead(404);
-          json(res, { error: "No cloud config loaded" });
-          return;
-        }
-        const freshRegion = regionFromUserPoolId(freshConfig.userPoolId);
+        const freshRegion = freshConfig.userPoolId
+          ? regionFromUserPoolId(freshConfig.userPoolId)
+          : "";
         json(res, {
-          stage: freshConfig.stage,
+          stage: freshConfig.stage ?? null,
           s3Bucket: freshConfig.s3Bucket ?? null,
           s3Region: freshConfig.s3Region ?? freshRegion,
           auroraEndpoint: freshConfig.auroraEndpoint ?? null,
           apiGatewayUrl: freshConfig.apiGatewayUrl ?? null,
-          cognitoConfig: {
-            region: freshRegion,
-            userPoolId: freshConfig.userPoolId,
-            userPoolClientId: freshConfig.userPoolClientId,
-            identityPoolId: freshConfig.identityPoolId,
-          },
+          cognitoConfig: freshConfig.userPoolId
+            ? {
+                region: freshRegion,
+                userPoolId: freshConfig.userPoolId,
+                userPoolClientId: freshConfig.userPoolClientId,
+                identityPoolId: freshConfig.identityPoolId,
+              }
+            : null,
         });
         return;
       }
 
       if (path === "/config" && req.method === "PATCH") {
-        if (!starkeepConfig) {
-          res.writeHead(404);
-          json(res, { error: "No cloud config loaded" });
-          return;
-        }
         const patch = JSON.parse(await readBody(req)) as Partial<StarkeepConfig>;
+        // nodeId is generated once on first boot and must never change.
+        delete (patch as { nodeId?: unknown }).nodeId;
         const updated: StarkeepConfig = { ...starkeepConfig, ...patch };
         await writeFile(STARKEEP_CONFIG_PATH, JSON.stringify(updated, null, 2), "utf8");
         Object.assign(starkeepConfig, patch);
@@ -990,7 +987,6 @@ async function main() {
               origin_app_id: r.originAppId,
               created_at: new Date(r.createdAt.wallTime).toISOString(),
               updated_at: new Date(r.updatedAt.wallTime).toISOString(),
-              owner_id: r.ownerId,
               version: r.version,
               content_hash: r.contentHash,
               object_storage_key: r.objectStorageKey,
@@ -1064,7 +1060,6 @@ async function main() {
           type: string;
           createdAt: { wallTime: number };
           updatedAt: { wallTime: number };
-          ownerId: string;
           mimeType: string;
           sizeBytes: number;
           objectStorageKey: string | null;
@@ -1075,7 +1070,6 @@ async function main() {
           type: r.type,
           created_at: new Date(r.createdAt.wallTime).toISOString(),
           updated_at: new Date(r.updatedAt.wallTime).toISOString(),
-          owner_id: r.ownerId,
           mime_type: r.mimeType,
           size_bytes: r.sizeBytes,
           object_storage_key: r.objectStorageKey,
@@ -1084,16 +1078,15 @@ async function main() {
           path: r.objectStorageKey ? await localAdapter.resolvePath(r.objectStorageKey) : null,
         });
 
-        // Owner-scoped duplicate check: (owner, filename, content) is unique
-        // among live records. Same bytes under the same filename → return the
-        // existing record with deduped:true, matching the response shape this
-        // endpoint already uses. Enforced at the DB layer too — this pre-check
-        // turns the would-be unique-violation into an idempotent success.
+        // Duplicate check: (filename, content) is unique among live records.
+        // Same bytes under the same filename → return the existing record
+        // with deduped:true, matching the response shape this endpoint already
+        // uses. Enforced at the DB layer too — this pre-check turns the
+        // would-be unique-violation into an idempotent success.
         const dedupFilename = fileName ?? null;
         if (contentHash && dedupFilename && /^[a-f0-9]{64}$/.test(contentHash)) {
           const dup = await databaseAdapter.query({
             filters: [
-              { field: "ownerId", operator: "eq", value: OWNER_ID },
               { field: "originalFilename", operator: "eq", value: dedupFilename },
               { field: "contentHash", operator: "eq", value: contentHash },
               { field: "deletedAt", operator: "isNull" },
@@ -1108,7 +1101,7 @@ async function main() {
         }
 
         let record;
-        const baseInput = { type, ownerId: OWNER_ID, originAppId: appId!, parentId: parentId ?? null };
+        const baseInput = { type, originAppId: appId!, parentId: parentId ?? null };
         if (contentHash) {
           if (!/^[a-f0-9]{64}$/.test(contentHash)) {
             res.writeHead(400);
@@ -1586,7 +1579,6 @@ async function main() {
             category: categoryOf(record.type),
             created_at: new Date(record.createdAt.wallTime).toISOString(),
             updated_at: new Date(record.updatedAt.wallTime).toISOString(),
-            owner_id: record.ownerId,
             version: record.version,
             content_hash: record.contentHash,
             object_storage_key: record.objectStorageKey,

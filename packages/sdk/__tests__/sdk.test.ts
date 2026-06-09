@@ -54,7 +54,6 @@ describe("createStarkeepSdk", () => {
       objectStorageAdapter: localObjectStorage,
       accessPolicyStore: memoryPolicyStore(),
       sharingTokenStore: memoryTokenStore(),
-      ownerId: "test-owner",
       nodeId: "test-node",
       clock,
     });
@@ -67,7 +66,7 @@ describe("createStarkeepSdk", () => {
 
       const fileData = Buffer.from("fake image data");
       const record = await sdk.data.putWithFile(
-        { type: "jpg", ownerId: "test-owner", originAppId: "test" },
+        { type: "jpg", originAppId: "test" },
         fileData,
         "image/jpeg",
       );
@@ -98,7 +97,6 @@ describe("createStarkeepSdk", () => {
         objectStorageAdapter: localObjectStorage,
         accessPolicyStore: memoryPolicyStore(),
         sharingTokenStore: memoryTokenStore(),
-        ownerId: "test-owner",
         nodeId: "app-a",
         clock,
       });
@@ -107,14 +105,13 @@ describe("createStarkeepSdk", () => {
         objectStorageAdapter: localObjectStorage,
         accessPolicyStore: memoryPolicyStore(),
         sharingTokenStore: memoryTokenStore(),
-        ownerId: "test-owner",
         nodeId: "app-b",
         clock,
       });
 
       const fileData = Buffer.from("shared bytes");
       const written = await sdkA.data.putWithFile(
-        { type: "jpg", ownerId: "test-owner", originAppId: "test" },
+        { type: "jpg", originAppId: "test" },
         fileData,
         "image/jpeg",
       );
@@ -133,7 +130,7 @@ describe("createStarkeepSdk", () => {
       const { sdk } = await createTestSdk();
 
       const record = await sdk.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        { type: "@test/photo", originAppId: "test" },
         Buffer.from("x"),
         "image/jpeg",
       );
@@ -146,7 +143,7 @@ describe("createStarkeepSdk", () => {
     it("writes and reads a per-category metadata row", async () => {
       const { sdk } = await createTestSdk();
       const record = await sdk.data.putWithFile(
-        { type: "jpg", ownerId: "test-owner", originAppId: "test" },
+        { type: "jpg", originAppId: "test" },
         Buffer.from("x"),
         "image/jpeg",
       );
@@ -170,12 +167,12 @@ describe("createStarkeepSdk", () => {
       const { sdk } = await createTestSdk();
 
       await sdk.data.putWithFile(
-        { type: "@test/photo", ownerId: "test-owner", originAppId: "test" },
+        { type: "@test/photo", originAppId: "test" },
         Buffer.from("a"),
         "image/jpeg",
       );
       await sdk.data.putWithFile(
-        { type: "@test/document", ownerId: "test-owner", originAppId: "test" },
+        { type: "@test/document", originAppId: "test" },
         Buffer.from("b"),
         "text/plain",
       );

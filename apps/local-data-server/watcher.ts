@@ -148,10 +148,9 @@ export function createFileWatchManager(opts: {
   sdk: StarkeepSdk;
   db: DatabaseSync;
   databaseAdapter: DatabaseAdapter;
-  ownerId: string;
   appId: string;
 }): FileWatchManager {
-  const { sdk, db, databaseAdapter, ownerId, appId } = opts;
+  const { sdk, db, databaseAdapter, appId } = opts;
   const watches = new Map<string, ActiveWatch>();
 
   // Create the private watch_files table if it doesn't exist.
@@ -292,7 +291,6 @@ export function createFileWatchManager(opts: {
         const record = await sdk.data.putWithLocalFile(
           {
             type,
-            ownerId,
             originAppId: appId,
             originalFilename: filename,
           },

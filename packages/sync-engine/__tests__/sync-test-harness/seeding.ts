@@ -67,7 +67,6 @@ async function seedSrSingle(
   const objectKey = `shared/test/photo/${id}`;
   const baseInput = {
     type: "@test/photo",
-    ownerId: "u1",
     originAppId: "test",
     contentHash: "sha256:base",
     objectStorageKey: objectKey,
@@ -232,7 +231,6 @@ async function seedSrMulti(
       createDataRecord(
         {
           type: "@test/photo",
-          ownerId: "u1",
           originAppId: "test",
           contentHash: `sha256:multi-${i}`,
           objectStorageKey: objectKey,

@@ -12,7 +12,6 @@ export interface BaseRecord {
   readonly type: string;
   readonly createdAt: HLCTimestamp;
   updatedAt: HLCTimestamp;
-  readonly ownerId: string;
   deletedAt: HLCTimestamp | null;
   version: number;
 }

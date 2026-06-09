@@ -45,7 +45,6 @@ describe("channel split — SR vs. AR/AW", () => {
       ...createDataRecord(
         {
           type: "@test/photo",
-          ownerId: "u1",
           originAppId: "photos",
           contentHash: "sha256:x",
           objectStorageKey: "",

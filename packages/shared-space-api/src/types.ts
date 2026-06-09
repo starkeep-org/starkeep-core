@@ -71,7 +71,6 @@ export interface ApiContext {
   readonly databaseAdapter: DatabaseAdapter;
   readonly objectStorageAdapter: ObjectStorageAdapter;
   readonly clock: HLCClock;
-  readonly ownerId: string;
   /**
    * Scoped row CRUD + file ops against the calling app's app-specific
    * syncable namespace. `null` when the request subject is not an installed
@@ -111,7 +110,6 @@ export interface SharedSpaceApiOptions {
   readonly databaseAdapter: DatabaseAdapter;
   readonly objectStorageAdapter: ObjectStorageAdapter;
   readonly clock: HLCClock;
-  readonly ownerId: string;
   /** When provided, change events are forwarded to all connected WebSocket clients. */
   readonly changeNotifier?: ChangeNotifier;
   /**

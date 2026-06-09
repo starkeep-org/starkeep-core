@@ -19,7 +19,7 @@
  * Manager is not involved in the runtime data path.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
@@ -244,10 +244,20 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 // (e.g. an admin endpoint, a cross-type cleanup pass, a sharing-token op),
 // this seed will underestimate the true cloud max and let the new write
 // mint a stamp lower than an existing cloud stamp on the same record.
+// Per-Lambda-instance nodeId. The HLC clock requires nodeId to be unique
+// per replica — using a literal "cloud" let two warm Lambda containers mint
+// timestamps with the same (wallTime, counter, nodeId), violating ordering.
+// AWS_LAMBDA_LOG_STREAM_NAME is set per execution-environment instance and
+// stable across invocations within that env. Outside Lambda (local tests),
+// fall back to a process-lifetime UUID so test runs still produce a stable
+// id. The `cloud-` prefix lets makeCloudClock filter the records-table for
+// any cloud replica's max stamp, regardless of which instance wrote it.
+const CLOUD_NODE_ID = `cloud-${process.env.AWS_LAMBDA_LOG_STREAM_NAME ?? randomUUID()}`;
+
 async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
   const result = await client.query(
     "SELECT updated_at FROM shared.records WHERE updated_at LIKE $1 ORDER BY updated_at DESC LIMIT 1",
-    ["%:cloud"],
+    ["%:cloud-%"],
   );
   let initialState: { wallTime: number; counter: number } | undefined;
   if (result.rows.length > 0) {
@@ -256,7 +266,7 @@ async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
     initialState = { wallTime: parsed.wallTime, counter: parsed.counter };
   }
   return createHLCClock({
-    nodeId: "cloud",
+    nodeId: CLOUD_NODE_ID,
     wallClockFunction: Date.now,
     ...(initialState ? { initialState } : {}),
   });
@@ -334,7 +344,6 @@ function recordToResponse(record: DataRecord) {
     category: categoryOf(record.type),
     created_at: new Date(record.createdAt.wallTime).toISOString(),
     updated_at: new Date(record.updatedAt.wallTime).toISOString(),
-    owner_id: record.ownerId,
     version: record.version,
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
@@ -397,8 +406,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     const query = event.queryStringParameters ?? {};
-    const claims = event.requestContext.authorizer?.jwt?.claims;
-    const ownerId = claims?.sub ?? "unknown";
 
     // GET /apps/{appId}/health — app-scoped health check
     if (method === "GET" && subPath === "/health") {
@@ -531,7 +538,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         id: generateId(),
         kind: "data",
         type: body.type,
-        ownerId,
         originAppId: appId,
         createdAt: now,
         updatedAt: now,

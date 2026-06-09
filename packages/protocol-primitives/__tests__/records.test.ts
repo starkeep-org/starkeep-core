@@ -7,7 +7,6 @@ describe("createDataRecord", () => {
 
   const baseInput = {
     type: "@test/photo",
-    ownerId: "user-1",
     originAppId: "test",
     contentHash: "sha256:abc123",
     objectStorageKey: "shared/@test/photo/ab/sha256:abc123",
@@ -23,7 +22,6 @@ describe("createDataRecord", () => {
 
     expect(record.kind).toBe("data");
     expect(record.type).toBe("@test/photo");
-    expect(record.ownerId).toBe("user-1");
     expect(record.id).toHaveLength(26);
     expect(record.version).toBe(1);
     expect(record.deletedAt).toBeNull();

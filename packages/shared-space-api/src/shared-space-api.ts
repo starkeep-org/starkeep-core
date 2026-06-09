@@ -34,7 +34,7 @@ function parseRoutePath(fullPath: string): {
 export function createSharedSpaceApi(
   options: SharedSpaceApiOptions,
 ): SharedSpaceApi {
-  const { databaseAdapter, objectStorageAdapter, clock, ownerId, changeNotifier, getAppSpecific } = options;
+  const { databaseAdapter, objectStorageAdapter, clock, changeNotifier, getAppSpecific } = options;
   const router = createApiRouter();
 
   function buildContext(request: ApiRequest): ApiContext {
@@ -42,7 +42,6 @@ export function createSharedSpaceApi(
       databaseAdapter,
       objectStorageAdapter,
       clock,
-      ownerId,
       appSpecific: getAppSpecific ? getAppSpecific(request.subject) : null,
     };
   }
