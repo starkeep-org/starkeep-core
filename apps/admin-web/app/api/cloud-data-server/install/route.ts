@@ -32,6 +32,16 @@ import { getRegion } from "../../../../src/lib/cloud-config";
 const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
 const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
 
+// Flip to true to re-enable the iam-permission-tests POC capture:
+//   - sets PULUMI_OPTION_VERBOSE=9 + LOGTOSTDERR + LOGFLOW and TF_LOG=DEBUG so
+//     pulumi-aws emits its full HTTP trace on stderr;
+//   - sets IAM_SDK_TRACE_PATH so the Node-side @aws-sdk wrapper appends to a
+//     parallel sdk.trace file;
+//   - tees the child's stdout+stderr to cds-install.trace alongside.
+// Off by default — install logs stay quiet. Pairs with the matching flag
+// in packages/admin-installer/src/compute-stack.ts.
+const PULUMI_VERBOSE_TRACE = false;
+
 // Module-level store for an in-progress install. When the browser suspends
 // (laptop sleep) the SSE connection drops but the child keeps running. A
 // subsequent POST from the reconnecting client reattaches to the existing
@@ -103,14 +113,10 @@ export async function POST(req: NextRequest) {
   }
   const region = getRegion(preConfig);
 
-  // TEMP (iam-permission-tests POC): capture two traces during install so
-  // packages/iam-permission-tests can replay every AWS call through
-  // iam-simulate.
+  // iam-permission-tests POC capture — gated by PULUMI_VERBOSE_TRACE above:
   //   - cds-install.trace: pulumi-aws HTTP traffic (via PULUMI_OPTION_*)
   //   - cds-install.sdk.trace: Node-side @aws-sdk client calls made by the
   //     installer itself (IAM CreateRole, STS AssumeRole, DSQL signer, …)
-  // Remove this block, the env vars, and the file-tee in spawnChild when
-  // the POC graduates or is dropped.
   const traceFilePath = join(STARKEEP_DATA_DIR, "cds-install.trace");
   const sdkTraceFilePath = join(STARKEEP_DATA_DIR, "cds-install.sdk.trace");
 
@@ -120,12 +126,15 @@ export async function POST(req: NextRequest) {
     AWS_SECRET_ACCESS_KEY: body.secretAccessKey,
     AWS_SESSION_TOKEN: body.sessionToken,
     AWS_REGION: region,
-    // TEMP (iam-permission-tests POC) — remove with the block above.
-    TF_LOG: "DEBUG",
-    PULUMI_OPTION_LOGFLOW: "true",
-    PULUMI_OPTION_LOGTOSTDERR: "true",
-    PULUMI_OPTION_VERBOSE: "9",
-    IAM_SDK_TRACE_PATH: sdkTraceFilePath,
+    ...(PULUMI_VERBOSE_TRACE
+      ? {
+          TF_LOG: "DEBUG",
+          PULUMI_OPTION_LOGFLOW: "true",
+          PULUMI_OPTION_LOGTOSTDERR: "true",
+          PULUMI_OPTION_VERBOSE: "9",
+          IAM_SDK_TRACE_PATH: sdkTraceFilePath,
+        }
+      : {}),
   };
 
   const encoder = new TextEncoder();
@@ -190,20 +199,21 @@ export async function POST(req: NextRequest) {
         runningChild = child;
         runningChildDone = finish;
 
-        // TEMP (iam-permission-tests POC): tee child stdout+stderr to a file
-        // so we have a complete trace after the install regardless of whether
-        // the SSE client stayed connected. Overwrites on each fresh spawn.
-        // Remove with the env-var block in the POST handler when done.
+        // iam-permission-tests POC: tee child stdout+stderr to a file so we
+        // have a complete trace after the install regardless of whether the
+        // SSE client stayed connected. Gated by PULUMI_VERBOSE_TRACE.
         let traceFile: WriteStream | null = null;
-        try {
-          traceFile = createWriteStream(traceFilePath, { flags: "w" });
-        } catch (err) {
-          console.warn(`[iam-trace] could not open ${traceFilePath}: ${err}`);
-        }
-        if (traceFile) {
-          child.stdout.pipe(traceFile, { end: false });
-          child.stderr.pipe(traceFile, { end: false });
-          child.on("close", () => traceFile?.end());
+        if (PULUMI_VERBOSE_TRACE) {
+          try {
+            traceFile = createWriteStream(traceFilePath, { flags: "w" });
+          } catch (err) {
+            console.warn(`[iam-trace] could not open ${traceFilePath}: ${err}`);
+          }
+          if (traceFile) {
+            child.stdout.pipe(traceFile, { end: false });
+            child.stderr.pipe(traceFile, { end: false });
+            child.on("close", () => traceFile?.end());
+          }
         }
 
         runningChildListeners.set(listenerId, (line) => {

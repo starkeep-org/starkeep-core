@@ -27,6 +27,12 @@ import * as path from "node:path";
 // time any cloud install runs, and reuse it on every subsequent invocation.
 const PULUMI_CLI_ROOT = path.join(os.homedir(), ".starkeep", "pulumi");
 
+// Flip to true to forward pulumi's stderr (gRPC + AWS provider HTTP traces
+// emitted under PULUMI_OPTION_LOGTOSTDERR + PULUMI_OPTION_VERBOSE) to our
+// own stderr so the admin-web install log-tee can capture it. Pairs with
+// the matching PULUMI_VERBOSE_TRACE flag in the install route handlers.
+const PULUMI_VERBOSE_TRACE = false;
+
 let pulumiCommandPromise: Promise<pulumi.PulumiCommand> | undefined;
 
 async function ensurePulumiCli(): Promise<pulumi.PulumiCommand> {
@@ -270,12 +276,15 @@ export async function pulumiUpInline(opts: {
     await opts.preCleanupOrphans(inStateUrns);
   }
 
-  // TEMP (iam-permission-tests POC): forward pulumi's stderr to our own
-  // stderr so PULUMI_OPTION_LOGTOSTDERR=true + -v=9 traces (which include
-  // the AWS provider's HTTP requests/responses) reach the install
-  // log-tee in admin-web. Without onError, automation API buffers stderr
-  // internally and only surfaces it on failure. Remove when the POC ends.
-  const onError = (line: string) => process.stderr.write(line);
+  // iam-permission-tests POC: forward pulumi's stderr to our own stderr so
+  // PULUMI_OPTION_LOGTOSTDERR=true + -v=9 traces (which include the AWS
+  // provider's HTTP requests/responses) reach the install log-tee in
+  // admin-web. Without onError, automation API buffers stderr internally
+  // and only surfaces it on failure. Gated by PULUMI_VERBOSE_TRACE so it
+  // can be flipped back on when we need the traces again.
+  const onError = PULUMI_VERBOSE_TRACE
+    ? (line: string) => process.stderr.write(line)
+    : undefined;
 
   // Clear any pending operations left by a prior interrupted run before
   // attempting up. refresh is a no-op on a brand-new stack.
