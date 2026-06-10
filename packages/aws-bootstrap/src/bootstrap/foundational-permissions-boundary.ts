@@ -276,6 +276,25 @@ export function foundationalPermissionsBoundaryStatements(
       },
     },
     {
+      // Per-app HMAC credential reads. cloud-data-server reads any app's
+      // creds parameter to verify HMAC-signed /apps/{appId}/* requests. The
+      // role's broker-power inline policy grants this; the boundary admits
+      // the same so the intersection holds at runtime.
+      Sid: "FoundationalReadAppCreds",
+      Effect: "Allow",
+      Action: "ssm:GetParameter",
+      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`,
+    },
+    {
+      Sid: "FoundationalReadAppCredsKmsDecrypt",
+      Effect: "Allow",
+      Action: "kms:Decrypt",
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+      },
+    },
+    {
       // Broker pattern: cloud-data-server assumes the caller's per-app role on
       // every sync request to act under that app's identity. The role's inline
       // `broker-power` policy grants the same action; without this matching

@@ -19,8 +19,9 @@
  * Manager is not involved in the runtime data path.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
+import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
@@ -74,6 +75,106 @@ interface CachedCreds {
 
 const credentialCache = new Map<string, CachedCreds>();
 const CRED_REFRESH_BUFFER_MS = 60_000; // refresh 60s before expiry
+
+// ---------------------------------------------------------------------------
+// Per-app HMAC secret cache (SSM SecureString, refreshed every 5 min)
+// ---------------------------------------------------------------------------
+//
+// Every /apps/{appId}/* request is HMAC-signed (see packages/app-client/src/
+// sign.ts). The verifier below fetches the secret from
+// /${stackPrefix}/app-creds/${appId} once per warm Lambda instance and caches
+// it. The same SecureString is written by the installer at cloud install
+// (admin-installer/src/app-creds.ts) and mirrored from the local-side hmac
+// secret so the sync supervisor signs with the same key the verifier expects.
+
+interface CachedHmacSecret {
+  hmacSecret: string;
+  fetchedAt: number;
+}
+
+const HMAC_CACHE_TTL_MS = 5 * 60_000;
+const hmacSecretCache = new Map<string, CachedHmacSecret>();
+
+let ssmClientSingleton: SSMClient | null = null;
+function getSsmClient(): SSMClient {
+  if (ssmClientSingleton) return ssmClientSingleton;
+  ssmClientSingleton = new SSMClient({
+    region: process.env.AWS_REGION ?? "us-east-1",
+  });
+  return ssmClientSingleton;
+}
+
+async function loadAppHmacSecret(appId: string): Promise<string | null> {
+  const cached = hmacSecretCache.get(appId);
+  if (cached && Date.now() - cached.fetchedAt < HMAC_CACHE_TTL_MS) {
+    return cached.hmacSecret;
+  }
+  const stackPrefix = process.env.STACK_PREFIX;
+  if (!stackPrefix) throw new Error("STACK_PREFIX env var is required");
+  const name = `/${stackPrefix}/app-creds/${appId}`;
+  try {
+    const result = await getSsmClient().send(
+      new GetParameterCommand({ Name: name, WithDecryption: true }),
+    );
+    const raw = result.Parameter?.Value;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { hmacSecret?: string };
+    if (!parsed.hmacSecret) return null;
+    hmacSecretCache.set(appId, {
+      hmacSecret: parsed.hmacSecret,
+      fetchedAt: Date.now(),
+    });
+    return parsed.hmacSecret;
+  } catch (err) {
+    if (err instanceof ParameterNotFound) return null;
+    throw err;
+  }
+}
+
+/**
+ * Verify the X-Starkeep-App-Id + X-Starkeep-App-Sig headers against the
+ * appId from the URL path. Returns the appId on success; an error object
+ * otherwise. Mirrors `signRequest` in @starkeep/app-client/src/sign.ts.
+ *
+ * Body is the raw request bytes the client signed. GET/HEAD sign over the
+ * empty string. For base64-encoded API Gateway events we must decode first
+ * so the bytes match what the client transmitted.
+ */
+function validateAppHmac(
+  pathAppId: string,
+  method: string,
+  headers: Record<string, string | undefined>,
+  bodyBytes: Buffer,
+  hmacSecret: string,
+): { ok: true } | { ok: false; status: number; message: string } {
+  const headerAppId =
+    headers["x-starkeep-app-id"]
+    ?? headers["X-Starkeep-App-Id"]
+    ?? headers["X-STARKEEP-APP-ID"];
+  const headerSig =
+    headers["x-starkeep-app-sig"]
+    ?? headers["X-Starkeep-App-Sig"]
+    ?? headers["X-STARKEEP-APP-SIG"];
+  if (!headerAppId || !headerSig) {
+    return { ok: false, status: 401, message: "Missing X-Starkeep-App-{Id,Sig} headers" };
+  }
+  if (headerAppId !== pathAppId) {
+    return { ok: false, status: 401, message: "Header appId does not match path" };
+  }
+  const isEmptyBody = method === "GET" || method === "HEAD";
+  const signedBody = isEmptyBody ? Buffer.alloc(0) : bodyBytes;
+  const prefix = Buffer.from(`${pathAppId}:`, "utf8");
+  const expected = createHmac("sha256", hmacSecret)
+    .update(Buffer.concat([prefix as unknown as Uint8Array, signedBody as unknown as Uint8Array]) as unknown as Uint8Array)
+    .digest("hex");
+  if (
+    expected.length !== headerSig.length
+    || !timingSafeEqual(Buffer.from(expected, "utf8") as unknown as Uint8Array, Buffer.from(headerSig, "utf8") as unknown as Uint8Array)
+  ) {
+    return { ok: false, status: 401, message: "Invalid signature" };
+  }
+  return { ok: true };
+}
 
 async function getAppCreds(appId: string, accountId: string): Promise<CachedCreds> {
   const cached = credentialCache.get(appId);
@@ -385,6 +486,29 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const parsed = parseAppPath(rawPath);
     if (!parsed) return clientErr("Not found", 404);
     const { appId, subPath } = parsed;
+
+    // HMAC verification gate. Every /apps/{appId}/* route (sync exchange,
+    // /data/*, /files/*, /app-data/*, /health) is HMAC-signed by the caller;
+    // signatures are checked against the per-app SecureString in SSM. Path-
+    // trust without a signature would let any cross-app caller use another
+    // app's role-power simply by changing the URL.
+    const hmacSecret = await loadAppHmacSecret(appId);
+    if (!hmacSecret) {
+      return clientErr(`Unknown app: ${appId}`, 401);
+    }
+    const bodyBytes = event.body
+      ? (event.isBase64Encoded
+        ? Buffer.from(event.body, "base64")
+        : Buffer.from(event.body, "utf8"))
+      : Buffer.alloc(0);
+    const normalizedHeaders: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(event.headers ?? {})) {
+      if (typeof value === "string") normalizedHeaders[key.toLowerCase()] = value;
+    }
+    const hmacCheck = validateAppHmac(appId, method, normalizedHeaders, bodyBytes, hmacSecret);
+    if (!hmacCheck.ok) {
+      return clientErr(hmacCheck.message, hmacCheck.status);
+    }
 
     const accountId = getAccountId(context.invokedFunctionArn);
     const creds = await getAppCreds(appId, accountId);

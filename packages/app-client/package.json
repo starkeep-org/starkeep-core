@@ -32,7 +32,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@aws-sdk/client-ssm": "^3.700.0"
+  },
   "devDependencies": {
     "@types/node": "^25.4.0",
     "tsup": "^8.0.0",

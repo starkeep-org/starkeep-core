@@ -327,6 +327,9 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.700.0
         version: 3.1009.0
+      '@aws-sdk/client-ssm':
+        specifier: ^3.700.0
+        version: 3.1045.0
       '@aws-sdk/client-sts':
         specifier: ^3.700.0
         version: 3.1030.0
@@ -397,6 +400,10 @@ importers:
         version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
 
   packages/app-client:
+    dependencies:
+      '@aws-sdk/client-ssm':
+        specifier: ^3.700.0
+        version: 3.1045.0
     devDependencies:
       '@types/node':
         specifier: ^25.4.0
@@ -10840,14 +10847,14 @@ snapshots:
       chai: 5.3.3
       tinyrainbow: 2.0.0
 
-  '@vitest/mocker@3.2.4(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(vite@6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3))':
+  '@vitest/mocker@3.2.4(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(vite@6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3))':
     dependencies:
       '@vitest/spy': 3.2.4
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
       msw: 2.14.6(@types/node@22.10.0)(typescript@5.9.3)
-      vite: 6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+      vite: 6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
 
   '@vitest/mocker@3.2.4(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(vite@6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3))':
     dependencies:
@@ -13405,7 +13412,7 @@ snapshots:
     dependencies:
       '@types/chai': 5.2.3
       '@vitest/expect': 3.2.4
-      '@vitest/mocker': 3.2.4(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(vite@6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3))
+      '@vitest/mocker': 3.2.4(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(vite@6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3))
       '@vitest/pretty-format': 3.2.4
       '@vitest/runner': 3.2.4
       '@vitest/snapshot': 3.2.4

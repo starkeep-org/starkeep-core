@@ -480,7 +480,9 @@ async function main() {
       localObjectStorage: localAdapter,
       localDb: databaseAdapter.getRawDatabase(),
       cloudUrl: CLOUD_URL,
-      getAuthHeader: () => (currentIdToken ? `Bearer ${currentIdToken}` : undefined),
+      // Outbound auth is per-request HMAC, not bearer JWT (see sync-supervisor.ts
+      // → makeSignerFor). The id token is still used elsewhere for admin-web's
+      // own AWS calls.
       listInstalledApps: () =>
         listAppRegistry(localDb).map((row) => ({
           appId: row.appId,

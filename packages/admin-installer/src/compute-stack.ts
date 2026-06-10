@@ -69,6 +69,12 @@ export interface ComputeContext {
    * this case under the stripped per-app boundary).
    */
   apiGatewayExecutionArn: string;
+  /**
+   * Public base URL of the shared API Gateway (the cloud-data-server's stage
+   * URL). Injected into per-app Lambdas as STARKEEP_CLOUD_DATA_BASE so they
+   * can call the broker over HTTPS via @starkeep/app-client.
+   */
+  apiGatewayUrl: string;
   authorizerId: string;
   region: string;
   accountId: string;

@@ -656,6 +656,11 @@ export function buildTempInstallCloudDataServerPolicy(
  * (access_grants) is the exact confinement; this IAM ceiling is intentionally
  * category-granular.
  */
+/**
+ * The account portion of an IAM ARN — wildcard for cross-region or installs
+ * that may not know it at policy-build time. `*` is fine here because the
+ * resource path itself is fully scoped (`/${stackPrefix}/app-creds/${appId}`).
+ */
 export function buildRuntimePolicy(
   stackPrefix: string,
   appId: string,
@@ -710,6 +715,28 @@ export function buildRuntimePolicy(
       Effect: "Allow",
       Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
       Resource: `arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-${appId}-*`,
+    },
+    {
+      // Per-app HMAC credential lookup. Each role can fetch only its own
+      // parameter; cross-app reads are denied. @starkeep/app-client uses this
+      // in cloud mode to load the secret it signs every outbound /apps/*
+      // request with (see app-client/src/credentials.ts).
+      Sid: "AppReadOwnCredsParameter",
+      Effect: "Allow",
+      Action: "ssm:GetParameter",
+      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/${appId}`,
+    },
+    {
+      // SecureString — decrypt via the SSM service key. Scoped by the
+      // kms:ViaService condition so the role can only decrypt SSM-bound
+      // ciphertexts, not arbitrary KMS data keys.
+      Sid: "AppReadOwnCredsParameterKmsDecrypt",
+      Effect: "Allow",
+      Action: "kms:Decrypt",
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+      },
     },
   ];
 

@@ -18,7 +18,10 @@
  * express, and they bootstrap the shared step ledger rather than reading it.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import { roleChain, type AwsCredentials } from "./session";
 import {
@@ -33,6 +36,11 @@ import {
   assertCloudInstallableAppId,
   assertNotReservedAppId,
 } from "./iam";
+import {
+  appCredsParameterName,
+  deleteAppCredsParameter,
+  putAppCredsParameter,
+} from "./app-creds";
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
 import {
   putAppKeepFile,
@@ -64,6 +72,13 @@ export interface InstallerConfig {
    */
   apiGatewayExecutionArn: string;
   authorizerId: string;
+  /**
+   * Base URL of the shared HTTP API Gateway (the cloud-data-server's stage
+   * URL). Injected into per-app Lambdas as STARKEEP_CLOUD_DATA_BASE so that
+   * @starkeep/app-client's cloud mode can route signed calls back through
+   * `/apps/<appId>/...` on the same gateway.
+   */
+  apiGatewayUrl: string;
   permissionsBoundaryArn: string;
   foundationalPermissionsBoundaryArn: string;
   userDataOwnerPermissionsBoundaryArn: string;
@@ -163,6 +178,24 @@ async function installAppInner(
 
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
 
+  // SSM provisioning step: mirror the local HMAC secret to a SecureString at
+  // /${stackPrefix}/app-creds/${appId}. The cloud-data-server verifier reads
+  // from here; the supervisor (locally) signs with the same secret loaded
+  // from the local creds file, so both sides agree. The local creds file is
+  // authoritative — its presence is required (it's written by admin-web on
+  // local install). On first cloud install if no local file exists we mint a
+  // fresh secret and write the local file ourselves so the symmetry holds.
+  const hmacSecret = ensureLocalHmacSecret(appId);
+  await runStep(registry, appId, "install", "put_app_creds_parameter", done, () =>
+    putAppCredsParameter({
+      stackPrefix: config.stackPrefix,
+      appId,
+      hmacSecret,
+      region: config.region,
+      awsCreds: managerCreds,
+    }).then(() => undefined),
+  );
+
   await runStep(registry, appId, "install", "create_iam_role", done, async () => {
     await createAppRole({
       stackPrefix: config.stackPrefix,
@@ -260,6 +293,7 @@ async function installAppInner(
           appRoleArn,
           apiGatewayId: config.apiGatewayId,
           apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+          apiGatewayUrl: config.apiGatewayUrl,
           authorizerId: config.authorizerId,
           region: config.region,
           accountId: config.accountId,
@@ -335,6 +369,7 @@ async function uninstallAppInner(
         appRoleArn,
         apiGatewayId: config.apiGatewayId,
         apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+        apiGatewayUrl: config.apiGatewayUrl,
         authorizerId: config.authorizerId,
         region: config.region,
         accountId: config.accountId,
@@ -391,4 +426,47 @@ async function uninstallAppInner(
   await runStep(registry, appId, "uninstall", "delete_iam_role", done, () =>
     deleteAppRole(config.stackPrefix, appId, managerCreds),
   );
+
+  await runStep(registry, appId, "uninstall", "delete_app_creds_parameter", done, () =>
+    deleteAppCredsParameter({
+      stackPrefix: config.stackPrefix,
+      appId,
+      region: config.region,
+      awsCreds: managerCreds,
+    }),
+  );
 }
+
+/**
+ * Read the per-app HMAC secret from the local creds file
+ * (`~/.starkeep/app-creds/${appId}.json`) — the same file `@starkeep/app-client`
+ * loads at runtime. The local install (via admin-web) writes it. If the file
+ * is missing we mint a fresh secret; the caller is responsible for ensuring
+ * the local install runs first if local–cloud parity matters.
+ *
+ * Side-effect: returns the secret only; does NOT write the local file. (Cloud
+ * install runs against an existing local install in normal flows; minting
+ * here would diverge from the local registry's hmac_secret.)
+ */
+function ensureLocalHmacSecret(appId: string): string {
+  const dataDir = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+  const credsPath = join(dataDir, "app-creds", `${appId}.json`);
+  if (existsSync(credsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(credsPath, "utf-8")) as {
+        hmacSecret?: string;
+      };
+      if (parsed.hmacSecret) return parsed.hmacSecret;
+    } catch {
+      // fall through to mint
+    }
+  }
+  // Fallback: mint a fresh 32-byte secret. Used only when no local creds
+  // file exists (e.g. cloud-only install in a fresh environment). The cloud
+  // verifier and any future caller fetching from SSM will see this value.
+  return randomBytes(32).toString("hex");
+}
+
+// Re-export so call sites (cli scripts, admin-web) can name the SSM parameter
+// without reaching into ./app-creds directly.
+export { appCredsParameterName };

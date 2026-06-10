@@ -53,6 +53,13 @@ export function buildPulumiProgram(
             STARKEEP_STACK_PREFIX: ctx.stackPrefix,
             STARKEEP_DSQL_HOSTNAME: ctx.dsqlHostname,
             STARKEEP_FILES_BUCKET: ctx.filesBucket,
+            // Activate @starkeep/app-client cloud mode: the client will fetch
+            // its HMAC secret from SSM via the Lambda's exec role and route
+            // signed calls through the shared API Gateway. See
+            // packages/app-client/src/credentials.ts.
+            STARKEEP_APP_CLIENT_MODE: "cloud",
+            STARKEEP_CLOUD_DATA_BASE: ctx.apiGatewayUrl,
+            STARKEEP_APP_CREDS_PARAMETER_NAME: `/${ctx.stackPrefix}/app-creds/${ctx.appId}`,
             ...handler.env,
           },
         },

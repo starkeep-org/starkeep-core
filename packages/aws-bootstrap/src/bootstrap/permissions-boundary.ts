@@ -82,6 +82,27 @@ export function appPermissionsBoundaryStatements(stackPrefix: string): IamStatem
       Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-*`,
     },
     {
+      // Per-app HMAC credential reads. The boundary permits any per-app
+      // role to read parameters under /${stackPrefix}/app-creds/*; the
+      // role's inline runtime policy narrows it to the role's own parameter
+      // via aws:PrincipalTag/starkeep:appId. Broker roles (cloud-data-server)
+      // need to read every app's creds, which their runtime policy allows
+      // through this same ceiling.
+      Sid: "AppReadAppCreds",
+      Effect: "Allow",
+      Action: "ssm:GetParameter",
+      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`,
+    },
+    {
+      Sid: "AppReadAppCredsKmsDecrypt",
+      Effect: "Allow",
+      Action: "kms:Decrypt",
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+      },
+    },
+    {
       // Defense-in-depth: deny every mutating IAM verb. Read-only IAM verbs
       // aren't denied but are implicitly denied at the boundary because
       // nothing Allows them.

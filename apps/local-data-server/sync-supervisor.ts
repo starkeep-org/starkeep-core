@@ -16,6 +16,8 @@ import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
+import { signRequest } from "../../packages/app-client/src/sign.js";
+import { appRegistryRow } from "../../packages/admin-installer/src/local/registry.js";
 
 /**
  * The reserved app id of the always-on Starkeep Drive channel — the single
@@ -46,7 +48,6 @@ export interface SyncSupervisorOptions {
   readonly localObjectStorage: ObjectStorageAdapter;
   readonly localDb: DatabaseSync;
   readonly cloudUrl: string;
-  readonly getAuthHeader: () => string | undefined;
   /**
    * Returns the current list of installed apps from the registry. The
    * supervisor calls it on startup and on `rescan()`.
@@ -144,7 +145,6 @@ export function createSyncSupervisor(
     localObjectStorage,
     localDb,
     cloudUrl,
-    getAuthHeader,
     listInstalledApps,
     namespaceStore,
     appApplier,
@@ -156,6 +156,22 @@ export function createSyncSupervisor(
   const engines = new Map<string, EngineEntry>();
   let paused = false;
   const cloudUrlBase = cloudUrl.replace(/\/+$/, "");
+
+  // Per-engine HMAC signer. The cloud verifier requires every /apps/{appId}/*
+  // request to carry an X-Starkeep-App-Sig HMAC over `${appId}:` ++ body bytes
+  // (see packages/app-client/src/sign.ts and the verifier in
+  // cloud-data-server/src/api-handler.ts). The per-app hmac secret is the same
+  // value the installer wrote into both the local registry and the SSM
+  // SecureString at cloud install, so both sides agree.
+  function makeSignerFor(appId: string): ((body: string) => Record<string, string>) | undefined {
+    const row = appRegistryRow(localDb, appId);
+    const hmacSecret = row?.hmacSecret;
+    if (!hmacSecret) {
+      console.warn(`[sync] no hmac secret for app=${appId}; outbound requests will be unsigned`);
+      return undefined;
+    }
+    return (body: string) => signRequest({ appId, hmacSecret, body });
+  }
 
   function makeEngineEntry(
     appId: string,
@@ -189,10 +205,11 @@ export function createSyncSupervisor(
   function startDriveEngine(): void {
     if (engines.has(DRIVE_APP_ID)) return;
     const baseUrl = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}`;
-    const transport = createHttpSyncTransport({ baseUrl, getAuthHeader });
+    const driveSigner = makeSignerFor(DRIVE_APP_ID);
+    const transport = createHttpSyncTransport({ baseUrl, signRequest: driveSigner });
     const remoteStorage = new HttpObjectStorageAdapter({
       baseUrl: `${baseUrl}/files`,
-      getAuthHeader,
+      signRequest: driveSigner,
     });
     const syncState = createPerAppSyncStateStore(
       localDb,
@@ -216,15 +233,16 @@ export function createSyncSupervisor(
     if (engines.has(appId)) return;
 
     const perAppBaseUrl = `${cloudUrlBase}/apps/${encodeURIComponent(appId)}`;
+    const appSigner = makeSignerFor(appId);
 
     const transport = createHttpSyncTransport({
       baseUrl: perAppBaseUrl,
-      getAuthHeader,
+      signRequest: appSigner,
     });
 
     const remoteStorage = new HttpObjectStorageAdapter({
       baseUrl: `${perAppBaseUrl}/files`,
-      getAuthHeader,
+      signRequest: appSigner,
     });
 
     const syncState = createPerAppSyncStateStore(
