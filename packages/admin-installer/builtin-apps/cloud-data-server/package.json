@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@starkeep/protocol-primitives": "workspace:*",
+    "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/storage-aurora-dsql": "workspace:*",
     "@starkeep/storage-s3": "workspace:*",

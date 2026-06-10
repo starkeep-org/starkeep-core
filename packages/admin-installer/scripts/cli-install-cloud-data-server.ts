@@ -49,7 +49,7 @@ import {
 import { execSync } from "node:child_process";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { installCloudDataServer } from "../src/builtin-installs";
-import { rotatePulumiPassphraseIfPlaceholder } from "../src/pulumi-passphrase";
+import { ensurePulumiPassphrase } from "../src/pulumi-passphrase";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -287,19 +287,20 @@ execSync("pnpm --filter @starkeep/builtin-cloud-data-server build", {
   stdio: "inherit",
 });
 
-// Rotate the bootstrap-time placeholder Pulumi passphrase before any
-// pulumi up runs. Idempotent: subsequent installs see a non-placeholder
-// value and leave it alone — the passphrase must stay stable once any
-// Pulumi state exists or every later up/destroy breaks.
+// Create the Pulumi state passphrase if missing. CloudFormation can't
+// create SecureString SSM parameters, so bootstrap leaves this to the
+// installer. Idempotent: subsequent installs see the existing value and
+// leave it alone — the passphrase must stay stable once any Pulumi state
+// exists or every later up/destroy breaks.
 console.log("\nChecking Pulumi state passphrase…");
-const rotationOutcome = await rotatePulumiPassphraseIfPlaceholder({
+const ensureOutcome = await ensurePulumiPassphrase({
   stackPrefix,
   region,
 });
 console.log(
-  rotationOutcome === "rotated"
-    ? "  Rotated bootstrap placeholder → random SecureString."
-    : "  Already rotated; leaving as-is.",
+  ensureOutcome === "created"
+    ? "  Created SecureString with fresh random value."
+    : "  Already present; leaving as-is.",
 );
 
 console.log("\nInstalling cloud-data-server…\n");

@@ -30,6 +30,7 @@ import {
   createHLCClock,
   serializeHLC,
   deserializeHLC,
+  appSyncableObjectKey,
   dataRecordObjectKey,
   categoryOf,
   getCategory,
@@ -42,6 +43,8 @@ import {
   DsqlAppSyncableNamespaceStore,
   DsqlAppSyncableApplier,
 } from "@starkeep/storage-aurora-dsql";
+import { createAppSpecificFactory } from "@starkeep/shared-space-api";
+import type { AppSpecificOperations } from "@starkeep/shared-space-api";
 import type {
   DatabaseClientFactory,
   DatabaseClient,
@@ -407,6 +410,52 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     const query = event.queryStringParameters ?? {};
 
+    // Lazy per-request app-syncable source: needed by both /sync/exchange (the
+    // per-app channel, not Drive) and /app-data/*. Build at most once; both
+    // call sites share the same DSQL connection. The source's pg client gets
+    // closed via toClose in the finally below.
+    let appSyncableSource:
+      | Awaited<ReturnType<typeof buildAppSyncableSource>>
+      | null = null;
+    async function getAppSyncableSource() {
+      if (!appSyncableSource) {
+        appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+        toClose.push(() => appSyncableSource!.client.end());
+      }
+      return appSyncableSource;
+    }
+
+    // Lazy per-request app-specific view used by /app-data/*. Mirrors the
+    // local-data-server's appSpecificFactory wiring (apps/local-data-server/
+    // server.ts:429-439) — same shared-space-api factory, DSQL applier instead
+    // of SQLite, S3 storage instead of local.
+    //
+    // We deliberately do NOT pass buildFileUrl: the factory's fileUrl() is
+    // synchronous, but S3 presigning is async, so the GET /app-data/files
+    // route below calls storage.getSignedUrl directly after the manifest gate.
+    let appSpecificView: AppSpecificOperations | null | undefined;
+    async function getAppSpecificView(): Promise<AppSpecificOperations | null> {
+      if (appSpecificView !== undefined) return appSpecificView;
+      const source = await getAppSyncableSource();
+      const factory = createAppSpecificFactory({
+        namespace: source.namespaces,
+        applier: source.applier,
+        fileStorage: storage,
+        clock,
+      });
+      appSpecificView = factory({ subjectType: "app", subjectId: appId });
+      return appSpecificView;
+    }
+
+    // Clamp a requested presigned-URL TTL (seconds) to the remaining STS
+    // session lifetime minus a 30s safety buffer. Presigned URLs signed with
+    // session credentials stop working when the session expires — capping
+    // expiresIn here ensures the URL never outlives the credentials.
+    function clampPresignExpiresIn(requested: number): number {
+      const remainingSec = Math.floor((creds.expiresAt - Date.now()) / 1000) - 30;
+      return Math.max(1, Math.min(requested, remainingSec));
+    }
+
     // GET /apps/{appId}/health — app-scoped health check
     if (method === "GET" && subPath === "/health") {
       const dbHealthy = await db.healthCheck();
@@ -742,6 +791,113 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
     }
 
+    // ---- App-specific syncable data (mirrors local-data-server) ----
+    // All /app-data/... routes are scoped to the caller's appId (resolved
+    // from the path prefix above). The factory's view refuses ops on tables/
+    // files the app didn't declare; absence of the namespace means the app
+    // didn't declare appSpecificSyncable in its manifest.
+    if (subPath.startsWith("/app-data/")) {
+      const view = await getAppSpecificView();
+      if (!view) {
+        return clientErr("App did not declare appSpecificSyncable in its manifest", 404);
+      }
+
+      const dbMatch = subPath.match(/^\/app-data\/db\/([^/]+)$/);
+      if (dbMatch) {
+        const table = decodeURIComponent(dbMatch[1]!);
+        try {
+          if (method === "POST") {
+            const raw = event.isBase64Encoded && event.body
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : (event.body ?? "{}");
+            const body = JSON.parse(raw) as { row?: Record<string, unknown> };
+            if (!body.row) return clientErr("row is required", 400);
+            await view.insertRow(table, body.row);
+            return ok({ ok: true });
+          }
+          if (method === "PATCH") {
+            const raw = event.isBase64Encoded && event.body
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : (event.body ?? "{}");
+            const body = JSON.parse(raw) as {
+              where?: Record<string, unknown>;
+              patch?: Record<string, unknown>;
+            };
+            if (!body.where || !body.patch) {
+              return clientErr("where and patch are required", 400);
+            }
+            const changes = await view.updateRow(table, body.where, body.patch);
+            return ok({ changes });
+          }
+          if (method === "DELETE") {
+            const raw = event.isBase64Encoded && event.body
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : (event.body ?? "{}");
+            const body = JSON.parse(raw) as { where?: Record<string, unknown> };
+            if (!body.where) return clientErr("where is required", 400);
+            const changes = await view.deleteRow(table, body.where);
+            return ok({ changes });
+          }
+          if (method === "GET") {
+            const where: Record<string, unknown> = { ...query };
+            const rows = await view.queryRows(table, Object.keys(where).length ? where : undefined);
+            return ok({ rows });
+          }
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+        return clientErr("Method not allowed", 405);
+      }
+
+      const fileMatch = subPath.match(/^\/app-data\/files\/(.+)$/);
+      if (fileMatch) {
+        const subKey = decodeURIComponent(fileMatch[1]!);
+        try {
+          if (method === "PUT") {
+            if (!event.body) return clientErr("Request body must not be empty", 400);
+            const bytes = event.isBase64Encoded
+              ? Buffer.from(event.body, "base64")
+              : Buffer.from(event.body, "utf8");
+            if (bytes.length === 0) return clientErr("Request body must not be empty", 400);
+            if (bytes.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
+            const mimeType = (event.headers?.["content-type"]
+              ?? event.headers?.["Content-Type"]
+              ?? "application/octet-stream").split(";")[0]!.trim();
+            const result = await view.putFile(
+              subKey,
+              bytes as unknown as Uint8Array,
+              mimeType,
+            );
+            return ok(result);
+          }
+          if (method === "GET") {
+            // Manifest gate + key construction live in the factory; we use
+            // getFile (which enforces filesEnabled and the per-app key prefix)
+            // to verify existence, then presign directly because the factory's
+            // fileUrl is sync and S3 presigning is async.
+            const file = await view.getFile(subKey);
+            if (!file) return clientErr("File not found", 404);
+            const requested = parseInt(query["expiresIn"] ?? "3600", 10);
+            const expiresIn = clampPresignExpiresIn(
+              Number.isFinite(requested) ? requested : 3600,
+            );
+            const objectKey = appSyncableObjectKey(appId, subKey);
+            const url = await storage.getSignedUrl(objectKey, { expiresIn });
+            return ok({ url, expiresIn });
+          }
+          if (method === "DELETE") {
+            await view.deleteFile(subKey);
+            return ok({ ok: true });
+          }
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+        return clientErr("Method not allowed", 405);
+      }
+
+      return clientErr("Not found", 404);
+    }
+
     // POST /apps/{appId}/sync/exchange — version-vector exchange.
     // Body: SyncExchangeRequest. Writes go under the calling channel's
     // identity; PG GRANTs gate which types this channel can write. No
@@ -768,12 +924,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           syncSharedRecords: true,
         });
       } else {
-        const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
-        toClose.push(() => appSyncableSource.client.end());
+        const source = await getAppSyncableSource();
         transport = createInProcessSyncTransport({
           databaseAdapter: db,
           clock,
-          appSyncableSource,
+          appSyncableSource: source,
           objectStorage: storage,
           syncSharedRecords: false,
         });

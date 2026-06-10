@@ -82,15 +82,15 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
         `arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-admin-*`,
       ),
     },
-    // The bootstrap CloudFormation seeds /pulumi/passphrase with a literal
-    // placeholder; the admin-installer rotates it to a random SecureString on
-    // first cloud-data-server install (detect-then-skip thereafter — the
-    // passphrase must stay stable once any Pulumi state exists). Read+write
-    // are scoped to that one parameter.
+    // The admin-installer creates /pulumi/passphrase as a SecureString on
+    // first cloud-data-server install (CloudFormation can't create
+    // SecureString SSM parameters itself). Create-if-missing thereafter —
+    // the passphrase must stay stable once any Pulumi state exists. Read+
+    // write are scoped to that one parameter.
     {
-      Sid: "AdminAppRotatePulumiPassphrase",
+      Sid: "AdminAppEnsurePulumiPassphrase",
       Effect: "Allow",
-      Action: ["ssm:GetParameter", "ssm:PutParameter"],
+      Action: ["ssm:GetParameter", "ssm:PutParameter", "ssm:AddTagsToResource"],
       Resource: SUB(
         `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
       ),

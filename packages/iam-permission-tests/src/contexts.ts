@@ -288,19 +288,24 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         {
           action: "ssm:GetParameter",
           resource: passphraseArn,
-          why: "rotatePulumiPassphraseIfPlaceholder reads the parameter (WithDecryption) to decide rotate-vs-skip.",
+          why: "ensurePulumiPassphrase reads the parameter (WithDecryption) to decide create-vs-skip.",
         },
         {
           action: "ssm:PutParameter",
           resource: passphraseArn,
-          why: "If the bootstrap placeholder is still present, the rotation overwrites it with a fresh SecureString.",
+          why: "If the parameter does not yet exist, ensurePulumiPassphrase creates it as a fresh SecureString.",
+        },
+        {
+          action: "ssm:AddTagsToResource",
+          resource: passphraseArn,
+          why: "PutParameter with Tags triggers a separate ssm:AddTagsToResource authorization check (the starkeep:managed tag on initial creation).",
         },
         {
           action: "kms:Decrypt",
           resource: "*",
           contextVariables: { "kms:ViaService": ssmViaService },
           why:
-            "GetParameter WithDecryption on the SecureString (post first rotation) " +
+            "GetParameter WithDecryption on the SecureString (post first creation) " +
             "flows through KMS via SSM. Admin-app grants kms:Encrypt+Decrypt scoped " +
             "by kms:ViaService — must stay covered.",
         },
@@ -308,7 +313,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "kms:Encrypt",
           resource: "*",
           contextVariables: { "kms:ViaService": ssmViaService },
-          why: "PutParameter Type=SecureString during rotation encrypts via KMS via SSM.",
+          why: "PutParameter Type=SecureString during initial creation encrypts via KMS via SSM.",
         },
         {
           action: "sts:AssumeRole",
@@ -346,7 +351,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
     expectedCalls({ stackPrefix, accountId, region }) {
       // Pulumi's full call set isn't enumerated here yet (captured traces
       // remain the primary source). What IS modeled: the passphrase reads,
-      // because after admin-app rotates /pulumi/passphrase to a SecureString,
+      // because after admin-app creates /pulumi/passphrase as a SecureString,
       // every subsequent CDS pulumi up needs both ssm:GetParameter on that
       // parameter AND kms:Decrypt via ssm. Catching a missing kms statement
       // here is the whole point of running the simulator pre-deploy.

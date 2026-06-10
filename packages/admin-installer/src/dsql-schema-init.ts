@@ -21,16 +21,26 @@
  *      `CREATE ROLE` idempotent we do an explicit `SELECT FROM pg_roles`
  *      pre-check and conditionally issue the CREATE — see `ensureRole` below.
  *
- *   3. FOREIGN KEY constraints (including `REFERENCES ... ON DELETE ...`)
+  *   3. FOREIGN KEY constraints (including `REFERENCES ... ON DELETE ...`)
  *      → SQLSTATE 0A000 "FOREIGN KEY constraint not supported". DSQL has no
  *      cross-row referential integrity. Cascade/SET NULL semantics that we
  *      relied on FK declarations for must be enforced in application code
  *      (cloud-data-server's delete paths, etc.).
  *
+ *   4. Partial indexes (`CREATE INDEX ... WHERE ...`) → SQLSTATE 0A000
+ *      "WHERE not supported for CREATE INDEX". Fold the predicate columns
+ *      into the index key instead (DSQL allows multiple NULLs in a unique
+ *      index, so nullable columns can preserve "ignore these rows" semantics).
+ *
+ *   5. Synchronous secondary indexes → SQLSTATE 0A000 "unsupported mode.
+ *      please use CREATE INDEX ASYNC.". DSQL builds secondary indexes
+ *      asynchronously and does not accept `IF NOT EXISTS` on the async form,
+ *      so we pre-check pg_indexes — see `ensureIndex` below.
+ *
  * If you add to this file, keep every entry to a single non-PL/pgSQL
- * statement with no FK constraints, and use the role-step pattern (or a
- * similar pre-check) for anything Postgres would normally express as
- * `IF NOT EXISTS ... DO`.
+ * statement with no FK constraints or partial-index predicates, and use the
+ * role/index pre-check pattern for anything Postgres would normally express
+ * as `IF NOT EXISTS ... DO`.
  */
 
 import pg from "pg";
@@ -95,6 +105,27 @@ async function ensureRole(
 }
 
 /**
+ * Idempotent CREATE INDEX ASYNC for DSQL. DSQL requires secondary indexes to
+ * be built asynchronously and does not accept IF NOT EXISTS on the async
+ * form, so we pre-check pg_indexes by name.
+ */
+async function ensureIndex(
+  db: Kysely<Record<string, never>>,
+  schemaname: string,
+  indexname: string,
+  createSql: string,
+): Promise<void> {
+  const existing = await sql<{ exists: boolean }>`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname = ${schemaname} AND indexname = ${indexname}
+    ) AS exists
+  `.execute(db);
+  if (existing.rows[0]?.exists) return;
+  await sql.raw(createSql).execute(db);
+}
+
+/**
  * Apply the full shared-schema DDL. Each statement runs in its own implicit
  * transaction — see the DSQL note at the top of this file.
  */
@@ -115,6 +146,15 @@ export async function initializeSharedSchema(
 
       `GRANT CREATE, USAGE ON SCHEMA shared TO manager_ddl`,
       `GRANT ALL PRIVILEGES ON SCHEMA shared TO user_data_owner`,
+      // Installer connects as <stackPrefix>_installer to read/write the
+      // install-step ledger and app registry, both in `shared`. Table grants
+      // alone aren't enough — schema-level USAGE is required to resolve the
+      // qualified names.
+      `GRANT USAGE ON SCHEMA shared TO "${installer}"`,
+      // PUBLIC needs USAGE too: shared.access_grants and
+      // shared.app_syncable_namespaces are granted SELECT to PUBLIC below,
+      // which is meaningless without schema USAGE.
+      `GRANT USAGE ON SCHEMA shared TO PUBLIC`,
 
       // shared.records — single flat table for all shared data types.
       // parent_id is a plain text column: DSQL has no FK constraints, so the
@@ -135,14 +175,6 @@ export async function initializeSharedSchema(
          origin_app_id      text        NOT NULL,
          parent_id          text
        )`,
-
-      // Duplicate-file prevention: (filename + bytes) is unique among live
-      // records. Tombstoned rows are excluded so re-upload after delete is
-      // allowed. NULL filenames are not constrained — the rule requires both
-      // filename and content to match.
-      `CREATE UNIQUE INDEX IF NOT EXISTS uq_records_filename_hash
-         ON shared.records (original_filename, content_hash)
-         WHERE deleted_at IS NULL AND original_filename IS NOT NULL`,
 
       `ALTER DEFAULT PRIVILEGES IN SCHEMA shared GRANT ALL ON TABLES TO user_data_owner`,
       `GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA shared TO user_data_owner`,
@@ -211,6 +243,20 @@ export async function initializeSharedSchema(
     for (const stmt of statements) {
       await sql.raw(stmt).execute(db);
     }
+
+    // Duplicate-file prevention: (filename + bytes) is unique among live
+    // records. DSQL doesn't support partial indexes, so include deleted_at
+    // in the key — live rows share a NULL deleted_at and collide, while
+    // tombstoned rows carry a timestamp and don't block re-upload. NULL
+    // original_filename rows also don't collide (multiple NULLs allowed).
+    // DSQL requires CREATE INDEX ASYNC for secondary indexes.
+    await ensureIndex(
+      db,
+      "shared",
+      "uq_records_filename_hash",
+      `CREATE UNIQUE INDEX ASYNC uq_records_filename_hash
+         ON shared.records (original_filename, content_hash, deleted_at)`,
+    );
 
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The
     // orchestrator opens its registry connection as the admin-app IAM role
