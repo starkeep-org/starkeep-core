@@ -19,7 +19,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AppManifest } from "@starkeep/admin-manifest";
@@ -440,17 +440,19 @@ async function uninstallAppInner(
 /**
  * Read the per-app HMAC secret from the local creds file
  * (`~/.starkeep/app-creds/${appId}.json`) — the same file `@starkeep/app-client`
- * loads at runtime. The local install (via admin-web) writes it. If the file
- * is missing we mint a fresh secret; the caller is responsible for ensuring
- * the local install runs first if local–cloud parity matters.
+ * loads at runtime, and the same value that's mirrored into the local
+ * registry's `hmac_secret` column so the sync supervisor can sign with it.
  *
- * Side-effect: returns the secret only; does NOT write the local file. (Cloud
- * install runs against an existing local install in normal flows; minting
- * here would diverge from the local registry's hmac_secret.)
+ * If the file is missing (cloud-only install in a fresh environment) we mint
+ * a fresh 32-byte secret AND write it back to the local file. Without the
+ * write-back, the cloud verifier would have a secret no local component can
+ * sign with, and every supervisor → cloud sync call would 401. The mode 0600
+ * write mirrors admin-web's local-install behavior.
  */
 function ensureLocalHmacSecret(appId: string): string {
   const dataDir = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-  const credsPath = join(dataDir, "app-creds", `${appId}.json`);
+  const credsDir = join(dataDir, "app-creds");
+  const credsPath = join(credsDir, `${appId}.json`);
   if (existsSync(credsPath)) {
     try {
       const parsed = JSON.parse(readFileSync(credsPath, "utf-8")) as {
@@ -461,10 +463,19 @@ function ensureLocalHmacSecret(appId: string): string {
       // fall through to mint
     }
   }
-  // Fallback: mint a fresh 32-byte secret. Used only when no local creds
-  // file exists (e.g. cloud-only install in a fresh environment). The cloud
-  // verifier and any future caller fetching from SSM will see this value.
-  return randomBytes(32).toString("hex");
+  // Mint and persist. The local registry's `hmac_secret` column is populated
+  // separately by admin-web at local install; if this path is hit before that
+  // ran, the registry row will be filled in lazily on first supervisor
+  // startup that sees the local creds file. (Supervisor now hard-fails on
+  // missing secret, so the divergence is loud rather than silent.)
+  const fresh = randomBytes(32).toString("hex");
+  mkdirSync(credsDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    credsPath,
+    JSON.stringify({ appId, hmacSecret: fresh }, null, 2),
+    { mode: 0o600 },
+  );
+  return fresh;
 }
 
 // Re-export so call sites (cli scripts, admin-web) can name the SSM parameter

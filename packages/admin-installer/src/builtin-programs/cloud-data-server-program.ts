@@ -256,40 +256,47 @@ export function buildCloudDataServerProgram(
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
-    // Per-app authenticated health endpoint
+    // Per-app health endpoint. App identity is established by the handler's
+    // HMAC verifier (X-Starkeep-App-Id + X-Starkeep-App-Sig against the SSM
+    // SecureString at /${stackPrefix}/app-creds/${appId}), not by the
+    // gateway's JWT authorizer. The data plane identifies the *app*, not the
+    // end user; end-user identity is the app's business.
     new aws.apigatewayv2.Route("route-app-health", {
       apiId: api.id,
       routeKey: "GET /apps/{appId}/health",
       target: pulumi.interpolate`integrations/${integration.id}`,
-      authorizerId: authorizer.id,
-      authorizationType: "JWT",
     });
 
     // Reserved data-plane sub-namespaces. {appId} is a path variable purely
     // for APIGW route specificity — the handler parses appId from rawPath
-    // itself and does not read event.pathParameters.
+    // itself and does not read event.pathParameters. All four routes rely on
+    // the handler's HMAC verifier for identity; no gateway authorizer.
     new aws.apigatewayv2.Route("route-data-proxy", {
       apiId: api.id,
       routeKey: "ANY /apps/{appId}/data/{proxy+}",
       target: pulumi.interpolate`integrations/${integration.id}`,
-      authorizerId: authorizer.id,
-      authorizationType: "JWT",
     });
 
     new aws.apigatewayv2.Route("route-files-proxy", {
       apiId: api.id,
       routeKey: "ANY /apps/{appId}/files/{proxy+}",
       target: pulumi.interpolate`integrations/${integration.id}`,
-      authorizerId: authorizer.id,
-      authorizationType: "JWT",
     });
 
     new aws.apigatewayv2.Route("route-sync-proxy", {
       apiId: api.id,
       routeKey: "ANY /apps/{appId}/sync/{proxy+}",
       target: pulumi.interpolate`integrations/${integration.id}`,
-      authorizerId: authorizer.id,
-      authorizationType: "JWT",
+    });
+
+    // Step 2: cloud-side /app-data/* surface (mirrors local-data-server's
+    // /app-data/db/<table> and /app-data/files/<key> routes). Handler logic
+    // lives in api-handler.ts; this route is what makes it reachable through
+    // the gateway. Identity gated by the HMAC verifier, same as the others.
+    new aws.apigatewayv2.Route("route-app-data-proxy", {
+      apiId: api.id,
+      routeKey: "ANY /apps/{appId}/app-data/{proxy+}",
+      target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
     // -----------------------------------------------------------------------

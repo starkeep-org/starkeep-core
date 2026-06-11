@@ -245,17 +245,26 @@ export async function initializeSharedSchema(
     }
 
     // Duplicate-file prevention: (filename + bytes) is unique among live
-    // records. DSQL doesn't support partial indexes, so include deleted_at
-    // in the key — live rows share a NULL deleted_at and collide, while
-    // tombstoned rows carry a timestamp and don't block re-upload. NULL
-    // original_filename rows also don't collide (multiple NULLs allowed).
+    // records. DSQL doesn't support partial indexes (no `WHERE` on CREATE
+    // INDEX), so we include `deleted_at` in the key and use NULLS NOT
+    // DISTINCT (PG 15+) so two live rows with NULL deleted_at collide.
+    // Tombstoned rows carry distinct HLC stamps in deleted_at so they don't
+    // block re-upload after delete. NULL original_filename rows still don't
+    // collide because the filename is part of the key and NULLS NOT DISTINCT
+    // applies to the whole tuple, not per-column — but a NULL filename also
+    // means "not a user-uploaded file" so dedup is moot for those.
     // DSQL requires CREATE INDEX ASYNC for secondary indexes.
+    //
+    // If DSQL rejects NULLS NOT DISTINCT, install fails loudly here and we
+    // fall back to a sentinel-value scheme (see plan-cloud-auth-foundational
+    // -fixes-2026-06-11.md).
     await ensureIndex(
       db,
       "shared",
       "uq_records_filename_hash",
       `CREATE UNIQUE INDEX ASYNC uq_records_filename_hash
-         ON shared.records (original_filename, content_hash, deleted_at)`,
+         ON shared.records (original_filename, content_hash, deleted_at)
+         NULLS NOT DISTINCT`,
     );
 
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The

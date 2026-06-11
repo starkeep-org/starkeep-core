@@ -163,12 +163,21 @@ export function createSyncSupervisor(
   // cloud-data-server/src/api-handler.ts). The per-app hmac secret is the same
   // value the installer wrote into both the local registry and the SSM
   // SecureString at cloud install, so both sides agree.
-  function makeSignerFor(appId: string): ((body: string) => Record<string, string>) | undefined {
+  //
+  // Hard-fail if the secret is missing. The previous warn-and-return-undefined
+  // sent unsigned traffic to the broker, which would 401 — but the supervisor
+  // would keep retrying and the warning was easy to miss. Refusing to start
+  // the engine is louder and matches the install invariant: every registered
+  // app has an hmac_secret.
+  function makeSignerFor(appId: string): (body: string) => Record<string, string> {
     const row = appRegistryRow(localDb, appId);
     const hmacSecret = row?.hmacSecret;
     if (!hmacSecret) {
-      console.warn(`[sync] no hmac secret for app=${appId}; outbound requests will be unsigned`);
-      return undefined;
+      throw new Error(
+        `[sync] no hmac_secret in local registry for app=${appId}. ` +
+        `Re-run the local install for this app; the supervisor will not sign ` +
+        `outbound requests without it.`,
+      );
     }
     return (body: string) => signRequest({ appId, hmacSecret, body });
   }
