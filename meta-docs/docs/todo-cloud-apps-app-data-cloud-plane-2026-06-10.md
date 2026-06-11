@@ -1,5 +1,17 @@
 # TODO: Cloud-side app-data plane (HTTP read/write of synced app-specific data)
 
+> **Resolved (2026-06-11, done).** Verified in code: the broker handles
+> `/app-data/db/<table>` (GET/POST/PATCH/DELETE) and `/app-data/files/<key>`
+> (PUT/GET/DELETE) in `api-handler.ts`, scoped to the HMAC-verified calling
+> app with the manifest gate enforced, and the gateway program claims
+> `ANY /apps/{appId}/app-data/{proxy+}` (`cloud-data-server-program.ts:296`),
+> so the surface is reachable. The proving example (cloud photos captions)
+> rides cloud-mode `@starkeep/app-client` (`loadAppCredentialsAsync` +
+> `signedFetch`). Follow-ups [[todo-app-data-files-existence-probe]] (doc 40)
+> and [[todo-app-data-files-presigned-flow]] (doc 41) remain open — GET still
+> downloads full bytes for the existence check, and PUT still pushes bytes
+> through APIGW/Lambda.
+
 App-specific data sync to the cloud already works: every per-app sync
 channel's `/sync/exchange` is wired with an `appSyncableSource`
 (`packages/admin-installer/builtin-apps/cloud-data-server/src/api-handler.ts:771-779`),

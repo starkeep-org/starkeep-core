@@ -48,7 +48,7 @@ The cloud data server presents one HTTPS API to clients. The shape is `/apps/{ap
 - `/apps/{appId}/data/*` — record reads/writes, per-record metadata, file-URL retrieval.
 - `/apps/{appId}/files/*` — direct file access by content-addressed key (presigned PUT/GET, HEAD, DELETE).
 - `/apps/{appId}/sync/exchange` — the channel-level sync endpoint (see Sync).
-- `/apps/{appId}/app-data/db/<table>` (GET/POST/PATCH/DELETE) and `/apps/{appId}/app-data/files/<key>` (GET/PUT/DELETE) — the cloud counterpart of local-data-server's `/app-data/*` surface, intended to let a cloud-served app read and write its own app-specific syncable data through the broker. The handler logic was added in the 2026-06-10 changes. **Note (see Part 2): no APIGW route claims `/apps/{appId}/app-data/{proxy+}`, so this surface is currently unreachable through the gateway.**
+- `/apps/{appId}/app-data/db/<table>` (GET/POST/PATCH/DELETE) and `/apps/{appId}/app-data/files/<key>` (GET/PUT/DELETE) — the cloud counterpart of local-data-server's `/app-data/*` surface, letting a cloud-served app read and write its own app-specific syncable data through the broker. The handler logic was added in the 2026-06-10 changes; the gateway route `ANY /apps/{appId}/app-data/{proxy+}` is claimed in `cloud-data-server-program.ts` (verified reachable 2026-06-11). The byte-path shape is still suboptimal — see todos 40 (existence check downloads full bytes) and 41 (PUT pushes bytes through APIGW instead of presigning).
 
 Two structural points are worth calling out because they shape what the API *does*:
 
