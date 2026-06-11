@@ -223,6 +223,25 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
               Action: "sts:AssumeRole",
               Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
             },
+            {
+              // Broker reads every per-app HMAC credential so it can verify
+              // signatures on /apps/{appId}/* requests. Scoped to the
+              // per-stack creds path; no other SSM parameters are reachable.
+              Sid: "BrokerReadAppCreds",
+              Effect: "Allow",
+              Action: "ssm:GetParameter",
+              Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/app-creds/*`,
+            },
+            {
+              // SecureString — decrypt via the SSM service key.
+              Sid: "BrokerReadAppCredsKmsDecrypt",
+              Effect: "Allow",
+              Action: "kms:Decrypt",
+              Resource: "*",
+              Condition: {
+                StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+              },
+            },
           ],
         }),
       }),

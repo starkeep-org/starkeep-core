@@ -117,7 +117,6 @@ describe("createSharedSpaceApi", () => {
       databaseAdapter,
       objectStorageAdapter,
       clock,
-      ownerId: "test-owner",
     });
 
     return { api, databaseAdapter, objectStorageAdapter };
@@ -208,7 +207,7 @@ describe("createSharedSpaceApi", () => {
       method: "GET",
       handler: async (_request, context) => ({
         status: 200,
-        body: { ownerId: context.ownerId },
+        body: { hasClock: context.clock !== undefined },
       }),
     });
 
@@ -219,7 +218,7 @@ describe("createSharedSpaceApi", () => {
     };
 
     const response = await api.handleRequest(request);
-    expect(response.body).toEqual({ ownerId: "test-owner" });
+    expect(response.body).toEqual({ hasClock: true });
   });
 });
 

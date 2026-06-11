@@ -11,7 +11,6 @@ const baseRecordSchema = v.object({
   type: v.pipe(v.string(), v.minLength(1)),
   createdAt: hlcTimestampSchema,
   updatedAt: hlcTimestampSchema,
-  ownerId: v.pipe(v.string(), v.minLength(1)),
   deletedAt: v.nullable(hlcTimestampSchema),
   version: v.pipe(v.number(), v.integer(), v.minValue(1)),
 });

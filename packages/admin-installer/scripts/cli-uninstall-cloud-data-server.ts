@@ -53,6 +53,7 @@ interface StarkeepConfig {
   // on DSQL/files-bucket existing) before tearing down cloud-data-server's
   // foundational infra.
   apiGatewayId?: string;
+  apiGatewayUrl?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
   s3Bucket?: string;
@@ -297,6 +298,7 @@ if (config.apiGatewayId && config.authorizerId && config.s3Bucket && config.auro
         pulumiStateBucket,
         apiGatewayId: config.apiGatewayId,
         apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+        apiGatewayUrl: config.apiGatewayUrl ?? "",
         authorizerId: config.authorizerId,
         permissionsBoundaryArn,
         foundationalPermissionsBoundaryArn,

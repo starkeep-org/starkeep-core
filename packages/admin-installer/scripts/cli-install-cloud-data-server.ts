@@ -49,6 +49,7 @@ import {
 import { execSync } from "node:child_process";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { installCloudDataServer } from "../src/builtin-installs";
+import { ensurePulumiPassphrase } from "../src/pulumi-passphrase";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -285,6 +286,22 @@ console.log("\nBuilding cloud-data-server bundle…\n");
 execSync("pnpm --filter @starkeep/builtin-cloud-data-server build", {
   stdio: "inherit",
 });
+
+// Create the Pulumi state passphrase if missing. CloudFormation can't
+// create SecureString SSM parameters, so bootstrap leaves this to the
+// installer. Idempotent: subsequent installs see the existing value and
+// leave it alone — the passphrase must stay stable once any Pulumi state
+// exists or every later up/destroy breaks.
+console.log("\nChecking Pulumi state passphrase…");
+const ensureOutcome = await ensurePulumiPassphrase({
+  stackPrefix,
+  region,
+});
+console.log(
+  ensureOutcome === "created"
+    ? "  Created SecureString with fresh random value."
+    : "  Already present; leaving as-is.",
+);
 
 console.log("\nInstalling cloud-data-server…\n");
 const outputs = await installCloudDataServer({

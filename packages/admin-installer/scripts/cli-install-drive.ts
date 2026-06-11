@@ -267,6 +267,7 @@ await installDrive(
     pulumiStateBucket,
     apiGatewayId: config.apiGatewayId,
     apiGatewayExecutionArn,
+    apiGatewayUrl: config.apiGatewayUrl ?? "",
     authorizerId: config.authorizerId,
     permissionsBoundaryArn,
     foundationalPermissionsBoundaryArn,

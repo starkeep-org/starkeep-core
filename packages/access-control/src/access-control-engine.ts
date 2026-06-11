@@ -24,13 +24,12 @@ export interface CreateAccessControlEngineOptions {
    */
   tokenStore: SharingTokenStore;
   clock: HLCClock;
-  ownerId: string;
 }
 
 export function createAccessControlEngine(
   options: CreateAccessControlEngineOptions,
 ): AccessControlEngine {
-  const { policyStore, tokenStore, clock, ownerId } = options;
+  const { policyStore, tokenStore, clock } = options;
 
   // In-memory cache. checkAccess is on the hot path (every read/write of a
   // shared record) so we trade a startup load for cheap subject lookups.
@@ -84,14 +83,6 @@ export function createAccessControlEngine(
   }
 
   async function checkAccess(request: AccessCheckRequest): Promise<AccessCheckResult> {
-    if (request.subjectId === ownerId) {
-      return {
-        allowed: true,
-        matchedPolicy: null,
-        reason: "Owner has full access",
-      };
-    }
-
     const subjectPolicies = Array.from(policyCache.values()).filter(
       (policy) => policy.subjectType === request.subjectType && policy.subjectId === request.subjectId,
     );

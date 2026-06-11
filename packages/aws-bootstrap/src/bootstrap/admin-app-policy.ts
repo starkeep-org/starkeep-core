@@ -82,5 +82,27 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
         `arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-admin-*`,
       ),
     },
+    // The admin-installer creates /pulumi/passphrase as a SecureString on
+    // first cloud-data-server install (CloudFormation can't create
+    // SecureString SSM parameters itself). Create-if-missing thereafter —
+    // the passphrase must stay stable once any Pulumi state exists. Read+
+    // write are scoped to that one parameter.
+    {
+      Sid: "AdminAppEnsurePulumiPassphrase",
+      Effect: "Allow",
+      Action: ["ssm:GetParameter", "ssm:PutParameter", "ssm:AddTagsToResource"],
+      Resource: SUB(
+        `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
+      ),
+    },
+    {
+      Sid: "AdminAppPulumiPassphraseKms",
+      Effect: "Allow",
+      Action: ["kms:Encrypt", "kms:Decrypt"],
+      Resource: "*",
+      Condition: {
+        StringEquals: { "kms:ViaService": SUB("ssm.${AWS::Region}.amazonaws.com") },
+      },
+    },
   ];
 }

@@ -15,7 +15,6 @@ const FIELD_MAP: Record<string, string> = {
   type: "type",
   createdAt: "created_at",
   updatedAt: "updated_at",
-  ownerId: "owner_id",
   deletedAt: "deleted_at",
   version: "version",
   contentHash: "content_hash",

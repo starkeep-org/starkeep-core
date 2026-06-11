@@ -6,7 +6,6 @@ export interface SqliteRow {
   type: string;
   created_at: string;
   updated_at: string;
-  owner_id: string;
   deleted_at: string | null;
   version: number;
   content_hash: string;
@@ -24,7 +23,6 @@ export function recordToRow(record: DataRecord): SqliteRow {
     type: record.type,
     created_at: serializeHLC(record.createdAt),
     updated_at: serializeHLC(record.updatedAt),
-    owner_id: record.ownerId,
     deleted_at: record.deletedAt ? serializeHLC(record.deletedAt) : null,
     version: record.version,
     content_hash: record.contentHash,
@@ -44,7 +42,6 @@ export function rowToRecord(row: SqliteRow): DataRecord {
     type: row.type,
     createdAt: deserializeHLC(row.created_at),
     updatedAt: deserializeHLC(row.updated_at),
-    ownerId: row.owner_id,
     deletedAt: row.deleted_at ? deserializeHLC(row.deleted_at) : null,
     version: row.version,
     contentHash: row.content_hash,

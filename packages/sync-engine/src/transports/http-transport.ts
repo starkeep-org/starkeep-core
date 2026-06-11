@@ -8,7 +8,12 @@ import { SyncError } from "../errors.js";
 export interface HttpSyncTransportOptions {
   readonly baseUrl: string;
   readonly fetch?: typeof globalThis.fetch;
-  readonly getAuthHeader?: () => string | undefined;
+  /**
+   * Produce per-request auth headers given the serialized body bytes.
+   * Used to HMAC-sign requests for the cloud verifier; mirrors the shape
+   * `@starkeep/app-client/sign.ts`'s `signRequest` emits.
+   */
+  readonly signRequest?: (body: string) => Record<string, string>;
 }
 
 /**
@@ -18,23 +23,23 @@ export interface HttpSyncTransportOptions {
 export function createHttpSyncTransport(
   options: HttpSyncTransportOptions,
 ): SyncTransport {
-  const { baseUrl, fetch: fetchImpl = globalThis.fetch, getAuthHeader } = options;
+  const { baseUrl, fetch: fetchImpl = globalThis.fetch, signRequest } = options;
   const trimmed = baseUrl.replace(/\/+$/, "");
 
   async function postJson<TRequest, TResponse>(
     path: string,
     body: TRequest,
   ): Promise<TResponse> {
+    const serialized = JSON.stringify(body);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
+      ...(signRequest?.(serialized) ?? {}),
     };
-    const auth = getAuthHeader?.();
-    if (auth) headers["Authorization"] = auth;
 
     const response = await fetchImpl(`${trimmed}${path}`, {
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: serialized,
     });
 
     if (!response.ok) {

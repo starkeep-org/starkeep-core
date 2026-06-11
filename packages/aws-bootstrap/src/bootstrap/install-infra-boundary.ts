@@ -49,6 +49,18 @@ export function installInfraBoundaryStatements(stackPrefix: string): IamStatemen
       Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
     },
     {
+      // The passphrase parameter is a SecureString, so reading it requires
+      // KMS decrypt against the SSM service key. Scoped via kms:ViaService
+      // so this permits only SSM-mediated decrypts.
+      Sid: "InstallInfraPulumiPassphraseKmsDecrypt",
+      Effect: "Allow",
+      Action: "kms:Decrypt",
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+      },
+    },
+    {
       // Artifacts bucket: install-infra uploads each app's deployment bundle
       // (uploadAppBundle) and Pulumi's aws.lambda.Function sources Lambda
       // code from the same key.

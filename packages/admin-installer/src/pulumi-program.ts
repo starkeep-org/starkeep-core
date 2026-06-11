@@ -18,7 +18,7 @@ import type { ComputeContext } from "./compute-stack";
  * APIGW v2 specificity regardless of any app's {proxy+} claim, so a
  * literal collision in a manifest is always a mistake.
  */
-const RESERVED_SUBPATHS = new Set(["data", "files", "sync", "health"]);
+const RESERVED_SUBPATHS = new Set(["data", "files", "sync", "health", "app-data"]);
 
 export function buildPulumiProgram(
   manifest: AppManifest,
@@ -53,6 +53,13 @@ export function buildPulumiProgram(
             STARKEEP_STACK_PREFIX: ctx.stackPrefix,
             STARKEEP_DSQL_HOSTNAME: ctx.dsqlHostname,
             STARKEEP_FILES_BUCKET: ctx.filesBucket,
+            // Activate @starkeep/app-client cloud mode: the client will fetch
+            // its HMAC secret from SSM via the Lambda's exec role and route
+            // signed calls through the shared API Gateway. See
+            // packages/app-client/src/credentials.ts.
+            STARKEEP_APP_CLIENT_MODE: "cloud",
+            STARKEEP_CLOUD_DATA_BASE: ctx.apiGatewayUrl,
+            STARKEEP_APP_CREDS_PARAMETER_NAME: `/${ctx.stackPrefix}/app-creds/${ctx.appId}`,
             ...handler.env,
           },
         },
@@ -109,7 +116,7 @@ export function buildPulumiProgram(
               throw new Error(
                 `App "${ctx.appId}" handler "${handler.name}" declares route "${routes[i]}" ` +
                 `which after prefixing becomes "${prefixedRouteKey}". The sub-paths ` +
-                `/apps/${ctx.appId}/{data,files,sync,health}/... are reserved for the ` +
+                `/apps/${ctx.appId}/{data,files,sync,health,app-data}/... are reserved for the ` +
                 `cloud-data-server and cannot be claimed by an app handler. ` +
                 `Note: these paths are also unreachable via a wildcard like "GET /{proxy+}" — ` +
                 `API Gateway v2 routes the broker's more-specific reserved routes first, ` +

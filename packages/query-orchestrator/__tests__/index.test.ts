@@ -12,7 +12,6 @@ import type { UnifiedIndex } from "../src/types.js";
 function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
   return {
     type: "@test/photo",
-    ownerId: "user1",
     originAppId: "test",
     contentHash: `sha256:${Math.random().toString(36).slice(2)}`,
     objectStorageKey: `shared/@test/photo/ab/${Math.random().toString(36).slice(2)}`,

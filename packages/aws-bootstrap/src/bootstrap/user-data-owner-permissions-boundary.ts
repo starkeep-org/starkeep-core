@@ -76,6 +76,24 @@ export function userDataOwnerPermissionsBoundaryStatements(
       },
     },
     {
+      // Drive's per-app HMAC credential. Same shape as the per-app boundary;
+      // narrowed in Drive's runtime policy to /${stackPrefix}/app-creds/
+      // starkeep-drive only.
+      Sid: "UserDataOwnerReadAppCreds",
+      Effect: "Allow",
+      Action: "ssm:GetParameter",
+      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`,
+    },
+    {
+      Sid: "UserDataOwnerReadAppCredsKmsDecrypt",
+      Effect: "Allow",
+      Action: "kms:Decrypt",
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+      },
+    },
+    {
       // Defense-in-depth: deny every mutating IAM verb. Mirrors the Deny block
       // in the other boundaries.
       Sid: "DenyOtherIam",

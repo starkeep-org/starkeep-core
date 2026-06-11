@@ -40,7 +40,6 @@ export async function createStarkeepSdk(
     objectStorageAdapter,
     accessPolicyStore,
     sharingTokenStore,
-    ownerId,
     nodeId,
     syncStateStore,
     subject,
@@ -92,7 +91,6 @@ export async function createStarkeepSdk(
     policyStore: accessPolicyStore,
     tokenStore: sharingTokenStore,
     clock,
-    ownerId,
   });
   await accessControlEngine.loadPolicies();
 
@@ -124,7 +122,6 @@ export async function createStarkeepSdk(
     databaseAdapter,
     objectStorageAdapter,
     clock,
-    ownerId,
     changeNotifier,
     getAppSpecific: options.getAppSpecific,
   });

@@ -149,6 +149,17 @@ export function foundationalPermissionsBoundaryStatements(
       Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
     },
     {
+      // The passphrase parameter is a SecureString; decrypt is via the SSM
+      // service key. Scoped via kms:ViaService.
+      Sid: "FoundationalPulumiPassphraseKmsDecrypt",
+      Effect: "Allow",
+      Action: "kms:Decrypt",
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+      },
+    },
+    {
       Sid: "FoundationalLambda",
       Effect: "Allow",
       Action: [
@@ -262,6 +273,25 @@ export function foundationalPermissionsBoundaryStatements(
         StringEquals: {
           "iam:AWSServiceName": "dsql.amazonaws.com",
         },
+      },
+    },
+    {
+      // Per-app HMAC credential reads. cloud-data-server reads any app's
+      // creds parameter to verify HMAC-signed /apps/{appId}/* requests. The
+      // role's broker-power inline policy grants this; the boundary admits
+      // the same so the intersection holds at runtime.
+      Sid: "FoundationalReadAppCreds",
+      Effect: "Allow",
+      Action: "ssm:GetParameter",
+      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`,
+    },
+    {
+      Sid: "FoundationalReadAppCredsKmsDecrypt",
+      Effect: "Allow",
+      Action: "kms:Decrypt",
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
       },
     },
     {

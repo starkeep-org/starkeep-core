@@ -24,6 +24,7 @@ import {
   buildTempInstallInfraPolicy,
   buildRuntimePolicy,
 } from "../../admin-installer/src/temp-policies";
+import { adminAppPolicyStatements } from "../../aws-bootstrap/src/bootstrap/admin-app-policy";
 import { foundationalPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/foundational-permissions-boundary";
 import { installDdlBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/install-ddl-boundary";
 import { installInfraBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/install-infra-boundary";
@@ -167,6 +168,52 @@ function resolveCfnValues<T>(value: T): T {
   return value;
 }
 
+function adminAppPolicy(stackPrefix: string, accountId: string, region: string): PolicyDoc {
+  // adminAppPolicyStatements is the one bootstrap policy still authored for
+  // CloudFormation to interpolate at deploy time: it uses `${AWS::Region}` in
+  // the kms:ViaService condition and `{ GetAtt: "UserPool.Arn" }` for the
+  // cognito statements. Neither survives `resolveCfnValues` on its own, so we
+  // pre-substitute both: wildcard for the user pool ARN (cognito statements
+  // aren't on the rotation hot path), and the concrete region for the kms
+  // condition (load-bearing — the simulator must see the resolved value to
+  // match the captured/expected call's kms:ViaService context).
+  const userPoolArn = `arn:aws:cognito-idp:*:${accountId}:userpool/*`;
+  const substituted = JSON.parse(
+    JSON.stringify(adminAppPolicyStatements(stackPrefix), (_k, v) => {
+      if (
+        v &&
+        typeof v === "object" &&
+        "GetAtt" in (v as object) &&
+        (v as { GetAtt: unknown }).GetAtt === "UserPool.Arn"
+      ) {
+        return userPoolArn;
+      }
+      return v;
+    }),
+  );
+  const fillPseudoParams = (v: unknown): unknown => {
+    if (typeof v === "string") {
+      return v.replaceAll("${AWS::Region}", region).replaceAll("${AWS::AccountId}", accountId);
+    }
+    if (Array.isArray(v)) return v.map(fillPseudoParams);
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, vv] of Object.entries(v as Record<string, unknown>)) {
+        out[k] = fillPseudoParams(vv);
+      }
+      return out;
+    }
+    return v;
+  };
+  return {
+    name: "admin-app-inline",
+    policy: {
+      Version: "2012-10-17",
+      Statement: fillPseudoParams(resolveCfnValues(substituted)) as unknown[],
+    },
+  };
+}
+
 function managerPolicy(stackPrefix: string): PolicyDoc {
   return {
     name: "manager-inline",
@@ -209,6 +256,76 @@ function requireAppId(name: string, appId: string | undefined): string {
 // ---------------------------------------------------------------------------
 
 const CONTEXTS: Record<string, ContextBuilder> = {
+  "admin-app": {
+    description:
+      "Admin-app role (federated Cognito user) at cli-install-cloud-data-server " +
+      "start — runs the Pulumi-passphrase rotation (ssm get/put + kms via ssm) " +
+      "and assumes Manager before any provisioning. Bootstrap-created role with " +
+      "no permissions boundary; its inline policy is the entire cap.",
+    build({ stackPrefix, accountId, region }) {
+      const roleName = `${stackPrefix}-app-admin-role`;
+      return {
+        principalArn: assumedRoleArn(accountId, roleName, "install"),
+        principalRoleName: roleName,
+        identityPolicies: [adminAppPolicy(stackPrefix, accountId, region)],
+        // Admin-app is bootstrap-created (same as Manager) with no boundary.
+        permissionBoundaryPolicies: [],
+        contextVariables: {
+          "aws:PrincipalTag/starkeep:appId": "admin",
+        },
+      };
+    },
+    expectedCalls({ stackPrefix, accountId, region }): ExpectedCall[] {
+      const passphraseArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`;
+      const managerRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
+      const ssmViaService = `ssm.${region}.amazonaws.com`;
+      return [
+        {
+          action: "sts:GetCallerIdentity",
+          resource: "*",
+          why: "cli-install-cloud-data-server resolves the AWS account ID up front when not in config.",
+        },
+        {
+          action: "ssm:GetParameter",
+          resource: passphraseArn,
+          why: "ensurePulumiPassphrase reads the parameter (WithDecryption) to decide create-vs-skip.",
+        },
+        {
+          action: "ssm:PutParameter",
+          resource: passphraseArn,
+          why: "If the parameter does not yet exist, ensurePulumiPassphrase creates it as a fresh SecureString.",
+        },
+        {
+          action: "ssm:AddTagsToResource",
+          resource: passphraseArn,
+          why: "PutParameter with Tags triggers a separate ssm:AddTagsToResource authorization check (the starkeep:managed tag on initial creation).",
+        },
+        {
+          action: "kms:Decrypt",
+          resource: "*",
+          contextVariables: { "kms:ViaService": ssmViaService },
+          why:
+            "GetParameter WithDecryption on the SecureString (post first creation) " +
+            "flows through KMS via SSM. Admin-app grants kms:Encrypt+Decrypt scoped " +
+            "by kms:ViaService — must stay covered.",
+        },
+        {
+          action: "kms:Encrypt",
+          resource: "*",
+          contextVariables: { "kms:ViaService": ssmViaService },
+          why: "PutParameter Type=SecureString during initial creation encrypts via KMS via SSM.",
+        },
+        {
+          action: "sts:AssumeRole",
+          resource: managerRoleArn,
+          why:
+            "installCloudDataServer's roleChain([managerRoleArn]) hops admin-app → Manager " +
+            "before any provisioning runs. Without this the install never reaches Pulumi.",
+        },
+      ];
+    },
+  },
+
   "install-cloud-data-server": {
     description:
       "cloud-data-server app role during pulumi up — broker-power + " +
@@ -231,10 +348,27 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         },
       };
     },
-    expectedCalls() {
-      // Not yet modeled — captured traces from a cds install remain the
-      // primary source until we enumerate Pulumi's call set here.
-      return [];
+    expectedCalls({ stackPrefix, accountId, region }) {
+      // Pulumi's full call set isn't enumerated here yet (captured traces
+      // remain the primary source). What IS modeled: the passphrase reads,
+      // because after admin-app creates /pulumi/passphrase as a SecureString,
+      // every subsequent CDS pulumi up needs both ssm:GetParameter on that
+      // parameter AND kms:Decrypt via ssm. Catching a missing kms statement
+      // here is the whole point of running the simulator pre-deploy.
+      const passphraseArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`;
+      return [
+        {
+          action: "ssm:GetParameter",
+          resource: passphraseArn,
+          why: "Pulumi loads the passphrase for state encryption on every up/destroy.",
+        },
+        {
+          action: "kms:Decrypt",
+          resource: "*",
+          contextVariables: { "kms:ViaService": `ssm.${region}.amazonaws.com` },
+          why: "Passphrase is a SecureString post-rotation; decryption flows through KMS via SSM.",
+        },
+      ];
     },
   },
 
@@ -351,7 +485,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         contextVariables: {},
       };
     },
-    expectedCalls({ stackPrefix, accountId, region, appId }) {
+    expectedCalls({ stackPrefix, accountId, region, appId }): ExpectedCall[] {
       const id = requireAppId("install-infra", appId);
       const stateBucket = `${stackPrefix}-pulumi-state-${accountId}-${region}`;
       const stateKey = `arn:aws:s3:::${stateBucket}/.pulumi/stacks/${stackPrefix}-app-${id}.json`;
@@ -371,6 +505,12 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         { action: "s3:ListBucket", resource: stateBucketArn, why: "Pulumi enumerates state objects under .pulumi/." },
         { action: "s3:GetAccelerateConfiguration", resource: stateBucketArn, why: "probePulumiStateBucket() — IAM propagation probe before Pulumi up." },
         { action: "ssm:GetParameter", resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`, why: "Pulumi loads the passphrase for state encryption." },
+        {
+          action: "kms:Decrypt",
+          resource: "*",
+          contextVariables: { "kms:ViaService": `ssm.${region}.amazonaws.com` },
+          why: "Passphrase is a SecureString post-rotation; GetParameter WithDecryption flows through KMS via SSM. Without the boundary's kms:Decrypt (via ssm) statement, Pulumi up 403s before reading state.",
+        },
 
         // Artifacts upload + Pulumi-source read of the bundle.
         { action: "s3:PutObject", resource: artifactKey, why: "uploadAppBundle writes apps/<appId>/latest/dist.zip." },

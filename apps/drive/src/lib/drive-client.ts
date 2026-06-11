@@ -85,7 +85,6 @@ export interface DriveRecord {
   origin_app_id: string;
   created_at: string;
   updated_at: string;
-  owner_id: string;
   version: number;
   content_hash: string | null;
   object_storage_key: string | null;
@@ -127,7 +126,6 @@ export type CloudRecord = Pick<
   | "category"
   | "created_at"
   | "updated_at"
-  | "owner_id"
   | "version"
   | "content_hash"
   | "object_storage_key"
