@@ -327,6 +327,9 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.700.0
         version: 3.1009.0
+      '@aws-sdk/client-ssm':
+        specifier: ^3.700.0
+        version: 3.1045.0
       '@aws-sdk/client-sts':
         specifier: ^3.700.0
         version: 3.1030.0
@@ -342,6 +345,9 @@ importers:
       '@starkeep/protocol-primitives':
         specifier: workspace:*
         version: link:../../../protocol-primitives
+      '@starkeep/shared-space-api':
+        specifier: workspace:*
+        version: link:../../../shared-space-api
       '@starkeep/storage-adapter':
         specifier: workspace:*
         version: link:../../../storage-adapter
@@ -394,6 +400,10 @@ importers:
         version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
 
   packages/app-client:
+    dependencies:
+      '@aws-sdk/client-ssm':
+        specifier: ^3.700.0
+        version: 3.1045.0
     devDependencies:
       '@types/node':
         specifier: ^25.4.0

@@ -7,7 +7,6 @@ import { createDataRecord } from "../src/records/builders.js";
 
 const recordInput = {
   type: "@test/photo",
-  ownerId: "u1",
   originAppId: "test",
   contentHash: "sha256:abc",
   objectStorageKey: "shared/@test/photo/ab/sha256:abc",

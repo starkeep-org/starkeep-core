@@ -150,7 +150,6 @@ export interface StarkeepSdkOptions {
    * the local-data-server — tokens are issued and validated cloud-side.
    */
   readonly sharingTokenStore: SharingTokenStore;
-  readonly ownerId: string;
   readonly nodeId: string;
   readonly clock?: HLCClock;
   /**

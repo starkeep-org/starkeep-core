@@ -165,7 +165,6 @@ describe("version-vector exchange", () => {
     const localRecord = createDataRecord(
       {
         type: "@test/photo",
-        ownerId: "u1",
         originAppId: "test",
         contentHash: "sha256:abc",
         objectStorageKey: "shared/@test/photo/ab/abc",
@@ -185,7 +184,6 @@ describe("version-vector exchange", () => {
     const cloudRecord = createDataRecord(
       {
         type: "@test/photo",
-        ownerId: "u2",
         originAppId: "test",
         contentHash: "sha256:def",
         objectStorageKey: "shared/@test/photo/de/def",
@@ -273,7 +271,6 @@ describe("version-vector exchange", () => {
     const record = createDataRecord(
       {
         type: "@test/photo",
-        ownerId: "u1",
         originAppId: "test",
         contentHash: "sha256:tombstone",
         objectStorageKey: "shared/@test/photo/to/tombstone",
@@ -346,7 +343,6 @@ describe("version-vector exchange", () => {
       const r = createDataRecord(
         {
           type: "@test/photo",
-          ownerId: "u1",
           originAppId: "test",
           contentHash: `sha256:r${i}`,
           objectStorageKey: `shared/@test/photo/r/r${i}`,
@@ -428,7 +424,6 @@ describe("version-vector exchange", () => {
       const r = createDataRecord(
         {
           type: "@test/photo",
-          ownerId: "u1",
           originAppId: "test",
           contentHash: `sha256:r${i}`,
           objectStorageKey: `shared/@test/photo/r/r${i}`,
@@ -583,7 +578,6 @@ describe("version-vector exchange", () => {
     const srEarly = createDataRecord(
       {
         type: "@test/photo",
-        ownerId: "u1",
         originAppId: "test",
         contentHash: "sha256:sr-early",
         objectStorageKey: "shared/@test/photo/sr/early",
@@ -612,7 +606,6 @@ describe("version-vector exchange", () => {
     const srLate = createDataRecord(
       {
         type: "@test/photo",
-        ownerId: "u1",
         originAppId: "test",
         contentHash: "sha256:sr-late",
         objectStorageKey: "shared/@test/photo/sr/late",

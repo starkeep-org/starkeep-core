@@ -11,7 +11,6 @@ import { SqliteDatabaseAdapter } from "../src/adapter.js";
 function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
   return {
     type: "@test/photo",
-    ownerId: "u1",
     originAppId: "test",
     contentHash: `sha256:${Math.random().toString(36).slice(2)}`,
     objectStorageKey: `shared/@test/photo/ab/${Math.random().toString(36).slice(2)}`,
@@ -110,14 +109,14 @@ describe("SqliteDatabaseAdapter", () => {
     });
 
     it("should support eq filter", async () => {
-      await adapter.put(createDataRecord(baseInput({ ownerId: "u1" }), clock));
-      await adapter.put(createDataRecord(baseInput({ ownerId: "u2" }), clock));
+      await adapter.put(createDataRecord(baseInput({ originalFilename: "a.jpg" }), clock));
+      await adapter.put(createDataRecord(baseInput({ originalFilename: "b.jpg" }), clock));
 
       const result = await adapter.query({
-        filters: [{ field: "ownerId", operator: "eq", value: "u2" }],
+        filters: [{ field: "originalFilename", operator: "eq", value: "b.jpg" }],
       });
       expect(result.records).toHaveLength(1);
-      expect(result.records[0].ownerId).toBe("u2");
+      expect(result.records[0].originalFilename).toBe("b.jpg");
     });
 
     it("should support like filter", async () => {

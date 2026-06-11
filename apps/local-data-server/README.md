@@ -59,18 +59,16 @@ Files attached to records are served via the data-server's `/files` routes. Sign
 
 ## Configuration
 
+Runtime settings live in `~/.starkeep/config.json` (or `$STARKEEP_DIR/config.json`). The file is auto-created on first boot with a generated `nodeId`; cloud fields are filled in later by the admin panel's cloud setup wizard via `PATCH /config`.
+
+Recognised keys: `nodeId` (generated once, never change), `pullIntervalMs` (default 30000), `pushDebounceMs` (default 500), `stage`, `userPoolId`, `userPoolClientId`, `identityPoolId`, `s3Bucket`, `s3Region`, `auroraEndpoint`, `apiGatewayUrl`.
+
+Only two env vars are recognised — both bootstrap concerns that can't live in the config file:
+
 | Environment Variable | Default | Description |
 |---|---|---|
 | `STARKEEP_PORT` | `9820` | HTTP port |
-| `STARKEEP_DIR` | `~/.starkeep` | Root directory for local data |
-| `STARKEEP_OWNER_ID` | — | Owner identifier for records |
-| `STARKEEP_NODE_ID` | — | Node identifier for HLC and sync |
-| `STARKEEP_CONFIG` | auto-resolved | Path to `starkeep-config.json` |
-| `STARKEEP_PULL_INTERVAL_MS` | `30000` | How often to pull remote changes |
-| `STARKEEP_PUSH_DEBOUNCE_MS` | `500` | Debounce before pushing local changes |
-| `STARKEEP_CLOUD_URL` | from config file | Override the cloud API endpoint |
-
-S3 credentials can also be overridden via environment variables (`STARKEEP_S3_BUCKET`, `STARKEEP_S3_REGION`, `STARKEEP_S3_ACCESS_KEY_ID`, `STARKEEP_S3_SECRET_ACCESS_KEY`) for cases where the config file is not used.
+| `STARKEEP_DIR` | `~/.starkeep` | Root directory for local data (chicken-and-egg with the config file's own location) |
 
 ## Local Storage
 

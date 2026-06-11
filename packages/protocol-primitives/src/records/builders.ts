@@ -5,7 +5,6 @@ import { type DataRecord } from "./types.js";
 
 export interface CreateDataRecordInput {
   type: string;
-  ownerId: string;
   originAppId: string;
   contentHash: string;
   objectStorageKey: string;
@@ -23,7 +22,6 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     type: input.type,
     createdAt: now,
     updatedAt: now,
-    ownerId: input.ownerId,
     deletedAt: null,
     version: 1,
     contentHash: input.contentHash,

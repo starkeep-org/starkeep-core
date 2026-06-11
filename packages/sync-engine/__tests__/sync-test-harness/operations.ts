@@ -48,7 +48,6 @@ async function driveSrOperation(
       const record = createDataRecord(
         {
           type: "@test/photo",
-          ownerId: "u1",
           originAppId: "test",
           contentHash: `sha256:${op.side}-insert`,
           objectStorageKey: objectKey,

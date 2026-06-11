@@ -5,7 +5,6 @@ import { MockDatabaseAdapter } from "../src/mock/mock-database-adapter.js";
 function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
   return {
     type: "@test/photo",
-    ownerId: "u1",
     originAppId: "test",
     contentHash: `sha256:${Math.random().toString(36).slice(2)}`,
     objectStorageKey: `shared/@test/photo/ab/${Math.random().toString(36).slice(2)}`,
@@ -104,16 +103,16 @@ describe("MockDatabaseAdapter", () => {
     });
 
     it("should support eq filter", async () => {
-      const record1 = createDataRecord(baseInput({ ownerId: "u1" }), clock);
-      const record2 = createDataRecord(baseInput({ ownerId: "u2" }), clock);
+      const record1 = createDataRecord(baseInput({ originalFilename: "a.jpg" }), clock);
+      const record2 = createDataRecord(baseInput({ originalFilename: "b.jpg" }), clock);
       await adapter.put(record1);
       await adapter.put(record2);
 
       const result = await adapter.query({
-        filters: [{ field: "ownerId", operator: "eq", value: "u1" }],
+        filters: [{ field: "originalFilename", operator: "eq", value: "a.jpg" }],
       });
       expect(result.records).toHaveLength(1);
-      expect(result.records[0].ownerId).toBe("u1");
+      expect(result.records[0].originalFilename).toBe("a.jpg");
     });
 
     it("should support sorting", async () => {

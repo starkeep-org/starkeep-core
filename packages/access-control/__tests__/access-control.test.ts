@@ -22,7 +22,6 @@ import type {
 function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
   return {
     type: "@test/note",
-    ownerId: "owner-user-1",
     originAppId: "test",
     contentHash: `sha256:${Math.random().toString(36).slice(2)}`,
     objectStorageKey: `shared/@test/note/ab/${Math.random().toString(36).slice(2)}`,
@@ -63,7 +62,6 @@ describe("AccessControl", () => {
   let policyStore: AccessPolicyStore;
   let tokenStore: SharingTokenStore;
   let engine: AccessControlEngine;
-  const ownerId = "owner-user-1";
 
   beforeEach(async () => {
     clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => Date.now() });
@@ -71,7 +69,7 @@ describe("AccessControl", () => {
     await databaseAdapter.init();
     policyStore = memoryPolicyStore();
     tokenStore = memoryTokenStore();
-    engine = createAccessControlEngine({ policyStore, tokenStore, clock, ownerId });
+    engine = createAccessControlEngine({ policyStore, tokenStore, clock });
   });
 
   describe("createPolicy and listPolicies", () => {
@@ -280,7 +278,7 @@ describe("AccessControl", () => {
         permissions: ["read", "write"],
       });
 
-      const engine2 = createAccessControlEngine({ policyStore, tokenStore, clock, ownerId });
+      const engine2 = createAccessControlEngine({ policyStore, tokenStore, clock });
       await engine2.loadPolicies();
 
       const policies = await engine2.listPolicies({ subjectId: "user-persist" });
@@ -299,7 +297,7 @@ describe("AccessControl", () => {
       });
       const { token } = await engine.createSharingToken(policy.policyId);
 
-      const engine2 = createAccessControlEngine({ policyStore, tokenStore, clock, ownerId });
+      const engine2 = createAccessControlEngine({ policyStore, tokenStore, clock });
       await engine2.loadPolicies();
 
       const validated = await engine2.validateSharingToken(token);
@@ -317,7 +315,7 @@ describe("AccessControl", () => {
       });
       await engine.revokePolicy(policy.policyId);
 
-      const engine2 = createAccessControlEngine({ policyStore, tokenStore, clock, ownerId });
+      const engine2 = createAccessControlEngine({ policyStore, tokenStore, clock });
       await engine2.loadPolicies();
 
       const policies = await engine2.listPolicies({ subjectId: "user-revoke" });

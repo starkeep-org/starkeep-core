@@ -113,5 +113,32 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
       Action: "sts:GetCallerIdentity",
       Resource: "*",
     },
+    {
+      // Manage per-app HMAC creds in SSM. Manager mirrors the local hmacSecret
+      // into a SecureString at install (PutParameter) and deletes it at
+      // uninstall (DeleteParameter). No GetParameter — Manager never needs
+      // to read the secret; only the per-app role and the broker do.
+      Sid: "ManagerManageAppCreds",
+      Effect: "Allow",
+      Action: [
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+      ],
+      Resource: SUB(`arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`),
+    },
+    {
+      // SecureString PutParameter calls KMS Encrypt under the SSM service
+      // key. Scoped by kms:ViaService so Manager can only encrypt
+      // SSM-bound ciphertexts.
+      Sid: "ManagerAppCredsKmsEncrypt",
+      Effect: "Allow",
+      Action: ["kms:Encrypt", "kms:GenerateDataKey", "kms:Decrypt"],
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+      },
+    },
   ];
 }

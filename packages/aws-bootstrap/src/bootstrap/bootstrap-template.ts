@@ -19,8 +19,8 @@ export interface GenerateBootstrapTemplateInput {
  * No "self-hosted vs SaaS" mode parameter — there is only one mode.
  *
  * Roles created:
- *   1. ${StackPrefix}-app-admin-role — federated entry point + admin app runtime
- *   2. ${StackPrefix}-manager-role   — pure-delegation role for install/uninstall
+ *   1. \${StackPrefix}-app-admin-role — federated entry point + admin app runtime
+ *   2. \${StackPrefix}-manager-role   — pure-delegation role for install/uninstall
  *   3. Permissions boundary managed policy for Manager-minted per-app roles
  */
 export function generateBootstrapTemplate(
@@ -387,17 +387,17 @@ ${installInfraBoundaryPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
-  PulumiPassphrase:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: !Sub '/\${StackPrefix}/pulumi/passphrase'
-      Type: String
-      Value: 'REPLACE_WITH_RANDOM_32_BYTE_VALUE'
-      Description: >-
-        Pulumi stack-state encryption passphrase. Replace Value with a random
-        32-byte string before deploying (or use a post-deploy custom resource).
-      Tags:
-        starkeep:managed: 'true'
+  # The Pulumi state-encryption passphrase lives at
+  # /\${StackPrefix}/pulumi/passphrase as an SSM SecureString, but it is NOT
+  # created here. CloudFormation's AWS::SSM::Parameter resource does not
+  # support Type: SecureString (only String / StringList). Instead, the
+  # admin-installer creates the parameter on first cloud-data-server install
+  # via ensurePulumiPassphrase (create-if-missing; never overwrite — the
+  # passphrase must stay stable once any Pulumi state exists).
+  #
+  # Teardown: scripts/teardown-bootstrap.sh deletes this parameter
+  # explicitly via 'ssm delete-parameter' (it already handles other
+  # resources CF can't clean up, like the versioned state bucket).
 
 Outputs:
   UserPoolId:

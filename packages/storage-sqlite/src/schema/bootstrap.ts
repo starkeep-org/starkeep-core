@@ -35,7 +35,6 @@ export function initializeLocalSchema(db: DatabaseSync): void {
       type TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      owner_id TEXT NOT NULL,
       deleted_at TEXT,
       version INTEGER NOT NULL DEFAULT 1,
       content_hash TEXT NOT NULL,
@@ -50,13 +49,13 @@ export function initializeLocalSchema(db: DatabaseSync): void {
   db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_type ON shared_records(type)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_origin_app ON shared_records(origin_app_id)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_parent_id ON shared_records(parent_id)");
-  // Duplicate-file prevention: (filename + bytes) is unique per owner among
-  // live records. Tombstoned rows (deleted_at IS NOT NULL) are excluded so a
-  // re-upload after delete is allowed. Records with NULL filename are not
-  // constrained — the rule requires both filename and content to match.
+  // Duplicate-file prevention: (filename + bytes) is unique among live records.
+  // Tombstoned rows (deleted_at IS NOT NULL) are excluded so a re-upload after
+  // delete is allowed. Records with NULL filename are not constrained — the
+  // rule requires both filename and content to match.
   db.exec(
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_shared_records_owner_filename_hash " +
-      "ON shared_records(owner_id, original_filename, content_hash) " +
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_shared_records_filename_hash " +
+      "ON shared_records(original_filename, content_hash) " +
       "WHERE deleted_at IS NULL AND original_filename IS NOT NULL",
   );
 

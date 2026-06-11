@@ -19,8 +19,9 @@
  * Manager is not involved in the runtime data path.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
+import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
@@ -30,6 +31,7 @@ import {
   createHLCClock,
   serializeHLC,
   deserializeHLC,
+  appSyncableObjectKey,
   dataRecordObjectKey,
   categoryOf,
   getCategory,
@@ -42,6 +44,8 @@ import {
   DsqlAppSyncableNamespaceStore,
   DsqlAppSyncableApplier,
 } from "@starkeep/storage-aurora-dsql";
+import { createAppSpecificFactory } from "@starkeep/shared-space-api";
+import type { AppSpecificOperations } from "@starkeep/shared-space-api";
 import type {
   DatabaseClientFactory,
   DatabaseClient,
@@ -71,6 +75,106 @@ interface CachedCreds {
 
 const credentialCache = new Map<string, CachedCreds>();
 const CRED_REFRESH_BUFFER_MS = 60_000; // refresh 60s before expiry
+
+// ---------------------------------------------------------------------------
+// Per-app HMAC secret cache (SSM SecureString, refreshed every 5 min)
+// ---------------------------------------------------------------------------
+//
+// Every /apps/{appId}/* request is HMAC-signed (see packages/app-client/src/
+// sign.ts). The verifier below fetches the secret from
+// /${stackPrefix}/app-creds/${appId} once per warm Lambda instance and caches
+// it. The same SecureString is written by the installer at cloud install
+// (admin-installer/src/app-creds.ts) and mirrored from the local-side hmac
+// secret so the sync supervisor signs with the same key the verifier expects.
+
+interface CachedHmacSecret {
+  hmacSecret: string;
+  fetchedAt: number;
+}
+
+const HMAC_CACHE_TTL_MS = 5 * 60_000;
+const hmacSecretCache = new Map<string, CachedHmacSecret>();
+
+let ssmClientSingleton: SSMClient | null = null;
+function getSsmClient(): SSMClient {
+  if (ssmClientSingleton) return ssmClientSingleton;
+  ssmClientSingleton = new SSMClient({
+    region: process.env.AWS_REGION ?? "us-east-1",
+  });
+  return ssmClientSingleton;
+}
+
+async function loadAppHmacSecret(appId: string): Promise<string | null> {
+  const cached = hmacSecretCache.get(appId);
+  if (cached && Date.now() - cached.fetchedAt < HMAC_CACHE_TTL_MS) {
+    return cached.hmacSecret;
+  }
+  const stackPrefix = process.env.STACK_PREFIX;
+  if (!stackPrefix) throw new Error("STACK_PREFIX env var is required");
+  const name = `/${stackPrefix}/app-creds/${appId}`;
+  try {
+    const result = await getSsmClient().send(
+      new GetParameterCommand({ Name: name, WithDecryption: true }),
+    );
+    const raw = result.Parameter?.Value;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { hmacSecret?: string };
+    if (!parsed.hmacSecret) return null;
+    hmacSecretCache.set(appId, {
+      hmacSecret: parsed.hmacSecret,
+      fetchedAt: Date.now(),
+    });
+    return parsed.hmacSecret;
+  } catch (err) {
+    if (err instanceof ParameterNotFound) return null;
+    throw err;
+  }
+}
+
+/**
+ * Verify the X-Starkeep-App-Id + X-Starkeep-App-Sig headers against the
+ * appId from the URL path. Returns the appId on success; an error object
+ * otherwise. Mirrors `signRequest` in @starkeep/app-client/src/sign.ts.
+ *
+ * Body is the raw request bytes the client signed. GET/HEAD sign over the
+ * empty string. For base64-encoded API Gateway events we must decode first
+ * so the bytes match what the client transmitted.
+ */
+function validateAppHmac(
+  pathAppId: string,
+  method: string,
+  headers: Record<string, string | undefined>,
+  bodyBytes: Buffer,
+  hmacSecret: string,
+): { ok: true } | { ok: false; status: number; message: string } {
+  const headerAppId =
+    headers["x-starkeep-app-id"]
+    ?? headers["X-Starkeep-App-Id"]
+    ?? headers["X-STARKEEP-APP-ID"];
+  const headerSig =
+    headers["x-starkeep-app-sig"]
+    ?? headers["X-Starkeep-App-Sig"]
+    ?? headers["X-STARKEEP-APP-SIG"];
+  if (!headerAppId || !headerSig) {
+    return { ok: false, status: 401, message: "Missing X-Starkeep-App-{Id,Sig} headers" };
+  }
+  if (headerAppId !== pathAppId) {
+    return { ok: false, status: 401, message: "Header appId does not match path" };
+  }
+  const isEmptyBody = method === "GET" || method === "HEAD";
+  const signedBody = isEmptyBody ? Buffer.alloc(0) : bodyBytes;
+  const prefix = Buffer.from(`${pathAppId}:`, "utf8");
+  const expected = createHmac("sha256", hmacSecret)
+    .update(Buffer.concat([prefix as unknown as Uint8Array, signedBody as unknown as Uint8Array]) as unknown as Uint8Array)
+    .digest("hex");
+  if (
+    expected.length !== headerSig.length
+    || !timingSafeEqual(Buffer.from(expected, "utf8") as unknown as Uint8Array, Buffer.from(headerSig, "utf8") as unknown as Uint8Array)
+  ) {
+    return { ok: false, status: 401, message: "Invalid signature" };
+  }
+  return { ok: true };
+}
 
 async function getAppCreds(appId: string, accountId: string): Promise<CachedCreds> {
   const cached = credentialCache.get(appId);
@@ -244,10 +348,20 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 // (e.g. an admin endpoint, a cross-type cleanup pass, a sharing-token op),
 // this seed will underestimate the true cloud max and let the new write
 // mint a stamp lower than an existing cloud stamp on the same record.
+// Per-Lambda-instance nodeId. The HLC clock requires nodeId to be unique
+// per replica — using a literal "cloud" let two warm Lambda containers mint
+// timestamps with the same (wallTime, counter, nodeId), violating ordering.
+// AWS_LAMBDA_LOG_STREAM_NAME is set per execution-environment instance and
+// stable across invocations within that env. Outside Lambda (local tests),
+// fall back to a process-lifetime UUID so test runs still produce a stable
+// id. The `cloud-` prefix lets makeCloudClock filter the records-table for
+// any cloud replica's max stamp, regardless of which instance wrote it.
+const CLOUD_NODE_ID = `cloud-${process.env.AWS_LAMBDA_LOG_STREAM_NAME ?? randomUUID()}`;
+
 async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
   const result = await client.query(
     "SELECT updated_at FROM shared.records WHERE updated_at LIKE $1 ORDER BY updated_at DESC LIMIT 1",
-    ["%:cloud"],
+    ["%:cloud-%"],
   );
   let initialState: { wallTime: number; counter: number } | undefined;
   if (result.rows.length > 0) {
@@ -256,7 +370,7 @@ async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
     initialState = { wallTime: parsed.wallTime, counter: parsed.counter };
   }
   return createHLCClock({
-    nodeId: "cloud",
+    nodeId: CLOUD_NODE_ID,
     wallClockFunction: Date.now,
     ...(initialState ? { initialState } : {}),
   });
@@ -334,7 +448,6 @@ function recordToResponse(record: DataRecord) {
     category: categoryOf(record.type),
     created_at: new Date(record.createdAt.wallTime).toISOString(),
     updated_at: new Date(record.updatedAt.wallTime).toISOString(),
-    owner_id: record.ownerId,
     version: record.version,
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
@@ -374,6 +487,29 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (!parsed) return clientErr("Not found", 404);
     const { appId, subPath } = parsed;
 
+    // HMAC verification gate. Every /apps/{appId}/* route (sync exchange,
+    // /data/*, /files/*, /app-data/*, /health) is HMAC-signed by the caller;
+    // signatures are checked against the per-app SecureString in SSM. Path-
+    // trust without a signature would let any cross-app caller use another
+    // app's role-power simply by changing the URL.
+    const hmacSecret = await loadAppHmacSecret(appId);
+    if (!hmacSecret) {
+      return clientErr(`Unknown app: ${appId}`, 401);
+    }
+    const bodyBytes = event.body
+      ? (event.isBase64Encoded
+        ? Buffer.from(event.body, "base64")
+        : Buffer.from(event.body, "utf8"))
+      : Buffer.alloc(0);
+    const normalizedHeaders: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(event.headers ?? {})) {
+      if (typeof value === "string") normalizedHeaders[key.toLowerCase()] = value;
+    }
+    const hmacCheck = validateAppHmac(appId, method, normalizedHeaders, bodyBytes, hmacSecret);
+    if (!hmacCheck.ok) {
+      return clientErr(hmacCheck.message, hmacCheck.status);
+    }
+
     const accountId = getAccountId(context.invokedFunctionArn);
     const creds = await getAppCreds(appId, accountId);
     const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
@@ -397,8 +533,52 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     const query = event.queryStringParameters ?? {};
-    const claims = event.requestContext.authorizer?.jwt?.claims;
-    const ownerId = claims?.sub ?? "unknown";
+
+    // Lazy per-request app-syncable source: needed by both /sync/exchange (the
+    // per-app channel, not Drive) and /app-data/*. Build at most once; both
+    // call sites share the same DSQL connection. The source's pg client gets
+    // closed via toClose in the finally below.
+    let appSyncableSource:
+      | Awaited<ReturnType<typeof buildAppSyncableSource>>
+      | null = null;
+    async function getAppSyncableSource() {
+      if (!appSyncableSource) {
+        appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+        toClose.push(() => appSyncableSource!.client.end());
+      }
+      return appSyncableSource;
+    }
+
+    // Lazy per-request app-specific view used by /app-data/*. Mirrors the
+    // local-data-server's appSpecificFactory wiring (apps/local-data-server/
+    // server.ts:429-439) — same shared-space-api factory, DSQL applier instead
+    // of SQLite, S3 storage instead of local.
+    //
+    // We deliberately do NOT pass buildFileUrl: the factory's fileUrl() is
+    // synchronous, but S3 presigning is async, so the GET /app-data/files
+    // route below calls storage.getSignedUrl directly after the manifest gate.
+    let appSpecificView: AppSpecificOperations | null | undefined;
+    async function getAppSpecificView(): Promise<AppSpecificOperations | null> {
+      if (appSpecificView !== undefined) return appSpecificView;
+      const source = await getAppSyncableSource();
+      const factory = createAppSpecificFactory({
+        namespace: source.namespaces,
+        applier: source.applier,
+        fileStorage: storage,
+        clock,
+      });
+      appSpecificView = factory({ subjectType: "app", subjectId: appId });
+      return appSpecificView;
+    }
+
+    // Clamp a requested presigned-URL TTL (seconds) to the remaining STS
+    // session lifetime minus a 30s safety buffer. Presigned URLs signed with
+    // session credentials stop working when the session expires — capping
+    // expiresIn here ensures the URL never outlives the credentials.
+    function clampPresignExpiresIn(requested: number): number {
+      const remainingSec = Math.floor((creds.expiresAt - Date.now()) / 1000) - 30;
+      return Math.max(1, Math.min(requested, remainingSec));
+    }
 
     // GET /apps/{appId}/health — app-scoped health check
     if (method === "GET" && subPath === "/health") {
@@ -531,7 +711,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         id: generateId(),
         kind: "data",
         type: body.type,
-        ownerId,
         originAppId: appId,
         createdAt: now,
         updatedAt: now,
@@ -736,6 +915,113 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
     }
 
+    // ---- App-specific syncable data (mirrors local-data-server) ----
+    // All /app-data/... routes are scoped to the caller's appId (resolved
+    // from the path prefix above). The factory's view refuses ops on tables/
+    // files the app didn't declare; absence of the namespace means the app
+    // didn't declare appSpecificSyncable in its manifest.
+    if (subPath.startsWith("/app-data/")) {
+      const view = await getAppSpecificView();
+      if (!view) {
+        return clientErr("App did not declare appSpecificSyncable in its manifest", 404);
+      }
+
+      const dbMatch = subPath.match(/^\/app-data\/db\/([^/]+)$/);
+      if (dbMatch) {
+        const table = decodeURIComponent(dbMatch[1]!);
+        try {
+          if (method === "POST") {
+            const raw = event.isBase64Encoded && event.body
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : (event.body ?? "{}");
+            const body = JSON.parse(raw) as { row?: Record<string, unknown> };
+            if (!body.row) return clientErr("row is required", 400);
+            await view.insertRow(table, body.row);
+            return ok({ ok: true });
+          }
+          if (method === "PATCH") {
+            const raw = event.isBase64Encoded && event.body
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : (event.body ?? "{}");
+            const body = JSON.parse(raw) as {
+              where?: Record<string, unknown>;
+              patch?: Record<string, unknown>;
+            };
+            if (!body.where || !body.patch) {
+              return clientErr("where and patch are required", 400);
+            }
+            const changes = await view.updateRow(table, body.where, body.patch);
+            return ok({ changes });
+          }
+          if (method === "DELETE") {
+            const raw = event.isBase64Encoded && event.body
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : (event.body ?? "{}");
+            const body = JSON.parse(raw) as { where?: Record<string, unknown> };
+            if (!body.where) return clientErr("where is required", 400);
+            const changes = await view.deleteRow(table, body.where);
+            return ok({ changes });
+          }
+          if (method === "GET") {
+            const where: Record<string, unknown> = { ...query };
+            const rows = await view.queryRows(table, Object.keys(where).length ? where : undefined);
+            return ok({ rows });
+          }
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+        return clientErr("Method not allowed", 405);
+      }
+
+      const fileMatch = subPath.match(/^\/app-data\/files\/(.+)$/);
+      if (fileMatch) {
+        const subKey = decodeURIComponent(fileMatch[1]!);
+        try {
+          if (method === "PUT") {
+            if (!event.body) return clientErr("Request body must not be empty", 400);
+            const bytes = event.isBase64Encoded
+              ? Buffer.from(event.body, "base64")
+              : Buffer.from(event.body, "utf8");
+            if (bytes.length === 0) return clientErr("Request body must not be empty", 400);
+            if (bytes.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
+            const mimeType = (event.headers?.["content-type"]
+              ?? event.headers?.["Content-Type"]
+              ?? "application/octet-stream").split(";")[0]!.trim();
+            const result = await view.putFile(
+              subKey,
+              bytes as unknown as Uint8Array,
+              mimeType,
+            );
+            return ok(result);
+          }
+          if (method === "GET") {
+            // Manifest gate + key construction live in the factory; we use
+            // getFile (which enforces filesEnabled and the per-app key prefix)
+            // to verify existence, then presign directly because the factory's
+            // fileUrl is sync and S3 presigning is async.
+            const file = await view.getFile(subKey);
+            if (!file) return clientErr("File not found", 404);
+            const requested = parseInt(query["expiresIn"] ?? "3600", 10);
+            const expiresIn = clampPresignExpiresIn(
+              Number.isFinite(requested) ? requested : 3600,
+            );
+            const objectKey = appSyncableObjectKey(appId, subKey);
+            const url = await storage.getSignedUrl(objectKey, { expiresIn });
+            return ok({ url, expiresIn });
+          }
+          if (method === "DELETE") {
+            await view.deleteFile(subKey);
+            return ok({ ok: true });
+          }
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+        return clientErr("Method not allowed", 405);
+      }
+
+      return clientErr("Not found", 404);
+    }
+
     // POST /apps/{appId}/sync/exchange — version-vector exchange.
     // Body: SyncExchangeRequest. Writes go under the calling channel's
     // identity; PG GRANTs gate which types this channel can write. No
@@ -762,12 +1048,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           syncSharedRecords: true,
         });
       } else {
-        const appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
-        toClose.push(() => appSyncableSource.client.end());
+        const source = await getAppSyncableSource();
         transport = createInProcessSyncTransport({
           databaseAdapter: db,
           clock,
-          appSyncableSource,
+          appSyncableSource: source,
           objectStorage: storage,
           syncSharedRecords: false,
         });

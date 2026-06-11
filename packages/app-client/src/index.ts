@@ -2,6 +2,7 @@ export {
   type AppCredentials,
   appCredentialsPath,
   loadAppCredentials,
+  loadAppCredentialsAsync,
   clearAppCredentialsCache,
 } from "./credentials";
 export { type SignableBody, signRequest, signedFetch, type SignedFetchInit } from "./sign";
