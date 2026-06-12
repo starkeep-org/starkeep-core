@@ -11,6 +11,9 @@
     "admin-web#test": {
       "dependsOn": ["^build"]
     },
+    "@starkeep/builtin-cloud-data-server#test": {
+      "dependsOn": ["^build"]
+    },
     "test:e2e": {
       "dependsOn": ["^build"],
       "cache": false

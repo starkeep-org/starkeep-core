@@ -140,7 +140,7 @@ async function loadAppHmacSecret(appId: string): Promise<string | null> {
  * empty string. For base64-encoded API Gateway events we must decode first
  * so the bytes match what the client transmitted.
  */
-function validateAppHmac(
+export function validateAppHmac(
   pathAppId: string,
   method: string,
   headers: Record<string, string | undefined>,
@@ -389,7 +389,7 @@ async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
 // hand because this handler is a separately-deployed artifact.
 const DRIVE_APP_ID = "starkeep-drive";
 
-function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
+export function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
   const match = rawPath.match(/^\/apps\/([a-z0-9][a-z0-9._-]*)(\/.*)?$/);
   if (!match) return null;
   return { appId: match[1]!, subPath: match[2] ?? "/" };
@@ -400,7 +400,7 @@ function parseAppPath(rawPath: string): { appId: string; subPath: string } | nul
 //   shared/<typeId>/<shard>/<hash>   — gated by per-type read/write grants
 //   apps/<appId>/syncable/<...>      — owned by the named app; only that app
 //                                       may touch it via its own files routes
-function parseObjectKey(
+export function parseObjectKey(
   callerAppId: string,
   decodedKey: string,
   grants: AccessGrants,
