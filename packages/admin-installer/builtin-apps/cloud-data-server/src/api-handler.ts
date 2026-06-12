@@ -303,6 +303,17 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
 // Per-request adapter creation (not cached — creds are cached separately)
 // ---------------------------------------------------------------------------
 
+// Test seam: every DB access in the handler flows through one
+// DatabaseClientFactory (the records adapter, the grants/clock client, and the
+// app-syncable source all call createClient on the factory makeAdapters
+// returns), so swapping the factory here is sufficient to fake DSQL entirely.
+let databaseClientFactoryOverride: DatabaseClientFactory | null = null;
+export function __setDatabaseClientFactoryForTests(
+  factory: DatabaseClientFactory | null,
+): void {
+  databaseClientFactoryOverride = factory;
+}
+
 function makeAdapters(appId: string, creds: CachedCreds) {
   const region = process.env.AWS_REGION ?? "us-east-1";
   const auroraEndpoint = process.env.AURORA_ENDPOINT;
@@ -312,7 +323,8 @@ function makeAdapters(appId: string, creds: CachedCreds) {
   if (!auroraEndpoint) throw new Error("AURORA_ENDPOINT env var is required");
   if (!s3Bucket) throw new Error("S3_BUCKET env var is required");
 
-  const clientFactory = new AppDsqlClientFactory(appId, creds, stackPrefix);
+  const clientFactory: DatabaseClientFactory =
+    databaseClientFactoryOverride ?? new AppDsqlClientFactory(appId, creds, stackPrefix);
 
   const db = new AuroraDsqlDatabaseAdapter(
     { hostname: auroraEndpoint, region },
@@ -1088,7 +1100,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 }
 
 async function buildAppSyncableSource(
-  clientFactory: AppDsqlClientFactory,
+  clientFactory: DatabaseClientFactory,
   hostname: string,
   region: string,
 ): Promise<{
