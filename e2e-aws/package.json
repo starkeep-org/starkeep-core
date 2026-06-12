@@ -1,0 +1,24 @@
+{
+  "name": "@starkeep/e2e-aws",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:aws": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudformation": "^3.700.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
+    "@starkeep/admin-installer": "workspace:*",
+    "@starkeep/app-client": "workspace:*",
+    "@starkeep/aws-bootstrap": "workspace:*",
+    "@starkeep/e2e": "workspace:*",
+    "@starkeep/testkit": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4"
+  }
+}

@@ -259,6 +259,40 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  e2e-aws:
+    dependencies:
+      '@aws-sdk/client-cloudformation':
+        specifier: ^3.700.0
+        version: 3.1030.0
+      '@aws-sdk/client-cognito-identity-provider':
+        specifier: ^3.700.0
+        version: 3.1034.0
+      '@starkeep/admin-installer':
+        specifier: workspace:*
+        version: link:../packages/admin-installer
+      '@starkeep/app-client':
+        specifier: workspace:*
+        version: link:../packages/app-client
+      '@starkeep/aws-bootstrap':
+        specifier: workspace:*
+        version: link:../packages/aws-bootstrap
+      '@starkeep/e2e':
+        specifier: workspace:*
+        version: link:../e2e
+      '@starkeep/testkit':
+        specifier: workspace:*
+        version: link:../packages/testkit
+    devDependencies:
+      '@types/node':
+        specifier: ^25.4.0
+        version: 25.4.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
+
   packages/access-control:
     dependencies:
       '@starkeep/protocol-primitives':

@@ -4,3 +4,4 @@ packages:
   - "examples/*"
   - "apps/*"
   - "e2e"
+  - "e2e-aws"
