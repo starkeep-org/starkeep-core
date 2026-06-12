@@ -3,3 +3,4 @@ packages:
   - "packages/admin-installer/builtin-apps/*"
   - "examples/*"
   - "apps/*"
+  - "e2e"
