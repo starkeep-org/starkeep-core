@@ -13,17 +13,13 @@
     "check:temp-vs-boundary": "tsx scripts/check-temp-vs-boundary.ts",
     "debug:dsql-inspect": "tsx scripts/debug-dsql-inspect.ts",
     "debug:dsql-as-app": "tsx scripts/debug-dsql-as-app.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@starkeep/protocol-primitives": "workspace:*",
-    "@starkeep/shared-space-api": "workspace:*",
-    "@starkeep/storage-adapter": "workspace:*",
-    "@starkeep/storage-sqlite": "workspace:*",
-    "kysely": "^0.27.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.0.0",
     "@aws-sdk/client-cognito-identity": "^3.700.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
-    "@aws-sdk/client-cloudwatch-logs": "^3.0.0",
     "@aws-sdk/client-cost-and-usage-report-service": "^3.0.0",
     "@aws-sdk/client-iam": "^3.0.0",
     "@aws-sdk/client-lambda": "^3.0.0",
@@ -31,16 +27,24 @@
     "@aws-sdk/client-ssm": "^3.0.0",
     "@aws-sdk/client-sts": "^3.0.0",
     "@aws-sdk/dsql-signer": "^3.0.0",
-    "@pulumi/pulumi": "^3.0.0",
     "@pulumi/aws": "^6.0.0",
+    "@pulumi/pulumi": "^3.0.0",
+    "@starkeep/protocol-primitives": "workspace:*",
+    "@starkeep/shared-space-api": "workspace:*",
+    "@starkeep/storage-adapter": "workspace:*",
+    "@starkeep/storage-sqlite": "workspace:*",
+    "kysely": "^0.27.0",
     "pg": "^8.0.0"
   },
   "devDependencies": {
+    "@starkeep/aws-bootstrap": "workspace:*",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.0.0",
+    "aws-sdk-client-mock": "^4.1.0",
     "esbuild": "^0.24.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^3.2.4"
   },
   "peerDependencies": {
     "@starkeep/admin-manifest": "workspace:*"

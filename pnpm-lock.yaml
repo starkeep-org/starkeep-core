@@ -8,6 +8,7 @@ overrides:
   '@types/react': ^19.0.0
   '@types/react-dom': ^19.0.0
   '@smithy/smithy-client': 4.12.12
+  '@smithy/types': 4.14.2
 
 importers:
 
@@ -27,7 +28,7 @@ importers:
         version: 3.8.1
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       tsx:
         specifier: ^4.21.0
         version: 4.21.0
@@ -39,7 +40,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   apps/admin-web:
     dependencies:
@@ -211,6 +212,12 @@ importers:
         specifier: ^1.2.0
         version: 1.2.0(typescript@5.9.3)
     devDependencies:
+      '@starkeep/app-client':
+        specifier: workspace:*
+        version: link:../../packages/app-client
+      '@starkeep/testkit':
+        specifier: workspace:*
+        version: link:../../packages/testkit
       '@types/node':
         specifier: ^22.10.0
         version: 22.10.0
@@ -223,6 +230,9 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/access-control:
     dependencies:
@@ -238,13 +248,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/admin-installer:
     dependencies:
@@ -306,12 +316,18 @@ importers:
         specifier: ^8.0.0
         version: 8.20.0
     devDependencies:
+      '@starkeep/aws-bootstrap':
+        specifier: workspace:*
+        version: link:../aws-bootstrap
       '@types/node':
         specifier: ^22.0.0
         version: 22.10.0
       '@types/pg':
         specifier: ^8.0.0
         version: 8.20.0
+      aws-sdk-client-mock:
+        specifier: ^4.1.0
+        version: 4.1.0
       esbuild:
         specifier: ^0.24.0
         version: 0.24.2
@@ -321,6 +337,9 @@ importers:
       typescript:
         specifier: ^5.0.0
         version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/admin-installer/builtin-apps/cloud-data-server:
     dependencies:
@@ -391,13 +410,13 @@ importers:
     devDependencies:
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/app-client:
     dependencies:
@@ -408,15 +427,18 @@ importers:
       '@types/node':
         specifier: ^25.4.0
         version: 25.4.0
+      aws-sdk-client-mock:
+        specifier: ^4.1.0
+        version: 4.1.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/aws-bootstrap:
     devDependencies:
@@ -434,13 +456,16 @@ importers:
         version: 4.1.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
 
   packages/iam-permission-tests:
     dependencies:
@@ -471,7 +496,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/protocol-primitives:
     dependencies:
@@ -487,13 +512,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/query-orchestrator:
     dependencies:
@@ -509,13 +534,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/sdk:
     dependencies:
@@ -543,13 +568,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/shared-space-api:
     dependencies:
@@ -568,13 +593,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/storage-adapter:
     dependencies:
@@ -587,13 +612,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/storage-aurora-dsql:
     dependencies:
@@ -621,13 +646,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/storage-fs:
     dependencies:
@@ -640,13 +665,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/storage-s3:
     dependencies:
@@ -668,13 +693,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/storage-sqlite:
     dependencies:
@@ -699,13 +724,13 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/sync-engine:
     dependencies:
@@ -721,13 +746,41 @@ importers:
         version: 25.4.0
       tsup:
         specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/testkit:
+    dependencies:
+      '@starkeep/admin-installer':
+        specifier: workspace:*
+        version: link:../admin-installer
+      '@starkeep/protocol-primitives':
+        specifier: workspace:*
+        version: link:../protocol-primitives
+      '@starkeep/storage-fs':
+        specifier: workspace:*
+        version: link:../storage-fs
+      '@starkeep/storage-sqlite':
+        specifier: workspace:*
+        version: link:../storage-sqlite
+      '@starkeep/sync-engine':
+        specifier: workspace:*
+        version: link:../sync-engine
+    devDependencies:
+      '@types/node':
+        specifier: ^25.4.0
+        version: 25.4.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
 packages:
 
@@ -3499,14 +3552,6 @@ packages:
 
   '@smithy/smithy-client@4.12.12':
     resolution: {integrity: sha512-daO7SJn4eM6ArbmrEs+/BTbH7af8AEbSL3OMQdcRvvn8tuUcR5rU2n6DgxIV53aXMS42uwK8NgKKCh5XgqYOPQ==}
-    engines: {node: '>=18.0.0'}
-
-  '@smithy/types@4.13.1':
-    resolution: {integrity: sha512-787F3yzE2UiJIQ+wYW1CVg2odHjmaWLGksnKQHUrK/lYZSEcy1msuLVvxaR/sI2/aDe9U+TBuLsXnr3vod1g0g==}
-    engines: {node: '>=18.0.0'}
-
-  '@smithy/types@4.14.1':
-    resolution: {integrity: sha512-59b5HtSVrVR/eYNei3BUj3DCPKD/G7EtDDe7OEJE7i7FtQFugYo6MxbotS8mVJkLNVf8gYaAlEBwwtJ9HzhWSg==}
     engines: {node: '>=18.0.0'}
 
   '@smithy/types@4.14.2':
@@ -6305,8 +6350,8 @@ packages:
     resolution: {integrity: sha512-YgvUTfwqyc7UXVMrB+SImsVYSmTS8X/tSrtdNZMImM+n7+QTriRXyXim0mBrTXNeqzVF0KWGgHPeiyViFFrNDw==}
     engines: {node: '>=18'}
 
-  yaml@2.8.3:
-    resolution: {integrity: sha512-AvbaCLOO2Otw/lW5bmh9d/WEdcDFdQp2Z2ZUH3pX9U2ihyUY0nvLv7J6TrWowklRGPYbB/IuIMfYgxaCPg5Bpg==}
+  yaml@2.9.0:
+    resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
     engines: {node: '>= 14.6'}
     hasBin: true
 
@@ -6418,7 +6463,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.0
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6466,7 +6511,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.1
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6510,7 +6555,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.0
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6554,7 +6599,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.0
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6598,7 +6643,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.0
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6642,7 +6687,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.1
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6686,7 +6731,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.1
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6712,7 +6757,7 @@ snapshots:
       '@smithy/core': 3.24.3
       '@smithy/fetch-http-handler': 5.4.3
       '@smithy/node-http-handler': 4.7.3
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@aws-sdk/client-s3@3.1009.0':
@@ -6758,7 +6803,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.0
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6804,7 +6849,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.1
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6849,7 +6894,7 @@ snapshots:
       '@smithy/node-http-handler': 4.6.1
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -6902,7 +6947,7 @@ snapshots:
       '@smithy/protocol-http': 5.3.14
       '@smithy/signature-v4': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/util-base64': 4.3.2
       '@smithy/util-middleware': 4.2.14
       '@smithy/util-retry': 4.3.3
@@ -7232,7 +7277,7 @@ snapshots:
       '@smithy/credential-provider-imds': 4.2.14
       '@smithy/property-provider': 4.2.14
       '@smithy/shared-ini-file-loader': 4.4.9
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
     transitivePeerDependencies:
       - aws-crt
@@ -7460,7 +7505,7 @@ snapshots:
       '@smithy/node-config-provider': 4.3.14
       '@smithy/protocol-http': 5.3.14
       '@smithy/signature-v4': 5.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
     transitivePeerDependencies:
       - aws-crt
@@ -7514,7 +7559,7 @@ snapshots:
     dependencies:
       '@aws-sdk/types': 3.973.8
       '@smithy/protocol-http': 5.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@aws-sdk/middleware-location-constraint@3.972.8':
@@ -7526,7 +7571,7 @@ snapshots:
   '@aws-sdk/middleware-logger@3.972.10':
     dependencies:
       '@aws-sdk/types': 3.973.8
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@aws-sdk/middleware-recursion-detection@3.972.11':
@@ -7534,7 +7579,7 @@ snapshots:
       '@aws-sdk/types': 3.973.8
       '@aws/lambda-invoke-store': 0.2.4
       '@smithy/protocol-http': 5.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@aws-sdk/middleware-sdk-s3@3.972.32':
@@ -7629,7 +7674,7 @@ snapshots:
       '@aws-sdk/util-endpoints': 3.996.8
       '@smithy/core': 3.23.16
       '@smithy/protocol-http': 5.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/util-retry': 4.3.3
       tslib: 2.8.1
 
@@ -7849,7 +7894,7 @@ snapshots:
       '@aws-sdk/types': 3.973.8
       '@smithy/config-resolver': 4.4.17
       '@smithy/node-config-provider': 4.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@aws-sdk/s3-request-presigner@3.1009.0':
@@ -7860,7 +7905,7 @@ snapshots:
       '@smithy/middleware-endpoint': 4.4.25
       '@smithy/protocol-http': 5.3.12
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.13.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@aws-sdk/signature-v4-multi-region@3.996.20':
@@ -7980,7 +8025,7 @@ snapshots:
 
   '@aws-sdk/types@3.973.8':
     dependencies:
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@aws-sdk/util-arn-parser@3.972.3':
@@ -7990,7 +8035,7 @@ snapshots:
   '@aws-sdk/util-endpoints@3.996.8':
     dependencies:
       '@aws-sdk/types': 3.973.8
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-endpoints': 3.4.2
       tslib: 2.8.1
@@ -8016,7 +8061,7 @@ snapshots:
   '@aws-sdk/util-user-agent-browser@3.972.10':
     dependencies:
       '@aws-sdk/types': 3.973.8
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       bowser: 2.14.1
       tslib: 2.8.1
 
@@ -8034,7 +8079,7 @@ snapshots:
       '@aws-sdk/middleware-user-agent': 3.972.34
       '@aws-sdk/types': 3.973.8
       '@smithy/node-config-provider': 4.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/util-config-provider': 4.2.2
       tslib: 2.8.1
 
@@ -10106,7 +10151,7 @@ snapshots:
   '@smithy/config-resolver@4.4.17':
     dependencies:
       '@smithy/node-config-provider': 4.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/util-config-provider': 4.2.2
       '@smithy/util-endpoints': 3.4.2
       '@smithy/util-middleware': 4.2.14
@@ -10115,7 +10160,7 @@ snapshots:
   '@smithy/core@3.23.16':
     dependencies:
       '@smithy/protocol-http': 5.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-base64': 4.3.2
       '@smithy/util-body-length-browser': 4.2.2
@@ -10192,7 +10237,7 @@ snapshots:
     dependencies:
       '@smithy/protocol-http': 5.3.14
       '@smithy/querystring-builder': 4.2.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/util-base64': 4.3.2
       tslib: 2.8.1
 
@@ -10211,7 +10256,7 @@ snapshots:
 
   '@smithy/hash-node@4.2.14':
     dependencies:
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/util-buffer-from': 4.2.2
       '@smithy/util-utf8': 4.2.2
       tslib: 2.8.1
@@ -10224,7 +10269,7 @@ snapshots:
 
   '@smithy/invalid-dependency@4.2.14':
     dependencies:
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/is-array-buffer@2.2.0':
@@ -10244,7 +10289,7 @@ snapshots:
   '@smithy/middleware-content-length@4.2.14':
     dependencies:
       '@smithy/protocol-http': 5.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/middleware-endpoint@4.4.25':
@@ -10264,7 +10309,7 @@ snapshots:
       '@smithy/middleware-serde': 4.2.19
       '@smithy/node-config-provider': 4.3.14
       '@smithy/shared-ini-file-loader': 4.4.9
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/url-parser': 4.2.14
       '@smithy/util-middleware': 4.2.14
       tslib: 2.8.1
@@ -10287,7 +10332,7 @@ snapshots:
       '@smithy/protocol-http': 5.3.14
       '@smithy/service-error-classification': 4.3.0
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/util-middleware': 4.2.14
       '@smithy/util-retry': 4.3.3
       '@smithy/uuid': 1.1.2
@@ -10310,7 +10355,7 @@ snapshots:
     dependencies:
       '@smithy/core': 3.23.16
       '@smithy/protocol-http': 5.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/middleware-serde@4.2.20':
@@ -10322,21 +10367,21 @@ snapshots:
 
   '@smithy/middleware-stack@4.2.14':
     dependencies:
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/node-config-provider@4.3.14':
     dependencies:
       '@smithy/property-provider': 4.2.14
       '@smithy/shared-ini-file-loader': 4.4.9
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/node-http-handler@4.6.0':
     dependencies:
       '@smithy/protocol-http': 5.3.14
       '@smithy/querystring-builder': 4.2.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/node-http-handler@4.6.1':
@@ -10364,7 +10409,7 @@ snapshots:
 
   '@smithy/protocol-http@5.3.14':
     dependencies:
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/querystring-builder@4.2.12':
@@ -10440,14 +10485,6 @@ snapshots:
       '@smithy/util-stream': 4.5.25
       tslib: 2.8.1
 
-  '@smithy/types@4.13.1':
-    dependencies:
-      tslib: 2.8.1
-
-  '@smithy/types@4.14.1':
-    dependencies:
-      tslib: 2.8.1
-
   '@smithy/types@4.14.2':
     dependencies:
       tslib: 2.8.1
@@ -10455,7 +10492,7 @@ snapshots:
   '@smithy/url-parser@4.2.14':
     dependencies:
       '@smithy/querystring-parser': 4.2.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/util-base64@4.3.2':
@@ -10490,7 +10527,7 @@ snapshots:
     dependencies:
       '@smithy/property-provider': 4.2.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/util-defaults-mode-browser@4.3.49':
@@ -10507,7 +10544,7 @@ snapshots:
       '@smithy/node-config-provider': 4.3.14
       '@smithy/property-provider': 4.2.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/util-defaults-mode-node@4.2.54':
@@ -10523,7 +10560,7 @@ snapshots:
   '@smithy/util-endpoints@3.4.2':
     dependencies:
       '@smithy/node-config-provider': 4.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/util-hex-encoding@4.2.2':
@@ -10532,13 +10569,13 @@ snapshots:
 
   '@smithy/util-middleware@4.2.14':
     dependencies:
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/util-retry@4.3.3':
     dependencies:
       '@smithy/service-error-classification': 4.3.0
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/util-retry@4.3.6':
@@ -10585,7 +10622,7 @@ snapshots:
 
   '@smithy/util-waiter@4.2.16':
     dependencies:
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@smithy/util-waiter@4.3.0':
@@ -10847,23 +10884,23 @@ snapshots:
       chai: 5.3.3
       tinyrainbow: 2.0.0
 
-  '@vitest/mocker@3.2.4(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(vite@6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3))':
+  '@vitest/mocker@3.2.4(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(vite@6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0))':
     dependencies:
       '@vitest/spy': 3.2.4
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
       msw: 2.14.6(@types/node@22.10.0)(typescript@5.9.3)
-      vite: 6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+      vite: 6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
-  '@vitest/mocker@3.2.4(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(vite@6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3))':
+  '@vitest/mocker@3.2.4(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(vite@6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0))':
     dependencies:
       '@vitest/spy': 3.2.4
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
       msw: 2.14.6(@types/node@25.4.0)(typescript@5.9.3)
-      vite: 6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+      vite: 6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
   '@vitest/pretty-format@3.2.4':
     dependencies:
@@ -12472,14 +12509,14 @@ snapshots:
       mlly: 1.8.1
       pathe: 2.0.3
 
-  postcss-load-config@6.0.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(yaml@2.8.3):
+  postcss-load-config@6.0.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       lilconfig: 3.1.3
     optionalDependencies:
       jiti: 2.7.0
       postcss: 8.5.14
       tsx: 4.21.0
-      yaml: 2.8.3
+      yaml: 2.9.0
 
   postcss-selector-parser@7.1.1:
     dependencies:
@@ -13174,7 +13211,7 @@ snapshots:
 
   tslib@2.8.1: {}
 
-  tsup@8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3):
+  tsup@8.5.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.0):
     dependencies:
       bundle-require: 5.1.0(esbuild@0.27.3)
       cac: 6.7.14
@@ -13185,7 +13222,7 @@ snapshots:
       fix-dts-default-cjs-exports: 1.0.1
       joycon: 3.1.1
       picocolors: 1.1.1
-      postcss-load-config: 6.0.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(yaml@2.8.3)
+      postcss-load-config: 6.0.1(jiti@2.7.0)(postcss@8.5.14)(tsx@4.21.0)(yaml@2.9.0)
       resolve-from: 5.0.0
       rollup: 4.59.0
       source-map: 0.7.6
@@ -13332,13 +13369,13 @@ snapshots:
 
   vary@1.1.2: {}
 
-  vite-node@3.2.4(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3):
+  vite-node@3.2.4(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       cac: 6.7.14
       debug: 4.4.3
       es-module-lexer: 1.7.0
       pathe: 2.0.3
-      vite: 6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+      vite: 6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
     transitivePeerDependencies:
       - '@types/node'
       - jiti
@@ -13353,13 +13390,13 @@ snapshots:
       - tsx
       - yaml
 
-  vite-node@3.2.4(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3):
+  vite-node@3.2.4(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       cac: 6.7.14
       debug: 4.4.3
       es-module-lexer: 1.7.0
       pathe: 2.0.3
-      vite: 6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+      vite: 6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
     transitivePeerDependencies:
       - '@types/node'
       - jiti
@@ -13374,7 +13411,7 @@ snapshots:
       - tsx
       - yaml
 
-  vite@6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3):
+  vite@6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       esbuild: 0.25.12
       fdir: 6.5.0(picomatch@4.0.4)
@@ -13389,9 +13426,9 @@ snapshots:
       lightningcss: 1.32.0
       terser: 5.16.9
       tsx: 4.21.0
-      yaml: 2.8.3
+      yaml: 2.9.0
 
-  vite@6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3):
+  vite@6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       esbuild: 0.25.12
       fdir: 6.5.0(picomatch@4.0.4)
@@ -13406,13 +13443,13 @@ snapshots:
       lightningcss: 1.32.0
       terser: 5.16.9
       tsx: 4.21.0
-      yaml: 2.8.3
+      yaml: 2.9.0
 
-  vitest@3.2.4(@types/debug@4.1.13)(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3):
+  vitest@3.2.4(@types/debug@4.1.13)(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       '@types/chai': 5.2.3
       '@vitest/expect': 3.2.4
-      '@vitest/mocker': 3.2.4(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(vite@6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3))
+      '@vitest/mocker': 3.2.4(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(vite@6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0))
       '@vitest/pretty-format': 3.2.4
       '@vitest/runner': 3.2.4
       '@vitest/snapshot': 3.2.4
@@ -13430,8 +13467,8 @@ snapshots:
       tinyglobby: 0.2.15
       tinypool: 1.1.1
       tinyrainbow: 2.0.0
-      vite: 6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
-      vite-node: 3.2.4(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+      vite: 6.4.1(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
+      vite-node: 3.2.4(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/debug': 4.1.13
@@ -13450,11 +13487,11 @@ snapshots:
       - tsx
       - yaml
 
-  vitest@3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3):
+  vitest@3.2.4(@types/debug@4.1.13)(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       '@types/chai': 5.2.3
       '@vitest/expect': 3.2.4
-      '@vitest/mocker': 3.2.4(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(vite@6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3))
+      '@vitest/mocker': 3.2.4(msw@2.14.6(@types/node@25.4.0)(typescript@5.9.3))(vite@6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0))
       '@vitest/pretty-format': 3.2.4
       '@vitest/runner': 3.2.4
       '@vitest/snapshot': 3.2.4
@@ -13472,8 +13509,8 @@ snapshots:
       tinyglobby: 0.2.15
       tinypool: 1.1.1
       tinyrainbow: 2.0.0
-      vite: 6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
-      vite-node: 3.2.4(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.8.3)
+      vite: 6.4.1(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
+      vite-node: 3.2.4(@types/node@25.4.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/debug': 4.1.13
@@ -13544,8 +13581,7 @@ snapshots:
 
   yallist@5.0.0: {}
 
-  yaml@2.8.3:
-    optional: true
+  yaml@2.9.0: {}
 
   yargs-parser@21.1.1: {}
 
