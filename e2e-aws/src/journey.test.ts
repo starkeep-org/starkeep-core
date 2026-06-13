@@ -15,6 +15,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   startLocalDataServer,
   type LocalDataServer,
@@ -51,7 +52,15 @@ let lds: LocalDataServer | undefined;
 let drive: LdsApp;
 let photos: LdsApp;
 let syncedRecordId: string;
-const photoBytes = solidPng([0, 128, 255]);
+// Unique per run: the cloud is kept up between runs and dedupes records by
+// content hash on live rows, so a constant image would ship only on its very
+// first run and report shipped: 0 thereafter. Random colour + size give each
+// run a fresh content hash (well over the 24-bit colour space, so collisions
+// stay negligible even across a long-lived stack) so the sync genuinely ships.
+const photoBytes = solidPng(
+  [...randomBytes(3)] as [number, number, number],
+  16 + (randomBytes(1)[0] % 48), // 16–63 px; still tiny, still a valid PNG
+);
 
 /** HMAC-signed fetch against the real broker: `${apiGatewayUrl}/apps/{appId}`. */
 function cloudApp(local: AppCredentials): LdsApp {
@@ -181,7 +190,11 @@ function runTeardownScript(script: string): void {
       });
       syncedRecordId = record.id;
 
-      const sync = await fetch(`${lds!.url}/sync/now`, { method: "POST" });
+      // /sync/now requires app auth at the LDS gate (it's not a loopback-
+      // exempt path), so drive it through an installed app's signed fetch.
+      // `drive` here is the LdsApp from driveCreds — its dataServerUrl is the
+      // local LDS, distinct from cloudApp(drive) which targets the broker.
+      const sync = await drive.fetch("/sync/now", { method: "POST" });
       expect(sync.status).toBe(200);
       const { shipped } = (await sync.json()) as { applied: number; shipped: number };
       expect(shipped).toBeGreaterThan(0);
@@ -211,23 +224,35 @@ function runTeardownScript(script: string): void {
     });
 
     it("photos resize endpoint round-trips", async () => {
-      const res = await cloudApp(photos).fetch("/api/resize", {
+      // Unlike the broker's HMAC-gated data/sync/app-data planes, an app's own
+      // routes (e.g. photos /api/resize) sit behind the gateway's Cognito JWT
+      // authorizer — they're user-facing, so they take the signed-in user's id
+      // token as a Bearer credential, not an app HMAC signature.
+      const res = await fetch(`${config.apiGatewayUrl}/apps/photos/api/resize`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ recordId: syncedRecordId, width: 4 }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.idToken}`,
+        },
+        // The handler takes { targetId } and resizes to its own fixed max
+        // width; there is no caller-supplied width.
+        body: JSON.stringify({ targetId: syncedRecordId }),
       });
       expect(res.status).toBe(200);
     });
 
     it("writes a caption through the cloud /app-data plane", async () => {
-      const insert = await cloudApp(photos).fetch("/app-data/image_enriched", {
+      // App-specific tables live under /app-data/db/<table>; writes take a
+      // { row } envelope whose keys are the manifest-declared columns
+      // (image_enriched: record_id PK, caption).
+      const insert = await cloudApp(photos).fetch("/app-data/db/image_enriched", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ record_id: syncedRecordId, caption: "tier-3 caption" }),
+        body: JSON.stringify({ row: { record_id: syncedRecordId, caption: "tier-3 caption" } }),
       });
       expect(insert.status).toBe(200);
 
-      const query = await cloudApp(photos).fetch("/app-data/image_enriched");
+      const query = await cloudApp(photos).fetch("/app-data/db/image_enriched");
       expect(query.status).toBe(200);
       const body = await query.text();
       expect(body).toContain("tier-3 caption");

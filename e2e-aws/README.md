@@ -1,0 +1,88 @@
+# @starkeep/e2e-aws — Tier-3 cloud journey
+
+The Tier-3 test of the four-tier plan (`meta-docs` doc 43, §11): the full
+install → sync → use → uninstall journey driven against **real AWS** through the
+same admin-installer CLIs an operator runs. It is the only suite that touches a
+live account, so it is **inert unless explicitly enabled**.
+
+```bash
+STARKEEP_AWS_TESTS=1 pnpm test:aws          # from repo root (turbo) or this dir
+```
+
+Without `STARKEEP_AWS_TESTS=1` the single test file reports a skipped suite and
+makes no AWS calls. `pnpm test` (the default unit suite) never runs it.
+
+## What it does (`src/journey.test.ts`, 11 ordered steps)
+
+1. Create-if-missing the bootstrap CloudFormation stack; read its outputs.
+2. Create-if-missing a Cognito admin user (per-run password) and sign in through
+   the real Cognito + Identity Pool chain.
+3. Install cloud-data-server via `cli-install-cloud-data-server` (real Pulumi up:
+   DSQL cluster, Lambda, API Gateway).
+4. Boot a local-data-server (testkit) pointed at the real cloud.
+5. Install Drive, then 6. photos, via the real install CLIs.
+7. Create a photo locally, `POST /sync/now`, assert the record + blob landed in
+   the cloud under Drive with origin `photos`.
+8. Static handler, 9. `/api/resize`, 10. caption via `/app-data` — exercise the
+   app's cloud routes.
+11. Uninstall photos; assert the app plane is gone but shared records survive.
+
+## Environment contract (`src/env.ts`)
+
+| Var | Default | Meaning |
+| --- | --- | --- |
+| `STARKEEP_AWS_TESTS` | _(unset)_ | Must be `1` to run; otherwise the suite skips. |
+| `STARKEEP_AWS_STACK_PREFIX` | `sktest` | Dedicated test stack prefix. **Never** point this at a live deployment's prefix. |
+| `STARKEEP_AWS_REGION` | `us-east-2` | Region for a from-scratch bootstrap (an existing stack's own region always wins via its pool ID). |
+| `STARKEEP_AWS_TEARDOWN` | _(unset)_ | `apps` → run `teardown-cloud-data-server.sh`; `all` → `teardown-bootstrap.sh`, after the journey. Default keeps the stack up. |
+| `HMAC_CACHE_TTL_MS` | `0` (in this suite) | Baked into the broker Lambda at install. The suite sets `0` so a just-rotated/revoked app secret isn't served from the broker's cache. Real installs leave it unset → broker keeps its 5-min default. |
+
+AWS credentials come from the ambient profile/role (the default profile during
+development). The runner authenticates the admin user itself and hands the
+Cognito-derived temporary credentials to the CLIs via `--non-interactive`.
+
+Turbo sanitizes the environment, so `turbo.json`'s `test:aws` task declares all
+of the above (plus the AWS credential vars) under `passThroughEnv` — without
+that, the gate var never reaches vitest and the suite silently skips.
+
+## Run state (`src/run-state.ts`)
+
+Per-prefix state lives in `e2e-aws/.run/<prefix>/` (gitignored) and doubles as
+`STARKEEP_DATA_DIR` for the spawned CLIs — they read **and rewrite**
+`config.json`, so a dedicated dir is what keeps a run from clobbering the
+operator's live `~/.starkeep/config.json`. `admin.json` (0600) holds the
+generated test-admin password; it unlocks only the disposable test stack.
+
+## Cost / time / lifecycle
+
+- **~26 min per full run.** First run is dominated by the cloud-data-server
+  Pulumi up (DSQL cluster provisioning); the photos install/uninstall add a
+  Pulumi up + destroy each.
+- **The stack is kept up between runs by default** (idle ≈ $0): bootstrap +
+  cloud-data-server + Drive persist; only photos is fully torn down by the
+  journey's uninstall step. Re-runs reuse the warm stack and the orchestrator's
+  step ledger.
+- `vitest.config.ts` runs serially with long (30-min) timeouts; set
+  `bail: 1` while iterating so the first failure stops cheaply. Failures are
+  resumable against the kept-up stack.
+
+## Gotchas learned bringing this green
+
+- **App secrets rotate per run.** The ephemeral local-data-server re-mints each
+  app's HMAC secret on every boot, so the cloud install must *reconcile* it to
+  SSM every run (`put_app_creds_parameter` is an `alwaysRun` orchestrator step,
+  not skip-if-done) and the photo content must be unique per run (the cloud
+  dedupes identical content on live rows, otherwise `shipped: 0`).
+- **Two auth models.** The broker's data/sync/app-data planes are HMAC-signed
+  (app identity); an app's *own* routes (e.g. photos `/api/resize`) sit behind
+  the gateway's Cognito JWT authorizer (user identity, `Authorization: Bearer`).
+- **`/sync/now` needs an app signature** — it is not one of the LDS's
+  loopback-exempt paths.
+- **IAM propagation can exceed a couple of minutes** after attaching a temp
+  role policy; the AccessDenied retry budget is sized accordingly.
+
+## Still deferred (§11 extras)
+
+- DSQL dedup-on-live-rows pin and the explicit `dsql:DbConnect` 28000 case.
+- The teardown flags (`STARKEEP_AWS_TEARDOWN=apps|all`) are wired but not yet
+  exercised by a run.

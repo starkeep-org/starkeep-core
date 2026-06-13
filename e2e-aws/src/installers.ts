@@ -19,6 +19,7 @@ import {
   type IdentityPoolCredentials,
 } from "@starkeep/admin-installer";
 import type { AdminCredentials, RunPaths, TestStackConfig } from "./run-state.js";
+import { HMAC_CACHE_TTL_MS } from "./env.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const INSTALLER_DIR = resolve(REPO_ROOT, "packages/admin-installer");
@@ -64,6 +65,10 @@ export async function runInstallCli(
         AWS_SECRET_ACCESS_KEY: session.awsCredentials.secretAccessKey,
         AWS_SESSION_TOKEN: session.awsCredentials.sessionToken,
         AWS_REGION: session.region,
+        // Baked into the broker Lambda by the cloud-data-server install (the
+        // pulumi program forwards it); shortens the HMAC secret cache so signed
+        // calls right after an install/uninstall aren't served a stale secret.
+        HMAC_CACHE_TTL_MS,
       },
     });
     child.once("error", rejectDone);

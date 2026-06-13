@@ -14,6 +14,15 @@
  */
 
 export const AWS_TESTS_ENABLED = process.env.STARKEEP_AWS_TESTS === "1";
+
+/**
+ * Broker HMAC secret-cache lifetime baked into the cloud-data-server Lambda at
+ * install (forwarded by the pulumi program when set). The suite installs and
+ * uninstalls apps and then immediately makes signed cloud calls, so it sets
+ * this to "0" (no caching) to avoid the broker serving a rotated/revoked
+ * secret out of its default 5-min cache. Real installs leave it unset.
+ */
+export const HMAC_CACHE_TTL_MS = process.env.HMAC_CACHE_TTL_MS ?? "0";
 export const STACK_PREFIX = process.env.STARKEEP_AWS_STACK_PREFIX ?? "sktest";
 export const REGION = process.env.STARKEEP_AWS_REGION ?? "us-east-2";
 export const TEARDOWN = process.env.STARKEEP_AWS_TEARDOWN as "apps" | "all" | undefined;
