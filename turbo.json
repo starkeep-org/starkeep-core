@@ -8,6 +8,34 @@
     "test": {
       "dependsOn": ["build"]
     },
+    "admin-web#test": {
+      "dependsOn": ["^build"]
+    },
+    "@starkeep/builtin-cloud-data-server#test": {
+      "dependsOn": ["^build"]
+    },
+    "test:e2e": {
+      "dependsOn": ["^build"],
+      "cache": false
+    },
+    "test:aws": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "passThroughEnv": [
+        "STARKEEP_AWS_TESTS",
+        "STARKEEP_AWS_STACK_PREFIX",
+        "STARKEEP_AWS_REGION",
+        "STARKEEP_AWS_TEARDOWN",
+        "AWS_PROFILE",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_CONFIG_FILE"
+      ]
+    },
     "typecheck": {
       "dependsOn": ["^build"]
     },

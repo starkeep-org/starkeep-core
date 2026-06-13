@@ -5,6 +5,8 @@
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test",
+    "test:e2e": "turbo run test:e2e",
+    "test:aws": "turbo run test:aws",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "format": "prettier --write .",
@@ -33,7 +35,8 @@
     "overrides": {
       "@types/react": "^19.0.0",
       "@types/react-dom": "^19.0.0",
-      "@smithy/smithy-client": "4.12.12"
+      "@smithy/smithy-client": "4.12.12",
+      "@smithy/types": "4.14.2"
     }
   }
 }

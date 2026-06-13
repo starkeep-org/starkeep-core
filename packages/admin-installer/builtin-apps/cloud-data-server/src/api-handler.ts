@@ -92,7 +92,19 @@ interface CachedHmacSecret {
   fetchedAt: number;
 }
 
-const HMAC_CACHE_TTL_MS = 5 * 60_000;
+// Per-app secret cache lifetime. Defaults to 5 min (trading SSM call volume
+// for up to a 5-min lag on credential rotation/revocation). Overridable via
+// the HMAC_CACHE_TTL_MS Lambda env var — the Tier-3 e2e suite sets it low so
+// installs/uninstalls take effect promptly without waiting out the cache; left
+// unset in real deployments, which keep the 5-min default.
+function resolveHmacCacheTtlMs(): number {
+  const raw = process.env.HMAC_CACHE_TTL_MS;
+  if (raw === undefined) return 5 * 60_000;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 5 * 60_000;
+}
+
+const HMAC_CACHE_TTL_MS = resolveHmacCacheTtlMs();
 const hmacSecretCache = new Map<string, CachedHmacSecret>();
 
 let ssmClientSingleton: SSMClient | null = null;
@@ -140,7 +152,7 @@ async function loadAppHmacSecret(appId: string): Promise<string | null> {
  * empty string. For base64-encoded API Gateway events we must decode first
  * so the bytes match what the client transmitted.
  */
-function validateAppHmac(
+export function validateAppHmac(
   pathAppId: string,
   method: string,
   headers: Record<string, string | undefined>,
@@ -303,6 +315,17 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
 // Per-request adapter creation (not cached — creds are cached separately)
 // ---------------------------------------------------------------------------
 
+// Test seam: every DB access in the handler flows through one
+// DatabaseClientFactory (the records adapter, the grants/clock client, and the
+// app-syncable source all call createClient on the factory makeAdapters
+// returns), so swapping the factory here is sufficient to fake DSQL entirely.
+let databaseClientFactoryOverride: DatabaseClientFactory | null = null;
+export function __setDatabaseClientFactoryForTests(
+  factory: DatabaseClientFactory | null,
+): void {
+  databaseClientFactoryOverride = factory;
+}
+
 function makeAdapters(appId: string, creds: CachedCreds) {
   const region = process.env.AWS_REGION ?? "us-east-1";
   const auroraEndpoint = process.env.AURORA_ENDPOINT;
@@ -312,7 +335,8 @@ function makeAdapters(appId: string, creds: CachedCreds) {
   if (!auroraEndpoint) throw new Error("AURORA_ENDPOINT env var is required");
   if (!s3Bucket) throw new Error("S3_BUCKET env var is required");
 
-  const clientFactory = new AppDsqlClientFactory(appId, creds, stackPrefix);
+  const clientFactory: DatabaseClientFactory =
+    databaseClientFactoryOverride ?? new AppDsqlClientFactory(appId, creds, stackPrefix);
 
   const db = new AuroraDsqlDatabaseAdapter(
     { hostname: auroraEndpoint, region },
@@ -389,7 +413,7 @@ async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
 // hand because this handler is a separately-deployed artifact.
 const DRIVE_APP_ID = "starkeep-drive";
 
-function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
+export function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
   const match = rawPath.match(/^\/apps\/([a-z0-9][a-z0-9._-]*)(\/.*)?$/);
   if (!match) return null;
   return { appId: match[1]!, subPath: match[2] ?? "/" };
@@ -400,7 +424,7 @@ function parseAppPath(rawPath: string): { appId: string; subPath: string } | nul
 //   shared/<typeId>/<shard>/<hash>   — gated by per-type read/write grants
 //   apps/<appId>/syncable/<...>      — owned by the named app; only that app
 //                                       may touch it via its own files routes
-function parseObjectKey(
+export function parseObjectKey(
   callerAppId: string,
   decodedKey: string,
   grants: AccessGrants,
@@ -454,6 +478,7 @@ function recordToResponse(record: DataRecord) {
     content_hash: record.contentHash,
     object_storage_key: record.objectStorageKey,
     original_filename: record.originalFilename,
+    origin_app_id: record.originAppId,
     parent_id: record.parentId,
   };
 }
@@ -1088,7 +1113,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 }
 
 async function buildAppSyncableSource(
-  clientFactory: AppDsqlClientFactory,
+  clientFactory: DatabaseClientFactory,
   hostname: string,
   region: string,
 ): Promise<{

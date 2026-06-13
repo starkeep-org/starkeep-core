@@ -159,6 +159,12 @@ export function buildCloudDataServerProgram(
             STACK_PREFIX: ctx.stackPrefix,
             STARKEEP_APP_ID: "cloud-data-server",
             STARKEEP_STACK_PREFIX: ctx.stackPrefix,
+            // Forwarded only when the installer process sets it (the Tier-3
+            // e2e suite does, to shorten the broker's HMAC secret cache).
+            // Absent in real installs → broker keeps its 5-min default.
+            ...(process.env.HMAC_CACHE_TTL_MS !== undefined
+              ? { HMAC_CACHE_TTL_MS: process.env.HMAC_CACHE_TTL_MS }
+              : {}),
           },
         },
         tags: {

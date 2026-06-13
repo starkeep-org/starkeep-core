@@ -160,6 +160,8 @@ interface StarkeepConfig {
   nodeId: string;
   pullIntervalMs?: number;
   pushDebounceMs?: number;
+  /** Max items per exchange round (sync-engine pageLimit). Default 1000. */
+  syncPageLimit?: number;
   // Cloud fields — populated by the admin wizard's PATCH /config, absent
   // until then. nodeId stands alone so cloud-disabled installs still get a
   // stable replica identity.
@@ -493,6 +495,7 @@ async function main() {
       underlyingSyncStateStore: syncStateStore,
       exchangeIntervalMs: PULL_INTERVAL_MS,
       nudgeDebounceMs: PUSH_DEBOUNCE_MS,
+      pageLimit: starkeepConfig.syncPageLimit,
     });
   }
 

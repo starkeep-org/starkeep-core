@@ -16,19 +16,14 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { createInterface } from "node:readline";
-import {
-  CognitoIdentityProviderClient,
-  InitiateAuthCommand,
-  RespondToAuthChallengeCommand,
-} from "@aws-sdk/client-cognito-identity-provider";
-import {
-  CognitoIdentityClient,
-  GetIdCommand,
-  GetCredentialsForIdentityCommand,
-} from "@aws-sdk/client-cognito-identity";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { installDrive } from "../src/builtin-installs";
+import {
+  regionFromUserPoolId,
+  cognitoPasswordAuth,
+  getIdentityPoolCredentials,
+} from "../src/cognito-auth";
+import { prompt } from "../src/cli-prompt";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -50,17 +45,6 @@ interface StarkeepConfig {
   auroraEndpoint?: string;
 }
 
-function regionFromUserPoolId(userPoolId: string): string {
-  const parts = userPoolId.split("_");
-  if (parts.length < 2 || !parts[0]) {
-    throw new Error(
-      `userPoolId "${userPoolId}" is not in the expected format <region>_<id>. ` +
-        `Region is derived from userPoolId, so this prevents the installer from running.`,
-    );
-  }
-  return parts[0];
-}
-
 const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
 const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
 
@@ -79,105 +63,6 @@ function loadConfig(): StarkeepConfig {
     console.error("Error: ~/.starkeep/config.json is not valid JSON");
     process.exit(1);
   }
-}
-
-function prompt(question: string, hidden = false): Promise<string> {
-  return new Promise((resolveFn) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    if (hidden) {
-      process.stdout.write(question);
-      process.stdin.setRawMode?.(true);
-      let value = "";
-      process.stdin.resume();
-      process.stdin.setEncoding("utf8");
-      const onData = (char: string) => {
-        if (char === "\n" || char === "\r" || char === "") {
-          process.stdin.setRawMode?.(false);
-          process.stdin.pause();
-          process.stdin.removeListener("data", onData);
-          process.stdout.write("\n");
-          rl.close();
-          resolveFn(value);
-        } else if (char === "" || char === "\b") {
-          value = value.slice(0, -1);
-        } else {
-          value += char;
-        }
-      };
-      process.stdin.on("data", onData);
-    } else {
-      rl.question(question, (answer: string) => {
-        rl.close();
-        resolveFn(answer);
-      });
-    }
-  });
-}
-
-async function authenticate(
-  config: StarkeepConfig,
-  email: string,
-  password: string,
-): Promise<string> {
-  const region = regionFromUserPoolId(config.userPoolId);
-  const client = new CognitoIdentityProviderClient({ region });
-  const initResponse = await client.send(
-    new InitiateAuthCommand({
-      AuthFlow: "USER_PASSWORD_AUTH",
-      ClientId: config.userPoolClientId,
-      AuthParameters: { USERNAME: email, PASSWORD: password },
-    }),
-  );
-  if (initResponse.AuthenticationResult?.IdToken) {
-    return initResponse.AuthenticationResult.IdToken;
-  }
-  if (initResponse.ChallengeName === "NEW_PASSWORD_REQUIRED") {
-    console.log("\nThis account requires a new password (first login).");
-    const newPassword = await prompt("New password: ", true);
-    const confirmPassword = await prompt("Confirm new password: ", true);
-    if (newPassword !== confirmPassword) {
-      console.error("Passwords do not match.");
-      process.exit(1);
-    }
-    const challengeResponse = await client.send(
-      new RespondToAuthChallengeCommand({
-        ChallengeName: "NEW_PASSWORD_REQUIRED",
-        ClientId: config.userPoolClientId,
-        Session: initResponse.Session,
-        ChallengeResponses: { USERNAME: email, NEW_PASSWORD: newPassword },
-      }),
-    );
-    const idToken = challengeResponse.AuthenticationResult?.IdToken;
-    if (!idToken) throw new Error("No ID token returned after password challenge");
-    return idToken;
-  }
-  throw new Error(`Unexpected Cognito challenge: ${initResponse.ChallengeName}`);
-}
-
-async function getSTSCredentials(
-  config: StarkeepConfig,
-  idToken: string,
-): Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string }> {
-  const region = regionFromUserPoolId(config.userPoolId);
-  const client = new CognitoIdentityClient({ region });
-  const loginKey = `cognito-idp.${region}.amazonaws.com/${config.userPoolId}`;
-  const logins = { [loginKey]: idToken };
-  const idResponse = await client.send(
-    new GetIdCommand({ IdentityPoolId: config.identityPoolId, Logins: logins }),
-  );
-  if (!idResponse.IdentityId) throw new Error("Failed to get Cognito Identity ID");
-  const credsResponse = await client.send(
-    new GetCredentialsForIdentityCommand({ IdentityId: idResponse.IdentityId, Logins: logins }),
-  );
-  const c = credsResponse.Credentials;
-  if (!c?.AccessKeyId || !c.SecretKey || !c.SessionToken) {
-    throw new Error("Incomplete credentials from Identity Pool");
-  }
-  return {
-    accessKeyId: c.AccessKeyId,
-    secretAccessKey: c.SecretKey,
-    sessionToken: c.SessionToken,
-  };
 }
 
 const flags = process.argv.slice(2);
@@ -209,9 +94,18 @@ if (nonInteractive) {
   const email = await prompt("Email: ");
   const password = await prompt("Password: ", true);
   console.log("\nAuthenticating with Cognito…");
-  const idToken = await authenticate(config, email, password);
+  const idToken = await cognitoPasswordAuth(config, email, password, async () => {
+    console.log("\nThis account requires a new password (first login).");
+    const newPassword = await prompt("New password: ", true);
+    const confirmPassword = await prompt("Confirm new password: ", true);
+    if (newPassword !== confirmPassword) {
+      console.error("Passwords do not match.");
+      process.exit(1);
+    }
+    return newPassword;
+  });
   console.log("Fetching temporary AWS credentials…");
-  const creds = await getSTSCredentials(config, idToken);
+  const creds = await getIdentityPoolCredentials(config, idToken);
   process.env.AWS_ACCESS_KEY_ID = creds.accessKeyId;
   process.env.AWS_SECRET_ACCESS_KEY = creds.secretAccessKey;
   process.env.AWS_SESSION_TOKEN = creds.sessionToken;

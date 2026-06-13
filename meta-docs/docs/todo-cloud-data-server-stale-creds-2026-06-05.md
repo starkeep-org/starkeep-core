@@ -18,3 +18,13 @@ The fix shape is the same: an explicit invalidation hook driven by install/unins
 From doc id 14 (`functional-doc-cloud-data-server-2026-06-05.md`), Part 2 — Missing behaviors, and doc id 18 (`functional-doc-cloud-apps-2026-06-05.md`), Part 2 — Potential gaps.
 
 Revisit when: someone is hardening install/uninstall flows for production, or sooner if a real user hits either failure mode.
+
+## Progress: `hmacSecretCache` mode validated; partial mitigation landed (2026-06-13)
+
+The Tier-3 e2e-aws runner (test-plan §11, first green run) directly **validated the `hmacSecretCache` failure mode**. With a warm broker, after the install CLI rotated an app's SSM secret, signed requests under the new secret 401'd until the cache expired — confirmed by reading the SSM parameter history, the broker Lambda env, and a signed-curl burst that flipped to 200 only after the 5-min TTL lapsed. So the "warm Lambda keeps using the stale secret" claim is real for the HMAC cache.
+
+Two changes landed on `aaron/tests` (commit `c5a5857`) that mitigate but do **not** fully close this:
+- `HMAC_CACHE_TTL_MS` is now an env knob on the broker Lambda (default 5 min). The Tier-3 suite sets it to `0` so rotation/revocation take effect immediately under test. This is a tunable, not an invalidation hook — production still has the up-to-5-min window.
+- The installer's `put_app_creds_parameter` step is now `alwaysRun` (reconciles SSM to the current local secret on every drive), so a re-minted local secret reliably reaches SSM — removing one *source* of divergence, but not the warm-cache staleness itself.
+
+**Still open** (the actual ask here): the `getAppCreds` **STS-creds** cache on uninstall/reinstall is unvalidated and unaddressed, and neither cache has an explicit install/uninstall-driven invalidation hook. Keep this todo in backlog for that work.

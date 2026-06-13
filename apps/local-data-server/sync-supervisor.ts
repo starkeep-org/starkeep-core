@@ -60,6 +60,11 @@ export interface SyncSupervisorOptions {
   readonly exchangeIntervalMs: number;
   /** Debounce window for local-change-recorded → exchange. */
   readonly nudgeDebounceMs: number;
+  /**
+   * Max items per exchange round, passed through to every engine
+   * (`SyncEngineOptions.pageLimit`). Engine default (1000) when omitted.
+   */
+  readonly pageLimit?: number;
 }
 
 interface EngineEntry {
@@ -69,6 +74,8 @@ interface EngineEntry {
   tickTimer: NodeJS.Timeout | null;
   /** Local-write nudge timer — debounces local-change-recorded into one exchange. */
   nudgeTimer: NodeJS.Timeout | null;
+  /** Detaches the engine→SDK change-event forwarding on engine teardown. */
+  unsubscribeForwarding: () => void;
   lastExchangeAt: string | null;
   lastError: string | null;
   backoffMs: number;
@@ -151,6 +158,7 @@ export function createSyncSupervisor(
     underlyingSyncStateStore,
     exchangeIntervalMs,
     nudgeDebounceMs,
+    pageLimit,
   } = options;
 
   const engines = new Map<string, EngineEntry>();
@@ -187,11 +195,20 @@ export function createSyncSupervisor(
     engine: SyncEngine,
     baseUrl: string,
   ): void {
+    // Each engine emits pull-side events (local-data-synced) on its own
+    // internal notifier; forward them onto the SDK's unified notifier so the
+    // /events SSE fan-out kicks on sync-applied remote changes too. The
+    // supervisor's own nudge subscription filters on local-change-recorded,
+    // so forwarding cannot feed back into an exchange loop.
+    const unsubscribeForwarding = engine.changeNotifier.subscribe((event) =>
+      sdk.changeNotifier.emit(event),
+    );
     const entry: EngineEntry = {
       appId,
       engine,
       tickTimer: null,
       nudgeTimer: null,
+      unsubscribeForwarding,
       lastExchangeAt: null,
       lastError: null,
       backoffMs: exchangeIntervalMs,
@@ -233,6 +250,7 @@ export function createSyncSupervisor(
       clock: sdk.clock,
       syncState,
       syncSharedRecords: true,
+      pageLimit,
       // No appSyncableSource: the Drive channel never carries app-specific rows.
     });
     makeEngineEntry(DRIVE_APP_ID, engine, baseUrl);
@@ -273,6 +291,7 @@ export function createSyncSupervisor(
       clock: sdk.clock,
       syncState,
       syncSharedRecords: false,
+      pageLimit,
       appSyncableSource: {
         namespaces: narrowedNamespaces,
         applier: appApplier,
@@ -287,6 +306,7 @@ export function createSyncSupervisor(
     if (!entry) return;
     if (entry.tickTimer) clearTimeout(entry.tickTimer);
     if (entry.nudgeTimer) clearTimeout(entry.nudgeTimer);
+    entry.unsubscribeForwarding();
     engines.delete(appId);
     console.log(`[sync] stopped loop for app=${appId}`);
   }
