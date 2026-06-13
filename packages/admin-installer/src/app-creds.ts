@@ -19,6 +19,7 @@ import {
   SSMClient,
   GetParameterCommand,
   ParameterNotFound,
+  ParameterAlreadyExists,
   PutParameterCommand,
   DeleteParameterCommand,
 } from "@aws-sdk/client-ssm";
@@ -40,8 +41,16 @@ function makeSsmClient(region: string, creds: AwsCredentials): SSMClient {
 }
 
 /**
- * Mirror the given hmac secret to SSM SecureString. Idempotent — re-puts the
- * same value on every call (Overwrite: true) so retried install steps converge.
+ * Mirror the given hmac secret to SSM SecureString. Idempotent — retried
+ * install steps converge on the same value.
+ *
+ * SSM forbids Tags together with Overwrite in one PutParameter, and the manager
+ * role intentionally lacks GetParameter on app-creds (it never reads the
+ * secret), so we cannot check existence first. Instead: create with Tags and no
+ * Overwrite — the create path fires the implicit ssm:AddTagsToResource authz
+ * check the manager role is granted (see manager-policy ManagerManageAppCreds);
+ * if the parameter already exists, re-put the value with Overwrite and no Tags
+ * (PutParameter only, no tagging check). Tags are applied once at creation.
  *
  * Returns the SSM parameter name (so callers can wire it into Lambda env).
  */
@@ -55,19 +64,32 @@ export async function putAppCredsParameter(opts: {
   const ssm = makeSsmClient(opts.region, opts.awsCreds);
   const name = appCredsParameterName(opts.stackPrefix, opts.appId);
   const value = JSON.stringify({ appId: opts.appId, hmacSecret: opts.hmacSecret });
-  await ssm.send(
-    new PutParameterCommand({
-      Name: name,
-      Type: "SecureString",
-      Value: value,
-      Overwrite: true,
-      Description: `Per-app HMAC credential for ${opts.appId}. Created by admin-installer.`,
-      Tags: [
-        { Key: "starkeep:appId", Value: opts.appId },
-        { Key: "starkeep:managed", Value: "true" },
-      ],
-    }),
-  );
+  const description = `Per-app HMAC credential for ${opts.appId}. Created by admin-installer.`;
+  try {
+    await ssm.send(
+      new PutParameterCommand({
+        Name: name,
+        Type: "SecureString",
+        Value: value,
+        Description: description,
+        Tags: [
+          { Key: "starkeep:appId", Value: opts.appId },
+          { Key: "starkeep:managed", Value: "true" },
+        ],
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof ParameterAlreadyExists)) throw err;
+    await ssm.send(
+      new PutParameterCommand({
+        Name: name,
+        Type: "SecureString",
+        Value: value,
+        Overwrite: true,
+        Description: description,
+      }),
+    );
+  }
   return name;
 }
 

@@ -1,0 +1,64 @@
+{
+  "id": "photos",
+  "name": "Photos",
+  "version": "0.1.0",
+  "tier": "official",
+  "targets": ["local", "cloud"],
+  "localRun": {
+    "command": "pnpm",
+    "args": ["dev"],
+    "portFlag": "-p"
+  },
+  "infraRequirements": {
+    "fileAccess": [
+      {
+        "extensions": ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "tiff", "tif"],
+        "access": "readwrite",
+        "metadataWrite": true,
+        "rationale": "Photos app stores raster images and writes EXIF/dimensions extracted from uploaded image files into the image metadata table."
+      }
+    ],
+    "appSpecificSyncable": {
+      "files": true,
+      "tables": [
+        {
+          "name": "image_enriched",
+          "columns": [
+            { "name": "record_id", "type": "text", "primaryKey": true, "notNull": true },
+            { "name": "caption", "type": "text" },
+            { "name": "title", "type": "text" },
+            { "name": "date_taken_override", "type": "text" }
+          ]
+        }
+      ]
+    },
+    "compute": {
+      "enabled": true,
+      "handlers": [
+        {
+          "name": "api",
+          "handler": "infra/src/resize-handler.handler",
+          "memoryMb": 512,
+          "timeoutSeconds": 30,
+          "routes": [
+            "POST /api/resize"
+          ]
+        },
+        {
+          "name": "static",
+          "handler": "index.handler",
+          "memoryMb": 256,
+          "timeoutSeconds": 10,
+          "routes": ["GET /", "GET /{proxy+}"],
+          "auth": "public",
+          "env": {
+            "STARKEEP_API_GATEWAY_URL": "",
+            "STARKEEP_USER_POOL_ID": "",
+            "STARKEEP_USER_POOL_CLIENT_ID": "",
+            "STARKEEP_IDENTITY_POOL_ID": ""
+          }
+        }
+      ]
+    }
+  }
+}

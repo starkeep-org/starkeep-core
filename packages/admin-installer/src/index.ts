@@ -25,6 +25,17 @@ export { roleChain } from "./session";
 export type { AwsCredentials } from "./session";
 
 export {
+  regionFromUserPoolId,
+  cognitoPasswordAuth,
+  getIdentityPoolCredentials,
+} from "./cognito-auth";
+export type {
+  CognitoUserPoolRef,
+  CognitoIdentityPoolRef,
+  IdentityPoolCredentials,
+} from "./cognito-auth";
+
+export {
   installLocal,
   uninstallLocal,
   LocalInstallError,

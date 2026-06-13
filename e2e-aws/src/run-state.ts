@@ -1,0 +1,86 @@
+/**
+ * Per-prefix run state for the Tier-3 runner, kept under `e2e-aws/.run/<prefix>/`
+ * (gitignored). The directory doubles as STARKEEP_DATA_DIR for the install
+ * CLIs: they read AND rewrite `$STARKEEP_DATA_DIR/config.json`, so giving them
+ * a dedicated dir is what keeps a test run from clobbering the operator's
+ * live ~/.starkeep/config.json.
+ *
+ * `admin.json` holds the generated Cognito test-admin password (0600). It is
+ * deliberately not a managed secret: the user it unlocks only exists in the
+ * disposable test stack.
+ */
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
+
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+export interface RunPaths {
+  /** e2e-aws/.run/<prefix> — also the STARKEEP_DATA_DIR for spawned CLIs. */
+  dataDir: string;
+  configPath: string;
+  adminPath: string;
+}
+
+export function runPaths(stackPrefix: string): RunPaths {
+  const dataDir = join(PACKAGE_ROOT, ".run", stackPrefix);
+  return {
+    dataDir,
+    configPath: join(dataDir, "config.json"),
+    adminPath: join(dataDir, "admin.json"),
+  };
+}
+
+/** Mirrors the StarkeepConfig the install CLIs read from config.json. */
+export interface TestStackConfig {
+  stackPrefix: string;
+  accountId?: string;
+  userPoolId: string;
+  userPoolClientId: string;
+  identityPoolId: string;
+  permissionsBoundaryArn?: string;
+  foundationalPermissionsBoundaryArn?: string;
+  userDataOwnerPermissionsBoundaryArn?: string;
+  managerRoleArn?: string;
+  pulumiStateBucket?: string;
+  apiGatewayUrl?: string;
+  apiGatewayId?: string;
+  apiGatewayExecutionArn?: string;
+  authorizerId?: string;
+  s3Bucket?: string;
+  auroraEndpoint?: string;
+  appParentDirs?: string[];
+  nodeId?: string;
+}
+
+export function readConfig(paths: RunPaths): TestStackConfig | undefined {
+  if (!existsSync(paths.configPath)) return undefined;
+  return JSON.parse(readFileSync(paths.configPath, "utf-8")) as TestStackConfig;
+}
+
+export function writeConfig(paths: RunPaths, config: TestStackConfig): void {
+  mkdirSync(paths.dataDir, { recursive: true });
+  writeFileSync(paths.configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+}
+
+export interface AdminCredentials {
+  email: string;
+  password: string;
+}
+
+export function readAdminCredentials(paths: RunPaths): AdminCredentials | undefined {
+  if (!existsSync(paths.adminPath)) return undefined;
+  return JSON.parse(readFileSync(paths.adminPath, "utf-8")) as AdminCredentials;
+}
+
+export function writeAdminCredentials(paths: RunPaths, creds: AdminCredentials): void {
+  mkdirSync(paths.dataDir, { recursive: true });
+  writeFileSync(paths.adminPath, JSON.stringify(creds, null, 2), { mode: 0o600 });
+}
+
+/** A password satisfying the bootstrap pool's policy (only length ≥ 8). */
+export function generatePassword(): string {
+  return `Sk3!${randomBytes(18).toString("base64url")}`;
+}

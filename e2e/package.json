@@ -1,0 +1,23 @@
+{
+  "name": "@starkeep/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@starkeep/app-client": "workspace:*",
+    "@starkeep/testkit": "workspace:*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.1",
+    "@types/node": "^25.4.0",
+    "typescript": "^5.7.0"
+  }
+}

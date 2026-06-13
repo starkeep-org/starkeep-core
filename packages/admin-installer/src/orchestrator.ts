@@ -32,7 +32,7 @@ import {
   detachTempUninstallInfraPolicy,
   attachTempInstallDdlPolicy,
   detachTempInstallDdlPolicy,
-  deleteAppRole,
+  deleteAppRoleWithPolicies,
   assertCloudInstallableAppId,
   assertNotReservedAppId,
 } from "./iam";
@@ -135,8 +135,14 @@ async function runStep(
   stepName: string,
   done: Set<string>,
   fn: () => Promise<void>,
+  opts?: { alwaysRun?: boolean },
 ): Promise<void> {
-  if (done.has(stepName)) return;
+  // Most steps are skipped once recorded "done" so a resumed install doesn't
+  // repeat completed (and possibly non-idempotent) work. A step flagged
+  // alwaysRun reconciles every time instead — used where the desired cloud
+  // state can drift from a completed record (e.g. the local HMAC secret was
+  // re-minted) and the step is cheap and idempotent.
+  if (!opts?.alwaysRun && done.has(stepName)) return;
   await registry.recordStep(appId, operation, stepName, "pending");
   try {
     await fn();
@@ -186,14 +192,25 @@ async function installAppInner(
   // local install). On first cloud install if no local file exists we mint a
   // fresh secret and write the local file ourselves so the symmetry holds.
   const hmacSecret = ensureLocalHmacSecret(appId);
-  await runStep(registry, appId, "install", "put_app_creds_parameter", done, () =>
-    putAppCredsParameter({
-      stackPrefix: config.stackPrefix,
-      appId,
-      hmacSecret,
-      region: config.region,
-      awsCreds: managerCreds,
-    }).then(() => undefined),
+  // alwaysRun: reconcile SSM to the current local secret every time. A
+  // completed record doesn't guarantee SSM still matches — if the local secret
+  // was re-minted, a skipped mirror would leave the cloud verifier on a stale
+  // key and every signed request would 401. The put is idempotent.
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "put_app_creds_parameter",
+    done,
+    () =>
+      putAppCredsParameter({
+        stackPrefix: config.stackPrefix,
+        appId,
+        hmacSecret,
+        region: config.region,
+        awsCreds: managerCreds,
+      }).then(() => undefined),
+    { alwaysRun: true },
   );
 
   await runStep(registry, appId, "install", "create_iam_role", done, async () => {
@@ -424,7 +441,9 @@ async function uninstallAppInner(
   );
 
   await runStep(registry, appId, "uninstall", "delete_iam_role", done, () =>
-    deleteAppRole(config.stackPrefix, appId, managerCreds),
+    // The app role carries inline policies (runtime, broker-power); DeleteRole
+    // fails with DeleteConflict unless they're removed first.
+    deleteAppRoleWithPolicies(config.stackPrefix, appId, managerCreds),
   );
 
   await runStep(registry, appId, "uninstall", "delete_app_creds_parameter", done, () =>

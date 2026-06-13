@@ -6,7 +6,12 @@
  * needs its own probe before we hand control to whichever downstream
  * subsystem will exercise it.
  *
- * Default budget: 12 attempts, exp backoff capped at 10s → ~90s worst case.
+ * Default budget: 24 attempts, exp backoff capped at 10s → ~215s worst case.
+ * The budget has to actually cover the "couple of minutes" propagation window
+ * above: a freshly attached temp policy was observed still not effective at
+ * 85s (uninstall's install-infra passphrase read), so a ~90s budget gave up
+ * just short of propagation. Backoff means the success path stays fast — the
+ * larger ceiling only costs time when an action is genuinely still propagating.
  *
  * AccessDenied is detected across three error shapes we've seen:
  *   - AWS SDK v3:  err.name === "AccessDeniedException" / "AccessDenied"
@@ -40,7 +45,7 @@ export async function retryOnAccessDenied<T>(
   fn: () => Promise<T>,
   opts: RetryOpts = {},
 ): Promise<T> {
-  const maxAttempts = opts.maxAttempts ?? 12;
+  const maxAttempts = opts.maxAttempts ?? 24;
   const maxDelayMs = opts.maxDelayMs ?? 10_000;
   let delay = 1000;
   const start = Date.now();

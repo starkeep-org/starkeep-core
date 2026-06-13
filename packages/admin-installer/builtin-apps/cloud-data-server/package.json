@@ -5,7 +5,9 @@
   "type": "module",
   "description": "Built-in app: cloud broker (DSQL + files bucket + protocol-core Lambda + API Gateway). Installed by the admin-installer pipeline as the final step of bootstrap.",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@starkeep/protocol-primitives": "workspace:*",
@@ -23,10 +25,13 @@
     "pg": "^8.13.0"
   },
   "devDependencies": {
+    "@starkeep/app-client": "workspace:*",
     "@types/aws-lambda": "^8.10.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
+    "aws-sdk-client-mock": "^4.1.0",
     "esbuild": "^0.24.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
   }
 }
