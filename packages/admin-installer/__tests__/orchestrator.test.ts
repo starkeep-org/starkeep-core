@@ -56,7 +56,7 @@ vi.mock("../src/iam", async (importOriginal) => {
     detachTempUninstallInfraPolicy: vi.fn(async () => {}),
     attachTempInstallDdlPolicy: vi.fn(async () => {}),
     detachTempInstallDdlPolicy: vi.fn(async () => {}),
-    deleteAppRole: vi.fn(async () => {}),
+    deleteAppRoleWithPolicies: vi.fn(async () => {}),
   };
 });
 
@@ -139,7 +139,18 @@ beforeEach(() => {
 });
 
 function doneSteps(operation: string): string[] {
-  return ledger.filter((e) => e.operation === operation && e.status === "done").map((e) => e.step);
+  // Distinct steps that reached "done", in first-completion order. Dedup
+  // matters because alwaysRun steps (e.g. put_app_creds_parameter) re-record
+  // "done" on every drive, so a resumed install legitimately logs them twice.
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const e of ledger) {
+    if (e.operation === operation && e.status === "done" && !seen.has(e.step)) {
+      seen.add(e.step);
+      out.push(e.step);
+    }
+  }
+  return out;
 }
 
 const INSTALL_STEPS_WITH_COMPUTE = [
@@ -206,7 +217,10 @@ describe("install", () => {
       registryCredentials,
     });
     expect(vi.mocked(createAppRole)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(putAppCredsParameter)).toHaveBeenCalledTimes(1);
+    // put_app_creds_parameter is an alwaysRun step (reconciles SSM to the
+    // current local secret), so it runs on every drive — once per drive here,
+    // unlike createAppRole which is skipped once recorded done.
+    expect(vi.mocked(putAppCredsParameter)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(putAppKeepFile)).toHaveBeenCalledTimes(2);
     expect(doneSteps("install")).toEqual(INSTALL_STEPS_WITH_COMPUTE);
   });

@@ -92,7 +92,19 @@ interface CachedHmacSecret {
   fetchedAt: number;
 }
 
-const HMAC_CACHE_TTL_MS = 5 * 60_000;
+// Per-app secret cache lifetime. Defaults to 5 min (trading SSM call volume
+// for up to a 5-min lag on credential rotation/revocation). Overridable via
+// the HMAC_CACHE_TTL_MS Lambda env var — the Tier-3 e2e suite sets it low so
+// installs/uninstalls take effect promptly without waiting out the cache; left
+// unset in real deployments, which keep the 5-min default.
+function resolveHmacCacheTtlMs(): number {
+  const raw = process.env.HMAC_CACHE_TTL_MS;
+  if (raw === undefined) return 5 * 60_000;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 5 * 60_000;
+}
+
+const HMAC_CACHE_TTL_MS = resolveHmacCacheTtlMs();
 const hmacSecretCache = new Map<string, CachedHmacSecret>();
 
 let ssmClientSingleton: SSMClient | null = null;
@@ -466,6 +478,7 @@ function recordToResponse(record: DataRecord) {
     content_hash: record.contentHash,
     object_storage_key: record.objectStorageKey,
     original_filename: record.originalFilename,
+    origin_app_id: record.originAppId,
     parent_id: record.parentId,
   };
 }
