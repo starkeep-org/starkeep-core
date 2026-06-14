@@ -193,6 +193,9 @@ test("a corrupted HMAC secret turns into 401s and a visible error state", async 
   });
 
   // And the UI surfaces it rather than rendering an empty-but-healthy grid.
+  // Scope to the app's own error banner ("Data server GET … → 401"); under
+  // `next dev` a bare /→ 401/ also matches the Next.js error overlay that the
+  // data-server-client's throw produces, which is a dev-only artifact.
   await page.goto(photosUrl);
-  await expect(page.getByText(/→ 401/)).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/Data server GET .*→ 401/)).toBeVisible({ timeout: 60_000 });
 });
