@@ -12,17 +12,6 @@ import type { AppSpecificOperations, ApiSubject } from "../types.js";
 import { validateTableName } from "./validation.js";
 import { FILE_RECORDS_TABLE, RESERVED_TABLE_NAMES } from "./reserved.js";
 
-async function sha256Hex(data: Uint8Array): Promise<string> {
-  const copy = data.buffer.slice(
-    data.byteOffset,
-    data.byteOffset + data.byteLength,
-  ) as ArrayBuffer;
-  const buf = await crypto.subtle.digest("SHA-256", copy);
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 export interface AppSpecificFactoryOptions {
   namespace: AppSyncableNamespaceStore;
   applier: AppSyncableApplier;
@@ -92,19 +81,22 @@ export function createAppSpecificFactory(
 
     async function upsertFileRecord(
       key: string,
-      bytes: Uint8Array,
-      mimeType: string,
+      meta: {
+        contentHash: string;
+        mimeType: string;
+        sizeBytes: number;
+        originalFilename?: string | null;
+      },
     ): Promise<void> {
       const ts = clock.now();
       const tsStr = serializeHLC(ts);
-      const contentHash = await sha256Hex(bytes);
       const row: Record<string, unknown> = {
         id: key,
         object_storage_key: key,
-        content_hash: contentHash,
-        mime_type: mimeType,
-        size_bytes: bytes.byteLength,
-        original_filename: null,
+        content_hash: meta.contentHash,
+        mime_type: meta.mimeType,
+        size_bytes: meta.sizeBytes,
+        original_filename: meta.originalFilename ?? null,
         origin_app_id: appId,
         created_at: tsStr,
         updated_at: tsStr,
@@ -118,6 +110,23 @@ export function createAppSpecificFactory(
         row,
       };
       await applier.apply(entry);
+    }
+
+    /**
+     * Read the reserved `_starkeep_sync_records` index row for `key`, bypassing
+     * the `resolveTable` guard that (correctly) blocks apps from addressing the
+     * reserved table through the normal query path. Returns null when no live
+     * (non-tombstoned) row exists. `queryRows` already filters `deleted_at`.
+     */
+    async function readFileRecord(
+      key: string,
+    ): Promise<Record<string, unknown> | null> {
+      const capable = applier as QueryCapableApplier;
+      if (typeof capable.queryRows !== "function") {
+        throw new Error("The configured applier does not support queryRows");
+      }
+      const rows = await capable.queryRows(appId, FILE_RECORDS_TABLE, { id: key });
+      return rows[0] ?? null;
     }
 
     async function tombstoneFileRecord(key: string): Promise<void> {
@@ -199,11 +208,21 @@ export function createAppSpecificFactory(
         throw new Error("The configured applier does not support queryRows");
       },
 
-      async putFile(subKey, bytes, mimeType) {
+      async registerFile(
+        subKey: string,
+        meta: {
+          contentHash: string;
+          mimeType: string;
+          sizeBytes: number;
+          originalFilename?: string | null;
+        },
+      ) {
+        // Records the index row for bytes already uploaded out-of-band (the
+        // direct-to-S3 presign flow), so the file becomes visible to statFile
+        // and cross-channel sync without the server ever holding the bytes.
         ensureFilesEnabled();
         const key = appSyncableObjectKey(appId, subKey);
-        await fileStorage.put(key, bytes, { contentType: mimeType });
-        await upsertFileRecord(key, bytes, mimeType);
+        await upsertFileRecord(key, meta);
         emitLocalChange();
         return { key };
       },
@@ -220,6 +239,20 @@ export function createAppSpecificFactory(
         return { bytes: data, mimeType: result.contentType ?? "application/octet-stream" };
       },
 
+      async statFile(subKey: string) {
+        // Existence + metadata from the index row — no S3 round-trip and no
+        // byte download. The index is the authoritative existence signal.
+        ensureFilesEnabled();
+        const key = appSyncableObjectKey(appId, subKey);
+        const row = await readFileRecord(key);
+        if (!row) return null;
+        return {
+          mimeType: (row["mime_type"] as string) ?? "application/octet-stream",
+          sizeBytes: Number(row["size_bytes"] ?? 0),
+          contentHash: (row["content_hash"] as string) ?? "",
+        };
+      },
+
       async deleteFile(subKey) {
         ensureFilesEnabled();
         const key = appSyncableObjectKey(appId, subKey);
@@ -231,9 +264,10 @@ export function createAppSpecificFactory(
       async fileUrl(subKey, opts) {
         ensureFilesEnabled();
         const key = appSyncableObjectKey(appId, subKey);
-        const result = await fileStorage.get(key);
-        if (!result) return null;
-        const mimeType = result.contentType ?? "application/octet-stream";
+        // Existence via the index (no byte download); presign only if present.
+        const row = await readFileRecord(key);
+        if (!row) return null;
+        const mimeType = (row["mime_type"] as string) ?? "application/octet-stream";
         const expiresIn = opts?.expiresIn ?? 3600;
         return buildFileUrl ? buildFileUrl(key, mimeType, expiresIn) : null;
       },

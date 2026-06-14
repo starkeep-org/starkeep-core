@@ -2,10 +2,19 @@ export {
   type AppCredentials,
   appCredentialsPath,
   loadAppCredentials,
-  loadAppCredentialsAsync,
   clearAppCredentialsCache,
 } from "./credentials";
-export { type SignableBody, signRequest, signedFetch, type SignedFetchInit } from "./sign";
+export {
+  type SignableBody,
+  signRequest,
+  signedFetch,
+  type SignedFetchInit,
+  canonicalSignedPath,
+  APP_ID_HEADER,
+  APP_SIG_HEADER,
+  APP_TS_HEADER,
+  APP_SIG_MAX_SKEW_MS,
+} from "./sign";
 export {
   type ProxyRequest,
   type ProxyResponse,

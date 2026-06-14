@@ -6,7 +6,6 @@ import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
 import {
   loadAppCredentials,
-  loadAppCredentialsAsync,
   appCredentialsPath,
   clearAppCredentialsCache,
 } from "../src/credentials.js";
@@ -53,42 +52,36 @@ function writeCreds(appId: string, content: unknown): void {
 }
 
 describe("local-mode credentials", () => {
-  it("loads creds written at install time", () => {
+  it("loads creds written at install time", async () => {
     writeCreds("photos", { appId: "photos", hmacSecret: "s3cret", dataServerUrl: "http://x:1" });
-    const creds = loadAppCredentials("photos");
+    const creds = await loadAppCredentials("photos");
     expect(creds).toEqual({ appId: "photos", hmacSecret: "s3cret", dataServerUrl: "http://x:1" });
     expect(appCredentialsPath("photos")).toBe(join(dir, "app-creds", "photos.json"));
   });
 
-  it("defaults dataServerUrl to the local server when absent", () => {
+  it("defaults dataServerUrl to the local server when absent", async () => {
     writeCreds("photos", { appId: "photos", hmacSecret: "s3cret" });
-    expect(loadAppCredentials("photos")?.dataServerUrl).toBe("http://127.0.0.1:9820");
+    expect((await loadAppCredentials("photos"))?.dataServerUrl).toBe("http://127.0.0.1:9820");
   });
 
-  it("returns null for a missing creds file", () => {
-    expect(loadAppCredentials("not-installed")).toBeNull();
+  it("returns null for a missing creds file", async () => {
+    expect(await loadAppCredentials("not-installed")).toBeNull();
   });
 
-  it("returns null for malformed JSON and for incomplete creds", () => {
+  it("returns null for malformed JSON and for incomplete creds", async () => {
     writeCreds("broken", "{not json");
-    expect(loadAppCredentials("broken")).toBeNull();
+    expect(await loadAppCredentials("broken")).toBeNull();
     writeCreds("partial", { appId: "partial" });
-    expect(loadAppCredentials("partial")).toBeNull();
+    expect(await loadAppCredentials("partial")).toBeNull();
   });
 
-  it("caches per process until cleared", () => {
+  it("caches per process until cleared", async () => {
     writeCreds("photos", { appId: "photos", hmacSecret: "v1" });
-    expect(loadAppCredentials("photos")?.hmacSecret).toBe("v1");
+    expect((await loadAppCredentials("photos"))?.hmacSecret).toBe("v1");
     writeCreds("photos", { appId: "photos", hmacSecret: "v2" });
-    expect(loadAppCredentials("photos")?.hmacSecret).toBe("v1");
+    expect((await loadAppCredentials("photos"))?.hmacSecret).toBe("v1");
     clearAppCredentialsCache("photos");
-    expect(loadAppCredentials("photos")?.hmacSecret).toBe("v2");
-  });
-
-  it("async load delegates to the sync path in local mode", async () => {
-    writeCreds("photos", { appId: "photos", hmacSecret: "s3cret" });
-    const creds = await loadAppCredentialsAsync("photos");
-    expect(creds?.hmacSecret).toBe("s3cret");
+    expect((await loadAppCredentials("photos"))?.hmacSecret).toBe("v2");
   });
 });
 
@@ -99,17 +92,20 @@ describe("cloud-mode credentials", () => {
     process.env.STACK_PREFIX = "teststack";
   });
 
-  it("sync loader returns null in cloud mode (pinned until the sync path is removed)", () => {
-    // Documented gap (todo 42): cloud Lambdas must use the async loader.
-    writeCreds("photos", { appId: "photos", hmacSecret: "local-file-ignored" });
-    expect(loadAppCredentials("photos")).toBeNull();
-  });
-
-  it("async loader fetches the secret from SSM and derives the app URL", async () => {
+  it("ignores any local creds file and fetches from SSM in cloud mode", async () => {
     ssmMock.on(GetParameterCommand).resolves({
       Parameter: { Value: JSON.stringify({ appId: "photos", hmacSecret: "from-ssm" }) },
     });
-    const creds = await loadAppCredentialsAsync("photos");
+    // A stale local file must never be used in cloud mode.
+    writeCreds("photos", { appId: "photos", hmacSecret: "local-file-ignored" });
+    expect((await loadAppCredentials("photos"))?.hmacSecret).toBe("from-ssm");
+  });
+
+  it("fetches the secret from SSM and derives the app URL", async () => {
+    ssmMock.on(GetParameterCommand).resolves({
+      Parameter: { Value: JSON.stringify({ appId: "photos", hmacSecret: "from-ssm" }) },
+    });
+    const creds = await loadAppCredentials("photos");
     expect(creds).toEqual({
       appId: "photos",
       hmacSecret: "from-ssm",
@@ -127,7 +123,7 @@ describe("cloud-mode credentials", () => {
     ssmMock.on(GetParameterCommand).resolves({
       Parameter: { Value: JSON.stringify({ appId: "photos", hmacSecret: "x" }) },
     });
-    await loadAppCredentialsAsync("photos");
+    await loadAppCredentials("photos");
     expect(ssmMock.commandCalls(GetParameterCommand)[0].args[0].input.Name).toBe("/custom/param");
   });
 
@@ -135,12 +131,12 @@ describe("cloud-mode credentials", () => {
     ssmMock.on(GetParameterCommand).rejects(
       new ParameterNotFound({ message: "no such parameter", $metadata: {} }),
     );
-    expect(await loadAppCredentialsAsync("photos")).toBeNull();
+    expect(await loadAppCredentials("photos")).toBeNull();
   });
 
   it("throws when cloud mode is missing its required env", async () => {
     delete process.env.STARKEEP_CLOUD_DATA_BASE;
-    await expect(loadAppCredentialsAsync("photos")).rejects.toThrow(
+    await expect(loadAppCredentials("photos")).rejects.toThrow(
       /STARKEEP_CLOUD_DATA_BASE/,
     );
   });
@@ -149,8 +145,8 @@ describe("cloud-mode credentials", () => {
     ssmMock.on(GetParameterCommand).resolves({
       Parameter: { Value: JSON.stringify({ appId: "photos", hmacSecret: "x" }) },
     });
-    await loadAppCredentialsAsync("photos");
-    await loadAppCredentialsAsync("photos");
+    await loadAppCredentials("photos");
+    await loadAppCredentials("photos");
     expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(1);
   });
 });

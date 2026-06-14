@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import {
   installApp,
+  putAppFile,
   testAppManifest,
   createRecordWithBytes,
   type InstalledApp,
@@ -126,11 +127,7 @@ describe("uninstall", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ row: { note_id: "doomed", body: "bye" } }),
     });
-    await app.fetch("/app-data/files/keep/me.bin", {
-      method: "PUT",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: Buffer.from("app private bytes"),
-    });
+    await putAppFile(app, "keep/me.bin", "app private bytes");
   });
 
   it("drops tables, grants, namespace, and the files prefix — shared records survive", async () => {

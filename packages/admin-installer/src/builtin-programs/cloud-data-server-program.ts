@@ -203,6 +203,7 @@ export function buildCloudDataServerProgram(
           "Authorization",
           "X-Starkeep-App-Id",
           "X-Starkeep-App-Sig",
+          "X-Starkeep-App-Ts",
         ],
       },
       tags: {

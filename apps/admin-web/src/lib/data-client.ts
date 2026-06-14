@@ -1,8 +1,8 @@
 import { readCloudConfig, readCognitoSession, writeCognitoSession } from "./cloud-config";
 import { refreshTokens } from "./cognito-auth";
+import { localDataServerUrl } from "./runtime-config";
 
 export type DataSourceMode = "local" | "remote";
-export const LOCAL_URL = "http://127.0.0.1:9820";
 
 let tokenCache: { accessToken: string; expiresAt: number } | null = null;
 
@@ -32,5 +32,5 @@ export async function resolveDataSource(mode: DataSourceMode): Promise<{
       };
     }
   }
-  return { baseUrl: LOCAL_URL, headers: {} };
+  return { baseUrl: await localDataServerUrl(), headers: {} };
 }

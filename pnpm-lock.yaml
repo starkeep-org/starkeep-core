@@ -830,6 +830,9 @@ importers:
       '@starkeep/protocol-primitives':
         specifier: workspace:*
         version: link:../protocol-primitives
+      '@starkeep/shared-space-api':
+        specifier: workspace:*
+        version: link:../shared-space-api
       '@starkeep/storage-fs':
         specifier: workspace:*
         version: link:../storage-fs

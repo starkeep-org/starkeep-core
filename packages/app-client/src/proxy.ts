@@ -34,6 +34,8 @@ export async function proxyToDataServer(
   const fwdHeaders: Record<string, string> = signRequest({
     appId: creds.appId,
     hmacSecret: creds.hmacSecret,
+    method: req.method,
+    path: req.path,
     body,
   });
   const ct = req.headers["content-type"];

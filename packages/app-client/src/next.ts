@@ -35,7 +35,7 @@ export function createNextProxyHandler(opts: NextProxyOptions) {
     req: MinimalNextRequest,
     ctx: { params: Promise<NextProxyParams> },
   ): Promise<Response> {
-    const creds = loadAppCredentials(opts.appId);
+    const creds = await loadAppCredentials(opts.appId);
     if (!creds) {
       if (opts.onMissingCredentials) return opts.onMissingCredentials();
       return new Response(

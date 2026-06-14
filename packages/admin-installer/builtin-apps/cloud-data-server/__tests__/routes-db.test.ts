@@ -75,6 +75,8 @@ function signedEvent(args: {
   const headers = signRequest({
     appId: args.appId,
     hmacSecret: `secret-${args.appId}`,
+    method: args.method,
+    path: args.subPath,
     ...(isBodyless ? {} : { body: bodyStr }),
   });
   return {
@@ -574,13 +576,109 @@ describe("/app-data routes", () => {
     const res = await handler(
       signedEvent({
         appId: "appdata1",
-        method: "PUT",
-        subPath: "/app-data/files/pic.png",
-        body: { not: "checked" },
+        method: "POST",
+        subPath: "/app-data/files/presign",
+        body: { subKey: "pic.png", contentType: "image/png" },
       }),
       context,
     );
     expect(res.statusCode).toBe(400);
     expect(bodyOf(res)["error"]).toMatch(/did not opt in to syncable files/);
+  });
+
+  // ---- Direct-to-S3 presign flow (todo 24/25) ----
+  const filesNamespace = {
+    app_id: "appdata1",
+    // The installer persists the reserved index table into tables_json for any
+    // files_enabled app (withFileRecordsTable), so the applier knows its pk.
+    tables_json: JSON.stringify([
+      { name: "notes", pkColumns: ["id"] },
+      { name: "_starkeep_sync_records", pkColumns: ["id"] },
+    ]),
+    files_enabled: true,
+  };
+  // The reserved index table the applier reads/writes for app-private files.
+  const FILE_RECORDS_SELECT = /SELECT \* FROM app_appdata1\."_starkeep_sync_records"/;
+  const FILE_RECORDS_INSERT = /INSERT INTO app_appdata1\."_starkeep_sync_records"/;
+  const fileRow = {
+    id: "apps/appdata1/syncable/cover",
+    object_storage_key: "apps/appdata1/syncable/cover",
+    content_hash: "c".repeat(64),
+    mime_type: "image/png",
+    size_bytes: 21,
+    original_filename: null,
+    origin_app_id: "appdata1",
+    deleted_at: null,
+  };
+
+  it("presigns an app-data file PUT URL, keyed under the app's syncable prefix", async () => {
+    const db = fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "POST",
+        subPath: "/app-data/files/presign",
+        body: { subKey: "cover", contentType: "image/png" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res);
+    expect(body["key"]).toBe("apps/appdata1/syncable/cover");
+    expect(String(body["url"])).toContain("fake-bucket");
+    // The broker never reads or writes bytes on the presign path.
+    expect(db.calls(FILE_RECORDS_INSERT)).toHaveLength(0);
+  });
+
+  it("registers the index row for a presigned upload without holding bytes", async () => {
+    const db = fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_INSERT, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "POST",
+        subPath: "/app-data/files/cover/record",
+        body: { contentHash: "c".repeat(64), mimeType: "image/png", sizeBytes: 21 },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)["key"]).toBe("apps/appdata1/syncable/cover");
+    expect(db.calls(FILE_RECORDS_INSERT)).toHaveLength(1);
+  });
+
+  it("400s register without the required metadata", async () => {
+    setDbFactory(fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]));
+    const res = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "POST",
+        subPath: "/app-data/files/cover/record",
+        body: { mimeType: "image/png" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(bodyOf(res)["error"]).toMatch(/contentHash, mimeType, and sizeBytes/);
+  });
+
+  it("GET presigns from the index row (no byte download), 404s when absent", async () => {
+    const present = fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, [fileRow]);
+    setDbFactory(present);
+    const found = await handler(
+      signedEvent({ appId: "appdata1", method: "GET", subPath: "/app-data/files/cover" }),
+      context,
+    );
+    expect(found.statusCode).toBe(200);
+    expect(typeof bodyOf(found)["url"]).toBe("string");
+
+    const absent = fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, []);
+    setDbFactory(absent);
+    const gone = await handler(
+      signedEvent({ appId: "appdata1", method: "GET", subPath: "/app-data/files/cover" }),
+      context,
+    );
+    expect(gone.statusCode).toBe(404);
   });
 });

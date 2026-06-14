@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type SyncStatus =
   | "local-only"
@@ -52,7 +52,7 @@ export default function DrivePage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const loadTypes = useCallback(() => {
     fetch("/api/types")
       .then((r) => r.json())
       .then((d: { types?: DriveTypeSummary[]; error?: string }) => {
@@ -61,24 +61,59 @@ export default function DrivePage() {
       .catch(() => {});
   }, []);
 
+  const loadRecords = useCallback(
+    (opts?: { silent?: boolean }) => {
+      // A live-update refresh is silent — replacing the table with "Loading…"
+      // on every remote write would flicker. Only the initial load and an
+      // explicit type switch show the loading state.
+      if (!opts?.silent) setLoading(true);
+      setError(null);
+      const qs = activeType ? `?type=${encodeURIComponent(activeType)}` : "";
+      fetch(`/api/records${qs}`)
+        .then(async (r) => {
+          const d = (await r.json()) as {
+            records?: DriveRecord[];
+            cloud?: CloudInfo;
+            error?: string;
+          };
+          if (!r.ok) throw new Error(d.error ?? `${r.status}`);
+          setRecords(d.records ?? []);
+          setCloud(d.cloud ?? null);
+        })
+        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+        .finally(() => setLoading(false));
+    },
+    [activeType],
+  );
+
   useEffect(() => {
-    setLoading(true);
-    setError(null);
-    const qs = activeType ? `?type=${encodeURIComponent(activeType)}` : "";
-    fetch(`/api/records${qs}`)
-      .then(async (r) => {
-        const d = (await r.json()) as {
-          records?: DriveRecord[];
-          cloud?: CloudInfo;
-          error?: string;
-        };
-        if (!r.ok) throw new Error(d.error ?? `${r.status}`);
-        setRecords(d.records ?? []);
-        setCloud(d.cloud ?? null);
-      })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setLoading(false));
-  }, [activeType]);
+    loadTypes();
+  }, [loadTypes]);
+
+  useEffect(() => {
+    loadRecords();
+  }, [loadRecords]);
+
+  // Live updates: subscribe to the LDS /events stream (proxied same-origin at
+  // /api/events) and re-fetch on each kick, so a record added underneath the
+  // page — by another app or the watcher — appears without a manual reload.
+  // Refs keep one EventSource for the page's lifetime instead of reconnecting
+  // every time the type filter changes the loaders' identity.
+  const loadTypesRef = useRef(loadTypes);
+  const loadRecordsRef = useRef(loadRecords);
+  loadTypesRef.current = loadTypes;
+  loadRecordsRef.current = loadRecords;
+
+  useEffect(() => {
+    const es = new EventSource("/api/events");
+    es.onmessage = () => {
+      loadTypesRef.current();
+      loadRecordsRef.current({ silent: true });
+    };
+    // The browser auto-reconnects an SSE source on transient errors; nothing to
+    // do here beyond letting it.
+    return () => es.close();
+  }, []);
 
   return (
     <main>

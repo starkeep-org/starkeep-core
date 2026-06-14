@@ -19,6 +19,7 @@ import {
   writeCognitoSession,
 } from "@/lib/cloud-config";
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
+import { getRuntimeConfig, RUNTIME_CONFIG_DEFAULTS } from "@/lib/runtime-config";
 
 type AppTarget = "local" | "cloud";
 
@@ -211,10 +212,10 @@ function AppDirsEditor({ onSaved }: { onSaved: () => void }) {
 
 // ---------------------------------------------------------------------------
 // Starkeep Drive — built-in app installed with the core. Not manifest-discovered;
-// it runs on a fixed port (9830) under the daemon id "drive".
+// it runs under the daemon id "drive". Its URL is the loopback default on a
+// real install but ephemeral in a harness-booted stack, so it comes from the
+// runtime-config bootstrap (STARKEEP_DRIVE_URL) rather than a hardcoded port.
 // ---------------------------------------------------------------------------
-
-const DRIVE_URL = "http://localhost:9830";
 
 async function checkUrl(url: string): Promise<boolean> {
   try {
@@ -228,22 +229,27 @@ async function checkUrl(url: string): Promise<boolean> {
 function DriveSection() {
   const [online, setOnline] = useState<boolean | null>(null);
   const [pending, setPending] = useState<"start" | "stop" | null>(null);
+  const [driveUrl, setDriveUrl] = useState<string>(RUNTIME_CONFIG_DEFAULTS.driveUrl);
+
+  useEffect(() => {
+    getRuntimeConfig().then((c) => setDriveUrl(c.driveUrl)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     setOnline(null);
-    checkUrl(DRIVE_URL).then(setOnline);
-  }, []);
+    checkUrl(driveUrl).then(setOnline);
+  }, [driveUrl]);
 
   // Poll the URL until it matches the requested transition, with a hard cap.
   const waitForTransition = useCallback(async (want: "start" | "stop") => {
     const MAX_ATTEMPTS = 20; // 20 × 1s = 20s
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
       await new Promise((r) => setTimeout(r, 1000));
-      const up = await checkUrl(DRIVE_URL);
+      const up = await checkUrl(driveUrl);
       setOnline(up);
       if ((want === "start" && up) || (want === "stop" && !up)) return;
     }
-  }, []);
+  }, [driveUrl]);
 
   const transition = async (action: "start" | "stop") => {
     setPending(action);
@@ -274,7 +280,7 @@ function DriveSection() {
             <span className="font-medium">Starkeep Drive</span>
             <Badge variant="secondary" className="text-xs">Built-in</Badge>
             {running && (
-              <a href={DRIVE_URL} target="_blank" rel="noopener noreferrer" title={`Open ${DRIVE_URL}`}>
+              <a href={driveUrl} target="_blank" rel="noopener noreferrer" title={`Open ${driveUrl}`}>
                 <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 hover:bg-blue-200 dark:hover:bg-blue-800 cursor-pointer">
                   Running ↗
                 </Badge>
@@ -283,7 +289,7 @@ function DriveSection() {
           </div>
           <div className="flex gap-2 items-center">
             {running && (
-              <a href={DRIVE_URL} target="_blank" rel="noopener noreferrer" className="text-sm underline">
+              <a href={driveUrl} target="_blank" rel="noopener noreferrer" className="text-sm underline">
                 Open ↗
               </a>
             )}
