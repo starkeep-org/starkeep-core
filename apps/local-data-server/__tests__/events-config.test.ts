@@ -41,7 +41,7 @@ describe("/events SSE", () => {
       });
       expect(sse.dataEvents).toEqual([]);
 
-      await createRecordWithBytes(app, { type: "jpg" });
+      await createRecordWithBytes(app, { type: "image/jpeg" });
 
       await eventually(() => {
         expect(sse.dataEvents.length).toBeGreaterThan(0);

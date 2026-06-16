@@ -33,7 +33,7 @@ import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/ob
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
-import { getCategory, categoryOf, isCategoryId } from "../../packages/protocol-primitives/src/types/core-types.js";
+import { getCategory, typeCategory, isCategoryId, isKnownType } from "../../packages/protocol-primitives/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { createStarkeepId } from "@starkeep/protocol-primitives";
@@ -92,8 +92,8 @@ function grantsForApp(db: DatabaseSync, appId: string): AppGrantRow[] {
 // All-access local identities: Starkeep Drive (the User-Data-Owner) and the
 // local watcher. Both operate on all shared data — every extension plus the
 // Drive-only `other` catch-all — which cannot be represented as a finite set of
-// extension grant rows, so they are authorized by app id (matching the cloud
-// access-enforcer for Drive). `type` is the record's extension.
+// type grant rows, so they are authorized by app id (matching the cloud
+// access-enforcer for Drive). `type` is the record's Starkeep type id.
 const ALL_ACCESS_APP_IDS = new Set<string>([DRIVE_APP_ID, LOCAL_WATCHER_APP_ID]);
 
 function appCanRead(db: DatabaseSync, appId: string, type: string): boolean {
@@ -108,24 +108,24 @@ function appCanWrite(db: DatabaseSync, appId: string, type: string): boolean {
 
 // Category-level access. Object-storage keys (`shared/<category>/…`) and the
 // per-category metadata tables are category-namespaced (so is the IAM ceiling),
-// so they authorize against the categories the app's extension grants map to —
-// a category is accessible when at least one granted extension maps to it.
+// so they authorize against the categories the app's type grants map to —
+// a category is accessible when at least one granted type maps to it.
 function appCanReadCategory(db: DatabaseSync, appId: string, category: string): boolean {
   if (ALL_ACCESS_APP_IDS.has(appId)) return true;
-  return grantsForApp(db, appId).some((g) => categoryOf(g.type_id) === category);
+  return grantsForApp(db, appId).some((g) => typeCategory(g.type_id) === category);
 }
 
 function appCanWriteCategory(db: DatabaseSync, appId: string, category: string): boolean {
   if (ALL_ACCESS_APP_IDS.has(appId)) return true;
   return grantsForApp(db, appId).some(
-    (g) => categoryOf(g.type_id) === category && g.access === "readwrite",
+    (g) => typeCategory(g.type_id) === category && g.access === "readwrite",
   );
 }
 
 function appCanWriteMetadataCategory(db: DatabaseSync, appId: string, category: string): boolean {
   if (ALL_ACCESS_APP_IDS.has(appId)) return true;
   return grantsForApp(db, appId).some(
-    (g) => categoryOf(g.type_id) === category && g.metadata_write === 1,
+    (g) => typeCategory(g.type_id) === category && g.metadata_write === 1,
   );
 }
 
@@ -1022,7 +1022,7 @@ async function main() {
               id: r.id,
               kind: r.kind,
               type: r.type,
-              category: categoryOf(r.type),
+              category: typeCategory(r.type),
               // Immutable provenance: which app created the record. Surfaced so
               // the Drive UI can show "this came from photos" even when photos
               // isn't cloud-installed.
@@ -1079,9 +1079,13 @@ async function main() {
           });
           return;
         }
-        if (!contentType) {
+        // contentType is advisory MIME — optional. When omitted the record's
+        // mime_type is stored null (the serving edge falls back to
+        // application/octet-stream).
+
+        if (!isKnownType(type)) {
           res.writeHead(400);
-          json(res, { error: "contentType is required" });
+          json(res, { error: `Unknown type id: ${type}` });
           return;
         }
 
@@ -1102,7 +1106,7 @@ async function main() {
           type: string;
           createdAt: { wallTime: number };
           updatedAt: { wallTime: number };
-          mimeType: string;
+          mimeType: string | null;
           sizeBytes: number;
           objectStorageKey: string | null;
           originalFilename: string | null;
@@ -1339,9 +1343,15 @@ async function main() {
           json(res, { error: "type query param is required" });
           return;
         }
-        // Bytes land at shared/<category>/…, so authorize the derived category
-        // (the type param is normally an extension).
-        const fileCategory = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+        // Bytes land at shared/<category>/…, so authorize the derived category.
+        // Accept a full Starkeep type id or a bare category id; reject anything
+        // else rather than letting typeCategory's "other" fallback coerce a typo.
+        if (!isKnownType(typeId) && !isCategoryId(typeId)) {
+          res.writeHead(400);
+          json(res, { error: `Unknown type id: ${typeId}` });
+          return;
+        }
+        const fileCategory = typeCategory(typeId);
         if (!appCanWriteCategory(localDb, appId!, fileCategory)) {
           res.writeHead(403);
           json(res, { error: `App does not have readwrite access to category "${fileCategory}"` });
@@ -1622,7 +1632,7 @@ async function main() {
           json(res, { error: "metadata must be an object" });
           return;
         }
-        const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+        const category = typeCategory(typeId);
         if (!appCanWriteMetadataCategory(localDb, appId!, category)) {
           res.writeHead(403);
           json(res, { error: "AccessDenied", detail: `app "${appId}" has no metadataWrite grant on category "${category}"` });
@@ -1652,7 +1662,7 @@ async function main() {
       if (metadataReadMatch && req.method === "GET") {
         const recordId = metadataReadMatch[1]!;
         const typeId = metadataReadMatch[2]!;
-        const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+        const category = typeCategory(typeId);
         if (!appCanReadCategory(localDb, appId!, category)) {
           res.writeHead(403);
           json(res, { error: "AccessDenied", detail: `app "${appId}" has no read grant on category "${category}"` });
@@ -1682,7 +1692,7 @@ async function main() {
             id: record.id,
             kind: record.kind,
             type: record.type,
-            category: categoryOf(record.type),
+            category: typeCategory(record.type),
             created_at: new Date(record.createdAt.wallTime).toISOString(),
             updated_at: new Date(record.updatedAt.wallTime).toISOString(),
             version: record.version,

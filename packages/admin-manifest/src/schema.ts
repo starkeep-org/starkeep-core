@@ -7,14 +7,14 @@ export const appTierSchema = z.enum(["official", "verified", "community"]);
 export const appTargetSchema = z.enum(["local", "cloud"]);
 
 /**
- * An app's grant over a set of file extensions. Installable apps enumerate the
- * exact lowercase extensions they handle (no dot, alphanumeric). Validation
- * rejects any extension not in the platform map, so the unmapped (`other`) set
- * is unreachable by apps. Category-level and wildcard grants are not expressible
- * here — Drive's all-access uses `fileAccessAll` instead.
+ * An app's grant over a set of canonical Starkeep types. Installable apps
+ * enumerate the exact `<category>/<format>` type ids they handle (e.g.
+ * "image/jpeg"). Validation rejects any id not in the platform registry, so the
+ * unmapped (`other/*`) set is unreachable by apps. Category-level and wildcard
+ * grants are not expressible here — Drive's all-access uses `fileAccessAll`.
  */
 export const fileAccessSchema = z.object({
-  extensions: z.array(z.string().regex(/^[a-z0-9]+$/)).min(1),
+  types: z.array(z.string().regex(/^[a-z0-9]+\/[a-z0-9]+$/)).min(1),
   access: z.enum(["read", "readwrite"]),
   metadataWrite: z.boolean().default(false),
   rationale: z.string(),
@@ -79,10 +79,10 @@ export const appSpecificSyncableSchema = z.object({
 
 export const infraRequirementsSchema = z.object({
   fileAccess: z.array(fileAccessSchema).default([]),
-  // All-access over every extension + the `other` catch-all. Only the
+  // All-access over every type + the `other` catch-all. Only the
   // `starkeep-drive` (User-Data-Owner) app may set this true; the validator
   // enforces that. Grants Drive the `shared/*` IAM ceiling. Installable apps
-  // must enumerate extensions in `fileAccess` instead.
+  // must enumerate types in `fileAccess` instead.
   fileAccessAll: z.boolean().default(false),
   compute: z
     .object({

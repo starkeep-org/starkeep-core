@@ -36,7 +36,7 @@ describe("write grants", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        type: "pdf",
+        type: "document/pdf",
         contentType: "application/pdf",
         contentHash: "a".repeat(64),
         sizeBytes: 1,
@@ -53,7 +53,7 @@ describe("write grants", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        type: "jpg",
+        type: "image/jpeg",
         contentType: "image/jpeg",
         contentHash: "b".repeat(64),
         sizeBytes: 1,
@@ -63,7 +63,7 @@ describe("write grants", () => {
   });
 
   it("byte uploads are category-gated too", async () => {
-    const res = await pdfReader.fetch("/data/files?type=pdf", {
+    const res = await pdfReader.fetch("/data/files?type=document/pdf", {
       method: "POST",
       headers: { "Content-Type": "application/pdf" },
       body: Buffer.from("pdf bytes"),
@@ -90,7 +90,7 @@ describe("read visibility", () => {
 
     const typesRes = await pdfReader.fetch("/data/types");
     const types = (await typesRes.json()) as { types: Array<{ record_type: string }>; total: number };
-    expect(types.types.some((t) => t.record_type === "jpg")).toBe(false);
+    expect(types.types.some((t) => t.record_type === "image/jpeg")).toBe(false);
   });
 
   it("category-widening: a jpg grant permits category file ops on png bytes (pinned-intentional)", async () => {
@@ -102,13 +102,13 @@ describe("read visibility", () => {
       tier: "community",
       infraRequirements: {
         fileAccess: [
-          { extensions: ["jpg"], access: "readwrite", metadataWrite: false, rationale: "t" },
+          { types: ["image/jpeg"], access: "readwrite", metadataWrite: false, rationale: "t" },
         ],
       },
     });
     // png is a different extension in the same category (image) — the
     // category-level byte upload is allowed by design.
-    const res = await jpgOnly.fetch("/data/files?type=png", {
+    const res = await jpgOnly.fetch("/data/files?type=image/png", {
       method: "POST",
       headers: { "Content-Type": "image/png" },
       body: Buffer.from("png-bytes"),
@@ -119,7 +119,7 @@ describe("read visibility", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        type: "png",
+        type: "image/png",
         contentType: "image/png",
         contentHash: "c".repeat(64),
         sizeBytes: 1,
@@ -146,18 +146,18 @@ describe("metadata writes", () => {
     const ok = await imageApp.fetch(`/data/records/${record.id}/metadata`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ typeId: "jpg", metadata: { width: 800, height: 600 } }),
+      body: JSON.stringify({ typeId: "image/jpeg", metadata: { width: 800, height: 600 } }),
     });
     expect(ok.status).toBe(200);
 
-    const read = await imageApp.fetch(`/data/records/${record.id}/metadata/jpg`);
+    const read = await imageApp.fetch(`/data/records/${record.id}/metadata/image`);
     const meta = (await read.json()) as { metadata: Record<string, unknown> };
     expect(meta.metadata).toMatchObject({ width: 800, height: 600 });
 
     const unknownColumn = await imageApp.fetch(`/data/records/${record.id}/metadata`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ typeId: "jpg", metadata: { not_a_column: 1 } }),
+      body: JSON.stringify({ typeId: "image/jpeg", metadata: { not_a_column: 1 } }),
     });
     expect(unknownColumn.status).toBe(400);
   });
@@ -167,7 +167,7 @@ describe("metadata writes", () => {
     const res = await pdfReader.fetch(`/data/records/${record.id}/metadata`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ typeId: "jpg", metadata: { width: 1 } }),
+      body: JSON.stringify({ typeId: "image/jpeg", metadata: { width: 1 } }),
     });
     expect(res.status).toBe(403);
   });

@@ -18,7 +18,7 @@ export function testAppManifest(over: Record<string, unknown> = {}): Record<stri
     infraRequirements: {
       fileAccess: [
         {
-          extensions: ["jpg", "png"],
+          types: ["image/jpeg", "image/png"],
           access: "readwrite",
           metadataWrite: true,
           rationale: "test",
@@ -50,7 +50,7 @@ export function readOnlyAppManifest(): Record<string, unknown> {
     tier: "community",
     infraRequirements: {
       fileAccess: [
-        { extensions: ["pdf"], access: "read", metadataWrite: false, rationale: "test" },
+        { types: ["document/pdf"], access: "read", metadataWrite: false, rationale: "test" },
       ],
     },
   };
@@ -117,7 +117,7 @@ export async function createRecordWithBytes(
     parentId?: string;
   } = {},
 ): Promise<{ record: { id: string; [k: string]: unknown }; deduped?: boolean }> {
-  const type = options.type ?? "jpg";
+  const type = options.type ?? "image/jpeg";
   const contentType = options.contentType ?? "image/jpeg";
   const bytes = Buffer.isBuffer(options.bytes)
     ? options.bytes

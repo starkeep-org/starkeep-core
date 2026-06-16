@@ -4,10 +4,11 @@ import type { HLCTimestamp } from "../hlc/types.js";
 export interface BaseRecord {
   readonly id: StarkeepId;
   /**
-   * The record's lowercase file extension, verbatim (e.g. "jpg", "md", "xyz");
-   * "" for extension-less files. This is the identification key. The derived
-   * category (`categoryOf(type)`) determines the metadata table and storage
-   * prefix; unmapped/empty extensions derive category "other".
+   * The record's canonical Starkeep type — a `<category>/<format>` id (e.g.
+   * "image/jpeg", "document/markdown"); `other/other` for unmapped /
+   * extension-less files. This is the identification key, declared by the
+   * writing app. Its category prefix (`typeCategory(type)`) determines the
+   * metadata table and storage prefix.
    */
   readonly type: string;
   readonly createdAt: HLCTimestamp;
@@ -20,7 +21,7 @@ export interface BaseRecord {
  * A row in the shared records table. Every DataRecord is backed by a file in
  * object storage (`objectStorageKey` + `contentHash`); metadata derived from
  * the file lives in the per-category `record_<category>_metadata` table
- * (category = `categoryOf(type)`; `other` records have no metadata table).
+ * (category = `typeCategory(type)`; `other` records have no metadata table).
  *
  * App-level / user-authored fields that cannot be deterministically derived
  * from the file (titles, captions, edit provenance, etc.) live in app-private
@@ -30,7 +31,13 @@ export interface DataRecord extends BaseRecord {
   readonly kind: "data";
   contentHash: string;
   objectStorageKey: string;
-  mimeType: string;
+  /**
+   * Advisory MIME type, recorded only when a write path actually supplies one
+   * (e.g. an over-the-network upload). `null` when unknown — notably the local
+   * watcher, which has only a filename. Never authoritative for identity; the
+   * serving edge falls back to `application/octet-stream` when this is null.
+   */
+  mimeType: string | null;
   sizeBytes: number;
   originalFilename: string | null;
   /**

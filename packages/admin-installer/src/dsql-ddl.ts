@@ -20,7 +20,7 @@ import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import type { FileAccess, SyncableTable } from "@starkeep/admin-manifest";
 import {
   APP_GRANTABLE_CATEGORIES,
-  categoryOf,
+  typeCategory,
   type Category,
 } from "@starkeep/protocol-primitives";
 import {
@@ -30,24 +30,24 @@ import {
 import { retryOnAccessDenied } from "./retry-on-access-denied";
 
 /**
- * Flattens a manifest's fileAccess (+ fileAccessAll) into the per-extension
- * grants written to `shared.access_grants`, and the distinct categories those
- * grants imply (used for metadata-table GRANTs). Drive's `fileAccessAll`
- * cannot enumerate unmapped extensions, so it writes no per-extension grant
- * rows — its read/write authority is granted in the runtime path by app-id —
- * but it does imply every grantable category for metadata-table GRANTs.
+ * Flattens a manifest's fileAccess (+ fileAccessAll) into the per-type grants
+ * written to `shared.access_grants` (one row per declared Starkeep type id),
+ * and the distinct categories those grants imply (used for metadata-table
+ * GRANTs). Drive's `fileAccessAll` cannot enumerate `other/*` types, so it
+ * writes no per-type grant rows — its read/write authority is granted in the
+ * runtime path by app-id — but it does imply every grantable category.
  */
-interface ExtensionGrant {
-  extension: string;
+interface TypeGrant {
+  type: string;
   access: "read" | "readwrite";
   metadataWrite: boolean;
 }
 
-function flattenFileAccess(fileAccess: FileAccess[]): ExtensionGrant[] {
-  const out: ExtensionGrant[] = [];
+function flattenFileAccess(fileAccess: FileAccess[]): TypeGrant[] {
+  const out: TypeGrant[] = [];
   for (const entry of fileAccess) {
-    for (const extension of entry.extensions) {
-      out.push({ extension, access: entry.access, metadataWrite: entry.metadataWrite });
+    for (const type of entry.types) {
+      out.push({ type, access: entry.access, metadataWrite: entry.metadataWrite });
     }
   }
   return out;
@@ -55,14 +55,14 @@ function flattenFileAccess(fileAccess: FileAccess[]): ExtensionGrant[] {
 
 interface CategoryGrant {
   category: Category;
-  /** True if any extension in this category is writable. */
+  /** True if any type in this category is writable. */
   write: boolean;
-  /** True if any extension in this category grants metadata write. */
+  /** True if any type in this category grants metadata write. */
   metadataWrite: boolean;
 }
 
 function categoriesFromGrants(
-  grants: ExtensionGrant[],
+  grants: TypeGrant[],
   fileAccessAll: boolean,
 ): CategoryGrant[] {
   if (fileAccessAll) {
@@ -76,7 +76,7 @@ function categoriesFromGrants(
   }
   const byCategory = new Map<Category, CategoryGrant>();
   for (const g of grants) {
-    const category = categoryOf(g.extension);
+    const category = typeCategory(g.type);
     if (category === "other") continue; // no metadata table
     const existing = byCategory.get(category) ?? { category, write: false, metadataWrite: false };
     existing.write ||= g.access === "readwrite";
@@ -236,14 +236,14 @@ export async function runAppInstallDdl(
       }
     }
 
-    // access_grants rows — one per declared extension (the exact app-layer
-    // check). Drive (fileAccessAll) writes none: it cannot enumerate unmapped
-    // extensions, and its read/write authority is granted by app-id in the
-    // runtime access path (see access-enforcer.ts).
+    // access_grants rows — one per declared Starkeep type (the exact app-layer
+    // check). Drive (fileAccessAll) writes none: it cannot enumerate `other/*`
+    // types, and its read/write authority is granted by app-id in the runtime
+    // access path (see access-enforcer.ts).
     for (const g of grants) {
       await sql`
         INSERT INTO shared.access_grants (app_id, type_id, access, metadata_write)
-        VALUES (${appId}, ${g.extension}, ${g.access}, ${g.metadataWrite})
+        VALUES (${appId}, ${g.type}, ${g.access}, ${g.metadataWrite})
         ON CONFLICT (app_id, type_id) DO UPDATE
           SET access = EXCLUDED.access, metadata_write = EXCLUDED.metadata_write
       `.execute(db);

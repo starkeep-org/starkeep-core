@@ -8,7 +8,8 @@ export interface CreateDataRecordInput {
   originAppId: string;
   contentHash: string;
   objectStorageKey: string;
-  mimeType: string;
+  /** Advisory MIME; `null`/omitted when the write path supplies none. */
+  mimeType?: string | null;
   sizeBytes: number;
   originalFilename?: string | null;
   parentId?: StarkeepId | null;
@@ -26,7 +27,7 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     version: 1,
     contentHash: input.contentHash,
     objectStorageKey: input.objectStorageKey,
-    mimeType: input.mimeType,
+    mimeType: input.mimeType ?? null,
     sizeBytes: input.sizeBytes,
     originalFilename: input.originalFilename ?? null,
     originAppId: input.originAppId,

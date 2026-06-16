@@ -25,6 +25,5 @@ export {
 
 export {
   validateManifest,
-  KNOWN_EXTENSIONS,
   type ValidationResult,
 } from "./validate.js";

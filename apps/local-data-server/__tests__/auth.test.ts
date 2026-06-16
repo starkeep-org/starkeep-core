@@ -85,7 +85,7 @@ describe("HMAC on the data plane", () => {
   });
 
   it("rejects when the body is tampered after signing", async () => {
-    const body = JSON.stringify({ type: "jpg", contentType: "image/jpeg", contentHash: "0".repeat(64), sizeBytes: 1 });
+    const body = JSON.stringify({ type: "image/jpeg", contentType: "image/jpeg", contentHash: "0".repeat(64), sizeBytes: 1 });
     const headers = signRequest({
       appId: app.appId,
       hmacSecret: app.hmacSecret,
@@ -93,7 +93,7 @@ describe("HMAC on the data plane", () => {
       path: "/data/records",
       body,
     });
-    const tampered = body.replace("jpg", "png");
+    const tampered = body.replace("image/jpeg", "image/png");
     const res = await fetch(`${server.url}/data/records`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },

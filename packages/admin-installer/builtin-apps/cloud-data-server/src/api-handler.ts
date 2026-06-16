@@ -33,10 +33,10 @@ import {
   deserializeHLC,
   appSyncableObjectKey,
   dataRecordObjectKey,
-  categoryOf,
+  typeCategory,
   getCategory,
   isCategoryId,
-  KNOWN_EXTENSIONS,
+  isKnownType,
 } from "@starkeep/protocol-primitives";
 import type { DataRecord, StarkeepId, HLCClock } from "@starkeep/protocol-primitives";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
@@ -503,7 +503,7 @@ function recordToResponse(record: DataRecord) {
   return {
     id: record.id,
     type: record.type,
-    category: categoryOf(record.type),
+    category: typeCategory(record.type),
     created_at: new Date(record.createdAt.wallTime).toISOString(),
     updated_at: new Date(record.updatedAt.wallTime).toISOString(),
     version: record.version,
@@ -720,7 +720,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         parentId?: string;
       };
       if (!body.type) return clientErr("type is required", 400);
-      if (!body.contentType) return clientErr("contentType is required", 400);
+      if (!isKnownType(body.type)) return clientErr(`Unknown type id: ${body.type}`, 400);
       if (!canWrite(grants, body.type)) return clientErr("Forbidden", 403);
       if (!body.contentHash) {
         return clientErr(
@@ -777,7 +777,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         version: 1,
         contentHash,
         objectStorageKey,
-        mimeType: body.contentType,
+        mimeType: body.contentType ?? null,
         sizeBytes,
         originalFilename: body.fileName ?? null,
         parentId: (body.parentId as DataRecord["parentId"]) ?? null,
@@ -794,15 +794,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const typeId = query["type"];
       if (!typeId) return clientErr("type query param is required", 400);
       // The blob lands at shared/<category>/…, so authorize the derived
-      // category (the type param is normally an extension). Reject unknown
-      // type ids up front rather than letting categoryOf's "other" fallback
-      // silently coerce them — the caller's "other" grants would then gate
-      // a misspelled type, which is a footgun.
-      const normalizedExt = typeId.toLowerCase().replace(/^\./, "");
-      if (!isCategoryId(typeId) && !KNOWN_EXTENSIONS.has(normalizedExt)) {
+      // category. Accept a full Starkeep type id or a bare category id; reject
+      // anything else up front rather than letting typeCategory's "other"
+      // fallback silently coerce a typo — the caller's "other" grants would then
+      // gate a misspelled type, which is a footgun.
+      if (!isKnownType(typeId) && !isCategoryId(typeId)) {
         return clientErr(`Unknown type id: ${typeId}`, 400);
       }
-      const fileCategory = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+      const fileCategory = typeCategory(typeId);
       if (!canWriteCategory(grants, fileCategory)) return clientErr("Forbidden", 403);
       const headers = event.headers ?? {};
       const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
@@ -887,9 +886,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         return clientErr("metadata must be an object", 400);
       }
       // Metadata tables are per-category, so gate on the caller's writable
-      // categories (derived from its extension grants). PG GRANTs back this up
-      // at the per-category metadata table.
-      const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+      // categories (derived from its type grants). PG GRANTs back this up at
+      // the per-category metadata table. `typeId` may be a full type id or a
+      // bare category id; typeCategory handles both.
+      const category = typeCategory(typeId);
       if (!canWriteCategory(grants, category)) return clientErr("Forbidden", 403);
       if (category === "other") {
         return clientErr(`Category "other" has no metadata table`, 400);
@@ -909,7 +909,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (metadataReadMatch && method === "GET") {
       const recordId = decodeURIComponent(metadataReadMatch[1]!) as StarkeepId;
       const typeId = decodeURIComponent(metadataReadMatch[2]!);
-      const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+      const category = typeCategory(typeId);
       if (!canReadCategory(grants, category)) return clientErr("Forbidden", 403);
       if (category === "other") return ok({ metadata: null });
       const metadata = await db.getMetadata(category, recordId);

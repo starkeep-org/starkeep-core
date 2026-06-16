@@ -98,10 +98,10 @@ const VALID_HASH = "b".repeat(64);
 
 describe("grants parity on records routes", () => {
   it("403s an explicit ?type= outside the readable set without querying records", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "jpg", access: "readwrite" }]);
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]);
     setDbFactory(db);
     const res = await handler(
-      signedEvent({ appId: "gp1", method: "GET", subPath: "/data/records", query: { type: "mp3" } }),
+      signedEvent({ appId: "gp1", method: "GET", subPath: "/data/records", query: { type: "audio/mp3" } }),
       context,
     );
     expect(res.statusCode).toBe(403);
@@ -121,9 +121,9 @@ describe("grants parity on records routes", () => {
   });
 
   it("constrains an untyped scan to the readable types and maps rows", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "jpg", access: "readwrite" }]).on(
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
       RECORDS_SELECT,
-      [recordRow({ id: "rec-1", type: "jpg", mime_type: "image/jpeg" })],
+      [recordRow({ id: "rec-1", type: "image/jpeg", mime_type: "image/jpeg" })],
     );
     setDbFactory(db);
     const res = await handler(
@@ -135,12 +135,12 @@ describe("grants parity on records routes", () => {
     expect(body.records).toHaveLength(1);
     expect(body.records[0]).toMatchObject({
       id: "rec-1",
-      type: "jpg",
+      type: "image/jpeg",
       category: "image",
       mime_type: "image/jpeg",
     });
     // The IN filter carries exactly the readable extensions.
-    expect(db.calls(RECORDS_SELECT)[0]!.values).toContain("jpg");
+    expect(db.calls(RECORDS_SELECT)[0]!.values).toContain("image/jpeg");
   });
 
   it("GET /data/types short-circuits with no grants and counts by type otherwise", async () => {
@@ -154,12 +154,12 @@ describe("grants parity on records routes", () => {
     expect(dbNone.calls(RECORDS_SELECT)).toHaveLength(0);
 
     const dbSome = fakeDsqlWithGrants([
-      { type_id: "jpg", access: "read" },
-      { type_id: "png", access: "read" },
+      { type_id: "image/jpeg", access: "read" },
+      { type_id: "image/png", access: "read" },
     ]).on(RECORDS_SELECT, [
-      recordRow({ id: "t1", type: "jpg" }),
-      recordRow({ id: "t2", type: "jpg" }),
-      recordRow({ id: "t3", type: "png" }),
+      recordRow({ id: "t1", type: "image/jpeg" }),
+      recordRow({ id: "t2", type: "image/jpeg" }),
+      recordRow({ id: "t3", type: "image/png" }),
     ]);
     setDbFactory(dbSome);
     const resSome = await handler(
@@ -168,18 +168,18 @@ describe("grants parity on records routes", () => {
     );
     const body = bodyOf(resSome) as { types: unknown[]; total: number };
     expect(body.total).toBe(3);
-    expect(body.types).toContainEqual({ record_type: "jpg", count: 2 });
-    expect(body.types).toContainEqual({ record_type: "png", count: 1 });
+    expect(body.types).toContainEqual({ record_type: "image/jpeg", count: 2 });
+    expect(body.types).toContainEqual({ record_type: "image/png", count: 1 });
   });
 
   it("403s a record registration for a read-only type before touching S3", async () => {
-    setDbFactory(fakeDsqlWithGrants([{ type_id: "pdf", access: "read" }]));
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "document/pdf", access: "read" }]));
     const res = await handler(
       signedEvent({
         appId: "gp6",
         method: "POST",
         subPath: "/data/records",
-        body: { type: "pdf", contentType: "application/pdf", contentHash: VALID_HASH, sizeBytes: 3 },
+        body: { type: "document/pdf", contentType: "application/pdf", contentHash: VALID_HASH, sizeBytes: 3 },
       }),
       context,
     );
@@ -189,7 +189,7 @@ describe("grants parity on records routes", () => {
 });
 
 describe("record registration", () => {
-  const grants = [{ type_id: "jpg", access: "readwrite" as const }];
+  const grants = [{ type_id: "image/jpeg", access: "readwrite" as const }];
 
   it("409s when no blob exists at the content-addressed key", async () => {
     setDbFactory(fakeDsqlWithGrants(grants));
@@ -201,7 +201,7 @@ describe("record registration", () => {
         appId: "reg1",
         method: "POST",
         subPath: "/data/records",
-        body: { type: "jpg", contentType: "image/jpeg", contentHash: VALID_HASH, sizeBytes: 3 },
+        body: { type: "image/jpeg", contentType: "image/jpeg", contentHash: VALID_HASH, sizeBytes: 3 },
       }),
       context,
     );
@@ -218,7 +218,7 @@ describe("record registration", () => {
         method: "POST",
         subPath: "/data/records",
         body: {
-          type: "jpg",
+          type: "image/jpeg",
           contentType: "image/jpeg",
           contentHash: VALID_HASH,
           sizeBytes: 3,
@@ -230,15 +230,15 @@ describe("record registration", () => {
     expect(res.statusCode).toBe(201);
     const { record } = bodyOf(res) as { record: Record<string, unknown> };
     expect(record).toMatchObject({
-      type: "jpg",
+      type: "image/jpeg",
       category: "image",
       content_hash: VALID_HASH,
-      object_storage_key: dataRecordObjectKey("jpg", VALID_HASH),
+      object_storage_key: dataRecordObjectKey("image/jpeg", VALID_HASH),
       original_filename: "cat.jpg",
       version: 1,
     });
     expect(s3Mock.commandCalls(HeadObjectCommand)[0]!.args[0].input.Key).toBe(
-      dataRecordObjectKey("jpg", VALID_HASH),
+      dataRecordObjectKey("image/jpeg", VALID_HASH),
     );
     const inserts = db.calls(RECORDS_INSERT);
     expect(inserts).toHaveLength(1);
@@ -247,7 +247,7 @@ describe("record registration", () => {
 
   it("dedups a byte-identical derived child of the same parent", async () => {
     const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
-      recordRow({ id: "existing-thumb", type: "jpg", content_hash: VALID_HASH, parent_id: "parent-1" }),
+      recordRow({ id: "existing-thumb", type: "image/jpeg", content_hash: VALID_HASH, parent_id: "parent-1" }),
     ]);
     setDbFactory(db);
     s3Mock.on(HeadObjectCommand).resolves({});
@@ -257,7 +257,7 @@ describe("record registration", () => {
         method: "POST",
         subPath: "/data/records",
         body: {
-          type: "jpg",
+          type: "image/jpeg",
           contentType: "image/jpeg",
           contentHash: VALID_HASH,
           sizeBytes: 3,
@@ -275,13 +275,13 @@ describe("record registration", () => {
 
 describe("metadata routes", () => {
   it("403s a metadata write to a category outside the writable set", async () => {
-    setDbFactory(fakeDsqlWithGrants([{ type_id: "jpg", access: "read" }]));
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]));
     const res = await handler(
       signedEvent({
         appId: "md1",
         method: "POST",
         subPath: "/data/records/r1/metadata",
-        body: { typeId: "jpg", metadata: { width: 100 } },
+        body: { typeId: "image/jpeg", metadata: { width: 100 } },
       }),
       context,
     );
@@ -289,13 +289,13 @@ describe("metadata routes", () => {
   });
 
   it("400s unknown metadata columns against the category schema", async () => {
-    setDbFactory(fakeDsqlWithGrants([{ type_id: "jpg", access: "readwrite" }]));
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]));
     const res = await handler(
       signedEvent({
         appId: "md2",
         method: "POST",
         subPath: "/data/records/r1/metadata",
-        body: { typeId: "jpg", metadata: { width: 100, bogus_column: 1 } },
+        body: { typeId: "image/jpeg", metadata: { width: 100, bogus_column: 1 } },
       }),
       context,
     );
@@ -304,7 +304,7 @@ describe("metadata routes", () => {
   });
 
   it("writes valid metadata into the derived category's table", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "jpg", access: "readwrite" }]).on(
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
       /INSERT INTO shared\.record_image_metadata/,
       [],
     );
@@ -314,7 +314,7 @@ describe("metadata routes", () => {
         appId: "md3",
         method: "POST",
         subPath: "/data/records/r1/metadata",
-        body: { typeId: "jpg", metadata: { width: 100, height: 50 } },
+        body: { typeId: "image/jpeg", metadata: { width: 100, height: 50 } },
       }),
       context,
     );
@@ -340,13 +340,13 @@ describe("metadata routes", () => {
   });
 
   it("reads metadata for a readable category and null for other", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "jpg", access: "read" }]).on(
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
       /FROM shared\.record_image_metadata WHERE record_id/,
       [{ record_id: "r9", width: 640 }],
     );
     setDbFactory(db);
     const res = await handler(
-      signedEvent({ appId: "md4", method: "GET", subPath: "/data/records/r9/metadata/jpg" }),
+      signedEvent({ appId: "md4", method: "GET", subPath: "/data/records/r9/metadata/image" }),
       context,
     );
     expect(bodyOf(res)["metadata"]).toMatchObject({ recordId: "r9", width: 640 });
@@ -366,9 +366,9 @@ describe("metadata routes", () => {
 
 describe("per-record routes honor read/write grants", () => {
   it("403s file-url for a record whose type the caller cannot read", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "jpg", access: "readwrite" }]).on(
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
       /FROM shared\.records WHERE id =/,
-      [recordRow({ id: "v1", type: "mp3" })],
+      [recordRow({ id: "v1", type: "audio/mp3" })],
     );
     setDbFactory(db);
     const res = await handler(
@@ -379,8 +379,8 @@ describe("per-record routes honor read/write grants", () => {
   });
 
   it("DELETE tombstones a writable record and 403s otherwise", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "jpg", access: "readwrite" }])
-      .on(/FROM shared\.records WHERE id =/, [recordRow({ id: "d1", type: "jpg" })])
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
+      .on(/FROM shared\.records WHERE id =/, [recordRow({ id: "d1", type: "image/jpeg" })])
       .on(/UPDATE shared\.records SET deleted_at/, []);
     setDbFactory(db);
     const res = await handler(
@@ -391,9 +391,9 @@ describe("per-record routes honor read/write grants", () => {
     expect(bodyOf(res)).toEqual({ deleted: true });
     expect(db.calls(/UPDATE shared\.records SET deleted_at/)).toHaveLength(1);
 
-    const dbRo = fakeDsqlWithGrants([{ type_id: "jpg", access: "read" }]).on(
+    const dbRo = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
       /FROM shared\.records WHERE id =/,
-      [recordRow({ id: "d2", type: "jpg" })],
+      [recordRow({ id: "d2", type: "image/jpeg" })],
     );
     setDbFactory(dbRo);
     const resRo = await handler(
@@ -410,14 +410,14 @@ describe("sync exchange channel split", () => {
   const incomingRecord = {
     id: "sync-rec-1",
     kind: "data",
-    type: "jpg",
+    type: "image/jpeg",
     originAppId: "photos",
     createdAt: hlc,
     updatedAt: hlc,
     deletedAt: null,
     version: 1,
     contentHash: VALID_HASH,
-    objectStorageKey: dataRecordObjectKey("jpg", VALID_HASH),
+    objectStorageKey: dataRecordObjectKey("image/jpeg", VALID_HASH),
     mimeType: "image/jpeg",
     sizeBytes: 3,
     originalFilename: null,
@@ -447,7 +447,7 @@ describe("sync exchange channel split", () => {
   });
 
   it("a per-app channel drops shared records and never scans shared.records", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "jpg", access: "readwrite" }]).on(
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
       /FROM shared\.app_syncable_namespaces/,
       [],
     );
