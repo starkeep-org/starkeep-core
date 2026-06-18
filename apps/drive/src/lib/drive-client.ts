@@ -130,6 +130,25 @@ export async function listTypes(): Promise<DriveTypeSummary[]> {
   return types;
 }
 
+export interface FileUrl {
+  url: string;
+  source: "local" | "remote";
+  mimeType: string | null;
+  sizeBytes: number | null;
+  expiresIn: number;
+}
+
+/**
+ * Resolve a record's bytes to a fetchable URL via the LDS `file-url` route,
+ * signed as Drive. The LDS returns a short-lived token URL when the file is on
+ * this device (`source: "local"`) or a signed remote URL when it lives only in
+ * object storage. Either way the returned URL needs no further auth, so the
+ * browser can follow it directly. Throws if the record has no attached file.
+ */
+export async function getFileUrl(id: string): Promise<FileUrl> {
+  return ldsGet<FileUrl>(`/data/records/${encodeURIComponent(id)}/file-url`);
+}
+
 /**
  * The cloud-data-server's record shape is a subset of the local one — notably
  * it omits `origin_app_id`, `kind` and the local file `path`. For a merge we

@@ -17,6 +17,7 @@ interface DriveRecord {
   size_bytes?: number | null;
   original_filename?: string | null;
   mime_type?: string | null;
+  object_storage_key?: string | null;
   sync_status: SyncStatus;
 }
 
@@ -175,7 +176,15 @@ export default function DrivePage() {
             </tr>
           </thead>
           <tbody>
-            {records.map((r) => (
+            {records.map((r) => {
+              // The bytes are fetchable only when the file is on this device:
+              // any local status with an attached object. Cloud-only rows have
+              // no local bytes (the cloud proxy isn't wired for file-url), and
+              // a record with no object_storage_key has nothing to link.
+              const name = r.original_filename ?? r.id;
+              const linkable =
+                r.sync_status !== "cloud-only" && !!r.object_storage_key;
+              return (
               <tr key={r.id}>
                 <td>
                   <span className={`badge ${r.sync_status}`}>
@@ -184,8 +193,18 @@ export default function DrivePage() {
                 </td>
                 <td>{r.category ?? "—"}</td>
                 <td>{r.type || "—"}</td>
-                <td title={r.original_filename ?? r.id}>
-                  {r.original_filename ?? r.id}
+                <td title={name}>
+                  {linkable ? (
+                    <a
+                      href={`/api/records/${encodeURIComponent(r.id)}/file?type=${encodeURIComponent(r.type ?? "")}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {name}
+                    </a>
+                  ) : (
+                    name
+                  )}
                 </td>
                 <td>
                   <span className="origin">{r.origin_app_id ?? "—"}</span>
@@ -195,7 +214,8 @@ export default function DrivePage() {
                   {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}

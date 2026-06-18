@@ -415,7 +415,6 @@ export default function DashboardPage() {
     <div className="max-w-7xl">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
-        <Button variant="outline" size="sm" onClick={bumpAll}>Refresh</Button>
       </div>
 
       <div className="mb-6 flex flex-col gap-3">
