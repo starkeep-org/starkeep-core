@@ -15,7 +15,7 @@ test("records list and type sidebar render from the live data server", async ({ 
   const drive = await driveCreds(ldsUrl());
   await createRecordWithBytes(drive, {
     bytes: solidPng([0, 128, 255], 4),
-    type: "png",
+    type: "image/png",
     contentType: "image/png",
     fileName: "drive-smoke.png",
   });
@@ -32,8 +32,8 @@ test("records list and type sidebar render from the live data server", async ({ 
   // Cloud view degrades softly rather than failing the page.
   await expect(page.getByText(/Showing local data only/)).toBeVisible();
 
-  // Type sidebar: a png chip with a count; clicking it filters the list.
-  const chip = page.getByRole("button", { name: /^png \(\d+\)$/ });
+  // Type sidebar: an image/png chip with a count; clicking it filters the list.
+  const chip = page.getByRole("button", { name: /^image\/png \(\d+\)$/ });
   await expect(chip).toBeVisible();
   await chip.click();
   await expect(page.getByRole("row").filter({ hasText: "drive-smoke.png" })).toBeVisible();
@@ -54,7 +54,7 @@ test("live-updates when a record is added underneath it via an /events kick", as
   // row appears with no manual reload.
   await createRecordWithBytes(drive, {
     bytes: solidPng([255, 0, 0], 4),
-    type: "png",
+    type: "image/png",
     contentType: "image/png",
     fileName: "live-update.png",
   });

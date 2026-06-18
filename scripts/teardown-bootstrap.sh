@@ -10,7 +10,11 @@
 #   - Permissions boundary policies attached to roles outside the stack
 #   - Any resources left in ROLLBACK_COMPLETE / partial-delete state
 #
-# Usage: ./teardown-bootstrap.sh [--yes|-y] [--prefix <stack-prefix>] [--region <region>]
+# Usage: ./teardown-bootstrap.sh [--yes|-y] --prefix <stack-prefix> [--region <region>]
+#
+# --prefix is required: it scopes the teardown to one deployment and is never
+# inferred from config. If omitted in an interactive shell you'll be prompted
+# for it; an unattended run (--yes or no TTY) without it errors out.
 
 set -euo pipefail
 
@@ -46,11 +50,24 @@ if [[ -f "$CONFIG_FILE" ]]; then
   IDENTITY_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('identityPoolId',''))" 2>/dev/null || true)
 fi
 
-STACK_PREFIX="${FLAG_PREFIX:-$CONFIG_STACK_PREFIX}"
+# The stack prefix is the only thing that scopes a teardown to a single
+# deployment, so we never infer it silently from config — an unqualified run
+# would otherwise delete whichever deployment the ambient
+# ~/.starkeep/config.json happens to describe (typically the real one). It
+# must be passed via --prefix, or entered at an interactive prompt.
+STACK_PREFIX="$FLAG_PREFIX"
 if [[ -z "$STACK_PREFIX" ]]; then
-  echo "Error: stackPrefix not found in config and --prefix not provided."
-  echo "Usage: $0 [--yes] --prefix <stack-prefix> --region <region>"
-  exit 1
+  if [[ "$YES" != "true" && -t 0 ]]; then
+    if [[ -n "$CONFIG_STACK_PREFIX" ]]; then
+      echo "No --prefix given. (For reference, $CONFIG_FILE describes prefix '$CONFIG_STACK_PREFIX'.)" >&2
+    fi
+    read -r -p "Enter the stack prefix to tear down: " STACK_PREFIX
+  fi
+  if [[ -z "$STACK_PREFIX" ]]; then
+    echo "Error: a stack prefix is required; pass --prefix <stack-prefix>." >&2
+    echo "Usage: $0 [--yes] --prefix <stack-prefix> --region <region>" >&2
+    exit 1
+  fi
 fi
 
 STACK_NAME="${STACK_PREFIX}-bootstrap"

@@ -76,7 +76,7 @@ export default function AppsPage() {
 }
 
 interface FileAccess {
-  extensions: string[];
+  types: string[];
   access: "read" | "readwrite";
   metadataWrite?: boolean;
   rationale: string;
@@ -608,7 +608,7 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
               <ul className="text-xs text-muted-foreground flex flex-col gap-0.5">
                 {grants.map((g, i) => (
                   <li key={i}>
-                    <span className="font-mono">{g.extensions.join(", ")}</span>: {g.access}
+                    <span className="font-mono">{g.types.join(", ")}</span>: {g.access}
                     {g.metadataWrite ? " + metadata:write" : ""}
                   </li>
                 ))}
@@ -1066,7 +1066,7 @@ function ConsentModal({
               return (
                 <li key={i} className="border rounded-md p-3 flex flex-col gap-1">
                   <div className="flex items-center gap-2 text-sm flex-wrap">
-                    <span className="font-mono">{g.extensions.join(", ")}</span>
+                    <span className="font-mono">{g.types.join(", ")}</span>
                     <Badge variant="secondary" className="text-xs">records: {dataPermissions}</Badge>
                     <Badge variant="secondary" className="text-xs">metadata: {metadataPermissions}</Badge>
                   </div>
