@@ -28,6 +28,7 @@ import {
 import {
   builtinAppCreds,
   installApp,
+  putAppFile,
   testAppManifest,
   createRecordWithBytes,
   listRecords,
@@ -221,6 +222,59 @@ describe("app-specific rows across the wire", () => {
       expect(rows.status).toBe(200);
       const { rows: data } = (await rows.json()) as { rows: Array<Record<string, unknown>> };
       expect(data.map((r) => r["note_id"])).toContain("wire-note");
+    });
+  });
+});
+
+describe("app-specific files across the wire", () => {
+  const filesManifest = testAppManifest({ id: "files-app" });
+  let filesA: InstalledApp;
+  let filesB: InstalledApp;
+
+  beforeAll(async () => {
+    filesA = await installApp(serverA, filesManifest);
+    filesB = await installApp(serverB, filesManifest);
+    cloud.installApp(filesManifest);
+  });
+
+  /** Resolve an app-private file's bytes through the presigned GET, or null on 404. */
+  async function coverBytes(app: InstalledApp, subKey: string): Promise<string | null> {
+    const res = await app.fetch(`/app-data/files/${subKey}`);
+    if (res.status === 404) return null;
+    expect(res.status).toBe(200);
+    const { url } = (await res.json()) as { url: string };
+    const bytes = await fetch(url);
+    expect(bytes.status).toBe(200);
+    return bytes.text();
+  }
+
+  it("a cover set on A uploads to the cloud and resolves on B with its bytes", { timeout: 30_000 }, async () => {
+    await putAppFile(filesA, "cover", "cover-from-A", "image/png");
+    await converge();
+
+    // Reached the cloud: the index row landed in the cloud-side app table.
+    const cloudKeys = cloud
+      .appRows("files-app", "_starkeep_sync_records")
+      .map((r) => r["object_storage_key"]);
+    expect(cloudKeys).toContain("apps/files-app/syncable/cover");
+    // And the blob is resident in cloud storage.
+    expect(await cloud.hasBlob("apps/files-app/syncable/cover")).toBe(true);
+
+    // Came down to B: existence (index) + bytes (blob) both resident locally.
+    await eventually(async () => {
+      await converge();
+      expect(await coverBytes(filesB, "cover")).toBe("cover-from-A");
+    });
+  });
+
+  it("a cover set on the cloud syncs down to a local server", { timeout: 30_000 }, async () => {
+    // Originates the write on the cloud side, as the cloud-served app would
+    // via the broker's presign → upload → register flow.
+    await cloud.setAppFile("files-app", "banner", "cover-from-cloud", "image/png");
+
+    await eventually(async () => {
+      await converge();
+      expect(await coverBytes(filesA, "banner")).toBe("cover-from-cloud");
     });
   });
 });

@@ -3,31 +3,79 @@ import type { AppCredentials } from "./credentials";
 
 export type SignableBody = string | Buffer | Uint8Array | undefined;
 
-// HMAC input is `appId:` bytes ++ raw body bytes. Operating on bytes (not
-// `${appId}:${body}` as a string) keeps binary payloads lossless — the prior
-// utf-8/Latin-1 detour silently round-tripped through string coercion and
-// could disagree with the server on non-ASCII bytes.
-function hmacInput(appId: string, body: SignableBody): Buffer {
-  const prefix = Buffer.from(`${appId}:`, "utf8");
-  if (body === undefined) return prefix;
-  if (typeof body === "string") {
-    return Buffer.concat([prefix as unknown as Uint8Array, Buffer.from(body, "utf8") as unknown as Uint8Array]);
+// Header names the signature scheme emits/consumes. Kept here as the single
+// source of truth; the cloud verifier (a separately-deployed artifact that
+// cannot import this package) mirrors these literals by hand.
+export const APP_ID_HEADER = "X-Starkeep-App-Id";
+export const APP_SIG_HEADER = "X-Starkeep-App-Sig";
+export const APP_TS_HEADER = "X-Starkeep-App-Ts";
+
+// Freshness window for the signed timestamp. A signature whose X-Starkeep-App-Ts
+// is more than this far from the verifier's clock (in either direction, to
+// tolerate skew) is rejected. Bounds the replay window to ~5 min.
+export const APP_SIG_MAX_SKEW_MS = 5 * 60_000;
+
+/**
+ * Canonical request path used in the signed message: pathname only (query
+ * string stripped) and percent-decoded, so client and server agree regardless
+ * of how the path was encoded on the wire. API Gateway normalizes %2F back to
+ * "/" before the cloud handler routes, and the local-data-server routes on
+ * `URL.pathname` (already decoded) — decoding here makes both line up with the
+ * logical path the caller passed.
+ */
+export function canonicalSignedPath(path: string): string {
+  const q = path.indexOf("?");
+  const pathname = q >= 0 ? path.slice(0, q) : path;
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return pathname;
   }
-  const bodyBuf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+}
+
+// HMAC input is `${appId}:${METHOD}:${path}:${ts}:` bytes ++ raw body bytes.
+// Binding method + path stops a signature captured for one POST from being
+// replayed against a different endpoint; binding the timestamp (enforced
+// against a freshness window on the verifier) stops indefinite replay. Operating
+// on bytes (not a fully-stringified message) keeps binary payloads lossless.
+function hmacInput(
+  appId: string,
+  method: string,
+  path: string,
+  ts: number,
+  body: SignableBody,
+): Buffer {
+  const prefix = Buffer.from(
+    `${appId}:${method.toUpperCase()}:${canonicalSignedPath(path)}:${ts}:`,
+    "utf8",
+  );
+  if (body === undefined) return prefix;
+  const bodyBuf =
+    typeof body === "string"
+      ? Buffer.from(body, "utf8")
+      : Buffer.isBuffer(body)
+        ? body
+        : Buffer.from(body);
   return Buffer.concat([prefix as unknown as Uint8Array, bodyBuf as unknown as Uint8Array]);
 }
 
 export function signRequest(args: {
   appId: string;
   hmacSecret: string;
+  method: string;
+  path: string;
   body?: SignableBody;
+  /** ms epoch; defaults to Date.now(). Exposed for deterministic tests. */
+  timestamp?: number;
 }): Record<string, string> {
+  const ts = args.timestamp ?? Date.now();
   const sig = createHmac("sha256", args.hmacSecret)
-    .update(hmacInput(args.appId, args.body) as unknown as Uint8Array)
+    .update(hmacInput(args.appId, args.method, args.path, ts, args.body) as unknown as Uint8Array)
     .digest("hex");
   return {
-    "X-Starkeep-App-Id": args.appId,
-    "X-Starkeep-App-Sig": sig,
+    [APP_ID_HEADER]: args.appId,
+    [APP_SIG_HEADER]: sig,
+    [APP_TS_HEADER]: String(ts),
   };
 }
 
@@ -50,7 +98,13 @@ export async function signedFetch(
   const body = NO_BODY_METHODS.has(method.toUpperCase()) ? undefined : init?.body;
   const headers: Record<string, string> = {
     ...(init?.headers ?? {}),
-    ...signRequest({ appId: creds.appId, hmacSecret: creds.hmacSecret, body }),
+    ...signRequest({
+      appId: creds.appId,
+      hmacSecret: creds.hmacSecret,
+      method,
+      path,
+      body,
+    }),
   };
   return fetch(`${creds.dataServerUrl}${path}`, {
     method,

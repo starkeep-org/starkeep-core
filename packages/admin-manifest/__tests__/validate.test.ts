@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { validateManifest, KNOWN_EXTENSIONS } from "../src/validate.js";
+import { validateManifest } from "../src/validate.js";
+import { isKnownType } from "@starkeep/protocol-primitives";
 import { appManifestSchema, type AppManifest } from "../src/schema.js";
 
 // Snapshot of starkeep-apps/photos/starkeep.manifest.json — the canonical
@@ -160,42 +161,52 @@ describe("syncable table column rules", () => {
   });
 });
 
-describe("file access extensions", () => {
-  function withExtensions(extensions: string[]): Record<string, unknown> {
+describe("file access types", () => {
+  function withTypes(types: string[]): Record<string, unknown> {
     return minimal({
       infraRequirements: {
-        fileAccess: [{ extensions, access: "read", rationale: "test" }],
+        fileAccess: [{ types, access: "read", rationale: "test" }],
       },
     });
   }
 
-  it("rejects extensions that are not lowercase alphanumeric", () => {
-    for (const bad of ["JPG", "jp-g", ".jpg", "jp g"]) {
-      const result = validateManifest(withExtensions([bad]));
-      expect(result.valid, `extension "${bad}" should be rejected`).toBe(false);
+  it("rejects type ids that are not `<category>/<format>` shaped", () => {
+    for (const bad of ["IMAGE/JPEG", "image", "image/", "/jpeg", "image jpeg"]) {
+      const result = validateManifest(withTypes([bad]));
+      expect(result.valid, `type "${bad}" should be rejected`).toBe(false);
     }
   });
 
-  it("rejects extensions outside the platform map (the `other` set is unreachable)", () => {
-    const result = validateManifest(withExtensions(["zzznotreal"]));
+  it("rejects type ids outside the platform registry (the `other` set is unreachable)", () => {
+    const result = validateManifest(withTypes(["image/bogus"]));
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("not in the platform extension map"))).toBe(true);
-    expect(KNOWN_EXTENSIONS.has("zzznotreal")).toBe(false);
+    expect(result.errors.some((e) => e.includes("not in the platform type registry"))).toBe(true);
+    expect(isKnownType("image/bogus")).toBe(false);
   });
 
-  it("requires at least one extension per fileAccess entry", () => {
-    const result = validateManifest(withExtensions([]));
+  it("rejects the `other/other` catch-all even though it is a registered type", () => {
+    // other/other is in the registry (isKnownType is true), so the registry
+    // check alone would let it through — validation must reject it as the
+    // Drive-only catch-all, keeping `other` ungrantable to installable apps.
+    expect(isKnownType("other/other")).toBe(true);
+    const result = validateManifest(withTypes(["other/other"]));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('Drive-only "other" catch-all'))).toBe(true);
+  });
+
+  it("requires at least one type per fileAccess entry", () => {
+    const result = validateManifest(withTypes([]));
     expect(result.valid).toBe(false);
   });
 
-  it("accepts duplicate extensions across entries (categories deduped)", () => {
+  it("accepts duplicate types across entries (categories deduped)", () => {
     // Pin: duplicates are not an error today; impliedCategories is a set.
     const result = validateManifest(
       minimal({
         infraRequirements: {
           fileAccess: [
-            { extensions: ["jpg"], access: "read", rationale: "a" },
-            { extensions: ["jpg", "png"], access: "readwrite", rationale: "b" },
+            { types: ["image/jpeg"], access: "read", rationale: "a" },
+            { types: ["image/jpeg", "image/png"], access: "readwrite", rationale: "b" },
           ],
         },
       }),

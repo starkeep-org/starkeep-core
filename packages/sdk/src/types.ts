@@ -42,7 +42,7 @@ export type DataPutInput = Omit<
   /**
    * Optional per-category metadata row to write atomically with the
    * records-table row. Columns are defined by the record's category entry in
-   * `CATEGORIES` (category = `categoryOf(type)`); `other` records have no
+   * `CATEGORIES` (category = `typeCategory(type)`); `other` records have no
    * metadata table. The SDK supplies the `recordId` itself — callers omit it.
    */
   metadata?: Omit<MetadataRow, "recordId">;
@@ -52,12 +52,12 @@ export interface DataOperations {
   putWithFile(
     input: DataPutInput,
     file: Uint8Array,
-    contentType: string,
+    contentType?: string | null,
   ): Promise<DataRecord>;
   putWithLocalFile(
     input: DataPutInput,
     filePath: string,
-    contentType: string,
+    contentType?: string | null,
   ): Promise<DataRecord>;
   /**
    * Write a record for a blob that has already been placed in object storage
@@ -72,7 +72,7 @@ export interface DataOperations {
       contentHash: string;
       objectStorageKey: string;
       sizeBytes: number;
-      mimeType: string;
+      mimeType?: string | null;
     },
   ): Promise<DataRecord>;
   get(recordId: StarkeepId): Promise<DataRecord | null>;

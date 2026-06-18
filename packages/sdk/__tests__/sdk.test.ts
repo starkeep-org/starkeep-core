@@ -66,7 +66,7 @@ describe("createStarkeepSdk", () => {
 
       const fileData = Buffer.from("fake image data");
       const record = await sdk.data.putWithFile(
-        { type: "jpg", originAppId: "test" },
+        { type: "image/jpeg", originAppId: "test" },
         fileData,
         "image/jpeg",
       );
@@ -111,7 +111,7 @@ describe("createStarkeepSdk", () => {
 
       const fileData = Buffer.from("shared bytes");
       const written = await sdkA.data.putWithFile(
-        { type: "jpg", originAppId: "test" },
+        { type: "image/jpeg", originAppId: "test" },
         fileData,
         "image/jpeg",
       );
@@ -143,7 +143,7 @@ describe("createStarkeepSdk", () => {
     it("writes and reads a per-category metadata row", async () => {
       const { sdk } = await createTestSdk();
       const record = await sdk.data.putWithFile(
-        { type: "jpg", originAppId: "test" },
+        { type: "image/jpeg", originAppId: "test" },
         Buffer.from("x"),
         "image/jpeg",
       );

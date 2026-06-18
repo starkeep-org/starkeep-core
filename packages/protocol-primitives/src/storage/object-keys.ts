@@ -20,14 +20,14 @@
 // are enumerable. The system does not provide an app-private non-syncable
 // namespace; apps that want such storage handle it themselves.
 
-import { categoryOf } from "../types/core-types.js";
+import { typeCategory } from "../types/core-types.js";
 
-// `typeOrExt` is the record's `type` (lowercase extension). The category is
-// derived here so the key stays category-bucketed and unmapped/extension-less
-// records land under `shared/other/...`.
-export function dataRecordObjectKey(typeOrExt: string, contentHash: string): string {
+// `type` is the record's canonical Starkeep type (`<category>/<format>`). The
+// category is its prefix, so the key stays category-bucketed and
+// `other/*`/unmapped records land under `shared/other/...`.
+export function dataRecordObjectKey(type: string, contentHash: string): string {
   const shard = contentHash.slice(0, 2);
-  return `shared/${categoryOf(typeOrExt)}/${shard}/${contentHash}`;
+  return `shared/${typeCategory(type)}/${shard}/${contentHash}`;
 }
 
 // Build the canonical object key for an app's syncable file. `subKey` is the

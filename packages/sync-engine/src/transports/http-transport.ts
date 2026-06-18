@@ -9,11 +9,16 @@ export interface HttpSyncTransportOptions {
   readonly baseUrl: string;
   readonly fetch?: typeof globalThis.fetch;
   /**
-   * Produce per-request auth headers given the serialized body bytes.
-   * Used to HMAC-sign requests for the cloud verifier; mirrors the shape
-   * `@starkeep/app-client/sign.ts`'s `signRequest` emits.
+   * Produce per-request auth headers given the HTTP method, the request path
+   * (relative to the per-app mount), and the serialized body bytes. Used to
+   * HMAC-sign requests for the cloud verifier; mirrors the shape
+   * `@starkeep/app-client/sign.ts`'s `signRequest` emits (method/path/ts bound).
    */
-  readonly signRequest?: (body: string) => Record<string, string>;
+  readonly signRequest?: (
+    method: string,
+    path: string,
+    body: string,
+  ) => Record<string, string>;
 }
 
 /**
@@ -33,7 +38,7 @@ export function createHttpSyncTransport(
     const serialized = JSON.stringify(body);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
-      ...(signRequest?.(serialized) ?? {}),
+      ...(signRequest?.("POST", path, serialized) ?? {}),
     };
 
     const response = await fetchImpl(`${trimmed}${path}`, {

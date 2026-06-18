@@ -26,7 +26,7 @@ function input(over: Partial<CreateAppRoleInput> = {}): CreateAppRoleInput {
     accountId: "111122223333",
     ...BOUNDARIES,
     fileAccess: [
-      { extensions: ["jpg", "png"], access: "readwrite", metadataWrite: true, rationale: "t" },
+      { types: ["image/jpeg", "image/png"], access: "readwrite", metadataWrite: true, rationale: "t" },
     ],
     fileAccessAll: false,
     brokerPower: false,

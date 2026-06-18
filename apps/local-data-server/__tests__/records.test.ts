@@ -38,7 +38,7 @@ describe("create — key-ref shape", () => {
       fileName: "keyref.jpg",
     });
     expect(deduped).toBeUndefined();
-    expect(record.type).toBe("jpg");
+    expect(record.type).toBe("image/jpeg");
     expect(record.original_filename).toBe("keyref.jpg");
     expect(record.object_storage_key).toMatch(/^shared\/image\//); // category-namespaced
     // Readable back through GET /data/records/:id
@@ -51,7 +51,7 @@ describe("create — key-ref shape", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        type: "jpg",
+        type: "image/jpeg",
         contentType: "image/jpeg",
         contentHash: createHash("sha256").update("never-uploaded").digest("hex"),
         sizeBytes: 13,
@@ -65,7 +65,7 @@ describe("create — key-ref shape", () => {
     const bad = await app.fetch("/data/records", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "jpg", contentType: "image/jpeg", contentHash: "XYZ" }),
+      body: JSON.stringify({ type: "image/jpeg", contentType: "image/jpeg", contentHash: "XYZ" }),
     });
     expect(bad.status).toBe(400);
   });
@@ -78,7 +78,7 @@ describe("create — filePath shape", () => {
     const res = await app.fetch("/data/records", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "jpg", contentType: "image/jpeg", filePath }),
+      body: JSON.stringify({ type: "image/jpeg", contentType: "image/jpeg", filePath }),
     });
     expect(res.status).toBe(200);
     const { record } = (await res.json()) as { record: Record<string, unknown> };
@@ -90,7 +90,7 @@ describe("create — filePath shape", () => {
     const res = await app.fetch("/data/records", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "jpg", contentType: "image/jpeg" }),
+      body: JSON.stringify({ type: "image/jpeg", contentType: "image/jpeg" }),
     });
     expect(res.status).toBe(400);
   });
@@ -144,8 +144,8 @@ describe("list", () => {
     }
     const limited = await listRecords(app, "?limit=2");
     expect(limited.length).toBe(2);
-    const jpgs = await listRecords(app, "?type=jpg");
-    expect(jpgs.every((r) => r.type === "jpg")).toBe(true);
+    const jpgs = await listRecords(app, "?type=image/jpeg");
+    expect(jpgs.every((r) => r.type === "image/jpeg")).toBe(true);
   });
 
   it("filters with updated_after", async () => {
@@ -170,7 +170,7 @@ describe("list", () => {
       types: Array<{ record_type: string; count: number }>;
       total: number;
     };
-    const jpg = body.types.find((t) => t.record_type === "jpg");
+    const jpg = body.types.find((t) => t.record_type === "image/jpeg");
     expect(jpg).toBeDefined();
     expect(jpg!.count).toBeGreaterThan(0);
     expect(body.total).toBeGreaterThan(0);

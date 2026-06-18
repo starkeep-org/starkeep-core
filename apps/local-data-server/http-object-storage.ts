@@ -10,11 +10,17 @@ export interface HttpObjectStorageAdapterOptions {
   readonly baseUrl: string;
   readonly fetch?: typeof globalThis.fetch;
   /**
-   * Produce per-request auth headers from the serialized body bytes (the empty
-   * string for GET/HEAD/DELETE). HMAC-signs the request for the cloud
-   * verifier; mirrors the shape `@starkeep/app-client/sign.ts` emits.
+   * Produce per-request auth headers from the HTTP method, the request path
+   * (relative to the per-app mount, i.e. starting at `/files...` or `/health`),
+   * and the serialized body bytes (the empty string for GET/HEAD/DELETE).
+   * HMAC-signs the request for the cloud verifier; mirrors the shape
+   * `@starkeep/app-client/sign.ts` emits (method/path/ts bound).
    */
-  readonly signRequest?: (body: string) => Record<string, string>;
+  readonly signRequest?: (
+    method: string,
+    path: string,
+    body: string,
+  ) => Record<string, string>;
 }
 
 /**
@@ -28,7 +34,11 @@ export interface HttpObjectStorageAdapterOptions {
 export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof globalThis.fetch;
-  private readonly signRequest?: (body: string) => Record<string, string>;
+  private readonly signRequest?: (
+    method: string,
+    path: string,
+    body: string,
+  ) => Record<string, string>;
 
   constructor(options: HttpObjectStorageAdapterOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -45,13 +55,18 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     return this.baseUrl.replace(/\/files$/, "");
   }
 
+  // The signed path is logical (relative to the per-app mount) and decoded —
+  // `/files/<key>` rather than the percent-encoded wire form — so it matches
+  // the subPath the cloud verifier routes on after API Gateway normalizes it.
   private headers(
+    method: string,
+    path: string,
     body: string,
     extra?: Record<string, string>,
   ): Record<string, string> {
     return {
       ...(extra ?? {}),
-      ...(this.signRequest?.(body) ?? {}),
+      ...(this.signRequest?.(method, path, body) ?? {}),
     };
   }
 
@@ -67,7 +82,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     try {
       const response = await this.fetchImpl(
         `${this.apiBase()}/health`,
-        { headers: this.headers("") },
+        { headers: this.headers("GET", "/health", "") },
       );
       return response.ok;
     } catch {
@@ -80,7 +95,9 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     const presignBody = JSON.stringify({ key, contentType: options?.contentType });
     const presignRes = await this.fetchImpl(`${this.apiBase()}/files/presign`, {
       method: "POST",
-      headers: this.headers(presignBody, { "Content-Type": "application/json" }),
+      headers: this.headers("POST", "/files/presign", presignBody, {
+        "Content-Type": "application/json",
+      }),
       body: presignBody,
     });
     if (!presignRes.ok) {
@@ -106,7 +123,9 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       const confirmBody = JSON.stringify({ key });
       const confirmRes = await this.fetchImpl(`${this.apiBase()}/files/confirm`, {
         method: "POST",
-        headers: this.headers(confirmBody, { "Content-Type": "application/json" }),
+        headers: this.headers("POST", "/files/confirm", confirmBody, {
+          "Content-Type": "application/json",
+        }),
         body: confirmBody,
       });
       if (!confirmRes.ok) {
@@ -124,7 +143,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
   async get(key: string): Promise<GetResult | null> {
     // Request a presigned S3 GET URL from the server to bypass API Gateway response limits.
     const presignRes = await this.fetchImpl(`${this.url(key)}/presign`, {
-      headers: this.headers(""),
+      headers: this.headers("GET", `/files/${key}/presign`, ""),
     });
     if (presignRes.status === 404) return null;
     if (!presignRes.ok) {
@@ -149,7 +168,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
   async has(key: string): Promise<boolean> {
     const response = await this.fetchImpl(this.url(key), {
       method: "HEAD",
-      headers: this.headers(""),
+      headers: this.headers("HEAD", `/files/${key}`, ""),
     });
     return response.ok;
   }
@@ -160,7 +179,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     // (the cloud handler doesn't read a DELETE body for /files/{key}).
     const response = await this.fetchImpl(this.url(key), {
       method: "DELETE",
-      headers: this.headers(""),
+      headers: this.headers("DELETE", `/files/${key}`, ""),
     });
     if (!response.ok && response.status !== 404) {
       throw new Error(`DELETE ${key} failed: ${response.status} ${response.statusText}`);

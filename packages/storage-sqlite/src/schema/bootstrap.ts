@@ -39,7 +39,7 @@ export function initializeLocalSchema(db: DatabaseSync): void {
       version INTEGER NOT NULL DEFAULT 1,
       content_hash TEXT NOT NULL,
       object_storage_key TEXT NOT NULL,
-      mime_type TEXT NOT NULL,
+      mime_type TEXT,
       size_bytes INTEGER NOT NULL,
       original_filename TEXT,
       origin_app_id TEXT NOT NULL,

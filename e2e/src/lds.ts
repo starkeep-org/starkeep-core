@@ -59,7 +59,7 @@ export async function createRecordWithBytes(
     parentId?: string;
   },
 ): Promise<{ record: { id: string; [k: string]: unknown }; deduped?: boolean }> {
-  const type = options.type ?? "png";
+  const type = options.type ?? "image/png";
   const contentType = options.contentType ?? "image/png";
 
   const upload = await app.fetch(`/data/files?type=${type}`, {

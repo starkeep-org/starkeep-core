@@ -50,7 +50,7 @@ export function testAppManifest(over: Record<string, unknown> = {}): Record<stri
     tier: "community",
     infraRequirements: {
       fileAccess: [
-        { extensions: ["jpg", "png"], access: "readwrite", metadataWrite: true, rationale: "test" },
+        { types: ["image/jpeg", "image/png"], access: "readwrite", metadataWrite: true, rationale: "test" },
       ],
     },
     ...over,

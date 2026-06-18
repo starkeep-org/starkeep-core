@@ -139,10 +139,10 @@ export function deleteAppRegistry(db: DatabaseSync, appId: string): void {
 }
 
 /**
- * Writes one `shared_access_grants` row per declared extension (type_id =
- * extension). Apps with `fileAccessAll` (only Starkeep Drive) write no rows —
- * the local data-server grants Drive all-access by app id (it cannot enumerate
- * unmapped/`other` extensions). Mirrors the cloud `runAppInstallDdl` rule.
+ * Writes one `shared_access_grants` row per declared Starkeep type (type_id =
+ * `<category>/<format>`). Apps with `fileAccessAll` (only Starkeep Drive) write
+ * no rows — the local data-server grants Drive all-access by app id (it cannot
+ * enumerate `other/*` types). Mirrors the cloud `runAppInstallDdl` rule.
  */
 export function insertAccessGrants(
   db: DatabaseSync,
@@ -157,8 +157,8 @@ export function insertAccessGrants(
        metadata_write = excluded.metadata_write`,
   );
   for (const entry of fileAccess) {
-    for (const ext of entry.extensions) {
-      stmt.run(appId, ext, entry.access, entry.metadataWrite ? 1 : 0);
+    for (const type of entry.types) {
+      stmt.run(appId, type, entry.access, entry.metadataWrite ? 1 : 0);
     }
   }
 }

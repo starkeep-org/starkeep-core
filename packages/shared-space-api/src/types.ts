@@ -57,12 +57,28 @@ export interface AppSpecificOperations {
     where?: Record<string, unknown>,
   ): Promise<Record<string, unknown>[]>;
 
-  putFile(
+  /**
+   * Record the index row for a file whose bytes were uploaded out-of-band
+   * (the direct-to-S3 presign flow), without the server holding the bytes.
+   * This is the only write path for the app-data file plane.
+   */
+  registerFile(
     subKey: string,
-    bytes: Uint8Array,
-    mimeType: string,
+    meta: {
+      contentHash: string;
+      mimeType: string;
+      sizeBytes: number;
+      originalFilename?: string | null;
+    },
   ): Promise<{ key: string }>;
   getFile(subKey: string): Promise<{ bytes: Uint8Array; mimeType: string } | null>;
+  /**
+   * Existence + metadata from the index row alone — no S3 call, no byte
+   * download. Returns null when no live file exists at `subKey`.
+   */
+  statFile(
+    subKey: string,
+  ): Promise<{ mimeType: string; sizeBytes: number; contentHash: string } | null>;
   deleteFile(subKey: string): Promise<void>;
   fileUrl(subKey: string, opts?: { expiresIn?: number }): Promise<string | null>;
 }

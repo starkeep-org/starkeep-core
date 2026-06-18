@@ -123,7 +123,7 @@ describe("HMAC gate", () => {
 
   it("401s a header appId that does not match the path, without assuming a role", async () => {
     scriptSecret("app-mismatch", "secret-mismatch");
-    const headers = signRequest({ appId: "other-app", hmacSecret: "secret-mismatch" });
+    const headers = signRequest({ appId: "other-app", hmacSecret: "secret-mismatch", method: "GET", path: "/health" });
     const res = await handler(
       makeEvent({ method: "GET", path: "/apps/app-mismatch/health", headers }),
       context,
@@ -135,7 +135,7 @@ describe("HMAC gate", () => {
 
   it("401s a signature made with the wrong secret", async () => {
     scriptSecret("app-badsig", "the-real-secret");
-    const headers = signRequest({ appId: "app-badsig", hmacSecret: "some-other-secret" });
+    const headers = signRequest({ appId: "app-badsig", hmacSecret: "some-other-secret", method: "GET", path: "/health" });
     const res = await handler(
       makeEvent({ method: "GET", path: "/apps/app-badsig/health", headers }),
       context,
@@ -144,11 +144,47 @@ describe("HMAC gate", () => {
     expect(errorOf(res)).toBe("Invalid signature");
   });
 
+  it("401s a stale signature outside the freshness window", async () => {
+    scriptSecret("app-stale", "secret-stale");
+    const headers = signRequest({
+      appId: "app-stale",
+      hmacSecret: "secret-stale",
+      method: "GET",
+      path: "/health",
+      timestamp: Date.now() - 10 * 60_000,
+    });
+    const res = await handler(
+      makeEvent({ method: "GET", path: "/apps/app-stale/health", headers }),
+      context,
+    );
+    expect(res.statusCode).toBe(401);
+    expect(errorOf(res)).toBe("Stale or invalid signature timestamp");
+    expect(stsMock.calls()).toHaveLength(0);
+  });
+
+  it("401s a signature replayed against a different path (path binding)", async () => {
+    scriptSecret("app-pathbind", "secret-pathbind");
+    // Signed for /health, presented at /data/types.
+    const headers = signRequest({
+      appId: "app-pathbind",
+      hmacSecret: "secret-pathbind",
+      method: "GET",
+      path: "/health",
+    });
+    const res = await handler(
+      makeEvent({ method: "GET", path: "/apps/app-pathbind/data/types", headers }),
+      context,
+    );
+    expect(res.statusCode).toBe(401);
+    expect(errorOf(res)).toBe("Invalid signature");
+    expect(stsMock.calls()).toHaveLength(0);
+  });
+
   it("passes a valid GET signature and assumes the per-app role", async () => {
     scriptSecret("app-valid", "secret-valid");
     scriptAssumeRole();
     // GET signs over the empty body on both sides (sign.ts / validateAppHmac).
-    const headers = signRequest({ appId: "app-valid", hmacSecret: "secret-valid" });
+    const headers = signRequest({ appId: "app-valid", hmacSecret: "secret-valid", method: "GET", path: "/health" });
     const res = await handler(
       makeEvent({ method: "GET", path: "/apps/app-valid/health", headers }),
       context,
@@ -166,7 +202,7 @@ describe("HMAC gate", () => {
     scriptSecret("app-b64", "secret-b64");
     scriptAssumeRole();
     const bodyBytes = Buffer.from(JSON.stringify({ hello: "wörld" }), "utf8");
-    const headers = signRequest({ appId: "app-b64", hmacSecret: "secret-b64", body: bodyBytes });
+    const headers = signRequest({ appId: "app-b64", hmacSecret: "secret-b64", method: "POST", path: "/data/records", body: bodyBytes });
     const res = await handler(
       makeEvent({
         method: "POST",
@@ -188,7 +224,7 @@ describe("warm-instance caches", () => {
     // reinstalled app's new secret is not seen until the 5-min TTL lapses.
     scriptSecret("app-cache", "secret-cache");
     scriptAssumeRole();
-    const headers = signRequest({ appId: "app-cache", hmacSecret: "secret-cache" });
+    const headers = signRequest({ appId: "app-cache", hmacSecret: "secret-cache", method: "GET", path: "/health" });
     const event = makeEvent({ method: "GET", path: "/apps/app-cache/health", headers });
     expect((await handler(event, context)).statusCode).toBe(500);
     expect((await handler(event, context)).statusCode).toBe(500);
@@ -198,7 +234,7 @@ describe("warm-instance caches", () => {
   it("assumes the per-app role once per app while the session is fresh", async () => {
     scriptSecret("app-stscache", "secret-stscache");
     scriptAssumeRole();
-    const headers = signRequest({ appId: "app-stscache", hmacSecret: "secret-stscache" });
+    const headers = signRequest({ appId: "app-stscache", hmacSecret: "secret-stscache", method: "GET", path: "/health" });
     const event = makeEvent({ method: "GET", path: "/apps/app-stscache/health", headers });
     expect((await handler(event, context)).statusCode).toBe(500);
     expect((await handler(event, context)).statusCode).toBe(500);

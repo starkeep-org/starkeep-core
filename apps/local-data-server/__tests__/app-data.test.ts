@@ -4,9 +4,10 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
-import { installApp, testAppManifest, type InstalledApp } from "./helpers.js";
+import { installApp, putAppFile, testAppManifest, type InstalledApp } from "./helpers.js";
 
 let server: LocalDataServer;
 let appA: InstalledApp; // declares `notes` + files:true
@@ -112,13 +113,8 @@ describe("declared-table CRUD", () => {
 });
 
 describe("per-app file namespace", () => {
-  it("put/get/delete confined to the app's own namespace", async () => {
-    const put = await appA.fetch("/app-data/files/thumbs/t1.bin", {
-      method: "PUT",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: Buffer.from("app-file-bytes"),
-    });
-    expect(put.status).toBe(200);
+  it("write/get/delete confined to the app's own namespace", async () => {
+    await putAppFile(appA, "thumbs/t1.bin", "app-file-bytes");
 
     const get = await appA.fetch("/app-data/files/thumbs/t1.bin");
     expect(get.status).toBe(200);
@@ -132,21 +128,68 @@ describe("per-app file namespace", () => {
     expect(gone.status).toBe(404);
   });
 
-  it("files plane refused for an app that declared files:false", async () => {
-    const res = await appB.fetch("/app-data/files/x.bin", {
+  it("presign → direct upload → register → stat/get round-trip", async () => {
+    const body = Buffer.from("presigned-cover-bytes");
+    const contentHash = createHash("sha256").update(body as unknown as Uint8Array).digest("hex");
+
+    // Before any upload, the file is absent.
+    const before = await appA.fetch("/app-data/files/cover");
+    expect(before.status).toBe(404);
+
+    // 1. Presign — server constructs the key from appId + subKey.
+    const presign = await appA.fetch("/app-data/files/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subKey: "cover", contentType: "image/png" }),
+    });
+    expect(presign.status).toBe(200);
+    const { url: uploadUrl, key } = (await presign.json()) as { url: string; key: string };
+    expect(key).toContain("/syncable/cover");
+
+    // 2. Upload bytes directly to the presigned URL (no app HMAC needed).
+    const put = await fetch(uploadUrl, {
       method: "PUT",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: Buffer.from("nope"),
+      headers: { "Content-Type": "image/png" },
+      body: body as unknown as BodyInit,
+    });
+    expect(put.status).toBe(204);
+
+    // Bytes are present, but the index row isn't written until register, so
+    // existence-via-index still reports absent.
+    const beforeRegister = await appA.fetch("/app-data/files/cover");
+    expect(beforeRegister.status).toBe(404);
+
+    // 3. Register the index row.
+    const register = await appA.fetch("/app-data/files/cover/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contentHash, mimeType: "image/png", sizeBytes: body.length }),
+    });
+    expect(register.status).toBe(200);
+
+    // 4. Now it exists; GET presigns and the bytes round-trip.
+    const get = await appA.fetch("/app-data/files/cover");
+    expect(get.status).toBe(200);
+    const { url } = (await get.json()) as { url: string };
+    const fetched = await fetch(url);
+    expect(Buffer.from(await fetched.arrayBuffer()).toString()).toBe("presigned-cover-bytes");
+
+    // Cleanup so the reserved-table assertions below aren't perturbed.
+    await appA.fetch("/app-data/files/cover", { method: "DELETE" });
+  });
+
+  it("files plane refused for an app that declared files:false", async () => {
+    // The presign route gates on filesEnabled before minting an upload token.
+    const res = await appB.fetch("/app-data/files/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subKey: "x.bin", contentType: "application/octet-stream" }),
     });
     expect([400, 404]).toContain(res.status);
   });
 
   it("one app's files are invisible to another", async () => {
-    await appA.fetch("/app-data/files/private.bin", {
-      method: "PUT",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: Buffer.from("private"),
-    });
+    await putAppFile(appA, "private.bin", "private");
     // app-b probing the same subKey resolves inside ITS namespace → absent
     // (and its files plane is disabled anyway).
     const res = await appB.fetch("/app-data/files/private.bin");

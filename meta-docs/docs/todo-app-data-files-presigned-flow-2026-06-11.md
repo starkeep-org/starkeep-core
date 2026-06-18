@@ -71,6 +71,46 @@ Mirror the shared-data flow for app-data:
   (`api-handler.ts`) already rejects `apps/<other-app>/...` keys, so
   presign requests can reuse it.
 
+## Resolved design (2026-06-14)
+
+Mirror the shared-data flow exactly; no new mechanism is invented:
+
+1. `POST /apps/{appId}/app-data/files/presign` — body `{ subKey,
+   contentType? }`. Manifest gate (the `appSpecificSyncable` view must
+   exist), construct the key server-side via
+   `appSyncableObjectKey(appId, subKey)` (so the client never has to know
+   the key scheme), return `{ url, key }` from
+   `storage.getSignedPutUrl`. Client PUTs bytes straight to S3.
+2. `POST /apps/{appId}/app-data/files/<subKey>/record` — body
+   `{ contentHash, mimeType, sizeBytes, originalFilename? }`. Calls a new
+   `view.registerFile(subKey, meta)` that writes the `_starkeep_sync_records`
+   index row **without** re-uploading bytes. This is the step that keeps
+   direct-to-S3 uploads visible to existence checks (todo 25) and to
+   cross-channel sync — bytes bypass `putFile`, so the index write has to
+   be explicit. Exactly the shape shared data uses (`/files/presign` →
+   direct PUT → `POST /data/records`).
+3. `GET /apps/{appId}/app-data/files/<subKey>` already returns a
+   presigned GET URL (not bytes); todo 25 swaps its existence check from
+   `getFile` (byte download) to `statFile` (index read).
+4. Same three routes are added to the **local-data-server** so a single
+   client code path works against either backend (the local presign
+   issues an upload-token URL the way `/files/presign` already does).
+5. The body-through `PUT /app-data/files/<subKey>` is **kept** as a
+   small-file convenience (fine under the APIGW cap; it writes the index
+   row via `putFile`). DELETE is unchanged. No client removal needed
+   because there is no production file-plane client yet — see below.
+
+### Proving client
+
+There was no production consumer of the app-data **file** plane (only
+tests); the captions proving example exercised the **db** plane. To hook
+this up for real (per CLAUDE.md: implemented code must be fully wired to
+something testable), the photos app gains a per-app **cover image** — one
+app-private synced file set in the photos UI that rides presign →
+register → stat → presigned-GET through both local and cloud. Photos
+manifest declares `appSpecificSyncable.files`; `data-server-client.ts`
+gets `setCoverImage`/`getCoverImage`.
+
 ## Source
 
 From doc id 14 (`functional-doc-cloud-data-server-2026-06-05.md`),

@@ -23,7 +23,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { createHLCClock, type AnyRecord } from "@starkeep/protocol-primitives";
+import {
+  createHLCClock,
+  appSyncableObjectKey,
+  type AnyRecord,
+} from "@starkeep/protocol-primitives";
+import { createAppSpecificFactory } from "@starkeep/shared-space-api";
+import { createHash } from "node:crypto";
 import {
   SqliteDatabaseAdapter,
   SqliteAppSyncableNamespaceStore,
@@ -83,6 +89,18 @@ export interface FakeCloud {
   sharedRecords(): Promise<AnyRecord[]>;
   /** Rows in a cloud-side app-syncable table (empty if table absent). */
   appRows(appId: string, table: string): Array<Record<string, unknown>>;
+  /**
+   * Write an app-private file directly on the cloud side — as if the
+   * cloud-served app had called the broker's presign → upload → register
+   * flow. Puts the bytes into cloud storage and writes the `_starkeep_sync_records`
+   * index row, so a subsequent exchange ships it down to a local server.
+   */
+  setAppFile(
+    appId: string,
+    subKey: string,
+    bytes: Buffer | string,
+    mimeType?: string,
+  ): Promise<{ key: string }>;
   hasBlob(key: string): Promise<boolean>;
   close(): Promise<void>;
 }
@@ -101,6 +119,14 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   const clock = createHLCClock({ nodeId: `fake-cloud-${port}`, wallClockFunction: Date.now });
   const namespaceStore = new SqliteAppSyncableNamespaceStore(db);
   const applier = new SqliteAppSyncableApplier(db, namespaceStore);
+  // Lets tests originate an app-private file write on the cloud side (as the
+  // cloud-served app would via the broker), so it can sync down to a local.
+  const appFactory = createAppSpecificFactory({
+    namespace: namespaceStore,
+    applier,
+    fileStorage: objectStorage,
+    clock,
+  });
 
   const exchangeLog: FakeCloudExchangeLogEntry[] = [];
   const failures: FakeCloudFailures = {
@@ -354,6 +380,18 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       } catch {
         return [];
       }
+    },
+    async setAppFile(appId, subKey, bytes, mimeType = "application/octet-stream") {
+      const view = appFactory({ subjectType: "app", subjectId: appId });
+      if (!view) throw new Error(`fake-cloud: app "${appId}" not installed`);
+      const body = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      const key = appSyncableObjectKey(appId, subKey);
+      await objectStorage.put(key, body, { contentType: mimeType });
+      return view.registerFile(subKey, {
+        contentHash: createHash("sha256").update(body as unknown as Uint8Array).digest("hex"),
+        mimeType,
+        sizeBytes: body.length,
+      });
     },
     hasBlob: (key) => objectStorage.has(key),
     async close() {

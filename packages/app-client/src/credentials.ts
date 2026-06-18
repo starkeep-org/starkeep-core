@@ -16,72 +16,59 @@ export function appCredentialsPath(appId: string): string {
   return join(dataDir(), "app-creds", `${appId}.json`);
 }
 
-const cache = new Map<string, AppCredentials | null>();
-const cloudCache = new Map<string, Promise<AppCredentials | null>>();
+// Per-process credential cache, keyed by appId. Stores the in-flight (and
+// settled) promise so concurrent callers share one SSM fetch / file read. The
+// underlying source (SSM parameter in cloud mode, creds file in local mode) is
+// rewritten only on install/uninstall, so caching for the process lifetime is
+// safe; call `clearAppCredentialsCache` after an install to pick up a rotation.
+const cache = new Map<string, Promise<AppCredentials | null>>();
 
 /**
- * Synchronous credential load.
+ * Load an app's credentials. The single credential entry point for both modes:
  *
- * Local mode (default): reads `~/.starkeep/app-creds/${appId}.json` written by
- * admin-web at install time.
+ * - Cloud mode (`STARKEEP_APP_CLIENT_MODE=cloud`): fetches the HMAC secret from
+ *   SSM via the Lambda's exec role; the data-server URL is derived from
+ *   `STARKEEP_CLOUD_DATA_BASE`.
+ * - Local mode (default): reads `~/.starkeep/app-creds/${appId}.json`, written
+ *   by admin-web at install time.
  *
- * Cloud mode: returns null synchronously — cloud creds live in SSM and must
- * be fetched async. Callers running in cloud Lambdas should use
- * `loadAppCredentialsAsync` instead, or rely on the in-process cache
- * (`primeCloudAppCredentials`) populated at module load.
+ * Always async — SSM has no synchronous API, and every caller runs inside an
+ * async request handler — so there is no way to silently get `null` in cloud
+ * mode by picking a sync loader.
  */
-export function loadAppCredentials(appId: string): AppCredentials | null {
-  if (cache.has(appId)) return cache.get(appId) ?? null;
-  if (clientMode() === "cloud") {
-    // Cloud secret cannot be fetched synchronously. Return null; the async
-    // path below is the supported entry point for cloud Lambdas.
-    return null;
-  }
+export async function loadAppCredentials(
+  appId: string,
+): Promise<AppCredentials | null> {
+  const existing = cache.get(appId);
+  if (existing) return existing;
+  const promise = (
+    clientMode() === "cloud"
+      ? fetchCloudCredentials(appId)
+      : loadLocalCredentials(appId)
+  ).catch((err) => {
+    // Don't cache a transient failure (e.g. an SSM throttle); let the next
+    // call retry. A resolved `null` (genuinely not installed) stays cached.
+    cache.delete(appId);
+    throw err;
+  });
+  cache.set(appId, promise);
+  return promise;
+}
+
+async function loadLocalCredentials(appId: string): Promise<AppCredentials | null> {
   const path = appCredentialsPath(appId);
-  if (!existsSync(path)) {
-    cache.set(appId, null);
-    return null;
-  }
+  if (!existsSync(path)) return null;
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<AppCredentials>;
-    if (!parsed.appId || !parsed.hmacSecret) {
-      cache.set(appId, null);
-      return null;
-    }
-    const creds: AppCredentials = {
+    if (!parsed.appId || !parsed.hmacSecret) return null;
+    return {
       appId: parsed.appId,
       hmacSecret: parsed.hmacSecret,
       dataServerUrl: parsed.dataServerUrl ?? "http://127.0.0.1:9820",
     };
-    cache.set(appId, creds);
-    return creds;
   } catch {
-    cache.set(appId, null);
     return null;
   }
-}
-
-/**
- * Async credential load. In cloud mode, fetches the HMAC secret from SSM via
- * the Lambda's exec role; the data-server URL comes from
- * `STARKEEP_CLOUD_DATA_BASE`. In local mode, delegates to the sync path.
- *
- * Cached per process — the underlying SSM parameter is rotated only on
- * install/uninstall, which redeploys the Lambda.
- */
-export async function loadAppCredentialsAsync(
-  appId: string,
-): Promise<AppCredentials | null> {
-  if (cache.has(appId)) return cache.get(appId) ?? null;
-  if (clientMode() !== "cloud") return loadAppCredentials(appId);
-  const existing = cloudCache.get(appId);
-  if (existing) return existing;
-  const promise = fetchCloudCredentials(appId).then((creds) => {
-    cache.set(appId, creds);
-    return creds;
-  });
-  cloudCache.set(appId, promise);
-  return promise;
 }
 
 function clientMode(): "local" | "cloud" {
@@ -129,9 +116,7 @@ async function fetchCloudCredentials(appId: string): Promise<AppCredentials | nu
 export function clearAppCredentialsCache(appId?: string): void {
   if (appId) {
     cache.delete(appId);
-    cloudCache.delete(appId);
   } else {
     cache.clear();
-    cloudCache.clear();
   }
 }

@@ -10,7 +10,7 @@ export interface PostgresRow {
   version: number;
   content_hash: string;
   object_storage_key: string;
-  mime_type: string;
+  mime_type: string | null;
   size_bytes: number;
   original_filename: string | null;
   origin_app_id: string;

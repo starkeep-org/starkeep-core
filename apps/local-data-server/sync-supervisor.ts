@@ -177,7 +177,9 @@ export function createSyncSupervisor(
   // would keep retrying and the warning was easy to miss. Refusing to start
   // the engine is louder and matches the install invariant: every registered
   // app has an hmac_secret.
-  function makeSignerFor(appId: string): (body: string) => Record<string, string> {
+  function makeSignerFor(
+    appId: string,
+  ): (method: string, path: string, body: string) => Record<string, string> {
     const row = appRegistryRow(localDb, appId);
     const hmacSecret = row?.hmacSecret;
     if (!hmacSecret) {
@@ -187,7 +189,8 @@ export function createSyncSupervisor(
         `outbound requests without it.`,
       );
     }
-    return (body: string) => signRequest({ appId, hmacSecret, body });
+    return (method: string, path: string, body: string) =>
+      signRequest({ appId, hmacSecret, method, path, body });
   }
 
   function makeEngineEntry(

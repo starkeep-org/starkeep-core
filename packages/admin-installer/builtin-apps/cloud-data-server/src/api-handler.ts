@@ -33,10 +33,10 @@ import {
   deserializeHLC,
   appSyncableObjectKey,
   dataRecordObjectKey,
-  categoryOf,
+  typeCategory,
   getCategory,
   isCategoryId,
-  KNOWN_EXTENSIONS,
+  isKnownType,
 } from "@starkeep/protocol-primitives";
 import type { DataRecord, StarkeepId, HLCClock } from "@starkeep/protocol-primitives";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
@@ -143,10 +143,32 @@ async function loadAppHmacSecret(appId: string): Promise<string | null> {
   }
 }
 
+// Freshness window for the signed timestamp (skew-tolerant). Mirrors
+// APP_SIG_MAX_SKEW_MS in @starkeep/app-client/src/sign.ts; hand-kept because
+// this handler is a separately-deployed artifact and cannot import the package.
+const APP_SIG_MAX_SKEW_MS = 5 * 60_000;
+
+// Canonical signed path: pathname only, percent-decoded. Mirrors
+// canonicalSignedPath in @starkeep/app-client/src/sign.ts. The subPath the
+// handler routes on is already query-free and slash-normalized by API Gateway;
+// decoding here aligns it with the logical path the client signed.
+function canonicalSignedPath(path: string): string {
+  const q = path.indexOf("?");
+  const pathname = q >= 0 ? path.slice(0, q) : path;
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return pathname;
+  }
+}
+
 /**
- * Verify the X-Starkeep-App-Id + X-Starkeep-App-Sig headers against the
- * appId from the URL path. Returns the appId on success; an error object
- * otherwise. Mirrors `signRequest` in @starkeep/app-client/src/sign.ts.
+ * Verify the X-Starkeep-App-{Id,Sig,Ts} headers against the appId + subPath
+ * from the URL. Returns ok on success; an error object otherwise. Mirrors
+ * `signRequest` in @starkeep/app-client/src/sign.ts: the signature binds
+ * method, path, and a timestamp (enforced against a freshness window) so a
+ * captured request can be neither replayed against a different endpoint nor
+ * replayed indefinitely.
  *
  * Body is the raw request bytes the client signed. GET/HEAD sign over the
  * empty string. For base64-encoded API Gateway events we must decode first
@@ -155,6 +177,7 @@ async function loadAppHmacSecret(appId: string): Promise<string | null> {
 export function validateAppHmac(
   pathAppId: string,
   method: string,
+  subPath: string,
   headers: Record<string, string | undefined>,
   bodyBytes: Buffer,
   hmacSecret: string,
@@ -167,15 +190,26 @@ export function validateAppHmac(
     headers["x-starkeep-app-sig"]
     ?? headers["X-Starkeep-App-Sig"]
     ?? headers["X-STARKEEP-APP-SIG"];
-  if (!headerAppId || !headerSig) {
-    return { ok: false, status: 401, message: "Missing X-Starkeep-App-{Id,Sig} headers" };
+  const headerTs =
+    headers["x-starkeep-app-ts"]
+    ?? headers["X-Starkeep-App-Ts"]
+    ?? headers["X-STARKEEP-APP-TS"];
+  if (!headerAppId || !headerSig || !headerTs) {
+    return { ok: false, status: 401, message: "Missing X-Starkeep-App-{Id,Sig,Ts} headers" };
   }
   if (headerAppId !== pathAppId) {
     return { ok: false, status: 401, message: "Header appId does not match path" };
   }
+  const tsMs = Number(headerTs);
+  if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > APP_SIG_MAX_SKEW_MS) {
+    return { ok: false, status: 401, message: "Stale or invalid signature timestamp" };
+  }
   const isEmptyBody = method === "GET" || method === "HEAD";
   const signedBody = isEmptyBody ? Buffer.alloc(0) : bodyBytes;
-  const prefix = Buffer.from(`${pathAppId}:`, "utf8");
+  const prefix = Buffer.from(
+    `${pathAppId}:${method.toUpperCase()}:${canonicalSignedPath(subPath)}:${tsMs}:`,
+    "utf8",
+  );
   const expected = createHmac("sha256", hmacSecret)
     .update(Buffer.concat([prefix as unknown as Uint8Array, signedBody as unknown as Uint8Array]) as unknown as Uint8Array)
     .digest("hex");
@@ -469,7 +503,7 @@ function recordToResponse(record: DataRecord) {
   return {
     id: record.id,
     type: record.type,
-    category: categoryOf(record.type),
+    category: typeCategory(record.type),
     created_at: new Date(record.createdAt.wallTime).toISOString(),
     updated_at: new Date(record.updatedAt.wallTime).toISOString(),
     version: record.version,
@@ -530,7 +564,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     for (const [key, value] of Object.entries(event.headers ?? {})) {
       if (typeof value === "string") normalizedHeaders[key.toLowerCase()] = value;
     }
-    const hmacCheck = validateAppHmac(appId, method, normalizedHeaders, bodyBytes, hmacSecret);
+    const hmacCheck = validateAppHmac(appId, method, subPath, normalizedHeaders, bodyBytes, hmacSecret);
     if (!hmacCheck.ok) {
       return clientErr(hmacCheck.message, hmacCheck.status);
     }
@@ -686,7 +720,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         parentId?: string;
       };
       if (!body.type) return clientErr("type is required", 400);
-      if (!body.contentType) return clientErr("contentType is required", 400);
+      if (!isKnownType(body.type)) return clientErr(`Unknown type id: ${body.type}`, 400);
       if (!canWrite(grants, body.type)) return clientErr("Forbidden", 403);
       if (!body.contentHash) {
         return clientErr(
@@ -743,7 +777,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         version: 1,
         contentHash,
         objectStorageKey,
-        mimeType: body.contentType,
+        mimeType: body.contentType ?? null,
         sizeBytes,
         originalFilename: body.fileName ?? null,
         parentId: (body.parentId as DataRecord["parentId"]) ?? null,
@@ -760,15 +794,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const typeId = query["type"];
       if (!typeId) return clientErr("type query param is required", 400);
       // The blob lands at shared/<category>/…, so authorize the derived
-      // category (the type param is normally an extension). Reject unknown
-      // type ids up front rather than letting categoryOf's "other" fallback
-      // silently coerce them — the caller's "other" grants would then gate
-      // a misspelled type, which is a footgun.
-      const normalizedExt = typeId.toLowerCase().replace(/^\./, "");
-      if (!isCategoryId(typeId) && !KNOWN_EXTENSIONS.has(normalizedExt)) {
+      // category. Accept a full Starkeep type id or a bare category id; reject
+      // anything else up front rather than letting typeCategory's "other"
+      // fallback silently coerce a typo — the caller's "other" grants would then
+      // gate a misspelled type, which is a footgun.
+      if (!isKnownType(typeId) && !isCategoryId(typeId)) {
         return clientErr(`Unknown type id: ${typeId}`, 400);
       }
-      const fileCategory = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+      const fileCategory = typeCategory(typeId);
       if (!canWriteCategory(grants, fileCategory)) return clientErr("Forbidden", 403);
       const headers = event.headers ?? {};
       const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
@@ -853,9 +886,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         return clientErr("metadata must be an object", 400);
       }
       // Metadata tables are per-category, so gate on the caller's writable
-      // categories (derived from its extension grants). PG GRANTs back this up
-      // at the per-category metadata table.
-      const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+      // categories (derived from its type grants). PG GRANTs back this up at
+      // the per-category metadata table. `typeId` may be a full type id or a
+      // bare category id; typeCategory handles both.
+      const category = typeCategory(typeId);
       if (!canWriteCategory(grants, category)) return clientErr("Forbidden", 403);
       if (category === "other") {
         return clientErr(`Category "other" has no metadata table`, 400);
@@ -875,7 +909,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (metadataReadMatch && method === "GET") {
       const recordId = decodeURIComponent(metadataReadMatch[1]!) as StarkeepId;
       const typeId = decodeURIComponent(metadataReadMatch[2]!);
-      const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+      const category = typeCategory(typeId);
       if (!canReadCategory(grants, category)) return clientErr("Forbidden", 403);
       if (category === "other") return ok({ metadata: null });
       const metadata = await db.getMetadata(category, recordId);
@@ -998,34 +1032,80 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         return clientErr("Method not allowed", 405);
       }
 
+      // POST /app-data/files/presign — issue a presigned S3 PUT URL for an
+      // app-private file. Body: { subKey, contentType? }. The client uploads
+      // bytes directly to S3 (bypassing the APIGW body cap), then calls the
+      // /record route below to write the index row. The key is constructed
+      // server-side from appId + subKey so the client never sees the scheme.
+      if (subPath === "/app-data/files/presign" && method === "POST") {
+        try {
+          const raw = event.isBase64Encoded && event.body
+            ? Buffer.from(event.body, "base64").toString("utf8")
+            : (event.body ?? "{}");
+          const body = JSON.parse(raw) as { subKey?: string; contentType?: string };
+          if (!body.subKey) return clientErr("subKey is required", 400);
+          // statFile enforces filesEnabled + the per-app key prefix; we only
+          // use it here to surface a clear manifest error before signing.
+          await view.statFile(body.subKey);
+          const key = appSyncableObjectKey(appId, body.subKey);
+          const url = await storage.getSignedPutUrl!(key, {
+            expiresIn: clampPresignExpiresIn(3600),
+            ...(body.contentType ? { contentType: body.contentType } : {}),
+          });
+          return ok({ url, key });
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+      }
+
+      // POST /app-data/files/<subKey>/record — register a file uploaded
+      // out-of-band via the presign flow. Body:
+      // { contentHash, mimeType, sizeBytes, originalFilename? }. Writes the
+      // index row so the file becomes visible to statFile and cross-channel
+      // sync without the broker ever holding the bytes.
+      const fileRecordMatch = subPath.match(/^\/app-data\/files\/(.+)\/record$/);
+      if (fileRecordMatch && method === "POST") {
+        const subKey = decodeURIComponent(fileRecordMatch[1]!);
+        try {
+          const raw = event.isBase64Encoded && event.body
+            ? Buffer.from(event.body, "base64").toString("utf8")
+            : (event.body ?? "{}");
+          const body = JSON.parse(raw) as {
+            contentHash?: string;
+            mimeType?: string;
+            sizeBytes?: number;
+            originalFilename?: string | null;
+          };
+          if (!body.contentHash || !body.mimeType || typeof body.sizeBytes !== "number") {
+            return clientErr("contentHash, mimeType, and sizeBytes are required", 400);
+          }
+          const result = await view.registerFile(subKey, {
+            contentHash: body.contentHash,
+            mimeType: body.mimeType,
+            sizeBytes: body.sizeBytes,
+            originalFilename: body.originalFilename ?? null,
+          });
+          return ok(result);
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+      }
+
       const fileMatch = subPath.match(/^\/app-data\/files\/(.+)$/);
       if (fileMatch) {
         const subKey = decodeURIComponent(fileMatch[1]!);
         try {
-          if (method === "PUT") {
-            if (!event.body) return clientErr("Request body must not be empty", 400);
-            const bytes = event.isBase64Encoded
-              ? Buffer.from(event.body, "base64")
-              : Buffer.from(event.body, "utf8");
-            if (bytes.length === 0) return clientErr("Request body must not be empty", 400);
-            if (bytes.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
-            const mimeType = (event.headers?.["content-type"]
-              ?? event.headers?.["Content-Type"]
-              ?? "application/octet-stream").split(";")[0]!.trim();
-            const result = await view.putFile(
-              subKey,
-              bytes as unknown as Uint8Array,
-              mimeType,
-            );
-            return ok(result);
-          }
+          // Writes go through the presign + /record flow above — there is no
+          // body-through PUT on the app-data file plane (the broker never holds
+          // app-private bytes).
           if (method === "GET") {
             // Manifest gate + key construction live in the factory; we use
-            // getFile (which enforces filesEnabled and the per-app key prefix)
-            // to verify existence, then presign directly because the factory's
-            // fileUrl is sync and S3 presigning is async.
-            const file = await view.getFile(subKey);
-            if (!file) return clientErr("File not found", 404);
+            // statFile (which enforces filesEnabled and the per-app key prefix)
+            // to verify existence from the index row — no byte download — then
+            // presign directly because the factory's fileUrl is sync and S3
+            // presigning is async.
+            const stat = await view.statFile(subKey);
+            if (!stat) return clientErr("File not found", 404);
             const requested = parseInt(query["expiresIn"] ?? "3600", 10);
             const expiresIn = clampPresignExpiresIn(
               Number.isFinite(requested) ? requested : 3600,

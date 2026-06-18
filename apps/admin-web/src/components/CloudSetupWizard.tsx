@@ -34,12 +34,12 @@ import {
   type CognitoConfig,
   type STSCredentials,
 } from "../lib/cognito-auth";
-
-const LOCAL_DATA_SERVER_URL = "http://127.0.0.1:9820";
+import { localDataServerUrl } from "../lib/runtime-config";
 
 async function isLocalDataServerOnline(): Promise<boolean> {
   try {
-    const resp = await fetch(`${LOCAL_DATA_SERVER_URL}/health`, { signal: AbortSignal.timeout(1500) });
+    const base = await localDataServerUrl();
+    const resp = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) });
     return resp.ok;
   } catch {
     return false;
@@ -47,7 +47,8 @@ async function isLocalDataServerOnline(): Promise<boolean> {
 }
 
 async function pushAuthToLocalDataServer(tokens: { idToken: string; refreshToken: string }): Promise<void> {
-  const resp = await fetch(`${LOCAL_DATA_SERVER_URL}/auth/tokens`, {
+  const base = await localDataServerUrl();
+  const resp = await fetch(`${base}/auth/tokens`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }),

@@ -2,8 +2,7 @@ import {
   createHLCClock,
   createDataRecord,
   dataRecordObjectKey,
-  categoryOf,
-  isCategoryId,
+  typeCategory,
   type DataRecord,
   type MetadataRow,
 } from "@starkeep/protocol-primitives";
@@ -26,10 +25,10 @@ import type {
   DataPutInput,
 } from "./types.js";
 
-// Resolve a record's type/extension (or a category id) to its metadata
+// Resolve a record's Starkeep type id (or a bare category id) to its metadata
 // category. `other` has no metadata table, so callers skip persistence for it.
 function metadataCategory(typeOrCategory: string): string {
-  return isCategoryId(typeOrCategory) ? typeOrCategory : categoryOf(typeOrCategory);
+  return typeCategory(typeOrCategory);
 }
 
 export async function createStarkeepSdk(
@@ -129,7 +128,7 @@ export async function createStarkeepSdk(
   async function writeRecordAndMetadata(
     input: DataPutInput,
     fileBytes: Uint8Array,
-    contentType: string,
+    contentType: string | null,
     originalFilename: string | null,
   ): Promise<DataRecord> {
     const contentHash = await sha256Hex(fileBytes);
@@ -163,11 +162,11 @@ export async function createStarkeepSdk(
         const contentHash = await sha256Hex(file);
         const objectStorageKey = dataRecordObjectKey(input.type, contentHash);
 
-        await objectStorageAdapter.put(objectStorageKey, file, { contentType });
+        await objectStorageAdapter.put(objectStorageKey, file, { contentType: contentType ?? undefined });
         return writeRecordAndMetadata(
           { ...input, contentHash, objectStorageKey } as DataPutInput,
           file,
-          contentType,
+          contentType ?? null,
           input.originalFilename ?? null,
         );
       },
@@ -178,15 +177,15 @@ export async function createStarkeepSdk(
         const objectStorageKey = dataRecordObjectKey(input.type, contentHash);
 
         if (objectStorageAdapter.putSymlink) {
-          await objectStorageAdapter.putSymlink(objectStorageKey, filePath, { contentType });
+          await objectStorageAdapter.putSymlink(objectStorageKey, filePath, { contentType: contentType ?? undefined });
         } else {
-          await objectStorageAdapter.put(objectStorageKey, fileBytes, { contentType });
+          await objectStorageAdapter.put(objectStorageKey, fileBytes, { contentType: contentType ?? undefined });
         }
 
         return writeRecordAndMetadata(
           input,
           fileBytes,
-          contentType,
+          contentType ?? null,
           input.originalFilename ?? basename(filePath),
         );
       },

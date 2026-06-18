@@ -18,6 +18,7 @@ import {
   listInstallSteps,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
+import { canonicalSignedPath, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
   createSqliteAccessPolicyStore,
@@ -32,13 +33,14 @@ import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/ob
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
-import { getCategory, categoryOf, isCategoryId } from "../../packages/protocol-primitives/src/types/core-types.js";
+import { getCategory, typeCategory, isCategoryId, isKnownType } from "../../packages/protocol-primitives/src/types/core-types.js";
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
-import { dataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
+import { dataRecordObjectKey, appSyncableObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { createStarkeepId } from "@starkeep/protocol-primitives";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
+import { openSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createFileWatchManager } from "./watcher.js";
 import {
@@ -90,8 +92,8 @@ function grantsForApp(db: DatabaseSync, appId: string): AppGrantRow[] {
 // All-access local identities: Starkeep Drive (the User-Data-Owner) and the
 // local watcher. Both operate on all shared data — every extension plus the
 // Drive-only `other` catch-all — which cannot be represented as a finite set of
-// extension grant rows, so they are authorized by app id (matching the cloud
-// access-enforcer for Drive). `type` is the record's extension.
+// type grant rows, so they are authorized by app id (matching the cloud
+// access-enforcer for Drive). `type` is the record's Starkeep type id.
 const ALL_ACCESS_APP_IDS = new Set<string>([DRIVE_APP_ID, LOCAL_WATCHER_APP_ID]);
 
 function appCanRead(db: DatabaseSync, appId: string, type: string): boolean {
@@ -106,24 +108,24 @@ function appCanWrite(db: DatabaseSync, appId: string, type: string): boolean {
 
 // Category-level access. Object-storage keys (`shared/<category>/…`) and the
 // per-category metadata tables are category-namespaced (so is the IAM ceiling),
-// so they authorize against the categories the app's extension grants map to —
-// a category is accessible when at least one granted extension maps to it.
+// so they authorize against the categories the app's type grants map to —
+// a category is accessible when at least one granted type maps to it.
 function appCanReadCategory(db: DatabaseSync, appId: string, category: string): boolean {
   if (ALL_ACCESS_APP_IDS.has(appId)) return true;
-  return grantsForApp(db, appId).some((g) => categoryOf(g.type_id) === category);
+  return grantsForApp(db, appId).some((g) => typeCategory(g.type_id) === category);
 }
 
 function appCanWriteCategory(db: DatabaseSync, appId: string, category: string): boolean {
   if (ALL_ACCESS_APP_IDS.has(appId)) return true;
   return grantsForApp(db, appId).some(
-    (g) => categoryOf(g.type_id) === category && g.access === "readwrite",
+    (g) => typeCategory(g.type_id) === category && g.access === "readwrite",
   );
 }
 
 function appCanWriteMetadataCategory(db: DatabaseSync, appId: string, category: string): boolean {
   if (ALL_ACCESS_APP_IDS.has(appId)) return true;
   return grantsForApp(db, appId).some(
-    (g) => categoryOf(g.type_id) === category && g.metadata_write === 1,
+    (g) => typeCategory(g.type_id) === category && g.metadata_write === 1,
   );
 }
 
@@ -134,15 +136,32 @@ function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
   return row?.hmac_secret ?? null;
 }
 
-function validateAppHmac(db: DatabaseSync, appId: string, body: Buffer, sig: string | undefined): boolean {
-  if (!sig) return false;
+function validateAppHmac(
+  db: DatabaseSync,
+  appId: string,
+  method: string,
+  path: string,
+  body: Buffer,
+  sig: string | undefined,
+  ts: string | undefined,
+): boolean {
+  if (!sig || !ts) return false;
+  // Reject stale or future-dated signatures (replay-window bound, with skew
+  // tolerance). Mirrors the cloud verifier.
+  const tsMs = Number(ts);
+  if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > APP_SIG_MAX_SKEW_MS) {
+    return false;
+  }
   const secret = getAppHmacSecret(db, appId);
   if (!secret) return false;
-  // HMAC over raw bytes: `${appId}:` (utf-8) ++ body bytes. Operating on bytes
-  // (not a `${appId}:${body}` string) keeps binary payloads lossless and
-  // removes the asymmetry where the client signs "binary"-decoded bytes while
-  // the server signs the utf-8 decode of the same buffer.
-  const prefix = Buffer.from(`${appId}:`, "utf8");
+  // HMAC over raw bytes: `${appId}:${METHOD}:${path}:${ts}:` (utf-8) ++ body
+  // bytes. Binding method/path/ts stops cross-endpoint and indefinite replay;
+  // operating on bytes (not a fully-stringified message) keeps binary payloads
+  // lossless. Mirrors `signRequest` in @starkeep/app-client/src/sign.ts.
+  const prefix = Buffer.from(
+    `${appId}:${method.toUpperCase()}:${canonicalSignedPath(path)}:${tsMs}:`,
+    "utf8",
+  );
   const input = Buffer.concat([prefix as unknown as Uint8Array, body as unknown as Uint8Array]);
   const expected = createHmac("sha256", secret).update(input as unknown as Uint8Array).digest("hex");
   // timingSafeEqual requires equal-length buffers
@@ -206,12 +225,29 @@ interface PersistedAuth {
 
 function restartProcess(): void {
   console.log("[server] Restarting to apply config changes…");
-  const child = spawn(process.execPath, process.argv.slice(1), {
-    detached: true,
-    stdio: "inherit",
-    env: process.env,
-    cwd: process.cwd(),
-  });
+  // Re-exec the *same* interpreter invocation. process.argv.slice(1) carries
+  // the script + its args but NOT the node flags in process.execArgv — under
+  // tsx those flags are the `--import tsx` loader, without which the respawn
+  // crashes with ERR_MODULE_NOT_FOUND on the repo's `.js`-suffixed TS imports.
+  // execArgv is empty in a plain-`node` / compiled deployment, so this reduces
+  // to the previous behavior there.
+  //
+  // The replacement is detached and must NOT inherit this (exiting) process's
+  // stdio: inheriting a parent's pipes leaves the daemon writing into a closed
+  // reader once we exit. Redirect its output to an append-only log file under
+  // STARKEEP_DIR so logs survive the restart and the child is fully detached.
+  mkdirSync(STARKEEP_DIR, { recursive: true });
+  const logFd = openSync(join(STARKEEP_DIR, "local-data-server.log"), "a");
+  const child = spawn(
+    process.execPath,
+    [...process.execArgv, ...process.argv.slice(1)],
+    {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: process.env,
+      cwd: process.cwd(),
+    },
+  );
   child.unref();
   process.exit(0);
 }
@@ -590,7 +626,7 @@ async function main() {
   const server = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Starkeep-App-Id, X-Starkeep-App-Sig");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Starkeep-App-Id, X-Starkeep-App-Sig, X-Starkeep-App-Ts");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -615,6 +651,7 @@ async function main() {
     // Every other route requires X-Starkeep-App-Id and a valid HMAC body sig.
     const appId = req.headers["x-starkeep-app-id"] as string | undefined;
     const appSig = req.headers["x-starkeep-app-sig"] as string | undefined;
+    const appTs = req.headers["x-starkeep-app-ts"] as string | undefined;
 
     const LOOPBACK_AUTHORIZED_PATTERNS = [
       /^\/health$/,
@@ -652,7 +689,7 @@ async function main() {
         req.method === "GET" || req.method === "HEAD"
           ? Buffer.alloc(0)
           : await readBodyBuffer(req);
-      if (!validateAppHmac(localDb, appId, rawBody, appSig)) {
+      if (!validateAppHmac(localDb, appId, req.method ?? "GET", path, rawBody, appSig, appTs)) {
         res.writeHead(401);
         json(res, { error: "Invalid X-Starkeep-App-Sig (app not installed or signature mismatch)" });
         return;
@@ -985,7 +1022,7 @@ async function main() {
               id: r.id,
               kind: r.kind,
               type: r.type,
-              category: categoryOf(r.type),
+              category: typeCategory(r.type),
               // Immutable provenance: which app created the record. Surfaced so
               // the Drive UI can show "this came from photos" even when photos
               // isn't cloud-installed.
@@ -1042,9 +1079,13 @@ async function main() {
           });
           return;
         }
-        if (!contentType) {
+        // contentType is advisory MIME — optional. When omitted the record's
+        // mime_type is stored null (the serving edge falls back to
+        // application/octet-stream).
+
+        if (!isKnownType(type)) {
           res.writeHead(400);
-          json(res, { error: "contentType is required" });
+          json(res, { error: `Unknown type id: ${type}` });
           return;
         }
 
@@ -1065,7 +1106,7 @@ async function main() {
           type: string;
           createdAt: { wallTime: number };
           updatedAt: { wallTime: number };
-          mimeType: string;
+          mimeType: string | null;
           sizeBytes: number;
           objectStorageKey: string | null;
           originalFilename: string | null;
@@ -1257,21 +1298,26 @@ async function main() {
           json(res, { error: "Request body must not be empty" });
           return;
         }
-        // The token's key is content-addressed (shared/<typeId>/<shard>/<hash>).
-        // Verify the body actually hashes to the expected key, otherwise the
-        // caller is trying to write mismatched bytes under a fixed name.
-        const expectedHash = parsed.key.split("/").pop();
-        const actualHash = createHash("sha256")
-          .update(fileBuffer as unknown as Uint8Array)
-          .digest("hex");
-        if (expectedHash !== actualHash) {
-          res.writeHead(400);
-          json(res, {
-            error: "Upload body hash does not match the key",
-            expected: expectedHash,
-            actual: actualHash,
-          });
-          return;
+        // Shared-data keys are content-addressed (shared/<typeId>/<shard>/<hash>),
+        // so verify the body actually hashes to the expected key — otherwise the
+        // caller is trying to write mismatched bytes under a fixed name. App-data
+        // keys (apps/<appId>/syncable/<subKey>) are *not* content-addressed (the
+        // subKey is a stable app-chosen name), so the hash check doesn't apply;
+        // the signed token already authorizes that exact key.
+        if (parsed.key.startsWith("shared/")) {
+          const expectedHash = parsed.key.split("/").pop();
+          const actualHash = createHash("sha256")
+            .update(fileBuffer as unknown as Uint8Array)
+            .digest("hex");
+          if (expectedHash !== actualHash) {
+            res.writeHead(400);
+            json(res, {
+              error: "Upload body hash does not match the key",
+              expected: expectedHash,
+              actual: actualHash,
+            });
+            return;
+          }
         }
         await localAdapter.put(parsed.key, fileBuffer, { contentType: parsed.mimeType });
         // Cloud propagation is handled by the sync engine's file-transfer pass
@@ -1297,9 +1343,15 @@ async function main() {
           json(res, { error: "type query param is required" });
           return;
         }
-        // Bytes land at shared/<category>/…, so authorize the derived category
-        // (the type param is normally an extension).
-        const fileCategory = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+        // Bytes land at shared/<category>/…, so authorize the derived category.
+        // Accept a full Starkeep type id or a bare category id; reject anything
+        // else rather than letting typeCategory's "other" fallback coerce a typo.
+        if (!isKnownType(typeId) && !isCategoryId(typeId)) {
+          res.writeHead(400);
+          json(res, { error: `Unknown type id: ${typeId}` });
+          return;
+        }
+        const fileCategory = typeCategory(typeId);
         if (!appCanWriteCategory(localDb, appId!, fileCategory)) {
           res.writeHead(403);
           json(res, { error: `App does not have readwrite access to category "${fileCategory}"` });
@@ -1394,19 +1446,78 @@ async function main() {
           }
         }
 
+        // POST /app-data/files/presign — issue an upload-token URL for an
+        // app-private file, mirroring /files/presign so a single client code
+        // path works against either backend. The key is built server-side from
+        // appId + subKey. After uploading, the client calls .../record below.
+        if (path === "/app-data/files/presign" && req.method === "POST") {
+          try {
+            const body = JSON.parse(await readBody(req)) as {
+              subKey?: string;
+              contentType?: string;
+              expiresIn?: number;
+            };
+            if (!body.subKey) {
+              res.writeHead(400);
+              json(res, { error: "subKey is required" });
+              return;
+            }
+            // statFile enforces filesEnabled before we mint an upload token.
+            await view.statFile(body.subKey);
+            const key = appSyncableObjectKey(appId!, body.subKey);
+            const mimeType = body.contentType ?? "application/octet-stream";
+            const token = createUploadToken(key, mimeType, body.expiresIn ?? 3600);
+            json(res, {
+              url: `http://127.0.0.1:${PORT}/data/files/upload/${token}`,
+              key,
+            });
+            return;
+          } catch (err) {
+            res.writeHead(400);
+            json(res, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+        }
+
+        // POST /app-data/files/<subKey>/record — register a file uploaded
+        // out-of-band via the presign flow, writing the index row without the
+        // server holding the bytes.
+        const fileRecordMatch = path.match(/^\/app-data\/files\/(.+)\/record$/);
+        if (fileRecordMatch && req.method === "POST") {
+          const subKey = decodeURIComponent(fileRecordMatch[1]!);
+          try {
+            const body = JSON.parse(await readBody(req)) as {
+              contentHash?: string;
+              mimeType?: string;
+              sizeBytes?: number;
+              originalFilename?: string | null;
+            };
+            if (!body.contentHash || !body.mimeType || typeof body.sizeBytes !== "number") {
+              res.writeHead(400);
+              json(res, { error: "contentHash, mimeType, and sizeBytes are required" });
+              return;
+            }
+            const result = await view.registerFile(subKey, {
+              contentHash: body.contentHash,
+              mimeType: body.mimeType,
+              sizeBytes: body.sizeBytes,
+              originalFilename: body.originalFilename ?? null,
+            });
+            json(res, result);
+            return;
+          } catch (err) {
+            res.writeHead(400);
+            json(res, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+        }
+
         const fileMatch = path.match(/^\/app-data\/files\/(.+)$/);
         if (fileMatch) {
           const subKey = decodeURIComponent(fileMatch[1]!);
           try {
-            if (req.method === "PUT") {
-              const bytes = await readBodyBuffer(req);
-              const mimeType = (req.headers["content-type"] ?? "application/octet-stream")
-                .split(";")[0]!
-                .trim();
-              const result = await view.putFile(subKey, bytes as unknown as Uint8Array, mimeType);
-              json(res, result);
-              return;
-            }
+            // Writes go through the presign + /record flow above — there is no
+            // body-through PUT on the app-data file plane.
             if (req.method === "GET") {
               const expiresIn = parseInt(url.searchParams.get("expiresIn") ?? "3600", 10);
               const fileUrl = await view.fileUrl(subKey, { expiresIn });
@@ -1521,7 +1632,7 @@ async function main() {
           json(res, { error: "metadata must be an object" });
           return;
         }
-        const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+        const category = typeCategory(typeId);
         if (!appCanWriteMetadataCategory(localDb, appId!, category)) {
           res.writeHead(403);
           json(res, { error: "AccessDenied", detail: `app "${appId}" has no metadataWrite grant on category "${category}"` });
@@ -1551,7 +1662,7 @@ async function main() {
       if (metadataReadMatch && req.method === "GET") {
         const recordId = metadataReadMatch[1]!;
         const typeId = metadataReadMatch[2]!;
-        const category = isCategoryId(typeId) ? typeId : categoryOf(typeId);
+        const category = typeCategory(typeId);
         if (!appCanReadCategory(localDb, appId!, category)) {
           res.writeHead(403);
           json(res, { error: "AccessDenied", detail: `app "${appId}" has no read grant on category "${category}"` });
@@ -1581,7 +1692,7 @@ async function main() {
             id: record.id,
             kind: record.kind,
             type: record.type,
-            category: categoryOf(record.type),
+            category: typeCategory(record.type),
             created_at: new Date(record.createdAt.wallTime).toISOString(),
             updated_at: new Date(record.updatedAt.wallTime).toISOString(),
             version: record.version,

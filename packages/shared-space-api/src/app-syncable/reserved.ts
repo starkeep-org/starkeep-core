@@ -30,7 +30,7 @@ export const FILE_RECORDS_COLUMNS: readonly FileRecordsTableColumn[] = [
   { name: "id", type: "text", notNull: true, primaryKey: true },
   { name: "object_storage_key", type: "text", notNull: true, primaryKey: false },
   { name: "content_hash", type: "text", notNull: true, primaryKey: false },
-  { name: "mime_type", type: "text", notNull: true, primaryKey: false },
+  { name: "mime_type", type: "text", notNull: false, primaryKey: false },
   { name: "size_bytes", type: "integer", notNull: true, primaryKey: false },
   { name: "original_filename", type: "text", notNull: false, primaryKey: false },
   { name: "origin_app_id", type: "text", notNull: true, primaryKey: false },
