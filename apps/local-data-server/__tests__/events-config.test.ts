@@ -41,7 +41,7 @@ describe("/events SSE", () => {
       });
       expect(sse.dataEvents).toEqual([]);
 
-      await createRecordWithBytes(app, { type: "jpg" });
+      await createRecordWithBytes(app, { type: "image/jpeg" });
 
       await eventually(() => {
         expect(sse.dataEvents.length).toBeGreaterThan(0);
@@ -81,7 +81,7 @@ describe("config & lifecycle", () => {
     }
   });
 
-  it("PATCH /config persists the patch and exits the process (assert exit, not survival)", { timeout: 30_000 }, async () => {
+  it("PATCH /config persists the patch, exits, and the replacement respawns serving it", { timeout: 30_000 }, async () => {
     const server = await startLocalDataServer();
     const { port, starkeepDir } = server;
     try {
@@ -99,11 +99,7 @@ describe("config & lifecycle", () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
 
-      // The serving process exits. (The detached replacement restartProcess
-      // spawns is NOT asserted here — under tsx, process.argv.slice(1) drops
-      // the loader and the respawn crashes on the first .js-suffixed TS
-      // import. The plan pins exit-then-rewrite as the contract; the respawn
-      // bug is tracked outside this suite.)
+      // The serving process exits to apply the change…
       const exitCode = await server.waitForExit(10_000);
       expect(exitCode).toBe(0);
 
@@ -113,8 +109,27 @@ describe("config & lifecycle", () => {
       ) as { stage?: string; nodeId: string };
       expect(onDisk.stage).toBe("patched-stage");
       expect(onDisk.nodeId).toBe(originalNodeId);
+
+      // …and the detached replacement restartProcess spawns comes back up on
+      // the same port, serving the patched config. restartProcess now re-execs
+      // with process.execArgv, so the tsx loader survives the respawn (it did
+      // not before — the replacement crashed with ERR_MODULE_NOT_FOUND).
+      // The respawn boots into an append-only log file; assert it reached the
+      // "listening" line (a missing loader would instead log
+      // ERR_MODULE_NOT_FOUND and never bind).
+      const logPath = join(starkeepDir, "local-data-server.log");
+      const booted = await eventually(
+        async () => {
+          const log = await readFile(logPath, "utf8");
+          expect(log).toMatch(/listening on|ERR_MODULE_NOT_FOUND/);
+          return log;
+        },
+        { timeoutMs: 15_000 },
+      );
+      expect(booted).not.toMatch(/ERR_MODULE_NOT_FOUND/);
+      expect(booted).toMatch(/listening on/);
     } finally {
-      // Reap any detached replacement that did manage to bind the port.
+      // Reap the detached replacement now holding the port.
       try {
         const { stdout } = await execFileAsync("lsof", ["-ti", `tcp:${port}`]);
         for (const pid of stdout.trim().split("\n").filter(Boolean)) {

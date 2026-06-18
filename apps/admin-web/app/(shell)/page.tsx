@@ -48,6 +48,7 @@ import {
   projectFullMonth,
   type ServiceCost,
 } from "../../src/lib/cost-usage-report";
+import { localDataServerUrl } from "../../src/lib/runtime-config";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -138,7 +139,8 @@ export default function DashboardPage() {
     // and the daemon route would clobber the existing pid file in the process.
     if (id === "local-data-server") {
       try {
-        const probe = await fetch("http://127.0.0.1:9820/health", { signal: AbortSignal.timeout(1500) });
+        const base = await localDataServerUrl();
+        const probe = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) });
         if (probe.ok) { setLocalRefreshKey((k) => k + 1); return; }
       } catch { /* not reachable — proceed to start */ }
     }
@@ -208,8 +210,9 @@ export default function DashboardPage() {
     const controller = new AbortController();
 
     async function fetchLocal() {
+      const base = await localDataServerUrl();
       try {
-        const healthResp = await fetch("http://127.0.0.1:9820/health", { signal: controller.signal });
+        const healthResp = await fetch(`${base}/health`, { signal: controller.signal });
         if (!healthResp.ok) { setLocalOnline(false); return; }
         setLocalOnline(true);
       } catch {
@@ -221,8 +224,8 @@ export default function DashboardPage() {
       // admin-web doesn't have, so we don't probe them from here.
       try {
         const [watchesResp, configResp] = await Promise.all([
-          fetch("http://127.0.0.1:9820/watches", { signal: controller.signal }),
-          fetch("http://127.0.0.1:9820/config", { signal: controller.signal }),
+          fetch(`${base}/watches`, { signal: controller.signal }),
+          fetch(`${base}/config`, { signal: controller.signal }),
         ]);
         if (watchesResp.ok) setWatches((await watchesResp.json()).watches);
         if (configResp.ok) {
@@ -290,7 +293,7 @@ export default function DashboardPage() {
       const result = await initiateAuth(cognitoConfig, signInEmail, signInPassword);
       if (result.tokens) {
         const email = extractEmailFromIdToken(result.tokens.idToken);
-        await fetch("http://127.0.0.1:9820/auth/tokens", {
+        await fetch(`${await localDataServerUrl()}/auth/tokens`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ idToken: result.tokens.idToken, refreshToken: result.tokens.refreshToken }),
@@ -319,7 +322,7 @@ export default function DashboardPage() {
     try {
       const tokens = await respondNewPasswordChallenge(cognitoConfig, signInChallenge.session, signInEmail, signInNewPassword);
       const email = extractEmailFromIdToken(tokens.idToken);
-      await fetch("http://127.0.0.1:9820/auth/tokens", {
+      await fetch(`${await localDataServerUrl()}/auth/tokens`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }),
@@ -349,7 +352,8 @@ export default function DashboardPage() {
     if (duplicate) { setWatchError("A watch for this directory already exists."); return; }
     setWatchSubmitting(true);
     try {
-      const resp = await fetch("http://127.0.0.1:9820/watches", {
+      const base = await localDataServerUrl();
+      const resp = await fetch(`${base}/watches`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ directoryPath: path, recursive: true }),
@@ -357,7 +361,7 @@ export default function DashboardPage() {
       const data = await resp.json();
       if (resp.ok) {
         setWatchPath(""); setWatchSuccess(`Watch started: ${data.watch?.directoryPath ?? path}`);
-        const wResp = await fetch("http://127.0.0.1:9820/watches");
+        const wResp = await fetch(`${base}/watches`);
         if (wResp.ok) setWatches((await wResp.json()).watches);
       } else {
         setWatchError(data.error ?? "Failed to add watch.");
@@ -368,13 +372,13 @@ export default function DashboardPage() {
 
   async function handleRemoveWatch(id: string) {
     try {
-      await fetch(`http://127.0.0.1:9820/watches/${id}`, { method: "DELETE" });
+      await fetch(`${await localDataServerUrl()}/watches/${id}`, { method: "DELETE" });
       setWatches((ws) => ws?.filter((w) => w.id !== id) ?? null);
     } catch { /* server offline */ }
   }
 
   async function handleSignOut() {
-    await fetch("http://127.0.0.1:9820/auth/logout", { method: "POST" }).catch(() => {});
+    await fetch(`${await localDataServerUrl()}/auth/logout`, { method: "POST" }).catch(() => {});
     await clearCloudCredentials();
     setCognitoSession(null);
     bumpAll();

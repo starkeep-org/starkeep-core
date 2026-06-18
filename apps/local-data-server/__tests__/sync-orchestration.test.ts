@@ -96,7 +96,7 @@ describe("nudge routing and pause/resume (long tick interval)", () => {
   });
 
   it("a shared-record write nudges only the Drive channel", async () => {
-    await createRecordWithBytes(app, { type: "jpg" });
+    await createRecordWithBytes(app, { type: "image/jpeg" });
     await eventually(() => {
       const driveExchanges = cloud.exchangeLog.filter((e) => e.appId === "starkeep-drive");
       expect(driveExchanges.length).toBeGreaterThan(0);
@@ -134,7 +134,7 @@ describe("nudge routing and pause/resume (long tick interval)", () => {
     expect(pause.status).toBe(200);
     expect((await syncStatus(app)).syncPaused).toBe(true);
 
-    await createRecordWithBytes(app, { type: "jpg" });
+    await createRecordWithBytes(app, { type: "image/jpeg" });
     await sleep(400);
     expect(cloud.exchangeLog).toEqual([]);
 

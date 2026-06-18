@@ -61,7 +61,7 @@ test("install photos through the admin consent flow", async ({ page }) => {
   // modal overlay.)
   const consent = page.locator("div.fixed").filter({ hasText: "Install Photos?" });
   await expect(consent).toBeVisible();
-  await expect(consent.getByText(/jpg, jpeg, png/)).toBeVisible();
+  await expect(consent.getByText(/image\/jpeg, image\/png/)).toBeVisible();
   await expect(consent.getByText("records: read + write")).toBeVisible();
   await expect(consent.getByText("metadata: read + write")).toBeVisible();
 
@@ -97,7 +97,7 @@ test("start photos from the admin UI and open it on its allocated port", async (
 
 test("a photo uploaded in photos appears in Drive; its caption does not", async ({ page }) => {
   await page.goto(photosUrl);
-  await page.locator('input[type="file"]').setInputFiles(fixturePath);
+  await page.locator('input[type="file"]').first().setInputFiles(fixturePath);
   await expect(page.getByAltText("sunset.png").first()).toBeVisible({
     timeout: 60_000,
   });
@@ -127,7 +127,7 @@ test("re-uploading the same photo dedups at the platform layer", async ({ page }
   });
   const countBefore = await page.getByAltText("sunset.png").count();
 
-  await page.locator('input[type="file"]').setInputFiles(fixturePath);
+  await page.locator('input[type="file"]').first().setInputFiles(fixturePath);
   await expect(page.getByRole("status")).toContainText("is already in your photos");
   expect(await page.getByAltText("sunset.png").count()).toBe(countBefore);
 });
@@ -193,6 +193,9 @@ test("a corrupted HMAC secret turns into 401s and a visible error state", async 
   });
 
   // And the UI surfaces it rather than rendering an empty-but-healthy grid.
+  // Scope to the app's own error banner ("Data server GET … → 401"); under
+  // `next dev` a bare /→ 401/ also matches the Next.js error overlay that the
+  // data-server-client's throw produces, which is a dev-only artifact.
   await page.goto(photosUrl);
-  await expect(page.getByText(/→ 401/)).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/Data server GET .*→ 401/)).toBeVisible({ timeout: 60_000 });
 });

@@ -24,7 +24,7 @@ import {
   buildTempInstallDdlPolicy,
 } from "./temp-policies";
 import type { FileAccess } from "@starkeep/admin-manifest";
-import { APP_GRANTABLE_CATEGORIES, categoryOf } from "@starkeep/protocol-primitives";
+import { APP_GRANTABLE_CATEGORIES, typeCategory } from "@starkeep/protocol-primitives";
 
 function makeIamClient(creds: AwsCredentials): IAMClient {
   return new IAMClient({
@@ -45,8 +45,8 @@ function makeIamClient(creds: AwsCredentials): IAMClient {
 function categoriesOf(fileAccess: FileAccess[]): string[] {
   const set = new Set<string>();
   for (const entry of fileAccess) {
-    for (const ext of entry.extensions) {
-      const category = categoryOf(ext);
+    for (const type of entry.types) {
+      const category = typeCategory(type);
       if (category !== "other") set.add(category);
     }
   }

@@ -169,7 +169,7 @@ export async function initializeSharedSchema(
          version            integer     NOT NULL DEFAULT 1,
          content_hash       text        NOT NULL,
          object_storage_key text        NOT NULL,
-         mime_type          text        NOT NULL,
+         mime_type          text,
          size_bytes         bigint      NOT NULL,
          original_filename  text,
          origin_app_id      text        NOT NULL,

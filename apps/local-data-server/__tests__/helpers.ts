@@ -4,6 +4,7 @@
  * HTTP exactly like an installed app: HMAC-signed requests through
  * @starkeep/app-client, with /admin/* used loopback-style like admin-web.
  */
+import { createHash } from "node:crypto";
 import { signedFetch, type AppCredentials } from "@starkeep/app-client";
 import type { LocalDataServer } from "@starkeep/testkit";
 
@@ -17,7 +18,7 @@ export function testAppManifest(over: Record<string, unknown> = {}): Record<stri
     infraRequirements: {
       fileAccess: [
         {
-          extensions: ["jpg", "png"],
+          types: ["image/jpeg", "image/png"],
           access: "readwrite",
           metadataWrite: true,
           rationale: "test",
@@ -49,7 +50,7 @@ export function readOnlyAppManifest(): Record<string, unknown> {
     tier: "community",
     infraRequirements: {
       fileAccess: [
-        { extensions: ["pdf"], access: "read", metadataWrite: false, rationale: "test" },
+        { types: ["document/pdf"], access: "read", metadataWrite: false, rationale: "test" },
       ],
     },
   };
@@ -116,7 +117,7 @@ export async function createRecordWithBytes(
     parentId?: string;
   } = {},
 ): Promise<{ record: { id: string; [k: string]: unknown }; deduped?: boolean }> {
-  const type = options.type ?? "jpg";
+  const type = options.type ?? "image/jpeg";
   const contentType = options.contentType ?? "image/jpeg";
   const bytes = Buffer.isBuffer(options.bytes)
     ? options.bytes
@@ -147,6 +148,46 @@ export async function createRecordWithBytes(
   });
   if (!register.ok) throw new Error(`register failed: ${register.status} ${await register.text()}`);
   return (await register.json()) as { record: { id: string }; deduped?: boolean };
+}
+
+/**
+ * Write an app-private file through the only supported path: presign → direct
+ * upload to the returned URL → register the index row. Returns the stored key.
+ */
+export async function putAppFile(
+  app: InstalledApp,
+  subKey: string,
+  bytes: Buffer | string,
+  mimeType = "application/octet-stream",
+): Promise<{ key: string }> {
+  const body = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+
+  const presign = await app.fetch("/app-data/files/presign", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subKey, contentType: mimeType }),
+  });
+  if (!presign.ok) throw new Error(`presign failed: ${presign.status} ${await presign.text()}`);
+  const { url } = (await presign.json()) as { url: string; key: string };
+
+  const uploaded = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": mimeType },
+    body: body as unknown as BodyInit,
+  });
+  if (!uploaded.ok) throw new Error(`upload failed: ${uploaded.status}`);
+
+  const register = await app.fetch(`/app-data/files/${subKey}/record`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contentHash: createHash("sha256").update(body as unknown as Uint8Array).digest("hex"),
+      mimeType,
+      sizeBytes: body.length,
+    }),
+  });
+  if (!register.ok) throw new Error(`register failed: ${register.status} ${await register.text()}`);
+  return (await register.json()) as { key: string };
 }
 
 export async function listRecords(

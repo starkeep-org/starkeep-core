@@ -37,10 +37,10 @@ const clock = createHLCClock({ nodeId: "node-test" });
 function sampleRecord() {
   return createDataRecord(
     {
-      type: "jpg",
+      type: "image/jpeg",
       originAppId: "photos",
       contentHash: "sha256:abc",
-      objectStorageKey: "shared/jpg/ab/abc",
+      objectStorageKey: "shared/image/ab/abc",
       mimeType: "image/jpeg",
       sizeBytes: 10,
     },
@@ -193,7 +193,7 @@ describe("batch", () => {
 describe("metadata tables", () => {
   it("upserts metadata into the category table derived from the type", async () => {
     const record = sampleRecord();
-    await adapter.putMetadata("jpg", { recordId: record.id, width: 800, height: 600 });
+    await adapter.putMetadata("image/jpeg", { recordId: record.id, width: 800, height: 600 });
     const [call] = client.calls;
     expect(call.text).toContain("INSERT INTO shared.record_image_metadata");
     expect(call.text).toContain("ON CONFLICT(record_id) DO UPDATE SET");
@@ -203,7 +203,7 @@ describe("metadata tables", () => {
 
   it("uses DO NOTHING when the row carries no columns beyond record_id", async () => {
     const record = sampleRecord();
-    await adapter.putMetadata("jpg", { recordId: record.id });
+    await adapter.putMetadata("image/jpeg", { recordId: record.id });
     expect(client.calls[0].text).toContain("ON CONFLICT(record_id) DO NOTHING");
   });
 
@@ -213,18 +213,18 @@ describe("metadata tables", () => {
       match: /SELECT \* FROM shared\.record_image_metadata/,
       rows: [{ record_id: record.id, width: 800 }],
     });
-    expect(await adapter.getMetadata("jpg", record.id)).toEqual({
+    expect(await adapter.getMetadata("image/jpeg", record.id)).toEqual({
       recordId: record.id,
       width: 800,
     });
-    const byIds = await adapter.getMetadataByIds("jpg", [record.id]);
+    const byIds = await adapter.getMetadataByIds("image/jpeg", [record.id]);
     expect(byIds.get(record.id)).toEqual({ recordId: record.id, width: 800 });
-    expect(await adapter.getMetadataByIds("jpg", [])).toEqual(new Map());
+    expect(await adapter.getMetadataByIds("image/jpeg", [])).toEqual(new Map());
   });
 
   it("deleteMetadata targets the category table by record id", async () => {
     const record = sampleRecord();
-    await adapter.deleteMetadata("jpg", record.id);
+    await adapter.deleteMetadata("image/jpeg", record.id);
     expect(client.calls[0].text).toBe(
       "DELETE FROM shared.record_image_metadata WHERE record_id = $1",
     );

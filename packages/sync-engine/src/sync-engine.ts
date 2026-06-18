@@ -477,7 +477,7 @@ function manifestForRecord(record: AnyRecord): FileSyncManifest | null {
     fileHash: record.contentHash || record.objectStorageKey,
     objectStorageKey: record.objectStorageKey,
     sizeBytes: record.sizeBytes,
-    mimeType: record.mimeType,
+    mimeType: record.mimeType ?? undefined,
   };
 }
 

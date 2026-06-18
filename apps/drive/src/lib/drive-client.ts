@@ -18,7 +18,7 @@ import { DatabaseSync } from "node:sqlite";
 const DRIVE_APP_ID = "starkeep-drive";
 const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
 const DATA_DB_PATH = join(STARKEEP_DIR, "data.db");
-const LDS_URL =
+export const LDS_URL =
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
 
 /**
@@ -44,6 +44,25 @@ function readDriveSecret(): string | null {
   }
 }
 
+/**
+ * Build the signed headers for a GET to the local-data-server as Drive. The
+ * HMAC binds method + path + a timestamp (empty body for GET), matching the LDS
+ * `validateAppHmac` / `@starkeep/app-client`'s `signRequest`. `path` may carry
+ * a query string; the signature is over the pathname only (query stripped),
+ * which is what the LDS canonicalizes too.
+ */
+function signedDriveGetHeaders(secret: string, path: string): Record<string, string> {
+  const ts = Date.now();
+  const pathname = path.split("?")[0]!;
+  const input = `${DRIVE_APP_ID}:GET:${pathname}:${ts}:`;
+  const sig = createHmac("sha256", secret).update(input).digest("hex");
+  return {
+    "X-Starkeep-App-Id": DRIVE_APP_ID,
+    "X-Starkeep-App-Sig": sig,
+    "X-Starkeep-App-Ts": String(ts),
+  };
+}
+
 export class DriveNotInstalledError extends Error {
   constructor() {
     super(
@@ -54,18 +73,15 @@ export class DriveNotInstalledError extends Error {
 }
 
 /**
- * GET a local-data-server `/data/*` path signed as Starkeep Drive. The HMAC is
- * over `${appId}:` (empty body for GET), matching the LDS `validateAppHmac`.
+ * GET a local-data-server `/data/*` path signed as Starkeep Drive. The HMAC
+ * binds method + path + timestamp (empty body for GET), matching the LDS
+ * `validateAppHmac`.
  */
 async function ldsGet<T>(path: string): Promise<T> {
   const secret = readDriveSecret();
   if (!secret) throw new DriveNotInstalledError();
-  const sig = createHmac("sha256", secret).update(`${DRIVE_APP_ID}:`).digest("hex");
   const res = await fetch(`${LDS_URL}${path}`, {
-    headers: {
-      "X-Starkeep-App-Id": DRIVE_APP_ID,
-      "X-Starkeep-App-Sig": sig,
-    },
+    headers: signedDriveGetHeaders(secret, path),
     cache: "no-store",
   });
   if (!res.ok) {
@@ -146,12 +162,8 @@ export class CloudUnavailableError extends Error {
 async function ldsGetCloud<T>(path: string): Promise<T> {
   const secret = readDriveSecret();
   if (!secret) throw new DriveNotInstalledError();
-  const sig = createHmac("sha256", secret).update(`${DRIVE_APP_ID}:`).digest("hex");
   const res = await fetch(`${LDS_URL}${path}`, {
-    headers: {
-      "X-Starkeep-App-Id": DRIVE_APP_ID,
-      "X-Starkeep-App-Sig": sig,
-    },
+    headers: signedDriveGetHeaders(secret, path),
     cache: "no-store",
   });
   const body = await res.text();

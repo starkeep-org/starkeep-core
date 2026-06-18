@@ -17,7 +17,7 @@ import { pipeline } from "node:stream/promises";
 import type { DatabaseSync } from "node:sqlite";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
-import { createStarkeepId } from "@starkeep/protocol-primitives";
+import { createStarkeepId, defaultTypeForExtension } from "@starkeep/protocol-primitives";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -65,31 +65,13 @@ export interface FileWatchManager {
 // Identification
 // ---------------------------------------------------------------------------
 
-// The record's `type` is the lowercase file extension (no dot); "" for
-// extension-less files. The category is derived downstream via
-// `categoryOf(type)` — unmapped/empty extensions become the Drive-only
-// "other" category. The watcher never skips: every file is ingested.
+// The filename extension (lowercase, no dot); "" for extension-less files.
+// Advisory only — fed to `defaultTypeForExtension` to pick a default Starkeep
+// type. Unmapped/empty extensions become the Drive-only `other/other` type.
+// The watcher never skips: every file is ingested.
 function extensionOf(filePath: string): string {
   const ext = extname(filePath).toLowerCase();
   return ext.startsWith(".") ? ext.slice(1) : ext;
-}
-
-// Incidental MIME for the stored blob's Content-Type. Not authoritative and
-// never decides the type. A small table covers common cases; everything else
-// is the generic octet-stream.
-const EXT_MIME: Record<string, string> = {
-  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
-  gif: "image/gif", webp: "image/webp", heic: "image/heic",
-  mp4: "video/mp4", mov: "video/quicktime", avi: "video/x-msvideo",
-  mp3: "audio/mpeg", wav: "audio/wav", flac: "audio/flac",
-  pdf: "application/pdf", txt: "text/plain", md: "text/markdown",
-  json: "application/json", csv: "text/csv",
-  doc: "application/msword",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-};
-
-function mimeFromExtension(ext: string): string {
-  return EXT_MIME[ext] ?? "application/octet-stream";
 }
 
 // ---------------------------------------------------------------------------
@@ -285,8 +267,10 @@ export function createFileWatchManager(opts: {
       let dataRecordId = await findExistingByHash(contentHash);
 
       if (!dataRecordId) {
-        const type = extensionOf(filePath);
-        const contentType = mimeFromExtension(type);
+        // The watcher has only a filename, so it picks a default Starkeep type
+        // from the extension via the advisory map. MIME is left null — there is
+        // no over-the-network Content-Type on a local-disk ingest.
+        const type = defaultTypeForExtension(extensionOf(filePath));
 
         const record = await sdk.data.putWithLocalFile(
           {
@@ -295,7 +279,7 @@ export function createFileWatchManager(opts: {
             originalFilename: filename,
           },
           filePath,
-          contentType,
+          null,
         );
         dataRecordId = record.id;
       }

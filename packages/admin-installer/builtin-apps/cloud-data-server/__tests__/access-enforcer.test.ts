@@ -31,22 +31,22 @@ describe("loadAccessGrants", () => {
   it("maps read rows to readableTypes only and readwrite rows to both", async () => {
     const grants = await loadAccessGrants(
       scriptedClient([
-        { type_id: "pdf", access: "read" },
-        { type_id: "jpg", access: "readwrite" },
+        { type_id: "document/pdf", access: "read" },
+        { type_id: "image/jpeg", access: "readwrite" },
       ]),
       "photos",
     );
     expect(grants.allAccess).toBe(false);
-    expect([...grants.readableTypes].sort()).toEqual(["jpg", "pdf"]);
-    expect([...grants.writableTypes]).toEqual(["jpg"]);
+    expect([...grants.readableTypes].sort()).toEqual(["document/pdf", "image/jpeg"]);
+    expect([...grants.writableTypes]).toEqual(["image/jpeg"]);
   });
 
-  it("derives categories from extension grants via categoryOf", async () => {
+  it("derives categories from type grants via typeCategory", async () => {
     const grants = await loadAccessGrants(
       scriptedClient([
-        { type_id: "jpg", access: "readwrite" },
-        { type_id: "png", access: "readwrite" },
-        { type_id: "mp4", access: "read" },
+        { type_id: "image/jpeg", access: "readwrite" },
+        { type_id: "image/png", access: "readwrite" },
+        { type_id: "video/mp4", access: "read" },
       ]),
       "photos",
     );
@@ -65,7 +65,7 @@ describe("loadAccessGrants", () => {
 
   it("ignores unknown access values", async () => {
     const grants = await loadAccessGrants(
-      scriptedClient([{ type_id: "jpg", access: "admin" }]),
+      scriptedClient([{ type_id: "image/jpeg", access: "admin" }]),
       "photos",
     );
     expect(grants.readableTypes.size).toBe(0);
@@ -77,16 +77,16 @@ describe("canRead / canWrite / canReadCategory / canWriteCategory", () => {
   it("gate on the loaded type and category sets", async () => {
     const grants = await loadAccessGrants(
       scriptedClient([
-        { type_id: "jpg", access: "readwrite" },
-        { type_id: "pdf", access: "read" },
+        { type_id: "image/jpeg", access: "readwrite" },
+        { type_id: "document/pdf", access: "read" },
       ]),
       "photos",
     );
-    expect(canRead(grants, "jpg")).toBe(true);
-    expect(canWrite(grants, "jpg")).toBe(true);
-    expect(canRead(grants, "pdf")).toBe(true);
-    expect(canWrite(grants, "pdf")).toBe(false);
-    expect(canRead(grants, "mp3")).toBe(false);
+    expect(canRead(grants, "image/jpeg")).toBe(true);
+    expect(canWrite(grants, "image/jpeg")).toBe(true);
+    expect(canRead(grants, "document/pdf")).toBe(true);
+    expect(canWrite(grants, "document/pdf")).toBe(false);
+    expect(canRead(grants, "audio/mp3")).toBe(false);
     expect(canReadCategory(grants, "image")).toBe(true);
     expect(canWriteCategory(grants, "image")).toBe(true);
     expect(canReadCategory(grants, "document")).toBe(true);

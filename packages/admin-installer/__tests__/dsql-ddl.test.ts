@@ -147,14 +147,14 @@ describe("install DDL for the photos manifest", () => {
     expect(s.some((t) => t.includes("record_video_metadata"))).toBe(false);
   });
 
-  it("upserts one access_grants row per declared extension", async () => {
+  it("upserts one access_grants row per declared type", async () => {
     await installPhotos();
     const grantInserts = stmts().filter((t) => t.includes("INSERT INTO shared.access_grants"));
-    const extCount = photosManifest.infraRequirements.fileAccess.reduce(
-      (n, e) => n + e.extensions.length,
+    const typeCount = photosManifest.infraRequirements.fileAccess.reduce(
+      (n, e) => n + e.types.length,
       0,
     );
-    expect(grantInserts).toHaveLength(extCount); // 11 extensions for photos
+    expect(grantInserts).toHaveLength(typeCount); // 9 types for photos
     for (const t of grantInserts) {
       expect(t).toContain("ON CONFLICT (app_id, type_id) DO UPDATE");
     }
@@ -203,7 +203,7 @@ describe("read-only app install DDL", () => {
     await runAppInstallDdl(
       opts,
       "viewer",
-      [{ extensions: ["pdf"], access: "read", metadataWrite: false, rationale: "t" }],
+      [{ types: ["document/pdf"], access: "read", metadataWrite: false, rationale: "t" }],
       false,
     );
     const s = stmts();
@@ -218,7 +218,7 @@ describe("read-only app install DDL", () => {
     await runAppInstallDdl(
       opts,
       "thumbs",
-      [{ extensions: ["jpg"], access: "read", metadataWrite: true, rationale: "t" }],
+      [{ types: ["image/jpeg"], access: "read", metadataWrite: true, rationale: "t" }],
       false,
     );
     const s = stmts();

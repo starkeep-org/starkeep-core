@@ -12,7 +12,7 @@
   "infraRequirements": {
     "fileAccess": [
       {
-        "extensions": ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "tiff", "tif"],
+        "types": ["image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/heif", "image/avif", "image/bmp", "image/tiff"],
         "access": "readwrite",
         "metadataWrite": true,
         "rationale": "Photos app stores raster images and writes EXIF/dimensions extracted from uploaded image files into the image metadata table."

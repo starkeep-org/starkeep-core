@@ -33,26 +33,67 @@ describe("HMAC on the data plane", () => {
   });
 
   it("rejects a signature minted with the wrong secret", async () => {
-    const headers = signRequest({ appId: app.appId, hmacSecret: "wrong-secret" });
+    const headers = signRequest({
+      appId: app.appId,
+      hmacSecret: "wrong-secret",
+      method: "GET",
+      path: "/data/types",
+    });
     const res = await fetch(`${server.url}/data/types`, { headers });
     expect(res.status).toBe(401);
   });
 
   it("rejects a sig from one app id presented under another (id binding)", async () => {
-    const sig = signRequest({ appId: app.appId, hmacSecret: app.hmacSecret });
+    const sig = signRequest({
+      appId: app.appId,
+      hmacSecret: app.hmacSecret,
+      method: "GET",
+      path: "/data/types",
+    });
     const res = await fetch(`${server.url}/data/types`, {
       headers: {
         "X-Starkeep-App-Id": "starkeep-drive",
         "X-Starkeep-App-Sig": sig["X-Starkeep-App-Sig"],
+        "X-Starkeep-App-Ts": sig["X-Starkeep-App-Ts"],
       },
     });
     expect(res.status).toBe(401);
   });
 
+  it("rejects a signature replayed against a different path (path binding)", async () => {
+    // Sign for /data/types, present at /data/records — must be rejected.
+    const headers = signRequest({
+      appId: app.appId,
+      hmacSecret: app.hmacSecret,
+      method: "GET",
+      path: "/data/types",
+    });
+    const res = await fetch(`${server.url}/data/records`, { headers });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a stale signature outside the freshness window", async () => {
+    const headers = signRequest({
+      appId: app.appId,
+      hmacSecret: app.hmacSecret,
+      method: "GET",
+      path: "/data/types",
+      timestamp: Date.now() - 10 * 60_000,
+    });
+    const res = await fetch(`${server.url}/data/types`, { headers });
+    expect(res.status).toBe(401);
+  });
+
   it("rejects when the body is tampered after signing", async () => {
-    const body = JSON.stringify({ type: "jpg", contentType: "image/jpeg", contentHash: "0".repeat(64), sizeBytes: 1 });
-    const headers = signRequest({ appId: app.appId, hmacSecret: app.hmacSecret, body });
-    const tampered = body.replace("jpg", "png");
+    const body = JSON.stringify({ type: "image/jpeg", contentType: "image/jpeg", contentHash: "0".repeat(64), sizeBytes: 1 });
+    const headers = signRequest({
+      appId: app.appId,
+      hmacSecret: app.hmacSecret,
+      method: "POST",
+      path: "/data/records",
+      body,
+    });
+    const tampered = body.replace("image/jpeg", "image/png");
     const res = await fetch(`${server.url}/data/records`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
@@ -62,7 +103,12 @@ describe("HMAC on the data plane", () => {
   });
 
   it("rejects an unknown app id outright", async () => {
-    const headers = signRequest({ appId: "never-installed", hmacSecret: "whatever" });
+    const headers = signRequest({
+      appId: "never-installed",
+      hmacSecret: "whatever",
+      method: "GET",
+      path: "/data/types",
+    });
     const res = await fetch(`${server.url}/data/types`, { headers });
     expect(res.status).toBe(401);
   });
