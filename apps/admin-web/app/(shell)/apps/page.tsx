@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -19,7 +20,7 @@ import {
   writeCognitoSession,
 } from "@/lib/cloud-config";
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
-import { getRuntimeConfig, RUNTIME_CONFIG_DEFAULTS } from "@/lib/runtime-config";
+import { getRuntimeConfig, RUNTIME_CONFIG_DEFAULTS, localDataServerUrl } from "@/lib/runtime-config";
 
 type AppTarget = "local" | "cloud";
 
@@ -116,6 +117,7 @@ interface InstallStep {
 // ---------------------------------------------------------------------------
 
 function AppDirsEditor({ onSaved }: { onSaved: () => void }) {
+  const [open, setOpen] = useState(false);
   const [dirs, setDirs] = useState<string[] | null>(null);
   const [newDir, setNewDir] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -163,9 +165,20 @@ function AppDirsEditor({ onSaved }: { onSaved: () => void }) {
 
   const remove = (d: string) => save((dirs ?? []).filter((x) => x !== d));
 
+  if (!open) {
+    return (
+      <Button variant="outline" size="sm" className="w-fit" onClick={() => setOpen(true)}>
+        Discover apps
+      </Button>
+    );
+  }
+
   return (
     <div className="rounded-lg border p-5 flex flex-col gap-3">
-      <h2 className="text-base font-semibold">App discovery</h2>
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-base font-semibold">App discovery</h2>
+        <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>Hide</Button>
+      </div>
       <p className="text-sm text-muted-foreground">
         Parent directories scanned for apps (each subdir with a{" "}
         <code className="text-xs">starkeep.manifest.json</code>).
@@ -272,8 +285,6 @@ function DriveSection() {
 
   return (
     <div className="flex flex-col gap-3">
-      <h3 className="text-sm font-medium">Built-ins</h3>
-
       <div className="rounded-md border p-3 flex flex-col gap-2">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -330,6 +341,24 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
   // reflects the target state (running for "start", not-running for "stop"),
   // so the spinner survives the first poll round.
   const [pending, setPending] = useState<Record<string, "start" | "stop" | undefined>>({});
+  // Whether the local-data-server is reachable. Installs route through it, so
+  // the Install button stays disabled until its /health probe succeeds.
+  // null = not yet probed.
+  const [localOnline, setLocalOnline] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const base = await localDataServerUrl();
+        const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) });
+        if (!cancelled) setLocalOnline(res.ok);
+      } catch {
+        if (!cancelled) setLocalOnline(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [apps]);
 
   const refreshStatus = useCallback(async (appIds: string[]) => {
     const entries = await Promise.all(appIds.map(async (id) => {
@@ -469,11 +498,6 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">Installed apps</h3>
-        <Button variant="outline" size="sm" onClick={refresh}>Refresh</Button>
-      </div>
-
       {error && (
         <Alert variant="destructive">
           <AlertTitle>Error</AlertTitle>
@@ -487,8 +511,6 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
       )}
 
       {apps?.map((entry) => {
-        const grants = entry.manifest.infraRequirements?.fileAccess ?? [];
-        const allAccess = entry.manifest.infraRequirements?.fileAccessAll ?? false;
         const installed = entry.status === "active";
         const status = runStatus[entry.appId];
         const want = pending[entry.appId];
@@ -570,7 +592,8 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
                   <Button
                     size="sm"
                     onClick={() => setPendingConsent(entry)}
-                    disabled={busyAppId === entry.appId}
+                    disabled={busyAppId === entry.appId || !localOnline}
+                    title={localOnline ? undefined : "Start the local data server before installing"}
                   >
                     {busyAppId === entry.appId ? "Installing…" : "Install"}
                   </Button>
@@ -586,33 +609,10 @@ function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; ref
                     {busyAppId === entry.appId ? "Uninstalling…" : "Uninstall"}
                   </Button>
                 )}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setStepsOpenFor(entry.appId)}
-                  title="Show install/uninstall step history"
-                >
-                  Steps
-                </Button>
               </div>
             </div>
             {entry.manifest.description && (
               <p className="text-sm text-muted-foreground">{entry.manifest.description}</p>
-            )}
-            {allAccess && (
-              <p className="text-xs text-muted-foreground">
-                <span className="font-mono">all files</span> (User-Data-Owner): read + write
-              </p>
-            )}
-            {grants.length > 0 && (
-              <ul className="text-xs text-muted-foreground flex flex-col gap-0.5">
-                {grants.map((g, i) => (
-                  <li key={i}>
-                    <span className="font-mono">{g.types.join(", ")}</span>: {g.access}
-                    {g.metadataWrite ? " + metadata:write" : ""}
-                  </li>
-                ))}
-              </ul>
             )}
           </div>
         );
@@ -752,6 +752,9 @@ function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose:
 
 function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
   const [apiGatewayUrl, setApiGatewayUrl] = useState<string | null>(null);
+  // null = config not yet read; false = no usable cloud setup (missing config
+  // or region), which gates installs and surfaces the "Set up cloud" CTA.
+  const [cloudReady, setCloudReady] = useState<boolean | null>(null);
   const [credError, setCredError] = useState<string | null>(null);
   // The app whose install modal is currently open (null when closed).
   const [installing, setInstalling] = useState<{ appId: string; appName: string; endpoint: string } | null>(null);
@@ -769,6 +772,9 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
     (async () => {
       const cfg = await readCloudConfig();
       setApiGatewayUrl(cfg?.apiGatewayUrl ?? null);
+      // A usable cloud setup needs config present with a derivable region
+      // (region comes from the userPoolId). Without it, installs can't run.
+      setCloudReady(!!cfg?.region);
     })();
   }, []);
 
@@ -842,10 +848,21 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
       )}
 
       {registryError && (
-        <Alert variant="destructive">
-          <AlertTitle>Couldn’t load cloud install state</AlertTitle>
+        <Alert variant="destructive" className="border-0 p-0">
+          <AlertTitle>Cloud install not found</AlertTitle>
           <AlertDescription>{registryError}</AlertDescription>
         </Alert>
+      )}
+
+      {cloudReady === false && (
+        <div className="rounded-lg border p-4 flex items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">
+            Cloud is not set up yet. Apps can’t be installed in the cloud until setup is complete.
+          </p>
+          <Button asChild size="sm">
+            <Link href="/cloud-setup">Set up cloud →</Link>
+          </Button>
+        </div>
       )}
 
       {apps === null && <p className="text-sm text-muted-foreground">Loading…</p>}
@@ -882,7 +899,12 @@ function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
                     Open ↗
                   </a>
                 )}
-                <Button size="sm" onClick={() => handleInstall(entry.appId, name, endpoint)}>
+                <Button
+                  size="sm"
+                  onClick={() => handleInstall(entry.appId, name, endpoint)}
+                  disabled={!cloudReady}
+                  title={cloudReady ? undefined : "Set up cloud before installing apps"}
+                >
                   {installed ? "Redeploy" : "Install in cloud"}
                 </Button>
               </div>
