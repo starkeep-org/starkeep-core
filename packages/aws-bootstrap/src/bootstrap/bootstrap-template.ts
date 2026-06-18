@@ -478,5 +478,8 @@ export function getBootstrapStackOutputsUrl(
   region: string,
   stackName = "starkeep-bootstrap",
 ): string {
-  return `https://${region}.console.aws.amazon.com/cloudformation/home?region=${region}#/stacks/stackinfo?filteringStatus=active&filteringText=${encodeURIComponent(stackName)}&viewNested=true&hideStacks=false`;
+  // We can't include the per-stack stackId ARN (it isn't known until the stack
+  // is created), so the console can't pin the exact stack. filteringText
+  // narrows the stack list to the bootstrap stack on the Outputs tab.
+  return `https://${region}.console.aws.amazon.com/cloudformation/home?region=${region}#/stacks/outputs?filteringStatus=active&filteringText=${encodeURIComponent(stackName)}&viewNested=true&hideStacks=false`;
 }

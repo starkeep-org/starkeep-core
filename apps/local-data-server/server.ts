@@ -287,6 +287,28 @@ async function loadStarkeepConfig(): Promise<StarkeepConfig> {
   return parsed as StarkeepConfig;
 }
 
+/**
+ * Assemble the Cognito config from a StarkeepConfig, or null if the three
+ * required pool fields aren't all present. Region is derived from the
+ * userPoolId (AWS encodes it in the prefix), never stored separately.
+ *
+ * Callers that authenticate must derive this from a *freshly loaded* config
+ * rather than a boot-time snapshot: the admin panel writes the pool IDs to
+ * ~/.starkeep/config.json directly (it does not restart this daemon), so a
+ * value captured at boot goes stale the moment cloud setup fills them in.
+ */
+function cognitoConfigFrom(config: StarkeepConfig): CognitoConfig | null {
+  if (!config.userPoolId || !config.userPoolClientId || !config.identityPoolId) {
+    return null;
+  }
+  return {
+    region: regionFromUserPoolId(config.userPoolId),
+    userPoolId: config.userPoolId,
+    userPoolClientId: config.userPoolClientId,
+    identityPoolId: config.identityPoolId,
+  };
+}
+
 async function loadPersistedAuth(): Promise<PersistedAuth | null> {
   try {
     return JSON.parse(await readFile(join(STARKEEP_DIR, "auth.json"), "utf8")) as PersistedAuth;
@@ -391,15 +413,10 @@ async function main() {
     }
   }
 
-  const cognitoConfig: CognitoConfig | null =
-    starkeepConfig.userPoolId && starkeepConfig.userPoolClientId && starkeepConfig.identityPoolId
-      ? {
-          region: configRegion,
-          userPoolId: starkeepConfig.userPoolId,
-          userPoolClientId: starkeepConfig.userPoolClientId,
-          identityPoolId: starkeepConfig.identityPoolId,
-        }
-      : null;
+  // Boot-time snapshot — used only to decide whether to start the credential
+  // refresh timer below. Request handlers that authenticate must NOT trust this
+  // (it goes stale once cloud setup writes the pool IDs); they reload from disk.
+  const cognitoConfig: CognitoConfig | null = cognitoConfigFrom(starkeepConfig);
 
   if (cognitoConfig && currentRefreshToken) {
     console.log("Stored auth found — starting credential refresh timer");
@@ -740,14 +757,20 @@ async function main() {
       }
 
       if (path === "/auth/status" && req.method === "GET") {
+        // Reload from disk so this reflects setup that completed after boot.
+        const freshCognito = cognitoConfigFrom(await loadStarkeepConfig());
         json(res, {
-          configLoaded: cognitoConfig !== null,
+          configLoaded: freshCognito !== null,
           authenticated: currentRefreshToken !== null,
         });
         return;
       }
 
       if (path === "/auth/login" && req.method === "POST") {
+        // Reload from disk: the admin panel writes the Cognito pool IDs to
+        // config.json without restarting this daemon, so the boot-time snapshot
+        // may be stale (null) even though setup is complete.
+        const cognitoConfig = cognitoConfigFrom(await loadStarkeepConfig());
         if (!cognitoConfig) {
           res.writeHead(503);
           json(res, { error: "No ~/.starkeep/config.json found — cannot authenticate" });
@@ -815,6 +838,10 @@ async function main() {
       }
 
       if (path === "/auth/tokens" && req.method === "POST") {
+        // Reload from disk — see the note in /auth/login. The boot-time
+        // cognitoConfig const is null until this daemon is restarted, but cloud
+        // setup writes the pool IDs directly to config.json.
+        const cognitoConfig = cognitoConfigFrom(await loadStarkeepConfig());
         if (!cognitoConfig) {
           res.writeHead(503);
           json(res, { error: "No cloud config loaded — cannot authenticate" });
