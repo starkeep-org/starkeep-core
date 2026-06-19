@@ -38,6 +38,7 @@ import { getCategory, typeCategory, isCategoryId, isKnownType } from "../../pack
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { createStarkeepId } from "@starkeep/protocol-primitives";
+import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
@@ -57,7 +58,7 @@ import {
 // all outstanding tokens are invalidated on restart (revocable by design).
 const TOKEN_SECRET = randomBytes(32) as unknown as Uint8Array;
 
-const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
+const STARKEEP_DIR = starkeepDir();
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
 // Intentionally not configurable. The request-auth model in this server treats
 // the loopback bind as the boundary for administrative and host-level routes

@@ -19,9 +19,15 @@
  *
  * Gap 3 (HMAC secret drift, todo 39) is characterized here too: when the cloud
  * secret has drifted from the local registry's, both the Drive cloud view
- * (proxy) and Drive sync return 401 `Invalid signature`. That bug's *durable*
- * fix (closing the drift path in the installer) is out of scope; this pins the
- * observable symptom so the eventual fix has a regression to flip.
+ * (proxy) and Drive sync return 401 `Invalid signature`. The *durable* fix for
+ * todo 39 lives in the installer — `resolveLocalHmacSecret`
+ * (admin-installer/src/orchestrator.ts) now mirrors the *local registry*
+ * secret (the one the supervisor signs with) to SSM instead of a separately
+ * minted creds-file value, so the stores can no longer diverge through the
+ * install flow (regression: admin-installer/__tests__/orchestrator.test.ts).
+ * The drift case below stays asserting 401 on purpose: it injects a mismatch
+ * the install path can no longer produce, keeping the proxy's signature check
+ * honest (a real bad signature must still be rejected).
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
@@ -123,10 +129,11 @@ describe("HMAC secret drift between local registry and cloud (gap 3 / todo 39 ch
     await cloud?.close();
   });
 
-  // NOTE: this asserts the *wrong* behavior on purpose. The durable fix for
-  // todo 39 closes the drift path (reinstall re-mirrors, or refuses to
-  // regenerate an already-mirrored secret) so these 401s never happen in the
-  // field. When that lands, this test should be flipped to assert success.
+  // The durable todo-39 fix landed in the installer (see header): cloud install
+  // now mirrors the local registry secret, so this mismatch can't arise through
+  // the install flow. These 401s stay asserted on purpose — they prove the
+  // proxy/verifier still reject a genuinely wrong signature, not that drift is
+  // tolerated.
   it("returns 401 on the Drive cloud view through the proxy", async () => {
     const res = await drive.fetch("/cloud/data/types");
     expect(res.status).toBe(401);

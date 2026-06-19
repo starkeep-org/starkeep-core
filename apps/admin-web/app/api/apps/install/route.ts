@@ -1,13 +1,13 @@
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { stopById } from "../../../../src/lib/daemon-control";
 import { findApp } from "../../../../src/lib/app-scan";
 
 const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-const APP_CREDS_DIR = join(STARKEEP_DATA_DIR, "app-creds");
+const STARKEEP_DIR = starkeepDir();
+const APP_CREDS_DIR = join(STARKEEP_DIR, "app-creds");
 
 /**
  * Install an app locally. Body: `{ appId, approved: true }`.

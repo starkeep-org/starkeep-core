@@ -6,19 +6,22 @@
 #   2. cloud-data-server: Lambda, log group, API Gateway, DSQL cluster,
 #      files bucket, billing bucket, CUR report, IAM role
 #
-# --prefix is required: it scopes the teardown to one deployment and is never
-# inferred from config. If omitted in an interactive shell you'll be prompted
-# for it; an unattended run (--yes or no TTY) without it errors out. Region is
-# still read from ~/.starkeep/config.json when not passed via --region.
+# --prefix and --region are both required: they scope the teardown to one
+# deployment in one place and neither is ever inferred from config. A
+# config-derived or CLI-default region can silently target the wrong region
+# (e.g. the test suite deploys to us-east-2 while the AWS CLI default is
+# us-east-1), skipping the real resources. If either is omitted in an
+# interactive shell you'll be prompted for it; an unattended run (--yes or no
+# TTY) missing either errors out.
 #
 # Usage:
-#   ./teardown-cloud-data-server.sh [--yes|-y] --prefix <stack-prefix> [--region <region>]
+#   ./teardown-cloud-data-server.sh [--yes|-y] --prefix <stack-prefix> --region <region>
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STARKEEP_DATA_DIR="${STARKEEP_DATA_DIR:-$HOME/.starkeep}"
-CONFIG_FILE="$STARKEEP_DATA_DIR/config.json"
+STARKEEP_DIR="${STARKEEP_DIR:-$HOME/.starkeep}"
+CONFIG_FILE="$STARKEEP_DIR/config.json"
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
 
@@ -60,24 +63,30 @@ if [[ -z "$STACK_PREFIX" ]]; then
   fi
   if [[ -z "$STACK_PREFIX" ]]; then
     echo "Error: a stack prefix is required; pass --prefix <stack-prefix>." >&2
-    echo "Usage: $0 [--yes] --prefix <stack-prefix> [--region <region>]" >&2
+    echo "Usage: $0 [--yes] --prefix <stack-prefix> --region <region>" >&2
     exit 1
   fi
 fi
 
-if [[ -n "$FLAG_REGION" ]]; then
-  REGION="$FLAG_REGION"
-elif [[ -n "$CONFIG_USER_POOL_ID" ]]; then
-  REGION="${CONFIG_USER_POOL_ID%%_*}"
-elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-  REGION="$AWS_DEFAULT_REGION"
-elif [[ -n "${AWS_REGION:-}" ]]; then
-  REGION="$AWS_REGION"
-elif REGION=$(aws configure get region 2>/dev/null) && [[ -n "$REGION" ]]; then
-  :
-else
-  echo "Error: cannot determine region. Supply --region <region> or set AWS_DEFAULT_REGION."
-  exit 1
+# Region, like the prefix, scopes a teardown to one place and is never inferred
+# silently: a config-derived or CLI-default region can point at the wrong place
+# (e.g. the test suite deploys to us-east-2 while the AWS CLI default is
+# us-east-1), which would skip the real resources and falsely report success.
+# It must be passed via --region, or entered at an interactive prompt.
+REGION="$FLAG_REGION"
+if [[ -z "$REGION" ]]; then
+  if [[ "$YES" != "true" && -t 0 ]]; then
+    CONFIG_REGION="${CONFIG_USER_POOL_ID%%_*}"
+    if [[ -n "$CONFIG_REGION" ]]; then
+      echo "No --region given. (For reference, $CONFIG_FILE describes region '$CONFIG_REGION'.)" >&2
+    fi
+    read -r -p "Enter the region to tear down: " REGION
+  fi
+  if [[ -z "$REGION" ]]; then
+    echo "Error: a region is required; pass --region <region>." >&2
+    echo "Usage: $0 [--yes] --prefix <stack-prefix> --region <region>" >&2
+    exit 1
+  fi
 fi
 
 # Pin every aws subcommand below to the resolved region. The CLI's default

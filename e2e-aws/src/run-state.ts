@@ -1,9 +1,9 @@
 /**
  * Per-prefix run state for the Tier-3 runner, kept under `e2e-aws/.run/<prefix>/`
- * (gitignored). The directory doubles as STARKEEP_DATA_DIR for the install
- * CLIs: they read AND rewrite `$STARKEEP_DATA_DIR/config.json`, so giving them
- * a dedicated dir is what keeps a test run from clobbering the operator's
- * live ~/.starkeep/config.json.
+ * (gitignored). The directory doubles as STARKEEP_DIR for the install CLIs and
+ * the booted LDS: they read AND rewrite `$STARKEEP_DIR/config.json` and the
+ * registry `$STARKEEP_DIR/data.db`, so giving them a dedicated shared dir is what
+ * keeps a test run from clobbering the operator's live ~/.starkeep.
  *
  * `admin.json` holds the generated Cognito test-admin password (0600). It is
  * deliberately not a managed secret: the user it unlocks only exists in the
@@ -18,7 +18,7 @@ import { randomBytes } from "node:crypto";
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export interface RunPaths {
-  /** e2e-aws/.run/<prefix> — also the STARKEEP_DATA_DIR for spawned CLIs. */
+  /** e2e-aws/.run/<prefix> — also the STARKEEP_DIR for spawned CLIs and the LDS. */
   dataDir: string;
   configPath: string;
   adminPath: string;

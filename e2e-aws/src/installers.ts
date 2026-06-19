@@ -5,8 +5,11 @@
  * credentials to the CLIs via `--non-interactive`, which is exactly what the
  * CLIs' interactive mode does internally after prompting.
  *
- * STARKEEP_DATA_DIR is always the run-state dir: the CLIs read and rewrite
- * `$STARKEEP_DATA_DIR/config.json`, and must never touch ~/.starkeep.
+ * STARKEEP_DIR is always the run-state dir — the single root for this "machine":
+ * the CLIs read and rewrite `$STARKEEP_DIR/config.json` and read the local
+ * registry `$STARKEEP_DIR/data.db`, and must never touch ~/.starkeep. The booted
+ * LDS shares the same dir (see journey.test.ts), so config.json and data.db
+ * co-locate exactly as they do under ~/.starkeep in production.
  */
 
 import { spawn } from "node:child_process";
@@ -69,7 +72,7 @@ export async function runInstallCli(
       stdio: "inherit",
       env: {
         ...process.env,
-        STARKEEP_DATA_DIR: paths.dataDir,
+        STARKEEP_DIR: paths.dataDir,
         AWS_ACCESS_KEY_ID: session.awsCredentials.accessKeyId,
         AWS_SECRET_ACCESS_KEY: session.awsCredentials.secretAccessKey,
         AWS_SESSION_TOKEN: session.awsCredentials.sessionToken,

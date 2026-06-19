@@ -72,28 +72,13 @@ function cloudApp(local: AppCredentials): LdsApp {
   return { ...creds, fetch: (path, init) => signedFetch(creds, path, init) };
 }
 
-/**
- * Mirror an LDS-held app secret into the run dir's app-creds file, where the
- * cloud install CLI (`ensureLocalHmacSecret`) reads it before writing SSM.
- * This is how the local signer and the cloud verifier end up sharing a key.
- */
-function mirrorLocalCreds(app: AppCredentials): void {
-  const credsDir = join(paths.dataDir, "app-creds");
-  mkdirSync(credsDir, { recursive: true, mode: 0o700 });
-  writeFileSync(
-    join(credsDir, `${app.appId}.json`),
-    JSON.stringify({ appId: app.appId, hmacSecret: app.hmacSecret }, null, 2),
-    { mode: 0o600 },
-  );
-}
-
 function runTeardownScript(script: string): void {
   const result = spawnSync(
     "bash",
     [join(REPO_ROOT, "scripts", script), "--yes", "--prefix", STACK_PREFIX, "--region", REGION],
     {
       stdio: "inherit",
-      env: { ...process.env, STARKEEP_DATA_DIR: paths.dataDir, AWS_REGION: REGION },
+      env: { ...process.env, STARKEEP_DIR: paths.dataDir, AWS_REGION: REGION },
     },
   );
   if (result.status !== 0) {
@@ -162,16 +147,17 @@ function runTeardownScript(script: string): void {
       // means the sync supervisor stays parked (startOrKickSupervisor gates on a
       // live id token) until that handoff lands — so the later `shipped > 0`
       // assertion genuinely depends on the handoff having started sync.
+      // Share the run-state dir as the LDS's STARKEEP_DIR, so config.json (written
+      // by the cloud-data-server install) and data.db (the LDS's registry) live in
+      // one dir — the single-root model the install CLIs also use, mirroring
+      // ~/.starkeep in production. Pass the full on-disk config so the boot write
+      // preserves the install's apiGatewayUrl/auroraEndpoint rather than clobbering
+      // them. No auth.json is seeded — sign-in happens via /auth/tokens next.
       lds = await startLocalDataServer({
-        config: {
-          apiGatewayUrl: config.apiGatewayUrl,
-          userPoolId: config.userPoolId,
-          userPoolClientId: config.userPoolClientId,
-          identityPoolId: config.identityPoolId,
-        },
+        starkeepDir: paths.dataDir,
+        config: { ...config } as Record<string, unknown>,
       });
       drive = await driveCreds(lds.url);
-      mirrorLocalCreds(drive);
     });
 
     it("signs in through the LDS /auth/tokens handoff (real Cognito→STS exchange)", async () => {
@@ -206,8 +192,13 @@ function runTeardownScript(script: string): void {
     });
 
     it("installs Drive in the cloud (User-Data-Owner identity)", async () => {
+      // The cloud install mirrors the secret straight from the LDS's local
+      // registry (no creds-file pre-seed): the CLI reads the same data.db the
+      // supervisor signs from, since both share STARKEEP_DIR (the run-state dir).
+      // So a passing /health below is itself the todo-39 regression — local
+      // signer and cloud verifier agree because both derive from the one
+      // registry secret.
       await runInstallCli("cli-install-drive", [], paths, session);
-      // Cloud verifier and local signer must now agree on Drive's key.
       const res = await cloudApp(drive).fetch("/health");
       expect(res.status).toBe(200);
     });
@@ -217,7 +208,6 @@ function runTeardownScript(script: string): void {
         readFileSync(join(STARKEEP_APPS_DIR, "photos", "starkeep.manifest.json"), "utf-8"),
       ) as Record<string, unknown>;
       photos = await installAppDirect(lds!.url, manifest);
-      mirrorLocalCreds(photos);
       await runInstallCli("cli-install-app", ["photos"], paths, session);
 
       const res = await cloudApp(photos).fetch("/health");
@@ -256,6 +246,54 @@ function runTeardownScript(script: string): void {
       const blob = await fetch(url);
       expect(blob.status).toBe(200);
       expect(Buffer.from(await blob.arrayBuffer()).equals(photoBytes)).toBe(true);
+    });
+
+    it("reinstall after local creds drift: cloud install re-mirrors the registry secret, sync still validates", async () => {
+      // Reproduce the todo-39 drift directly: leave a local creds file holding a
+      // *different* secret than Drive's local registry (the value the supervisor
+      // signs with). The pre-fix installer read this creds file and mirrored it
+      // to SSM, so the cloud verifier ended up on a key no local signer held —
+      // every signed Drive request then 401'd "Invalid signature".
+      const credsDir = join(paths.dataDir, "app-creds");
+      const driveCredsPath = join(credsDir, "starkeep-drive.json");
+      mkdirSync(credsDir, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        driveCredsPath,
+        JSON.stringify(
+          { appId: "starkeep-drive", hmacSecret: `${drive.hmacSecret}-drifted` },
+          null,
+          2,
+        ),
+        { mode: 0o600 },
+      );
+
+      // Re-run the cloud Drive install. The fix sources the secret from the
+      // local registry (drive.hmacSecret), not the drifted creds file, and the
+      // alwaysRun put_app_creds_parameter step re-mirrors it to SSM.
+      await runInstallCli("cli-install-drive", [], paths, session);
+
+      // The creds file is reconciled back to the registry secret (so
+      // @starkeep/app-client and the app→LDS HMAC path also converge).
+      const reconciled = JSON.parse(readFileSync(driveCredsPath, "utf-8")) as {
+        hmacSecret: string;
+      };
+      expect(reconciled.hmacSecret).toBe(drive.hmacSecret);
+
+      // Cloud verifier still agrees with the local signer (HMAC_CACHE_TTL_MS=0
+      // in this suite, so the re-mirror takes effect immediately). Pre-fix this
+      // 401'd because SSM held the drifted secret.
+      const health = await cloudApp(drive).fetch("/health");
+      expect(health.status).toBe(200);
+
+      // And the sync exchange — signed by the supervisor with the registry
+      // secret — still validates end-to-end.
+      const sync = await drive.fetch("/sync/now", { method: "POST" });
+      expect(sync.status).toBe(200);
+      const statusRes = await drive.fetch("/sync/status");
+      const { perApp } = (await statusRes.json()) as {
+        perApp: Array<{ appId: string; lastError: string | null }>;
+      };
+      expect(perApp.find((e) => e.appId === "starkeep-drive")?.lastError).toBeNull();
     });
 
     it("photos cloud static handler serves", async () => {

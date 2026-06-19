@@ -14,7 +14,7 @@ const ssmMock = mockClient(SSMClient);
 
 let dir: string;
 const ENV_KEYS = [
-  "STARKEEP_DATA_DIR",
+  "STARKEEP_DIR",
   "STARKEEP_APP_CLIENT_MODE",
   "STARKEEP_CLOUD_DATA_BASE",
   "STARKEEP_APP_CREDS_PARAMETER_NAME",
@@ -29,7 +29,7 @@ beforeEach(() => {
     delete process.env[k];
   }
   dir = mkdtempSync(join(tmpdir(), "app-client-test-"));
-  process.env.STARKEEP_DATA_DIR = dir;
+  process.env.STARKEEP_DIR = dir;
   clearAppCredentialsCache();
   ssmMock.reset();
 });

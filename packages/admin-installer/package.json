@@ -29,6 +29,7 @@
     "@aws-sdk/dsql-signer": "^3.0.0",
     "@pulumi/aws": "^6.0.0",
     "@pulumi/pulumi": "^3.0.0",
+    "@starkeep/app-client": "workspace:*",
     "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",

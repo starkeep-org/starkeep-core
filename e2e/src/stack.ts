@@ -4,8 +4,8 @@
  * Boots the real platform topology: a local-data-server child process (via
  * @starkeep/testkit) against a throwaway STARKEEP_DIR, plus `next dev`
  * instances of admin-web and drive on ephemeral ports, all wired together
- * through the same env vars production uses (STARKEEP_DATA_DIR,
- * STARKEEP_LOCAL_DATA_SERVER_URL, STARKEEP_DIR). Installed apps (photos) are
+ * through the same env vars production uses (STARKEEP_DIR,
+ * STARKEEP_LOCAL_DATA_SERVER_URL). Installed apps (photos) are
  * not booted here — installing them through the real admin-web API and
  * starting them through the real daemon route *is* test coverage, so specs do
  * that themselves via the helpers below.
@@ -132,7 +132,7 @@ export interface PlatformStack {
   adminUrl: string;
   /** null when started with `drive: false`. */
   driveUrl: string | null;
-  /** admin-web's STARKEEP_DATA_DIR (config.json, app-creds/, pids/). */
+  /** admin-web's STARKEEP_DIR (config.json, app-creds/, pids/). */
   adminDataDir: string;
   stop(): Promise<void>;
 }
@@ -142,9 +142,11 @@ export async function startPlatformStack(
 ): Promise<PlatformStack> {
   const lds = await startLocalDataServer();
 
-  // admin-web gets its own data dir, separate from the LDS's STARKEEP_DIR —
-  // the same split a real machine has (~/.starkeep is shared, but here each
-  // side is isolated so tests can't touch real operator state). The config is
+  // admin-web gets its own STARKEEP_DIR, isolated from the LDS's, so tests
+  // can't touch real operator state. (On a real machine admin-web and the LDS
+  // share one ~/.starkeep; this harness only exercises admin-web's local
+  // install/list/config paths — config.json + app-creds/ + pids/ — which never
+  // read the LDS's data.db, so the dirs can stay separate here.) The config is
   // written up front rather than relying on the config route's first-read
   // seeding, so discovery is deterministic.
   const adminDataDir = await mkdtemp(join(tmpdir(), "starkeep-e2e-admin-"));
@@ -160,6 +162,14 @@ export async function startPlatformStack(
       appDir: join(REPO_ROOT, "apps/admin-web"),
       readyPath: "/api/apps/list",
       env: {
+        STARKEEP_DIR: adminDataDir,
+        // Installed-app daemons (e.g. photos) are spawned by admin-web's daemon
+        // route and inherit this env. Those apps resolve their data dir — where
+        // admin-web wrote their app-creds — via STARKEEP_DATA_DIR (the name the
+        // published @starkeep/app-client uses), not STARKEEP_DIR. Without this
+        // they'd fall back to the real ~/.starkeep, read its creds (pointing at
+        // the real local-data-server on :9820), and leak the test out of its
+        // sandbox onto real operator data. Pin both to the isolated dir.
         STARKEEP_DATA_DIR: adminDataDir,
         STARKEEP_LOCAL_DATA_SERVER_URL: lds.url,
       },

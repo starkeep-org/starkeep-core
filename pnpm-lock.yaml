@@ -68,6 +68,9 @@ importers:
       '@aws-sdk/dsql-signer':
         specifier: ^3.0.0
         version: 3.1029.0
+      '@starkeep/app-client':
+        specifier: workspace:*
+        version: link:../../packages/app-client
       '@starkeep/aws-bootstrap':
         specifier: workspace:*
         version: link:../../packages/aws-bootstrap
@@ -144,6 +147,9 @@ importers:
 
   apps/drive:
     dependencies:
+      '@starkeep/app-client':
+        specifier: workspace:*
+        version: link:../../packages/app-client
       next:
         specifier: ^16.0.0
         version: 16.2.3(@babel/core@7.29.0)(@opentelemetry/api@1.9.1)(@playwright/test@1.60.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
@@ -359,6 +365,9 @@ importers:
       '@starkeep/admin-manifest':
         specifier: workspace:*
         version: link:../admin-manifest
+      '@starkeep/app-client':
+        specifier: workspace:*
+        version: link:../app-client
       '@starkeep/protocol-primitives':
         specifier: workspace:*
         version: link:../protocol-primitives

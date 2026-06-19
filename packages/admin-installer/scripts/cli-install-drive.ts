@@ -15,7 +15,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { installDrive } from "../src/builtin-installs";
 import {
@@ -45,8 +45,8 @@ interface StarkeepConfig {
   auroraEndpoint?: string;
 }
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
+const STARKEEP_DIR = starkeepDir();
+const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 function loadConfig(): StarkeepConfig {
   let raw: string;

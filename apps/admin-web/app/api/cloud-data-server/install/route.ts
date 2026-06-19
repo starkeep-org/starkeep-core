@@ -24,14 +24,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, readFileSync, type WriteStream } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 import { NextRequest } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 import { getRegion } from "../../../../src/lib/cloud-config";
 import { restartWorkspaceDaemonIfRunning } from "../../../../src/lib/daemon-control";
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
+const STARKEEP_DIR = starkeepDir();
+const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 // Flip to true to re-enable the iam-permission-tests POC capture:
 //   - sets PULUMI_OPTION_VERBOSE=9 + LOGTOSTDERR + LOGFLOW and TF_LOG=DEBUG so
@@ -118,8 +118,8 @@ export async function POST(req: NextRequest) {
   //   - cds-install.trace: pulumi-aws HTTP traffic (via PULUMI_OPTION_*)
   //   - cds-install.sdk.trace: Node-side @aws-sdk client calls made by the
   //     installer itself (IAM CreateRole, STS AssumeRole, DSQL signer, …)
-  const traceFilePath = join(STARKEEP_DATA_DIR, "cds-install.trace");
-  const sdkTraceFilePath = join(STARKEEP_DATA_DIR, "cds-install.sdk.trace");
+  const traceFilePath = join(STARKEEP_DIR, "cds-install.trace");
+  const sdkTraceFilePath = join(STARKEEP_DIR, "cds-install.sdk.trace");
 
   const spawnEnv = {
     ...process.env,

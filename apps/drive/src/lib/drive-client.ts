@@ -11,13 +11,11 @@
  */
 
 import { createHmac } from "node:crypto";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { dataDbPath } from "@starkeep/app-client";
 
 const DRIVE_APP_ID = "starkeep-drive";
-const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
-const DATA_DB_PATH = join(STARKEEP_DIR, "data.db");
+const DATA_DB_PATH = dataDbPath();
 export const LDS_URL =
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
 
