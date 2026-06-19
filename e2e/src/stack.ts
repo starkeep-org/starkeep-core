@@ -163,14 +163,6 @@ export async function startPlatformStack(
       readyPath: "/api/apps/list",
       env: {
         STARKEEP_DIR: adminDataDir,
-        // Installed-app daemons (e.g. photos) are spawned by admin-web's daemon
-        // route and inherit this env. Those apps resolve their data dir — where
-        // admin-web wrote their app-creds — via STARKEEP_DATA_DIR (the name the
-        // published @starkeep/app-client uses), not STARKEEP_DIR. Without this
-        // they'd fall back to the real ~/.starkeep, read its creds (pointing at
-        // the real local-data-server on :9820), and leak the test out of its
-        // sandbox onto real operator data. Pin both to the isolated dir.
-        STARKEEP_DATA_DIR: adminDataDir,
         STARKEEP_LOCAL_DATA_SERVER_URL: lds.url,
       },
     });
