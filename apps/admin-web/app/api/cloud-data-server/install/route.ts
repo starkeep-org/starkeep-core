@@ -28,6 +28,7 @@ import { homedir } from "node:os";
 import { NextRequest } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 import { getRegion } from "../../../../src/lib/cloud-config";
+import { restartWorkspaceDaemonIfRunning } from "../../../../src/lib/daemon-control";
 
 const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
 const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
@@ -163,6 +164,20 @@ export async function POST(req: NextRequest) {
 
       const finish = (code: number | null) => {
         if (code === 0) {
+          // The installer rewrote ~/.starkeep/config.json with the new
+          // apiGatewayUrl / S3 / DSQL outputs, but the local-data-server reads
+          // that file once at boot. Restart it (if running) so its CLOUD_URL and
+          // sync supervisor pick up the freshly-installed cloud — otherwise the
+          // Drive cloud view keeps reporting "Cloud is not configured" until the
+          // user manually restarts the daemon.
+          try {
+            if (restartWorkspaceDaemonIfRunning("local-data-server")) {
+              emit("[Restarted local-data-server to apply new cloud config]");
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            emit(`[Warning: could not restart local-data-server: ${msg}]`);
+          }
           try {
             const post = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
             emitEvent("done", {

@@ -156,12 +156,53 @@ function runTeardownScript(script: string): void {
     });
 
     it("boots a local data server against the real cloud", async () => {
+      // Boot with the Cognito pool config but NO pre-seeded auth.json. The real
+      // wizard never injects a token at boot; it signs the user in afterwards
+      // through the LDS /auth/tokens handoff (next step). Booting unauthenticated
+      // means the sync supervisor stays parked (startOrKickSupervisor gates on a
+      // live id token) until that handoff lands — so the later `shipped > 0`
+      // assertion genuinely depends on the handoff having started sync.
       lds = await startLocalDataServer({
-        config: { apiGatewayUrl: config.apiGatewayUrl },
-        auth: { idToken: session.idToken },
+        config: {
+          apiGatewayUrl: config.apiGatewayUrl,
+          userPoolId: config.userPoolId,
+          userPoolClientId: config.userPoolClientId,
+          identityPoolId: config.identityPoolId,
+        },
       });
       drive = await driveCreds(lds.url);
       mirrorLocalCreds(drive);
+    });
+
+    it("signs in through the LDS /auth/tokens handoff (real Cognito→STS exchange)", async () => {
+      // The user-visible step 4 of cloud setup: the wizard POSTs the freshly
+      // minted Cognito tokens to the daemon, which then performs the in-process
+      // Identity-Pool (STS) exchange, persists cloud credentials, starts the
+      // credential-refresh timer, and starts the sync supervisor. We drive that
+      // real path here rather than pre-seeding auth.json, so the handoff —
+      // Cognito sign-in → /auth/tokens → STS exchange → supervisor startup — has
+      // end-to-end coverage against real AWS.
+      const res = await fetch(`${lds!.url}/auth/tokens`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idToken: session.idToken,
+          refreshToken: session.refreshToken,
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      // The daemon now reports cloud config loaded and an authenticated session
+      // backed by credentials it minted itself (not the test's out-of-band
+      // signInAdmin exchange).
+      const status = await fetch(`${lds!.url}/auth/status`);
+      expect(status.status).toBe(200);
+      const auth = (await status.json()) as {
+        configLoaded: boolean;
+        authenticated: boolean;
+      };
+      expect(auth.configLoaded).toBe(true);
+      expect(auth.authenticated).toBe(true);
     });
 
     it("installs Drive in the cloud (User-Data-Owner identity)", async () => {

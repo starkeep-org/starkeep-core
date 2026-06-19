@@ -13,7 +13,7 @@ import { spawn } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  cognitoPasswordAuth,
+  cognitoPasswordAuthTokens,
   getIdentityPoolCredentials,
   regionFromUserPoolId,
   type IdentityPoolCredentials,
@@ -26,6 +26,11 @@ const INSTALLER_DIR = resolve(REPO_ROOT, "packages/admin-installer");
 
 export interface AdminSession {
   idToken: string;
+  // The refresh token from the same Cognito sign-in. The install CLIs only
+  // need the idToken-derived AWS creds, but the LDS `/auth/tokens` handoff
+  // (journey step 4) needs the refresh token to seed the daemon's credential
+  // refresh timer — see the journey's sign-in handoff step.
+  refreshToken: string;
   awsCredentials: IdentityPoolCredentials;
   region: string;
 }
@@ -35,9 +40,13 @@ export async function signInAdmin(
   config: TestStackConfig,
   admin: AdminCredentials,
 ): Promise<AdminSession> {
-  const idToken = await cognitoPasswordAuth(config, admin.email, admin.password);
+  const { idToken, refreshToken } = await cognitoPasswordAuthTokens(
+    config,
+    admin.email,
+    admin.password,
+  );
   const awsCredentials = await getIdentityPoolCredentials(config, idToken);
-  return { idToken, awsCredentials, region: regionFromUserPoolId(config.userPoolId) };
+  return { idToken, refreshToken, awsCredentials, region: regionFromUserPoolId(config.userPoolId) };
 }
 
 export async function runInstallCli(

@@ -13,11 +13,14 @@
  *   request; this test pins that behavior at the exact ordering the real flow
  *   has (daemon up first, config written by another writer second).
  *
- * Why the e2e cloud journey can't catch it:
- *   `e2e-aws/journey.test.ts` injects a pre-minted idToken into auth.json at boot
- *   (via testkit's `startLocalDataServer({ auth })`) and signs in out-of-band
- *   through the AWS SDK. It never calls `/auth/login` or `/auth/tokens` and never
- *   loads `cognitoConfig`, so the sign-in handoff path has no other coverage.
+ * Why this hermetic test still earns its keep alongside the e2e:
+ *   `e2e-aws/journey.test.ts` now drives a real sign-in through `/auth/tokens`
+ *   against AWS, so the handoff is no longer uncovered there. But the e2e boots
+ *   the LDS with the Cognito pool IDs *already in config.json*, so it never
+ *   exercises the specific failure ordering that shipped the original bug:
+ *   daemon up first with no pool IDs, config written by another writer second,
+ *   then auth. This test pins exactly that ordering, hermetically and without
+ *   touching AWS.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFile, writeFile } from "node:fs/promises";

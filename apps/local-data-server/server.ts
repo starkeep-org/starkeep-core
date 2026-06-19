@@ -14,11 +14,12 @@ import {
   ManifestValidationError,
 } from "../../packages/admin-installer/src/local/installer.js";
 import {
+  appRegistryRow,
   listAppRegistry,
   listInstallSteps,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
-import { canonicalSignedPath, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
+import { canonicalSignedPath, signRequest, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
   createSqliteAccessPolicyStore,
@@ -945,12 +946,16 @@ async function main() {
       }
 
       // GET /cloud/data/types and /cloud/data/records — read-only proxy to the
-      // cloud-data-server, signed with the local-data-server's live Cognito id
-      // token. The calling app (e.g. starkeep-drive) authenticates to *us* with
-      // its HMAC as usual; we then re-auth to the cloud as the signed-in user.
-      // The cloud enforces the same per-app grants for /apps/{appId}/data/*, so
-      // this exposes no data the app couldn't already sync. Lets the Drive UI
-      // show the cloud-side view (what actually pushed) next to the local view.
+      // cloud-data-server, signed with the calling app's per-app HMAC. The app
+      // (e.g. starkeep-drive) authenticates to *us* with its HMAC as usual; we
+      // then re-sign as that same app for the cloud, exactly like the sync
+      // supervisor does (see sync-supervisor.ts → makeSignerFor). The cloud's
+      // verifier (cloud-data-server/api-handler.ts → validateAppHmac) requires
+      // every /apps/{appId}/* request to carry X-Starkeep-App-{Id,Sig,Ts}; a
+      // bearer JWT is not accepted there. The cloud enforces the same per-app
+      // grants for /apps/{appId}/data/*, so this exposes no data the app
+      // couldn't already sync. Lets the Drive UI show the cloud-side view (what
+      // actually pushed) next to the local view.
       if (path === "/cloud/data/types" || path === "/cloud/data/records") {
         if (req.method !== "GET") {
           res.writeHead(405);
@@ -962,17 +967,25 @@ async function main() {
           json(res, { error: "Cloud is not configured (no apiGatewayUrl / STARKEEP_CLOUD_URL)" });
           return;
         }
-        if (!currentIdToken) {
+        const hmacSecret = appRegistryRow(localDb, appId!)?.hmacSecret;
+        if (!hmacSecret) {
           res.writeHead(503);
-          json(res, { error: "Not signed in to the cloud (no id token)" });
+          json(res, { error: `No hmac_secret in local registry for app '${appId}' — re-run its local install` });
           return;
         }
         const subPath = path.slice("/cloud".length); // "/data/types" | "/data/records"
+        // Sign over the cloud sub-path (everything after /apps/{appId}), since
+        // the cloud verifier strips that prefix before checking the signature.
+        // The query string is excluded from the signed message (canonicalSignedPath).
+        const signedHeaders = signRequest({
+          appId: appId!,
+          hmacSecret,
+          method: "GET",
+          path: subPath,
+        });
         const cloudUrl = `${CLOUD_URL.replace(/\/+$/, "")}/apps/${encodeURIComponent(appId!)}${subPath}${url.search}`;
         try {
-          const cloudRes = await fetch(cloudUrl, {
-            headers: { Authorization: `Bearer ${currentIdToken}` },
-          });
+          const cloudRes = await fetch(cloudUrl, { headers: signedHeaders });
           const text = await cloudRes.text();
           res.writeHead(cloudRes.status, {
             "Content-Type": cloudRes.headers.get("content-type") ?? "application/json",
