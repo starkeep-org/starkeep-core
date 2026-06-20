@@ -1,6 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { appCredsPath } from "./paths";
 
 export interface AppCredentials {
   appId: string;
@@ -8,12 +7,8 @@ export interface AppCredentials {
   dataServerUrl: string;
 }
 
-function dataDir(): string {
-  return process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-}
-
 export function appCredentialsPath(appId: string): string {
-  return join(dataDir(), "app-creds", `${appId}.json`);
+  return appCredsPath(appId);
 }
 
 // Per-process credential cache, keyed by appId. Stores the in-flight (and

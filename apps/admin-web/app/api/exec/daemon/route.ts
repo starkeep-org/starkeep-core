@@ -3,12 +3,12 @@ import { mkdirSync, openSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
-import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "../../../../src/lib/exec-commands";
 import {
   PIDS_DIR,
   isWorkspaceDaemonId,
   metaFile,
   pidFile,
+  startWorkspaceDaemon,
   stopById,
 } from "../../../../src/lib/daemon-control";
 import { findApp } from "../../../../src/lib/app-scan";
@@ -60,26 +60,11 @@ export async function POST(req: NextRequest) {
     mkdirSync(PIDS_DIR, { recursive: true });
 
     if (isWorkspaceDaemonId(id)) {
-      const daemon = DAEMON_COMMANDS[id as DaemonId];
-      const [cmd, ...args] = daemon.args;
-      const logPath = resolve(PIDS_DIR, `${id}.log`);
-      const logFd = openSync(logPath, "w");
-      const child = spawn(cmd, args, {
-        detached: true,
-        stdio: ["ignore", logFd, logFd],
-        cwd: REPO_ROOT,
-      });
-      child.unref();
-      writeFileSync(pidFile(id), String(child.pid));
       // Record the fixed port so the status route can use port-based liveness:
       // for pnpm-launched dev/start servers the recorded pid is pnpm's launcher,
       // which may exit once the real server takes over — a port probe is more
       // reliable than checking that pid.
-      writeFileSync(
-        metaFile(id),
-        JSON.stringify({ pid: child.pid, logPath, ...(daemon.port ? { port: daemon.port } : {}) }),
-      );
-      return NextResponse.json({ pid: child.pid, logPath, ...(daemon.port ? { port: daemon.port } : {}) });
+      return NextResponse.json(startWorkspaceDaemon(id));
     }
 
     // Installed-app daemon: spawn shape comes from the app's manifest, not a

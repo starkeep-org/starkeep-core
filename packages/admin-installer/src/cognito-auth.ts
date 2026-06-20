@@ -42,19 +42,30 @@ export function regionFromUserPoolId(userPoolId: string): string {
   return parts[0];
 }
 
+/** The token pair a successful Cognito sign-in yields. */
+export interface CognitoTokens {
+  idToken: string;
+  /**
+   * The long-lived refresh token. Required by the local-data-server's
+   * `/auth/tokens` handoff, which uses it to seed the in-daemon credential
+   * refresh timer — a plain idToken alone can't keep cloud credentials live.
+   */
+  refreshToken: string;
+}
+
 /**
- * Authenticate an admin user and return the Cognito ID token.
+ * Authenticate an admin user and return the Cognito ID + refresh tokens.
  *
  * A NEW_PASSWORD_REQUIRED challenge (first login of a console- or
  * AdminCreateUser-created account with a temporary password) is resolved by
  * calling `promptNewPassword`; without the callback the challenge is an error.
  */
-export async function cognitoPasswordAuth(
+export async function cognitoPasswordAuthTokens(
   pool: CognitoUserPoolRef,
   email: string,
   password: string,
   promptNewPassword?: () => Promise<string>,
-): Promise<string> {
+): Promise<CognitoTokens> {
   const region = regionFromUserPoolId(pool.userPoolId);
   const client = new CognitoIdentityProviderClient({ region });
 
@@ -67,7 +78,7 @@ export async function cognitoPasswordAuth(
   );
 
   if (initResponse.AuthenticationResult?.IdToken) {
-    return initResponse.AuthenticationResult.IdToken;
+    return tokensFromAuthResult(initResponse.AuthenticationResult);
   }
 
   if (initResponse.ChallengeName === "NEW_PASSWORD_REQUIRED") {
@@ -87,12 +98,37 @@ export async function cognitoPasswordAuth(
       }),
     );
 
-    const idToken = challengeResponse.AuthenticationResult?.IdToken;
-    if (!idToken) throw new Error("No ID token returned after password challenge");
-    return idToken;
+    if (!challengeResponse.AuthenticationResult?.IdToken) {
+      throw new Error("No ID token returned after password challenge");
+    }
+    return tokensFromAuthResult(challengeResponse.AuthenticationResult);
   }
 
   throw new Error(`Unexpected Cognito challenge: ${initResponse.ChallengeName}`);
+}
+
+function tokensFromAuthResult(result: {
+  IdToken?: string;
+  RefreshToken?: string;
+}): CognitoTokens {
+  if (!result.IdToken) throw new Error("No ID token returned from Cognito");
+  if (!result.RefreshToken) throw new Error("No refresh token returned from Cognito");
+  return { idToken: result.IdToken, refreshToken: result.RefreshToken };
+}
+
+/**
+ * Authenticate an admin user and return just the Cognito ID token — the leg
+ * every install CLI walks before assuming the Manager role. Callers that also
+ * need the refresh token (the LDS sign-in handoff) use
+ * {@link cognitoPasswordAuthTokens}.
+ */
+export async function cognitoPasswordAuth(
+  pool: CognitoUserPoolRef,
+  email: string,
+  password: string,
+  promptNewPassword?: () => Promise<string>,
+): Promise<string> {
+  return (await cognitoPasswordAuthTokens(pool, email, password, promptNewPassword)).idToken;
 }
 
 export interface IdentityPoolCredentials {

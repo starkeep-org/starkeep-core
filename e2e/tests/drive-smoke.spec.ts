@@ -42,14 +42,24 @@ test("records list and type sidebar render from the live data server", async ({ 
 test("live-updates when a record is added underneath it via an /events kick", async ({ page }) => {
   const drive = await driveCreds(ldsUrl());
 
-  // Open the page first, with no matching row present yet.
+  // Open the page first, with no matching row present yet. The page mounts an
+  // EventSource on /api/events; we must wait until that SSE stream is live
+  // before writing, because the LDS kick is one-shot (never replayed) — a
+  // record created before the subscriber is attached fires a kick into the
+  // void and the page never re-fetches. The same-origin proxy only returns
+  // response headers once its upstream LDS /events connection (and thus the
+  // SSE subscriber) is in place, so the response is the readiness signal.
+  const eventsConnected = page.waitForResponse(
+    (r) => r.url().includes("/api/events") && r.status() === 200,
+  );
   await page.goto(driveUrl());
   await expect(page.getByRole("heading", { name: "Starkeep Drive" })).toBeVisible();
   await expect(
     page.getByRole("row").filter({ hasText: "live-update.png" }),
   ).toHaveCount(0);
+  await eventsConnected;
 
-  // Create a record after the page has loaded. The LDS write kicks /events;
+  // Create a record now that the page is loaded and the SSE is live. The LDS write kicks /events;
   // the page's EventSource (proxied via /api/events) re-fetches and the new
   // row appears with no manual reload.
   await createRecordWithBytes(drive, {

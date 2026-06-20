@@ -1,7 +1,7 @@
 /**
  * Shared helpers for admin-web API-route tests (Tier 1, plan §5 + §8).
  *
- * The route modules capture STARKEEP_DATA_DIR / STARKEEP_LOCAL_DATA_SERVER_URL
+ * The route modules capture STARKEEP_DIR / STARKEEP_LOCAL_DATA_SERVER_URL
  * at module load, so every test file must set the env vars *before* importing
  * a route (dynamic import inside beforeAll). Vitest isolates test files in
  * separate workers, so per-file env doesn't leak.
@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NextRequest } from "next/server";
 
-/** Temp dir to act as STARKEEP_DATA_DIR (config.json, app-creds/, pids/). */
+/** Temp dir to act as STARKEEP_DIR (config.json, app-creds/, pids/). */
 export function makeDataDir(prefix = "adminweb-test-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }

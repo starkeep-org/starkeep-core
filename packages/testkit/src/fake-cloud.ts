@@ -16,6 +16,13 @@
  * App-specific rows only apply if the app is "cloud-installed" first via
  * `installApp()` (which reuses the real installer against the cloud-side DB,
  * the honest analogue of the DSQL DDL step).
+ *
+ * Auth is accepted unconditionally *unless* a per-app secret is registered via
+ * `setAppSecret(appId, secret)` — then every `/apps/{appId}/*` request (except
+ * `/health`) is HMAC-verified exactly as the real cloud verifier does
+ * (cloud-data-server/api-handler.ts → validateAppHmac), so a test can exercise
+ * the LDS `/cloud/data/*` proxy and the sync signer against a real signature
+ * check rather than a rubber stamp.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -29,7 +36,7 @@ import {
   type AnyRecord,
 } from "@starkeep/protocol-primitives";
 import { createAppSpecificFactory } from "@starkeep/shared-space-api";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   SqliteDatabaseAdapter,
   SqliteAppSyncableNamespaceStore,
@@ -43,6 +50,7 @@ import {
   type SyncExchangeRequest,
 } from "@starkeep/sync-engine";
 import { installLocal, uninstallLocal, type InstallLocalResult } from "@starkeep/admin-installer";
+import { canonicalSignedPath, APP_SIG_MAX_SKEW_MS } from "@starkeep/app-client";
 import { getFreePort } from "./local-data-server.js";
 
 export interface FakeCloudExchangeLogEntry {
@@ -85,6 +93,14 @@ export interface FakeCloud {
   clearExchangeLog(): void;
   /** Mutate to inject failures; counters self-decrement as they fire. */
   failures: FakeCloudFailures;
+  /**
+   * Register the per-app HMAC secret the cloud should verify against. Once set,
+   * every `/apps/{appId}/*` request (except `/health`) must carry a valid
+   * `X-Starkeep-App-{Id,Sig,Ts}` signature for that secret or it gets a 401 —
+   * the same contract the real cloud verifier enforces. Registering a secret
+   * that differs from the local registry's reproduces HMAC-secret drift.
+   */
+  setAppSecret(appId: string, hmacSecret: string): void;
   /** Shared records currently in the cloud DB. */
   sharedRecords(): Promise<AnyRecord[]>;
   /** Rows in a cloud-side app-syncable table (empty if table absent). */
@@ -135,6 +151,61 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     blobGets: 0,
     blobPuts: 0,
   };
+
+  // Per-app HMAC secrets. Empty by default (auth rubber-stamped); a test that
+  // wants real signature checks registers the app's secret via setAppSecret.
+  const appSecrets = new Map<string, string>();
+
+  /**
+   * Mirror of the real cloud verifier (cloud-data-server/api-handler.ts →
+   * validateAppHmac): recompute the HMAC over
+   * `${appId}:${METHOD}:${signedPath}:${ts}:` ++ raw body and compare in
+   * constant time, after a freshness check on the timestamp. The signed path is
+   * the per-app sub-path (everything after `/apps/{appId}`), matching what the
+   * LDS proxy and sync signer sign over.
+   */
+  function verifyAppHmac(
+    appId: string,
+    method: string,
+    subPath: string,
+    body: Buffer,
+    headers: IncomingMessage["headers"],
+    secret: string,
+  ): boolean {
+    const sig = headers["x-starkeep-app-sig"];
+    const ts = headers["x-starkeep-app-ts"];
+    if (typeof sig !== "string" || typeof ts !== "string") return false;
+    const tsMs = Number(ts);
+    if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > APP_SIG_MAX_SKEW_MS) {
+      return false;
+    }
+    const prefix = Buffer.from(
+      `${appId}:${method.toUpperCase()}:${canonicalSignedPath(subPath)}:${tsMs}:`,
+      "utf8",
+    );
+    const input = Buffer.concat([prefix as unknown as Uint8Array, body as unknown as Uint8Array]);
+    const expected = createHmac("sha256", secret).update(input as unknown as Uint8Array).digest("hex");
+    const sigBuf = Buffer.from(sig, "hex");
+    const expBuf = Buffer.from(expected, "hex");
+    if (sigBuf.length !== expBuf.length) return false;
+    return timingSafeEqual(sigBuf as unknown as Uint8Array, expBuf as unknown as Uint8Array);
+  }
+
+  /** All non-paginated shared records currently in the cloud DB. */
+  async function collectSharedRecords(): Promise<AnyRecord[]> {
+    const all: AnyRecord[] = [];
+    let cursor: string | undefined = undefined;
+    for (;;) {
+      const page: { records: AnyRecord[]; nextCursor: string | null; hasMore: boolean } =
+        await databaseAdapter.query({
+          limit: 500,
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+      all.push(...page.records);
+      if (!page.hasMore || page.nextCursor === null) return all;
+      cursor = page.nextCursor;
+    }
+  }
 
   // One transport per channel, mirroring the production split: the Drive
   // channel carries shared records and nothing app-specific; a per-app channel
@@ -248,13 +319,29 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       return;
     }
 
+    // Read the body once so it's available both for HMAC verification (signed
+    // over the raw bytes) and for the handlers below.
+    const rawBody =
+      req.method === "POST" || req.method === "PUT" ? await readBody(req) : Buffer.alloc(0);
+
+    // Real signature check, opt-in per app via setAppSecret (see verifyAppHmac).
+    // Off by default so existing rubber-stamp sync tests are unaffected.
+    const registeredSecret = appSecrets.get(appId);
+    if (
+      registeredSecret &&
+      !verifyAppHmac(appId, req.method ?? "GET", rest, rawBody, req.headers, registeredSecret)
+    ) {
+      sendJson(res, 401, { error: "Invalid signature" });
+      return;
+    }
+
     if (rest === "/sync/exchange" && req.method === "POST") {
       if (failures.allExchanges || failures.exchanges > 0) {
         if (failures.exchanges > 0) failures.exchanges -= 1;
         sendJson(res, 500, { error: "injected exchange failure" });
         return;
       }
-      const request = JSON.parse((await readBody(req)).toString("utf8")) as SyncExchangeRequest;
+      const request = JSON.parse(rawBody.toString("utf8")) as SyncExchangeRequest;
       const response = await transportFor(appId).exchange(request);
       exchangeLog.push({
         appId,
@@ -275,13 +362,38 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         sendJson(res, 500, { error: "injected blob-put failure" });
         return;
       }
-      const { key } = JSON.parse((await readBody(req)).toString("utf8")) as { key: string };
+      const { key } = JSON.parse(rawBody.toString("utf8")) as { key: string };
       sendJson(res, 200, { url: blobUrl(key) });
       return;
     }
 
     if (rest === "/files/confirm" && req.method === "POST") {
       sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // Read endpoints the LDS `/cloud/data/*` proxy targets. Mirror the real
+    // cloud-data-server (api-handler.ts) response shape so a Drive client
+    // reading the cloud-side view through the proxy gets the same contract.
+    // Drive has all-access, so these scan every shared record.
+    if (rest === "/data/types" && req.method === "GET") {
+      const records = (await collectSharedRecords()).filter((r) => !r.deletedAt);
+      const counts = new Map<string, number>();
+      for (const r of records) counts.set(r.type, (counts.get(r.type) ?? 0) + 1);
+      const types = Array.from(counts.entries()).map(([record_type, count]) => ({
+        record_type,
+        count,
+      }));
+      sendJson(res, 200, { types, total: records.length });
+      return;
+    }
+
+    if (rest === "/data/records" && req.method === "GET") {
+      const typeFilter = new URL(req.url ?? "/", url).searchParams.get("type") ?? undefined;
+      const records = (await collectSharedRecords()).filter(
+        (r) => !r.deletedAt && (typeFilter === undefined || r.type === typeFilter),
+      );
+      sendJson(res, 200, { records, hasMore: false, nextCursor: null });
       return;
     }
 
@@ -317,9 +429,8 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         return;
       }
       if (req.method === "PUT") {
-        const bytes = await readBody(req);
         const contentType = req.headers["content-type"];
-        await objectStorage.put(key, bytes, {
+        await objectStorage.put(key, rawBody, {
           contentType: typeof contentType === "string" ? contentType : undefined,
         });
         res.writeHead(200);
@@ -359,20 +470,10 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       exchangeLog.length = 0;
     },
     failures,
-    async sharedRecords() {
-      const all: AnyRecord[] = [];
-      let cursor: string | undefined = undefined;
-      for (;;) {
-        const page: { records: AnyRecord[]; nextCursor: string | null; hasMore: boolean } =
-          await databaseAdapter.query({
-            limit: 500,
-            ...(cursor !== undefined ? { cursor } : {}),
-          });
-        all.push(...page.records);
-        if (!page.hasMore || page.nextCursor === null) return all;
-        cursor = page.nextCursor;
-      }
+    setAppSecret: (appId, hmacSecret) => {
+      appSecrets.set(appId, hmacSecret);
     },
+    sharedRecords: () => collectSharedRecords(),
     appRows(appId, table) {
       const fullName = appSyncableTableName(appId, table);
       try {

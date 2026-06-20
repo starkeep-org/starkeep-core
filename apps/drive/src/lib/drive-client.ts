@@ -11,13 +11,11 @@
  */
 
 import { createHmac } from "node:crypto";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { dataDbPath } from "@starkeep/app-client";
 
 const DRIVE_APP_ID = "starkeep-drive";
-const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
-const DATA_DB_PATH = join(STARKEEP_DIR, "data.db");
+const DATA_DB_PATH = dataDbPath();
 export const LDS_URL =
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
 
@@ -128,6 +126,25 @@ export async function listRecords(type?: string): Promise<DriveRecord[]> {
 export async function listTypes(): Promise<DriveTypeSummary[]> {
   const { types } = await ldsGet<{ types: DriveTypeSummary[] }>("/data/types");
   return types;
+}
+
+export interface FileUrl {
+  url: string;
+  source: "local" | "remote";
+  mimeType: string | null;
+  sizeBytes: number | null;
+  expiresIn: number;
+}
+
+/**
+ * Resolve a record's bytes to a fetchable URL via the LDS `file-url` route,
+ * signed as Drive. The LDS returns a short-lived token URL when the file is on
+ * this device (`source: "local"`) or a signed remote URL when it lives only in
+ * object storage. Either way the returned URL needs no further auth, so the
+ * browser can follow it directly. Throws if the record has no attached file.
+ */
+export async function getFileUrl(id: string): Promise<FileUrl> {
+  return ldsGet<FileUrl>(`/data/records/${encodeURIComponent(id)}/file-url`);
 }
 
 /**

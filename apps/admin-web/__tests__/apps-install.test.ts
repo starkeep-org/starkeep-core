@@ -36,7 +36,7 @@ beforeAll(async () => {
   makeAppDir(parent, "invalid", { id: "invalid-app" });
 
   lds = await startLocalDataServer();
-  process.env.STARKEEP_DATA_DIR = dataDir;
+  process.env.STARKEEP_DIR = dataDir;
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = lds.url;
   ({ POST } = await import("../app/api/apps/install/route"));
 });

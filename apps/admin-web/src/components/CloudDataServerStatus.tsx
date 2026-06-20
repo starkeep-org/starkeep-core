@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "./StatusBadge";
@@ -77,21 +78,24 @@ export function CloudDataServerStatus({
 
   return (
     <div className="rounded-lg border p-4 flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <h3 className="font-medium">Data Server</h3>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <h3 className="font-medium">Data Server</h3>
+          {!cloudConfig?.apiGatewayUrl && (
+            <Badge variant="secondary" className="text-xs">Not configured</Badge>
+          )}
+        </div>
         {cloudConfig?.apiGatewayUrl ? (
           <StatusBadge online={online} />
         ) : (
-          <Badge variant="secondary" className="text-xs">Not configured</Badge>
+          <Button asChild size="sm" className="bg-blue-600 text-white hover:bg-blue-700">
+            <Link href="/cloud-setup">Set up cloud →</Link>
+          </Button>
         )}
       </div>
 
       {state.status === "offline" && (
         <p className="text-xs text-muted-foreground">Could not reach the cloud data server: {state.reason}</p>
-      )}
-
-      {state.status === "no-config" && (
-        <p className="text-sm text-muted-foreground">Complete cloud setup to enable remote features.</p>
       )}
 
       {cloudConfig?.apiGatewayUrl && (

@@ -16,7 +16,6 @@ import { startCredentialRefreshTimer } from "../../src/lib/cognito-auth";
 
 const NAV_ITEMS = [
   { href: "/", label: "Dashboard" },
-  { href: "/apps", label: "Apps" },
   { href: "/settings", label: "Cloud Setup" },
 ];
 

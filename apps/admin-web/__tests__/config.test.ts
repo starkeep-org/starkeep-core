@@ -17,7 +17,7 @@ let configPath: string;
 beforeAll(async () => {
   dataDir = makeDataDir();
   configPath = join(dataDir, "config.json");
-  process.env.STARKEEP_DATA_DIR = dataDir;
+  process.env.STARKEEP_DIR = dataDir;
   ({ GET, PATCH } = await import("../app/api/config/route"));
   ({ DEFAULT_APPS_DIR } = await import("../src/lib/exec-commands"));
 });

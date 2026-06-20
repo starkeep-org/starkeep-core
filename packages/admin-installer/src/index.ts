@@ -27,11 +27,13 @@ export type { AwsCredentials } from "./session";
 export {
   regionFromUserPoolId,
   cognitoPasswordAuth,
+  cognitoPasswordAuthTokens,
   getIdentityPoolCredentials,
 } from "./cognito-auth";
 export type {
   CognitoUserPoolRef,
   CognitoIdentityPoolRef,
+  CognitoTokens,
   IdentityPoolCredentials,
 } from "./cognito-auth";
 

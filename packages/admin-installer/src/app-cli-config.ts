@@ -8,6 +8,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { configPath } from "@starkeep/app-client";
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 // packages/admin-installer/src -> admin-installer -> packages -> starkeep-core -> workspace root
@@ -38,10 +39,7 @@ export interface StarkeepCliConfig {
   appParentDirs?: string[];
 }
 
-export function starkeepConfigPath(): string {
-  const dataDir = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-  return join(dataDir, "config.json");
-}
+export const starkeepConfigPath = configPath;
 
 export function loadStarkeepCliConfig(): StarkeepCliConfig {
   const configPath = starkeepConfigPath();

@@ -1,11 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 import { NextRequest } from "next/server";
 import { REPO_ROOT } from "../../../../../src/lib/exec-commands";
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+const STARKEEP_DIR = starkeepDir();
 
 // Flip to true to re-enable the iam-permission-tests POC capture (verbose
 // pulumi-aws HTTP trace + Node @aws-sdk trace + child-output tee). Off by
@@ -54,8 +54,8 @@ export async function POST(
   // iam-permission-tests POC capture — gated by PULUMI_VERBOSE_TRACE above:
   //   - <appId>-install.trace:     pulumi-aws HTTP traffic (via PULUMI_OPTION_*)
   //   - <appId>-install.sdk.trace: Node-side @aws-sdk client calls
-  const traceFilePath = join(STARKEEP_DATA_DIR, `${appId}-install.trace`);
-  const sdkTraceFilePath = join(STARKEEP_DATA_DIR, `${appId}-install.sdk.trace`);
+  const traceFilePath = join(STARKEEP_DIR, `${appId}-install.trace`);
+  const sdkTraceFilePath = join(STARKEEP_DIR, `${appId}-install.sdk.trace`);
 
   const spawnEnv = {
     ...process.env,
