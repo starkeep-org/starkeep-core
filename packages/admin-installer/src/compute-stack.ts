@@ -128,17 +128,28 @@ async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
     },
   });
 
-  return retryOnAccessDenied("ssm:GetParameter pulumi/passphrase", async () => {
-    const result = await ssm.send(
-      new GetParameterCommand({
-        Name: `/${ctx.stackPrefix}/pulumi/passphrase`,
-        WithDecryption: true,
-      }),
-    );
-    const value = result.Parameter?.Value;
-    if (!value) throw new Error("Pulumi passphrase not found in SSM");
-    return value;
-  });
+  // Same budget as probePulumiStateBucket below (30 / ~300s, vs the default
+  // 24 / ~215s): the passphrase read and the S3 probe run together in the
+  // same Promise.all gating one Pulumi up/destroy, so a shorter budget here
+  // makes SSM the premature long-pole — a slow temp-policy propagation can
+  // make this give up at ~215s while the S3 probe (30 attempts) is still
+  // waiting and about to succeed, rejecting the whole operation. (Observed on
+  // an app uninstall: SSM still AccessDenied at 186s+, gave up at ~205s.)
+  return retryOnAccessDenied(
+    "ssm:GetParameter pulumi/passphrase",
+    async () => {
+      const result = await ssm.send(
+        new GetParameterCommand({
+          Name: `/${ctx.stackPrefix}/pulumi/passphrase`,
+          WithDecryption: true,
+        }),
+      );
+      const value = result.Parameter?.Value;
+      if (!value) throw new Error("Pulumi passphrase not found in SSM");
+      return value;
+    },
+    { maxAttempts: 30, maxDelayMs: 10_000 },
+  );
 }
 
 /**
