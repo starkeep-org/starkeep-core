@@ -33,6 +33,8 @@ if (process.env.IAM_SDK_TRACE_PATH) {
   const { installSdkTrace } = await import("../../iam-permission-tests/src/sdk-trace");
   installSdkTrace(process.env.IAM_SDK_TRACE_PATH);
 }
+// First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
+import "@starkeep/app-client/load-env";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";

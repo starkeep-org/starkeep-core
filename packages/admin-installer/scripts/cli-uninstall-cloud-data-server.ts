@@ -20,6 +20,8 @@
  *   pnpm tsx scripts/cli-uninstall-cloud-data-server.ts --non-interactive
  */
 
+// First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
+import "@starkeep/app-client/load-env";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
