@@ -1,7 +1,7 @@
 /**
  * ~/.starkeep/config.json read/write endpoint.
  *
- * The file at $STARKEEP_DATA_DIR/config.json (default: ~/.starkeep/config.json)
+ * The file at $STARKEEP_DIR/config.json (default: ~/.starkeep/config.json)
  * is the single source of truth for cloud setup. The wizard, install routes,
  * deploy routes, and CLI all read it via this endpoint (or directly from server
  * code). No region is stored — region is derived from userPoolId at the point
@@ -15,12 +15,12 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 import { NextRequest, NextResponse } from "next/server";
 import { DEFAULT_APPS_DIR } from "../../../src/lib/exec-commands";
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
+const STARKEEP_DIR = starkeepDir();
+const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 function readConfig(): Record<string, unknown> | null {
   if (!existsSync(CONFIG_PATH)) return null;

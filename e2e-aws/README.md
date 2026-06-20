@@ -12,7 +12,7 @@ STARKEEP_AWS_TESTS=1 pnpm test:aws          # from repo root (turbo) or this dir
 Without `STARKEEP_AWS_TESTS=1` the single test file reports a skipped suite and
 makes no AWS calls. `pnpm test` (the default unit suite) never runs it.
 
-## What it does (`src/journey.test.ts`, 11 ordered steps)
+## What it does (`src/journey.test.ts`, 12 ordered steps)
 
 1. Create-if-missing the bootstrap CloudFormation stack; read its outputs.
 2. Create-if-missing a Cognito admin user (per-run password) and sign in through
@@ -23,9 +23,13 @@ makes no AWS calls. `pnpm test` (the default unit suite) never runs it.
 5. Install Drive, then 6. photos, via the real install CLIs.
 7. Create a photo locally, `POST /sync/now`, assert the record + blob landed in
    the cloud under Drive with origin `photos`.
-8. Static handler, 9. `/api/resize`, 10. caption via `/app-data` — exercise the
+8. Drift a local creds file, re-run the Drive cloud install, and assert sync
+   still validates — the todo-39 regression: the installer mirrors the *local
+   registry* secret (what the supervisor signs with), not the drifted creds
+   file, so the cloud verifier can't be left on a stale key.
+9. Static handler, 10. `/api/resize`, 11. caption via `/app-data` — exercise the
    app's cloud routes.
-11. Uninstall photos; assert the app plane is gone but shared records survive.
+12. Uninstall photos; assert the app plane is gone but shared records survive.
 
 ## Environment contract (`src/env.ts`)
 
@@ -48,10 +52,12 @@ that, the gate var never reaches vitest and the suite silently skips.
 ## Run state (`src/run-state.ts`)
 
 Per-prefix state lives in `e2e-aws/.run/<prefix>/` (gitignored) and doubles as
-`STARKEEP_DATA_DIR` for the spawned CLIs — they read **and rewrite**
-`config.json`, so a dedicated dir is what keeps a run from clobbering the
-operator's live `~/.starkeep/config.json`. `admin.json` (0600) holds the
-generated test-admin password; it unlocks only the disposable test stack.
+`STARKEEP_DIR` for the spawned CLIs **and** the booted LDS — they read and
+rewrite `config.json` and share the registry `data.db`, so a dedicated shared
+dir is what keeps a run from clobbering the operator's live `~/.starkeep`. This
+one-dir layout mirrors production, where config.json and data.db both live under
+`~/.starkeep`. `admin.json` (0600) holds the generated test-admin password; it
+unlocks only the disposable test stack.
 
 ## Cost / time / lifecycle
 

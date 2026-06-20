@@ -10,7 +10,7 @@
  * slate — for example, after tearing down and redeploying the CloudFormation
  * bootstrap stack.
  *
- * Reads ~/.starkeep/config.json (or $STARKEEP_DATA_DIR/config.json). The
+ * Reads ~/.starkeep/config.json (or $STARKEEP_DIR/config.json). The
  * file must contain at least userPoolId, userPoolClientId, and identityPoolId.
  *
  * Region is NOT stored in the file — it is derived from `userPoolId`.
@@ -22,7 +22,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 import { createInterface } from "node:readline";
 import {
   CognitoIdentityProviderClient,
@@ -71,8 +71,8 @@ function regionFromUserPoolId(userPoolId: string): string {
   return parts[0];
 }
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
+const STARKEEP_DIR = starkeepDir();
+const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 function loadConfig(): StarkeepConfig {
   let raw: string;

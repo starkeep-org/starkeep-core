@@ -53,7 +53,7 @@ beforeAll(async () => {
   writeFileSync(join(appDir, "server.mjs"), SERVER_MJS);
   makeAppDir(parent, "norun-app", testAppManifest({ id: "norun-app" }));
 
-  process.env.STARKEEP_DATA_DIR = dataDir;
+  process.env.STARKEEP_DIR = dataDir;
   ({ POST: daemonPOST } = await import("../app/api/exec/daemon/route"));
   ({ GET: statusGET } = await import("../app/api/exec/daemon/status/route"));
 });

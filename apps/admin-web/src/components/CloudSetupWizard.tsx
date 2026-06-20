@@ -1,10 +1,17 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Check } from "lucide-react";
+import { Check, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -71,6 +78,18 @@ const STEPS: { id: StepId; label: string }[] = [
   { id: 3, label: "Create user" },
   { id: 4, label: "Sign in" },
   { id: 5, label: "Deploy" },
+];
+
+const AWS_REGIONS: { slug: string; label: string }[] = [
+  { slug: "us-east-1", label: "US East (N. Virginia)" },
+  { slug: "us-east-2", label: "US East (Ohio)" },
+  { slug: "us-west-2", label: "US West (Oregon)" },
+  { slug: "ap-northeast-3", label: "Asia Pacific (Osaka)" },
+  { slug: "ap-northeast-1", label: "Asia Pacific (Tokyo)" },
+  { slug: "ap-northeast-2", label: "Asia Pacific (Seoul)" },
+  { slug: "eu-west-1", label: "Europe (Ireland)" },
+  { slug: "eu-west-2", label: "Europe (London)" },
+  { slug: "eu-west-3", label: "Europe (Paris)" },
 ];
 
 function openUrl(url: string) {
@@ -154,14 +173,16 @@ function Step1Bootstrap({
 }: {
   initialStackPrefix: string;
   initialRegion: string;
-  onContinue: (stackPrefix: string) => void;
+  onContinue: (stackPrefix: string, region: string) => void;
 }) {
   // Step 1's region exists only to construct the CloudFormation console URL
   // and the bootstrap template's stack name. It is not persisted: once Step 2
   // captures the userPoolId, region is derived from that going forward.
-  const [region, setRegion] = useState(initialRegion);
-  const [stackPrefix, setStackPrefix] = useState(initialStackPrefix);
+  const [region, setRegion] = useState(initialRegion || "us-east-1");
+  const [stackPrefix, setStackPrefix] = useState(initialStackPrefix || "starkeep");
   const [downloaded, setDownloaded] = useState(false);
+  const [showInstructions, setShowInstructions] = useState(false);
+  const downloadStepRef = useRef<HTMLDivElement>(null);
 
   const canContinue = !!region.trim() && !!stackPrefix.trim();
 
@@ -182,19 +203,24 @@ function Step1Bootstrap({
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-muted-foreground">
-        Deploy the Starkeep bootstrap CloudFormation stack. This creates Cognito authentication,
-        IAM roles, and S3/Pulumi infrastructure in your AWS account.
+        Starkeep cloud runs in your own AWS account. Don&apos;t worry, setup is quick and painless.
       </p>
 
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
           <label className="text-sm font-medium" htmlFor="region">AWS Region</label>
-          <Input
-            id="region"
-            placeholder="us-east-1"
-            value={region}
-            onChange={(e) => setRegion(e.currentTarget.value)}
-          />
+          <Select value={region} onValueChange={setRegion}>
+            <SelectTrigger id="region" className="w-full">
+              <SelectValue placeholder="Select a region" />
+            </SelectTrigger>
+            <SelectContent>
+              {AWS_REGIONS.map(({ slug, label }) => (
+                <SelectItem key={slug} value={slug}>
+                  {label} ({slug})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <p className="text-xs text-muted-foreground">The AWS region where your Starkeep infrastructure will be deployed.</p>
         </div>
 
@@ -213,12 +239,11 @@ function Step1Bootstrap({
       <Separator />
 
       <div className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1.5">
+        <div ref={downloadStepRef} className="flex flex-col gap-1.5 scroll-mt-4">
           <p className="text-sm font-medium">1. Download the bootstrap template</p>
-          <p className="text-xs text-muted-foreground">Generates a CloudFormation YAML template and downloads it to your browser.</p>
           <div className="flex items-center gap-2">
             <Button
-              variant="outline"
+              variant="secondary"
               size="sm"
               onClick={handleDownload}
               disabled={!stackPrefix || !region}
@@ -235,15 +260,16 @@ function Step1Bootstrap({
 
         <div className="flex flex-col gap-1.5">
           <p className="text-sm font-medium">2. Deploy the stack in AWS CloudFormation</p>
-          <p className="text-xs text-muted-foreground">
-            In the CloudFormation console, choose <strong>Upload a template file</strong> and upload the file above.
-            Name the stack <code className="font-mono text-xs">{stackPrefix ? `${stackPrefix}-bootstrap` : "starkeep-bootstrap"}</code> and
-            wait for <strong>CREATE_COMPLETE</strong> status.
-          </p>
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
-            onClick={() => openUrl(getCloudFormationCreateStackUrl(region, { stackName: `${stackPrefix}-bootstrap` }))}
+            onClick={() => {
+              setShowInstructions(true);
+              openUrl(getCloudFormationCreateStackUrl(region, { stackName: `${stackPrefix}-bootstrap` }));
+              requestAnimationFrame(() => {
+                downloadStepRef.current?.scrollIntoView({ block: "start" });
+              });
+            }}
             disabled={!region}
             className="w-fit"
           >
@@ -252,14 +278,94 @@ function Step1Bootstrap({
         </div>
       </div>
 
-      <Alert>
-        <AlertDescription>
-          Once the stack reaches <strong>CREATE_COMPLETE</strong>, click Continue to enter the stack outputs and finish setting up your account.
-        </AlertDescription>
-      </Alert>
+      {!showInstructions ? (
+        <button
+          type="button"
+          onClick={() => setShowInstructions(true)}
+          className="text-sm font-medium text-primary hover:underline w-fit"
+        >
+          Show full instructions
+        </button>
+      ) : (
+        <Alert className="p-5">
+          <AlertDescription className="block space-y-3 text-sm text-foreground">
+            <h4 className="text-base font-semibold text-foreground">AWS Setup Walkthrough</h4>
+
+            <p>
+              Starkeep Cloud runs on your own AWS account, so a <strong>one-time</strong> setup is
+              required. This usually takes about 5 minutes to complete.
+            </p>
+
+            <p>
+              First, click the <strong>Open CloudFormation console</strong> button just above. This
+              links to AWS.
+            </p>
+
+            <p>
+              Unless you’re already signed in to AWS, click <strong>Create a new AWS account</strong>{" "}
+              (or <strong>Sign in as root user email</strong> if you already have an AWS account you
+              want to use).
+            </p>
+
+            <p>
+              After signing in, you should be on the <strong>Create Stack</strong> page. If you’re
+              not, just click the <strong>Open CloudFormation console</strong> button (above) again
+              and it will take you to the right place. Then follow these steps:
+            </p>
+
+            <ol className="list-decimal space-y-1.5 pl-5">
+              <li>
+                Under <strong>Specify template</strong> (2nd section), select{" "}
+                <strong>Upload a template file</strong>
+              </li>
+              <li>
+                Click <strong>Choose file</strong> and select the template .yaml file downloaded from
+                Starkeep Setup
+              </li>
+              <li>
+                Click <strong>Next</strong>
+              </li>
+              <li>
+                Click <strong>Next</strong> again without modifying the values (these are preset based
+                on your input during Starkeep Setup)
+              </li>
+              <li>
+                When the next page loads, scroll to the bottom and check the checkbox “
+                <strong>
+                  I acknowledge that AWS CloudFormation might create IAM resources with custom names.
+                </strong>
+                ”
+              </li>
+              <li>
+                Click <strong>Next</strong>
+              </li>
+              <li>
+                Scroll to the bottom of the final page and click <strong>Submit</strong>.
+              </li>
+              <li>
+                Click on the <strong>Outputs</strong> tab. It will say “No outputs” at first, but once
+                the stack finishing deploying (take about a minute) you will see various properties
+                show up.
+              </li>
+              <li>
+                Once you see Outputs properties show up, go back to your Starkeep Cloud Setup tab and click{" "}
+                <strong>Stack is deployed - Continue</strong>.
+              </li>
+            </ol>
+
+            <button
+              type="button"
+              onClick={() => setShowInstructions(false)}
+              className="text-sm font-medium text-primary hover:underline"
+            >
+              Hide instructions
+            </button>
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="flex justify-end">
-        <Button onClick={() => onContinue(stackPrefix)} disabled={!canContinue}>
+        <Button onClick={() => onContinue(stackPrefix, region)} disabled={!canContinue}>
           Stack is deployed — Continue
         </Button>
       </div>
@@ -273,11 +379,13 @@ function Step1Bootstrap({
 
 function Step2Outputs({
   stackPrefix,
+  fallbackRegion,
   initialCognitoConfig,
   onContinue,
   onBack,
 }: {
   stackPrefix: string;
+  fallbackRegion: string;
   initialCognitoConfig: Partial<CognitoConfig>;
   onContinue: (config: Pick<CognitoConfig, "userPoolId" | "userPoolClientId" | "identityPoolId">) => void;
   onBack: () => void;
@@ -295,38 +403,43 @@ function Step2Outputs({
     identityPoolId: validateIdentityPoolId(identityPoolId),
   };
   const isValid = Object.values(errors).every((e) => e === null);
-  const region = regionFromUserPoolId(userPoolId);
+  const region = regionFromUserPoolId(userPoolId) || fallbackRegion;
 
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-muted-foreground">
-        Open the CloudFormation stack <strong>Outputs</strong> tab and copy the three values below.
+        Open the{" "}
+        {region ? (
+          <a
+            href={getBootstrapStackOutputsUrl(region, `${stackPrefix}-bootstrap`)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-primary underline hover:no-underline"
+          >
+            CloudFormation stack
+          </a>
+        ) : (
+          "CloudFormation stack"
+        )}{" "}
+        <strong>Outputs</strong> tab and copy the three values below.
       </p>
 
-      <Button
-        variant="outline"
-        size="sm"
-        className="w-fit"
-        disabled={!region}
-        onClick={() => openUrl(getBootstrapStackOutputsUrl(region, `${stackPrefix}-bootstrap`))}
-      >
-        Open stack outputs in AWS console ↗
-      </Button>
+      <p className="text-sm text-muted-foreground">The outputs are listed in alphabetical order.</p>
 
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="userPoolId">UserPoolId</label>
+          <label className="text-sm font-medium" htmlFor="identityPoolId">IdentityPoolId</label>
           <Input
-            id="userPoolId"
-            placeholder="us-east-1_Xxxxxxxxx"
-            value={userPoolId}
-            onChange={(e) => setUserPoolId(e.currentTarget.value.trim())}
-            onBlur={() => touch("userPoolId")}
-            aria-invalid={touched.userPoolId && !!errors.userPoolId}
-            className={cn(touched.userPoolId && errors.userPoolId && "border-destructive")}
+            id="identityPoolId"
+            placeholder="us-east-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+            value={identityPoolId}
+            onChange={(e) => setIdentityPoolId(e.currentTarget.value.trim())}
+            onBlur={() => touch("identityPoolId")}
+            aria-invalid={touched.identityPoolId && !!errors.identityPoolId}
+            className={cn(touched.identityPoolId && errors.identityPoolId && "border-destructive")}
           />
-          {touched.userPoolId && errors.userPoolId && (
-            <p className="text-xs text-destructive">{errors.userPoolId}</p>
+          {touched.identityPoolId && errors.identityPoolId && (
+            <p className="text-xs text-destructive">{errors.identityPoolId}</p>
           )}
         </div>
 
@@ -347,18 +460,18 @@ function Step2Outputs({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="identityPoolId">IdentityPoolId</label>
+          <label className="text-sm font-medium" htmlFor="userPoolId">UserPoolId</label>
           <Input
-            id="identityPoolId"
-            placeholder="us-east-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            value={identityPoolId}
-            onChange={(e) => setIdentityPoolId(e.currentTarget.value.trim())}
-            onBlur={() => touch("identityPoolId")}
-            aria-invalid={touched.identityPoolId && !!errors.identityPoolId}
-            className={cn(touched.identityPoolId && errors.identityPoolId && "border-destructive")}
+            id="userPoolId"
+            placeholder="us-east-1_Xxxxxxxxx"
+            value={userPoolId}
+            onChange={(e) => setUserPoolId(e.currentTarget.value.trim())}
+            onBlur={() => touch("userPoolId")}
+            aria-invalid={touched.userPoolId && !!errors.userPoolId}
+            className={cn(touched.userPoolId && errors.userPoolId && "border-destructive")}
           />
-          {touched.identityPoolId && errors.identityPoolId && (
-            <p className="text-xs text-destructive">{errors.identityPoolId}</p>
+          {touched.userPoolId && errors.userPoolId && (
+            <p className="text-xs text-destructive">{errors.userPoolId}</p>
           )}
         </div>
       </div>
@@ -389,6 +502,7 @@ function Step3CreateUser({
   onContinue: () => void;
   onBack: () => void;
 }) {
+  const [showInstructions, setShowInstructions] = useState(false);
   const region = cognitoConfig.userPoolId ? regionFromUserPoolId(cognitoConfig.userPoolId) : "us-east-1";
   const consoleLink = cognitoConfig.userPoolId
     ? `https://${region}.console.aws.amazon.com/cognito/v2/idp/user-pools/${cognitoConfig.userPoolId}/users/create`
@@ -397,28 +511,82 @@ function Step3CreateUser({
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-muted-foreground">
-        Your Cognito user pool has been created, but it has no users yet. You need to create your
-        account before you can sign in.
+        Next, you&rsquo;ll create your Starkeep Cloud user account. This user exists within your own
+        AWS account. No one else (including the Starkeep Org) has access.
       </p>
 
-      <div className="rounded-md border p-4 flex flex-col gap-3">
-        <p className="text-sm font-medium">Create your account in the AWS console</p>
-        <ol className="flex flex-col gap-1 text-sm text-muted-foreground list-none">
-          <li>1. Click the button below to open the Cognito console.</li>
-          <li>2. Click <strong>Create user</strong>.</li>
-          <li>3. Enter your email address. Cognito will send a temporary password to that address.</li>
-          <li>4. Return here once you have received the email.</li>
-        </ol>
-        {consoleLink ? (
-          <Button variant="outline" size="sm" className="w-fit" onClick={() => openUrl(consoleLink)}>
-            Open Cognito Users console ↗
+      {consoleLink ? (
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="w-fit"
+            onClick={() => {
+              setShowInstructions(true);
+              openUrl(consoleLink);
+            }}
+          >
+            Create user ↗
           </Button>
-        ) : (
-          <Alert>
-            <AlertDescription>UserPoolId not set — go back and enter outputs.</AlertDescription>
-          </Alert>
-        )}
-      </div>
+
+          {!showInstructions ? (
+            <button
+              type="button"
+              onClick={() => setShowInstructions(true)}
+              className="text-sm font-medium text-primary hover:underline w-fit"
+            >
+              Show full instructions
+            </button>
+          ) : (
+            <Alert className="p-5">
+              <AlertDescription className="block space-y-3 text-sm text-foreground">
+                <p>Make sure you&rsquo;re signed into your AWS account, then:</p>
+
+                <ol className="list-decimal space-y-1.5 pl-5">
+                  <li>
+                    Click <strong>Create User</strong>
+                  </li>
+                  <li>
+                    Under <strong>User Information / Invitation message</strong>, choose{" "}
+                    <strong>Send an email invitation</strong>
+                  </li>
+                  <li>Enter your email address</li>
+                  <li>
+                    Under <strong>Temporary password</strong>, choose{" "}
+                    <strong>Generate a password</strong>
+                  </li>
+                  <li>
+                    Click <strong>Create user</strong>
+                  </li>
+                  <li>
+                    Within a minute you should receive an email with the temporary password
+                    <p className="mt-1.5">
+                      Please note: the email from AWS says: “Your temporary password is{" "}
+                      &lt;password&gt;.” The period at the end of this sentence is NOT part of your
+                      temp password.
+                    </p>
+                  </li>
+                  <li>
+                    Click <strong>User created - Continue</strong>.
+                  </li>
+                </ol>
+
+                <button
+                  type="button"
+                  onClick={() => setShowInstructions(false)}
+                  className="text-sm font-medium text-primary hover:underline"
+                >
+                  Hide instructions
+                </button>
+              </AlertDescription>
+            </Alert>
+          )}
+        </>
+      ) : (
+        <Alert>
+          <AlertDescription>UserPoolId not set — go back and enter outputs.</AlertDescription>
+        </Alert>
+      )}
 
       <div className="flex justify-between">
         <Button variant="ghost" onClick={onBack}>Back</Button>
@@ -539,11 +707,11 @@ function Step4SignIn({
   const serverGate = serverOnline === false ? (
     <Alert>
       <AlertDescription className="flex items-center justify-between gap-3">
-        <span>
-          The local data server isn&apos;t running. It needs to be running so sign-in tokens can be
-          handed to it — otherwise sync will use whatever stale tokens it last had.
+        <span className="flex items-center gap-2">
+          <TriangleAlert className="size-4 shrink-0" />
+          You must start your local data server to continue cloud setup.
         </span>
-        <Button size="sm" variant="outline" onClick={handleStartServer} disabled={serverStarting}>
+        <Button size="sm" onClick={handleStartServer} disabled={serverStarting}>
           {serverStarting && <span className="mr-2 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
           Start
         </Button>
@@ -566,10 +734,12 @@ function Step4SignIn({
         )}
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="newPassword">New password</label>
+            <label className="text-sm font-medium" htmlFor="starkeep-new-password">New password</label>
             <Input
-              id="newPassword"
+              id="starkeep-new-password"
+              name="starkeep-new-password"
               type="password"
+              autoComplete="new-password"
               placeholder="At least 8 characters"
               value={newPassword}
               onChange={(e) => setNewPassword(e.currentTarget.value)}
@@ -577,10 +747,12 @@ function Step4SignIn({
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="confirmPassword">Confirm new password</label>
+            <label className="text-sm font-medium" htmlFor="starkeep-confirm-password">Confirm new password</label>
             <Input
-              id="confirmPassword"
+              id="starkeep-confirm-password"
+              name="starkeep-confirm-password"
               type="password"
+              autoComplete="new-password"
               value={newPasswordConfirm}
               onChange={(e) => setNewPasswordConfirm(e.currentTarget.value)}
               disabled={loading}
@@ -604,7 +776,7 @@ function Step4SignIn({
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-muted-foreground">
-        Sign in with your email and the temporary password from Cognito.
+        You should receive an email &ldquo;Your Starkeep account&rdquo; with a temp password.
       </p>
       {serverGate}
       {error && (
@@ -614,10 +786,13 @@ function Step4SignIn({
       )}
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="email">Email</label>
+          <label className="text-sm font-medium" htmlFor="starkeep-signin-email">Email</label>
           <Input
-            id="email"
-            type="email"
+            id="starkeep-signin-email"
+            name="starkeep-signin-email"
+            type="text"
+            inputMode="email"
+            autoComplete="off"
             placeholder="you@example.com"
             value={email}
             onChange={(e) => setEmail(e.currentTarget.value)}
@@ -625,17 +800,18 @@ function Step4SignIn({
           />
         </div>
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="password">Temporary password</label>
+          <label className="text-sm font-medium" htmlFor="starkeep-temp-password">Password</label>
           <Input
-            id="password"
+            id="starkeep-temp-password"
+            name="starkeep-temp-password"
             type="password"
-            placeholder="From the email Cognito sent"
+            autoComplete="new-password"
+            placeholder="Shown in the email you received, or already set by you"
             value={password}
             onChange={(e) => setPassword(e.currentTarget.value)}
             onKeyDown={(e) => { if (e.key === "Enter") handleSignIn(); }}
             disabled={loading}
           />
-          <p className="text-xs text-muted-foreground">From the email Cognito sent when you created your account</p>
         </div>
       </div>
       <div className="flex justify-between">
@@ -953,6 +1129,10 @@ export function CloudSetupWizard({ onComplete }: Props) {
 
   // In-memory mirror of the file. Updated on mount and after each PATCH.
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null>(null);
+  // Region chosen in step 1. Not persisted to cloud config (once a userPoolId
+  // is captured, region is derived from it), but kept here so step 2 can build
+  // the stack-outputs console link before any userPoolId has been entered.
+  const [bootstrapRegion, setBootstrapRegion] = useState("");
   const stackPrefix = cloudConfig?.stackPrefix ?? "";
   const cognitoConfig: Partial<CognitoConfig> = cloudConfig
     ? {
@@ -1097,7 +1277,8 @@ export function CloudSetupWizard({ onComplete }: Props) {
           <Step1Bootstrap
             initialStackPrefix={stackPrefix}
             initialRegion={cloudConfig?.userPoolId ? regionFromUserPoolId(cloudConfig.userPoolId) : ""}
-            onContinue={async (prefix) => {
+            onContinue={async (prefix, region) => {
+              setBootstrapRegion(region);
               const isChanging = !!cloudConfig?.stackPrefix && cloudConfig.stackPrefix !== prefix;
               const hasDownstream = !!cloudConfig?.userPoolId;
               if (isChanging && hasDownstream) {
@@ -1132,6 +1313,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
         {currentStep === 2 && (
           <Step2Outputs
             stackPrefix={stackPrefix}
+            fallbackRegion={bootstrapRegion}
             initialCognitoConfig={cognitoConfig}
             onContinue={async (config) => {
               const isChanging = !!cloudConfig?.userPoolId && cloudConfig.userPoolId !== config.userPoolId;

@@ -1,10 +1,11 @@
 import "server-only";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 import { join, resolve } from "node:path";
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
+const STARKEEP_DIR = starkeepDir();
+const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 function expandHome(p: string): string {
   if (p === "~") return homedir();

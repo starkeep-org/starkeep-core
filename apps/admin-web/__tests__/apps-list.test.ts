@@ -48,7 +48,7 @@ beforeAll(async () => {
   makeAppDir(parentB, "dup-from-b", testAppManifest({ id: "dup-app", name: "From B" }));
 
   ldsPort = await getFreePort();
-  process.env.STARKEEP_DATA_DIR = dataDir;
+  process.env.STARKEEP_DIR = dataDir;
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = `http://127.0.0.1:${ldsPort}`;
   ({ GET } = await import("../app/api/apps/list/route"));
 });

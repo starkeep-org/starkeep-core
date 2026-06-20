@@ -1,7 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import Link from "next/link";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -35,6 +34,11 @@ import {
 import { CommandOutputModal } from "../../src/components/CommandOutputModal";
 import { CloudDataServerStatus } from "../../src/components/CloudDataServerStatus";
 import { StatusBadge } from "../../src/components/StatusBadge";
+import { AppDiscovery } from "../../src/components/AppDiscovery";
+import { LocalDriveSection } from "../../src/components/LocalDriveSection";
+import { LocalAppsSection } from "../../src/components/LocalAppsSection";
+import { CloudAppsSection } from "../../src/components/CloudAppsSection";
+import { targetsOf, type LocalAppEntry } from "../../src/lib/app-types";
 import {
   initiateAuth,
   respondNewPasswordChallenge,
@@ -69,7 +73,24 @@ interface Watch {
 export default function DashboardPage() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [localRefreshKey, setLocalRefreshKey] = useState(0);
-  const bumpAll = () => { setRefreshKey((k) => k + 1); setLocalRefreshKey((k) => k + 1); };
+
+  // Discovered apps (from /api/apps/list). Membership in the local vs. cloud
+  // sections is derived from each manifest's `targets` (default ["local"]).
+  const [apps, setApps] = useState<LocalAppEntry[] | null>(null);
+  const [appsError, setAppsError] = useState<string | null>(null);
+  const refreshApps = useCallback(async () => {
+    setAppsError(null);
+    try {
+      const res = await fetch("/api/apps/list");
+      if (!res.ok) throw new Error(`list failed: ${res.status}`);
+      const body = (await res.json()) as { apps: LocalAppEntry[] };
+      setApps(body.apps);
+    } catch (err) {
+      setAppsError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const bumpAll = () => { setRefreshKey((k) => k + 1); setLocalRefreshKey((k) => k + 1); refreshApps(); };
 
   // Local data server
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
@@ -245,6 +266,12 @@ export default function DashboardPage() {
     readCognitoSession().then(setCognitoSession);
   }, [refreshKey]);
 
+  // Initial app-list fetch (also re-run by bumpAll via refreshApps).
+  useEffect(() => { refreshApps(); }, [refreshApps]);
+
+  const localApps = apps === null ? null : apps.filter((a) => targetsOf(a).includes("local"));
+  const cloudApps = apps === null ? null : apps.filter((a) => targetsOf(a).includes("cloud"));
+
   // Fetch costs
   useEffect(() => {
     setCosts("loading");
@@ -388,7 +415,16 @@ export default function DashboardPage() {
     <div className="max-w-7xl">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
-        <Button variant="outline" size="sm" onClick={bumpAll}>Refresh</Button>
+      </div>
+
+      <div className="mb-6 flex flex-col gap-3">
+        <AppDiscovery onSaved={refreshApps} />
+        {appsError && (
+          <Alert variant="destructive">
+            <AlertTitle>Error</AlertTitle>
+            <AlertDescription>{appsError}</AlertDescription>
+          </Alert>
+        )}
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
@@ -397,38 +433,36 @@ export default function DashboardPage() {
           <h2 className="text-lg font-medium">Local</h2>
 
           <div className="rounded-lg border p-4 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-medium">Data Server</h3>
+            <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
+                <h3 className="font-medium">Data Server</h3>
                 <StatusBadge online={localOnline} />
-                {localOnline === true && (
-                  <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
-                    disabled={!!daemonLoading["local-data-server"]}
-                    onClick={() => stopDaemon("local-data-server")}
-                  >
-                    {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-                    Stop
-                  </Button>
-                )}
               </div>
+              {localOnline === true && (
+                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
+                  disabled={!!daemonLoading["local-data-server"]}
+                  onClick={() => stopDaemon("local-data-server")}
+                >
+                  {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                  Stop
+                </Button>
+              )}
+              {localOnline === false && (
+                <Button size="sm" className="bg-blue-600 text-white hover:bg-blue-700"
+                  disabled={!!daemonLoading["local-data-server"]}
+                  onClick={() => startDaemon("local-data-server")}
+                >
+                  {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                  Start
+                </Button>
+              )}
             </div>
 
             {localOnline === false && (
-              <div className="flex flex-col gap-3">
-                <Alert>
-                  <AlertTitle>Data server not running</AlertTitle>
-                  <AlertDescription>The local data server must be running for local features to work.</AlertDescription>
-                </Alert>
-                <div className="flex justify-end">
-                  <Button size="sm" variant="outline"
-                    disabled={!!daemonLoading["local-data-server"]}
-                    onClick={() => startDaemon("local-data-server")}
-                  >
-                    {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-                    Start
-                  </Button>
-                </div>
-              </div>
+              <Alert className="border-0 px-0">
+                <AlertTitle>Data server not running</AlertTitle>
+                <AlertDescription>The local data server must be running for local features to work.</AlertDescription>
+              </Alert>
             )}
 
             {localOnline === true && (
@@ -475,6 +509,10 @@ export default function DashboardPage() {
             )}
           </div>
 
+          <LocalDriveSection />
+
+          <LocalAppsSection apps={localApps} refresh={refreshApps} />
+
           <div className="flex justify-end">
             <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
               onClick={() => openConfirm("reset-local-data", "Clear local data", "This will permanently delete all local object files, the SQLite database, and watch configs.", false)}
@@ -484,21 +522,14 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* ── REMOTE ── */}
+        {/* ── CLOUD ── */}
         <div className="flex flex-col gap-4">
-          <h2 className="text-lg font-medium">Remote</h2>
+          <h2 className="text-lg font-medium">Cloud</h2>
 
           {cloudConfig === undefined ? (
             <div className="rounded-lg border p-4 flex flex-col gap-2">
               <Skeleton className="h-4 w-32" />
               <Skeleton className="h-4 w-48" />
-            </div>
-          ) : cloudConfig === null ? (
-            <div className="rounded-lg border p-6 flex flex-col gap-4">
-              <p className="text-sm text-muted-foreground">Cloud is not set up yet.</p>
-              <Button asChild variant="outline" size="sm" className="w-fit">
-                <Link href="/cloud-setup">Set up cloud →</Link>
-              </Button>
             </div>
           ) : (
             <>
@@ -509,6 +540,8 @@ export default function DashboardPage() {
                 onSignIn={openSignIn}
                 onSignOut={handleSignOut}
               />
+
+              <CloudAppsSection apps={cloudApps} />
 
               <div className="rounded-lg border p-4">
                 <h3 className="font-medium mb-3">Costs</h3>

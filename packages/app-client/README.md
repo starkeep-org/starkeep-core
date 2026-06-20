@@ -42,7 +42,7 @@ data routes (`/data/*`, `/app-data/*`, `/files/presign`) all do.
 
 ## Credentials file
 
-Credentials live at `$STARKEEP_DATA_DIR/app-creds/<appId>.json` (default
+Credentials live at `$STARKEEP_DIR/app-creds/<appId>.json` (default
 `~/.starkeep/app-creds/`), written at mode `0o600` by admin-web at install
 time. Shape:
 

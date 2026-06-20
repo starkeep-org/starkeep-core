@@ -10,18 +10,38 @@
 #   - Permissions boundary policies attached to roles outside the stack
 #   - Any resources left in ROLLBACK_COMPLETE / partial-delete state
 #
-# Usage: ./teardown-bootstrap.sh [--yes|-y] --prefix <stack-prefix> [--region <region>]
+# Usage: ./teardown-bootstrap.sh [--yes|-y] --prefix <stack-prefix> --region <region>
 #
-# --prefix is required: it scopes the teardown to one deployment and is never
-# inferred from config. If omitted in an interactive shell you'll be prompted
-# for it; an unattended run (--yes or no TTY) without it errors out.
+# --prefix and --region are both required: together they scope the teardown to
+# one deployment in one place, and neither is ever inferred from config. A
+# config-derived or CLI-default region can silently point at the wrong region
+# (e.g. the test suite deploys to us-east-2 while the AWS CLI default is
+# us-east-1), which skips the real resources and reports success. If either is
+# omitted in an interactive shell you'll be prompted for it; an unattended run
+# (--yes or no TTY) missing either errors out.
+#
+# Local config (STARKEEP_DIR/config.json): the cloud config is cleared only when
+# STARKEEP_DIR is set explicitly (so we know the config belongs to the
+# deployment being torn down — the test suite always passes its own run-state
+# dir). With STARKEEP_DIR unset, the default $HOME/.starkeep config is left
+# untouched and flagged as possibly stale. Either way, clearing removes only
+# cloud state; the local 'appParentDirs' setting is always preserved.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-STARKEEP_DATA_DIR="${STARKEEP_DATA_DIR:-$HOME/.starkeep}"
-CONFIG_FILE="$STARKEEP_DATA_DIR/config.json"
+# Whether STARKEEP_DIR was set by the caller. A teardown only clears the local
+# config when it knows *which* config belongs to the deployment it's tearing
+# down — i.e. when STARKEEP_DIR is explicit (as the test suite always passes it,
+# pointing at its own run-state dir). A bare manual run inherits the default
+# $HOME/.starkeep, which typically describes the *real* deployment, so we must
+# not reset it just because some other prefix/region was torn down.
+STARKEEP_DIR_EXPLICIT=false
+[[ -n "${STARKEEP_DIR:-}" ]] && STARKEEP_DIR_EXPLICIT=true
+
+STARKEEP_DIR="${STARKEEP_DIR:-$HOME/.starkeep}"
+CONFIG_FILE="$STARKEEP_DIR/config.json"
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
 
@@ -72,20 +92,25 @@ fi
 
 STACK_NAME="${STACK_PREFIX}-bootstrap"
 
-# Resolve region: flag > userPoolId prefix > AWS config
-if [[ -n "$FLAG_REGION" ]]; then
-  REGION="$FLAG_REGION"
-elif [[ -n "$USER_POOL_ID" ]]; then
-  REGION="${USER_POOL_ID%%_*}"
-elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-  REGION="$AWS_DEFAULT_REGION"
-elif [[ -n "${AWS_REGION:-}" ]]; then
-  REGION="$AWS_REGION"
-elif REGION=$(aws configure get region 2>/dev/null) && [[ -n "$REGION" ]]; then
-  : # got it
-else
-  echo "Error: cannot determine region. Supply --region <region> or set AWS_DEFAULT_REGION."
-  exit 1
+# Region, like the prefix, scopes a teardown to one place and is never inferred
+# silently: a config-derived or CLI-default region can point at the wrong place
+# (e.g. the test suite deploys to us-east-2 while the AWS CLI default is
+# us-east-1), which would skip the real resources and falsely report success.
+# It must be passed via --region, or entered at an interactive prompt.
+REGION="$FLAG_REGION"
+if [[ -z "$REGION" ]]; then
+  if [[ "$YES" != "true" && -t 0 ]]; then
+    CONFIG_REGION="${USER_POOL_ID%%_*}"
+    if [[ -n "$CONFIG_REGION" ]]; then
+      echo "No --region given. (For reference, $CONFIG_FILE describes region '$CONFIG_REGION'.)" >&2
+    fi
+    read -r -p "Enter the region to tear down: " REGION
+  fi
+  if [[ -z "$REGION" ]]; then
+    echo "Error: a region is required; pass --region <region>." >&2
+    echo "Usage: $0 [--yes] --prefix <stack-prefix> --region <region>" >&2
+    exit 1
+  fi
 fi
 
 # Pin every aws subcommand below to the resolved region. The CLI's default
@@ -121,7 +146,14 @@ echo "    IAM policy           : ${STACK_PREFIX}-install-infra-permissions-bound
 [[ -n "$USER_POOL_ID" ]]      && echo "    Cognito User Pool    : $USER_POOL_ID"
 [[ -n "$IDENTITY_POOL_ID" ]]  && echo "    Cognito Identity Pool: $IDENTITY_POOL_ID"
 echo ""
-echo "After all resources are deleted, $CONFIG_FILE will be reset to {}."
+if [[ "$STARKEEP_DIR_EXPLICIT" == "true" ]]; then
+  echo "After all resources are deleted, the cloud config in $CONFIG_FILE will be"
+  echo "cleared (the local 'appParentDirs' setting is preserved)."
+else
+  echo "STARKEEP_DIR is not set, so $CONFIG_FILE will be left UNTOUCHED — it may"
+  echo "describe a different deployment than the one being torn down. Set"
+  echo "STARKEEP_DIR to this deployment's config dir if you want it cleared."
+fi
 echo ""
 
 if [[ "$YES" != "true" ]]; then
@@ -406,15 +438,38 @@ if [[ -n "$USER_POOL_ID" ]]; then
   fi
 fi
 
-# ── Step 6: Reset config ──────────────────────────────────────────────────────
-step "Resetting $CONFIG_FILE"
-python3 -c "
-import json
-with open('$CONFIG_FILE', 'w') as f:
-    json.dump({}, f, indent=2)
+# ── Step 6: Clear cloud config ────────────────────────────────────────────────
+# Only when STARKEEP_DIR was explicit do we know this config belongs to the
+# deployment we just tore down. Otherwise we leave it alone: the default
+# $HOME/.starkeep config usually describes the real deployment, and clearing it
+# after tearing down some other prefix/region would wrongly orphan it.
+#
+# Even when we do clear it, this removes only the *cloud* state. 'appParentDirs'
+# is a purely local concern (where apps live on disk) and survives a cloud
+# teardown.
+if [[ "$STARKEEP_DIR_EXPLICIT" == "true" ]]; then
+  step "Clearing cloud config in $CONFIG_FILE (preserving local appParentDirs)"
+  python3 -c "
+import json, os
+path = '$CONFIG_FILE'
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, ValueError):
+    cfg = {}
+LOCAL_KEYS = ('appParentDirs',)
+preserved = {k: cfg[k] for k in LOCAL_KEYS if k in cfg}
+with open(path, 'w') as f:
+    json.dump(preserved, f, indent=2)
     f.write('\n')
 "
-echo "  Config reset to {}."
+  echo "  Cloud config cleared; local appParentDirs preserved."
+else
+  step "Leaving $CONFIG_FILE untouched (STARKEEP_DIR not set)"
+  echo "  WARNING: this config was not cleared and may now be stale — it could"
+  echo "  describe a deployment that no longer exists. Re-bootstrap or edit it"
+  echo "  by hand as needed."
+fi
 
 echo ""
 echo "Bootstrap teardown complete."

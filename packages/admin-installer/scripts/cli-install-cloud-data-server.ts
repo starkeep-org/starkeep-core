@@ -8,7 +8,7 @@
  * Pulumi up to create DSQL/S3/Lambda/APIGw, the shared-schema DDL is
  * applied, and the temp policy is detached.
  *
- * Reads ~/.starkeep/config.json (or $STARKEEP_DATA_DIR/config.json). The
+ * Reads ~/.starkeep/config.json (or $STARKEEP_DIR/config.json). The
  * admin-web wizard writes this file server-side via /api/config as it advances
  * through setup steps, so it must already exist (with at least userPoolId /
  * userPoolClientId / identityPoolId from the Stack outputs step) before this
@@ -24,7 +24,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 
 // TEMP (iam-permission-tests POC): if IAM_SDK_TRACE_PATH is set, record
 // every AWS SDK call this process makes to that file. Must run before any
@@ -66,8 +66,8 @@ interface StarkeepConfig {
   auroraEndpoint?: string;
 }
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
+const STARKEEP_DIR = starkeepDir();
+const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 function loadConfig(): StarkeepConfig {
   let raw: string;
@@ -220,7 +220,7 @@ const updated: StarkeepConfig = {
   s3Bucket: outputs.bucketName,
   auroraEndpoint: outputs.auroraHostname,
 };
-mkdirSync(STARKEEP_DATA_DIR, { recursive: true });
+mkdirSync(STARKEEP_DIR, { recursive: true });
 writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
 
 console.log("\nInstall complete. Updated ~/.starkeep/config.json:");

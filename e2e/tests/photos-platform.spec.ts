@@ -50,7 +50,7 @@ test.beforeAll(async () => {
 });
 
 test("install photos through the admin consent flow", async ({ page }) => {
-  await page.goto(`${adminUrl()}/apps`);
+  await page.goto(adminUrl());
   const card = photosCard(page);
   await expect(card).toBeVisible();
 
@@ -70,7 +70,7 @@ test("install photos through the admin consent flow", async ({ page }) => {
 });
 
 test("start photos from the admin UI and open it on its allocated port", async ({ page }) => {
-  await page.goto(`${adminUrl()}/apps`);
+  await page.goto(adminUrl());
   const card = photosCard(page);
 
   await card.getByRole("button", { name: "Start" }).click();
@@ -134,7 +134,7 @@ test("re-uploading the same photo dedups at the platform layer", async ({ page }
 
 test("uninstall: app data is gone, shared records survive in Drive", async ({ page }) => {
   // Stop, then uninstall through the UI (native confirm dialog).
-  await page.goto(`${adminUrl()}/apps`);
+  await page.goto(adminUrl());
   const card = photosCard(page);
   await card.getByRole("button", { name: "Stop" }).click();
   await expect(card.getByRole("button", { name: "Start" })).toBeVisible({
@@ -153,7 +153,7 @@ test("uninstall: app data is gone, shared records survive in Drive", async ({ pa
 });
 
 test("reinstall re-exposes the shared photos; captions are gone", async ({ page }) => {
-  await page.goto(`${adminUrl()}/apps`);
+  await page.goto(adminUrl());
   const card = photosCard(page);
   await card.getByRole("button", { name: "Install", exact: true }).click();
   await page.getByRole("button", { name: "Approve & Install" }).click();

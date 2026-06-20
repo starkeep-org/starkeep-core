@@ -19,13 +19,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 import { NextRequest } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 import { getRegion } from "../../../../src/lib/cloud-config";
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-const CONFIG_PATH = join(STARKEEP_DATA_DIR, "config.json");
+const STARKEEP_DIR = starkeepDir();
+const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 // Module-level store for an in-progress install (mirrors the cloud-data-server
 // route): when the browser suspends, the SSE connection drops but the child

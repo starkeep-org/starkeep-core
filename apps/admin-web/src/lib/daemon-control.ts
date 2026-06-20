@@ -1,12 +1,12 @@
 import "server-only";
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { starkeepDir } from "@starkeep/app-client";
 import { join, resolve } from "node:path";
-import { DAEMON_COMMANDS, type DaemonId } from "./exec-commands";
+import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "./exec-commands";
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
-export const PIDS_DIR = join(STARKEEP_DATA_DIR, "pids");
+const STARKEEP_DIR = starkeepDir();
+export const PIDS_DIR = join(STARKEEP_DIR, "pids");
 
 // Any id not in DAEMON_COMMANDS is treated as an installed-app daemon —
 // admin-web spawned it from a manifest's localRun block and recorded its pid
@@ -99,4 +99,53 @@ export function stopById(id: string): StopResult {
   }
 
   return { stopped: false, error: "Not running (no PID file)" };
+}
+
+export interface StartResult {
+  pid: number | undefined;
+  logPath: string;
+  port?: number;
+}
+
+// Spawn a fixed workspace daemon (local-data-server / drive) detached, recording
+// its pid + port the same way POST /api/exec/daemon does. Shared so callers that
+// need to (re)start a daemon out-of-band — e.g. after a cloud install rewrites
+// ~/.starkeep/config.json — go through one implementation.
+export function startWorkspaceDaemon(id: DaemonId): StartResult {
+  mkdirSync(PIDS_DIR, { recursive: true });
+  const daemon = DAEMON_COMMANDS[id];
+  const [cmd, ...args] = daemon.args;
+  const logPath = resolve(PIDS_DIR, `${id}.log`);
+  const logFd = openSync(logPath, "w");
+  const child = spawn(cmd, args, {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    cwd: REPO_ROOT,
+  });
+  child.unref();
+  writeFileSync(pidFile(id), String(child.pid));
+  writeFileSync(
+    metaFile(id),
+    JSON.stringify({ pid: child.pid, logPath, ...(daemon.port ? { port: daemon.port } : {}) }),
+  );
+  return { pid: child.pid, logPath, ...(daemon.port ? { port: daemon.port } : {}) };
+}
+
+// True if the daemon's recorded pid is alive. Used to decide whether a restart
+// is warranted: if the daemon isn't running, a later manual start will read the
+// updated config anyway, so there's nothing to restart.
+export function isWorkspaceDaemonRunning(id: DaemonId): boolean {
+  const pf = pidFile(id);
+  if (!existsSync(pf)) return false;
+  const pid = parseInt(readFileSync(pf, "utf-8"), 10);
+  return !isNaN(pid) && isAlive(pid);
+}
+
+// Restart a running workspace daemon so it re-reads boot-time config (the
+// local-data-server captures ~/.starkeep/config.json once at startup). No-op
+// when the daemon isn't running.
+export function restartWorkspaceDaemonIfRunning(id: DaemonId): StartResult | null {
+  if (!isWorkspaceDaemonRunning(id)) return null;
+  stopById(id);
+  return startWorkspaceDaemon(id);
 }

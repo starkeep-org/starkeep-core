@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { starkeepDir } from "@starkeep/app-client";
 
-const STARKEEP_DATA_DIR = process.env.STARKEEP_DATA_DIR ?? join(homedir(), ".starkeep");
+const STARKEEP_DIR = starkeepDir();
 
 export async function GET() {
-  const configPath = join(STARKEEP_DATA_DIR, "config.json");
+  const configPath = join(STARKEEP_DIR, "config.json");
   if (!existsSync(configPath)) {
     return NextResponse.json({ error: "~/.starkeep/config.json not found" }, { status: 404 });
   }

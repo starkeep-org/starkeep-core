@@ -14,11 +14,12 @@ import {
   ManifestValidationError,
 } from "../../packages/admin-installer/src/local/installer.js";
 import {
+  appRegistryRow,
   listAppRegistry,
   listInstallSteps,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
-import { canonicalSignedPath, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
+import { canonicalSignedPath, signRequest, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
   createSqliteAccessPolicyStore,
@@ -37,6 +38,7 @@ import { getCategory, typeCategory, isCategoryId, isKnownType } from "../../pack
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { createStarkeepId } from "@starkeep/protocol-primitives";
+import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
@@ -56,7 +58,7 @@ import {
 // all outstanding tokens are invalidated on restart (revocable by design).
 const TOKEN_SECRET = randomBytes(32) as unknown as Uint8Array;
 
-const STARKEEP_DIR = process.env.STARKEEP_DIR || join(homedir(), ".starkeep");
+const STARKEEP_DIR = starkeepDir();
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
 // Intentionally not configurable. The request-auth model in this server treats
 // the loopback bind as the boundary for administrative and host-level routes
@@ -287,6 +289,28 @@ async function loadStarkeepConfig(): Promise<StarkeepConfig> {
   return parsed as StarkeepConfig;
 }
 
+/**
+ * Assemble the Cognito config from a StarkeepConfig, or null if the three
+ * required pool fields aren't all present. Region is derived from the
+ * userPoolId (AWS encodes it in the prefix), never stored separately.
+ *
+ * Callers that authenticate must derive this from a *freshly loaded* config
+ * rather than a boot-time snapshot: the admin panel writes the pool IDs to
+ * ~/.starkeep/config.json directly (it does not restart this daemon), so a
+ * value captured at boot goes stale the moment cloud setup fills them in.
+ */
+function cognitoConfigFrom(config: StarkeepConfig): CognitoConfig | null {
+  if (!config.userPoolId || !config.userPoolClientId || !config.identityPoolId) {
+    return null;
+  }
+  return {
+    region: regionFromUserPoolId(config.userPoolId),
+    userPoolId: config.userPoolId,
+    userPoolClientId: config.userPoolClientId,
+    identityPoolId: config.identityPoolId,
+  };
+}
+
 async function loadPersistedAuth(): Promise<PersistedAuth | null> {
   try {
     return JSON.parse(await readFile(join(STARKEEP_DIR, "auth.json"), "utf8")) as PersistedAuth;
@@ -391,15 +415,10 @@ async function main() {
     }
   }
 
-  const cognitoConfig: CognitoConfig | null =
-    starkeepConfig.userPoolId && starkeepConfig.userPoolClientId && starkeepConfig.identityPoolId
-      ? {
-          region: configRegion,
-          userPoolId: starkeepConfig.userPoolId,
-          userPoolClientId: starkeepConfig.userPoolClientId,
-          identityPoolId: starkeepConfig.identityPoolId,
-        }
-      : null;
+  // Boot-time snapshot — used only to decide whether to start the credential
+  // refresh timer below. Request handlers that authenticate must NOT trust this
+  // (it goes stale once cloud setup writes the pool IDs); they reload from disk.
+  const cognitoConfig: CognitoConfig | null = cognitoConfigFrom(starkeepConfig);
 
   if (cognitoConfig && currentRefreshToken) {
     console.log("Stored auth found — starting credential refresh timer");
@@ -740,14 +759,20 @@ async function main() {
       }
 
       if (path === "/auth/status" && req.method === "GET") {
+        // Reload from disk so this reflects setup that completed after boot.
+        const freshCognito = cognitoConfigFrom(await loadStarkeepConfig());
         json(res, {
-          configLoaded: cognitoConfig !== null,
+          configLoaded: freshCognito !== null,
           authenticated: currentRefreshToken !== null,
         });
         return;
       }
 
       if (path === "/auth/login" && req.method === "POST") {
+        // Reload from disk: the admin panel writes the Cognito pool IDs to
+        // config.json without restarting this daemon, so the boot-time snapshot
+        // may be stale (null) even though setup is complete.
+        const cognitoConfig = cognitoConfigFrom(await loadStarkeepConfig());
         if (!cognitoConfig) {
           res.writeHead(503);
           json(res, { error: "No ~/.starkeep/config.json found — cannot authenticate" });
@@ -815,6 +840,10 @@ async function main() {
       }
 
       if (path === "/auth/tokens" && req.method === "POST") {
+        // Reload from disk — see the note in /auth/login. The boot-time
+        // cognitoConfig const is null until this daemon is restarted, but cloud
+        // setup writes the pool IDs directly to config.json.
+        const cognitoConfig = cognitoConfigFrom(await loadStarkeepConfig());
         if (!cognitoConfig) {
           res.writeHead(503);
           json(res, { error: "No cloud config loaded — cannot authenticate" });
@@ -918,12 +947,16 @@ async function main() {
       }
 
       // GET /cloud/data/types and /cloud/data/records — read-only proxy to the
-      // cloud-data-server, signed with the local-data-server's live Cognito id
-      // token. The calling app (e.g. starkeep-drive) authenticates to *us* with
-      // its HMAC as usual; we then re-auth to the cloud as the signed-in user.
-      // The cloud enforces the same per-app grants for /apps/{appId}/data/*, so
-      // this exposes no data the app couldn't already sync. Lets the Drive UI
-      // show the cloud-side view (what actually pushed) next to the local view.
+      // cloud-data-server, signed with the calling app's per-app HMAC. The app
+      // (e.g. starkeep-drive) authenticates to *us* with its HMAC as usual; we
+      // then re-sign as that same app for the cloud, exactly like the sync
+      // supervisor does (see sync-supervisor.ts → makeSignerFor). The cloud's
+      // verifier (cloud-data-server/api-handler.ts → validateAppHmac) requires
+      // every /apps/{appId}/* request to carry X-Starkeep-App-{Id,Sig,Ts}; a
+      // bearer JWT is not accepted there. The cloud enforces the same per-app
+      // grants for /apps/{appId}/data/*, so this exposes no data the app
+      // couldn't already sync. Lets the Drive UI show the cloud-side view (what
+      // actually pushed) next to the local view.
       if (path === "/cloud/data/types" || path === "/cloud/data/records") {
         if (req.method !== "GET") {
           res.writeHead(405);
@@ -935,17 +968,25 @@ async function main() {
           json(res, { error: "Cloud is not configured (no apiGatewayUrl / STARKEEP_CLOUD_URL)" });
           return;
         }
-        if (!currentIdToken) {
+        const hmacSecret = appRegistryRow(localDb, appId!)?.hmacSecret;
+        if (!hmacSecret) {
           res.writeHead(503);
-          json(res, { error: "Not signed in to the cloud (no id token)" });
+          json(res, { error: `No hmac_secret in local registry for app '${appId}' — re-run its local install` });
           return;
         }
         const subPath = path.slice("/cloud".length); // "/data/types" | "/data/records"
+        // Sign over the cloud sub-path (everything after /apps/{appId}), since
+        // the cloud verifier strips that prefix before checking the signature.
+        // The query string is excluded from the signed message (canonicalSignedPath).
+        const signedHeaders = signRequest({
+          appId: appId!,
+          hmacSecret,
+          method: "GET",
+          path: subPath,
+        });
         const cloudUrl = `${CLOUD_URL.replace(/\/+$/, "")}/apps/${encodeURIComponent(appId!)}${subPath}${url.search}`;
         try {
-          const cloudRes = await fetch(cloudUrl, {
-            headers: { Authorization: `Bearer ${currentIdToken}` },
-          });
+          const cloudRes = await fetch(cloudUrl, { headers: signedHeaders });
           const text = await cloudRes.text();
           res.writeHead(cloudRes.status, {
             "Content-Type": cloudRes.headers.get("content-type") ?? "application/json",

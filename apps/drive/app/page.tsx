@@ -1,12 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { fileLinkHref } from "@/lib/file-link";
 
-type SyncStatus =
-  | "local-only"
-  | "synced"
-  | "modified-locally"
-  | "cloud-only";
+type SyncStatus = "local-only" | "synced" | "modified-locally" | "cloud-only";
 
 interface DriveRecord {
   id: string;
@@ -17,6 +14,7 @@ interface DriveRecord {
   size_bytes?: number | null;
   original_filename?: string | null;
   mime_type?: string | null;
+  object_storage_key?: string | null;
   sync_status: SyncStatus;
 }
 
@@ -119,9 +117,9 @@ export default function DrivePage() {
     <main>
       <h1>Starkeep Drive</h1>
       <p className="subtitle">
-        Everything you own across all your apps — including data from apps that
-        aren&apos;t cloud-installed. Read-only. Each row shows whether it lives
-        only on this device, only in the cloud, or is synced to both.
+        Everything you own across all your apps — including data from apps that aren&apos;t
+        cloud-installed. Read-only. Each row shows whether it lives only on this device, only in the
+        cloud, or is synced to both.
       </p>
 
       {cloud && !cloud.available && (
@@ -149,11 +147,7 @@ export default function DrivePage() {
         ))}
       </div>
 
-      {error && (
-        <div className="notice error">
-          Couldn&apos;t load records: {error}
-        </div>
-      )}
+      {error && <div className="notice error">Couldn&apos;t load records: {error}</div>}
 
       {!error && loading && <div className="notice">Loading…</div>}
 
@@ -175,27 +169,36 @@ export default function DrivePage() {
             </tr>
           </thead>
           <tbody>
-            {records.map((r) => (
-              <tr key={r.id}>
-                <td>
-                  <span className={`badge ${r.sync_status}`}>
-                    {SYNC_LABEL[r.sync_status]}
-                  </span>
-                </td>
-                <td>{r.category ?? "—"}</td>
-                <td>{r.type || "—"}</td>
-                <td title={r.original_filename ?? r.id}>
-                  {r.original_filename ?? r.id}
-                </td>
-                <td>
-                  <span className="origin">{r.origin_app_id ?? "—"}</span>
-                </td>
-                <td>{formatBytes(r.size_bytes ?? null)}</td>
-                <td>
-                  {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
-                </td>
-              </tr>
-            ))}
+            {records.map((r) => {
+              // The Name links through to the bytes only when the file is on
+              // this device; fileLinkHref returns null for cloud-only rows and
+              // records with no attached object. (See @/lib/file-link.)
+              const name = r.original_filename ?? r.id;
+              const href = fileLinkHref(r);
+              return (
+                <tr key={r.id}>
+                  <td>
+                    <span className={`badge ${r.sync_status}`}>{SYNC_LABEL[r.sync_status]}</span>
+                  </td>
+                  <td>{r.category ?? "—"}</td>
+                  <td>{r.type || "—"}</td>
+                  <td title={name}>
+                    {href ? (
+                      <a href={href} target="_blank" rel="noopener noreferrer">
+                        {name}
+                      </a>
+                    ) : (
+                      name
+                    )}
+                  </td>
+                  <td>
+                    <span className="origin">{r.origin_app_id ?? "—"}</span>
+                  </td>
+                  <td>{formatBytes(r.size_bytes ?? null)}</td>
+                  <td>{r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}
