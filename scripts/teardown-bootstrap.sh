@@ -31,6 +31,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Honor repo-root .env / .env.local before the explicit-vs-default check below, so
+# a STARKEEP_DIR provided via .env.local correctly counts as "explicit" (and thus
+# this deployment's config gets cleared).
+source "$SCRIPT_DIR/load-env.sh"
+
 # Whether STARKEEP_DIR was set by the caller. A teardown only clears the local
 # config when it knows *which* config belongs to the deployment it's tearing
 # down — i.e. when STARKEEP_DIR is explicit (as the test suite always passes it,

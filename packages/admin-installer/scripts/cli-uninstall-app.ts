@@ -15,6 +15,8 @@
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --non-interactive
  */
 
+// First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
+import "@starkeep/app-client/load-env";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
