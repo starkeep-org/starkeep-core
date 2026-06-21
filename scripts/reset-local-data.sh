@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# Honor repo-root .env / .env.local (STARKEEP_DIR etc.) before defaulting below.
+source "$(dirname "${BASH_SOURCE[0]}")/load-env.sh"
+
 STARKEEP_DIR="${STARKEEP_DIR:-$HOME/.starkeep}"
 OBJECTS_DIR="$STARKEEP_DIR/objects"
 DB_FILE="$STARKEEP_DIR/data.db"

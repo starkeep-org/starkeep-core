@@ -20,6 +20,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Honor repo-root .env / .env.local (STARKEEP_DIR etc.) before defaulting below.
+source "$SCRIPT_DIR/load-env.sh"
 STARKEEP_DIR="${STARKEEP_DIR:-$HOME/.starkeep}"
 CONFIG_FILE="$STARKEEP_DIR/config.json"
 

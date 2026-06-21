@@ -128,13 +128,17 @@ async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
     },
   });
 
-  // Same budget as probePulumiStateBucket below (30 / ~300s, vs the default
-  // 24 / ~215s): the passphrase read and the S3 probe run together in the
-  // same Promise.all gating one Pulumi up/destroy, so a shorter budget here
-  // makes SSM the premature long-pole — a slow temp-policy propagation can
-  // make this give up at ~215s while the S3 probe (30 attempts) is still
-  // waiting and about to succeed, rejecting the whole operation. (Observed on
-  // an app uninstall: SSM still AccessDenied at 186s+, gave up at ~205s.)
+  // Same budget as probePulumiStateBucket below (45 / ~415s): the passphrase
+  // read and the S3 probe run together in the same Promise.all gating one
+  // Pulumi up/destroy, so a shorter budget here makes SSM the premature
+  // long-pole — a slow temp-policy propagation can make this give up while the
+  // S3 probe is still waiting and about to succeed, rejecting the whole
+  // operation. Per-service propagation is independent and either side can be
+  // the long-pole: SSM has been observed still AccessDenied at 186s+ in one
+  // run, and again at 256s in an uninstall where S3 (same policy attach) had
+  // already gone live at 246s and the old 30-attempt (~266s) budget gave up at
+  // 266s. 45 attempts (~415s) covers the worst observed case for either side
+  // with margin.
   return retryOnAccessDenied(
     "ssm:GetParameter pulumi/passphrase",
     async () => {
@@ -148,7 +152,7 @@ async function getPulumiPassphrase(ctx: PulumiCredsContext): Promise<string> {
       if (!value) throw new Error("Pulumi passphrase not found in SSM");
       return value;
     },
-    { maxAttempts: 30, maxDelayMs: 10_000 },
+    { maxAttempts: 45, maxDelayMs: 10_000 },
   );
 }
 
@@ -186,10 +190,11 @@ async function probePulumiStateBucket(opts: {
   });
 
   // S3's authz cache propagation after PutRolePolicy is observed to take
-  // multiple minutes in some accounts/regions — much longer than other
-  // services (e.g. SSM resolves in 15–35s while S3 on the same policy
-  // attach is still denying at 85s+). Budget ~5 minutes here so we can
-  // wait through the slow case without aborting.
+  // multiple minutes in some accounts/regions. Which service is the long-pole
+  // is not fixed — S3 has been seen still denying at 85s+ while SSM resolved in
+  // 15–35s, and the reverse (SSM still denying at 256s while S3 went live at
+  // 246s) on an uninstall. Budget ~415s (45 attempts) here so we wait through
+  // the slow case for either side without aborting.
   await retryOnAccessDenied(
     `s3:ListBucket ${opts.pulumiStateBucket}`,
     async () => {
@@ -201,7 +206,7 @@ async function probePulumiStateBucket(opts: {
         }),
       );
     },
-    { maxAttempts: 30, maxDelayMs: 10_000 },
+    { maxAttempts: 45, maxDelayMs: 10_000 },
   );
 
   // Also probe s3:GetAccelerateConfiguration. PutRolePolicy propagation is
@@ -221,7 +226,7 @@ async function probePulumiStateBucket(opts: {
         }),
       );
     },
-    { maxAttempts: 30, maxDelayMs: 10_000 },
+    { maxAttempts: 45, maxDelayMs: 10_000 },
   );
 }
 

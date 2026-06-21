@@ -4,6 +4,9 @@
  * browses data through proper access control, not by reading the DB directly.
  */
 
+// First import: load repo-root .env / .env.local so STARKEEP_DIR (and any other
+// vars) are populated before anything below reads them.
+import "@starkeep/app-client/load-env";
 import { createServer } from "node:http";
 import { createHmac, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";

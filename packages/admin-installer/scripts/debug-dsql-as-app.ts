@@ -22,6 +22,8 @@
  *   pnpm -F @starkeep/admin-installer debug:dsql-as-app <appId>
  */
 
+// First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
+import "@starkeep/app-client/load-env";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";

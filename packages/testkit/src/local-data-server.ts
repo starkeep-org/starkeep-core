@@ -37,6 +37,13 @@ export interface LocalDataServerOptions {
   config?: Record<string, unknown>;
   /** Extra environment for the child process. */
   env?: Record<string, string>;
+  /**
+   * Don't inject `STARKEEP_DIR` into the child env — instead let the server's
+   * own `.env`-file loading resolve it (e.g. from a `.env.local` in the dir named
+   * by a `STARKEEP_ENV_DIR` passed via `env`). Used to test the dotfile wiring:
+   * the server must independently arrive at `starkeepDir`, not be told it.
+   */
+  loadDirFromEnvFile?: boolean;
   /** Milliseconds to wait for /health before failing. */
   startTimeoutMs?: number;
   /**
@@ -122,13 +129,20 @@ export async function startLocalDataServer(
   }
 
   let output = "";
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    STARKEEP_PORT: String(port),
+    ...options.env,
+  };
+  if (options.loadDirFromEnvFile) {
+    // The server must resolve STARKEEP_DIR from its own .env-file loading; make
+    // sure neither our injection nor an inherited shell export shortcuts that.
+    delete childEnv.STARKEEP_DIR;
+  } else {
+    childEnv.STARKEEP_DIR = starkeepDir;
+  }
   const child = spawn(TSX_BIN, [SERVER_ENTRY], {
-    env: {
-      ...process.env,
-      STARKEEP_DIR: starkeepDir,
-      STARKEEP_PORT: String(port),
-      ...options.env,
-    },
+    env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout!.on("data", (chunk: Buffer) => (output += chunk.toString()));
