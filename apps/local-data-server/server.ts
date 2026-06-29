@@ -22,12 +22,10 @@ import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js"
 import { canonicalSignedPath, signRequest, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import {
-  createSqliteAccessPolicyStore,
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
 } from "../../packages/storage-sqlite/src/index.js";
 import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
-import { disabledSharingTokenStore } from "../../packages/access-control/src/stores.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
@@ -35,6 +33,15 @@ import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
 import { getCategory, typeCategory, isCategoryId, isKnownType } from "../../packages/protocol-primitives/src/types/core-types.js";
+import {
+  buildAccessGrants,
+  canRead,
+  canWrite,
+  canReadCategory,
+  canWriteCategory,
+  canWriteMetadataCategory,
+  type AccessGrants,
+} from "../../packages/protocol-primitives/src/access/grants.js";
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { createStarkeepId } from "@starkeep/protocol-primitives";
@@ -98,14 +105,28 @@ function grantsForApp(db: DatabaseSync, appId: string): AppGrantRow[] {
 // access-enforcer for Drive). `type` is the record's Starkeep type id.
 const ALL_ACCESS_APP_IDS = new Set<string>([DRIVE_APP_ID, LOCAL_WATCHER_APP_ID]);
 
+// Resolve one app's grant snapshot from the local SQLite grant rows. The
+// grant→category derivation and the `can*` predicates are shared with the
+// cloud-data-server (see @starkeep/protocol-primitives `access/grants.ts`);
+// this server supplies only the SQLite grant source and the local all-access
+// policy (Drive + the watcher).
+function appGrants(db: DatabaseSync, appId: string): AccessGrants {
+  return buildAccessGrants(
+    grantsForApp(db, appId).map((g) => ({
+      typeId: g.type_id,
+      access: g.access,
+      metadataWrite: g.metadata_write === 1,
+    })),
+    { allAccess: ALL_ACCESS_APP_IDS.has(appId) },
+  );
+}
+
 function appCanRead(db: DatabaseSync, appId: string, type: string): boolean {
-  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
-  return grantsForApp(db, appId).some((g) => g.type_id === type);
+  return canRead(appGrants(db, appId), type);
 }
 
 function appCanWrite(db: DatabaseSync, appId: string, type: string): boolean {
-  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
-  return grantsForApp(db, appId).some((g) => g.type_id === type && g.access === "readwrite");
+  return canWrite(appGrants(db, appId), type);
 }
 
 // Category-level access. Object-storage keys (`shared/<category>/…`) and the
@@ -113,22 +134,15 @@ function appCanWrite(db: DatabaseSync, appId: string, type: string): boolean {
 // so they authorize against the categories the app's type grants map to —
 // a category is accessible when at least one granted type maps to it.
 function appCanReadCategory(db: DatabaseSync, appId: string, category: string): boolean {
-  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
-  return grantsForApp(db, appId).some((g) => typeCategory(g.type_id) === category);
+  return canReadCategory(appGrants(db, appId), category);
 }
 
 function appCanWriteCategory(db: DatabaseSync, appId: string, category: string): boolean {
-  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
-  return grantsForApp(db, appId).some(
-    (g) => typeCategory(g.type_id) === category && g.access === "readwrite",
-  );
+  return canWriteCategory(appGrants(db, appId), category);
 }
 
 function appCanWriteMetadataCategory(db: DatabaseSync, appId: string, category: string): boolean {
-  if (ALL_ACCESS_APP_IDS.has(appId)) return true;
-  return grantsForApp(db, appId).some(
-    (g) => typeCategory(g.type_id) === category && g.metadata_write === 1,
-  );
+  return canWriteMetadataCategory(appGrants(db, appId), category);
 }
 
 function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
@@ -471,8 +485,6 @@ async function main() {
   // tables (registry, grants) that have no adapter wrapper.
   const localDb = databaseAdapter.getRawDatabase();
 
-  const accessPolicyStore = createSqliteAccessPolicyStore(localDb);
-
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
   const appApplier = new SqliteAppSyncableApplier(localDb, namespaceStore);
 
@@ -498,11 +510,6 @@ async function main() {
   const sdk = await createStarkeepSdk({
     databaseAdapter,
     objectStorageAdapter: localAdapter,
-    accessPolicyStore,
-    // Sharing tokens are not wired anywhere today — neither local nor cloud
-    // persists them, and no endpoint redeems them. This stub throws on every
-    // call so anything that tries to issue or validate one fails loudly.
-    sharingTokenStore: disabledSharingTokenStore(),
     nodeId: NODE_ID,
     syncStateStore,
     changeNotifier,

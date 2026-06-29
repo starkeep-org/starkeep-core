@@ -12,14 +12,9 @@ import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/protocol-primitives";
  *
  *   - shared_records           — all shared data, all types (file-backed only)
  *   - shared_record_<category>_metadata — per-category metadata rows (typed columns)
- *   - shared_access_grants     — per-app, per-extension permissions
+ *   - shared_access_grants     — per-app, per-type permissions
  *   - shared_app_registry      — installed apps + HMAC secrets
  *   - shared_app_install_steps — idempotent install/uninstall ledger
- *   - access_policies          — control-plane: AccessControlEngine policies
- *
- * `sharing_tokens` is not persisted anywhere today — local uses the disabled
- * stub store and no cloud-side table or endpoint exists. The redemption path
- * is left for a future workstream.
  *
  * No migration system: this is a fresh-start schema. The user removes
  * ~/.starkeep/data.db (or the local-data-server's STARKEEP_DIR is fresh)
@@ -110,22 +105,6 @@ export function initializeLocalSchema(db: DatabaseSync): void {
       created_at    TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
-
-  // Control-plane: access policies issued via sdk.accessControl.createPolicy.
-  // Instance-local; never synced. See AccessControlEngine.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS access_policies (
-      policy_id     TEXT PRIMARY KEY,
-      subject_type  TEXT NOT NULL,
-      subject_id    TEXT NOT NULL,
-      resource_type TEXT NOT NULL,
-      resource_id   TEXT NOT NULL,
-      permissions   TEXT NOT NULL,
-      granted_at    TEXT NOT NULL,
-      expires_at    TEXT
-    )
-  `);
-  db.exec("CREATE INDEX IF NOT EXISTS idx_access_policies_subject ON access_policies(subject_type, subject_id)");
 
   // Per-category metadata tables on parity with DSQL. Generated from CATEGORIES
   // so adding a category or a column is a single edit in @starkeep/protocol-primitives's

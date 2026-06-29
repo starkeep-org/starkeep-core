@@ -8,11 +8,11 @@ function grants(overrides: Partial<{
   allAccess: boolean;
 }> = {}): AccessGrants {
   return {
-    appId: "photos",
     readableTypes: new Set(),
     writableTypes: new Set(),
     readableCategories: new Set(overrides.readableCategories ?? []),
     writableCategories: new Set(overrides.writableCategories ?? []),
+    writableMetadataCategories: new Set(),
     allAccess: overrides.allAccess ?? false,
   };
 }

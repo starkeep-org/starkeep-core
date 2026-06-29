@@ -17,7 +17,6 @@ async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
 }
 import { createUnifiedIndex } from "@starkeep/query-orchestrator";
 import { createChangeNotifier } from "@starkeep/sync-engine";
-import { createAccessControlEngine, createEnforcedDatabaseAdapter } from "@starkeep/access-control";
 import { createSharedSpaceApi } from "@starkeep/shared-space-api";
 import type {
   StarkeepSdk,
@@ -35,16 +34,13 @@ export async function createStarkeepSdk(
   options: StarkeepSdkOptions,
 ): Promise<StarkeepSdk> {
   const {
-    databaseAdapter: rawDatabaseAdapter,
+    databaseAdapter,
     objectStorageAdapter,
-    accessPolicyStore,
-    sharingTokenStore,
     nodeId,
     syncStateStore,
-    subject,
   } = options;
 
-  await rawDatabaseAdapter.init();
+  await databaseAdapter.init();
   await objectStorageAdapter.init();
 
   // Seed the clock from persisted state and debounce write-back on tick,
@@ -83,24 +79,6 @@ export async function createStarkeepSdk(
   // server hoists it to share with the app-specific factory, which emits
   // its own local-change events tagged with the writing app's id).
   const changeNotifier = options.changeNotifier ?? createChangeNotifier();
-
-  // When a subject is provided, wrap the adapter so every operation is
-  // gated by access control and the private-storage structural rule.
-  const accessControlEngine = createAccessControlEngine({
-    policyStore: accessPolicyStore,
-    tokenStore: sharingTokenStore,
-    clock,
-  });
-  await accessControlEngine.loadPolicies();
-
-  const databaseAdapter = subject
-    ? createEnforcedDatabaseAdapter({
-        databaseAdapter: rawDatabaseAdapter,
-        accessControlEngine,
-        subjectType: subject.subjectType,
-        subjectId: subject.subjectId,
-      })
-    : rawDatabaseAdapter;
 
   const unifiedIndex = createUnifiedIndex({ databaseAdapter });
 
@@ -283,34 +261,6 @@ export async function createStarkeepSdk(
     index: {
       async search(query) {
         return unifiedIndex.search(query);
-      },
-    },
-
-    accessControl: {
-      async createPolicy(input) {
-        if (subject) {
-          throw new Error(
-            "createPolicy is not available on an app-scoped SDK. Policies are managed by the admin layer.",
-          );
-        }
-        return accessControlEngine.createPolicy(input);
-      },
-
-      async revokePolicy(policyId) {
-        if (subject) {
-          throw new Error(
-            "revokePolicy is not available on an app-scoped SDK. Policies are managed by the admin layer.",
-          );
-        }
-        return accessControlEngine.revokePolicy(policyId);
-      },
-
-      async listPolicies(listOptions) {
-        return accessControlEngine.listPolicies(listOptions);
-      },
-
-      async checkAccess(request) {
-        return accessControlEngine.checkAccess(request);
       },
     },
 
