@@ -144,7 +144,7 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       if (isMissingOrForbidden(error)) {
         // S3 returns 403 (Forbidden) instead of 404 to callers without
         // s3:ListBucket on the prefix — see the per-app permissions boundary
-        // in roles-and-permissions.md, which intentionally withholds ListBucket
+        // in data-roles-and-permissions.md, which intentionally withholds ListBucket
         // on shared/*. The two cases are indistinguishable from the SDK, so
         // treat both as "not present". A genuine permission problem will
         // surface clearly on the subsequent put/get of the same key.

@@ -2,7 +2,7 @@
 
 > **Revision note (2026-06-10).** Revised after commits `345ec13` (HMAC app-auth), `10ce75b` (Pulumi passphrase + cloud-side `/app-data/*` routes), and `9e88958` (removed `owner_id` from `shared.records`). Part 1 has been updated to describe the current state; Part 2 captures the bugs and gaps these changes introduced.
 
-Scope: the `cloud-data-server` topic and its nine children (auth, data-ops, db-indexing, install, object-storage, security, serverless, sync, uninstall). The deep IAM/PG/trust-policy reasoning belongs to the cloud bootstrap doc and to `roles-and-permissions.md`; this review covers it only to the extent that it shapes how the cloud data server *works*.
+Scope: the `cloud-data-server` topic and its nine children (auth, data-ops, db-indexing, install, object-storage, security, serverless, sync, uninstall). The deep IAM/PG/trust-policy reasoning belongs to the cloud bootstrap doc and to `data-roles-and-permissions.md`; this review covers it only to the extent that it shapes how the cloud data server *works*.
 
 ---
 
@@ -37,7 +37,7 @@ What the cloud data server itself contributes to this layered model lives in fou
 
 The reserved `starkeep-drive` app id is the **User-Data-Owner channel**: it is granted all-access by app id (not via grant rows), and it is the only channel that ships shared records to the cloud (see Sync, below). The cloud data server's authorization code special-cases this app id; the deeper rationale for why Drive owns shared-record custody is the bootstrap doc's concern.
 
-The end result is that compromise or buggy behavior in the broker code can still only do what the calling app's role allows. *How* and *why* that property is constructed at the IAM layer is covered exhaustively in `roles-and-permissions.md` and the cloud-overview-and-bootstrap functional doc; this doc covers only the per-request mechanics the broker enforces in code.
+The end result is that compromise or buggy behavior in the broker code can still only do what the calling app's role allows. *How* and *why* that property is constructed at the IAM layer is covered exhaustively in `data-roles-and-permissions.md` and the cloud-overview-and-bootstrap functional doc; this doc covers only the per-request mechanics the broker enforces in code.
 
 ## The shared API surface
 

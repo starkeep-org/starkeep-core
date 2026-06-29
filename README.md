@@ -19,7 +19,7 @@ Beyond the core, Starkeep is designed for many "installable" apps to run on top 
 
 For now, we provide an example "Photos" app available in a separate repo, `starkeep-apps`.
 
-For the full picture of the parts and how data moves between them, see [`system-design.md`](system-design.md). For the trust boundaries between those parts, see [`roles-and-permissions.md`](roles-and-permissions.md).
+For the full picture of the parts and how data moves between them, see [`system-design.md`](system-design.md). For the trust boundaries between those parts, see [`data-roles-and-permissions.md`](data-roles-and-permissions.md).
 
 ## Prerequisites
 
@@ -134,7 +134,7 @@ Three tiers:
 ## Further reading
 
 - [`system-design.md`](system-design.md) — the major parts, how data is classified (shared vs app-specific), and how it moves and syncs.
-- [`roles-and-permissions.md`](roles-and-permissions.md) — identities, trust boundaries, and why the admin app never appears on the data path.
+- [`data-roles-and-permissions.md`](data-roles-and-permissions.md) — identities, trust boundaries, and why the admin app never appears on the data path.
 - App READMEs: [`apps/admin-web`](apps/admin-web/README.md), [`apps/local-data-server`](apps/local-data-server/README.md).
 - Authoring your own app: [`../starkeep-apps/README.md`](../starkeep-apps/README.md).
 
