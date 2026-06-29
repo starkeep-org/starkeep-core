@@ -1,127 +1,110 @@
 # @starkeep/sdk
 
-High-level facade over all Starkeep packages. Provides a single entry point for data operations, metadata generation, search, aggregations, sync, access control, and API handling.
-
-## Installation
-
-```bash
-pnpm add @starkeep/sdk
-```
+Host-side facade that wires the Starkeep data plane together: record + file
+operations, per-category metadata, search, the shared-space API surface, and the
+HLC clock / change notifier that the local-data-server shares with its sync
+supervisor. It runs the **local** side against a SQLite database adapter and a
+filesystem/S3 object-storage adapter; the cloud-data-server is a separate
+artifact and does not use this package.
 
 ## Usage
 
 ```ts
 import { createStarkeepSdk } from "@starkeep/sdk";
 
-const starkeepSdk = createStarkeepSdk({
-  databaseAdapter: localDatabaseAdapter,
-  objectStorageAdapter: localObjectStorage,
-  ownerId: "user-123",
-  nodeId: "device-abc",
-  // Optional: enable sync by providing remote adapters
-  remoteDatabaseAdapter: remoteDatabaseAdapter,
-  remoteObjectStorageAdapter: remoteObjectStorage,
-  // Optional: register metadata generators
-  generators: [imageDimensionsGenerator, textPreviewGenerator],
+const sdk = await createStarkeepSdk({
+  databaseAdapter: localDatabaseAdapter,   // e.g. SqliteDatabaseAdapter
+  objectStorageAdapter: localObjectStorage, // e.g. FsObjectStorageAdapter
+  nodeId: "device-abc",                     // unique per replica; seeds the HLC clock
+  // Optional:
+  // syncStateStore,   // persists/seeds the HLC clock state across restarts
+  // changeNotifier,   // inject to share one notifier with sibling components
+  // getAppSpecific,   // factory for per-app app-specific operations
+  // clock,            // inject a custom HLC clock
 });
 
-// Data operations
-const record = await starkeepSdk.data.put({
-  type: "photo",
-  ownerId: "user-123",
-  payload: { title: "Sunset", tags: ["nature"] },
-});
-
-const recordWithFile = await starkeepSdk.data.putWithFile(
-  { type: "photo", ownerId: "user-123", payload: { title: "Beach" } },
-  fileBuffer,
+// Write a shared record from in-memory bytes. `type` is a canonical
+// `<category>/<format>` Starkeep type id (e.g. "image/jpeg"); the SDK computes
+// the content hash, the content-addressed object key, size, and mime type.
+const record = await sdk.data.putWithFile(
+  { type: "image/jpeg", originAppId: "photos" },
+  fileBytes,
   "image/jpeg",
 );
 
-const fetched = await starkeepSdk.data.get(record.id);
-await starkeepSdk.data.delete(record.id);
+// Or register a blob already uploaded out-of-band (e.g. via a presigned PUT):
+await sdk.data.putWithExistingBlob(
+  { type: "image/jpeg", originAppId: "photos" },
+  { contentHash, objectStorageKey, sizeBytes, mimeType: "image/jpeg" },
+);
 
-// Metadata
-const generationResults = await starkeepSdk.metadata.generateAll(record.id, "photo");
-const metadataRecords = await starkeepSdk.metadata.getForRecord(record.id);
+const fetched = await sdk.data.get(record.id);
+await sdk.data.delete(record.id);
 
-// Search
-const searchResult = await starkeepSdk.index.search({
-  types: ["photo"],
-  fullTextSearch: "sunset",
-  limit: 20,
-});
+// Per-category metadata (deterministically derivable from the file bytes).
+// Keyed by category — "image" here. The `other` category has no metadata table.
+await sdk.data.putMetadata("image", { recordId: record.id, width: 800, height: 600 });
+const meta = await sdk.data.getMetadata("image", record.id);
 
-// Aggregations
-const aggregationResult = await starkeepSdk.aggregations.compute({
-  dateGranularity: "month",
-});
+// Search across records.
+const result = await sdk.index.search({ types: ["image/jpeg"], limit: 20 });
+console.log(result.items);
 
-// Sync (available when remote adapters are provided)
-if (starkeepSdk.sync) {
-  const syncResult = await starkeepSdk.sync.fullSync();
-  const unsubscribe = starkeepSdk.sync.onUpdate((changeEvent) => {
-    console.log(changeEvent.eventType, changeEvent.recordIds);
-  });
-}
-
-// Access control
-const policy = await starkeepSdk.accessControl.createPolicy({
-  subjectType: "user",
-  subjectId: "user-456",
-  resourceType: "type",
-  resourceId: "photo",
-  permissions: ["read"],
-});
-
-// API
-const apiResponse = await starkeepSdk.api.handleRequest({
-  path: "/photos/v1/albums",
+// Shared-space API surface (used by the local-data-server's HTTP routes).
+const response = await sdk.api.handleRequest({
+  path: "/data/records",
   method: "GET",
-  subject: { subjectType: "user", subjectId: "user-456" },
+  subject: { subjectType: "app", subjectId: "photos" },
 });
 
-// Cleanup
-await starkeepSdk.close();
+// React to writes (the supervisor forwards sync events onto the same channel).
+const unsubscribe = sdk.changeNotifier.subscribe((event) => {
+  console.log(event.eventType, event.recordIds);
+});
+
+await sdk.close();
 ```
+
+> Access enforcement is **not** performed by this package. The local-data-server
+> gates each request by the calling app's grants before it reaches the SDK; the
+> cloud-data-server enforces independently. The SDK operates on whatever adapter
+> it is handed.
 
 ## API
 
-### Factory Function
+### Factory
 
 | Function | Description |
 |---|---|
-| `createStarkeepSdk(options)` | Creates a `StarkeepSdk` instance wiring together all subsystems |
+| `createStarkeepSdk(options)` | Async. Initializes the adapters and returns a `StarkeepSdk`. |
 
 ### `StarkeepSdk`
 
 | Member | Description |
 |---|---|
-| `data` | `DataOperations` -- put, get, delete records and files |
-| `metadata` | `MetadataOperations` -- generate and retrieve metadata for records |
-| `index` | `IndexOperations` -- search across data and metadata |
-| `aggregations` | `AggregationOperations` -- compute counts, sizes, and histograms |
-| `sync` | `SyncOperations \| null` -- push, pull, full sync, and change subscriptions (null when no remote adapters) |
-| `accessControl` | `AccessControlOperations` -- create/revoke policies and check access |
-| `api` | `ApiOperations` -- handle shared space API requests |
-| `close()` | Clean up resources |
+| `data` | `DataOperations` — `putWithFile`, `putWithLocalFile`, `putWithExistingBlob`, `get`, `update`, `delete`, `query`, and per-category `putMetadata` / `getMetadata` / `getMetadataByIds` |
+| `index` | `IndexOperations` — `search(query)` over records, returning `{ items }` |
+| `api` | `ApiOperations` — `router`, `handleRequest`, `handleWebSocketConnect` for the shared-space API |
+| `changeNotifier` | `ChangeNotifier` — emits `local-change-recorded` on every write; the sync supervisor forwards its events onto the same channel |
+| `clock` | `HLCClock` — the clock backing this SDK, exposed so the supervisor can share it |
+| `close()` | Flush pending clock state and close the adapters |
 
 ### `StarkeepSdkOptions`
 
 | Option | Required | Description |
 |---|---|---|
 | `databaseAdapter` | Yes | Local database adapter |
-| `objectStorageAdapter` | Yes | Local object storage adapter |
-| `ownerId` | Yes | Owner identifier for records |
-| `nodeId` | Yes | Unique node ID for HLC clock |
-| `clock` | No | Custom HLC clock instance |
-| `remoteDatabaseAdapter` | No | Remote database adapter (enables sync) |
-| `remoteObjectStorageAdapter` | No | Remote object storage adapter (enables sync) |
-| `generators` | No | Metadata generator definitions to register |
+| `objectStorageAdapter` | Yes | Local object-storage adapter |
+| `nodeId` | Yes | Unique replica id; seeds the HLC clock |
+| `clock` | No | Inject a custom `HLCClock` instead of constructing one |
+| `syncStateStore` | No | Used only to seed and persist HLC clock state across restarts |
+| `changeNotifier` | No | Inject a shared notifier; one is created when omitted |
+| `getAppSpecific` | No | Factory for the app-scoped app-specific operations exposed on the API context |
 
-### Re-exported Types
+### Re-exported types
 
-The SDK re-exports commonly used types from `@starkeep/protocol-primitives` for convenience: `StarkeepId`, `DataRecord`, `MetadataRecord`, `HLCTimestamp`, `CreateDataRecordInput`, `CreateMetadataRecordInput`.
+For convenience the SDK re-exports from `@starkeep/protocol-primitives`:
+`StarkeepId`, `DataRecord`, `HLCTimestamp`, `CreateDataRecordInput`.
 
 ## Testing
 

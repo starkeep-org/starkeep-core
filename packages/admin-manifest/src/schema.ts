@@ -3,7 +3,7 @@ import { z } from "zod";
 export const appTierSchema = z.enum(["official", "verified", "community"]);
 
 // Where an app can be installed. An app may target local, cloud, or both. The
-// Apps page derives its Local / Cloud lists from this field.
+// admin Dashboard derives its Local / Cloud lists from this field.
 export const appTargetSchema = z.enum(["local", "cloud"]);
 
 /**

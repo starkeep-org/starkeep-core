@@ -22,7 +22,7 @@ const adminDataDir = () => process.env.E2E_ADMIN_DATA_DIR!;
 
 const CAPTION = "Sunset over the bay";
 
-/** The photos card on the admin apps page (Local section). */
+/** The photos card on the admin Dashboard (Local section). */
 function photosCard(page: Page): Locator {
   return page
     .locator("div.rounded-md.border")

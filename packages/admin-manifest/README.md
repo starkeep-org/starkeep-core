@@ -2,7 +2,7 @@
 
 Zod schema, types, and validator for Starkeep app manifests.
 
-An app manifest is the single declaration a Starkeep app (built-in or installable) makes about itself: identity, install targets, requested file-extension grants, IAM-shaped permissions, app-specific syncable state, and any compute / shared-resource infra it needs. The admin-installer reads it to plan installs; admin-web reads it to render the Apps page and to spawn local dev processes.
+An app manifest is the single declaration a Starkeep app (built-in or installable) makes about itself: identity, install targets, requested file-extension grants, IAM-shaped permissions, app-specific syncable state, and any compute / shared-resource infra it needs. The admin-installer reads it to plan installs; admin-web reads it to render the Dashboard's app lists and to spawn local dev processes.
 
 This package is the source of truth for that schema. It only describes and validates manifests — it does not load, persist, or apply them.
 
@@ -47,7 +47,7 @@ In addition to schema parsing, the validator enforces:
 ## Manifest shape (quick reference)
 
 - `id`, `name`, `version`, `tier` (`official` | `verified` | `community`)
-- `targets`: where the app can be installed — `local`, `cloud`, or both. Drives the Apps page's Local / Cloud split.
+- `targets`: where the app can be installed — `local`, `cloud`, or both. Drives the Dashboard's Local / Cloud split.
 - `requiredPermissions`, `optionalPermissions`: IAM-shaped entries against shared-data resources (`type` / `collection` / `wildcard`) with `read` / `write` / `delete` / `admin`.
 - `infraRequirements`:
   - `fileAccess[]`: enumerated extension grants with rationale and optional `metadataWrite`.

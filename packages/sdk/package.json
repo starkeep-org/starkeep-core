@@ -37,7 +37,6 @@
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/query-orchestrator": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",
-    "@starkeep/access-control": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*"
   },
   "devDependencies": {
