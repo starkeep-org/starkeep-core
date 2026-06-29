@@ -79,7 +79,7 @@ Starkeep recognises two categories of user data, with very different lifetimes, 
 Shared data is the user's content, typed against a registry that the platform owns. Defining properties:
 
 - **One item per file.** Each shared-data item is stored as a single file under the `shared/<category>/...` prefix in object storage. This makes items portable (they map cleanly onto a filesystem) and makes large items cheap (the database does not carry their bytes).
-- **Indexed by `shared.records`.** A single records table holds one row per item — id, type (the canonical `<category>/<format>` id), timestamps, a monotonic `version`, the content-addressed object-storage key, and common bookkeeping. The records table is the index; the file is the content.
+- **Indexed by `shared.records`.** A single records table holds one row per item — id, type (the canonical `<category>/<format>` id), timestamps, a `version` counter, the content-addressed object-storage key, and common bookkeeping. The `version` is bumped on each write but is **not** an OCC/concurrency token — nothing reads it to gate a write, and conflict resolution is last-writer-wins on the HLC `updated_at` (see "Sync semantics" below). The records table is the index; the file is the content.
 - **Identified by a canonical type, organized by category.** An item's `type` is a canonical two-level `<category>/<format>` Starkeep type id (e.g. `image/jpeg`, `document/markdown`) in Starkeep's own namespace — **not** an IANA MIME type and **not** a file extension. The writing app declares the type; the filename extension and MIME type are advisory only (a convenience for ingestors, such as the local watcher, that have only a filename) and never decide identity. The platform owns a hardcoded registry of types and categories; a type's category is structurally the prefix of its id. Apps cannot invent new types or categories; they declare types from the registry and are granted access at the category level. Unmapped or extension-less files fall into the terminal **`other/other`** type (category `other`) — visible only to Starkeep Drive (the User-Data-Owner), never to an installable app, because `other` is excluded from the set of grantable categories; Drive reaches it via its `shared/*` IAM ceiling.
 - **Per-category metadata, deterministic.** Each mapped category has an associated metadata table (e.g. for images: width, height, capture time, camera/EXIF, GPS). These tables are caches/indices of properties that are **deterministically derivable from the file itself** — not a place to hang app-specific commentary. Two apps reading the same image see the same width and height. `other` has no metadata table.
 - **Shareable across apps.** Multiple apps may hold grants on the same categories, and operate on the same items. The type/category system, the records table, and the per-category metadata tables are the contact surface they share through.
@@ -117,24 +117,23 @@ If a property is intrinsic to the bytes, it is per-type metadata. If it is somet
 
 ### Per-record residency (a derived state, not a column)
 
-Records that carry a blob (shared records, and app-records whose app stores files) exist in one of four residency states on a given side. **These states are derived at read time from facts already on disk, not stored in a status column.** This is non-obvious enough to be worth stating explicitly, because the absence of a `sync_status` column has historically misled both humans and code-reading agents into thinking the state isn't tracked.
+Rows that carry a blob exist in one of four residency states on a given side. Two kinds of row carry a blob: shared records (every `kind:"data"` record is blob-backed), and the file-bearing app-syncable rows that live in the reserved `_starkeep_sync_records` table. **These states are derived at read time from facts already on disk, not stored in a status column.** This is non-obvious enough to be worth stating explicitly, because the absence of a `sync_status` column has historically misled both humans and code-reading agents into thinking the state isn't tracked.
 
 The four states:
 
 - **Absent** — no row for this id on this side.
-- **Staged** — the metadata row is present and references an `objectStorageKey`, but the blob is not yet present in this side's object storage. The side knows it is *expecting* the file. Equivalently: own-side watermark does not yet cover this record's `updated_at`.
-- **Resident** — the metadata row is present AND (the record carries no blob, OR the blob is present in this side's object storage). Own-side watermark covers this record's `updated_at`.
+- **Staged** — the metadata row is present and references an `objectStorageKey`, but the blob is not yet present in this side's object storage. The side knows it is *expecting* the file.
+- **Resident** — the metadata row is present AND (the record carries no blob, OR the blob is present in this side's object storage).
 - **Tombstoned** — `deletedAt` is set on the metadata row. Treated identically to Resident by the sync protocol; the tombstone propagates the same way an update does. Blob garbage collection is a separate concern not handled by sync.
 
-The state is derived from three persisted facts together:
+The classification (`residencyOf`) is derived from just two persisted facts (plus `deletedAt`, which decides Tombstoned):
 
 1. Presence of the metadata row in the appropriate records table.
 2. Presence of the blob in this side's object storage (`localObjectStorage.has(key)`).
-3. This side's own watermark position relative to this record's `updated_at`.
 
-**The watermark is what makes Staged durable across restarts.** If a record's blob hasn't been received, this side's watermark does not advance past that record's `updated_at`. The next exchange round naturally surfaces it again because the gap is still there. No retry queue, no scan-everything reconciliation pass, no `sync_status` column — the watermark gap *is* the work queue. Steady state issues zero storage HEAD requests, because there is no gap to drive any.
+It does **not** read the watermark. The watermark is a *separate* mechanism that makes the Staged state durable across restarts rather than an input to the classification: while a record is Staged (blob not yet received), this side's watermark does not advance past that record's `updated_at`, so the gap persists and the next exchange round naturally surfaces the record again. No retry queue, no scan-everything reconciliation pass, no `sync_status` column — the watermark gap *is* the work queue. Steady state issues zero storage HEAD requests, because there is no gap to drive any.
 
-Records that never carry a blob (app-syncable rows; shared records would not exist in this category, but app-records may opt out per record) skip the Staged state entirely: row-present implies Resident.
+Rows that never carry a blob skip the Staged state entirely — row-present implies Resident. These are the non-file app-syncable rows, which live in the per-app tables rather than in `_starkeep_sync_records`. (Shared records are always blob-backed, so they never fall in this category; whether an app's syncable row carries a blob is determined by which table it lives in, not by a per-record flag.)
 
 A request from an app's client to read or write a shared item, in steady state, looks like this:
 

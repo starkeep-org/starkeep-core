@@ -196,6 +196,11 @@ mechanism, or model differs from what the code actually does.
 - **Read:** The watermark equivalence is true as an *invariant* but the doc
   elevates it to a third co-equal *input* of the derivation, which the canonical
   function does not do.
+- **Resolved (2026-06-29):** the residency section now says the classification
+  is derived from two facts (plus `deletedAt`) and explicitly notes it does not
+  read the watermark, with the watermark reframed as the separate durability
+  mechanism. The "Equivalently: watermark…" clauses were removed from the Staged
+  and Resident definitions.
 
 ### S3. "app-records" is not a distinct record kind *(medium confidence)*
 
@@ -209,6 +214,11 @@ mechanism, or model differs from what the code actually does.
   [`residencyOf`]" (`residency.ts:28-30`). So "app-record" as a kind, and "opt
   out per record," are loose labels for a structural split between two
   app-syncable storage destinations rather than a per-record flag.
+- **Resolved (2026-06-29):** the residency section no longer uses "app-records."
+  It now names the two blob-bearing row kinds (shared `kind:"data"` records and
+  the file-bearing app-syncable rows in `_starkeep_sync_records`) and states that
+  whether an app-syncable row carries a blob is decided by which table it lives
+  in, not by a per-record flag.
 
 ### S4. "OCC version" column vs. "no OCC" *(low confidence — internal tension)*
 
@@ -219,6 +229,10 @@ mechanism, or model differs from what the code actually does.
   `updatedAt` — `version` is not used for optimistic concurrency. Calling the
   column "OCC version" in line 82 sits awkwardly with the "no OCC" statement in
   line 91 and with how `version` is actually used.
+- **Resolved (2026-06-29):** the records bullet now describes `version` as a
+  counter that is bumped on each write but is explicitly **not** an OCC/
+  concurrency token (nothing reads it to gate a write; conflict resolution is
+  LWW on the HLC `updated_at`), consistent with the "no OCC" statement.
 
 ---
 
