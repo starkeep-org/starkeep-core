@@ -14,11 +14,11 @@ Opens on port 3000.
 
 ### Dashboard
 
-The dashboard shows the current state of the local and cloud environments:
+The dashboard shows the current state of the local and cloud environments, and is also where you discover, install, and manage apps.
 
-- **Local status** — whether the data-server is running, which record types are registered, file watch status, and record counts per type
-- **Cloud status** — whether cloud infrastructure is provisioned and reachable
-- **App status** — whether photos-web and file-browser are running locally
+- **Local** — whether the data-server is running, file watches (add/remove watched directories), Drive status, and the list of locally installed apps with install/uninstall and start/stop controls
+- **Cloud** — whether cloud infrastructure is provisioned and reachable, cloud sign-in, the list of cloud-installed apps, and a month-to-date / projected cost breakdown
+- **App discovery** — manage the parent directories scanned for installable apps; discovered apps are split into Local and Cloud lists based on each manifest's `targets`
 
 ### Cloud Setup Wizard
 
