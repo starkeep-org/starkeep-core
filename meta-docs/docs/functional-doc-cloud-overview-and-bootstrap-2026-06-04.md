@@ -22,7 +22,7 @@ Three functional concepts organize the rest of Part 1: **how the customer authen
 
 Bootstrap does not provision an IAM user for the customer. The human admin signs in to a Cognito User Pool (`UserPool` in the template, configured for `ADMIN_CREATE_USER` only, email-as-username, `ALLOW_USER_PASSWORD_AUTH`). A Cognito Identity Pool then exchanges that signed-in identity for temporary STS credentials in the **admin-app role** (`${StackPrefix}-app-admin-role`) via `sts:AssumeRoleWithWebIdentity`. The admin-app role is the *only* identity the human ever directly holds; everything else is reached by further role assumption under those temporary credentials.
 
-This shape is load-bearing for the security stance documented in `roles-and-permissions.md`: there are no long-lived access keys to lose, the human is not a superuser, and every administrative action eventually carries a *different* assumed identity. The bootstrap template enforces it structurally — the `AdminAppRole`'s trust policy only accepts Cognito identities from the identity pool this same stack created, and the `IdentityPoolRoleAttachment` wires the pool's `authenticated` role slot to that role's ARN.
+This shape is load-bearing for the security stance documented in `data-roles-and-permissions.md`: there are no long-lived access keys to lose, the human is not a superuser, and every administrative action eventually carries a *different* assumed identity. The bootstrap template enforces it structurally — the `AdminAppRole`'s trust policy only accepts Cognito identities from the identity pool this same stack created, and the `IdentityPoolRoleAttachment` wires the pool's `authenticated` role slot to that role's ARN.
 
 The Cognito user is created by an admin action later (the stack output `ConsoleLink` points the customer at the Cognito user-creation page in the AWS console). Bootstrap itself creates *no* user records — it only stands up the pools.
 
@@ -101,7 +101,7 @@ A new reader is most likely to be surprised by what's *missing* from the post-bo
 - No data plane: no DSQL cluster, no files bucket, no billing bucket, no API Gateway, no Lambdas.
 - No runtime app identities: no cloud-data-server role, no per-app roles, no Starkeep Drive (User-Data-Owner) role. Drive's *boundary* exists; its *role* is minted at Drive install.
 - No Cost-and-Usage Reports (see previous section).
-- No CodeBuild project, no SaaS control-plane resources, no cross-account assume roles — Starkeep is single-account-only and `roles-and-permissions.md` makes the customer's own AWS account the trust boundary.
+- No CodeBuild project, no SaaS control-plane resources, no cross-account assume roles — Starkeep is single-account-only and `data-roles-and-permissions.md` makes the customer's own AWS account the trust boundary.
 
 ## Open questions
 

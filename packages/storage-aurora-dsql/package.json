@@ -33,7 +33,6 @@
     "lint": "eslint src/"
   },
   "dependencies": {
-    "@starkeep/access-control": "workspace:*",
     "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",

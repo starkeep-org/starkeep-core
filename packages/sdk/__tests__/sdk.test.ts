@@ -1,43 +1,10 @@
 import { describe, it, expect } from "vitest";
-import {
-  createHLCClock,
-  type StarkeepId,
-  type HLCTimestamp,
-} from "@starkeep/protocol-primitives";
+import { createHLCClock } from "@starkeep/protocol-primitives";
 import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,
 } from "@starkeep/storage-adapter";
-import {
-  type AccessPolicy,
-  type AccessPolicyStore,
-  type SharingToken,
-  type SharingTokenStore,
-} from "@starkeep/access-control";
 import { createStarkeepSdk } from "../src/sdk.js";
-
-function memoryPolicyStore(): AccessPolicyStore {
-  const policies = new Map<StarkeepId, AccessPolicy>();
-  return {
-    async putPolicy(p) { policies.set(p.policyId, p); },
-    async getPolicy(id) { return policies.get(id) ?? null; },
-    async listPolicies() { return Array.from(policies.values()); },
-    async deletePolicy(id) { policies.delete(id); },
-  };
-}
-
-function memoryTokenStore(): SharingTokenStore {
-  const byHash = new Map<string, SharingToken>();
-  return {
-    async putToken(t) { byHash.set(t.tokenHash, t); },
-    async getTokenByHash(h) { return byHash.get(h) ?? null; },
-    async incrementUsage(h, _now: HLCTimestamp) {
-      const t = byHash.get(h);
-      if (t) t.usageCount++;
-    },
-    async deleteToken(h) { byHash.delete(h); },
-  };
-}
 
 describe("createStarkeepSdk", () => {
   async function createTestSdk() {
@@ -52,8 +19,6 @@ describe("createStarkeepSdk", () => {
     const sdk = await createStarkeepSdk({
       databaseAdapter: localDatabase,
       objectStorageAdapter: localObjectStorage,
-      accessPolicyStore: memoryPolicyStore(),
-      sharingTokenStore: memoryTokenStore(),
       nodeId: "test-node",
       clock,
     });
@@ -95,16 +60,12 @@ describe("createStarkeepSdk", () => {
       const sdkA = await createStarkeepSdk({
         databaseAdapter: localDatabase,
         objectStorageAdapter: localObjectStorage,
-        accessPolicyStore: memoryPolicyStore(),
-        sharingTokenStore: memoryTokenStore(),
         nodeId: "app-a",
         clock,
       });
       const sdkB = await createStarkeepSdk({
         databaseAdapter: localDatabase,
         objectStorageAdapter: localObjectStorage,
-        accessPolicyStore: memoryPolicyStore(),
-        sharingTokenStore: memoryTokenStore(),
         nodeId: "app-b",
         clock,
       });
@@ -179,27 +140,6 @@ describe("createStarkeepSdk", () => {
 
       const result = await sdk.index.search({ types: ["@test/photo"] });
       expect(result.items.length).toBeGreaterThanOrEqual(1);
-    });
-  });
-
-  describe("access control operations", () => {
-    it("should create and list policies", async () => {
-      const { sdk } = await createTestSdk();
-
-      const policy = await sdk.accessControl.createPolicy({
-        subjectType: "user",
-        subjectId: "user-1",
-        resourceType: "wildcard",
-        resourceId: "*",
-        permissions: ["read"],
-      });
-
-      expect(policy.policyId).toBeDefined();
-
-      const policies = await sdk.accessControl.listPolicies({
-        subjectId: "user-1",
-      });
-      expect(policies).toHaveLength(1);
     });
   });
 

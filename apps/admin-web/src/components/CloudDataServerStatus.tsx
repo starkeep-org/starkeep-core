@@ -81,6 +81,7 @@ export function CloudDataServerStatus({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <h3 className="font-medium">Data Server</h3>
+          <Badge variant="secondary" className="text-xs">Built-in</Badge>
           {!cloudConfig?.apiGatewayUrl && (
             <Badge variant="secondary" className="text-xs">Not configured</Badge>
           )}

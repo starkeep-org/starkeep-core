@@ -175,7 +175,7 @@ export async function runAppInstallDdl(
     // AUTHORIZATION <role>` requires the creating session to be able to
     // SET ROLE to the target. Grant admin membership in the app role so
     // ownership transfer is permitted. This goes the *opposite* direction
-    // of the load-bearing constraint in roles-and-permissions.md ("the app
+    // of the load-bearing constraint in data-roles-and-permissions.md ("the app
     // itself never holds DB admin"): admin gains membership in the app
     // role, not the other way around. Only install-ddl-role can reach
     // admin, so this membership is only exercised during install/uninstall.

@@ -12,15 +12,6 @@ import type {
   SyncStateStore,
 } from "@starkeep/sync-engine";
 import type {
-  CreatePolicyInput,
-  AccessPolicy,
-  AccessCheckRequest,
-  AccessCheckResult,
-  SubjectType,
-  AccessPolicyStore,
-  SharingTokenStore,
-} from "@starkeep/access-control";
-import type {
   ApiRequest,
   ApiResponse,
   ApiRouter,
@@ -104,16 +95,6 @@ export interface IndexOperations {
   search(query: IndexQuery): Promise<IndexResult>;
 }
 
-export interface AccessControlOperations {
-  createPolicy(input: CreatePolicyInput): Promise<AccessPolicy>;
-  revokePolicy(policyId: StarkeepId): Promise<void>;
-  listPolicies(options?: {
-    subjectId?: string;
-    resourceId?: string;
-  }): Promise<AccessPolicy[]>;
-  checkAccess(request: AccessCheckRequest): Promise<AccessCheckResult>;
-}
-
 export interface ApiOperations {
   readonly router: ApiRouter;
   handleRequest(request: ApiRequest): Promise<ApiResponse>;
@@ -126,7 +107,6 @@ export type { WebSocketConnection };
 export interface StarkeepSdk {
   readonly data: DataOperations;
   readonly index: IndexOperations;
-  readonly accessControl: AccessControlOperations;
   readonly api: ApiOperations;
   /**
    * Broadcast channel for record-level events. The SDK emits
@@ -143,13 +123,6 @@ export interface StarkeepSdk {
 export interface StarkeepSdkOptions {
   readonly databaseAdapter: DatabaseAdapter;
   readonly objectStorageAdapter: ObjectStorageAdapter;
-  /** Backing store for AccessPolicy rows (instance-local). */
-  readonly accessPolicyStore: AccessPolicyStore;
-  /**
-   * Backing store for sharing tokens. Pass `disabledSharingTokenStore()` on
-   * the local-data-server — tokens are issued and validated cloud-side.
-   */
-  readonly sharingTokenStore: SharingTokenStore;
   readonly nodeId: string;
   readonly clock?: HLCClock;
   /**
@@ -165,10 +138,6 @@ export interface StarkeepSdkOptions {
    * onto the same channel the supervisor subscribes to.
    */
   readonly changeNotifier?: ChangeNotifier;
-  readonly subject?: {
-    readonly subjectType: SubjectType;
-    readonly subjectId: string;
-  };
   /**
    * Factory for the app-scoped app-specific operations exposed on the
    * ApiContext. Provided by the harness (local-data-server) since it owns
