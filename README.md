@@ -24,7 +24,8 @@ For the full picture of the parts and how data moves between them, see [`system-
 
 ## Prerequisites
 
-- **Node.js 22+** and **pnpm 10.20** (`corepack enable` picks up the version pinned in `package.json`).
+- **Node.js 22+**
+- **pnpm 10.20** 
 
 ---
 
