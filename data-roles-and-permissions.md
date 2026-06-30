@@ -6,7 +6,7 @@ This document describes the system-level stance on roles, permissions, and trust
 
 ## Two classes of user data
 
-Everything below turns on a distinction the system draws between two kinds of user data. They are owned by different parties, touched by different identities, and carry different attribution guarantees — so the trust model only makes sense once they are separated. (For the full data-model treatment — storage layout, the type registry, sync semantics — see the "How data is classified" section of `system-design.md`. Here we cover only what bears on identity and permissions.)
+Starkeep operates on two classes of data: "Shared data" is your content (photos, documents, etc) and it's "shared" in the sense that it can be accessed and operated on by multiple apps. "App-specific data" is other app-bound data that is operated on by specific apps, but which is also synced through the Starkeep system. These They are owned by different parties, touched by different identities, and carry different attribution guarantees — so the trust model only makes sense once they are separated.
 
 - **Shared data** is the *user's* content (photos, documents): typed against a platform-owned registry and stored in the single `shared.records` table plus the `shared/<category>/*` object-storage prefix. It is **cross-app and platform-owned** — multiple apps can hold grants on the same type, items outlive the uninstall of any app that touched them, and no app *owns* shared data. An app is a tenant with declared, narrow access: it reaches only the categories/types its manifest was granted.
 
