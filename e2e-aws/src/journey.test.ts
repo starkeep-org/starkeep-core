@@ -130,7 +130,11 @@ function runTeardownScript(script: string): void {
     });
 
     it("installs cloud-data-server via the real CLI", async () => {
-      await runInstallCli("cli-install-cloud-data-server", [], paths, session);
+      // --ephemeral: these resources are torn down every run, so skip the
+      // production data-protection hardening (versioning/SSE/public-access-block
+      // + DSQL deletion protection) and let forceDestroy empty the bucket on
+      // teardown. Real installs never pass this flag — see isEphemeralInstall.
+      await runInstallCli("cli-install-cloud-data-server", ["--ephemeral"], paths, session);
       // The CLI rewrites config.json with apiGatewayUrl / s3Bucket / auroraEndpoint.
       config = readConfig(paths)!;
       expect(config.apiGatewayUrl).toMatch(/^https:\/\//);

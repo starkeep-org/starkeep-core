@@ -89,6 +89,37 @@ export interface CloudDataServerInstallConfig {
   /** Cognito user-pool resources from the bootstrap CFN stack. */
   userPoolId: string;
   userPoolClientId: string;
+  /**
+   * When true, provision disposable infrastructure and skip the production
+   * data-protection hardening (files-bucket versioning/SSE/public-access-block
+   * and DSQL deletion protection). Set by the cloud e2e harness; defaults to
+   * false so real user installs are hardened. See CloudDataServerProgramContext.
+   */
+  ephemeral?: boolean;
+}
+
+/**
+ * The flag that opts a cloud-data-server install into *ephemeral* (disposable)
+ * infrastructure — no files-bucket versioning/SSE/public-access-block, no DSQL
+ * deletion protection, and forceDestroy on the bucket. Only the cloud e2e
+ * harness passes it.
+ */
+export const EPHEMERAL_FLAG = "--ephemeral";
+
+/**
+ * Decide ephemerality from a CLI argv flag list — fail-safe by construction.
+ *
+ * This intentionally reads an explicit, non-inheritable CLI flag rather than an
+ * environment variable: the real-user install path (admin-web) spawns the CLI
+ * with `{ ...process.env }` inherited, so any env-based signal could leak in
+ * from the surrounding process and silently mark a real account ephemeral.
+ * argv cannot be injected that way — admin-web spawns a fixed argument list
+ * with no `--ephemeral`, so a real install is structurally un-ephemeral unless
+ * someone edits that argv. Anything other than the exact flag → false
+ * (hardened).
+ */
+export function isEphemeralInstall(flags: readonly string[]): boolean {
+  return flags.includes(EPHEMERAL_FLAG);
 }
 
 export interface CloudDataServerInstallOutputs {
@@ -309,6 +340,7 @@ export async function installCloudDataServer(
       bundleHash,
       userPoolId: config.userPoolId,
       userPoolClientId: config.userPoolClientId,
+      ephemeral: config.ephemeral ?? false,
     });
 
     const outputs = await pulumiUpInline({
