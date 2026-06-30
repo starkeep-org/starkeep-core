@@ -21,6 +21,29 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 
+// ---------------------------------------------------------------------------
+// Cost / DoS guardrails (todo-cloud-dos-cost-amplification-2026-06-30)
+//
+// The data plane is fully pay-per-use (Lambda + DSQL + S3), so volumetric
+// abuse of the internet-reachable gateway turns directly into the customer's
+// AWS bill rather than a clean outage. These two limits bound the blast radius
+// at zero fixed monthly cost:
+//
+//   - Gateway throttle caps the *request rate* reaching the Lambda. The default
+//     APIGW account ceiling is ~10k rps; we clamp the shared stage far below
+//     that. Tune up if a real deployment legitimately needs more.
+//   - Reserved concurrency is the hard *dollar ceiling*: even if throttling were
+//     mis-tuned, the Lambda can never run more than this many copies at once, so
+//     parallel DSQL connections and S3 ops — and thus spend-per-second — are
+//     bounded regardless. Legitimate bursts past the cap get 429'd, so size it
+//     to real peak load.
+//
+// Single named home so an operator can retune without hunting through the body.
+// ---------------------------------------------------------------------------
+const GATEWAY_THROTTLE_RATE_LIMIT = 50; // steady-state req/s across the whole shared stage
+const GATEWAY_THROTTLE_BURST_LIMIT = 100; // token-bucket burst allowance
+const LAMBDA_RESERVED_CONCURRENCY = 20; // max concurrent broker invocations
+
 export interface CloudDataServerProgramContext {
   stackPrefix: string;
   region: string;
@@ -152,6 +175,9 @@ export function buildCloudDataServerProgram(
         sourceCodeHash: ctx.bundleHash,
         memorySize: 256,
         timeout: 30,
+        // Hard ceiling on concurrent broker copies → bounds parallel DSQL/S3
+        // work and thus worst-case spend-per-second. See guardrail note above.
+        reservedConcurrentExecutions: LAMBDA_RESERVED_CONCURRENCY,
         environment: {
           variables: {
             AURORA_ENDPOINT: auroraHostname,
@@ -216,6 +242,14 @@ export function buildCloudDataServerProgram(
       apiId: api.id,
       name: "$default",
       autoDeploy: true,
+      // Stage-wide request throttle. Applies to every route (the public
+      // /health and OPTIONS preflight as well as the HMAC-gated data plane),
+      // so it bounds Lambda invocations regardless of which surface is hit.
+      // See guardrail note at the top of the file.
+      defaultRouteSettings: {
+        throttlingRateLimit: GATEWAY_THROTTLE_RATE_LIMIT,
+        throttlingBurstLimit: GATEWAY_THROTTLE_BURST_LIMIT,
+      },
       tags: {
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",

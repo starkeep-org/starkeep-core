@@ -136,7 +136,7 @@ Three tiers:
 - [`system-design.md`](system-design.md) — the major parts, how data is classified (shared vs app-specific), and how it moves and syncs.
 - [`data-roles-and-permissions.md`](data-roles-and-permissions.md) — identities, trust boundaries, and why the admin app never appears on the data path.
 - App READMEs: [`apps/admin-web`](apps/admin-web/README.md), [`apps/local-data-server`](apps/local-data-server/README.md).
-- Authoring your own app: [`../starkeep-apps/README.md`](../starkeep-apps/README.md).
+- Authoring your own app: [`authoring-an-app.md`](authoring-an-app.md) (and the app-author install steps in [`../starkeep-apps/README.md`](../starkeep-apps/README.md)).
 
 ## Repository layout
 
