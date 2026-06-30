@@ -249,10 +249,13 @@ route, or a presigned URL.
   at "the route reaches the Lambda unauthenticated, as declared." An app that
   puts data-touching logic on a `public` route without its own auth is a real
   risk, but it is the app author's responsibility, not the platform's.
-- **No rate limiting / throttling / WAF** anywhere on the gateway. Unauthenticated
-  routes (`/health`, `public` app routes) and the HMAC-gated routes (which still
-  do an SSM read + signature check per request before 401) are exposed to
-  volumetric abuse → see T10.
+- **Gateway throttle + Lambda reserved concurrency now bound volumetric abuse**
+  (added 2026-06-30): a stage-wide request throttle caps the rate reaching the
+  Lambda across all routes, and reserved concurrency caps worst-case spend. No
+  per-app/per-route quota or WAF yet — unauthenticated routes (`/health`,
+  `public` app routes) and the HMAC-gated routes (which still do an SSM read +
+  signature check per request before 401) remain reachable, but the cost blast
+  radius is capped → see T10.
 - Permissive CORS on the files bucket is a pragmatic necessity for the
   presigned-upload model; it does not by itself grant access (the presigned URL
   or IAM still gates the operation), but it widens the browser-reachable surface
@@ -393,19 +396,43 @@ default" rather than "guaranteed by policy."
 **Threat.** An attacker (or a runaway app) drives unbounded cost or degrades
 availability.
 
-**Stance & honest reality.** There is **no rate limiting, throttling, usage
-quota, or WAF** on the API Gateway, and the unauthenticated `/health` and
-`public` routes are internet-reachable. The serverless model (Lambda + DSQL +
-S3, pay-per-use) means volumetric abuse translates **directly into the
-customer's AWS bill** rather than into a hard outage. Separately, storage grows
-**monotonically**: tombstoned shared records never have their S3 blobs
-collected, and there is no `parent_id` repair pass (todos 15, blob-GC) — so disk
-usage only ever increases under normal use.
+**Stance & honest reality.** The serverless model (Lambda + DSQL + S3,
+pay-per-use) means volumetric abuse translates **directly into the customer's
+AWS bill** rather than into a hard outage, and the unauthenticated `/health`
+and `public` routes are internet-reachable. As of 2026-06-30 two zero-fixed-cost
+guardrails now bound the blast radius (`cloud-data-server-program.ts`):
 
-**Assessment — Partial (pre-production gap).** This is an accepted gap for the
-current stage, but it is the most realistic "internet-facing harm" for a live
-deployment: cost-amplification DoS on unauthenticated/HMAC-gated endpoints, and
-unbounded storage growth.
+- **Stage-wide request throttle** on the shared APIGW v2 `$default` stage
+  (`defaultRouteSettings`: 50 rps steady-state, 100 burst). Applies to every
+  route — the unauthenticated `/health`/`public` surface as well as the
+  HMAC-gated data plane — so it caps the *request rate* reaching the Lambda
+  regardless of which surface is hit.
+- **Lambda reserved concurrency** (`reservedConcurrentExecutions: 20`) on the
+  broker — the hard *dollar ceiling*: even if the throttle were mis-tuned, the
+  broker can never run more than this many copies at once, bounding parallel
+  DSQL connections and S3 ops, and thus worst-case spend-per-second. Legitimate
+  bursts past the cap get 429'd.
+
+Both limits are code constants for now; making them admin-configurable is
+deferred (todo 45 / doc 60). Still **absent**: per-app/per-route usage quotas
+(one app's leaked HMAC secret can consume the whole deployment's throttle
+budget) and a WAF (no IP/bot-level filtering) — both judged unnecessary at
+single-operator scale, and a WAF was explicitly excluded as it carries a fixed
+monthly cost. HMAC-gated routes still do an SSM read + signature check per
+request before they can 401, so hostile traffic up to the throttle ceiling is
+not free, just bounded.
+
+Separately, storage grows **monotonically**: tombstoned shared records never
+have their S3 blobs collected, and there is no `parent_id` repair pass (todos
+15, blob-GC) — so disk usage only ever increases under normal use. This axis
+remains unmitigated.
+
+**Assessment — Partial (improved 2026-06-30).** The cost-amplification axis is
+now meaningfully bounded — throttle caps request rate, reserved concurrency caps
+worst-case spend — taking the realistic "unbounded bill from internet traffic"
+failure mode off the table at zero fixed cost. Remaining gaps are narrower:
+no per-app quota (cross-app budget exhaustion), and unbounded storage growth
+(the more durable concern now).
 
 ## T11 — Secret and infrastructure-state exposure
 
@@ -441,13 +468,13 @@ up/destroy. State and artifacts buckets are versioned, account-private.
 | T1 | Malicious/buggy installed app (confinement) | **Strong** |
 | T2 | App-identity forgery & replay (HMAC) | **Adequate** |
 | T3 | Cross-app isolation (app-specific) | **Strong** |
-| T4 | Unauthenticated internet caller | **Adequate** (gaps: public routes, no rate limit, CORS) |
+| T4 | Unauthenticated internet caller | **Adequate** (gaps: public routes, no per-app quota, CORS; stage throttle now in place) |
 | T5 | Broker code compromise | **Adequate** (blast radius = all user data, not the account) |
 | T6 | Powerful install-time identities | **Strong** |
 | T7 | Admin / Cognito compromise | **Adequate** (MFA worth confirming) |
 | T8 | Malicious app supply chain | **Partial / accepted** |
 | T9 | Data at rest / in transit | **Adequate, under-specified** |
-| T10 | DoS & cost amplification | **Partial (pre-production gap)** |
+| T10 | DoS & cost amplification | **Partial (improved 2026-06-30: throttle + concurrency cap; storage growth remains)** |
 | T11 | Secret & infra-state exposure | **Adequate** |
 
 **The system's genuine strengths.** Least-privilege is real and structural, not
@@ -459,8 +486,12 @@ independent layers. This is a well-thought-out trust architecture.
 
 **The honest soft spots, in priority order.**
 
-1. **No rate limiting / cost-DoS protection** (T10) — the most realistic
-   internet-facing harm for a live deployment.
+1. **Cost-DoS now bounded, but storage growth is not** (T10) — a stage throttle
+   + Lambda reserved concurrency (added 2026-06-30) cap the request-rate and
+   worst-case-spend blast radius, taking the runaway-bill failure mode off the
+   table. The residual gaps are no per-app quota (one app can consume the shared
+   throttle budget) and unbounded storage growth (tombstoned blobs never GC'd) —
+   the latter is now the more durable internet-facing concern.
 2. **Shared-data grants are the real boundary, and they're admin-judgment-only**
    (T1, T8) — a granted app can touch *all* user data of its categories; nothing
    reviews or scores grant requests, and app code/bundles have no provenance.
