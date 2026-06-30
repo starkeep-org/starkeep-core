@@ -39,7 +39,7 @@ if (process.env.IAM_SDK_TRACE_PATH) {
 }
 import { execSync } from "node:child_process";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { installCloudDataServer } from "../src/builtin-installs";
+import { installCloudDataServer, isEphemeralInstall } from "../src/builtin-installs";
 import { ensurePulumiPassphrase } from "../src/pulumi-passphrase";
 import {
   regionFromUserPoolId,
@@ -199,6 +199,12 @@ const outputs = await installCloudDataServer({
   pulumiStateBucket,
   userPoolId: config.userPoolId,
   userPoolClientId: config.userPoolClientId,
+  // The cloud e2e harness passes --ephemeral to provision disposable infra and
+  // skip the production data-protection hardening (versioning/SSE/PAB/deletion-
+  // protect). A CLI flag — not an env var — so it can't leak in via the
+  // inherited process.env of admin-web's real-install spawn. See
+  // isEphemeralInstall.
+  ephemeral: isEphemeralInstall(flags),
 });
 
 // There is no separate cloud sync identity to install here: shared-record sync

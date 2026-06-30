@@ -60,6 +60,21 @@ export interface CloudDataServerProgramContext {
   /** Cognito user-pool resources from bootstrap, needed to wire the JWT authorizer. */
   userPoolId: string;
   userPoolClientId: string;
+  /**
+   * When true, this install provisions *disposable* infrastructure (the cloud
+   * e2e suite) and the production data-protection hardening is skipped:
+   *   - DSQL deletion protection stays OFF so teardown can drop the cluster.
+   *   - The files bucket gets NO versioning (versioned/delete-markered objects
+   *     would block bucket deletion on repeated e2e teardown), no explicit
+   *     SSE-S3 assertion, and no public-access block.
+   *
+   * Defaults to false everywhere except the e2e harness, so real user accounts
+   * are hardened by default. AWS still applies its own defaults to ephemeral
+   * resources (SSE-S3 on new buckets, account-level block-public-access,
+   * DSQL encryption + PITR); this flag only governs the *explicit* hardening
+   * we assert on top of those defaults.
+   */
+  ephemeral: boolean;
 }
 
 export function buildCloudDataServerProgram(
@@ -70,7 +85,9 @@ export function buildCloudDataServerProgram(
     // DSQL cluster
     // -----------------------------------------------------------------------
     const cluster = new aws.dsql.Cluster(`${ctx.stackPrefix}-db`, {
-      deletionProtectionEnabled: false,
+      // Protect real user clusters from accidental destroy; ephemeral e2e
+      // clusters stay unprotected so the suite can tear them down each run.
+      deletionProtectionEnabled: !ctx.ephemeral,
       tags: {
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",
@@ -84,11 +101,58 @@ export function buildCloudDataServerProgram(
     // -----------------------------------------------------------------------
     const bucket = new aws.s3.BucketV2(`${ctx.stackPrefix}-files`, {
       bucket: `${ctx.stackPrefix}-files-${ctx.accountId}-${ctx.region}`,
+      // Ephemeral e2e buckets self-empty on `pulumi destroy` so repeated
+      // teardown isn't wedged by leftover objects; real user buckets keep the
+      // default guard (destroy fails on a non-empty bucket) so a stray destroy
+      // can't silently wipe customer files. forceDestroy is only ever true when
+      // versioning is off (both ride ctx.ephemeral), so the existing
+      // s3:DeleteObject grant suffices — no s3:DeleteObjectVersion is needed.
+      forceDestroy: ctx.ephemeral,
       tags: {
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",
       },
     });
+
+    // Data-protection hardening — asserted explicitly for real user accounts;
+    // skipped for ephemeral e2e buckets (see ctx.ephemeral). The IAM
+    // foundational permissions boundary already grants the three Put* actions
+    // these resources require (PutBucketVersioning / PutEncryptionConfiguration
+    // / PutBucketPublicAccessBlock), so this is purely additive.
+    if (!ctx.ephemeral) {
+      // Versioning: keep prior object versions so an overwrite or delete of a
+      // user file is recoverable. Deliberately off for e2e — versioned objects
+      // and delete markers block bucket deletion on repeated teardown.
+      new aws.s3.BucketVersioningV2(`${ctx.stackPrefix}-files-versioning`, {
+        bucket: bucket.id,
+        versioningConfiguration: { status: "Enabled" },
+      });
+
+      // Encryption at rest: assert SSE-S3 (AES256) rather than relying on the
+      // implicit AWS bucket default, so the posture is visible in IaC and
+      // survives any future change to AWS defaults. A customer-managed KMS key
+      // is intentionally NOT used here: the permissions boundary only grants
+      // kms:Decrypt via SSM, so a CMK would require widening IAM and granting
+      // the broker role KMS access — a separate, larger change.
+      new aws.s3.BucketServerSideEncryptionConfigurationV2(
+        `${ctx.stackPrefix}-files-sse`,
+        {
+          bucket: bucket.id,
+          rules: [{ applyServerSideEncryptionByDefault: { sseAlgorithm: "AES256" } }],
+        },
+      );
+
+      // Block all public access. Presigned-URL access (SigV4) and the Deny-only
+      // cross-app bucket policy below are unaffected; this only forecloses
+      // public ACLs/policies ever being added.
+      new aws.s3.BucketPublicAccessBlock(`${ctx.stackPrefix}-files-pab`, {
+        bucket: bucket.id,
+        blockPublicAcls: true,
+        blockPublicPolicy: true,
+        ignorePublicAcls: true,
+        restrictPublicBuckets: true,
+      });
+    }
 
     // Defense-in-depth: deny any principal whose starkeep:appId tag does not
     // match the apps/<appId>/* prefix being accessed. The IAM permissions
