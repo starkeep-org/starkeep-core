@@ -77,6 +77,11 @@ export async function runInstallCli(
         AWS_SECRET_ACCESS_KEY: session.awsCredentials.secretAccessKey,
         AWS_SESSION_TOKEN: session.awsCredentials.sessionToken,
         AWS_REGION: session.region,
+        // Note: ephemerality is signalled by the explicit `--ephemeral` CLI
+        // flag on the cloud-data-server install (see journey.test.ts), NOT an
+        // env var — an env var would leak through admin-web's inherited
+        // process.env on real installs. Don't reintroduce one here.
+        //
         // Baked into the broker Lambda by the cloud-data-server install (the
         // pulumi program forwards it); shortens the HMAC secret cache so signed
         // calls right after an install/uninstall aren't served a stale secret.
