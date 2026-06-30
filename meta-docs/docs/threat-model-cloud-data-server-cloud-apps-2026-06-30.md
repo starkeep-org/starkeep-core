@@ -9,7 +9,7 @@
 > sample app.
 >
 > **Verified against code, not just docs.** Source refs: `starkeep-core @
-> df97e0a`, `starkeep-apps @ 5061ec4`. The assessments below describe the live
+> 2a2c23d`, `starkeep-apps @ 5061ec4`. The assessments below describe the live
 > code: the gateway places no Cognito JWT authorizer on the reserved data-plane
 > routes (HMAC is the sole identity check there), and the HMAC signature binds
 > method, path, and a timestamp.
@@ -378,18 +378,44 @@ as such.
 **Threat.** Data is exposed at rest, in transit, or across tenants.
 
 **Stance.** In transit: all external traffic is HTTPS (API Gateway), and
-S3 presigned access is over TLS. At rest: S3 and DSQL are AWS-managed stores
-with default encryption; Pulumi state is encrypted with an SSM-stored passphrase
-(T11). Tenant isolation is **not a concern** — the deployment is single-tenant
-in the customer's own account.
+S3 presigned access is over TLS. At rest: S3 and DSQL are AWS-managed stores;
+Pulumi state is encrypted with an SSM-stored passphrase (T11). As of 2026-06-30
+the data-plane no longer leans on AWS defaults alone — the files bucket now
+**asserts its data-protection posture explicitly** in the install program
+(`cloud-data-server-program.ts`): SSE-S3 (AES256) server-side encryption,
+versioning enabled, and a full public-access block, plus the DSQL cluster
+carries deletion protection and the bucket keeps the default destroy guard
+(no `forceDestroy`). These are the IAM actions the *foundational* permissions
+boundary already grants, so the pass is purely additive. Tenant isolation is
+**not a concern** — the deployment is single-tenant in the customer's own
+account.
 
-**Assessment — Adequate, under-specified.** The honest gap is that the codebase
-does not appear to *assert* encryption posture explicitly (e.g. enforced
-SSE-KMS with a customer-managed key on the files bucket, or
-`aws:SecureTransport` deny conditions on bucket policies). It relies on AWS
-defaults. For a personal-data-keeping product this is the area most worth an
-explicit, tested hardening pass before production; today it is "probably fine by
-default" rather than "guaranteed by policy."
+This hardening is applied to **real installs only**. The cloud e2e suite
+provisions *ephemeral* infrastructure that deliberately skips it (no versioning
+/SSE/public-access-block, no deletion protection, `forceDestroy` on so repeated
+teardown isn't wedged by leftover objects). Critically, that carve-out is
+**fail-safe by construction**: ephemerality is signalled by an explicit
+`--ephemeral` CLI flag (`isEphemeralInstall`), *not* an environment variable —
+because the real-user install path (admin-web) spawns the CLI with an inherited
+`process.env`, an env-based signal could leak in and silently downgrade a real
+account's data protection. A fixed argv cannot be injected that way, so a real
+install is structurally incapable of being treated as ephemeral. Unit tests
+lock in both the resource posture and the flag's fail-safe defaulting.
+
+**Assessment — Adequate; hardened 2026-06-30 (CMK + SecureTransport-deny
+deferred).** Encryption-at-rest and the surrounding data-protection posture are
+now *policy-asserted* rather than default-relied-upon, closing the prior "doesn't
+assert it explicitly" gap. Two deliberate, named residuals remain:
+
+- **AWS-managed keys, not a customer-managed KMS key (CMK).** SSE-S3 uses
+  AWS-owned keys. A CMK was consciously deferred: the foundational permissions
+  boundary grants only `kms:Decrypt` gated on `kms:ViaService=ssm.*`, so a CMK
+  would require widening that boundary *and* granting the broker/app roles KMS
+  encrypt/decrypt to read and write objects — a larger change than the
+  purely-additive S3 config, not a one-line addition.
+- **No `aws:SecureTransport` deny** on the bucket policy yet — transit is HTTPS
+  in practice (presigned URLs, gateway) but not yet *policy-enforced* against a
+  plaintext request.
 
 ## T10 — Availability, denial of service, and cost amplification
 
@@ -473,7 +499,7 @@ up/destroy. State and artifacts buckets are versioned, account-private.
 | T6 | Powerful install-time identities | **Strong** |
 | T7 | Admin / Cognito compromise | **Adequate** (MFA worth confirming) |
 | T8 | Malicious app supply chain | **Partial / accepted** |
-| T9 | Data at rest / in transit | **Adequate, under-specified** |
+| T9 | Data at rest / in transit | **Adequate; hardened 2026-06-30 (files-bucket SSE/versioning/PAB + DSQL deletion-protect asserted; CMK + SecureTransport-deny deferred)** |
 | T10 | DoS & cost amplification | **Partial (improved 2026-06-30: throttle + concurrency cap; storage growth remains)** |
 | T11 | Secret & infra-state exposure | **Adequate** |
 
@@ -499,8 +525,14 @@ independent layers. This is a well-thought-out trust architecture.
    installed apps' data (though not the account).
 4. **HMAC secret breadth & lifecycle** (T2, T11) — symmetric secret copied to
    several places, no rotation, stale-cache window on reinstall.
-5. **Encryption-at-rest posture is default-relied-upon, not policy-asserted**
-   (T9).
+5. **Encryption-at-rest is now policy-asserted (2026-06-30), with CMK +
+   SecureTransport-deny still deferred** (T9) — the files bucket now explicitly
+   asserts SSE-S3 / versioning / public-access-block and DSQL carries deletion
+   protection (real installs only; the e2e carve-out is fail-safe via an
+   explicit `--ephemeral` flag, never an inherited env var). What's left is the
+   step up to a customer-managed KMS key (deferred — it needs IAM-boundary
+   widening) and an `aws:SecureTransport` deny to make HTTPS policy-enforced
+   rather than merely conventional.
 
 None of these contradict the project's stated stance; several are explicit
 pre-production deferrals. The intent here is that a reader knows exactly where
@@ -517,6 +549,13 @@ the lines are drawn and what is and isn't guaranteed today.
 - Live code: `packages/admin-installer/builtin-apps/cloud-data-server/src/{api-handler,access-enforcer}.ts`,
   `packages/admin-installer/src/builtin-programs/cloud-data-server-program.ts`,
   `packages/protocol-primitives/src/storage/object-keys.ts`
+- Data-at-rest hardening (T9, 2026-06-30): files-bucket SSE/versioning/PAB +
+  DSQL deletion-protection + `forceDestroy` in
+  `packages/admin-installer/src/builtin-programs/cloud-data-server-program.ts`;
+  fail-safe ephemeral gating via `isEphemeralInstall` in
+  `packages/admin-installer/src/builtin-installs.ts` (CLI flag wired in
+  `scripts/cli-install-cloud-data-server.ts`, e2e in `e2e-aws/src/journey.test.ts`);
+  tests in `packages/admin-installer/__tests__/cloud-data-server-hardening.test.ts`
 - Related open items: todos 15, 16, 27
 - AWS shared-responsibility references (managed-runtime stance):
   - Lambda runtime management & patching —
