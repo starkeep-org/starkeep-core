@@ -1,16 +1,17 @@
 # Starkeep
 
-Starkeep is a modern self-hosting system that allows you to keep your own data and run your own apps on your own hardware and cloud infra. Starkeep's advantages over traditional self-hosting:
+Starkeep is a modern self-hosting system that allows you to keep your own data and run your own apps on your own hardware and cloud infra. Starkeep's advantages over traditional self-hosting include:
 
-- Common data storage and indexing layer for your data files (photos, documents, etc)
-- Runs locally on device and/or in the cloud, with P2P sync built in 
+- Common data storage and indexing layer allows building various app on top - no more siloed containers
+- Run apps locally on device and/or in the cloud
 - Ultra-low, scale-to-zero running costs
-- Enterprise-grade security and backups built-in
+- Enterprise-grade security, backups, and versioning built-in
+- Built-in P2P sync of common data files and app-specific data among multiple clients + cloud
 - Easy enough for anyone to run, with limitless potential for developers
 
 The Starkeep Core repo includes four built-in system apps:
 
-- **Starkeep Admin**: The management hub. Sign in, discover, install and run apps. Currently the Admin app runs locally only.
+- **Starkeep Admin**: The management hub. Sign in, discover, install and run apps. Currently, the Admin app runs locally only.
 - **Local Data Server**: A local service responsible for indexing, lookup, enforcing data semantics, and bookkeeping sync on the local side.
 - **Starkeep Drive**: A general purpose storage app with two special powers: it is the only app allowed to operate on all file types (including unknown), and its identity is used to sync data between local and cloud. Currently, the Starkeep Drive app runs locally only.
 - **Cloud Data Server**: The cloud analog of the local data server: responsible for indexing, lookup, enforcing data semantics, and bookkeeping sync on the cloud side. Runs in a Lambda.
@@ -23,7 +24,8 @@ For the full picture of the parts and how data moves between them, see [`system-
 
 ## Prerequisites
 
-- **Node.js 22+** and **pnpm 10.20** (`corepack enable` picks up the version pinned in `package.json`).
+- **Node.js 22+**
+- **pnpm 10.20** 
 
 ---
 
@@ -136,7 +138,6 @@ Three tiers:
 - [`system-design.md`](system-design.md) — the major parts, how data is classified (shared vs app-specific), and how it moves and syncs.
 - [`data-roles-and-permissions.md`](data-roles-and-permissions.md) — identities, trust boundaries, and why the admin app never appears on the data path.
 - App READMEs: [`apps/admin-web`](apps/admin-web/README.md), [`apps/local-data-server`](apps/local-data-server/README.md).
-- Authoring your own app: [`authoring-an-app.md`](authoring-an-app.md) (and the app-author install steps in [`../starkeep-apps/README.md`](../starkeep-apps/README.md)).
 
 ## Repository layout
 
