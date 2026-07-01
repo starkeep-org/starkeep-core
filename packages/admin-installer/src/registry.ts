@@ -21,6 +21,7 @@ import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import { installerPgUser } from "./dsql-schema-init";
+import { isRetryableDsqlConflict, isTransientConnectionError } from "./retry-on-access-denied";
 
 export type Operation = "install" | "uninstall";
 export type StepStatus = "pending" | "done" | "failed";
@@ -94,21 +95,38 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
   }
 
   async function withRetry<T>(fn: (db: Kysely<Record<string, never>>) => Promise<T>): Promise<T> {
-    try {
-      return await fn(await db());
-    } catch (err) {
-      // 28P01 = invalid_password (typical when the DSQL DbConnect token has
-      // expired mid-run). Drop the cached connection and try once more with a
-      // fresh token.
-      const code = (err as { code?: string } | null)?.code;
-      if (code === "28P01" || code === "28000") {
-        const stale = dbPromise;
-        dbPromise = null;
-        if (stale) await stale.then((k) => k.destroy()).catch(() => {});
+    const maxAttempts = 6;
+    let delay = 500;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
         return await fn(await db());
+      } catch (err) {
+        // 28P01 = invalid_password / 28000 = invalid auth (typical when the DSQL
+        // DbConnect token has expired mid-run) — reopen with a fresh token. A
+        // dropped socket (transient) also needs a reopen. DSQL OCC conflicts
+        // (OC*, "updated by another transaction") are catalog-contention on the
+        // *healthy* connection — e.g. a step's CREATE INDEX ASYNC still settling
+        // when the next ledger write lands — so retry on the same connection.
+        // All registry ops are reads or idempotent upserts, so replay is safe.
+        const code = (err as { code?: string } | null)?.code;
+        const authExpired = code === "28P01" || code === "28000";
+        const socketDropped = isTransientConnectionError(err);
+        const occConflict = isRetryableDsqlConflict(err);
+        if (attempt >= maxAttempts || !(authExpired || socketDropped || occConflict)) {
+          throw err;
+        }
+        if (authExpired || socketDropped) {
+          const stale = dbPromise;
+          dbPromise = null;
+          if (stale) await stale.then((k) => k.destroy()).catch(() => {});
+        }
+        if (socketDropped || occConflict) {
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, 5_000);
+        }
       }
-      throw err;
     }
+    throw new Error("unreachable: registry withRetry");
   }
 
   return {
@@ -170,8 +188,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
           name: r.name,
           installedAt:
             r.installed_at instanceof Date ? r.installed_at.toISOString() : r.installed_at,
-          updatedAt:
-            r.updated_at instanceof Date ? r.updated_at.toISOString() : r.updated_at,
+          updatedAt: r.updated_at instanceof Date ? r.updated_at.toISOString() : r.updated_at,
         }));
       });
     },

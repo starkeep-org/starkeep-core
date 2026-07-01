@@ -169,6 +169,9 @@ export function foundationalPermissionsBoundaryStatements(
         "lambda:GetFunctionConfiguration",
         "lambda:UpdateFunctionCode",
         "lambda:UpdateFunctionConfiguration",
+        // The broker Lambda declares reservedConcurrentExecutions; AWS sets it
+        // via a separate PutFunctionConcurrency call (create and update alike).
+        "lambda:PutFunctionConcurrency",
         "lambda:TagResource",
         "lambda:UntagResource",
         "lambda:ListTags",

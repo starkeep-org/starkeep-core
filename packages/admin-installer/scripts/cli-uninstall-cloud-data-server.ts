@@ -38,6 +38,7 @@ import {
 } from "@aws-sdk/client-cognito-identity";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { uninstallCloudDataServer, uninstallDrive } from "../src/builtin-installs";
+import { exitOnInstallFailure } from "../src/cli-exit";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -336,6 +337,6 @@ await uninstallCloudDataServer({
   pulumiStateBucket,
   userPoolId: config.userPoolId,
   userPoolClientId: config.userPoolClientId,
-});
+}).catch(exitOnInstallFailure);
 
 console.log("\nUninstall complete.");

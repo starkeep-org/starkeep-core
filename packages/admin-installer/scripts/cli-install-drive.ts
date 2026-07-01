@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { installDrive } from "../src/builtin-installs";
+import { exitOnInstallFailure } from "../src/cli-exit";
 import {
   regionFromUserPoolId,
   cognitoPasswordAuth,
@@ -177,6 +178,6 @@ await installDrive(
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
     sessionToken: process.env.AWS_SESSION_TOKEN!,
   },
-);
+).catch(exitOnInstallFailure);
 
 console.log("\nStarkeep Drive install complete.");

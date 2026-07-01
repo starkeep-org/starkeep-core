@@ -22,6 +22,7 @@ import { resolve } from "node:path";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { appManifestSchema } from "@starkeep/admin-manifest";
 import { uninstallApp } from "../src/orchestrator";
+import { exitOnInstallFailure } from "../src/cli-exit";
 import {
   regionFromUserPoolId,
   cognitoPasswordAuth,
@@ -161,6 +162,6 @@ await uninstallApp({
     installDdlRoleArn,
     installInfraRoleArn,
   },
-});
+}).catch(exitOnInstallFailure);
 
 console.log(`\n${appId} cloud uninstall complete.`);

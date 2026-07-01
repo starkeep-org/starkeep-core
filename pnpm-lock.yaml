@@ -273,6 +273,9 @@ importers:
       '@aws-sdk/client-cognito-identity-provider':
         specifier: ^3.700.0
         version: 3.1034.0
+      '@aws-sdk/client-lambda':
+        specifier: ^3.700.0
+        version: 3.1051.0
       '@starkeep/admin-installer':
         specifier: workspace:*
         version: link:../packages/admin-installer

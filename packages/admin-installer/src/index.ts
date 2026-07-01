@@ -15,6 +15,7 @@ export {
   uninstallCloudDataServer,
   installDrive,
   uninstallDrive,
+  cloudDataServerBundleSha256Base64,
 } from "./builtin-installs";
 export type {
   CloudDataServerInstallConfig,

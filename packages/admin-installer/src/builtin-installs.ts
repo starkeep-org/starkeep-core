@@ -61,6 +61,18 @@ function cloudDataServerPackageDir(): string {
   return resolve(__dirname, "..", "builtin-apps", "cloud-data-server");
 }
 
+/**
+ * Base64 SHA-256 of the cloud-data-server deployment bundle currently on disk.
+ * This is exactly what the install passes to Pulumi as the Lambda's
+ * `sourceCodeHash`, and what AWS reports back as the function's `CodeSha256`.
+ * Exposed so callers (e.g. the Tier-3 e2e) can assert the *live* broker is
+ * running the bundle this checkout builds, rather than a stale prior deploy.
+ */
+export function cloudDataServerBundleSha256Base64(): string {
+  const distZipPath = join(cloudDataServerPackageDir(), "dist.zip");
+  return createHash("sha256").update(readFileSync(distZipPath)).digest("base64");
+}
+
 interface CloudDataServerManifest {
   id: "cloud-data-server";
   name: string;
@@ -330,7 +342,7 @@ export async function installCloudDataServer(
     // sourceCodeHash forces Pulumi to detect a Lambda code change on redeploy
     // even if the on-disk path is unchanged. Mirrors the per-app installer
     // (pulumi-program.ts) — without it, a fresh dist.zip may not be picked up.
-    const bundleHash = createHash("sha256").update(readFileSync(distZipPath)).digest("base64");
+    const bundleHash = cloudDataServerBundleSha256Base64();
     const program = buildCloudDataServerProgram({
       stackPrefix: config.stackPrefix,
       region: config.region,

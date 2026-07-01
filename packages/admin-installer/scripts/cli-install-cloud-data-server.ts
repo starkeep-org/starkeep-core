@@ -40,6 +40,7 @@ if (process.env.IAM_SDK_TRACE_PATH) {
 import { execSync } from "node:child_process";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { installCloudDataServer, isEphemeralInstall } from "../src/builtin-installs";
+import { exitOnInstallFailure } from "../src/cli-exit";
 import { ensurePulumiPassphrase } from "../src/pulumi-passphrase";
 import {
   regionFromUserPoolId,
@@ -205,7 +206,7 @@ const outputs = await installCloudDataServer({
   // inherited process.env of admin-web's real-install spawn. See
   // isEphemeralInstall.
   ephemeral: isEphemeralInstall(flags),
-});
+}).catch(exitOnInstallFailure);
 
 // There is no separate cloud sync identity to install here: shared-record sync
 // (including watcher-originated records, origin_app_id = "local-watcher") flows
