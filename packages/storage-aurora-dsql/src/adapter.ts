@@ -20,6 +20,7 @@ import {
   type PostgresRow,
 } from "./serialization.js";
 import { buildPostgresQuery } from "./query-builder.js";
+import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
 
 
 export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
@@ -64,6 +65,13 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async put(record: DataRecord): Promise<void> {
+    await withOccRetry("put", () => this.putRaw(record));
+  }
+
+  // Raw single-statement upsert. Value-independent (the row is built from the
+  // caller-supplied record, not from a prior read), so replaying it verbatim is
+  // idempotent — safe for both the public `put` retry and inside batch/txn.
+  private async putRaw(record: DataRecord): Promise<void> {
     const row = recordToRow(record);
     const columns = Object.keys(row);
     const values = Object.values(row);
@@ -78,6 +86,10 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async get(id: StarkeepId): Promise<DataRecord | null> {
+    return withOccRetry("get", () => this.getRaw(id));
+  }
+
+  private async getRaw(id: StarkeepId): Promise<DataRecord | null> {
     const result = await this.getClient().query(
       "SELECT * FROM shared.records WHERE id = $1",
       [id],
@@ -87,6 +99,10 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
+    await withOccRetry("delete", () => this.deleteRaw(id, hlc));
+  }
+
+  private async deleteRaw(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     const ts = serializeHLC(hlc);
     await this.getClient().query(
       "UPDATE shared.records SET deleted_at = $1, updated_at = $2 WHERE id = $3",
@@ -95,6 +111,10 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async query(query: Query): Promise<QueryResult> {
+    return withOccRetry("query", () => this.queryRaw(query));
+  }
+
+  private async queryRaw(query: Query): Promise<QueryResult> {
     const { text, values } = buildPostgresQuery(query);
     const result = await this.getClient().query(text, values);
     const rows = result.rows as unknown as PostgresRow[];
@@ -110,47 +130,67 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     };
   }
 
+  // The whole BEGIN…COMMIT is one retry unit: DSQL reports an OCC conflict at
+  // COMMIT, so retrying anything narrower is wrong. `operations` is held in
+  // memory and every op is an idempotent single statement, so replaying the
+  // transaction from BEGIN converges. Inner ops use the raw (unwrapped) helpers
+  // to avoid a redundant nested retry.
   async batch(operations: BatchOperation[]): Promise<void> {
-    await this.getClient().query("BEGIN");
-    try {
-      for (const operation of operations) {
-        if (operation.type === "put") {
-          await this.put(operation.record);
-        } else {
-          await this.delete(operation.id, operation.hlc);
+    await withOccRetry("batch", async () => {
+      await this.getClient().query("BEGIN");
+      try {
+        for (const operation of operations) {
+          if (operation.type === "put") {
+            await this.putRaw(operation.record);
+          } else {
+            await this.deleteRaw(operation.id, operation.hlc);
+          }
         }
+        await this.getClient().query("COMMIT");
+      } catch (error) {
+        await this.getClient().query("ROLLBACK");
+        throw error;
       }
-      await this.getClient().query("COMMIT");
-    } catch (error) {
-      await this.getClient().query("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
+  // The callback is replayed verbatim on an OCC conflict (raised at RELEASE, the
+  // COMMIT of the savepoint), so it MUST be idempotent — any non-DB side effects
+  // it performs will run on each attempt. Inner ops use the raw helpers so the
+  // conflict is handled once, at this transaction boundary.
   async transaction<T>(
     callback: (transaction: Transaction) => Promise<T>,
   ): Promise<T> {
-    await this.getClient().query("SAVEPOINT starkeep_transaction");
-    try {
-      const transaction: Transaction = {
-        put: async (record) => this.put(record),
-        get: async (id) => this.get(id),
-        delete: async (id, hlc) => this.delete(id, hlc),
-        query: async (query) => this.query(query),
-      };
-      const result = await callback(transaction);
-      await this.getClient().query("RELEASE SAVEPOINT starkeep_transaction");
-      return result;
-    } catch (error) {
-      await this.getClient().query(
-        "ROLLBACK TO SAVEPOINT starkeep_transaction",
-      );
-      await this.getClient().query("RELEASE SAVEPOINT starkeep_transaction");
-      throw new TransactionError("Transaction failed", error);
-    }
+    return withOccRetry("transaction", async () => {
+      await this.getClient().query("SAVEPOINT starkeep_transaction");
+      try {
+        const transaction: Transaction = {
+          put: async (record) => this.putRaw(record),
+          get: async (id) => this.getRaw(id),
+          delete: async (id, hlc) => this.deleteRaw(id, hlc),
+          query: async (query) => this.queryRaw(query),
+        };
+        const result = await callback(transaction);
+        await this.getClient().query("RELEASE SAVEPOINT starkeep_transaction");
+        return result;
+      } catch (error) {
+        await this.getClient().query(
+          "ROLLBACK TO SAVEPOINT starkeep_transaction",
+        );
+        await this.getClient().query("RELEASE SAVEPOINT starkeep_transaction");
+        // Preserve OCC conflicts so withOccRetry can see and retry them;
+        // wrap only genuine (non-retryable) failures as TransactionError.
+        if (isRetryableDsqlConflict(error)) throw error;
+        throw new TransactionError("Transaction failed", error);
+      }
+    });
   }
 
   async putMetadata(typeId: string, row: MetadataRow): Promise<void> {
+    await withOccRetry("putMetadata", () => this.putMetadataRaw(typeId, row));
+  }
+
+  private async putMetadataRaw(typeId: string, row: MetadataRow): Promise<void> {
     const table = pgMetadataTableName(typeId);
     const cols: string[] = ["record_id"];
     const values: unknown[] = [row.recordId];
@@ -171,40 +211,46 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
-    const table = pgMetadataTableName(typeId);
-    const result = await this.getClient().query(
-      `SELECT * FROM ${table} WHERE record_id = $1`,
-      [recordId],
-    );
-    if (result.rows.length === 0) return null;
-    return columnsToMetadataRow(recordId, result.rows[0] as Record<string, unknown>);
+    return withOccRetry("getMetadata", async () => {
+      const table = pgMetadataTableName(typeId);
+      const result = await this.getClient().query(
+        `SELECT * FROM ${table} WHERE record_id = $1`,
+        [recordId],
+      );
+      if (result.rows.length === 0) return null;
+      return columnsToMetadataRow(recordId, result.rows[0] as Record<string, unknown>);
+    });
   }
 
   async getMetadataByIds(
     typeId: string,
     recordIds: StarkeepId[],
   ): Promise<Map<StarkeepId, MetadataRow>> {
-    const result = new Map<StarkeepId, MetadataRow>();
-    if (recordIds.length === 0) return result;
-    const table = pgMetadataTableName(typeId);
-    const placeholders = recordIds.map((_, i) => `$${i + 1}`).join(", ");
-    const dbResult = await this.getClient().query(
-      `SELECT * FROM ${table} WHERE record_id IN (${placeholders})`,
-      recordIds,
-    );
-    for (const raw of dbResult.rows) {
-      const row = raw as Record<string, unknown>;
-      const recordId = row["record_id"] as StarkeepId;
-      result.set(recordId, columnsToMetadataRow(recordId, row));
-    }
-    return result;
+    if (recordIds.length === 0) return new Map();
+    return withOccRetry("getMetadataByIds", async () => {
+      const result = new Map<StarkeepId, MetadataRow>();
+      const table = pgMetadataTableName(typeId);
+      const placeholders = recordIds.map((_, i) => `$${i + 1}`).join(", ");
+      const dbResult = await this.getClient().query(
+        `SELECT * FROM ${table} WHERE record_id IN (${placeholders})`,
+        recordIds,
+      );
+      for (const raw of dbResult.rows) {
+        const row = raw as Record<string, unknown>;
+        const recordId = row["record_id"] as StarkeepId;
+        result.set(recordId, columnsToMetadataRow(recordId, row));
+      }
+      return result;
+    });
   }
 
   async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
-    const table = pgMetadataTableName(typeId);
-    await this.getClient().query(
-      `DELETE FROM ${table} WHERE record_id = $1`,
-      [recordId],
-    );
+    await withOccRetry("deleteMetadata", async () => {
+      const table = pgMetadataTableName(typeId);
+      await this.getClient().query(
+        `DELETE FROM ${table} WHERE record_id = $1`,
+        [recordId],
+      );
+    });
   }
 }

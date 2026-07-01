@@ -78,6 +78,13 @@ export function isTransientConnectionError(err: unknown): boolean {
  * AWS's guidance for the OC* class is simply to retry the transaction — safe
  * here because the DDL bodies are idempotent, so a replay converges. Observed
  * intermittently on per-app install DDL in the Tier-3 e2e.
+ *
+ * NOTE: the data plane has an identical predicate in
+ * packages/storage-aurora-dsql/src/occ-retry.ts (`isRetryableDsqlConflict`).
+ * The two are kept as separate copies on purpose — this installer package does
+ * not depend on storage-aurora-dsql, and the CDS Lambda artifact cannot import
+ * this installer package at runtime. Keep them in sync when the OC* detection
+ * changes.
  */
 export function isRetryableDsqlConflict(err: unknown): boolean {
   const e = err as { code?: string; message?: string };

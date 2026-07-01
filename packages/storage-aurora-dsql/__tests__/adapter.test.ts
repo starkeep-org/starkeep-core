@@ -5,16 +5,36 @@ import { AuroraDsqlDatabaseAdapter } from "../src/adapter.js";
 import { recordToRow } from "../src/serialization.js";
 import type { DatabaseClient, DatabaseClientFactory } from "../src/types.js";
 
+/** A DSQL OCC-conflict shaped error (pg surfaces the code on the error). */
+function occConflict(): Error {
+  return Object.assign(new Error("change conflicts with another transaction"), {
+    code: "OC001",
+  });
+}
+
 /** Records every query; per-pattern canned responses and failure injection. */
 class FakeClient implements DatabaseClient {
   calls: { text: string; values?: unknown[] }[] = [];
   responses: Array<{ match: RegExp; rows: Record<string, unknown>[] }> = [];
   failOn: RegExp | null = null;
+  // Throw an OCC conflict the first `remaining` times a matching query runs,
+  // then let it through — simulates a transaction that loses the OCC race a
+  // bounded number of times before committing.
+  conflicts: Array<{ match: RegExp; remaining: number }> = [];
   ended = false;
+
+  conflictOnce(match: RegExp, times = 1) {
+    this.conflicts.push({ match, remaining: times });
+  }
 
   async query(text: string, values?: unknown[]) {
     this.calls.push({ text, values });
     if (this.failOn?.test(text)) throw new Error(`injected failure on: ${text}`);
+    const conflict = this.conflicts.find((c) => c.remaining > 0 && c.match.test(text));
+    if (conflict) {
+      conflict.remaining--;
+      throw occConflict();
+    }
     const canned = this.responses.find((r) => r.match.test(text));
     return { rows: canned?.rows ?? [] };
   }
@@ -187,6 +207,51 @@ describe("batch", () => {
     );
     const texts = client.texts();
     expect(texts[texts.length - 1]).toBe("ROLLBACK");
+  });
+});
+
+describe("OCC retry", () => {
+  it("retries put past OCC conflicts until the upsert commits", async () => {
+    client.conflictOnce(/INSERT INTO shared\.records/, 2);
+    await adapter.put(sampleRecord());
+    const inserts = client
+      .texts()
+      .filter((t) => t.startsWith("INSERT INTO shared.records"));
+    // Two conflicted attempts + one that committed.
+    expect(inserts).toHaveLength(3);
+  });
+
+  it("does NOT retry a non-OCC failure — it propagates on the first attempt", async () => {
+    client.failOn = /INSERT INTO shared\.records/;
+    await expect(adapter.put(sampleRecord())).rejects.toThrow(/injected failure/);
+    const inserts = client
+      .texts()
+      .filter((t) => t.startsWith("INSERT INTO shared.records"));
+    expect(inserts).toHaveLength(1);
+  });
+
+  it("replays the whole BEGIN…COMMIT when COMMIT loses the OCC race", async () => {
+    client.conflictOnce(/COMMIT/, 1);
+    await adapter.batch([{ type: "put", record: sampleRecord() }]);
+    const texts = client.texts();
+    // First attempt: BEGIN, INSERT, COMMIT(conflict) -> ROLLBACK.
+    // Second attempt: BEGIN, INSERT, COMMIT(ok).
+    expect(texts.filter((t) => t === "BEGIN")).toHaveLength(2);
+    expect(texts.filter((t) => t === "COMMIT")).toHaveLength(2); // conflicted + committed
+    expect(texts.filter((t) => t === "ROLLBACK")).toHaveLength(1);
+  });
+
+  it("replays the whole SAVEPOINT…RELEASE when RELEASE loses the OCC race", async () => {
+    client.conflictOnce(/RELEASE SAVEPOINT/, 1);
+    let callbackRuns = 0;
+    await adapter.transaction(async (tx) => {
+      callbackRuns++;
+      await tx.put(sampleRecord());
+    });
+    // Callback replayed once because the savepoint release conflicted.
+    expect(callbackRuns).toBe(2);
+    const texts = client.texts();
+    expect(texts.filter((t) => t === "SAVEPOINT starkeep_transaction")).toHaveLength(2);
   });
 });
 

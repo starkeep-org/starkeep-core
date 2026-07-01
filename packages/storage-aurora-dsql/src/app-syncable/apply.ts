@@ -8,6 +8,7 @@ import type {
   ScanSincePage,
 } from "@starkeep/shared-space-api";
 import type { DatabaseClient } from "../types.js";
+import { withOccRetry } from "../occ-retry.js";
 
 /**
  * DSQL-backed implementation of `AppSyncableApplier`.
@@ -25,6 +26,9 @@ export class DsqlAppSyncableApplier
     private readonly namespace: AppSyncableNamespaceStore,
   ) {}
 
+  // Each branch is a single LWW-guarded statement (upsert / conditional
+  // update / soft-delete keyed on `updated_at`), so replaying the whole
+  // dispatch on an OCC conflict is idempotent.
   async apply(entry: AppSyncableRowEntry): Promise<void> {
     const ns = this.namespace.get(entry.appId);
     if (!ns) {
@@ -42,13 +46,15 @@ export class DsqlAppSyncableApplier
     const schemaTable = `app_${entry.appId.replace(/-/g, "_")}."${entry.table}"`;
     const { pkColumns } = tableInfo;
 
-    if (entry.op === "insert") {
-      await this.applyInsert(schemaTable, pkColumns, entry);
-    } else if (entry.op === "update") {
-      await this.applyUpdate(schemaTable, entry);
-    } else {
-      await this.applyDelete(schemaTable, entry);
-    }
+    await withOccRetry(`applier.apply(${entry.op})`, async () => {
+      if (entry.op === "insert") {
+        await this.applyInsert(schemaTable, pkColumns, entry);
+      } else if (entry.op === "update") {
+        await this.applyUpdate(schemaTable, entry);
+      } else {
+        await this.applyDelete(schemaTable, entry);
+      }
+    });
   }
 
   private async applyInsert(

@@ -43,6 +43,7 @@ import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import {
   DsqlAppSyncableNamespaceStore,
   DsqlAppSyncableApplier,
+  withOccRetry,
 } from "@starkeep/storage-aurora-dsql";
 import { createAppSpecificFactory } from "@starkeep/shared-space-api";
 import type { AppSpecificOperations } from "@starkeep/shared-space-api";
@@ -745,45 +746,52 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         );
       }
 
-      // Dedup derived children (thumbnails) by (parentId, contentHash). A
-      // byte-identical child of the same parent is a duplicate — e.g. two
-      // concurrent /api/resize calls for one original. contentHash is part of
-      // the key so distinct crops of the same source (same parent, different
-      // bytes) are not collapsed. Idempotent: return the existing record.
-      if (body.parentId) {
-        const dup = await db.query({
-          filters: [
-            { field: "parentId", operator: "eq", value: body.parentId },
-            { field: "contentHash", operator: "eq", value: contentHash },
-            { field: "deletedAt", operator: "isNull" },
-          ],
-          limit: 1,
-        });
-        const existing = dup.records[0];
-        if (existing) {
-          return ok({ record: recordToResponse(existing) });
+      // The dedup-check + insert is one OCC unit: retry re-reads the dup query
+      // so a conflict caused by a concurrent writer re-checks for the duplicate
+      // before inserting. A rolled-back attempt commits nothing, so minting a
+      // fresh id/timestamp on each attempt cannot leave a duplicate behind.
+      // `created` distinguishes a fresh insert (201) from returning an existing
+      // duplicate (200).
+      const { record, created } = await withOccRetry("POST /data/records", async () => {
+        // Dedup derived children (thumbnails) by (parentId, contentHash). A
+        // byte-identical child of the same parent is a duplicate — e.g. two
+        // concurrent /api/resize calls for one original. contentHash is part of
+        // the key so distinct crops of the same source (same parent, different
+        // bytes) are not collapsed. Idempotent: return the existing record.
+        if (body.parentId) {
+          const dup = await db.query({
+            filters: [
+              { field: "parentId", operator: "eq", value: body.parentId },
+              { field: "contentHash", operator: "eq", value: contentHash },
+              { field: "deletedAt", operator: "isNull" },
+            ],
+            limit: 1,
+          });
+          const existing = dup.records[0];
+          if (existing) return { record: existing, created: false };
         }
-      }
 
-      const now = clock.now();
-      const record: DataRecord = {
-        id: generateId(),
-        kind: "data",
-        type: body.type,
-        originAppId: appId,
-        createdAt: now,
-        updatedAt: now,
-        deletedAt: null,
-        version: 1,
-        contentHash,
-        objectStorageKey,
-        mimeType: body.contentType ?? null,
-        sizeBytes,
-        originalFilename: body.fileName ?? null,
-        parentId: (body.parentId as DataRecord["parentId"]) ?? null,
-      };
-      await db.put(record);
-      return ok({ record: recordToResponse(record) }, 201);
+        const now = clock.now();
+        const fresh: DataRecord = {
+          id: generateId(),
+          kind: "data",
+          type: body.type!,
+          originAppId: appId,
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: null,
+          version: 1,
+          contentHash,
+          objectStorageKey,
+          mimeType: body.contentType ?? null,
+          sizeBytes,
+          originalFilename: body.fileName ?? null,
+          parentId: (body.parentId as DataRecord["parentId"]) ?? null,
+        };
+        await db.put(fresh);
+        return { record: fresh, created: true };
+      });
+      return ok({ record: recordToResponse(record) }, created ? 201 : 200);
     }
 
     // POST /apps/{appId}/data/files?type=<typeId>
@@ -946,31 +954,43 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         // tombstones). Editing user fields lives in app-specific data which is
         // out of scope; the PUT endpoint accepts only originalFilename and
         // parentId for now.
-        const existing = await db.get(id);
-        if (!existing || existing.deletedAt) return clientErr("Record not found", 404);
-        if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
         const body = event.body
           ? (JSON.parse(event.body) as { originalFilename?: string | null; parentId?: string | null })
           : null;
         if (!body) return clientErr("body is required", 400);
-        const now = clock.now();
-        const updated: DataRecord = {
-          ...existing,
-          originalFilename: body.originalFilename ?? existing.originalFilename,
-          parentId: (body.parentId as DataRecord["parentId"]) ?? existing.parentId,
-          updatedAt: now,
-          version: existing.version + 1,
-        };
-        await db.put(updated);
-        return ok({ record: recordToResponse(updated) });
+        // Read-modify-write: `version` is derived from the row we read, so the
+        // whole get→compute→put must be one OCC unit. Retrying only the put
+        // would replay a stale version and lose a concurrent update; wrapping
+        // here re-reads `existing` on conflict so version advances correctly.
+        // `await` (not a bare return) so the handler's finally — which closes
+        // the DB — runs only after the retry unit settles.
+        return await withOccRetry("PUT /data/records/:id", async () => {
+          const existing = await db.get(id);
+          if (!existing || existing.deletedAt) return clientErr("Record not found", 404);
+          if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
+          const now = clock.now();
+          const updated: DataRecord = {
+            ...existing,
+            originalFilename: body.originalFilename ?? existing.originalFilename,
+            parentId: (body.parentId as DataRecord["parentId"]) ?? existing.parentId,
+            updatedAt: now,
+            version: existing.version + 1,
+          };
+          await db.put(updated);
+          return ok({ record: recordToResponse(updated) });
+        });
       }
 
       if (method === "DELETE") {
-        const existing = await db.get(id);
-        if (!existing || existing.deletedAt) return clientErr("Record not found", 404);
-        if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
-        await db.delete(id, clock.now());
-        return ok({ deleted: true });
+        // get (existence + auth) → delete is one OCC unit; retry re-reads.
+        // `await` so the handler's finally (DB close) runs after it settles.
+        return await withOccRetry("DELETE /data/records/:id", async () => {
+          const existing = await db.get(id);
+          if (!existing || existing.deletedAt) return clientErr("Record not found", 404);
+          if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
+          await db.delete(id, clock.now());
+          return ok({ deleted: true });
+        });
       }
     }
 
