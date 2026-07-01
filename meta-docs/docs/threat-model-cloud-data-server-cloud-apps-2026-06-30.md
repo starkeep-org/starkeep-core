@@ -17,10 +17,10 @@
 > **How to read the assessments.** Each threat carries an honest posture label:
 > **Strong** (defended in depth, no material residual risk in the single-account
 > model), **Adequate** (defended, with bounded residual risk worth knowing),
-> **Partial** (real protection but with a named gap), **Pre-production gap**
-> (deliberately deferred per the project's "don't build production concerns
-> early" stance), or **Out of scope / accepted** (the design accepts this and
-> says so). The goal is to describe reality, not to flatter it.
+> **Partial** (real protection but with a named gap), **Deferred by design**
+> (deliberately deferred as not-yet-needed at the current scale), or **Out of
+> scope / accepted** (the design accepts this and says so). The goal is to
+> describe reality, not to flatter it.
 
 ---
 
@@ -249,10 +249,10 @@ route, or a presigned URL.
   at "the route reaches the Lambda unauthenticated, as declared." An app that
   puts data-touching logic on a `public` route without its own auth is a real
   risk, but it is the app author's responsibility, not the platform's.
-- **Gateway throttle + Lambda reserved concurrency now bound volumetric abuse**
-  (added 2026-06-30): a stage-wide request throttle caps the rate reaching the
-  Lambda across all routes, and reserved concurrency caps worst-case spend. No
-  per-app/per-route quota or WAF yet — unauthenticated routes (`/health`,
+- **Gateway throttle + Lambda reserved concurrency bound volumetric abuse:** a
+  stage-wide request throttle caps the rate reaching the Lambda across all
+  routes, and reserved concurrency caps worst-case spend. There is no
+  per-app/per-route quota or WAF — unauthenticated routes (`/health`,
   `public` app routes) and the HMAC-gated routes (which still do an SSM read +
   signature check per request before 401) remain reachable, but the cost blast
   radius is capped → see T10.
@@ -355,7 +355,7 @@ sibling `starkeep-apps/` checkout) for any dir containing a
 ids are namespace-checked (reserved ids rejected, `fileAccessAll`/`brokerPower`
 gated), and the install grants exactly what the manifest declares.
 
-**Assessment — Partial / accepted (pre-production).** The platform validates the
+**Assessment — Partial / accepted.** The platform validates the
 *shape* of the manifest and confines the app to its declared grants (T1), but:
 
 - There is **no code signing, no bundle provenance, and no review gate** beyond
@@ -379,18 +379,16 @@ as such.
 
 **Stance.** In transit: all external traffic is HTTPS (API Gateway), and
 S3 presigned access is over TLS. At rest: S3 and DSQL are AWS-managed stores;
-Pulumi state is encrypted with an SSM-stored passphrase (T11). As of 2026-06-30
-the data-plane no longer leans on AWS defaults alone — the files bucket now
+Pulumi state is encrypted with an SSM-stored passphrase (T11). The files bucket
 **asserts its data-protection posture explicitly** in the install program
 (`cloud-data-server-program.ts`): SSE-S3 (AES256) server-side encryption,
 versioning enabled, and a full public-access block, plus the DSQL cluster
 carries deletion protection and the bucket keeps the default destroy guard
-(no `forceDestroy`). These are the IAM actions the *foundational* permissions
-boundary already grants, so the pass is purely additive. Tenant isolation is
-**not a concern** — the deployment is single-tenant in the customer's own
-account.
+(no `forceDestroy`). These are IAM actions the *foundational* permissions
+boundary grants. Tenant isolation is **not a concern** — the deployment is
+single-tenant in the customer's own account.
 
-This hardening is applied to **real installs only**. The cloud e2e suite
+This data-protection posture is applied to **real installs only**. The cloud e2e suite
 provisions *ephemeral* infrastructure that deliberately skips it (no versioning
 /SSE/public-access-block, no deletion protection, `forceDestroy` on so repeated
 teardown isn't wedged by leftover objects). Critically, that carve-out is
@@ -402,10 +400,10 @@ account's data protection. A fixed argv cannot be injected that way, so a real
 install is structurally incapable of being treated as ephemeral. Unit tests
 lock in both the resource posture and the flag's fail-safe defaulting.
 
-**Assessment — Adequate; hardened 2026-06-30 (CMK + SecureTransport-deny
-deferred).** Encryption-at-rest and the surrounding data-protection posture are
-now *policy-asserted* rather than default-relied-upon, closing the prior "doesn't
-assert it explicitly" gap. Two deliberate, named residuals remain:
+**Assessment — Adequate (CMK + SecureTransport-deny deferred).**
+Encryption-at-rest and the surrounding data-protection posture are
+*policy-asserted* rather than default-relied-upon. Two deliberate, named
+residuals remain:
 
 - **AWS-managed keys, not a customer-managed KMS key (CMK).** SSE-S3 uses
   AWS-owned keys. A CMK was consciously deferred: the foundational permissions
@@ -425,8 +423,8 @@ availability.
 **Stance & honest reality.** The serverless model (Lambda + DSQL + S3,
 pay-per-use) means volumetric abuse translates **directly into the customer's
 AWS bill** rather than into a hard outage, and the unauthenticated `/health`
-and `public` routes are internet-reachable. As of 2026-06-30 two zero-fixed-cost
-guardrails now bound the blast radius (`cloud-data-server-program.ts`):
+and `public` routes are internet-reachable. Two zero-fixed-cost guardrails
+bound the blast radius (`cloud-data-server-program.ts`):
 
 - **Stage-wide request throttle** on the shared APIGW v2 `$default` stage
   (`defaultRouteSettings`: 50 rps steady-state, 100 burst). Applies to every
@@ -453,12 +451,11 @@ have their S3 blobs collected, and there is no `parent_id` repair pass (todos
 15, blob-GC) — so disk usage only ever increases under normal use. This axis
 remains unmitigated.
 
-**Assessment — Partial (improved 2026-06-30).** The cost-amplification axis is
-now meaningfully bounded — throttle caps request rate, reserved concurrency caps
-worst-case spend — taking the realistic "unbounded bill from internet traffic"
-failure mode off the table at zero fixed cost. Remaining gaps are narrower:
-no per-app quota (cross-app budget exhaustion), and unbounded storage growth
-(the more durable concern now).
+**Assessment — Partial.** The cost-amplification axis is meaningfully bounded —
+throttle caps request rate, reserved concurrency caps worst-case spend — keeping
+the realistic "unbounded bill from internet traffic" failure mode off the table
+at zero fixed cost. The remaining gaps are narrower: no per-app quota (cross-app
+budget exhaustion), and unbounded storage growth (the more durable concern).
 
 ## T11 — Secret and infrastructure-state exposure
 
@@ -494,13 +491,13 @@ up/destroy. State and artifacts buckets are versioned, account-private.
 | T1 | Malicious/buggy installed app (confinement) | **Strong** |
 | T2 | App-identity forgery & replay (HMAC) | **Adequate** |
 | T3 | Cross-app isolation (app-specific) | **Strong** |
-| T4 | Unauthenticated internet caller | **Adequate** (gaps: public routes, no per-app quota, CORS; stage throttle now in place) |
+| T4 | Unauthenticated internet caller | **Adequate** (gaps: public routes, no per-app quota, CORS; stage throttle in place) |
 | T5 | Broker code compromise | **Adequate** (blast radius = all user data, not the account) |
 | T6 | Powerful install-time identities | **Strong** |
 | T7 | Admin / Cognito compromise | **Adequate** (MFA worth confirming) |
 | T8 | Malicious app supply chain | **Partial / accepted** |
-| T9 | Data at rest / in transit | **Adequate; hardened 2026-06-30 (files-bucket SSE/versioning/PAB + DSQL deletion-protect asserted; CMK + SecureTransport-deny deferred)** |
-| T10 | DoS & cost amplification | **Partial (improved 2026-06-30: throttle + concurrency cap; storage growth remains)** |
+| T9 | Data at rest / in transit | **Adequate** (files-bucket SSE/versioning/PAB + DSQL deletion-protect asserted; CMK + SecureTransport-deny deferred) |
+| T10 | DoS & cost amplification | **Partial** (throttle + concurrency cap; storage growth remains) |
 | T11 | Secret & infra-state exposure | **Adequate** |
 
 **The system's genuine strengths.** Least-privilege is real and structural, not
@@ -512,12 +509,12 @@ independent layers. This is a well-thought-out trust architecture.
 
 **The honest soft spots, in priority order.**
 
-1. **Cost-DoS now bounded, but storage growth is not** (T10) — a stage throttle
-   + Lambda reserved concurrency (added 2026-06-30) cap the request-rate and
-   worst-case-spend blast radius, taking the runaway-bill failure mode off the
-   table. The residual gaps are no per-app quota (one app can consume the shared
-   throttle budget) and unbounded storage growth (tombstoned blobs never GC'd) —
-   the latter is now the more durable internet-facing concern.
+1. **Cost-DoS bounded, but storage growth is not** (T10) — a stage throttle
+   + Lambda reserved concurrency cap the request-rate and worst-case-spend blast
+   radius, keeping the runaway-bill failure mode off the table. The residual gaps
+   are no per-app quota (one app can consume the shared throttle budget) and
+   unbounded storage growth (tombstoned blobs never GC'd) — the latter is the
+   more durable internet-facing concern.
 2. **Shared-data grants are the real boundary, and they're admin-judgment-only**
    (T1, T8) — a granted app can touch *all* user data of its categories; nothing
    reviews or scores grant requests, and app code/bundles have no provenance.
@@ -525,18 +522,17 @@ independent layers. This is a well-thought-out trust architecture.
    installed apps' data (though not the account).
 4. **HMAC secret breadth & lifecycle** (T2, T11) — symmetric secret copied to
    several places, no rotation, stale-cache window on reinstall.
-5. **Encryption-at-rest is now policy-asserted (2026-06-30), with CMK +
-   SecureTransport-deny still deferred** (T9) — the files bucket now explicitly
-   asserts SSE-S3 / versioning / public-access-block and DSQL carries deletion
-   protection (real installs only; the e2e carve-out is fail-safe via an
-   explicit `--ephemeral` flag, never an inherited env var). What's left is the
-   step up to a customer-managed KMS key (deferred — it needs IAM-boundary
-   widening) and an `aws:SecureTransport` deny to make HTTPS policy-enforced
-   rather than merely conventional.
+5. **Encryption-at-rest is policy-asserted, with CMK + SecureTransport-deny
+   deferred** (T9) — the files bucket explicitly asserts SSE-S3 / versioning /
+   public-access-block and DSQL carries deletion protection (real installs only;
+   the e2e carve-out is fail-safe via an explicit `--ephemeral` flag, never an
+   inherited env var). What's left is the step up to a customer-managed KMS key
+   (deferred — it needs IAM-boundary widening) and an `aws:SecureTransport` deny
+   to make HTTPS policy-enforced rather than merely conventional.
 
 None of these contradict the project's stated stance; several are explicit
-pre-production deferrals. The intent here is that a reader knows exactly where
-the lines are drawn and what is and isn't guaranteed today.
+deferrals of not-yet-needed work. The intent here is that a reader knows exactly
+where the lines are drawn and what is and isn't guaranteed today.
 
 ---
 
@@ -549,7 +545,7 @@ the lines are drawn and what is and isn't guaranteed today.
 - Live code: `packages/admin-installer/builtin-apps/cloud-data-server/src/{api-handler,access-enforcer}.ts`,
   `packages/admin-installer/src/builtin-programs/cloud-data-server-program.ts`,
   `packages/protocol-primitives/src/storage/object-keys.ts`
-- Data-at-rest hardening (T9, 2026-06-30): files-bucket SSE/versioning/PAB +
+- Data-at-rest protection (T9): files-bucket SSE/versioning/PAB +
   DSQL deletion-protection + `forceDestroy` in
   `packages/admin-installer/src/builtin-programs/cloud-data-server-program.ts`;
   fail-safe ephemeral gating via `isEphemeralInstall` in
