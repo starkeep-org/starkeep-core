@@ -38,7 +38,7 @@ makes no AWS calls. `pnpm test` (the default unit suite) never runs it.
 | `STARKEEP_AWS_TESTS` | _(unset)_ | Must be `1` to run; otherwise the suite skips. |
 | `STARKEEP_AWS_STACK_PREFIX` | `sktest` | Dedicated test stack prefix. **Never** point this at a live deployment's prefix. |
 | `STARKEEP_AWS_REGION` | `us-east-2` | Region for a from-scratch bootstrap (an existing stack's own region always wins via its pool ID). |
-| `STARKEEP_AWS_TEARDOWN` | _(unset)_ | `apps` → run `teardown-cloud-data-server.sh`; `all` → `teardown-bootstrap.sh`, after the journey. Default keeps the stack up. |
+| `STARKEEP_AWS_TEARDOWN` | `all` | What to tear down **after a fully passing run**: `all` (default) → `teardown-bootstrap.sh`; `apps` → `teardown-cloud-data-server.sh`; `none` → keep everything up. A run with **any failed step never tears down**, so a broken stack is left for debugging. |
 | `HMAC_CACHE_TTL_MS` | `0` (in this suite) | Baked into the broker Lambda at install. The suite sets `0` so a just-rotated/revoked app secret isn't served from the broker's cache. Real installs leave it unset → broker keeps its 5-min default. |
 
 AWS credentials come from the ambient profile/role (the default profile during
@@ -64,13 +64,17 @@ unlocks only the disposable test stack.
 - **~26 min per full run.** First run is dominated by the cloud-data-server
   Pulumi up (DSQL cluster provisioning); the photos install/uninstall add a
   Pulumi up + destroy each.
-- **The stack is kept up between runs by default** (idle ≈ $0): bootstrap +
-  cloud-data-server + Drive persist; only photos is fully torn down by the
-  journey's uninstall step. Re-runs reuse the warm stack and the orchestrator's
-  step ledger.
-- `vitest.config.ts` runs serially with long (30-min) timeouts; set
-  `bail: 1` while iterating so the first failure stops cheaply. Failures are
-  resumable against the kept-up stack.
+- **A passing run tears the whole stack down by default** (`STARKEEP_AWS_TEARDOWN=all`)
+  so nothing stale is left behind. To iterate against a warm stack, run with
+  `STARKEEP_AWS_TEARDOWN=none`: bootstrap + cloud-data-server + Drive then
+  persist between runs (idle ≈ $0), and re-runs reuse the warm stack and the
+  orchestrator's step ledger.
+- **A failed run never tears down** — the real cloud resources are left up for
+  debugging regardless of `STARKEEP_AWS_TEARDOWN`. `bail: 1` stops at the first
+  failure, and the next run is idempotent against (and eventually tears down)
+  the same disposable stack.
+- `vitest.config.ts` runs serially with long (30-min) timeouts; `bail: 1` stops
+  the first failure cheaply. Failures are resumable against the left-up stack.
 
 ## Gotchas learned bringing this green
 
@@ -90,5 +94,3 @@ unlocks only the disposable test stack.
 ## Still deferred (§11 extras)
 
 - DSQL dedup-on-live-rows pin and the explicit `dsql:DbConnect` 28000 case.
-- The teardown flags (`STARKEEP_AWS_TEARDOWN=apps|all`) are wired but not yet
-  exercised by a run.

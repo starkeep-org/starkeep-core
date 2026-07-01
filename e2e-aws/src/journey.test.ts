@@ -10,7 +10,7 @@
  * cold start.
  */
 
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, afterEach } from "vitest";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,8 +94,29 @@ function runTeardownScript(script: string): void {
 (AWS_TESTS_ENABLED ? describe : describe.skip)(
   `tier-3 cloud journey (prefix ${STACK_PREFIX})`,
   () => {
+    // Teardown runs only on a fully green journey. A failed step leaves the
+    // real cloud resources up so they can be inspected; the disposable stack is
+    // idempotent, so the next run reuses (and eventually tears down) it. `bail:
+    // 1` stops at the first failure, and this afterEach still fires for that
+    // failing test, so `anyFailed` is set before afterAll decides.
+    let anyFailed = false;
+    afterEach((ctx) => {
+      if (ctx.task.result?.state === "fail") anyFailed = true;
+    });
+
     afterAll(async () => {
       await lds?.stop();
+      if (anyFailed) {
+        console.log(
+          "[e2e-aws] journey failed — leaving cloud resources up for debugging " +
+            `(tear down manually: scripts/teardown-bootstrap.sh --prefix ${STACK_PREFIX} --region ${REGION})`,
+        );
+        return;
+      }
+      if (TEARDOWN === "none") {
+        console.log("[e2e-aws] STARKEEP_AWS_TEARDOWN=none — leaving cloud resources up");
+        return;
+      }
       if (TEARDOWN === "apps") runTeardownScript("teardown-cloud-data-server.sh");
       if (TEARDOWN === "all") runTeardownScript("teardown-bootstrap.sh");
     });
