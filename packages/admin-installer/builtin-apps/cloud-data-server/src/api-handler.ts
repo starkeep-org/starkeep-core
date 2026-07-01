@@ -277,6 +277,17 @@ function getAccountId(invokedFunctionArn: string): string {
 // Per-app DSQL client factory
 // ---------------------------------------------------------------------------
 
+// DSQL refuses a connection whose IAM→PG role mapping isn't yet authorized with
+// SQLSTATE 28000 (invalid_authorization_specification), which the pg driver
+// surfaces as `error: unable to accept connection, access denied`; 28P01
+// (invalid_password) is the adjacent shape. Detect both by code, falling back
+// to the message when the driver doesn't attach a code to the connect error.
+function isConnectAuthDenied(err: unknown): boolean {
+  const e = err as { code?: string; message?: string };
+  if (e?.code === "28000" || e?.code === "28P01") return true;
+  return (e?.message ?? "").toLowerCase().includes("unable to accept connection");
+}
+
 class AppDsqlClientFactory implements DatabaseClientFactory {
   constructor(
     private readonly appId: string,
@@ -289,7 +300,7 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
     const pgUser = `${this.stackPrefix}_app_${this.appId}`.toLowerCase().replace(/-/g, "_");
     const creds = this.creds;
 
-    const createPgClient = async (): Promise<pg.Client> => {
+    const connectOnce = async (): Promise<pg.Client> => {
       const signer = new DsqlSigner({
         hostname,
         region,
@@ -317,8 +328,56 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
       client.on("error", (err) => {
         console.warn("[cds] pg client async error:", (err as Error).message);
       });
-      await client.connect();
+      try {
+        await client.connect();
+      } catch (err) {
+        // connect() rejected — the client owns a half-open socket; close it so a
+        // failed attempt doesn't leak an fd or a dangling 'error' emitter before
+        // the retry mints a fresh client.
+        await client.end().catch(() => {});
+        throw err;
+      }
       return client;
+    };
+
+    // Connect-time authorization can transiently fail right after an app is
+    // installed: DSQL maps the app's IAM role to its PG role via `AWS IAM GRANT`
+    // (admin-installer/src/dsql-ddl.ts), and that mapping takes time to
+    // propagate into DSQL's connection authorizer. Until it does, connect()
+    // rejects with SQLSTATE 28000 ("unable to accept connection, access
+    // denied"). This is distinct from the query-time 28000 retry below, which
+    // reconnects an already-authorized role whose DbConnect token has expired —
+    // here the *first* connection is refused. Retry with bounded backoff so a
+    // just-installed app becomes usable without a hard 500. The budget stays
+    // well under the API Gateway ~30s integration timeout; propagation longer
+    // than that is a gate-at-install concern, not something to absorb per
+    // request.
+    const createPgClient = async (): Promise<pg.Client> => {
+      const maxAttempts = 6;
+      const maxDelayMs = 4000;
+      let delay = 500;
+      const start = Date.now();
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const client = await connectOnce();
+          if (attempt > 1) {
+            const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+            console.log(
+              `[cds] dsql connect for ${this.appId}: succeeded on attempt ${attempt} after ${elapsed}s`,
+            );
+          }
+          return client;
+        } catch (err) {
+          if (attempt >= maxAttempts || !isConnectAuthDenied(err)) throw err;
+          const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+          console.warn(
+            `[cds] dsql connect for ${this.appId}: attempt ${attempt} refused ` +
+              `(${(err as Error).message}) at ${elapsed}s, retrying in ${(delay / 1000).toFixed(1)}s`,
+          );
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, maxDelayMs);
+        }
+      }
     };
 
     let inner = await createPgClient();
