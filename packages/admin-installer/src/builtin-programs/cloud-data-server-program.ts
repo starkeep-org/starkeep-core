@@ -36,13 +36,18 @@ import * as pulumi from "@pulumi/pulumi";
 //     mis-tuned, the Lambda can never run more than this many copies at once, so
 //     parallel DSQL connections and S3 ops — and thus spend-per-second — are
 //     bounded regardless. Legitimate bursts past the cap get 429'd, so size it
-//     to real peak load.
+//     to real peak load. NOTE: currently disabled — a default AWS account's
+//     total Lambda concurrency limit (10) makes any reservation impossible; see
+//     the reservedConcurrentExecutions site below.
 //
 // Single named home so an operator can retune without hunting through the body.
 // ---------------------------------------------------------------------------
 const GATEWAY_THROTTLE_RATE_LIMIT = 50; // steady-state req/s across the whole shared stage
 const GATEWAY_THROTTLE_BURST_LIMIT = 100; // token-bucket burst allowance
-const LAMBDA_RESERVED_CONCURRENCY = 20; // max concurrent broker invocations
+// TEMPORARILY DISABLED (see usage site below): unusable on a default AWS account
+// whose total Lambda concurrency limit is 10 — any reservation drops unreserved
+// below its floor of 10 and 400s the install. Re-enable with the account quota fix.
+// const LAMBDA_RESERVED_CONCURRENCY = 20; // max concurrent broker invocations
 
 export interface CloudDataServerProgramContext {
   stackPrefix: string;
@@ -241,7 +246,15 @@ export function buildCloudDataServerProgram(
         timeout: 30,
         // Hard ceiling on concurrent broker copies → bounds parallel DSQL/S3
         // work and thus worst-case spend-per-second. See guardrail note above.
-        reservedConcurrentExecutions: LAMBDA_RESERVED_CONCURRENCY,
+        //
+        // TEMPORARILY DISABLED: a fresh AWS account defaults to a total Lambda
+        // concurrency limit of 10, and AWS refuses any reservation that would
+        // drop unreserved concurrency below its floor of 10 — so on a default
+        // account you can't reserve *any* concurrency (need account limit ≥
+        // reserved + 10). Setting this 400s the install (InvalidParameterValue).
+        // Re-enable once we require/raise the account concurrency quota. The
+        // gateway throttle below still bounds the request rate in the meantime.
+        // reservedConcurrentExecutions: LAMBDA_RESERVED_CONCURRENCY,
         environment: {
           variables: {
             AURORA_ENDPOINT: auroraHostname,

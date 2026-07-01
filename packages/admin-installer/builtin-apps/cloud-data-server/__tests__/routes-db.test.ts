@@ -405,6 +405,79 @@ describe("per-record routes honor read/write grants", () => {
   });
 });
 
+describe("OCC retry on record read-modify-write", () => {
+  const grants = [{ type_id: "image/jpeg", access: "readwrite" as const }];
+  const RECORD_BY_ID = /FROM shared\.records WHERE id =/;
+
+  function occConflict(): Error {
+    return Object.assign(new Error("change conflicts with another transaction"), {
+      code: "OC001",
+    });
+  }
+
+  it("PUT re-reads on an OCC conflict so version advances (no lost update)", async () => {
+    // The upsert loses the OCC race exactly once. Between the failed attempt and
+    // the retry, a concurrent writer commits version 2, so the re-read sees 2
+    // and the retry must derive version 3 — not replay the stale 2.
+    let committedVersion = 1;
+    let insertAttempts = 0;
+    const db = fakeDsqlWithGrants(grants)
+      .on(RECORD_BY_ID, () => [
+        recordRow({ id: "rmw1", type: "image/jpeg", version: committedVersion }),
+      ])
+      .on(RECORDS_INSERT, () => {
+        insertAttempts++;
+        if (insertAttempts === 1) {
+          committedVersion = 2; // a concurrent writer wins the race
+          throw occConflict();
+        }
+        return [];
+      });
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "rmw",
+        method: "PUT",
+        subPath: "/data/records/rmw1",
+        body: { originalFilename: "renamed.jpg" },
+      }),
+      context,
+    );
+
+    expect(res.statusCode).toBe(200);
+    const { record } = bodyOf(res) as { record: Record<string, unknown> };
+    expect(record["version"]).toBe(3); // re-read 2 + 1, not stale 1 + 1
+    // The unit re-read: two SELECTs, two upsert attempts.
+    expect(db.calls(RECORD_BY_ID)).toHaveLength(2);
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(2);
+  });
+
+  it("maps a non-OCC write failure to 500 without retrying", async () => {
+    let insertAttempts = 0;
+    const db = fakeDsqlWithGrants(grants)
+      .on(RECORD_BY_ID, [recordRow({ id: "rmw2", type: "image/jpeg", version: 1 })])
+      .on(RECORDS_INSERT, () => {
+        insertAttempts++;
+        throw Object.assign(new Error("relation missing"), { code: "42P01" });
+      });
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "rmw",
+        method: "PUT",
+        subPath: "/data/records/rmw2",
+        body: { originalFilename: "x.jpg" },
+      }),
+      context,
+    );
+
+    expect(res.statusCode).toBe(500);
+    expect(insertAttempts).toBe(1); // no retry on a non-OCC error
+  });
+});
+
 describe("sync exchange channel split", () => {
   const hlc = { wallTime: Date.UTC(2026, 0, 2), counter: 0, nodeId: "peer" };
   const incomingRecord = {

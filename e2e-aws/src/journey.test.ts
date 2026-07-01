@@ -10,7 +10,7 @@
  * cold start.
  */
 
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, afterEach } from "vitest";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +28,11 @@ import {
   type LdsApp,
 } from "@starkeep/e2e";
 import { signedFetch, type AppCredentials } from "@starkeep/app-client";
+import { cloudDataServerBundleSha256Base64 } from "@starkeep/admin-installer";
+import {
+  LambdaClient,
+  GetFunctionConfigurationCommand,
+} from "@aws-sdk/client-lambda";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
@@ -89,8 +94,29 @@ function runTeardownScript(script: string): void {
 (AWS_TESTS_ENABLED ? describe : describe.skip)(
   `tier-3 cloud journey (prefix ${STACK_PREFIX})`,
   () => {
+    // Teardown runs only on a fully green journey. A failed step leaves the
+    // real cloud resources up so they can be inspected; the disposable stack is
+    // idempotent, so the next run reuses (and eventually tears down) it. `bail:
+    // 1` stops at the first failure, and this afterEach still fires for that
+    // failing test, so `anyFailed` is set before afterAll decides.
+    let anyFailed = false;
+    afterEach((ctx) => {
+      if (ctx.task.result?.state === "fail") anyFailed = true;
+    });
+
     afterAll(async () => {
       await lds?.stop();
+      if (anyFailed) {
+        console.log(
+          "[e2e-aws] journey failed — leaving cloud resources up for debugging " +
+            `(tear down manually: scripts/teardown-bootstrap.sh --prefix ${STACK_PREFIX} --region ${REGION})`,
+        );
+        return;
+      }
+      if (TEARDOWN === "none") {
+        console.log("[e2e-aws] STARKEEP_AWS_TEARDOWN=none — leaving cloud resources up");
+        return;
+      }
       if (TEARDOWN === "apps") runTeardownScript("teardown-cloud-data-server.sh");
       if (TEARDOWN === "all") runTeardownScript("teardown-bootstrap.sh");
     });
@@ -142,6 +168,26 @@ function runTeardownScript(script: string): void {
 
       const health = await fetch(`${config.apiGatewayUrl}/health`);
       expect(health.status).toBe(200);
+
+      // Defense in depth: a warm kept-up stack means the broker Lambda from a
+      // prior run answers /health = 200 even if *this* run's redeploy silently
+      // failed (e.g. Pulumi errored on a resource but the CLI exited 0). Prove
+      // the live broker is running the bundle this checkout just built by
+      // matching AWS's CodeSha256 against the deployed dist.zip's hash. This
+      // passes on a legitimate no-change re-run (live code == built bundle) and
+      // fails only when the running code is stale.
+      // Read with the ambient operator credentials (the default provider
+      // chain), NOT the admin-app session: the admin role is deliberately not a
+      // superuser and has no standing lambda:GetFunctionConfiguration. This is a
+      // test-side verification read of AWS state, so it mirrors how
+      // ensureBootstrapStack's CloudFormation client runs on ambient creds.
+      const lambda = new LambdaClient({ region: REGION });
+      const fn = await lambda.send(
+        new GetFunctionConfigurationCommand({
+          FunctionName: `${STACK_PREFIX}-app-cloud-data-server-api`,
+        }),
+      );
+      expect(fn.CodeSha256).toBe(cloudDataServerBundleSha256Base64());
     });
 
     it("boots a local data server against the real cloud", async () => {

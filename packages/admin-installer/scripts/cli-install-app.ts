@@ -42,6 +42,7 @@ import { tmpdir } from "node:os";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { appManifestSchema } from "@starkeep/admin-manifest";
 import { installApp } from "../src/orchestrator";
+import { exitOnInstallFailure } from "../src/cli-exit";
 import {
   regionFromUserPoolId,
   cognitoPasswordAuth,
@@ -250,7 +251,7 @@ await installApp({
     installDdlRoleArn,
     installInfraRoleArn,
   },
-});
+}).catch(exitOnInstallFailure);
 
 console.log(`\nInstall complete. ${appId} app available at:`);
 console.log(`  ${config.apiGatewayUrl ?? ""}${config.apiGatewayUrl ? `/apps/${appId}/` : "(apiGatewayUrl not in config)"}`);

@@ -368,6 +368,16 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           contextVariables: { "kms:ViaService": `ssm.${region}.amazonaws.com` },
           why: "Passphrase is a SecureString post-rotation; decryption flows through KMS via SSM.",
         },
+        {
+          action: "lambda:PutFunctionConcurrency",
+          resource: `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-cloud-data-server-api`,
+          why:
+            "The broker Lambda declares reservedConcurrentExecutions; AWS sets it via a " +
+            "separate PutFunctionConcurrency call (create and update alike). Both the " +
+            "temp-install-cloud-data-server policy AND the foundational boundary must grant " +
+            "it — a missing grant silently fails the Lambda update. Only the CDS stack sets " +
+            "reserved concurrency, so the per-app install-infra context intentionally omits it.",
+        },
       ];
     },
   },

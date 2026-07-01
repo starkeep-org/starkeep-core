@@ -481,6 +481,13 @@ export function buildTempInstallCloudDataServerPolicy(
           "lambda:ListVersionsByFunction",
           "lambda:GetFunctionCodeSigningConfig",
           "lambda:GetFunctionConcurrency",
+          // The broker Lambda declares reservedConcurrentExecutions (its hard
+          // dollar ceiling); AWS sets that via a separate PutFunctionConcurrency
+          // call on both create and update, so the install needs the write verb
+          // in addition to the Get above. Only the cloud-data-server stack sets
+          // reserved concurrency — per-app installs don't, so the install-infra
+          // temp policy deliberately carries only the Get.
+          "lambda:PutFunctionConcurrency",
           "lambda:GetFunctionUrlConfig",
           "lambda:ListFunctionEventInvokeConfigs",
           // G9k — Pulumi reads runtime-management config on every refresh.

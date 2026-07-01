@@ -133,6 +133,10 @@ Three tiers:
 2. `pnpm test:e2e`  — local Playwright e2e (see [`e2e/README.md`](e2e/README.md)); requires `pnpm exec playwright install chromium` once
 3. `pnpm test:aws`  — cloud e2e against real AWS; inert unless `STARKEEP_AWS_TESTS=1`. ~15 min, real account + (trivial) cost. See [`e2e-aws/README.md`](e2e-aws/README.md) for the full environment contract.
 
+## Security
+
+Starkeep's cloud-side security posture has been assessed in a written threat model: [`meta-docs/docs/threat-model-cloud-data-server-cloud-apps-2026-06-30.md`](meta-docs/docs/threat-model-cloud-data-server-cloud-apps-2026-06-30.md). It covers the cloud data server (broker, DSQL, files bucket, API Gateway), cloud apps and their install/uninstall lifecycle, the Cognito + IAM bootstrap, and the cloud sync path, working from the single-account, single-tenant trust boundary. Each threat carries an honest posture label — Strong, Adequate, Partial, Deferred by design, or Out of scope / accepted.
+
 ## Further reading
 
 - [`system-design.md`](system-design.md) — the major parts, how data is classified (shared vs app-specific), and how it moves and syncs.
