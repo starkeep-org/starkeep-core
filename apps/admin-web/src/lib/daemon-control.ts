@@ -39,6 +39,20 @@ function pidByPort(port: number): number | null {
   return isNaN(pid) ? null : pid;
 }
 
+// The process group id of a pid. We signal the whole group (-pgid) to take
+// down the pnpm launcher plus its tsx/node/esbuild children in one shot.
+// Detached spawns usually make the child its own group leader (pgid === pid),
+// but that isn't guaranteed — the recorded pid can end up in a group led by an
+// already-exited process, in which case `kill(-pid)` targets a nonexistent
+// group and throws ESRCH. Looking up the real pgid avoids that.
+function processGroupId(pid: number): number | null {
+  const result = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+    encoding: "utf-8",
+  });
+  const pgid = parseInt(result.stdout?.trim(), 10);
+  return isNaN(pgid) ? null : pgid;
+}
+
 // We only signal processes whose command line matches a known dev-server
 // shape; the kernel can recycle a recorded port onto an unrelated process and
 // we must not kill that.
@@ -63,7 +77,17 @@ export function stopById(id: string): StopResult {
   const pf = pidFile(id);
   if (existsSync(pf)) {
     const pid = parseInt(readFileSync(pf, "utf-8"), 10);
-    if (isAlive(pid)) process.kill(-pid, "SIGTERM");
+    if (isAlive(pid)) {
+      // Signal the process's actual group so children die with it. Guard the
+      // call: the process (or its group) can vanish between the liveness check
+      // and the signal, and a stale/mismatched pid must not turn Stop into a 500.
+      const pgid = processGroupId(pid);
+      try {
+        process.kill(pgid != null ? -pgid : pid, "SIGTERM");
+      } catch {
+        /* already gone, or group no longer exists — nothing left to stop */
+      }
+    }
     unlinkSync(pf);
     const mf = metaFile(id);
     if (existsSync(mf)) unlinkSync(mf);
