@@ -4,7 +4,7 @@ Starkeep is a modern self-hosting system that allows you to keep your own data a
 
 - Ultra-low, scale-to-zero running costs thanks to fully serverless architecture - **Starkeep costs ~$0 to run**, you just (essentially) pay for actual storage and transfer costs.
 - Common data storage and indexing layer makes building apps easy and eliminates unnecessary container silos
-- Common, built-in cloud <-> local sync layer that syncs both user data files and app specific files
+- Common, built-in cloud <-> local sync layer that syncs both user files and app specific data
 - Run apps locally on device and/or in the cloud
 - Enterprise-grade security, backups, and versioning built-in
 - **Easy enough for anyone to set up and run**, with limitless potential for developers
