@@ -48,6 +48,7 @@ import {
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { createStarkeepId } from "@starkeep/protocol-primitives";
+import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -1039,11 +1040,17 @@ async function main() {
         return;
       }
 
-      // GET /data/records?type=xxx&limit=100&updated_after=<iso>
+      // GET /data/records?type=xxx&limit=100&updated_after=<iso>&include=metadata
       if (path === "/data/records" && req.method === "GET") {
         const recordType = url.searchParams.get("type");
         const limit = parseInt(url.searchParams.get("limit") || "100", 10);
         const updatedAfter = url.searchParams.get("updated_after");
+        // Opt-in enrichment: embed each record's per-category metadata
+        // (dimensions, EXIF, …) so clients skip a per-record metadata fan-out.
+        const includeMetadata = (url.searchParams.get("include") ?? "")
+          .split(",")
+          .map(s => s.trim())
+          .includes("metadata");
 
         const filters: { field: string; operator: "eq" | "gt"; value: string }[] = recordType
           ? [{ field: "type", operator: "eq", value: recordType }]
@@ -1066,31 +1073,55 @@ async function main() {
           sort: [{ field: "updatedAt", direction: "desc" as const }],
         });
 
+        const readable = result.records.filter(
+          r => !r.deletedAt && appCanRead(localDb, appId!, r.type),
+        );
+
+        // When enrichment is requested, batch-read per-category metadata for the
+        // page (one call per represented category) and index it by record id.
+        const metadataById = new Map<string, MetadataRow>();
+        if (includeMetadata) {
+          const idsByCategory = new Map<string, StarkeepId[]>();
+          for (const r of readable) {
+            const category = typeCategory(r.type);
+            if (category === "other") continue; // no metadata table
+            let ids = idsByCategory.get(category);
+            if (!ids) idsByCategory.set(category, (ids = []));
+            ids.push(r.id);
+          }
+          for (const [category, ids] of idsByCategory) {
+            for (const [id, row] of await databaseAdapter.getMetadataByIds(category, ids)) {
+              metadataById.set(id, row);
+            }
+          }
+        }
+
         const records = await Promise.all(
-          result.records
-            .filter(r => !r.deletedAt && appCanRead(localDb, appId!, r.type))
-            .map(async r => ({
-              id: r.id,
-              kind: r.kind,
-              type: r.type,
-              category: typeCategory(r.type),
-              // Immutable provenance: which app created the record. Surfaced so
-              // the Drive UI can show "this came from photos" even when photos
-              // isn't cloud-installed.
-              origin_app_id: r.originAppId,
-              created_at: new Date(r.createdAt.wallTime).toISOString(),
-              updated_at: new Date(r.updatedAt.wallTime).toISOString(),
-              version: r.version,
-              content_hash: r.contentHash,
-              object_storage_key: r.objectStorageKey,
-              mime_type: r.mimeType,
-              size_bytes: r.sizeBytes,
-              original_filename: r.originalFilename,
-              parent_id: r.parentId,
-              path: r.objectStorageKey
-                ? await localAdapter.resolvePath(r.objectStorageKey)
-                : null,
-            }))
+          readable.map(async r => ({
+            id: r.id,
+            kind: r.kind,
+            type: r.type,
+            category: typeCategory(r.type),
+            // Immutable provenance: which app created the record. Surfaced so
+            // the Drive UI can show "this came from photos" even when photos
+            // isn't cloud-installed.
+            origin_app_id: r.originAppId,
+            created_at: new Date(r.createdAt.wallTime).toISOString(),
+            updated_at: new Date(r.updatedAt.wallTime).toISOString(),
+            version: r.version,
+            content_hash: r.contentHash,
+            object_storage_key: r.objectStorageKey,
+            mime_type: r.mimeType,
+            size_bytes: r.sizeBytes,
+            original_filename: r.originalFilename,
+            parent_id: r.parentId,
+            path: r.objectStorageKey
+              ? await localAdapter.resolvePath(r.objectStorageKey)
+              : null,
+            // `null` = enrichment requested but no metadata row (e.g. bytes
+            // ingested by the folder watcher, which doesn't extract metadata).
+            ...(includeMetadata ? { metadata: metadataById.get(r.id) ?? null } : {}),
+          })),
         );
 
         json(res, { records });

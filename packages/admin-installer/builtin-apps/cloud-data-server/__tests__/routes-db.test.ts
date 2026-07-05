@@ -273,6 +273,50 @@ describe("record registration", () => {
   });
 });
 
+const IMAGE_META_SELECT = /from shared\.record_image_metadata where record_id in/i;
+
+describe("list metadata enrichment (?include=metadata)", () => {
+  it("embeds each record's per-category metadata in one batched read", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(RECORDS_SELECT, [
+        recordRow({ id: "rec-1", type: "image/jpeg" }),
+        recordRow({ id: "rec-2", type: "image/jpeg" }),
+      ])
+      .on(IMAGE_META_SELECT, [
+        { record_id: "rec-1", width: 600, height: 800, orientation: null },
+      ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "m1", method: "GET", subPath: "/data/records", query: { include: "metadata" } }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res) as { records: Array<Record<string, unknown>> };
+    // rec-1 gets its dimensions; rec-2 has no metadata row → null, not omitted.
+    expect(body.records[0]!.metadata).toMatchObject({ recordId: "rec-1", width: 600, height: 800 });
+    expect(body.records[1]!.metadata).toBeNull();
+    // One batched metadata read for the whole page (not one per record).
+    expect(db.calls(IMAGE_META_SELECT)).toHaveLength(1);
+    expect(db.calls(IMAGE_META_SELECT)[0]!.values).toEqual(["rec-1", "rec-2"]);
+  });
+
+  it("omits metadata and issues no metadata query by default", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
+      RECORDS_SELECT,
+      [recordRow({ id: "rec-1", type: "image/jpeg" })],
+    );
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "m2", method: "GET", subPath: "/data/records" }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res) as { records: Array<Record<string, unknown>> };
+    expect(body.records[0]).not.toHaveProperty("metadata");
+    expect(db.calls(IMAGE_META_SELECT)).toHaveLength(0);
+  });
+});
+
 describe("metadata routes", () => {
   it("403s a metadata write to a category outside the writable set", async () => {
     setDbFactory(fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]));

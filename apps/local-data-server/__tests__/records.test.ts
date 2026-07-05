@@ -148,6 +148,31 @@ describe("list", () => {
     expect(jpgs.every((r) => r.type === "image/jpeg")).toBe(true);
   });
 
+  it("embeds per-category metadata only when include=metadata is requested", async () => {
+    const { record } = await createRecordWithBytes(app, { fileName: "with-dims.jpg" });
+    // Write image dimensions into the shared image metadata table.
+    const wrote = await app.fetch(`/data/records/${record.id}/metadata`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ typeId: "image", metadata: { width: 640, height: 480 } }),
+    });
+    expect(wrote.status).toBe(200);
+
+    const enriched = await listRecords(app, "?include=metadata");
+    const row = enriched.find((r) => r.id === record.id)!;
+    expect(row.metadata).toMatchObject({ recordId: record.id, width: 640, height: 480 });
+
+    // Default (no flag): metadata field is absent entirely.
+    const plain = await listRecords(app, "");
+    expect(plain.find((r) => r.id === record.id)!.metadata).toBeUndefined();
+  });
+
+  it("returns metadata:null for a record with no metadata row when enrichment is requested", async () => {
+    const { record } = await createRecordWithBytes(app, { fileName: "no-dims.jpg" });
+    const enriched = await listRecords(app, "?include=metadata");
+    expect(enriched.find((r) => r.id === record.id)!.metadata).toBeNull();
+  });
+
   it("filters with updated_after", async () => {
     await createRecordWithBytes(app, { fileName: "before-cutoff.jpg" });
     // HLC wall times are ms-resolution; leave a clear gap around the cutoff.

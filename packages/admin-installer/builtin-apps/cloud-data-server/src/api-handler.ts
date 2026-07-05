@@ -38,7 +38,7 @@ import {
   isCategoryId,
   isKnownType,
 } from "@starkeep/protocol-primitives";
-import type { DataRecord, StarkeepId, HLCClock } from "@starkeep/protocol-primitives";
+import type { DataRecord, StarkeepId, HLCClock, MetadataRow } from "@starkeep/protocol-primitives";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import {
   DsqlAppSyncableNamespaceStore,
@@ -559,7 +559,12 @@ export function parseObjectKey(
 // Response helpers
 // ---------------------------------------------------------------------------
 
-function recordToResponse(record: DataRecord) {
+// `metadata` is only included when the caller opted into enrichment
+// (?include=metadata). `undefined` omits the field entirely; `null` means
+// "enrichment requested, but this record has no metadata row" (or its bytes
+// were ingested by a path that doesn't extract metadata — e.g. the LDS folder
+// watcher — so it may be backfilled later).
+function recordToResponse(record: DataRecord, metadata?: MetadataRow | null) {
   return {
     id: record.id,
     type: record.type,
@@ -574,7 +579,36 @@ function recordToResponse(record: DataRecord) {
     original_filename: record.originalFilename,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
+    ...(metadata !== undefined ? { metadata } : {}),
   };
+}
+
+/**
+ * Batch-load per-category metadata for a page of records so the list endpoint
+ * can embed it (opt-in via ?include=metadata) instead of forcing an N+1
+ * per-record metadata fan-out on the client. Records are grouped by category
+ * and read one `getMetadataByIds` call per represented category (one call for a
+ * homogeneous photo list). Categories the caller can't read, and the
+ * metadata-less "other" category, are skipped.
+ */
+async function loadMetadataForPage(
+  db: { getMetadataByIds: (category: string, ids: StarkeepId[]) => Promise<Map<StarkeepId, MetadataRow>> },
+  grants: AccessGrants,
+  records: DataRecord[],
+): Promise<Map<StarkeepId, MetadataRow>> {
+  const idsByCategory = new Map<string, StarkeepId[]>();
+  for (const r of records) {
+    const category = typeCategory(r.type);
+    if (category === "other" || !canReadCategory(grants, category)) continue;
+    let ids = idsByCategory.get(category);
+    if (!ids) idsByCategory.set(category, (ids = []));
+    ids.push(r.id);
+  }
+  const byId = new Map<StarkeepId, MetadataRow>();
+  for (const [category, ids] of idsByCategory) {
+    for (const [id, row] of await db.getMetadataByIds(category, ids)) byId.set(id, row);
+  }
+  return byId;
 }
 
 // ---------------------------------------------------------------------------
@@ -730,6 +764,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const limit = Math.min(parseInt(query["limit"] ?? "50", 10), 500);
       const cursor = query["cursor"];
       const updatedAfter = query["updated_after"];
+      // Opt-in enrichment: embed each record's per-category metadata (dimensions,
+      // EXIF, …) so clients don't have to fan out a metadata request per record.
+      const includeMetadata = (query["include"] ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .includes("metadata");
 
       // Per-type read enforcement. An explicit ?type= must be in the caller's
       // readable set; otherwise constrain the scan to readable types.
@@ -757,7 +797,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const result = await db.query({ type, filters, limit: limit + 1, cursor });
       const hasMore = result.records.length > limit;
       const records = hasMore ? result.records.slice(0, limit) : result.records;
-      return ok({ records: records.map(recordToResponse), hasMore, nextCursor: hasMore ? records[records.length - 1].id : null });
+      const metadataById = includeMetadata ? await loadMetadataForPage(db, grants, records) : null;
+      return ok({
+        records: records.map((r) =>
+          recordToResponse(r, metadataById ? metadataById.get(r.id) ?? null : undefined),
+        ),
+        hasMore,
+        nextCursor: hasMore ? records[records.length - 1].id : null,
+      });
     }
 
     // POST /apps/{appId}/data/records
