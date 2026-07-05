@@ -1,13 +1,26 @@
 # Starkeep
 
-Starkeep is a modern self-hosting system that allows you to keep your own data and run your own apps on your own hardware and cloud infra. Starkeep's advantages over traditional self-hosting include:
+Starkeep is a modern self-hosting system that allows you to keep your own data and run your own apps on your own hardware and (optionally) your own serverless cloud infra. Starkeep's advantages over traditional self-hosting include:
 
-- Common data storage and indexing layer allows building various app on top - no more siloed containers
+- Ultra-low, scale-to-zero running costs thanks to fully serverless architecture - **Starkeep costs ~$0 to run**, you just (essentially) pay for actual storage and transfer costs.
+- Common data storage and indexing layer makes building apps easy and eliminates unnecessary container silos
+- Common, built-in cloud <-> local sync layer that syncs both user data files and app specific files
 - Run apps locally on device and/or in the cloud
-- Ultra-low, scale-to-zero running costs
 - Enterprise-grade security, backups, and versioning built-in
-- Built-in P2P sync of common data files and app-specific data among multiple clients + cloud
-- Easy enough for anyone to run, with limitless potential for developers
+- **Easy enough for anyone to set up and run**, with limitless potential for developers
+
+## Current Project Status
+
+Starkeep is currently in alpha, pre-production status. The whole system and all the benefits described above are fully implemented end-to-end, including a proof-of-concept installable Photos app (available in the sister repo starkeep-apps), and extensive automated tests.
+
+However, there are some significant known limitations, making Starkeep probably not yet suitable for "production" (that is personal use), yet:
+
+- Cloudfront and custom DNS support have not been added to the system yet, so your cloud-running apps will get a Lambda URL and they'll be slow to serve data. (But they work!)
+- Starkeep does not yet support non-default Lambda concurrency limits (i.e. beyond the new account default limit of 10). This is because increasing that limit requires making a request to Amazon and could complicate the setup, which we wanted to keep as simple as possible. We'll sort this out soon. Result: another source of cloud app slowness, but again: they work!
+- Starkeep does not yet provide a way to update its foundational bootstrap deployment, which will be required for certain changes in the future, such as adding Cloudfront. This may make it practically necessary to introduce breaking changes to the foundation, without a guaranteed managed migration path.
+- The apps - essentially Drive (built in) and Photos (installable) - are mostly bare bones proof-of-concept level and lack the features you'd likely need to use these apps as real replacements for, say, your current Photos app. We'll get there!
+
+## Overview
 
 The Starkeep Core repo includes four built-in system apps:
 
