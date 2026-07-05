@@ -27,10 +27,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/starkeep-dev/starkeep-core.git",
+    "url": "git+https://github.com/starkeep-org/starkeep-core.git",
     "directory": "packages/app-client"
   },
-  "homepage": "https://github.com/starkeep-dev/starkeep-core/tree/main/packages/app-client",
+  "homepage": "https://github.com/starkeep-org/starkeep-core/tree/main/packages/app-client",
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
