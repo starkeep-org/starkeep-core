@@ -12,7 +12,13 @@ STARKEEP_AWS_TESTS=1 pnpm test:aws          # from repo root (turbo) or this dir
 Without `STARKEEP_AWS_TESTS=1` the single test file reports a skipped suite and
 makes no AWS calls. `pnpm test` (the default unit suite) never runs it.
 
-## What it does (`src/journey.test.ts`, 12 ordered steps)
+The browser step (real Chromium) needs the Playwright browser installed once:
+
+```bash
+pnpm exec playwright install chromium
+```
+
+## What it does (`src/journey.test.ts`, ordered steps)
 
 1. Create-if-missing the bootstrap CloudFormation stack; read its outputs.
 2. Create-if-missing a Cognito admin user (per-run password) and sign in through
@@ -27,9 +33,13 @@ makes no AWS calls. `pnpm test` (the default unit suite) never runs it.
    still validates — the todo-39 regression: the installer mirrors the *local
    registry* secret (what the supervisor signs with), not the drifted creds
    file, so the cloud verifier can't be left on a stale key.
-9. Static handler, 10. `/api/resize`, 11. caption via `/app-data` — exercise the
-   app's cloud routes.
-12. Uninstall photos; assert the app plane is gone but shared records survive.
+9. Static handler, 10. the cloud-served `/api/local-data` proxy (list + a write
+   verb — the browser-facing data path, HMAC-signed server-side from SSM),
+   11. a full **browser** journey in real Chromium (Cognito sign-in → upload a
+   photo through the live file input → see it in the grid), exercising the whole
+   presign → S3 PUT → `POST /data/records` → metadata-write path end-to-end,
+   12. `/api/resize`, 13. caption via `/app-data` — exercise the app's cloud routes.
+14. Uninstall photos; assert the app plane is gone but shared records survive.
 
 ## Environment contract (`src/env.ts`)
 

@@ -13,7 +13,7 @@
  * just short of propagation. Backoff means the success path stays fast — the
  * larger ceiling only costs time when an action is genuinely still propagating.
  *
- * AccessDenied is detected across three error shapes we've seen:
+ * AccessDenied is detected across four error shapes we've seen:
  *   - AWS SDK v3:  err.name === "AccessDeniedException" / "AccessDenied"
  *                  or err.message contains "AccessDenied".
  *   - DSQL via pg: the postgres driver surfaces dsql:DbConnectAdmin denial
@@ -21,6 +21,15 @@
  *                  with hint `User: ... is not authorized to perform:
  *                  dsql:DbConnectAdmin ...`. Match the lowercase phrase
  *                  and the "not authorized to perform" hint.
+ *   - Fresh principal: a *just-created* IAM role's assumed-session creds are
+ *                  not yet recognized globally, so the first S3 call on them
+ *                  fails `InvalidAccessKeyId: The AWS Access Key Id you
+ *                  provided does not exist in our records.` This is the same
+ *                  eventual-consistency class as PutRolePolicy propagation
+ *                  (the principal exists, its identity just hasn't converged),
+ *                  so it belongs on the same retry budget. Retrying the same
+ *                  creds is correct — re-assuming only mints an equally-fresh
+ *                  key; we wait for S3 to recognize the one we have.
  */
 
 interface RetryOpts {
@@ -37,6 +46,9 @@ function isAccessDeniedError(err: unknown): boolean {
   if (message.includes("AccessDenied")) return true;
   if (message.toLowerCase().includes("access denied")) return true;
   if (hint.includes("not authorized to perform")) return true;
+  // Just-created IAM principal not yet globally recognized (see header).
+  if (name === "InvalidAccessKeyId") return true;
+  if (message.includes("does not exist in our records")) return true;
   return false;
 }
 

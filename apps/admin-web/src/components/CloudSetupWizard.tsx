@@ -22,6 +22,7 @@ import {
   generateBootstrapTemplate,
   getCloudFormationCreateStackUrl,
   getBootstrapStackOutputsUrl,
+  MAX_STACK_PREFIX_LENGTH,
 } from "@starkeep/aws-bootstrap";
 import {
   readCloudConfig,
@@ -230,9 +231,10 @@ function Step1Bootstrap({
             id="stackPrefix"
             placeholder="starkeep"
             value={stackPrefix}
+            maxLength={MAX_STACK_PREFIX_LENGTH}
             onChange={(e) => setStackPrefix(e.currentTarget.value.toLowerCase())}
           />
-          <p className="text-xs text-muted-foreground">A short name used to prefix all Starkeep resources. Lowercase letters, numbers, and hyphens only.</p>
+          <p className="text-xs text-muted-foreground">A short name used to prefix all Starkeep resources. Lowercase letters, numbers, and hyphens only ({MAX_STACK_PREFIX_LENGTH} chars max).</p>
         </div>
       </div>
 
@@ -1024,8 +1026,32 @@ function Step5Deploy({
           return;
         }
 
-        // Both passes succeeded — re-read the config so the status card sees
-        // the just-written s3Bucket / auroraEndpoint / apiGatewayUrl.
+        // Both passes succeeded. The installer rewrote ~/.starkeep/config.json
+        // with the new cloud outputs, but the local-data-server only reads
+        // CLOUD_URL / builds its sync supervisor at boot — so bounce it once,
+        // now, after the *whole* deploy. Doing it here (rather than inside a
+        // pass's install route) means the daemon reboots exactly once, against a
+        // fully-provisioned cloud, with no restart racing the next pass's auth
+        // refresh. Best-effort: the deploy has already succeeded, so a failed
+        // restart is a warning, not a failure.
+        try {
+          const resp = await fetch("/api/exec/daemon", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "restart", id: "local-data-server" }),
+          });
+          const body = (await resp.json().catch(() => ({}))) as { restarted?: boolean; error?: string };
+          if (resp.ok && body.restarted) {
+            setLines((l) => [...l, "", "[Restarted local-data-server to apply new cloud config]"]);
+          } else if (!resp.ok) {
+            setLines((l) => [...l, `[Warning: could not restart local-data-server: ${body.error ?? resp.statusText}]`]);
+          }
+        } catch (err) {
+          setLines((l) => [...l, `[Warning: could not restart local-data-server: ${err instanceof Error ? err.message : String(err)}]`]);
+        }
+
+        // Re-read the config so the status card sees the just-written
+        // s3Bucket / auroraEndpoint / apiGatewayUrl.
         await refreshCloudConfig();
         setDeployResult(result);
         setStatus("success");
@@ -1383,7 +1409,17 @@ export function CloudSetupWizard({ onComplete }: Props) {
               const fresh = await getIdentityPoolCredentials(cogCfg, tokens.idToken);
               setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
               setCredentials(fresh);
-              await pushAuthToLocalDataServer({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
+              // Notifying the local daemon is a side-benefit, not part of minting
+              // credentials — and it races with the daemon restart that pass 1's
+              // installer fires right before pass 2 calls this. If the daemon is
+              // mid-restart the fetch throws ECONNREFUSED; swallowing it here keeps
+              // that transient failure from bubbling up as a null "session expired"
+              // and aborting the deploy. The daemon refreshes its own auth anyway.
+              try {
+                await pushAuthToLocalDataServer({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
+              } catch (err) {
+                console.warn("[cloud-setup] could not push refreshed auth to local-data-server (continuing):", err);
+              }
               const userEmail = extractEmailFromIdToken(tokens.idToken);
               await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: userEmail ?? undefined });
               await writeCloudCredentials(fresh);

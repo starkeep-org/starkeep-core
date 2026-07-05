@@ -143,15 +143,30 @@ export function foundationalPermissionsBoundaryStatements(
       ],
     },
     {
-      Sid: "FoundationalPulumiPassphrase",
+      // The two SSM parameters this role reads with ssm:GetParameter, merged
+      // into one statement (union of resources) to conserve managed-policy
+      // size:
+      //  - /pulumi/passphrase: the Pulumi state-encryption passphrase.
+      //  - /app-creds/*: per-app HMAC secrets — cloud-data-server reads any
+      //    app's creds to verify HMAC-signed /apps/{appId}/* requests. The
+      //    role's broker-power inline policy grants the same; the boundary
+      //    admits it so the intersection holds at runtime.
+      Sid: "FoundationalReadSsmParameters",
       Effect: "Allow",
       Action: "ssm:GetParameter",
-      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
+      Resource: [
+        `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
+        `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`,
+      ],
     },
     {
-      // The passphrase parameter is a SecureString; decrypt is via the SSM
-      // service key. Scoped via kms:ViaService.
-      Sid: "FoundationalPulumiPassphraseKmsDecrypt",
+      // SecureString decrypt for the two SSM SecureStrings this role reads
+      // (both parameters in FoundationalReadSsmParameters — the Pulumi state
+      // passphrase and the per-app HMAC creds). Both decrypt via the SSM
+      // service key, so a single kms:ViaService-scoped statement covers both —
+      // folded together to keep this boundary under the 6144-char
+      // managed-policy size limit.
+      Sid: "FoundationalSsmSecureStringKmsDecrypt",
       Effect: "Allow",
       Action: "kms:Decrypt",
       Resource: "*",
@@ -276,25 +291,6 @@ export function foundationalPermissionsBoundaryStatements(
         StringEquals: {
           "iam:AWSServiceName": "dsql.amazonaws.com",
         },
-      },
-    },
-    {
-      // Per-app HMAC credential reads. cloud-data-server reads any app's
-      // creds parameter to verify HMAC-signed /apps/{appId}/* requests. The
-      // role's broker-power inline policy grants this; the boundary admits
-      // the same so the intersection holds at runtime.
-      Sid: "FoundationalReadAppCreds",
-      Effect: "Allow",
-      Action: "ssm:GetParameter",
-      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`,
-    },
-    {
-      Sid: "FoundationalReadAppCredsKmsDecrypt",
-      Effect: "Allow",
-      Action: "kms:Decrypt",
-      Resource: "*",
-      Condition: {
-        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
       },
     },
     {

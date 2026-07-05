@@ -8,6 +8,7 @@ import {
   installInfraBoundaryStatements,
 } from "../src/bootstrap/index.js";
 import { userDataOwnerPermissionsBoundaryStatements } from "../src/bootstrap/user-data-owner-permissions-boundary.js";
+import { MAX_STACK_PREFIX_LENGTH } from "../src/bootstrap/index.js";
 import type { IamStatement, CfnValue } from "../src/iam-utils.js";
 
 const PREFIX = "starkeep";
@@ -237,4 +238,58 @@ describe("admin-app policy", () => {
     const actions = actionsOf(statements);
     expect(actions.some((a) => a.startsWith("iam:"))).toBe(false);
   });
+});
+
+describe("managed-policy size (AWS 6144-char ceiling)", () => {
+  // Each permissions boundary is deployed as an AWS::IAM::ManagedPolicy, whose
+  // document may not exceed 6144 characters — whitespace excluded — or
+  // CreateStack fails with `Cannot exceed quota for PolicySize: 6144`. The
+  // StackPrefix is interpolated into these documents at generation time, so the
+  // worst case is the longest prefix the template permits
+  // (MAX_STACK_PREFIX_LENGTH). Guarding at that length means no permitted
+  // deploy can overflow, regardless of the prefix the operator picks.
+  const MANAGED_POLICY_SIZE_LIMIT = 6144;
+  const MAX_PREFIX = "x".repeat(MAX_STACK_PREFIX_LENGTH);
+
+  // Resolve any CFN intrinsic to the string it deploys to, so the size matches
+  // the policy document CloudFormation actually submits. The boundaries use
+  // plain interpolated strings today; the Sub/Ref arms are defensive.
+  function resolveCfn(v: unknown): unknown {
+    if (v === null || typeof v !== "object") return v;
+    if (Array.isArray(v)) return v.map(resolveCfn);
+    const o = v as Record<string, unknown>;
+    if ("Sub" in o) return (o.Sub as string).replace(/\$\{[^}]+\}/g, "123456789012");
+    if ("GetAtt" in o) return "arn:aws:iam::123456789012:role/placeholder";
+    if ("Ref" in o) return "arn:aws:iam::123456789012:policy/placeholder";
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(o)) out[k] = resolveCfn(val);
+    return out;
+  }
+
+  // AWS counts the policy document with whitespace stripped.
+  function policyDocSize(statements: IamStatement[]): number {
+    const doc = { Version: "2012-10-17", Statement: resolveCfn(statements) };
+    return JSON.stringify(doc).replace(/\s/g, "").length;
+  }
+
+  // Every managed policy in the bootstrap template = the five boundaries.
+  const managedPolicies: Record<string, (p: string) => IamStatement[]> = {
+    "app-permissions-boundary": appPermissionsBoundaryStatements,
+    "foundational-permissions-boundary": foundationalPermissionsBoundaryStatements,
+    "user-data-owner-permissions-boundary": userDataOwnerPermissionsBoundaryStatements,
+    "install-ddl-permissions-boundary": installDdlBoundaryStatements,
+    "install-infra-permissions-boundary": installInfraBoundaryStatements,
+  };
+
+  for (const [name, build] of Object.entries(managedPolicies)) {
+    it(`${name} fits under 6144 at the longest allowed prefix`, () => {
+      const size = policyDocSize(build(MAX_PREFIX));
+      expect(
+        size,
+        `${name} is ${size} chars at a ${MAX_STACK_PREFIX_LENGTH}-char prefix ` +
+          `(limit ${MANAGED_POLICY_SIZE_LIMIT}). Trim the boundary or lower ` +
+          `MAX_STACK_PREFIX_LENGTH.`,
+      ).toBeLessThanOrEqual(MANAGED_POLICY_SIZE_LIMIT);
+    });
+  }
 });

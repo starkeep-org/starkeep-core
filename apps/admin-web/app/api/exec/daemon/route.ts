@@ -8,6 +8,7 @@ import {
   isWorkspaceDaemonId,
   metaFile,
   pidFile,
+  restartWorkspaceDaemonIfRunning,
   startWorkspaceDaemon,
   stopById,
 } from "../../../../src/lib/daemon-control";
@@ -42,8 +43,24 @@ interface LocalRunBlock {
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json() as { action: "start" | "stop"; id: string };
+  const body = await req.json() as { action: "start" | "stop" | "restart"; id: string };
   const { action, id } = body;
+
+  if (action === "restart") {
+    // Bounce a fixed workspace daemon so it re-reads boot-time config (the
+    // local-data-server captures ~/.starkeep/config.json — notably CLOUD_URL and
+    // the sync supervisor — once at startup). No-op when it isn't running: a
+    // later manual start reads the updated config anyway. Only workspace daemons
+    // have a fixed restart command; installed-app daemons are excluded.
+    if (!isWorkspaceDaemonId(id)) {
+      return NextResponse.json(
+        { error: `'${id}' is not a restartable workspace daemon` },
+        { status: 400 },
+      );
+    }
+    const result = restartWorkspaceDaemonIfRunning(id);
+    return NextResponse.json(result ? { restarted: true, ...result } : { restarted: false });
+  }
 
   if (action === "stop") {
     // Stop tolerates unknown ids — if there's no PID file, stopById returns

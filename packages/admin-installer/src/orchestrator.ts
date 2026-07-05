@@ -276,6 +276,12 @@ async function installAppInner(
     // run upload + compute stack as install-infra, then detach. A bundle
     // without compute would have nothing to upload it for, so the gate is
     // strictly on `compute.enabled`.
+    // alwaysRun: the temp policy is detached at the end of every run (see the
+    // matching detach step below), so on a resume/redeploy — where the ledger
+    // already has this step "done" from the first install — a skipped attach
+    // would leave install-infra with no grant, and the alwaysRun upload_bundle
+    // + install_compute_stack steps below (which run under install-infra) would
+    // fail with AccessDenied. Attach is idempotent (PutRolePolicy overwrites).
     await runStep(registry, appId, "install", "attach_temp_install_infra_policy", done, () =>
       attachTempInstallInfraPolicy(
         config.stackPrefix,
@@ -284,6 +290,7 @@ async function installAppInner(
         config.region,
         managerCreds,
       ),
+      { alwaysRun: true },
     );
 
     const infraCreds: AwsCredentials = await roleChain([
@@ -292,6 +299,10 @@ async function installAppInner(
     ]);
 
     if (zipBuffer) {
+      // alwaysRun: a redeploy must re-upload the freshly-built bundle even
+      // though the step is already "done" from the first install — otherwise
+      // the Lambda keeps serving the original code and Redeploy is a no-op.
+      // Idempotent: it overwrites the same apps/<appId>/latest/dist.zip key.
       await runStep(registry, appId, "install", "upload_bundle", done, () =>
         uploadAppBundle(
           config.stackPrefix,
@@ -301,10 +312,16 @@ async function installAppInner(
           config.region,
           infraCreds,
         ),
+        { alwaysRun: true },
       );
     }
 
     if (ir.compute.enabled) {
+      // alwaysRun: Pulumi up is the reconcile that actually pushes new code and
+      // routes. Skipping it on a redeploy (because the first install recorded
+      // it "done") is why Redeploy never updated the app. Idempotent: a
+      // no-change up is a cheap no-op; a changed bundleHash/manifest updates the
+      // Lambda code and API Gateway routes.
       await runStep(registry, appId, "install", "install_compute_stack", done, async () => {
         const bundleHash = zipBuffer
           ? createHash("sha256").update(zipBuffer).digest("base64")
@@ -327,11 +344,16 @@ async function installAppInner(
           bundleHash,
         };
         receipt = await installComputeStack(manifest, computeCtx);
-      });
+      }, { alwaysRun: true });
     }
 
+    // alwaysRun: mirror the attach above — the policy is re-attached on every
+    // run, so it must be torn down on every run too (never left dangling on
+    // install-infra after the install completes). Idempotent: detach tolerates
+    // an already-absent policy.
     await runStep(registry, appId, "install", "detach_temp_install_infra_policy", done, () =>
       detachTempInstallInfraPolicy(config.stackPrefix, appId, managerCreds),
+      { alwaysRun: true },
     );
   }
 

@@ -12,10 +12,13 @@
 
 import { describe, it, expect, afterAll, afterEach } from "vitest";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { chromium } from "@playwright/test";
 import {
   startLocalDataServer,
   type LocalDataServer,
@@ -42,6 +45,7 @@ import {
   readConfig,
   writeConfig,
   type TestStackConfig,
+  type AdminCredentials,
 } from "./run-state.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -52,6 +56,7 @@ const paths = runPaths(STACK_PREFIX);
 // Shared journey state, filled in step order.
 let outputs: BootstrapOutputs;
 let session: AdminSession;
+let admin: AdminCredentials;
 let config: TestStackConfig;
 let lds: LocalDataServer | undefined;
 let drive: LdsApp;
@@ -149,7 +154,7 @@ function runTeardownScript(script: string): void {
     });
 
     it("admin user exists and signs in through Cognito + Identity Pool", async () => {
-      const admin = await ensureAdminUser(paths, outputs.userPoolId);
+      admin = await ensureAdminUser(paths, outputs.userPoolId);
       session = await signInAdmin(config, admin);
       expect(session.idToken.split(".")).toHaveLength(3);
       expect(session.awsCredentials.accessKeyId).toBeTruthy();
@@ -350,6 +355,85 @@ function runTeardownScript(script: string): void {
       const res = await fetch(`${config.apiGatewayUrl}/apps/photos/`);
       expect(res.status).toBe(200);
       expect(await res.text()).toContain("<");
+    });
+
+    it("photos data plane works through the cloud-served /api/local-data proxy", async () => {
+      // The seam that broke on cloud reinstall: the browser never signs; it
+      // calls the app's OWN same-origin proxy (/api/local-data/...), served by
+      // the cloud Next.js Lambda, which loads the photos HMAC secret from SSM
+      // and forwards a *signed* request to the broker. The `static` handler is
+      // public, so we can drive that proxy exactly as the browser does — no
+      // Bearer token — and it must reach the HMAC-gated data plane.
+      //
+      // This is what listPhotos() does. Before the fix it hit the gateway
+      // directly with only a Cognito token and got 401 "Missing X-Starkeep-App"
+      // headers; and the manifest only routed GET to the proxy, so writes 404'd.
+      const proxyBase = `${config.apiGatewayUrl}/apps/photos/api/local-data`;
+
+      const listRes = await fetch(`${proxyBase}/data/records?limit=500`);
+      expect(listRes.status).toBe(200);
+      const { records } = (await listRes.json()) as { records: Array<{ id: string }> };
+      expect(records.some((r) => r.id === syncedRecordId)).toBe(true);
+
+      // A write verb through the proxy — guards the GET-only manifest regression
+      // (the catch-all must be ANY, or every POST 404s at the gateway).
+      const metaRes = await fetch(`${proxyBase}/data/records/${syncedRecordId}/metadata`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ typeId: "image", metadata: { width: 1, height: 1 } }),
+      });
+      expect(metaRes.status).toBe(200);
+    });
+
+    it("drives the real cloud Photos UI end-to-end: sign in, upload, see the photo", async () => {
+      // True browser e2e of the cloud-served app: a real Chromium loads the SPA
+      // from the gateway, signs in through Cognito, and uploads a photo through
+      // the live file input. That upload is the ENTIRE browser→proxy→broker
+      // write path — presign → S3 PUT → POST /data/records → metadata POST — the
+      // exact flow that was completely broken on reinstall (proxy bypassed →
+      // 401; GET-only manifest → writes 404). Every layer the unit/contract
+      // tests stub is exercised here for real, including S3 CORS on the
+      // presigned PUT, which nothing else covers.
+      const appUrl = `${config.apiGatewayUrl}/apps/photos/`;
+
+      // Fresh tiny PNG → new content hash (the kept-up cloud dedupes by hash).
+      const uploadName = `e2e-browser-${Date.now()}.png`;
+      const uploadDir = await mkdtemp(join(tmpdir(), "photos-cloud-ui-"));
+      const uploadPath = join(uploadDir, uploadName);
+      await writeFile(uploadPath, solidPng([...randomBytes(3)] as [number, number, number], 12));
+
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage();
+        await page.goto(appUrl, { waitUntil: "domcontentloaded" });
+
+        // AuthGate (FORCE_REMOTE) gates the app behind Cognito sign-in. Drive
+        // the real SignInForm with the permanent-password admin user; on
+        // success the app reloads authenticated and the toolbar renders.
+        await page.locator('input[type="email"]').fill(admin.email);
+        await page.locator('input[type="password"]').fill(admin.password);
+        await page.getByRole("button", { name: "Sign in" }).click();
+        await page
+          .getByRole("button", { name: "Add Photo" })
+          .waitFor({ state: "visible", timeout: 120_000 });
+
+        // Upload through the live file input and wait for the thumbnail to render.
+        await page.locator('input[type="file"]').first().setInputFiles(uploadPath);
+        await page
+          .getByAltText(uploadName)
+          .first()
+          .waitFor({ state: "visible", timeout: 120_000 });
+
+        // Cross-check the data plane: the shared record now exists in the cloud.
+        const list = await cloudApp(photos).fetch("/data/records?limit=500");
+        expect(list.status).toBe(200);
+        const { records } = (await list.json()) as {
+          records: Array<{ original_filename: string | null }>;
+        };
+        expect(records.some((r) => r.original_filename === uploadName)).toBe(true);
+      } finally {
+        await browser.close();
+      }
     });
 
     it("photos resize endpoint round-trips", async () => {

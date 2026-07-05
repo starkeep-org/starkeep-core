@@ -87,7 +87,11 @@ vi.mock("../src/compute-stack", () => ({
 }));
 
 import { installApp, uninstallApp, type InstallerConfig } from "../src/orchestrator";
-import { createAppRole } from "../src/iam";
+import {
+  createAppRole,
+  attachTempInstallInfraPolicy,
+  detachTempInstallInfraPolicy,
+} from "../src/iam";
 import { putAppCredsParameter } from "../src/app-creds";
 import { putAppKeepFile, uploadAppBundle } from "../src/s3";
 import { installComputeStack } from "../src/compute-stack";
@@ -292,6 +296,49 @@ describe("install", () => {
     expect(vi.mocked(putAppCredsParameter)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(putAppKeepFile)).toHaveBeenCalledTimes(2);
     expect(doneSteps("install")).toEqual(INSTALL_STEPS_WITH_COMPUTE);
+  });
+
+  // Regression: "Redeploy" must actually redeploy. upload_bundle and
+  // install_compute_stack are the steps that push new Lambda code + gateway
+  // routes; the first install records them "done", and without alwaysRun every
+  // later redeploy silently skipped them — the app never updated no matter how
+  // many times Redeploy was clicked. They must re-run on every drive (both are
+  // idempotent: the bundle upload overwrites the same S3 key, and Pulumi up is a
+  // no-op when nothing changed / updates the Lambda when the bundleHash does).
+  it("re-runs upload_bundle and install_compute_stack on a redeploy of a fully-installed app", async () => {
+    const drive = () =>
+      installApp({
+        appId: "photos",
+        manifest: photosManifest,
+        zipBuffer: Buffer.from("zip"),
+        version: "0.1.0",
+        config,
+        registryCredentials,
+      });
+
+    await drive(); // first install records every step "done"
+    expect(doneSteps("install")).toEqual(INSTALL_STEPS_WITH_COMPUTE);
+
+    await drive(); // redeploy: every step is already recorded "done"
+
+    // The two reconcile steps run again on the redeploy...
+    expect(vi.mocked(uploadAppBundle)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(installComputeStack)).toHaveBeenCalledTimes(2);
+    // ...and so do the install-infra temp-policy attach/detach: the policy is
+    // torn down at the end of every run, so a redeploy that skipped re-attaching
+    // it (because the ledger had the step "done") would run the alwaysRun
+    // upload_bundle + install_compute_stack above under install-infra with no
+    // grant → S3/Pulumi AccessDenied. They must re-attach and re-detach.
+    expect(vi.mocked(attachTempInstallInfraPolicy)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(detachTempInstallInfraPolicy)).toHaveBeenCalledTimes(2);
+    // ...while a normal one-shot step (create_iam_role) stays skipped — proving
+    // the ledger genuinely skips non-alwaysRun "done" steps, so the counts above
+    // reflect alwaysRun and not a harness that never skips anything.
+    expect(vi.mocked(createAppRole)).toHaveBeenCalledTimes(1);
+    // Both re-runs also re-record "done" in the ledger (pending→done again).
+    expect(
+      ledger.filter((e) => e.step === "install_compute_stack" && e.status === "done"),
+    ).toHaveLength(2);
   });
 
   it("rejects reserved app ids before recording any step, unless explicitly allowed", async () => {

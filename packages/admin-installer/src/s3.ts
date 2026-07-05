@@ -32,12 +32,27 @@ export async function putAppKeepFile(
   appCreds: AwsCredentials,
 ): Promise<void> {
   const s3 = makeS3Client(appCreds, region);
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: filesBucket,
-      Key: `apps/${appId}/.keep`,
-      Body: "",
-    }),
+  const key = `apps/${appId}/.keep`;
+  // First S3 call made on the freshly-created app role's assumed-session creds
+  // (the orchestrator assumes the role immediately after createAppRole). A
+  // just-created IAM principal isn't recognized globally for a few seconds, so
+  // this can fail `InvalidAccessKeyId` until it converges — same eventual-
+  // consistency class as the PutRolePolicy propagation retryOnAccessDenied
+  // already absorbs. Without this wrapper a cold role fails the whole install
+  // on the very first data-plane write (the bundle upload below is already
+  // wrapped; this one wasn't, and that was the gap).
+  await retryOnAccessDenied(
+    `s3:PutObject ${filesBucket}/${key}`,
+    async () => {
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: filesBucket,
+          Key: key,
+          Body: "",
+        }),
+      );
+    },
+    { maxAttempts: 30, maxDelayMs: 10_000 },
   );
 }
 

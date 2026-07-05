@@ -280,12 +280,17 @@ export async function detachTempInstallInfraPolicy(
   managerCreds: AwsCredentials,
 ): Promise<void> {
   const iam = makeIamClient(managerCreds);
-  await iam.send(
-    new DeleteRolePolicyCommand({
-      RoleName: `${stackPrefix}-install-infra-role`,
-      PolicyName: `temp-install-infra-${appId}`,
-    }),
-  );
+  try {
+    await iam.send(
+      new DeleteRolePolicyCommand({
+        RoleName: `${stackPrefix}-install-infra-role`,
+        PolicyName: `temp-install-infra-${appId}`,
+      }),
+    );
+  } catch (err) {
+    // Idempotent teardown: an already-absent policy is success, not failure.
+    if ((err as { name?: string }).name !== "NoSuchEntityException") throw err;
+  }
 }
 
 export async function attachTempUninstallInfraPolicy(

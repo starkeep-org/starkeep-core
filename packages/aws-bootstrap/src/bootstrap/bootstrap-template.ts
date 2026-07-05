@@ -12,6 +12,19 @@ export interface GenerateBootstrapTemplateInput {
 }
 
 /**
+ * Maximum length of StackPrefix, enforced by the template's parameter
+ * constraint and the admin-web wizard input.
+ *
+ * Not cosmetic: every `${stackPrefix}` occurrence in a permissions-boundary
+ * managed policy grows with the prefix, and the foundational boundary is the
+ * closest to AWS's hard 6144-char managed-policy size limit. At length 16 it
+ * renders to ~6091 chars (~53 headroom); a longer cap would risk a
+ * PolicySize deploy failure. `policies.test.ts` asserts every managed policy
+ * fits at exactly this length, so the cap and the boundaries stay in lockstep.
+ */
+export const MAX_STACK_PREFIX_LENGTH = 16;
+
+/**
  * Single bootstrap CloudFormation template.
  *
  * Deploys into the user's own AWS account and creates the four foundational
@@ -68,7 +81,7 @@ Parameters:
     Default: ${stackPrefix}
     Description: Prefix for all Starkeep-managed resource names.
     MinLength: 1
-    MaxLength: 20
+    MaxLength: ${MAX_STACK_PREFIX_LENGTH}
     AllowedPattern: '^[a-z][a-z0-9-]*$'
 
 Resources:

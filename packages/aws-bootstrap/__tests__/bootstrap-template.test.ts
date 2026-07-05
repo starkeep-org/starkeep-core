@@ -4,6 +4,7 @@ import {
   generateBootstrapTemplate,
   getCloudFormationCreateStackUrl,
   getBootstrapStackOutputsUrl,
+  MAX_STACK_PREFIX_LENGTH,
 } from "../src/bootstrap/index.js";
 
 // CFN short-form intrinsics (!Sub / !Ref / !GetAtt) parsed into plain objects
@@ -39,6 +40,7 @@ describe("bootstrap template structure", () => {
     expect(template.Parameters.StackPrefix).toMatchObject({
       Type: "String",
       Default: "starkeep",
+      MaxLength: MAX_STACK_PREFIX_LENGTH,
       AllowedPattern: "^[a-z][a-z0-9-]*$",
     });
   });

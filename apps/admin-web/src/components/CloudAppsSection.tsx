@@ -147,12 +147,8 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
                 )}
               </div>
               <div className="flex gap-2 items-center">
-                {url && (
-                  <a href={url} target="_blank" rel="noopener noreferrer" className="text-sm underline" title={url}>
-                    Open ↗
-                  </a>
-                )}
                 <Button
+                  variant="link"
                   size="sm"
                   onClick={() => handleInstall(entry.appId, name, endpoint)}
                   disabled={!cloudReady}
@@ -160,6 +156,13 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
                 >
                   {installed ? "Redeploy" : "Install in cloud"}
                 </Button>
+                {url && (
+                  <Button asChild size="sm">
+                    <a href={url} target="_blank" rel="noopener noreferrer" title={url}>
+                      Open ↗
+                    </a>
+                  </Button>
+                )}
               </div>
             </div>
             {entry.manifest.description && (
@@ -205,6 +208,9 @@ function CloudAppInstallModal({
 }) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
+  // Bumped by the Retry button to re-drive the install effect. Most install
+  // failures are transient (IAM/S3 eventual consistency) and clear on retry.
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     if (!opened || !credentials || !endpoint) return;
@@ -279,17 +285,25 @@ function CloudAppInstallModal({
 
     run();
     return () => { aborted = true; };
-  }, [opened, credentials, endpoint]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [opened, credentials, endpoint, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Dialog open={opened} onOpenChange={(open) => { if (!open && status !== "running") onClose(); }}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-4xl">
         <DialogHeader>
           <DialogTitle>Install {appName ?? "app"} in cloud</DialogTitle>
         </DialogHeader>
         <CommandOutput lines={lines} status={status} />
         {status !== "running" && (
-          <div className="flex justify-end">
+          <div className="flex items-center justify-end gap-3">
+            {status === "failure" && (
+              <>
+                <p className="mr-auto text-sm text-muted-foreground">
+                  Most failures are transitory and fixed with a retry.
+                </p>
+                <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
+              </>
+            )}
             <Button variant="outline" onClick={onClose}>Close</Button>
           </div>
         )}

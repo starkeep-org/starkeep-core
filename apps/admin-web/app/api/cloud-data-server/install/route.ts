@@ -28,7 +28,7 @@ import { starkeepDir } from "@starkeep/app-client";
 import { NextRequest } from "next/server";
 import { REPO_ROOT } from "../../../../src/lib/exec-commands";
 import { getRegion } from "../../../../src/lib/cloud-config";
-import { restartWorkspaceDaemonIfRunning } from "../../../../src/lib/daemon-control";
+import { isCredentialFailureLine } from "../../../../src/lib/credential-errors";
 
 const STARKEEP_DIR = starkeepDir();
 const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
@@ -74,12 +74,6 @@ interface StarkeepConfig {
   s3Bucket?: string;
   auroraEndpoint?: string;
 }
-
-const EXPIRED_TOKEN_SIGNATURES = [
-  "ExpiredToken",
-  "ExpiredTokenException",
-  "The security token included in the request is expired",
-];
 
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as {
@@ -164,20 +158,14 @@ export async function POST(req: NextRequest) {
 
       const finish = (code: number | null) => {
         if (code === 0) {
-          // The installer rewrote ~/.starkeep/config.json with the new
-          // apiGatewayUrl / S3 / DSQL outputs, but the local-data-server reads
-          // that file once at boot. Restart it (if running) so its CLOUD_URL and
-          // sync supervisor pick up the freshly-installed cloud — otherwise the
-          // Drive cloud view keeps reporting "Cloud is not configured" until the
-          // user manually restarts the daemon.
-          try {
-            if (restartWorkspaceDaemonIfRunning("local-data-server")) {
-              emit("[Restarted local-data-server to apply new cloud config]");
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            emit(`[Warning: could not restart local-data-server: ${msg}]`);
-          }
+          // NB: this pass rewrites ~/.starkeep/config.json with the new
+          // apiGatewayUrl / S3 / DSQL outputs, which the local-data-server only
+          // reads at boot — so the daemon needs a restart to pick up the new
+          // cloud. That restart is deliberately NOT done here: this is only the
+          // first of two deploy passes (cloud-data-server, then Drive), and
+          // bouncing the daemon mid-deploy both raced with pass 2's auth refresh
+          // and booted the daemon against a half-provisioned cloud. The wizard
+          // fires a single restart via /api/exec/daemon after the final pass.
           try {
             const post = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
             emitEvent("done", {
@@ -195,7 +183,7 @@ export async function POST(req: NextRequest) {
         } else if (sawExpiredToken) {
           emitEvent("error", {
             message:
-              "Your AWS sign-in session expired while the installer was running. Sign in again to retry.",
+              "Your AWS sign-in session was rejected (expired or invalid). Sign in again to retry.",
             code: "EXPIRED_TOKEN",
           });
         } else {
@@ -232,7 +220,7 @@ export async function POST(req: NextRequest) {
         }
 
         runningChildListeners.set(listenerId, (line) => {
-          if (!sawExpiredToken && EXPIRED_TOKEN_SIGNATURES.some((sig) => line.includes(sig))) {
+          if (!sawExpiredToken && isCredentialFailureLine(line)) {
             sawExpiredToken = true;
           }
           emit(line);
@@ -275,7 +263,7 @@ export async function POST(req: NextRequest) {
         emit("[Reconnected to in-progress install]");
 
         runningChildListeners.set(listenerId, (line) => {
-          if (!sawExpiredToken && EXPIRED_TOKEN_SIGNATURES.some((sig) => line.includes(sig))) {
+          if (!sawExpiredToken && isCredentialFailureLine(line)) {
             sawExpiredToken = true;
           }
           emit(line);

@@ -9,6 +9,7 @@ export {
   foundationalPermissionsBoundaryStatements,
   installDdlBoundaryStatements,
   installInfraBoundaryStatements,
+  MAX_STACK_PREFIX_LENGTH,
   type GenerateBootstrapTemplateInput,
 } from "./bootstrap/index.js";
 

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { NextRequest } from "next/server";
 import { REPO_ROOT } from "../../../../../src/lib/exec-commands";
+import { isCredentialFailureLine } from "../../../../../src/lib/credential-errors";
 
 const STARKEEP_DIR = starkeepDir();
 
@@ -25,12 +26,6 @@ function broadcastLine(line: string): void {
     } catch { /* closed controller — will be cleaned up on cancel */ }
   }
 }
-
-const EXPIRED_TOKEN_SIGNATURES = [
-  "ExpiredToken",
-  "ExpiredTokenException",
-  "The security token included in the request is expired",
-];
 
 export async function POST(
   req: NextRequest,
@@ -101,7 +96,7 @@ export async function POST(
         } else if (sawExpiredToken) {
           emitEvent("error", {
             message:
-              "Your AWS sign-in session expired while the deploy was running. Sign in again to retry.",
+              "Your AWS sign-in session was rejected (expired or invalid). Sign in again to retry.",
             code: "EXPIRED_TOKEN",
           });
         } else {
@@ -137,7 +132,7 @@ export async function POST(
         }
 
         runningChildListeners.set(listenerId, (line) => {
-          if (!sawExpiredToken && EXPIRED_TOKEN_SIGNATURES.some((sig) => line.includes(sig))) {
+          if (!sawExpiredToken && isCredentialFailureLine(line)) {
             sawExpiredToken = true;
           }
           emit(line);
@@ -178,7 +173,7 @@ export async function POST(
         emit("[Reconnected to in-progress deploy]");
 
         runningChildListeners.set(listenerId, (line) => {
-          if (!sawExpiredToken && EXPIRED_TOKEN_SIGNATURES.some((sig) => line.includes(sig))) {
+          if (!sawExpiredToken && isCredentialFailureLine(line)) {
             sawExpiredToken = true;
           }
           emit(line);
