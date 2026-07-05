@@ -1597,6 +1597,58 @@ async function main() {
         return;
       }
 
+      // POST /data/records/file-urls — batch of time-limited file URLs.
+      // Per-id semantics mirror the single file-url route below (local token
+      // URL when the bytes are on disk, remote signed URL otherwise), except
+      // that unknown, unreadable, and unresolvable ids are omitted from the
+      // response instead of failing the whole batch. Exists so gallery-style
+      // clients can resolve N URLs in one request instead of N.
+      if (path === "/data/records/file-urls" && req.method === "POST") {
+        const body = await readBody(req);
+        const parsed = JSON.parse(body) as { ids?: unknown; expiresIn?: unknown };
+        if (
+          !Array.isArray(parsed.ids) ||
+          parsed.ids.length === 0 ||
+          !parsed.ids.every((id) => typeof id === "string" && id.length > 0)
+        ) {
+          res.writeHead(400);
+          json(res, { error: "ids must be a non-empty array of record ids" });
+          return;
+        }
+        if (parsed.ids.length > 500) {
+          res.writeHead(400);
+          json(res, { error: "ids must contain at most 500 record ids" });
+          return;
+        }
+        const expiresIn =
+          typeof parsed.expiresIn === "number" && Number.isFinite(parsed.expiresIn) && parsed.expiresIn > 0
+            ? parsed.expiresIn
+            : 3600;
+        const urls: Record<string, { url: string; mimeType?: string | null; sizeBytes?: number | null }> = {};
+        for (const id of new Set(parsed.ids)) {
+          const record = await sdk.data.get(createStarkeepId(id));
+          if (!record?.objectStorageKey) continue;
+          if (!appCanRead(localDb, appId!, record.type)) continue;
+          const mimeType = record.mimeType ?? "application/octet-stream";
+          if (await localAdapter.has(record.objectStorageKey)) {
+            const token = createFileToken(record.objectStorageKey, mimeType, expiresIn);
+            urls[record.id] = {
+              url: `http://127.0.0.1:${PORT}/data/files/${token}`,
+              mimeType: record.mimeType,
+              sizeBytes: record.sizeBytes,
+            };
+          } else if (remoteAdapter?.getSignedUrl) {
+            urls[record.id] = {
+              url: await remoteAdapter.getSignedUrl(record.objectStorageKey, { expiresIn }),
+              mimeType: record.mimeType,
+              sizeBytes: record.sizeBytes,
+            };
+          }
+        }
+        json(res, { urls, expiresIn });
+        return;
+      }
+
       // GET /data/records/:id/file-url — time-limited URL for file access
       const fileUrlMatch = path.match(/^\/data\/records\/([^/]+)\/file-url$/);
       if (fileUrlMatch && req.method === "GET") {

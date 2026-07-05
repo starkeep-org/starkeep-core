@@ -983,6 +983,59 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return ok({ metadata });
     }
 
+    // POST /apps/{appId}/data/records/file-urls — batch signed URLs.
+    //
+    // Collapses the gallery-style per-photo file-url fan-out (each of which
+    // costs its own Lambda invocation) into one request: one records query,
+    // then presigns in-process. Per-id semantics match the single file-url
+    // route below, except that unknown, deleted, unreadable, and file-less
+    // ids are silently omitted from the response instead of failing the
+    // whole batch.
+    if (subPath === "/data/records/file-urls" && method === "POST") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as { ids?: unknown; expiresIn?: unknown };
+      if (
+        !Array.isArray(body.ids) ||
+        body.ids.length === 0 ||
+        !body.ids.every((id) => typeof id === "string" && id.length > 0)
+      ) {
+        return clientErr("ids must be a non-empty array of record ids", 400);
+      }
+      if (body.ids.length > 500) {
+        return clientErr("ids must contain at most 500 record ids", 400);
+      }
+      const ids = [...new Set(body.ids)] as StarkeepId[];
+      // Unlike the single route this clamps to the STS session lifetime — a
+      // URL signed with session credentials dies with the session anyway.
+      const expiresIn = clampPresignExpiresIn(
+        typeof body.expiresIn === "number" && Number.isFinite(body.expiresIn) && body.expiresIn > 0
+          ? body.expiresIn
+          : 3600,
+      );
+      const result = await db.query({
+        filters: [
+          { field: "id", operator: "in", value: ids },
+          { field: "deletedAt", operator: "isNull" },
+        ],
+        limit: ids.length,
+      });
+      const urls: Record<string, { url: string; mimeType?: string; sizeBytes?: number }> = {};
+      await Promise.all(
+        result.records
+          .filter((r) => canRead(grants, r.type) && r.objectStorageKey)
+          .map(async (r) => {
+            urls[r.id] = {
+              url: await storage.getSignedUrl!(r.objectStorageKey!, { expiresIn }),
+              mimeType: r.mimeType ?? undefined,
+              sizeBytes: r.sizeBytes ?? undefined,
+            };
+          }),
+      );
+      return ok({ urls, expiresIn });
+    }
+
     // GET /apps/{appId}/data/records/:id/file-url
     const fileUrlMatch = subPath.match(/^\/data\/records\/([^/]+)\/file-url$/);
     if (fileUrlMatch && method === "GET") {

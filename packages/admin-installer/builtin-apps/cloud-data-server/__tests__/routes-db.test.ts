@@ -405,6 +405,86 @@ describe("per-record routes honor read/write grants", () => {
   });
 });
 
+describe("batch file-urls route", () => {
+  const grants = [{ type_id: "image/jpeg", access: "read" as const }];
+
+  it("presigns readable records in one query, omitting unreadable/deleted/file-less/unknown ids", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
+      recordRow({ id: "b1", type: "image/jpeg", mime_type: "image/jpeg", size_bytes: 42 }),
+      recordRow({ id: "b2", type: "audio/mp3" }),
+      recordRow({ id: "b3", type: "image/jpeg", object_storage_key: null }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "bu1",
+        method: "POST",
+        subPath: "/data/records/file-urls",
+        body: { ids: ["b1", "b2", "b3", "b-missing"] },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res) as {
+      urls: Record<string, { url: string; mimeType?: string; sizeBytes?: number }>;
+      expiresIn: number;
+    };
+    // Only the readable record with an attached file gets a URL; the audio
+    // record (no grant), the key-less record, and the unknown id are omitted.
+    expect(Object.keys(body.urls)).toEqual(["b1"]);
+    expect(body.urls["b1"]!.url).toContain("fake-bucket");
+    expect(body.urls["b1"]).toMatchObject({ mimeType: "image/jpeg", sizeBytes: 42 });
+    // Clamped to the STS session lifetime (mock session is ~15 min).
+    expect(body.expiresIn).toBeGreaterThan(0);
+    expect(body.expiresIn).toBeLessThanOrEqual(3600);
+    // The whole batch is one records query, not one per id.
+    expect(db.calls(RECORDS_SELECT)).toHaveLength(1);
+    // The IN filter carries the deduplicated ids.
+    expect(db.calls(RECORDS_SELECT)[0]!.values).toEqual(
+      expect.arrayContaining(["b1", "b2", "b3", "b-missing"]),
+    );
+  });
+
+  it("deduplicates repeated ids before querying", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
+      recordRow({ id: "b1", type: "image/jpeg" }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "bu2",
+        method: "POST",
+        subPath: "/data/records/file-urls",
+        body: { ids: ["b1", "b1", "b1"] },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const values = db.calls(RECORDS_SELECT)[0]!.values;
+    expect(values.filter((v) => v === "b1")).toHaveLength(1);
+  });
+
+  it("400s on a missing, empty, non-string, or oversized ids array without querying", async () => {
+    const cases: unknown[] = [
+      {},
+      { ids: [] },
+      { ids: "b1" },
+      { ids: [1, 2] },
+      { ids: Array.from({ length: 501 }, (_, i) => `id-${i}`) },
+    ];
+    for (const body of cases) {
+      const db = fakeDsqlWithGrants(grants);
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({ appId: "bu3", method: "POST", subPath: "/data/records/file-urls", body }),
+        context,
+      );
+      expect(res.statusCode, JSON.stringify(body).slice(0, 60)).toBe(400);
+      expect(db.calls(RECORDS_SELECT)).toHaveLength(0);
+    }
+  });
+});
+
 describe("OCC retry on record read-modify-write", () => {
   const grants = [{ type_id: "image/jpeg", access: "readwrite" as const }];
   const RECORD_BY_ID = /FROM shared\.records WHERE id =/;
