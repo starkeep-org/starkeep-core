@@ -635,6 +635,66 @@ export function buildTempInstallCloudDataServerPolicy(
         Resource: "*",
       },
       {
+        // Platform-owned CloudFront distribution + URL-signing key material
+        // (Part A/B of the CloudFront plan). The CDS Pulumi program creates a
+        // distribution, an S3-origin Origin Access Control, a shared-files
+        // cache policy, and an RSA public key + key group; it also *reads* the
+        // AWS-managed cache/origin-request policies by name (CachingOptimized,
+        // CachingDisabled, AllViewerExceptHostHeader) via getCachePolicy /
+        // getOriginRequestPolicy, which issue List*/Get* calls. CloudFront is
+        // global and these actions authorize against Resource:"*" (public
+        // keys, key groups, OAC, cache policies, and every List/Create call
+        // have no resource-level ARN). This is the ephemeral install grant,
+        // detached after install; the foundational boundary caps it (cloudfront:*).
+        // Enumerated (not cloudfront:*) so the actual grant stays auditable —
+        // the boundary is the wildcard ceiling, this is the specific need.
+        Sid: "TempInstallCloudFront",
+        Effect: "Allow",
+        Action: [
+          // Distribution lifecycle + refresh reads + tagging.
+          "cloudfront:CreateDistribution",
+          "cloudfront:CreateDistributionWithTags",
+          "cloudfront:GetDistribution",
+          "cloudfront:GetDistributionConfig",
+          "cloudfront:UpdateDistribution",
+          "cloudfront:DeleteDistribution",
+          "cloudfront:ListDistributions",
+          "cloudfront:TagResource",
+          "cloudfront:UntagResource",
+          "cloudfront:ListTagsForResource",
+          // Origin Access Control (S3 origin lockdown).
+          "cloudfront:CreateOriginAccessControl",
+          "cloudfront:GetOriginAccessControl",
+          "cloudfront:GetOriginAccessControlConfig",
+          "cloudfront:UpdateOriginAccessControl",
+          "cloudfront:DeleteOriginAccessControl",
+          "cloudfront:ListOriginAccessControls",
+          // Custom cache policy for the shared/* behavior + managed-policy reads.
+          "cloudfront:CreateCachePolicy",
+          "cloudfront:GetCachePolicy",
+          "cloudfront:GetCachePolicyConfig",
+          "cloudfront:UpdateCachePolicy",
+          "cloudfront:DeleteCachePolicy",
+          "cloudfront:ListCachePolicies",
+          "cloudfront:GetOriginRequestPolicy",
+          "cloudfront:ListOriginRequestPolicies",
+          // URL-signing public key + key group.
+          "cloudfront:CreatePublicKey",
+          "cloudfront:GetPublicKey",
+          "cloudfront:GetPublicKeyConfig",
+          "cloudfront:UpdatePublicKey",
+          "cloudfront:DeletePublicKey",
+          "cloudfront:ListPublicKeys",
+          "cloudfront:CreateKeyGroup",
+          "cloudfront:GetKeyGroup",
+          "cloudfront:GetKeyGroupConfig",
+          "cloudfront:UpdateKeyGroup",
+          "cloudfront:DeleteKeyGroup",
+          "cloudfront:ListKeyGroups",
+        ],
+        Resource: "*",
+      },
+      {
         // First dsql:CreateCluster in an account may need the DSQL
         // service-linked role auto-created (G9i). This lives on the CDS
         // temp policy specifically because cloud-data-server is the only

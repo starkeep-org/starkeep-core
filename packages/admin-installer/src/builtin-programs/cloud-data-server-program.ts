@@ -11,7 +11,8 @@
  *
  * Stack outputs match the previous SST shape so per-app Pulumi installs can
  * read apiGatewayId and authorizerId to attach their own routes:
- *   auroraHostname, bucketName, apiGatewayUrl, apiGatewayId, authorizerId, region
+ *   auroraHostname, bucketName, apiGatewayUrl, publicBaseUrl, apiGatewayId,
+ *   authorizerId, region
  *
  * The Lambda's IAM role is NOT a Pulumi resource — Manager mints it as part
  * of the install pipeline (createAppRole + broker-power policy). Pulumi only
@@ -20,6 +21,7 @@
 
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
+import * as tls from "@pulumi/tls";
 
 // ---------------------------------------------------------------------------
 // Cost / DoS guardrails (todo-cloud-dos-cost-amplification-2026-06-30)
@@ -86,6 +88,24 @@ export function buildCloudDataServerProgram(
   ctx: CloudDataServerProgramContext,
 ): () => Promise<Record<string, unknown>> {
   return async () => {
+    // CloudFront URL-signing config (Part B) is stored as a single SSM
+    // SecureString JSON blob { keyPairId, domain, privateKey }, read by the
+    // Lambda at runtime. The Lambda's env carries only this (static, no
+    // resource dependency) parameter NAME, so the Lambda needs no ordering
+    // relationship with the CloudFront resources. Stored under the existing
+    // `/${stackPrefix}/app-creds/` prefix — the only SSM path the CDS Lambda
+    // role can read.
+    //
+    // The parameter is NOT created here: the CDS Pulumi stack runs as the CDS
+    // role, which is deliberately read-only on SSM (it verifies HMAC secrets;
+    // it never writes app-creds — Manager does). Instead this program exports
+    // the signing material (keyPairId, domain, privateKey) as stack outputs and
+    // the installer writes the SecureString post-Pulumi under Manager creds —
+    // mirroring how the Pulumi passphrase and per-app HMAC secrets are minted.
+    // See putCloudFrontSigningParameter in app-creds.ts. The name is shared via
+    // this exported constant so both sides agree; keep them in lockstep.
+    const cloudfrontSigningParamName = `/${ctx.stackPrefix}/app-creds/_cloudfront-signing`;
+
     // -----------------------------------------------------------------------
     // DSQL cluster
     // -----------------------------------------------------------------------
@@ -159,48 +179,11 @@ export function buildCloudDataServerProgram(
       });
     }
 
-    // Defense-in-depth: deny any principal whose starkeep:appId tag does not
-    // match the apps/<appId>/* prefix being accessed. The IAM permissions
-    // boundary already scopes per-app roles to their own prefix; this is a
-    // redundant second gate enforced at the bucket itself. cloud-data-server,
-    // when brokering on behalf of an app, uses the assumed app role's
-    // credentials (which carry the matching tag), so brokering is unaffected.
-    new aws.s3.BucketPolicy(`${ctx.stackPrefix}-files-policy`, {
-      bucket: bucket.id,
-      policy: pulumi.jsonStringify({
-        Version: "2012-10-17",
-        Statement: [
-          {
-            // Deny object-level access under apps/* whose key does not live
-            // under apps/<principal's starkeep:appId>/*. The IAM permissions
-            // boundary already enforces this on the principal side; the
-            // bucket policy is a redundant second gate on the resource side.
-            //
-            // The ArnNotLike condition on aws:ResourceArn expands the
-            // ${aws:PrincipalTag/starkeep:appId} policy variable at
-            // evaluation time and compares against the requested resource
-            // ARN, so the same statement covers GetObject, PutObject,
-            // DeleteObject, etc.
-            //
-            // cloud-data-server, when brokering on behalf of an app, uses
-            // the assumed app role's credentials (which carry the matching
-            // tag), so brokering naturally satisfies the condition.
-            // Untagged principals get an empty expansion and are denied —
-            // which is intentional for the apps/* keyspace.
-            Sid: "DenyCrossAppPrefixAccess",
-            Effect: "Deny",
-            Principal: "*",
-            Action: "s3:*",
-            Resource: pulumi.interpolate`${bucket.arn}/apps/*`,
-            Condition: {
-              ArnNotLike: {
-                "aws:ResourceArn": pulumi.interpolate`${bucket.arn}/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
-              },
-            },
-          },
-        ],
-      }),
-    });
+    // NOTE: the files bucket policy is defined AFTER the CloudFront distribution
+    // below, because it must also admit the distribution (via OAC) to read
+    // shared/* objects — and S3 permits only one policy document per bucket, so
+    // both the cross-app Deny and the CloudFront Allow live in that single
+    // resource. See `${ctx.stackPrefix}-files-policy` further down.
 
     // Browser uploads/downloads go directly to S3 via presigned URLs from the
     // photos app served at the API Gateway origin, so the bucket itself must
@@ -262,6 +245,10 @@ export function buildCloudDataServerProgram(
             STACK_PREFIX: ctx.stackPrefix,
             STARKEEP_APP_ID: "cloud-data-server",
             STARKEEP_STACK_PREFIX: ctx.stackPrefix,
+            // Part B: SSM SecureString holding { keyPairId, domain, privateKey }
+            // for signing shared-file CloudFront URLs. Name only — the Lambda
+            // reads and caches the value once per warm container.
+            CLOUDFRONT_SIGNING_PARAM: cloudfrontSigningParamName,
             // Forwarded only when the installer process sets it (the Tier-3
             // e2e suite does, to shorten the broker's HMAC secret cache).
             // Absent in real installs → broker keeps its 5-min default.
@@ -418,6 +405,273 @@ export function buildCloudDataServerProgram(
     });
 
     // -----------------------------------------------------------------------
+    // CloudFront distribution (platform-owned) — Part A: app static assets
+    //
+    // Puts an edge cache in front of the shared API Gateway so each cloud app's
+    // Next.js JS/CSS/HTML (served under /apps/{appId}/*) is cached at the edge
+    // instead of costing a Lambda invocation per request. Lives in this stack
+    // so `pulumi destroy` tears it down (no teardown-bootstrap.sh change).
+    //
+    // CloudFront is an OPTIMIZATION layer, not a security boundary: the gateway
+    // stays directly reachable, and JWT/HMAC auth is unchanged on the origin.
+    // See data-roles-and-permissions.md.
+    // -----------------------------------------------------------------------
+
+    // Managed policies (looked up by name so we don't hardcode AWS's IDs).
+    const cachingOptimizedId = aws.cloudfront
+      .getCachePolicyOutput({ name: "Managed-CachingOptimized" })
+      .apply((p) => p.id!);
+    const cachingDisabledId = aws.cloudfront
+      .getCachePolicyOutput({ name: "Managed-CachingDisabled" })
+      .apply((p) => p.id!);
+    // Forwards all viewer headers EXCEPT Host. The two gotchas this resolves:
+    //   (a) with caching disabled, Authorization + custom (HMAC signature)
+    //       headers are only forwarded if the origin request policy includes
+    //       them — this policy forwards all viewer headers;
+    //   (b) forwarding the viewer Host header breaks API Gateway HTTP APIs
+    //       (the gateway requires its own execute-api hostname) — hence the
+    //       ...ExceptHostHeader variant. HMAC signs over the path (preserved),
+    //       so signatures remain valid.
+    const allViewerExceptHostId = aws.cloudfront
+      .getOriginRequestPolicyOutput({ name: "Managed-AllViewerExceptHostHeader" })
+      .apply((p) => p.id!);
+
+    // API Gateway execute-api origin domain (apiEndpoint minus the scheme).
+    const gatewayOriginDomain = api.apiEndpoint.apply((ep) =>
+      ep.replace(/^https?:\/\//, ""),
+    );
+    const gatewayOriginId = "api-gateway";
+
+    // -----------------------------------------------------------------------
+    // Part B — shared-data file bytes via CloudFront signed URLs
+    //
+    // A second origin (the files bucket, locked with OAC) plus a `shared/*`
+    // behavior that requires CloudFront-signed requests from a key group. The
+    // cloud-data-server Lambda signs URLs with the private key (read from SSM);
+    // the read path stops minting S3 presigned URLs for shared bytes.
+    //
+    // Trust note (see data-roles-and-permissions.md + the plan): this removes
+    // the per-app IAM ceiling from the shared *read* path. Blast radius is
+    // capped structurally at `shared/*` — the distribution has no behavior for
+    // apps/* or any other prefix, and OAC opens the bucket only to this
+    // distribution. Writes and app-data files are untouched.
+    // -----------------------------------------------------------------------
+
+    // RSA key pair for CloudFront URL signing. Generated via the TLS provider so
+    // the key material is stable in Pulumi state across updates (regenerating on
+    // every `pulumi up` would silently invalidate every already-issued URL).
+    const signingKey = new tls.PrivateKey(`${ctx.stackPrefix}-cf-signing-key`, {
+      algorithm: "RSA",
+      rsaBits: 2048,
+    });
+
+    const cfPublicKey = new aws.cloudfront.PublicKey(`${ctx.stackPrefix}-cf-pubkey`, {
+      comment: `${ctx.stackPrefix} shared-file signing key`,
+      encodedKey: signingKey.publicKeyPem,
+    });
+
+    // Key group created able to hold two keys so a future rotation needs no
+    // redesign (rotation itself is out of scope — fresh-start philosophy).
+    const keyGroup = new aws.cloudfront.KeyGroup(`${ctx.stackPrefix}-cf-keygroup`, {
+      comment: `${ctx.stackPrefix} shared-file signers`,
+      items: [cfPublicKey.id],
+    });
+
+    // (The private key + keyPairId + distribution domain are exported as stack
+    // outputs below and written to one SSM SecureString by the installer, under
+    // Manager creds — the CDS role that runs this program is read-only on SSM.)
+
+    // Origin Access Control — CloudFront signs its S3 origin requests (SigV4)
+    // so the bucket can stay fully private (block-public-access on) and admit
+    // only this distribution via the bucket policy below.
+    const filesOac = new aws.cloudfront.OriginAccessControl(`${ctx.stackPrefix}-files-oac`, {
+      name: `${ctx.stackPrefix}-files-oac`,
+      originAccessControlOriginType: "s3",
+      signingBehavior: "always",
+      signingProtocol: "sigv4",
+    });
+
+    // Custom cache policy for shared bytes: cache by PATH only. The signed-URL
+    // query params (Expires/Signature/Key-Pair-Id) are validated by CloudFront
+    // and then EXCLUDED from the cache key — otherwise every freshly-signed URL
+    // is a distinct key and the edge cache never hits. Objects are
+    // content-addressed and immutable, so long TTLs are safe.
+    const sharedFilesCachePolicy = new aws.cloudfront.CachePolicy(
+      `${ctx.stackPrefix}-shared-files-cache`,
+      {
+        name: `${ctx.stackPrefix}-shared-files-cache`,
+        comment: "Path-keyed caching for content-addressed shared file bytes",
+        minTtl: 0,
+        defaultTtl: 86400, // 1 day
+        maxTtl: 31536000, // 1 year — immutable content-addressed objects
+        parametersInCacheKeyAndForwardedToOrigin: {
+          enableAcceptEncodingGzip: true,
+          enableAcceptEncodingBrotli: true,
+          queryStringsConfig: { queryStringBehavior: "none" },
+          headersConfig: { headerBehavior: "none" },
+          cookiesConfig: { cookieBehavior: "none" },
+        },
+      },
+    );
+
+    const filesOriginId = "shared-files-s3";
+
+    const distribution = new aws.cloudfront.Distribution(
+      `${ctx.stackPrefix}-cdn`,
+      {
+        enabled: true,
+        // Default *.cloudfront.net domain — no custom domain / ACM cert.
+        comment: `${ctx.stackPrefix} platform CDN`,
+        origins: [
+          {
+            originId: gatewayOriginId,
+            domainName: gatewayOriginDomain,
+            customOriginConfig: {
+              httpPort: 80,
+              httpsPort: 443,
+              originProtocolPolicy: "https-only",
+              originSslProtocols: ["TLSv1.2"],
+            },
+          },
+          {
+            // Part B: the shared-data files bucket, locked with OAC.
+            originId: filesOriginId,
+            domainName: bucket.bucketRegionalDomainName,
+            originAccessControlId: filesOac.id,
+            // s3OriginConfig with an empty OAI is required by the API when
+            // using OAC on an S3 origin (OAC supersedes the legacy OAI).
+            s3OriginConfig: { originAccessIdentity: "" },
+          },
+        ],
+        orderedCacheBehaviors: [
+          {
+            // Next.js content-hashed assets — immutable, safe for long TTLs.
+            // Public (no auth headers), so CachingOptimized needs no origin
+            // request policy.
+            pathPattern: "/apps/*/_next/static/*",
+            targetOriginId: gatewayOriginId,
+            viewerProtocolPolicy: "redirect-to-https",
+            allowedMethods: ["GET", "HEAD"],
+            cachedMethods: ["GET", "HEAD"],
+            cachePolicyId: cachingOptimizedId,
+            compress: true,
+          },
+          {
+            // Part B: content-addressed shared file bytes. Served from S3,
+            // require CloudFront-signed requests from the key group, path-keyed
+            // caching. `shared/*` matches the confirmed key layout
+            // shared/<category>/<shard>/<hash> and never collides with the
+            // gateway routes (which live under /apps/*).
+            pathPattern: "shared/*",
+            targetOriginId: filesOriginId,
+            viewerProtocolPolicy: "redirect-to-https",
+            allowedMethods: ["GET", "HEAD"],
+            cachedMethods: ["GET", "HEAD"],
+            cachePolicyId: sharedFilesCachePolicy.id,
+            trustedKeyGroups: [keyGroup.id],
+            compress: true,
+          },
+        ],
+        defaultCacheBehavior: {
+          // Everything else: SPA HTML entry points + all API routes. No caching;
+          // forward all viewer headers except Host so JWT/HMAC auth passes
+          // through and the gateway sees its own hostname.
+          targetOriginId: gatewayOriginId,
+          viewerProtocolPolicy: "redirect-to-https",
+          allowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
+          cachedMethods: ["GET", "HEAD"],
+          cachePolicyId: cachingDisabledId,
+          originRequestPolicyId: allViewerExceptHostId,
+          compress: true,
+        },
+        restrictions: {
+          geoRestriction: { restrictionType: "none" },
+        },
+        viewerCertificate: {
+          cloudfrontDefaultCertificate: true,
+        },
+        tags: {
+          "starkeep:managed": "true",
+          "starkeep:appId": "cloud-data-server",
+        },
+      },
+    );
+
+    const publicBaseUrl = pulumi.interpolate`https://${distribution.domainName}`;
+
+    // CloudFront signing config → written to one SSM SecureString by the
+    // installer (under Manager creds) AFTER this stack comes up, not here: the
+    // CDS role that runs this program is read-only on SSM by design. The three
+    // pieces the Lambda needs are exported as stack outputs below —
+    // cloudfrontKeyPairId, cloudfrontSigningDomain, and the (secret)
+    // cloudfrontSigningPrivateKey. The Lambda still reads the finished
+    // SecureString at `cloudfrontSigningParamName`; the leading underscore in
+    // that name keeps it out of the real-appId keyspace so it can never collide
+    // with a per-app HMAC secret at `app-creds/<appId>`. Only the CDS Lambda
+    // role has app-creds read, so app code can never obtain the signing key.
+
+    // Files bucket policy — the single policy document for the files bucket,
+    // combining the redundant cross-app Deny (resource-side gate mirroring the
+    // per-app IAM prefix isolation) with the CloudFront OAC Allow that admits
+    // the distribution to read shared/* objects. S3 permits only one policy per
+    // bucket, so both statements live here. Created after the distribution
+    // because the Allow's SourceArn condition references the distribution ARN.
+    new aws.s3.BucketPolicy(`${ctx.stackPrefix}-files-policy`, {
+      bucket: bucket.id,
+      policy: pulumi.jsonStringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            // Deny object-level access under apps/* whose key does not live
+            // under apps/<principal's starkeep:appId>/*. The IAM permissions
+            // boundary already enforces this on the principal side; the
+            // bucket policy is a redundant second gate on the resource side.
+            //
+            // The ArnNotLike condition on aws:ResourceArn expands the
+            // ${aws:PrincipalTag/starkeep:appId} policy variable at
+            // evaluation time and compares against the requested resource
+            // ARN, so the same statement covers GetObject, PutObject,
+            // DeleteObject, etc.
+            //
+            // cloud-data-server, when brokering on behalf of an app, uses
+            // the assumed app role's credentials (which carry the matching
+            // tag), so brokering naturally satisfies the condition.
+            // Untagged principals get an empty expansion and are denied —
+            // which is intentional for the apps/* keyspace. CloudFront's OAC
+            // principal only ever reads shared/* (below), never apps/*, so
+            // this Deny does not interfere with it.
+            Sid: "DenyCrossAppPrefixAccess",
+            Effect: "Deny",
+            Principal: "*",
+            Action: "s3:*",
+            Resource: pulumi.interpolate`${bucket.arn}/apps/*`,
+            Condition: {
+              ArnNotLike: {
+                "aws:ResourceArn": pulumi.interpolate`${bucket.arn}/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
+              },
+            },
+          },
+          {
+            // Part B: admit this distribution (and only this one, via the
+            // SourceArn condition) to read shared/* object bytes through OAC.
+            // Scoped to shared/* so the distribution can never read apps/*
+            // (private app data) even if a behavior were mis-added.
+            Sid: "AllowCloudFrontSharedRead",
+            Effect: "Allow",
+            Principal: { Service: "cloudfront.amazonaws.com" },
+            Action: "s3:GetObject",
+            Resource: pulumi.interpolate`${bucket.arn}/shared/*`,
+            Condition: {
+              StringEquals: {
+                "AWS:SourceArn": distribution.arn,
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    // -----------------------------------------------------------------------
     // Billing bucket + CUR report definition
     //
     // CUR is a global service (us-east-1 only), so we need a dedicated
@@ -494,6 +748,20 @@ export function buildCloudDataServerProgram(
       apiGatewayUrl: pulumi.all([api.apiEndpoint, stage.name]).apply(([endpoint, name]) =>
         name === "$default" ? endpoint : `${endpoint}/${name}`,
       ),
+      // Browser-facing base URL — the CloudFront distribution domain. Everything
+      // downstream (runtime-config → SPA data-client / cloud-config / admin-web)
+      // derives its origin from this. Server-to-server calls keep using
+      // apiGatewayUrl directly (see the URL-plumbing decision in the plan).
+      publicBaseUrl,
+      // CloudFront URL-signing material (Part B). The installer bundles these
+      // into the `cloudfrontSigningParamName` SecureString post-Pulumi under
+      // Manager creds (the CDS role is read-only on SSM). keyPairId and domain
+      // are plain resource outputs; privateKey is a secret output (already
+      // sensitive via the tls provider, so it stays encrypted in stack state
+      // and is only decrypted into the installer process to write the param).
+      cloudfrontKeyPairId: cfPublicKey.id,
+      cloudfrontSigningDomain: distribution.domainName,
+      cloudfrontSigningPrivateKey: signingKey.privateKeyPem,
       authorizerId: authorizer.id,
       functionArn: fn.arn,
       region: ctx.region,

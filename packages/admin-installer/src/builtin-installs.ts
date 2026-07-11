@@ -45,6 +45,7 @@ import {
 import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
+import { putCloudFrontSigningParameter } from "./app-creds";
 import {
   logAppRoleSnapshot,
   logCallerIdentity,
@@ -139,6 +140,8 @@ export interface CloudDataServerInstallOutputs {
   auroraHostname: string;
   bucketName: string;
   apiGatewayUrl: string;
+  /** Browser-facing base URL — the CloudFront distribution domain. */
+  publicBaseUrl: string;
   apiGatewayId: string;
   apiGatewayExecutionArn: string;
   authorizerId: string;
@@ -371,9 +374,28 @@ export async function installCloudDataServer(
     const apiGatewayId = String(outputs.apiGatewayId);
     const apiGatewayExecutionArn = String(outputs.apiGatewayExecutionArn);
     const apiGatewayUrl = String(outputs.apiGatewayUrl);
+    const publicBaseUrl = String(outputs.publicBaseUrl);
     const authorizerId = String(outputs.authorizerId);
     const functionArn = String(outputs.functionArn);
     const region = String(outputs.region);
+
+    // Step 4.5: Persist the CloudFront URL-signing config (Part B) as a
+    // SecureString under Manager creds. The CDS Pulumi stack generates the key
+    // pair and exports the signing material (the CDS role is read-only on SSM,
+    // so it cannot write app-creds itself); Manager already holds
+    // PutParameter + KMS-encrypt on `app-creds/*`, so this mirrors how per-app
+    // HMAC secrets are minted with no IAM change. Idempotent — a redeploy
+    // re-puts the (possibly rotated) material.
+    console.log("Persisting CloudFront signing config to SSM…");
+    await putCloudFrontSigningParameter({
+      stackPrefix: config.stackPrefix,
+      keyPairId: String(outputs.cloudfrontKeyPairId),
+      domain: String(outputs.cloudfrontSigningDomain),
+      privateKey: String(outputs.cloudfrontSigningPrivateKey),
+      region: config.region,
+      awsCreds: managerCreds,
+    });
+    console.log("CloudFront signing config persisted.");
 
     // Step 5: Initialize the shared schema against the now-existing DSQL
     // cluster. Fully idempotent — see dsql-schema-init.ts.
@@ -416,6 +438,7 @@ export async function installCloudDataServer(
       auroraHostname,
       bucketName,
       apiGatewayUrl,
+      publicBaseUrl,
       apiGatewayId,
       apiGatewayExecutionArn,
       authorizerId,

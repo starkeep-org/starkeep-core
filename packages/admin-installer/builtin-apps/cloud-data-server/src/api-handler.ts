@@ -22,6 +22,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
+import { getSignedUrl as getCloudFrontSignedUrl } from "@aws-sdk/cloudfront-signer";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
@@ -524,14 +525,26 @@ export function parseObjectKey(
   grants: AccessGrants,
   mode: "read" | "write",
 ): { ok: true } | { ok: false; status: number; message: string } {
+  // Reject path traversal outright in EITHER namespace. Signed URLs (S3 or
+  // CloudFront) are fetched by clients/edges that normalize ".." path segments,
+  // so a key like shared/image/../audio/<hash> could resolve to a DIFFERENT
+  // category's bytes than the one authorized here. Legit content-addressed and
+  // app-syncable keys never contain "..". This is load-bearing now that the
+  // shared read path has no per-app IAM ceiling behind CloudFront signing.
+  if (decodedKey.split("/").includes("..")) {
+    return { ok: false, status: 400, message: "Invalid key" };
+  }
   if (decodedKey.startsWith("shared/")) {
-    const segments = decodedKey.split("/");
-    if (segments.length < 4 || !segments[1] || !segments[2] || !segments[3]) {
-      return { ok: false, status: 400, message: "Invalid shared key" };
-    }
-    // shared/<category>/<shard>/<hash> — the first segment is the derived
-    // category (see object-keys.ts), so authorize at the category level.
-    const category = segments[1]!;
+    // Strict shape: shared/<category>/<shard>/<hash>, every segment drawn from
+    // a safe alphabet (no dots, slashes, %-escapes, whitespace, or control
+    // chars). The category is the derived category (see object-keys.ts), so
+    // authorize at the category level. Anything that isn't a clean
+    // content-addressed blob key is rejected before it can be signed.
+    const m = decodedKey.match(
+      /^shared\/([a-z0-9_-]+)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/,
+    );
+    if (!m) return { ok: false, status: 400, message: "Invalid shared key" };
+    const category = m[1]!;
     const allowed =
       mode === "read" ? canReadCategory(grants, category) : canWriteCategory(grants, category);
     if (!allowed) return { ok: false, status: 403, message: "Forbidden" };
@@ -553,6 +566,97 @@ export function parseObjectKey(
     return { ok: true };
   }
   return { ok: false, status: 400, message: "Unknown key namespace" };
+}
+
+// ---------------------------------------------------------------------------
+// CloudFront signed URLs for shared file bytes (Part B)
+//
+// Shared blob reads are served through the platform CloudFront distribution's
+// `shared/*` behavior (signed requests, edge-cached) instead of S3 presigned
+// GETs. The signing config — { keyPairId, domain, privateKey } — lives in one
+// SSM SecureString (name in CLOUDFRONT_SIGNING_PARAM), read once per warm
+// container. The private key never leaves this Lambda; app code cannot reach
+// it (only the CDS role has app-creds SSM read).
+// ---------------------------------------------------------------------------
+
+interface CloudFrontSigningConfig {
+  keyPairId: string;
+  domain: string;
+  privateKey: string;
+}
+
+let cloudFrontConfigCache: { config: CloudFrontSigningConfig; fetchedAt: number } | null = null;
+
+async function loadCloudFrontSigningConfig(): Promise<CloudFrontSigningConfig> {
+  if (cloudFrontConfigCache && Date.now() - cloudFrontConfigCache.fetchedAt < HMAC_CACHE_TTL_MS) {
+    return cloudFrontConfigCache.config;
+  }
+  const name = process.env.CLOUDFRONT_SIGNING_PARAM;
+  if (!name) throw new Error("CLOUDFRONT_SIGNING_PARAM env var is required");
+  const result = await getSsmClient().send(
+    new GetParameterCommand({ Name: name, WithDecryption: true }),
+  );
+  const raw = result.Parameter?.Value;
+  if (!raw) throw new Error("CloudFront signing parameter is empty");
+  const parsed = JSON.parse(raw) as Partial<CloudFrontSigningConfig>;
+  if (!parsed.keyPairId || !parsed.domain || !parsed.privateKey) {
+    throw new Error("CloudFront signing parameter is malformed");
+  }
+  cloudFrontConfigCache = {
+    config: parsed as CloudFrontSigningConfig,
+    fetchedAt: Date.now(),
+  };
+  return cloudFrontConfigCache.config;
+}
+
+/**
+ * The single pre-sign revalidation chokepoint for shared-file CloudFront URLs.
+ *
+ * Every shared file-url route mints its URL through here; no route may reach
+ * the CloudFront signer around it. With the per-app IAM ceiling gone from the
+ * shared read path (see data-roles-and-permissions.md / the CloudFront plan),
+ * this in-process re-check is the last per-request line of defense: it re-parses
+ * the key against the caller's grants, REQUIRES the `shared/` namespace (the
+ * distribution never serves apps/* or any other prefix), and re-asserts the
+ * key's category against the caller's granted categories. Adversarial key
+ * handling (traversal, foreign categories, encoding tricks) is the whole point,
+ * so it is covered by dedicated tests.
+ */
+export async function signSharedCloudFrontUrl(
+  callerAppId: string,
+  key: string,
+  grants: AccessGrants,
+  expiresInSec: number,
+): Promise<{ ok: true; url: string } | { ok: false; status: number; message: string }> {
+  // (1) Re-validate the key against the caller's grants (namespace, segment
+  // shape, and — for shared/ — the category read grant).
+  const check = parseObjectKey(callerAppId, key, grants, "read");
+  if (!check.ok) return check;
+  // (2) Namespace requirement: CloudFront only ever signs shared/* bytes. Any
+  // other namespace (apps/*, unknown) is rejected even though parseObjectKey
+  // may have allowed it for an app's own syncable files — those never go
+  // through CloudFront.
+  if (!key.startsWith("shared/")) {
+    return { ok: false, status: 400, message: "CloudFront signing is only for shared keys" };
+  }
+  // (3) Redundant category re-check. parseObjectKey already did this for the
+  // shared/ branch, but this is the load-bearing defense line, so assert it
+  // explicitly here rather than trusting the call above.
+  const category = key.split("/")[1];
+  if (!category || !canReadCategory(grants, category)) {
+    return { ok: false, status: 403, message: "Forbidden" };
+  }
+  const cfg = await loadCloudFrontSigningConfig();
+  // Content-addressed keys contain only URL-safe chars (lowercase category ids,
+  // hex shards/hashes, slashes), and parseObjectKey has rejected anything else,
+  // so the key is safe to place directly in the URL path.
+  const url = getCloudFrontSignedUrl({
+    url: `https://${cfg.domain}/${key}`,
+    keyPairId: cfg.keyPairId,
+    privateKey: cfg.privateKey,
+    dateLessThan: new Date(Date.now() + Math.max(1, expiresInSec) * 1000).toISOString(),
+  });
+  return { ok: true, url };
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1065,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!check.ok) return clientErr(check.message, check.status);
       const exists = await storage.has(key);
       if (!exists) return clientErr("Not found", 404);
+      // Shared bytes → CloudFront signed URL (through the chokepoint); app
+      // syncable bytes stay on S3 presign (CloudFront never serves apps/*).
+      if (key.startsWith("shared/")) {
+        const signed = await signSharedCloudFrontUrl(appId, key, grants, 3600);
+        if (!signed.ok) return clientErr(signed.message, signed.status);
+        return ok({ url: signed.url });
+      }
       const url = await storage.getSignedUrl!(key, { expiresIn: 3600 });
       return ok({ url });
     }
@@ -1054,13 +1165,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         return clientErr("ids must contain at most 500 record ids", 400);
       }
       const ids = [...new Set(body.ids)] as StarkeepId[];
-      // Unlike the single route this clamps to the STS session lifetime — a
-      // URL signed with session credentials dies with the session anyway.
-      const expiresIn = clampPresignExpiresIn(
+      // Shared bytes are CloudFront-signed with a flat expiry — CloudFront
+      // key-pair signatures don't die with the STS session, so the historical
+      // STS clamp doesn't apply. The (defensive) S3-presign fallback for any
+      // non-shared key still clamps, since those URLs do die with the session.
+      const requestedExpiresIn =
         typeof body.expiresIn === "number" && Number.isFinite(body.expiresIn) && body.expiresIn > 0
           ? body.expiresIn
-          : 3600,
-      );
+          : 3600;
       const result = await db.query({
         filters: [
           { field: "id", operator: "in", value: ids },
@@ -1073,14 +1185,28 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         result.records
           .filter((r) => canRead(grants, r.type) && r.objectStorageKey)
           .map(async (r) => {
+            const key = r.objectStorageKey!;
+            let url: string;
+            if (key.startsWith("shared/")) {
+              // Through the pre-sign revalidation chokepoint. A key whose
+              // category the caller can't read (a route/data mismatch) is
+              // silently omitted, matching this batch route's per-id semantics.
+              const signed = await signSharedCloudFrontUrl(appId, key, grants, requestedExpiresIn);
+              if (!signed.ok) return;
+              url = signed.url;
+            } else {
+              url = await storage.getSignedUrl!(key, {
+                expiresIn: clampPresignExpiresIn(requestedExpiresIn),
+              });
+            }
             urls[r.id] = {
-              url: await storage.getSignedUrl!(r.objectStorageKey!, { expiresIn }),
+              url,
               mimeType: r.mimeType ?? undefined,
               sizeBytes: r.sizeBytes ?? undefined,
             };
           }),
       );
-      return ok({ urls, expiresIn });
+      return ok({ urls, expiresIn: requestedExpiresIn });
     }
 
     // GET /apps/{appId}/data/records/:id/file-url
@@ -1092,7 +1218,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
       if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
       const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
-      const url = await storage.getSignedUrl!(record.objectStorageKey, { expiresIn });
+      const key = record.objectStorageKey;
+      // Shared bytes → CloudFront signed URL (through the chokepoint); any
+      // non-shared key stays on S3 presign.
+      if (key.startsWith("shared/")) {
+        const signed = await signSharedCloudFrontUrl(appId, key, grants, expiresIn);
+        if (!signed.ok) return clientErr(signed.message, signed.status);
+        return ok({ url: signed.url, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
+      }
+      const url = await storage.getSignedUrl!(key, { expiresIn });
       return ok({ url, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
     }
 

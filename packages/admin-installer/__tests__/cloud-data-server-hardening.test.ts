@@ -27,7 +27,18 @@ pulumi.runtime.setMocks(
   {
     newResource(args: pulumi.runtime.MockResourceArgs): { id: string; state: Record<string, unknown> } {
       created.push({ type: args.type, name: args.name, inputs: args.inputs });
-      return { id: `${args.name}-id`, state: { ...args.inputs, arn: `arn:fake:${args.name}` } };
+      const extra: Record<string, unknown> = {};
+      // The API Gateway's apiEndpoint is a computed output the mock must supply,
+      // or the CloudFront origin-domain derivation (apiEndpoint.replace(...))
+      // gets undefined. Real Pulumi always resolves it.
+      if (args.type.endsWith("apigatewayv2/api:Api")) {
+        extra.apiEndpoint = "https://mockapi.execute-api.us-east-2.amazonaws.com";
+      }
+      // CloudFront distribution's domainName feeds publicBaseUrl.
+      if (args.type.endsWith("cloudfront/distribution:Distribution")) {
+        extra.domainName = `${args.name}.cloudfront.net`;
+      }
+      return { id: `${args.name}-id`, state: { ...args.inputs, arn: `arn:fake:${args.name}`, ...extra } };
     },
     call(args: pulumi.runtime.MockCallArgs) {
       return args.inputs;

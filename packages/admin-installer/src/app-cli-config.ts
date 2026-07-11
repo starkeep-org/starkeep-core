@@ -31,6 +31,12 @@ export interface StarkeepCliConfig {
   installInfraRoleArn?: string;
   pulumiStateBucket?: string;
   apiGatewayUrl?: string;
+  /**
+   * Browser-facing base URL — the CloudFront distribution domain. Falls back to
+   * apiGatewayUrl for pre-CloudFront configs. Server-to-server calls keep using
+   * apiGatewayUrl directly.
+   */
+  publicBaseUrl?: string;
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;

@@ -68,6 +68,7 @@ function broadcastLine(line: string): void {
 interface StarkeepConfig {
   userPoolId: string;
   apiGatewayUrl?: string;
+  publicBaseUrl?: string;
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
@@ -170,6 +171,7 @@ export async function POST(req: NextRequest) {
             const post = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
             emitEvent("done", {
               apiGatewayUrl: post.apiGatewayUrl,
+              publicBaseUrl: post.publicBaseUrl,
               apiGatewayId: post.apiGatewayId,
               apiGatewayExecutionArn: post.apiGatewayExecutionArn,
               authorizerId: post.authorizerId,

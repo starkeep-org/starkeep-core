@@ -245,6 +245,8 @@ echo "  Stack prefix : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
 echo "  API Gateway  : $GATEWAY_NAME"
 echo "  Lambda       : $CDS_LAMBDA"
 echo "  DSQL cluster : (tagged starkeep:appId=cloud-data-server)"
+echo "  CloudFront   : distribution + OAC + cache policy + public key + key group (Part B)"
+echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
 echo "  CUR report   : $CUR_REPORT"
 echo "  IAM role     : $CDS_ROLE"
@@ -359,10 +361,146 @@ if [[ -z "$CLUSTER_IDS" ]]; then
 else
   for CID in $CLUSTER_IDS; do
     echo "  Deleting cluster: $CID"
-    aws dsql delete-cluster --identifier "$CID" --region "$REGION"
-    echo "  Delete initiated (DSQL deletion is asynchronous)."
+    # Best-effort: a single cluster that refuses to delete (e.g. deletion
+    # protection still enabled, or it is already mid-delete) must NOT abort the
+    # whole teardown and leave the bootstrap layer half-removed. Warn and move
+    # on; a genuinely protected cluster is left for the operator to handle
+    # deliberately — teardown never silently bypasses deletion protection.
+    if aws dsql delete-cluster --identifier "$CID" --region "$REGION" 2>/tmp/dsql-del-err; then
+      echo "  Delete initiated (DSQL deletion is asynchronous)."
+    else
+      echo "  WARN: could not delete $CID — leaving it. Reason:"
+      sed 's/^/    /' /tmp/dsql-del-err
+    fi
   done
+  rm -f /tmp/dsql-del-err
 fi
+
+# ── Step 4b: CloudFront (Part B: shared-file signed URLs) ─────────────────────
+# The platform CloudFront distribution and its URL-signing material: the
+# distribution itself, the S3-origin OAC, the custom shared-files cache policy,
+# and the RSA public key + key group. Deleting a distribution requires
+# disable → wait-until-Deployed → delete, which is slow (~5–15 min). This whole
+# step is best-effort: any failure is logged and skipped so a hiccup never
+# aborts the wider teardown (these resources are idle/cheap and can be cleaned
+# up by hand). Done before the files bucket because the distribution's S3 origin
+# references it. Idempotent — silently skips anything already gone (e.g. an
+# install that failed before creating them).
+
+step "Deleting CloudFront distribution + signing key material"
+python3 - "$STACK_PREFIX" << 'PYEOF'
+import json, subprocess, sys, time
+
+prefix = sys.argv[1]
+
+DIST_COMMENT = f"{prefix} platform CDN"
+PUBKEY_COMMENT = f"{prefix} shared-file signing key"
+KEYGROUP_COMMENT = f"{prefix} shared-file signers"
+OAC_NAME = f"{prefix}-files-oac"
+CACHE_NAME = f"{prefix}-shared-files-cache"
+
+
+def cf(*args):
+    """Run an `aws cloudfront` subcommand, returning parsed JSON (or {})."""
+    r = subprocess.run(["aws", "cloudfront", *args, "--output", "json"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip())
+    return json.loads(r.stdout) if r.stdout.strip() else {}
+
+
+def delete_with_etag(kind, list_cmd, list_key, match, id_of, get_cmd, delete_cmd):
+    """Generic list→match→get-ETag→delete for the ETag-guarded CF resources
+    (key group, public key, OAC, cache policy). `match(item)` picks ours and
+    `id_of(item)` extracts its id (the list-item shapes differ: some wrap the
+    resource, some are flat). Best-effort — a still-referenced or absent
+    resource just warns/skips."""
+    try:
+        data = cf(list_cmd)
+        items = (data.get(list_key) or {}).get("Items", []) or []
+        found = next((it for it in items if match(it)), None)
+        if not found:
+            print(f"  {kind}: not found, skipping.")
+            return
+        rid = id_of(found)
+        got = cf(get_cmd, "--id", rid)
+        cf(delete_cmd, "--id", rid, "--if-match", got["ETag"])
+        print(f"  {kind}: deleted {rid}.")
+    except Exception as e:  # noqa: BLE001 — best-effort teardown
+        print(f"  WARN {kind} cleanup: {e}")
+
+
+# ---- Distribution: find by comment → disable → wait Deployed → delete --------
+try:
+    data = cf("list-distributions")
+    items = (data.get("DistributionList") or {}).get("Items", []) or []
+    dist = next((d for d in items if d.get("Comment") == DIST_COMMENT), None)
+    if not dist:
+        print("  Distribution: not found, skipping.")
+    else:
+        dist_id = dist["Id"]
+        print(f"  Distribution: {dist_id} (disable → wait → delete)")
+        gc = cf("get-distribution-config", "--id", dist_id)
+        etag, cfg = gc["ETag"], gc["DistributionConfig"]
+        if cfg.get("Enabled"):
+            cfg["Enabled"] = False
+            path = f"/tmp/cf-disable-{dist_id}.json"
+            with open(path, "w") as f:
+                json.dump(cfg, f)
+            print("  Disabling distribution…")
+            cf("update-distribution", "--id", dist_id, "--if-match", etag,
+               "--distribution-config", f"file://{path}")
+        deployed = False
+        deadline = time.time() + 25 * 60
+        while time.time() < deadline:
+            gd = cf("get-distribution", "--id", dist_id)
+            status = gd["Distribution"]["Status"]
+            etag = gd["ETag"]
+            if status == "Deployed":
+                deployed = True
+                break
+            print(f"  …status={status}; waiting 30s")
+            time.sleep(30)
+        if not deployed:
+            print("  Distribution did not reach Deployed in 25m; leave for manual cleanup.")
+        else:
+            print("  Deleting distribution…")
+            cf("delete-distribution", "--id", dist_id, "--if-match", etag)
+            print("  Distribution deleted.")
+except Exception as e:  # noqa: BLE001
+    print(f"  WARN distribution cleanup: {e}")
+
+# ---- Dependents (only deletable once the distribution no longer references
+# them; each best-effort, so a still-referenced resource just warns) ----------
+delete_with_etag(
+    "Key group", "list-key-groups", "KeyGroupList",
+    lambda it: it.get("KeyGroup", {}).get("KeyGroupConfig", {}).get("Comment") == KEYGROUP_COMMENT,
+    lambda it: it["KeyGroup"]["Id"],
+    "get-key-group", "delete-key-group",
+)
+delete_with_etag(
+    "Public key", "list-public-keys", "PublicKeyList",
+    lambda it: it.get("Comment") == PUBKEY_COMMENT,
+    lambda it: it["Id"],
+    "get-public-key", "delete-public-key",
+)
+delete_with_etag(
+    "Origin access control", "list-origin-access-controls", "OriginAccessControlList",
+    lambda it: it.get("Name") == OAC_NAME,
+    lambda it: it["Id"],
+    "get-origin-access-control", "delete-origin-access-control",
+)
+delete_with_etag(
+    "Cache policy", "list-cache-policies", "CachePolicyList",
+    lambda it: it.get("CachePolicy", {}).get("CachePolicyConfig", {}).get("Name") == CACHE_NAME,
+    lambda it: it["CachePolicy"]["Id"],
+    "get-cache-policy", "delete-cache-policy",
+)
+PYEOF
+
+step "Deleting CloudFront signing SecureString: /${STACK_PREFIX}/app-creds/_cloudfront-signing"
+aws ssm delete-parameter --name "/${STACK_PREFIX}/app-creds/_cloudfront-signing" 2>/dev/null \
+  && echo "  Deleted." || echo "  Not found, skipping."
 
 # ── Step 5: S3 files bucket ───────────────────────────────────────────────────
 
