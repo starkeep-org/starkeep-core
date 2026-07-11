@@ -15,9 +15,9 @@ Starkeep is currently in alpha, pre-production status. The whole system and all 
 
 However, there are some significant known limitations, making Starkeep probably not yet suitable for "production" (that is personal use), yet:
 
-- Cloudfront and custom DNS support have not been added to the system yet, so your cloud-running apps will get a Lambda URL and they'll be slow to serve data. (But they work!)
 - Starkeep does not yet support non-default Lambda concurrency limits (i.e. beyond the new account default limit of 10). This is because increasing that limit requires making a request to Amazon and could complicate the setup, which we wanted to keep as simple as possible. We'll sort this out soon. Result: another source of cloud app slowness, but again: they work!
-- Starkeep does not yet provide a way to update its foundational bootstrap deployment, which will be required for certain changes in the future, such as adding Cloudfront. This may make it practically necessary to introduce breaking changes to the foundation, without a guaranteed managed migration path.
+- Starkeep does not yet provide a way to update its foundational bootstrap deployment. (Of course, you can update it yourself since it runs on your infra, but there's no out of the box update support yet.
+- Custom DNS support has not been added to the system yet.
 - The apps - essentially Drive (built in) and Photos (installable) - are mostly bare bones proof-of-concept level and lack the features you'd likely need to use these apps as real replacements for, say, your current Photos app. We'll get there!
 
 ## Overview
@@ -124,7 +124,7 @@ With the Cloud Data Server installed, sync starts working automatically. Open th
 
 ### 6. Install the Photos example app to the cloud
 
-The Photos cloud app is a simple proof of concept that runs on a Lambda (Cloudfront coming soon). Install, then sign in to see your photos in the cloud.
+The Photos cloud app is a simple proof of concept. Install, then sign in to see your photos in the cloud.
 
 Note: you need to checkout the sister repo `starkeep-apps` to get the Photos
 
