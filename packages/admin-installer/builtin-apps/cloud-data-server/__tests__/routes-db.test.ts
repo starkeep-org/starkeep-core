@@ -270,6 +270,55 @@ describe("record registration", () => {
     expect(inserts[0]!.values).toContain(VALID_HASH);
   });
 
+  it("persists and echoes a valid advisory label owned by the app", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_INSERT, []);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const res = await handler(
+      signedEvent({
+        appId: "photos",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+          label: "photos/thumbnail",
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(201);
+    const { record } = bodyOf(res) as { record: Record<string, unknown> };
+    expect(record["label"]).toBe("photos/thumbnail");
+    expect(db.calls(RECORDS_INSERT)[0]!.values).toContain("photos/thumbnail");
+  });
+
+  it("400s a label whose prefix is not the writing app, before touching S3", async () => {
+    setDbFactory(fakeDsqlWithGrants(grants));
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const res = await handler(
+      signedEvent({
+        appId: "notes",
+        method: "POST",
+        subPath: "/data/records",
+        // Squatting attempt: "notes" cannot mint a "photos/…" label.
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+          label: "photos/thumbnail",
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    // Rejected before the blob existence check.
+    expect(s3Mock.commandCalls(HeadObjectCommand)).toHaveLength(0);
+  });
+
   it("dedups a byte-identical derived child of the same parent", async () => {
     const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
       recordRow({ id: "existing-thumb", type: "image/jpeg", content_hash: VALID_HASH, parent_id: "parent-1" }),
@@ -687,6 +736,7 @@ describe("sync exchange channel split", () => {
     sizeBytes: 3,
     originalFilename: null,
     parentId: null,
+    label: null,
   };
 
   it("the Drive channel applies incoming shared records", async () => {

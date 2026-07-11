@@ -8,3 +8,4 @@ export {
   createDataRecord,
   type CreateDataRecordInput,
 } from "./builders.js";
+export { labelHasValidPrefix } from "./label.js";

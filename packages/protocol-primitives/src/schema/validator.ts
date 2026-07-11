@@ -25,6 +25,7 @@ export const dataRecordSchema = v.object({
   originalFilename: v.nullable(v.string()),
   originAppId: v.pipe(v.string(), v.minLength(1)),
   parentId: v.nullable(v.string()),
+  label: v.nullable(v.string()),
 });
 
 export function validateDataRecord(data: unknown) {

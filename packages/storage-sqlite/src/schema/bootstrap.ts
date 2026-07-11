@@ -38,7 +38,10 @@ export function initializeLocalSchema(db: DatabaseSync): void {
       size_bytes INTEGER NOT NULL,
       original_filename TEXT,
       origin_app_id TEXT NOT NULL,
-      parent_id TEXT
+      parent_id TEXT,
+      -- Advisory appId/purpose interest-filter marker (e.g. photos/thumbnail);
+      -- NULL = general interest. See DataRecord.label.
+      label TEXT
     )
   `);
   db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_type ON shared_records(type)");

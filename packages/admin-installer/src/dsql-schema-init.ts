@@ -173,7 +173,8 @@ export async function initializeSharedSchema(
          size_bytes         bigint      NOT NULL,
          original_filename  text,
          origin_app_id      text        NOT NULL,
-         parent_id          text
+         parent_id          text,
+         label              text
        )`,
 
       `ALTER DEFAULT PRIVILEGES IN SCHEMA shared GRANT ALL ON TABLES TO user_data_owner`,

@@ -51,6 +51,19 @@ export interface DataRecord extends BaseRecord {
    * type; cross-type parent links are permitted.
    */
   parentId: StarkeepId | null;
+  /**
+   * Optional advisory label — a `<appId>/<purpose>` marker (e.g.
+   * `photos/thumbnail`) the origin app sets so *other* apps can filter out
+   * records unlikely to interest them (Photos' thumbnails polluting other
+   * image-declaring apps' views). Advisory-only on the read side: readers
+   * choose whether to honor it; nothing enforces filtering. `null` = general
+   * interest (no filtering hint). Set at creation by the origin app and never
+   * changed afterward. The write path validates that a present label's prefix
+   * matches the writing app's id (see `labelHasValidPrefix`) to prevent
+   * namespace squatting. Distinct from `parentId`, which is the structural
+   * thumbnail→original link, not an interest filter.
+   */
+  label: string | null;
 }
 
 /**

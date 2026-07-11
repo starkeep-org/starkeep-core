@@ -77,6 +77,7 @@ export function recordRow(
     original_filename: null,
     origin_app_id: "some-app",
     parent_id: null,
+    label: null,
     ...partial,
   };
 }

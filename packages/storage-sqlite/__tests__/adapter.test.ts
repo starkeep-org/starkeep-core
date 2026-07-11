@@ -63,6 +63,16 @@ describe("SqliteDatabaseAdapter", () => {
       expect(retrieved!.sizeBytes).toBe(1024);
     });
 
+    it("round-trips the advisory label (and defaults it to null)", async () => {
+      const labeled = createDataRecord(baseInput({ label: "photos/thumbnail" }), clock);
+      const unlabeled = createDataRecord(baseInput(), clock);
+      await adapter.put(labeled);
+      await adapter.put(unlabeled);
+
+      expect((await adapter.get(labeled.id))!.label).toBe("photos/thumbnail");
+      expect((await adapter.get(unlabeled.id))!.label).toBeNull();
+    });
+
     it("should return null for non-existent ID", async () => {
       const id = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
       expect(await adapter.get(id)).toBeNull();
@@ -117,6 +127,23 @@ describe("SqliteDatabaseAdapter", () => {
       });
       expect(result.records).toHaveLength(1);
       expect(result.records[0].originalFilename).toBe("b.jpg");
+    });
+
+    it("supports filtering by label so consumers can exclude thumbnails", async () => {
+      await adapter.put(createDataRecord(baseInput({ label: "photos/thumbnail" }), clock));
+      await adapter.put(createDataRecord(baseInput({ label: null }), clock));
+
+      const thumbs = await adapter.query({
+        filters: [{ field: "label", operator: "eq", value: "photos/thumbnail" }],
+      });
+      expect(thumbs.records).toHaveLength(1);
+      expect(thumbs.records[0].label).toBe("photos/thumbnail");
+
+      const generalInterest = await adapter.query({
+        filters: [{ field: "label", operator: "isNull" }],
+      });
+      expect(generalInterest.records).toHaveLength(1);
+      expect(generalInterest.records[0].label).toBeNull();
     });
 
     it("should support like filter", async () => {

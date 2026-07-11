@@ -47,7 +47,7 @@ import {
 } from "../../packages/protocol-primitives/src/access/grants.js";
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
-import { createStarkeepId } from "@starkeep/protocol-primitives";
+import { createStarkeepId, labelHasValidPrefix } from "@starkeep/protocol-primitives";
 import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
@@ -1115,6 +1115,7 @@ async function main() {
             size_bytes: r.sizeBytes,
             original_filename: r.originalFilename,
             parent_id: r.parentId,
+            label: r.label,
             path: r.objectStorageKey
               ? await localAdapter.resolvePath(r.objectStorageKey)
               : null,
@@ -1130,11 +1131,11 @@ async function main() {
 
       // POST /data/records — create a record from a file.
       // Two body shapes (in preference order):
-      //   key-ref:  { type, contentType, contentHash, sizeBytes, fileName?, parentId? }
+      //   key-ref:  { type, contentType, contentHash, sizeBytes, fileName?, parentId?, label? }
       //             Bytes already PUT via the presigned upload URL. Server
       //             verifies the blob is at shared/<type>/<shard>/<hash>.
       //             The path that scales to large files.
-      //   filePath: { type, contentType, filePath, fileName?, parentId? }
+      //   filePath: { type, contentType, filePath, fileName?, parentId?, label? }
       //             Bytes live on local disk; SDK ingests by path. Same-machine
       //             only — legit optimization over the network round trip.
       if (path === "/data/records" && req.method === "POST") {
@@ -1147,6 +1148,7 @@ async function main() {
           contentHash,
           sizeBytes,
           parentId,
+          label,
         } = JSON.parse(body);
         if (!type) {
           res.writeHead(400);
@@ -1181,6 +1183,19 @@ async function main() {
           return;
         }
 
+        // Advisory label is optional; when present it must be a well-formed
+        // `<appId>/<purpose>` marker owned by this app. Rejecting a mismatched
+        // prefix prevents one app from squatting another's label namespace
+        // (the label stays advisory for readers, enforced only at write time).
+        if (label != null && !labelHasValidPrefix(label, appId!)) {
+          res.writeHead(400);
+          json(res, {
+            error: "InvalidLabel",
+            detail: `label must be of the form "${appId}/<purpose>"`,
+          });
+          return;
+        }
+
         // Render a record into the API response shape. Used for both the
         // freshly-created and dedup-existing paths.
         const renderRecord = async (r: {
@@ -1193,6 +1208,7 @@ async function main() {
           objectStorageKey: string | null;
           originalFilename: string | null;
           parentId: string | null;
+          label: string | null;
         }) => ({
           id: r.id,
           type: r.type,
@@ -1203,6 +1219,7 @@ async function main() {
           object_storage_key: r.objectStorageKey,
           original_filename: r.originalFilename,
           parent_id: r.parentId,
+          label: r.label,
           path: r.objectStorageKey ? await localAdapter.resolvePath(r.objectStorageKey) : null,
         });
 
@@ -1229,7 +1246,7 @@ async function main() {
         }
 
         let record;
-        const baseInput = { type, originAppId: appId!, parentId: parentId ?? null };
+        const baseInput = { type, originAppId: appId!, parentId: parentId ?? null, label: label ?? null };
         if (contentHash) {
           if (!/^[a-f0-9]{64}$/.test(contentHash)) {
             res.writeHead(400);

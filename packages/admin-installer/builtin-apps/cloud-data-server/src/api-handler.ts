@@ -38,6 +38,7 @@ import {
   getCategory,
   isCategoryId,
   isKnownType,
+  labelHasValidPrefix,
 } from "@starkeep/protocol-primitives";
 import type { DataRecord, StarkeepId, HLCClock, MetadataRow } from "@starkeep/protocol-primitives";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
@@ -683,6 +684,7 @@ function recordToResponse(record: DataRecord, metadata?: MetadataRow | null) {
     original_filename: record.originalFilename,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
+    label: record.label,
     ...(metadata !== undefined ? { metadata } : {}),
   };
 }
@@ -914,7 +916,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // POST /apps/{appId}/data/records
     //
     // Body (key-ref form):
-    //   { type, contentType, contentHash, sizeBytes, fileName?, parentId? }
+    //   { type, contentType, contentHash, sizeBytes, fileName?, parentId?, label? }
     //
     // The caller PUTs the bytes to S3 via a presigned URL first (see POST
     // /files/presign), then registers the record by content-addressed key.
@@ -929,10 +931,17 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         contentHash?: string;
         sizeBytes?: number;
         parentId?: string;
+        label?: string;
       };
       if (!body.type) return clientErr("type is required", 400);
       if (!isKnownType(body.type)) return clientErr(`Unknown type id: ${body.type}`, 400);
       if (!canWrite(grants, body.type)) return clientErr("Forbidden", 403);
+      // Advisory label, when present, must be a `<appId>/<purpose>` marker owned
+      // by this app — same prefix rule the local-data-server enforces, so a
+      // record's label means the same thing whichever write path created it.
+      if (body.label != null && !labelHasValidPrefix(body.label, appId)) {
+        return clientErr(`label must be of the form "${appId}/<purpose>"`, 400);
+      }
       if (!body.contentHash) {
         return clientErr(
           "contentHash is required — PUT the bytes via a presigned URL first, then register the record by content-addressed key",
@@ -997,6 +1006,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           sizeBytes,
           originalFilename: body.fileName ?? null,
           parentId: (body.parentId as DataRecord["parentId"]) ?? null,
+          label: body.label ?? null,
         };
         await db.put(fresh);
         return { record: fresh, created: true };

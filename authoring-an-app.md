@@ -167,6 +167,27 @@ different granularities are in play, and it's easy to confuse them:
   full `image/jpeg` type. The bare value there is the **category**, not a record
   type.
 
+**A note on advisory labels.** If your app writes shared records that may not be
+of interest to *other* apps that read that same type, include a `label` on
+`POST /data/records` so those apps can easily filter them out. The convention is
+`<yourAppId>/<purpose>` — e.g. Photos tags each generated thumbnail
+`photos/thumbnail`, so a different image-declaring app can skip the thumbnails
+and show only the originals. Guidance:
+
+- Only label records that are genuinely lower-interest to *other* apps (derived,
+  auxiliary, machine-generated). A record the user would think of as their own
+  content — an uploaded original, a user-made crop — should stay **unlabeled**
+  (`null` label = general interest).
+- The label is advisory: it does not restrict access or hide anything, it only
+  gives readers a cheap way to filter. Reading apps decide whether to honor it
+  (e.g. a `WHERE label IS NULL` / `label != 'photos/thumbnail'` filter, or the
+  `label` filter on `GET /data/records`).
+- The prefix must be your own app id; the data server rejects a write whose
+  label prefixes another app's id. Set it once at creation — it is immutable.
+- It is not a substitute for `parentId`. `parentId` is the structural link from a
+  derived record to its source; `label` is the interest hint. A thumbnail sets
+  both.
+
 ---
 
 ## Optional parts
