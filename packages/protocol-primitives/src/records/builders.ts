@@ -13,6 +13,11 @@ export interface CreateDataRecordInput {
   sizeBytes: number;
   originalFilename?: string | null;
   parentId?: StarkeepId | null;
+  /**
+   * Optional advisory `<appId>/<purpose>` label (e.g. `photos/thumbnail`).
+   * Omitted/`null` for general-interest records. See `DataRecord.label`.
+   */
+  label?: string | null;
 }
 
 export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock): DataRecord {
@@ -32,5 +37,6 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     originalFilename: input.originalFilename ?? null,
     originAppId: input.originAppId,
     parentId: input.parentId ?? null,
+    label: input.label ?? null,
   };
 }

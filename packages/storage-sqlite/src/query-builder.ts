@@ -24,6 +24,7 @@ const FIELD_MAP: Record<string, string> = {
   originAppId: "origin_app_id",
   parentId: "parent_id",
   originalFilename: "original_filename",
+  label: "label",
 };
 
 function mapField(field: string): string {

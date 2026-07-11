@@ -47,6 +47,15 @@ describe("record ↔ row serialization", () => {
     expect(row.deleted_at).toBeNull();
     expect(row.origin_app_id).toBe("photos");
     expect(row.parent_id).toBeNull();
+    // General-interest records carry no label.
+    expect(row.label).toBeNull();
+  });
+
+  it("round-trips the advisory label to and from its column", () => {
+    const record = sampleRecord({ label: "photos/thumbnail" });
+    const row = recordToRow(record);
+    expect(row.label).toBe("photos/thumbnail");
+    expect(rowToRecord(row).label).toBe("photos/thumbnail");
   });
 });
 
