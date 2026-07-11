@@ -62,6 +62,12 @@ let lds: LocalDataServer | undefined;
 let drive: LdsApp;
 let photos: LdsApp;
 let syncedRecordId: string;
+// The photo the real browser uploads through the cloud-served UI: its bytes
+// enter the cloud via browser→proxy→broker→S3, never touching the local data
+// server. Captured here so the later cloud→local sync step can assert the
+// record (and its exact bytes) apply down into the local registry.
+let browserUploadName: string;
+let browserUploadBytes: Buffer;
 // Unique per run: the cloud is kept up between runs and dedupes records by
 // content hash on live rows, so a constant image would ship only on its very
 // first run and report shipped: 0 thereafter. Random colour + size give each
@@ -80,6 +86,47 @@ function cloudApp(local: AppCredentials): LdsApp {
     dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(local.appId)}`,
   };
   return { ...creds, fetch: (path, init) => signedFetch(creds, path, init) };
+}
+
+/**
+ * Poll a CloudFront URL until it reports an edge hit, or give up. CloudFront
+ * sets `x-cache: "Hit from cloudfront"` (also "RefreshHit ...") once the POP has
+ * the object; the first fetch of a cacheable object populates it and a
+ * subsequent fetch is a Hit. A second request can land on a sibling edge server
+ * that hasn't cached yet, so we retry a few times before concluding. Returns the
+ * last observed `x-cache` value.
+ */
+async function pollForEdgeHit(url: string, attempts = 8): Promise<string> {
+  let last = "";
+  for (let i = 0; i < attempts; i++) {
+    const res = await fetch(url);
+    // Drain the body so the connection is reusable and the fetch fully completes.
+    await res.arrayBuffer();
+    last = res.headers.get("x-cache") ?? "";
+    if (/Hit from cloudfront/i.test(last)) return last;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return last;
+}
+
+/** Corrupt a CloudFront signature param into a still-well-formed but invalid one. */
+function tamperSignature(sig: string): string {
+  // CloudFront signatures use URL-safe base64 (chars incl. `-_~`). Swap the
+  // first char for a different valid one so the value stays parseable but the
+  // signature no longer verifies → CloudFront returns 403, not 400.
+  const first = sig[0];
+  const replacement = first === "A" ? "B" : "A";
+  return replacement + sig.slice(1);
+}
+
+/** Retry a fetch until it stops returning a propagation-time 5xx, or give up. */
+async function fetchWhenReady(url: string, attempts = 15): Promise<Response> {
+  let res = await fetch(url);
+  for (let i = 0; i < attempts && res.status >= 500; i++) {
+    await new Promise((r) => setTimeout(r, 4000));
+    res = await fetch(url);
+  }
+  return res;
 }
 
 function runTeardownScript(script: string): void {
@@ -386,21 +433,35 @@ function runTeardownScript(script: string): void {
     });
 
     it("drives the real cloud Photos UI end-to-end: sign in, upload, see the photo", async () => {
-      // True browser e2e of the cloud-served app: a real Chromium loads the SPA
-      // from the gateway, signs in through Cognito, and uploads a photo through
-      // the live file input. That upload is the ENTIRE browser→proxy→broker
-      // write path — presign → S3 PUT → POST /data/records → metadata POST — the
-      // exact flow that was completely broken on reinstall (proxy bypassed →
-      // 401; GET-only manifest → writes 404). Every layer the unit/contract
-      // tests stub is exercised here for real, including S3 CORS on the
-      // presigned PUT, which nothing else covers.
-      const appUrl = `${config.apiGatewayUrl}/apps/photos/`;
+      // True browser e2e of the cloud-served app: a real Chromium loads the SPA,
+      // signs in through Cognito, and uploads a photo through the live file
+      // input. That upload is the ENTIRE browser→proxy→broker write path —
+      // presign → S3 PUT → POST /data/records → metadata POST — the exact flow
+      // that was completely broken on reinstall (proxy bypassed → 401; GET-only
+      // manifest → writes 404). Every layer the unit/contract tests stub is
+      // exercised here for real, including S3 CORS on the presigned PUT, which
+      // nothing else covers.
+      //
+      // Load via the CloudFront domain (publicBaseUrl), NOT the raw gateway.
+      // Part A repoints the SPA's runtime API base to publicBaseUrl, so a real
+      // browser makes its data calls to the CloudFront origin. Production
+      // browsers reach the app via that same origin, keeping HTML + API
+      // same-origin; loading the HTML from the gateway instead would split the
+      // origin (gateway HTML, CloudFront API) and the app's same-origin fetches
+      // would be CORS-blocked — a configuration that never occurs in the real
+      // deployment. The raw-fetch steps above stay on apiGatewayUrl on purpose
+      // (they assert the gateway is directly reachable, and Node fetch is not
+      // CORS-bound); only the real browser needs the single CloudFront origin.
+      const appUrl = `${config.publicBaseUrl}/apps/photos/`;
 
       // Fresh tiny PNG → new content hash (the kept-up cloud dedupes by hash).
       const uploadName = `e2e-browser-${Date.now()}.png`;
+      const uploadBytes = solidPng([...randomBytes(3)] as [number, number, number], 12);
+      browserUploadName = uploadName;
+      browserUploadBytes = uploadBytes;
       const uploadDir = await mkdtemp(join(tmpdir(), "photos-cloud-ui-"));
       const uploadPath = join(uploadDir, uploadName);
-      await writeFile(uploadPath, solidPng([...randomBytes(3)] as [number, number, number], 12));
+      await writeFile(uploadPath, uploadBytes);
 
       const browser = await chromium.launch();
       try {
@@ -409,12 +470,15 @@ function runTeardownScript(script: string): void {
 
         // AuthGate (FORCE_REMOTE) gates the app behind Cognito sign-in. Drive
         // the real SignInForm with the permanent-password admin user; on
-        // success the app reloads authenticated and the toolbar renders.
+        // success the app reloads authenticated and the toolbar renders. In
+        // this cloud journey the app runs FORCE_REMOTE (Cognito-gated), so the
+        // upload control is labelled "Upload Photo" — it reads "Add Photo" only
+        // in the local, non-remote build (see photos app.tsx).
         await page.locator('input[type="email"]').fill(admin.email);
         await page.locator('input[type="password"]').fill(admin.password);
         await page.getByRole("button", { name: "Sign in" }).click();
         await page
-          .getByRole("button", { name: "Add Photo" })
+          .getByRole("button", { name: "Upload Photo" })
           .waitFor({ state: "visible", timeout: 120_000 });
 
         // Upload through the live file input and wait for the thumbnail to render.
@@ -434,6 +498,45 @@ function runTeardownScript(script: string): void {
       } finally {
         await browser.close();
       }
+    });
+
+    it("cloud-origin browser upload syncs down to the local data server (record + bytes)", async () => {
+      // The reverse direction of the earlier ship test. The browser upload above
+      // landed in the cloud via browser→proxy→broker→S3 and never touched the
+      // local data server, so it is a genuinely cloud-origin shared record. The
+      // Drive supervisor must now pull it DOWN and apply it — record row and blob
+      // bytes — into the local registry, which is what makes a photo taken/added
+      // on one device show up on another. `/sync/now` runs a full exchange (it
+      // applied cloud-pending in one call in the ship step), so a single pull
+      // should land it; we still retry a few times to absorb any lag in the
+      // broker surfacing the just-written record to the pull.
+      expect(browserUploadName, "browser upload step must have run first").toBeTruthy();
+
+      let localRecord: { id: string; original_filename?: string | null } | undefined;
+      for (let attempt = 0; attempt < 5 && !localRecord; attempt++) {
+        const sync = await drive.fetch("/sync/now", { method: "POST" });
+        expect(sync.status).toBe(200);
+        const local = await photos.fetch("/data/records?limit=500&include=metadata");
+        expect(local.status).toBe(200);
+        const { records } = (await local.json()) as {
+          records: Array<{ id: string; original_filename?: string | null }>;
+        };
+        localRecord = records.find((r) => r.original_filename === browserUploadName);
+      }
+      expect(
+        localRecord,
+        "browser-uploaded photo must sync down to the local data server",
+      ).toBeDefined();
+
+      // The bytes came down too: the local file-url serves the exact PNG the
+      // browser uploaded (mirrors the cloud-side byte round-trip in the ship
+      // test, but proving the cloud→local blob transfer instead).
+      const urlRes = await photos.fetch(`/data/records/${localRecord!.id}/file-url`);
+      expect(urlRes.status).toBe(200);
+      const { url } = (await urlRes.json()) as { url: string };
+      const blob = await fetch(url);
+      expect(blob.status).toBe(200);
+      expect(Buffer.from(await blob.arrayBuffer()).equals(browserUploadBytes)).toBe(true);
     });
 
     it("photos resize endpoint round-trips", async () => {
@@ -469,6 +572,97 @@ function runTeardownScript(script: string): void {
       expect(query.status).toBe(200);
       const body = await query.text();
       expect(body).toContain("tier-3 caption");
+    });
+
+    it("Part A: SPA + _next/static served through the CloudFront distribution (edge hit)", async () => {
+      // The whole point of Part A: browser-facing traffic goes to the CloudFront
+      // domain (publicBaseUrl), not the raw gateway. Every other step in this
+      // journey deliberately hits apiGatewayUrl directly (the gateway stays
+      // reachable — CloudFront is an optimization layer, not a security
+      // boundary), so this is the ONLY coverage of the distribution itself.
+      // Placed late so the distribution — created minutes ago during the
+      // cloud-data-server install — has had time to reach "Deployed".
+      const base = config.publicBaseUrl;
+      expect(base, "cloud-data-server install must persist publicBaseUrl").toBeTruthy();
+      expect(base!).toMatch(/^https:\/\/[a-z0-9]+\.cloudfront\.net$/);
+
+      // SPA entry point via CloudFront → gateway origin (default no-cache
+      // behavior; AllViewerExceptHostHeader forwards viewer headers, strips
+      // Host so the HTTP API accepts it). Retry through any propagation 5xx.
+      const spa = await fetchWhenReady(`${base}/apps/photos/`);
+      expect(spa.status).toBe(200);
+      const html = await spa.text();
+      expect(html).toContain("<");
+      expect((spa.headers.get("via") ?? "").toLowerCase()).toContain("cloudfront");
+
+      // A content-hashed Next asset the SPA references → the /apps/*/_next/static/*
+      // behavior (CachingOptimized). These are immutable, so the edge caches
+      // them: after a priming fetch a later fetch reports `x-cache: Hit`.
+      const match = html.match(/\/apps\/photos\/_next\/static\/[^"'\\]+/);
+      expect(match, "SPA HTML should reference a _next/static asset").toBeTruthy();
+      const assetUrl = `${base}${match![0]}`;
+
+      const asset = await fetchWhenReady(assetUrl);
+      expect(asset.status).toBe(200);
+      const xCache = await pollForEdgeHit(assetUrl);
+      expect(xCache, `no edge hit for ${assetUrl} (last x-cache: ${xCache})`).toMatch(
+        /Hit from cloudfront/i,
+      );
+    });
+
+    it("Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/* isolated", async () => {
+      const base = config.publicBaseUrl!;
+
+      // The shared file-url endpoint now mints a CloudFront signed URL on the
+      // distribution (was an S3 presigned URL). Same auth checks, new minting.
+      const urlRes = await cloudApp(drive).fetch(`/data/records/${syncedRecordId}/file-url`);
+      expect(urlRes.status).toBe(200);
+      const { url } = (await urlRes.json()) as { url: string };
+      const signed = new URL(url);
+      expect(signed.host).toBe(new URL(base).host); // distribution domain, not S3
+      expect(signed.pathname.startsWith("/shared/")).toBe(true);
+      const signature = signed.searchParams.get("Signature");
+      expect(signature).toBeTruthy();
+      expect(signed.searchParams.get("Key-Pair-Id")).toBeTruthy();
+
+      // Bytes round-trip through the edge and match what was uploaded.
+      const first = await fetchWhenReady(url);
+      expect(first.status).toBe(200);
+      expect(Buffer.from(await first.arrayBuffer()).equals(photoBytes)).toBe(true);
+
+      // Edge hit on re-fetch. The custom cache policy excludes query strings from
+      // the cache key (the signed-URL params are validated then dropped), so a
+      // freshly signed URL for the same path still hits the path-keyed cache —
+      // this is exactly what makes Part B deliver anything.
+      const xCache = await pollForEdgeHit(url);
+      expect(xCache, `no edge hit for shared object (last x-cache: ${xCache})`).toMatch(
+        /Hit from cloudfront/i,
+      );
+
+      // Tampered signature → 403: CloudFront enforces the key-group signature.
+      const tampered = new URL(url);
+      tampered.searchParams.set("Signature", tamperSignature(signature!));
+      const bad = await fetch(tampered.toString());
+      expect(bad.status).toBe(403);
+
+      // No signature on the shared/* behavior → 403 (Missing Key): the S3 origin
+      // is signature-gated, never openly readable through the distribution.
+      const unsigned = await fetch(`${base}${signed.pathname}`);
+      expect(unsigned.status).toBe(403);
+
+      // apps/* is unreachable through the S3 files origin: the distribution has
+      // NO apps/*→S3 behavior (only shared/* routes to the bucket, and the
+      // bucket policy's OAC Allow is scoped to shared/*). So an apps/* path
+      // routes to the GATEWAY origin (default/SPA behavior) and can never serve
+      // app-private S3 bytes. Prove it lands on the gateway (HTML/SPA), not S3.
+      const appsProbe = await fetch(
+        `${base}/apps/photos/syncable/does-not-exist-${Date.now()}.bin`,
+      );
+      const probeBody = await appsProbe.text();
+      expect(probeBody).toContain("<"); // gateway/SPA HTML, not an S3 object
+      expect((appsProbe.headers.get("content-type") ?? "").toLowerCase()).not.toContain(
+        "octet-stream",
+      );
     });
 
     it("uninstalls photos: app plane gone, shared records persist", async () => {

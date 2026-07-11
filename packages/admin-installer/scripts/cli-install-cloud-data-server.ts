@@ -62,6 +62,7 @@ interface StarkeepConfig {
   pulumiStateBucket?: string;
   // populated by this script after a successful install:
   apiGatewayUrl?: string;
+  publicBaseUrl?: string;
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
@@ -223,6 +224,7 @@ const updated: StarkeepConfig = {
   managerRoleArn,
   pulumiStateBucket,
   apiGatewayUrl: outputs.apiGatewayUrl,
+  publicBaseUrl: outputs.publicBaseUrl,
   apiGatewayId: outputs.apiGatewayId,
   apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
   authorizerId: outputs.authorizerId,
@@ -234,5 +236,6 @@ writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
 
 console.log("\nInstall complete. Updated ~/.starkeep/config.json:");
 console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
+console.log(`  publicBaseUrl  : ${outputs.publicBaseUrl}`);
 console.log(`  s3Bucket       : ${outputs.bucketName}`);
 console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);

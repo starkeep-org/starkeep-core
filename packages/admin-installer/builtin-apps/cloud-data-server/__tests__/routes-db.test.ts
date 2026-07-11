@@ -6,6 +6,7 @@
  * mocked with aws-sdk-client-mock. DSQL-specific semantics stay Tier 3.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
@@ -23,6 +24,18 @@ const context: LambdaContext = {
   invokedFunctionArn: "arn:aws:lambda:us-east-1:123456789012:function:teststack-cds",
 };
 
+// Real RSA key pair so the CloudFront signer produces valid signatures in the
+// shared file-url tests. The public half is unused here (CloudFront would
+// verify it) — we only need a well-formed private key.
+const cfKeyPair = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs1", format: "pem" },
+});
+const CF_DOMAIN = "d1234testcdn.cloudfront.net";
+const CF_KEY_PAIR_ID = "K2TESTKEYPAIRID";
+const CF_SIGNING_PARAM = "/teststack/app-creds/_cloudfront-signing";
+
 type HandlerModule = typeof import("../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
@@ -32,6 +45,7 @@ beforeAll(async () => {
   process.env.AURORA_ENDPOINT = "invalid.test.localdomain";
   process.env.S3_BUCKET = "fake-bucket";
   process.env.AWS_REGION = "us-east-1";
+  process.env.CLOUDFRONT_SIGNING_PARAM = CF_SIGNING_PARAM;
   vi.spyOn(console, "warn").mockImplementation(() => {});
   const mod = await import("../src/api-handler.js");
   handler = mod.handler;
@@ -50,6 +64,17 @@ beforeEach(() => {
   // correctly. The handler's module-level caches make most of these mocks
   // hit only on each app's first request, which is fine.
   ssmMock.on(GetParameterCommand).callsFake(async (input: { Name?: string }) => {
+    if (input.Name === CF_SIGNING_PARAM) {
+      return {
+        Parameter: {
+          Value: JSON.stringify({
+            keyPairId: CF_KEY_PAIR_ID,
+            domain: CF_DOMAIN,
+            privateKey: cfKeyPair.privateKey,
+          }),
+        },
+      };
+    }
     const appId = input.Name!.split("/").pop()!;
     return { Parameter: { Value: JSON.stringify({ hmacSecret: `secret-${appId}` }) } };
   });
@@ -447,6 +472,45 @@ describe("per-record routes honor read/write grants", () => {
     expect(resRo.statusCode).toBe(403);
     expect(dbRo.calls(/UPDATE shared\.records SET deleted_at/)).toHaveLength(0);
   });
+
+  it("chokepoint catches a route/data mismatch: readable type, foreign-category key", async () => {
+    // The record's TYPE is readable (image/jpeg), so the route-level canRead
+    // check passes — but its object key points at a category the caller cannot
+    // read (audio). The pre-sign revalidation chokepoint re-checks the KEY, so
+    // the single file-url route 403s instead of signing a foreign-category URL.
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
+      /FROM shared\.records WHERE id =/,
+      [recordRow({ id: "mm1", type: "image/jpeg", object_storage_key: `shared/audio/ab/${"a".repeat(64)}` })],
+    );
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "mm", method: "GET", subPath: "/data/records/mm1/file-url" }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("chokepoint omits a route/data mismatch from the batch route", async () => {
+    // Same mismatch through the batch route: the foreign-category record is
+    // silently omitted (batch semantics) rather than signed.
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(RECORDS_SELECT, [
+      recordRow({ id: "ok1", type: "image/jpeg" }),
+      recordRow({ id: "bad1", type: "image/jpeg", object_storage_key: `shared/audio/ab/${"a".repeat(64)}` }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "mmb",
+        method: "POST",
+        subPath: "/data/records/file-urls",
+        body: { ids: ["ok1", "bad1"] },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res) as { urls: Record<string, unknown> };
+    expect(Object.keys(body.urls)).toEqual(["ok1"]);
+  });
 });
 
 describe("batch file-urls route", () => {
@@ -476,11 +540,15 @@ describe("batch file-urls route", () => {
     // Only the readable record with an attached file gets a URL; the audio
     // record (no grant), the key-less record, and the unknown id are omitted.
     expect(Object.keys(body.urls)).toEqual(["b1"]);
-    expect(body.urls["b1"]!.url).toContain("fake-bucket");
+    // Shared blobs are now CloudFront-signed (edge domain + signature params),
+    // not S3 presigned.
+    expect(body.urls["b1"]!.url).toContain(CF_DOMAIN);
+    expect(body.urls["b1"]!.url).toContain("Signature=");
+    expect(body.urls["b1"]!.url).toContain(`Key-Pair-Id=${CF_KEY_PAIR_ID}`);
     expect(body.urls["b1"]).toMatchObject({ mimeType: "image/jpeg", sizeBytes: 42 });
-    // Clamped to the STS session lifetime (mock session is ~15 min).
-    expect(body.expiresIn).toBeGreaterThan(0);
-    expect(body.expiresIn).toBeLessThanOrEqual(3600);
+    // Flat expiry — CloudFront signatures don't die with the STS session, so
+    // the shared path no longer clamps to it.
+    expect(body.expiresIn).toBe(3600);
     // The whole batch is one records query, not one per id.
     expect(db.calls(RECORDS_SELECT)).toHaveLength(1);
     // The IN filter carries the deduplicated ids.

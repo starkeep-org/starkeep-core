@@ -46,6 +46,8 @@ export interface TestStackConfig {
   managerRoleArn?: string;
   pulumiStateBucket?: string;
   apiGatewayUrl?: string;
+  /** Browser-facing base URL — the CloudFront distribution domain. */
+  publicBaseUrl?: string;
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;

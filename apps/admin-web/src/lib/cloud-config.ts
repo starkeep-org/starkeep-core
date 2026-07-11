@@ -27,6 +27,12 @@ export interface StarkeepConfig {
   pulumiStateBucket?: string;
   // Populated by the cloud-data-server install:
   apiGatewayUrl?: string;
+  /**
+   * Browser-facing base URL — the CloudFront distribution domain. Browser calls
+   * to the cloud data server prefer this; falls back to apiGatewayUrl for
+   * pre-CloudFront configs.
+   */
+  publicBaseUrl?: string;
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;

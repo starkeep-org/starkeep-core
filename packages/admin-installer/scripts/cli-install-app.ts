@@ -196,7 +196,13 @@ console.log("");
 // any empty value whose key it recognizes. App-agnostic: no handler-name or
 // app-name coupling.
 const platformEnv: Record<string, string> = {
-  STARKEEP_API_GATEWAY_URL: config.apiGatewayUrl ?? "",
+  // Browser-facing base URL points at the CloudFront distribution (publicBaseUrl)
+  // so the whole browser fan-out — runtime-config → SPA data-client / cloud-config
+  // / admin-web, all of which derive their origin from this env value — routes
+  // through the edge cache. Server-to-server HMAC calls keep using apiGatewayUrl
+  // directly (STARKEEP_CLOUD_DATA_BASE in pulumi-program.ts). Falls back to the
+  // raw gateway URL for pre-CloudFront configs.
+  STARKEEP_API_GATEWAY_URL: config.publicBaseUrl ?? config.apiGatewayUrl ?? "",
   STARKEEP_USER_POOL_ID: config.userPoolId,
   STARKEEP_USER_POOL_CLIENT_ID: config.userPoolClientId,
   STARKEEP_IDENTITY_POOL_ID: config.identityPoolId,

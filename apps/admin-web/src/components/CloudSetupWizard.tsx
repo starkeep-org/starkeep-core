@@ -835,6 +835,7 @@ interface DeployOutputs {
   s3Bucket: string;
   auroraEndpoint: string;
   apiGatewayUrl?: string;
+  publicBaseUrl?: string;
 }
 
 function Step5Deploy({
@@ -999,11 +1000,13 @@ function Step5Deploy({
             auroraHostname: string;
             bucketName: string;
             apiGatewayUrl: string;
+            publicBaseUrl?: string;
           };
           result = {
             s3Bucket: outputs.bucketName,
             auroraEndpoint: outputs.auroraHostname,
             apiGatewayUrl: outputs.apiGatewayUrl,
+            publicBaseUrl: outputs.publicBaseUrl,
           };
         } catch {
           setLines((l) => [...l, `Error: malformed done event: ${r1.data}`]);
@@ -1321,7 +1324,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userDataOwnerPermissionsBoundaryArn: null, managerRoleArn: null,
                   installDdlRoleArn: null,
                   pulumiStateBucket: null, s3Bucket: null, auroraEndpoint: null,
-                  apiGatewayUrl: null, apiGatewayId: null, authorizerId: null,
+                  apiGatewayUrl: null, publicBaseUrl: null, apiGatewayId: null, authorizerId: null,
                 });
                 setCloudConfig(updated);
                 setSignInResult(null);
@@ -1354,7 +1357,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
                   s3Bucket: null, auroraEndpoint: null,
-                  apiGatewayUrl: null, apiGatewayId: null, authorizerId: null,
+                  apiGatewayUrl: null, publicBaseUrl: null, apiGatewayId: null, authorizerId: null,
                 });
                 setCloudConfig(updated);
                 setSignInResult(null);

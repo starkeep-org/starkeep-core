@@ -9,7 +9,8 @@ import type { IamStatement } from "../iam-utils.js";
  * forbids — currently just ${StackPrefix}-app-cloud-data-server-role. It
  * permits DSQL cluster admin, S3 bucket admin on the well-known foundational
  * bucket name patterns, Lambda/log-group/API-Gateway admin scoped to the
- * cloud-data-server prefix, the CUR report definition API, and a single
+ * cloud-data-server prefix, CloudFront admin (the platform distribution +
+ * URL-signing key material), the CUR report definition API, and a single
  * PassRole carve-out (own role, lambda only). All other iam:* actions stay
  * denied via the NotAction carve-out, so a future temp-policy bug cannot
  * accidentally grant broader IAM.
@@ -275,6 +276,24 @@ export function foundationalPermissionsBoundaryStatements(
         "cur:TagResource",
         "cur:UntagResource",
       ],
+      Resource: "*",
+    },
+    {
+      // Platform-owned CloudFront distribution (the CDS Pulumi program creates
+      // the distribution, its S3-origin OAC, the shared-files cache policy, and
+      // the URL-signing public key + key group). CloudFront is a global service
+      // whose actions almost all authorize against Resource:"*" (public keys,
+      // key groups, OAC, cache policies, and all List/Create calls have no
+      // resource-level ARN), so a wildcard is the only workable boundary form —
+      // matching how DsqlCluster/Cur/ApiGateway are capped above. This is the
+      // *ceiling*: at steady state nothing grants cloudfront:* (the temp-install
+      // policy carrying the specific verbs is detached after install), so the
+      // effective standing CloudFront power of the CDS role is none. Kept as a
+      // single compact statement to stay under the 6144-char managed-policy
+      // limit.
+      Sid: "FoundationalCloudFront",
+      Effect: "Allow",
+      Action: "cloudfront:*",
       Resource: "*",
     },
     {

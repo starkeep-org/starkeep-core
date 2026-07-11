@@ -26,8 +26,11 @@ export async function resolveDataSource(mode: DataSourceMode): Promise<{
     const config = await readCloudConfig();
     if (config?.apiGatewayUrl) {
       const token = await getAccessToken();
+      // Browser traffic goes through the CloudFront distribution when available
+      // (edge-cached, same origin), falling back to the raw gateway URL.
+      const browserBase = config.publicBaseUrl ?? config.apiGatewayUrl;
       return {
-        baseUrl: config.apiGatewayUrl.replace(/\/$/, ""),
+        baseUrl: browserBase.replace(/\/$/, ""),
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       };
     }
