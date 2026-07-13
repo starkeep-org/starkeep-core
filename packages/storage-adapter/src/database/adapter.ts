@@ -20,6 +20,14 @@ export interface DatabaseAdapter {
    */
   delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void>;
   query(query: Query): Promise<QueryResult>;
+
+  /**
+   * Per-nodeId MAX(updated_at) over every stored row (tombstones included) —
+   * the responder-side summary the sync exchange reports as its coverage
+   * watermark. SQL adapters back this with the denormalized `node_id` column
+   * + `(node_id, updated_at)` index so it doesn't scan the table.
+   */
+  getNodeWatermarks(): Promise<Record<string, HLCTimestamp>>;
   batch(operations: BatchOperation[]): Promise<void>;
   transaction<T>(callback: (transaction: Transaction) => Promise<T>): Promise<T>;
 

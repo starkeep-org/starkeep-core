@@ -39,6 +39,24 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     this.store.set(id, { ...existing, deletedAt: hlc, updatedAt: hlc });
   }
 
+  async getNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
+    // In-memory reference fold — the behavior SQL adapters implement with the
+    // node_id column + (node_id, updated_at) index.
+    const out: Record<string, HLCTimestamp> = {};
+    for (const record of this.store.values()) {
+      const hlc = record.updatedAt;
+      const existing = out[hlc.nodeId];
+      if (
+        !existing ||
+        hlc.wallTime > existing.wallTime ||
+        (hlc.wallTime === existing.wallTime && hlc.counter > existing.counter)
+      ) {
+        out[hlc.nodeId] = hlc;
+      }
+    }
+    return out;
+  }
+
   async query(query: Query): Promise<QueryResult> {
     let records = Array.from(this.store.values());
 

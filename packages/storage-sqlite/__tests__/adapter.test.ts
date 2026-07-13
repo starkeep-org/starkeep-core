@@ -90,6 +90,42 @@ describe("SqliteDatabaseAdapter", () => {
     });
   });
 
+  describe("node watermarks", () => {
+    it("populates node_id on put and delete, and getNodeWatermarks reports per-node MAX", async () => {
+      const clockA = createHLCClock({
+        nodeId: "node-a",
+        wallClockFunction: (() => {
+          let t = 2000;
+          return () => t++;
+        })(),
+      });
+      const clockB = createHLCClock({
+        nodeId: "node-b",
+        wallClockFunction: (() => {
+          let t = 3000;
+          return () => t++;
+        })(),
+      });
+      await adapter.put(createDataRecord(baseInput(), clockA));
+      const latestA = createDataRecord(baseInput(), clockA);
+      await adapter.put(latestA);
+      const recB = createDataRecord(baseInput(), clockB);
+      await adapter.put(recB);
+
+      const watermarks = await adapter.getNodeWatermarks();
+      expect(watermarks["node-a"]).toEqual(latestA.updatedAt);
+      expect(watermarks["node-b"]).toEqual(recB.updatedAt);
+
+      // A tombstone re-stamps updated_at with the deleting node — node_id
+      // must follow, or the watermark would attribute the delete to the
+      // original author.
+      const tombstoneHlc = clockB.now();
+      await adapter.delete(latestA.id, tombstoneHlc);
+      const after = await adapter.getNodeWatermarks();
+      expect(after["node-b"]).toEqual(tombstoneHlc);
+    });
+  });
+
   describe("delete", () => {
     it("should soft-delete a record (tombstone)", async () => {
       const record = createDataRecord(baseInput(), clock);

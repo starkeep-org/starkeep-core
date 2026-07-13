@@ -88,6 +88,17 @@ function makeMockAppSource(
           : null;
       return { rows: pageRows, nextCursor, hasMore };
     },
+    async getNodeWatermarks(scanAppId, table) {
+      const out: Watermarks = {};
+      for (const e of rows.values()) {
+        if (e.appId !== scanAppId || e.table !== table) continue;
+        const existing = out[e.timestamp.nodeId];
+        if (!existing || compareHLC(e.timestamp, existing) > 0) {
+          out[e.timestamp.nodeId] = e.timestamp;
+        }
+      }
+      return out;
+    },
   };
   return { applier, namespaces, rows };
 }

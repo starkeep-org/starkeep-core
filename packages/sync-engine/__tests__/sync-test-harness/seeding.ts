@@ -728,9 +728,11 @@ export async function applyWatermarkState(
   // `ownWatermarks` on the local side tracks records local has applied
   // (received from peer or originated locally). `peerWatermarks` tracks
   // records local has successfully shipped to the peer. Each side's
-  // watermark map should only include HLCs corresponding to records that
-  // *both* sides hold — otherwise we'd claim sync history that didn't
-  // happen, and the engine would skip records the test expects to ship.
+  // watermark map only includes HLCs corresponding to records that *both*
+  // sides hold — that's what a real sync history produces. The
+  // *inconsistent* state (peerWatermarks covers a record the peer no longer
+  // holds — the redeploy bug's precondition) is seeded deliberately, not
+  // here: seed a consistent history first, then call `world.wipeCloud()`.
   const ownAtMax: Watermarks = {};
   const peerAtMax: Watermarks = {};
   for (const [, hlc] of seeded.hlcByLocal) advanceWatermark(ownAtMax, hlc);
@@ -775,11 +777,17 @@ export async function applyWatermarkState(
       break;
 
     case "cR":
-      // Models "cloud forgot what local sent": peerWatermarks wiped, so
-      // local re-ships everything it had successfully shipped before.
-      // ownWatermarks preserved at what local actually has.
+      // Cloud-reset baseline: both maps preserved at what the pre-reset
+      // history produced — including peerWatermarks at peerAtMax. This is
+      // the real production condition after a cloud redeploy: the local
+      // node's cache still claims the cloud has everything; only the
+      // cloud's *data* is gone. (The old model wiped peerWatermarks here,
+      // which pre-applied the peer-authoritative fix as a precondition and
+      // made the redeploy bug unrepresentable.) Pair with
+      // `world.wipeCloud()` to model the actual data loss; without it,
+      // cR + both-same is just a steady-state snapshot.
       await syncState.setWatermarks(ownAtMax);
-      await syncState.setPeerWatermarks({});
+      await syncState.setPeerWatermarks(peerAtMax);
       break;
   }
 

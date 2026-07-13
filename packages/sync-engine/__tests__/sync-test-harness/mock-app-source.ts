@@ -1,4 +1,4 @@
-import { compareHLC, serializeHLC } from "@starkeep/protocol-primitives";
+import { compareHLC, serializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableApplier,
   AppSyncableNamespace,
@@ -85,6 +85,17 @@ export function makeMockAppSource(
           ? serializeHLC(pageRows[pageRows.length - 1]!.timestamp)
           : null;
       return { rows: pageRows, nextCursor, hasMore };
+    },
+    async getNodeWatermarks(scanAppId, table) {
+      const out: Record<string, HLCTimestamp> = {};
+      for (const e of rows.values()) {
+        if (e.appId !== scanAppId || e.table !== table) continue;
+        const existing = out[e.timestamp.nodeId];
+        if (!existing || compareHLC(e.timestamp, existing) > 0) {
+          out[e.timestamp.nodeId] = e.timestamp;
+        }
+      }
+      return out;
     },
   };
 

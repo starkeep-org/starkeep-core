@@ -1,5 +1,5 @@
 import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
-import { pgMetadataTableName, serializeHLC } from "@starkeep/protocol-primitives";
+import { pgMetadataTableName, serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type {
   DatabaseAdapter,
   Query,
@@ -105,9 +105,27 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private async deleteRaw(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     const ts = serializeHLC(hlc);
     await this.getClient().query(
-      "UPDATE shared.records SET deleted_at = $1, updated_at = $2 WHERE id = $3",
-      [ts, ts, id],
+      "UPDATE shared.records SET deleted_at = $1, updated_at = $2, node_id = $3 WHERE id = $4",
+      [ts, ts, hlc.nodeId, id],
     );
+  }
+
+  async getNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
+    return withOccRetry("getNodeWatermarks", async () => {
+      // Within one node_id group, updated_at is fixed-width hex up to the
+      // nodeId suffix, so lexicographic MAX equals HLC MAX. The
+      // (node_id, updated_at) index makes this an index-only scan.
+      const result = await this.getClient().query(
+        "SELECT node_id, MAX(updated_at) AS max_updated_at FROM shared.records GROUP BY node_id",
+        [],
+      );
+      const out: Record<string, HLCTimestamp> = {};
+      for (const raw of result.rows) {
+        const row = raw as Record<string, unknown>;
+        out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
+      }
+      return out;
+    });
   }
 
   async query(query: Query): Promise<QueryResult> {

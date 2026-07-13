@@ -14,7 +14,9 @@ import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
+  Watermarks,
 } from "../types.js";
+import { advanceWatermark } from "../watermarks.js";
 
 export interface InProcessTransportOptions {
   readonly databaseAdapter: DatabaseAdapter;
@@ -62,11 +64,53 @@ export function createInProcessSyncTransport(
 
   return {
     async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
-      // 1. Apply incoming records — pure put(snapshot). HLC LWW: skip if local
+      // 1. Apply incoming app-syncable rows per nodeId in HLC order, stopping
+      //    a node's application on its first failure (including a missing
+      //    namespace). Holdings must stay a contiguous per-node prefix:
+      //    applying a later same-node item after an earlier one failed would
+      //    lift that node's coverage watermark over the failed row, and the
+      //    requester would never re-ship it. App rows go first because their
+      //    failures are the only silent ones (shared-record put() throws fail
+      //    the whole exchange); nodes halted here also skip their shared
+      //    records below.
+      const haltedNodes = new Set<string>();
+      const inboundAppRowsByNode = new Map<string, AppSyncableRowEntry[]>();
+      for (const entry of request.appSyncableRows ?? []) {
+        const arr = inboundAppRowsByNode.get(entry.timestamp.nodeId) ?? [];
+        arr.push(entry);
+        inboundAppRowsByNode.set(entry.timestamp.nodeId, arr);
+      }
+      for (const entries of inboundAppRowsByNode.values()) {
+        entries.sort((a, b) => compareHLC(a.timestamp, b.timestamp));
+        for (const entry of entries) {
+          if (!appSyncableSource || !appSyncableSource.namespaces.get(entry.appId)) {
+            console.warn(
+              `[sync] exchange skipped appSyncableRow for unknown app "${entry.appId}"; halting node ${entry.timestamp.nodeId} this round`,
+            );
+            haltedNodes.add(entry.timestamp.nodeId);
+            break;
+          }
+          clock.receive(entry.timestamp);
+          try {
+            await appSyncableSource.applier.apply(entry);
+          } catch (err) {
+            console.warn(
+              `[sync] exchange apply appSyncableRow failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}; halting node ${entry.timestamp.nodeId} this round`,
+            );
+            haltedNodes.add(entry.timestamp.nodeId);
+            break;
+          }
+        }
+      }
+
+      // 2. Apply incoming records — pure put(snapshot). HLC LWW: skip if local
       //    copy is at-or-ahead of incoming. Only the Drive channel
-      //    (syncSharedRecords=true) applies shared records.
+      //    (syncSharedRecords=true) applies shared records. Records from
+      //    nodes halted in step 1 are skipped to preserve the contiguous
+      //    prefix (they re-ship next round).
       if (syncSharedRecords) {
         for (const snapshot of request.records ?? []) {
+          if (haltedNodes.has(snapshot.updatedAt.nodeId)) continue;
           const current = await databaseAdapter.get(snapshot.id);
           if (current && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0) {
             continue;
@@ -81,21 +125,6 @@ export function createInProcessSyncTransport(
         console.warn(
           `[sync] in-process transport dropped ${request.records?.length ?? 0} shared record(s) on a per-app channel (syncSharedRecords=false)`,
         );
-      }
-
-      // 2. Apply incoming app-syncable rows.
-      for (const entry of request.appSyncableRows ?? []) {
-        if (!appSyncableSource) continue;
-        const ns = appSyncableSource.namespaces.get(entry.appId);
-        if (!ns) continue;
-        clock.receive(entry.timestamp);
-        try {
-          await appSyncableSource.applier.apply(entry);
-        } catch (err) {
-          console.warn(
-            `[sync] exchange apply appSyncableRow failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}`,
-          );
-        }
       }
 
       // 3. Scan local records the caller hasn't seen yet, paginated by
@@ -193,7 +222,43 @@ export function createInProcessSyncTransport(
         overflowed ||
         records.length + appSyncableRows.length >= limit;
 
-      return { records, appSyncableRows, hasMore };
+      // 5. Coverage watermarks over this channel's full post-apply state
+      //    (see SyncExchangeResponse.responderWatermarks). Scoped to the
+      //    channel's own data plane: shared records only on the Drive
+      //    channel, only the registered namespaces' tables on per-app
+      //    channels. A failed per-table query omits its nodes (watermark
+      //    understates → requester re-ships → idempotent LWW) rather than
+      //    failing the exchange.
+      const responderWatermarks: Watermarks = {};
+      if (syncSharedRecords) {
+        for (const hlc of Object.values(await databaseAdapter.getNodeWatermarks())) {
+          advanceWatermark(responderWatermarks, hlc);
+        }
+      }
+      if (appSyncableSource) {
+        const scanCapable = appSyncableSource.applier as ScanCapableApplier;
+        if (typeof scanCapable.getNodeWatermarks === "function") {
+          for (const ns of appSyncableSource.namespaces.list()) {
+            for (const tableInfo of ns.tables) {
+              try {
+                const tableWatermarks = await scanCapable.getNodeWatermarks(
+                  ns.appId,
+                  tableInfo.name,
+                );
+                for (const hlc of Object.values(tableWatermarks)) {
+                  advanceWatermark(responderWatermarks, hlc);
+                }
+              } catch (err) {
+                console.warn(
+                  `[sync] in-process transport getNodeWatermarks failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
+                );
+              }
+            }
+          }
+        }
+      }
+
+      return { records, appSyncableRows, responderWatermarks, hasMore };
     },
   };
 }

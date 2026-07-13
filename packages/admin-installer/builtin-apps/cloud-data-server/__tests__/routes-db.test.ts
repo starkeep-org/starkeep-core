@@ -12,7 +12,7 @@ import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { S3Client, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { signRequest } from "@starkeep/app-client";
-import { dataRecordObjectKey } from "@starkeep/protocol-primitives";
+import { dataRecordObjectKey, serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
 import { fakeDsqlWithGrants, recordRow } from "./fake-dsql.js";
 
@@ -119,6 +119,9 @@ function bodyOf(res: { body: string }): Record<string, unknown> {
 
 const RECORDS_SELECT = /select \* from "shared"\."records"/;
 const RECORDS_INSERT = /INSERT INTO shared\.records/;
+// The responder's coverage-watermark summary, computed on every exchange.
+const RECORDS_NODE_WATERMARKS =
+  /SELECT node_id, MAX\(updated_at\).*FROM shared\.records GROUP BY node_id/;
 const VALID_HASH = "b".repeat(64);
 
 describe("grants parity on records routes", () => {
@@ -743,7 +746,11 @@ describe("sync exchange channel split", () => {
     const db = fakeDsqlWithGrants()
       .on(/FROM shared\.records WHERE id =/, [])
       .on(RECORDS_INSERT, [])
-      .on(RECORDS_SELECT, []);
+      .on(RECORDS_SELECT, [])
+      .on(RECORDS_NODE_WATERMARKS, [
+        // Post-apply per-node coverage the responder reports back.
+        { node_id: "peer", max_updated_at: serializeHLC(hlc) },
+      ]);
     setDbFactory(db);
     const res = await handler(
       signedEvent({
@@ -758,7 +765,58 @@ describe("sync exchange channel split", () => {
     const inserts = db.calls(RECORDS_INSERT);
     expect(inserts).toHaveLength(1);
     expect(inserts[0]!.values).toContain("sync-rec-1");
-    expect(bodyOf(res)).toMatchObject({ records: [], hasMore: false });
+    // responderWatermarks serializes through ok() so the requester can
+    // replace its peerWatermarks from the response.
+    expect(bodyOf(res)).toMatchObject({
+      records: [],
+      hasMore: false,
+      responderWatermarks: { peer: hlc },
+    });
+  });
+
+  it("a wiped cloud reports empty responder watermarks and accepts the re-ship next round", async () => {
+    // Round 1 against an empty (redeployed) store: nothing to ship back and
+    // — the fix under test — coverage is reported as empty so the requester
+    // drops its stale peerWatermarks.
+    const emptyDb = fakeDsqlWithGrants()
+      .on(RECORDS_SELECT, [])
+      .on(RECORDS_NODE_WATERMARKS, []);
+    setDbFactory(emptyDb);
+    const res1 = await handler(
+      signedEvent({
+        appId: "starkeep-drive",
+        method: "POST",
+        subPath: "/sync/exchange",
+        body: { watermarks: { peer: hlc } }, // stale-high advertisement
+      }),
+      context,
+    );
+    expect(res1.statusCode).toBe(200);
+    expect(bodyOf(res1)).toMatchObject({ responderWatermarks: {} });
+
+    // Round 2: the requester re-ships; the store accepts and now covers it.
+    const db = fakeDsqlWithGrants()
+      .on(/FROM shared\.records WHERE id =/, [])
+      .on(RECORDS_INSERT, [])
+      .on(RECORDS_SELECT, [])
+      .on(RECORDS_NODE_WATERMARKS, [
+        { node_id: "peer", max_updated_at: serializeHLC(hlc) },
+      ]);
+    setDbFactory(db);
+    const res2 = await handler(
+      signedEvent({
+        appId: "starkeep-drive",
+        method: "POST",
+        subPath: "/sync/exchange",
+        body: { watermarks: {}, records: [incomingRecord] },
+      }),
+      context,
+    );
+    expect(res2.statusCode).toBe(200);
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(1);
+    expect(bodyOf(res2)).toMatchObject({
+      responderWatermarks: { peer: hlc },
+    });
   });
 
   it("a per-app channel drops shared records and never scans shared.records", async () => {

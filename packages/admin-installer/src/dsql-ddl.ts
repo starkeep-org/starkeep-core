@@ -264,9 +264,11 @@ export async function runAppInstallDdl(
       }
 
       // App-specific syncable tables under the app's private schema.
-      // Each table gets reserved `updated_at` (HLC-serialized) and `deleted_at`
+      // Each table gets reserved `updated_at` (HLC-serialized), `node_id`
+      // (denormalized from updated_at by the applier) and `deleted_at`
       // columns for inline-HLC change tracking, plus an index on `updated_at`
-      // for efficient pull scans.
+      // for efficient pull scans and one on (node_id, updated_at) for the
+      // responder's per-node coverage watermark.
       const schemaName = `app_${appId.replace(/-/g, "_")}`;
       for (const table of appSyncableTables) {
         const colDdl = table.columns
@@ -280,12 +282,17 @@ export async function runAppInstallDdl(
         const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
         await sql
           .raw(
-            `CREATE TABLE IF NOT EXISTS ${schemaName}."${table.name}" (${colDdl}, "updated_at" text NOT NULL, "deleted_at" text${pkClause})`,
+            `CREATE TABLE IF NOT EXISTS ${schemaName}."${table.name}" (${colDdl}, "updated_at" text NOT NULL, "node_id" text NOT NULL, "deleted_at" text${pkClause})`,
           )
           .execute(db);
         await sql
           .raw(
             `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${table.name}_updated_at" ON ${schemaName}."${table.name}"("updated_at")`,
+          )
+          .execute(db);
+        await sql
+          .raw(
+            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${table.name}_node_watermark" ON ${schemaName}."${table.name}"("node_id", "updated_at")`,
           )
           .execute(db);
         // Grant app role full DML on its own syncable tables.
@@ -310,12 +317,17 @@ export async function runAppInstallDdl(
         const reservedPkClause = reservedPks ? `, PRIMARY KEY (${reservedPks})` : "";
         await sql
           .raw(
-            `CREATE TABLE IF NOT EXISTS ${schemaName}."${FILE_RECORDS_TABLE}" (${reservedColDdl}, "updated_at" text NOT NULL, "deleted_at" text${reservedPkClause})`,
+            `CREATE TABLE IF NOT EXISTS ${schemaName}."${FILE_RECORDS_TABLE}" (${reservedColDdl}, "updated_at" text NOT NULL, "node_id" text NOT NULL, "deleted_at" text${reservedPkClause})`,
           )
           .execute(db);
         await sql
           .raw(
             `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_updated_at" ON ${schemaName}."${FILE_RECORDS_TABLE}"("updated_at")`,
+          )
+          .execute(db);
+        await sql
+          .raw(
+            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_node_watermark" ON ${schemaName}."${FILE_RECORDS_TABLE}"("node_id", "updated_at")`,
           )
           .execute(db);
         await sql

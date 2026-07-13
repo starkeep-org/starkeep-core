@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
-import { serializeHLC, sqliteMetadataTableName } from "@starkeep/protocol-primitives";
+import { serializeHLC, deserializeHLC, sqliteMetadataTableName } from "@starkeep/protocol-primitives";
 import type {
   DatabaseAdapter,
   Query,
@@ -104,11 +104,26 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   async delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     const ts = serializeHLC(hlc);
     this.runStmt(
-      "UPDATE shared_records SET deleted_at = ?, updated_at = ? WHERE id = ?",
+      "UPDATE shared_records SET deleted_at = ?, updated_at = ?, node_id = ? WHERE id = ?",
       ts,
       ts,
+      hlc.nodeId,
       id,
     );
+  }
+
+  async getNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
+    // Within one node_id group, updated_at is fixed-width hex up to the
+    // nodeId suffix, so lexicographic MAX equals HLC MAX. The
+    // (node_id, updated_at) index makes this an index-only scan.
+    const rows = this.allRows<{ node_id: string; max_updated_at: string }>(
+      "SELECT node_id, MAX(updated_at) AS max_updated_at FROM shared_records GROUP BY node_id",
+    );
+    const out: Record<string, HLCTimestamp> = {};
+    for (const row of rows) {
+      out[row.node_id] = deserializeHLC(row.max_updated_at);
+    }
+    return out;
   }
 
   async query(query: Query): Promise<QueryResult> {

@@ -1477,10 +1477,25 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         });
       } else {
         const source = await getAppSyncableSource();
+        // Scope the namespace store to the calling channel's app. The loaded
+        // store spans every installed app; without this filter the exchange
+        // scan — and worse, the coverage watermark — would cover foreign
+        // apps' tables, and a readable foreign row with a higher HLC on the
+        // same nodeId would mask this channel's own unshipped rows. PG
+        // grants usually deny cross-app reads, but scoping must not depend
+        // on permission failures.
+        const scopedNamespaces = {
+          get: (id: string) => (id === appId ? source.namespaces.get(id) : null),
+          list: () =>
+            source.namespaces.list().filter((ns) => ns.appId === appId),
+        };
         transport = createInProcessSyncTransport({
           databaseAdapter: db,
           clock,
-          appSyncableSource: source,
+          appSyncableSource: {
+            namespaces: scopedNamespaces,
+            applier: source.applier,
+          },
           objectStorage: storage,
           syncSharedRecords: false,
         });

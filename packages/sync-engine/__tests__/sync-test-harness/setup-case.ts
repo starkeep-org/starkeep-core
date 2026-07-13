@@ -1,4 +1,5 @@
 import { compareHLC, type HLCTimestamp, type StarkeepId } from "@starkeep/protocol-primitives";
+import type { MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../../src/transports/in-process-transport.js";
 import { residencyOf, type RecordResidency } from "../../src/residency.js";
@@ -312,6 +313,20 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     });
   }
 
+  async function wipeCloud(): Promise<void> {
+    // Hard-delete, not tombstone: a redeployed cloud has no rows at all.
+    (cloud.db as MockDatabaseAdapter).clear();
+    cloud.appRows.clear();
+    let cursor: string | undefined;
+    do {
+      const page = await cloud.storage.list("", cursor ? { cursor } : undefined);
+      for (const key of page.keys) {
+        await cloud.storage.delete(key);
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+  }
+
   async function exchange(opts: ExchangeOpts): Promise<ExchangeResult[]> {
     if (opts.inject) await applyInjection(opts.inject);
 
@@ -320,9 +335,23 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     if (opts.rounds === "until-converged") {
       let i = 0;
       while (i < cap) {
+        // A round that ships/applies nothing can still make progress by
+        // *learning*: the responder's coverage report may move
+        // peerWatermarks (e.g. down, after a cloud wipe), and the re-ship
+        // only happens on the following round. Treat watermark movement as
+        // progress so convergence means "a full no-op round".
+        const peerBefore = JSON.stringify(await syncState.getPeerWatermarks());
         const r = await engine.exchange();
         results.push(r);
-        if (!r.hasMore && r.applied === 0 && r.shipped === 0) break;
+        const peerAfter = JSON.stringify(await syncState.getPeerWatermarks());
+        if (
+          !r.hasMore &&
+          r.applied === 0 &&
+          r.shipped === 0 &&
+          peerBefore === peerAfter
+        ) {
+          break;
+        }
         i++;
       }
       if (i === cap) {
@@ -373,6 +402,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
         }
       }
     },
+    wipeCloud,
     exchange,
     recordExists,
     blobExists,

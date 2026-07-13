@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { HLCTimestamp } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSinceOptions, ScanSincePage } from "@starkeep/shared-space-api";
 import { appSyncableTableName } from "./namespace.js";
@@ -53,7 +54,7 @@ export class SqliteAppSyncableApplier
     pkColumns: string[],
     entry: AppSyncableRowEntry,
   ): void {
-    const row = entry.row ?? {};
+    const row = withNodeId(entry.row ?? {}, entry);
     const cols = Object.keys(row);
     if (cols.length === 0) return;
 
@@ -91,7 +92,9 @@ export class SqliteAppSyncableApplier
   }
 
   private applyUpdate(fullName: string, entry: AppSyncableRowEntry): void {
-    const patch = entry.row ?? {};
+    // node_id rides along whenever updated_at changes (it's derived from it).
+    const rawPatch = entry.row ?? {};
+    const patch = rawPatch["updated_at"] ? withNodeId(rawPatch, entry) : rawPatch;
     const where = entry.where ?? {};
     const patchCols = Object.keys(patch);
     const whereCols = Object.keys(where);
@@ -118,7 +121,7 @@ export class SqliteAppSyncableApplier
   private applyDelete(fullName: string, entry: AppSyncableRowEntry): void {
     const where = entry.where ?? {};
     const whereCols = Object.keys(where);
-    // Soft-delete: set deleted_at and updated_at.
+    // Soft-delete: set deleted_at and updated_at (and node_id with it).
     const incomingUpdatedAt = entry.row?.["updated_at"] as string | undefined;
     const ts = incomingUpdatedAt ?? serializeHLC(entry.timestamp);
 
@@ -128,19 +131,44 @@ export class SqliteAppSyncableApplier
     ];
     const whereClause = " WHERE " + conditions.join(" AND ");
 
-    // params order: SET deleted_at=?, updated_at=?, then WHERE bindings
+    // params order: SET deleted_at=?, updated_at=?, node_id=?, then WHERE bindings
     const params: unknown[] = [
       ts,
       ts,
+      nodeIdOf(ts, entry),
       ...whereCols.map((c) => where[c]),
       ts,  // for the LWW updated_at < ? condition
     ];
 
     this.db
       .prepare(
-        `UPDATE ${q(fullName)} SET deleted_at = ?, updated_at = ?${whereClause}`,
+        `UPDATE ${q(fullName)} SET deleted_at = ?, updated_at = ?, node_id = ?${whereClause}`,
       )
       .run(...(params as never[]));
+  }
+
+  /** See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`. */
+  async getNodeWatermarks(
+    appId: string,
+    table: string,
+  ): Promise<Record<string, HLCTimestamp>> {
+    const fullName = appSyncableTableName(appId, table);
+    let rows: { node_id: string; max_updated_at: string }[];
+    try {
+      rows = this.db
+        .prepare(
+          `SELECT node_id, MAX(updated_at) AS max_updated_at FROM ${q(fullName)} GROUP BY node_id`,
+        )
+        .all() as { node_id: string; max_updated_at: string }[];
+    } catch {
+      // Table might not exist yet (app not installed locally).
+      return {};
+    }
+    const out: Record<string, HLCTimestamp> = {};
+    for (const row of rows) {
+      out[row.node_id] = deserializeHLC(row.max_updated_at);
+    }
+    return out;
   }
 
   /**
@@ -212,6 +240,31 @@ export class SqliteAppSyncableApplier
 
 function q(name: string): string {
   return `"${name}"`;
+}
+
+/**
+ * Return `row` with `node_id` set from its `updated_at` (falling back to the
+ * entry timestamp). Writers can't be trusted to carry the column — locally
+ * authored entries and older wire rows don't — so the applier derives it at
+ * write time, keeping the NOT NULL invariant without touching every producer.
+ */
+function withNodeId(
+  row: Record<string, unknown>,
+  entry: AppSyncableRowEntry,
+): Record<string, unknown> {
+  return { ...row, node_id: nodeIdOf(row["updated_at"], entry) };
+}
+
+/** nodeId from a serialized-HLC `updated_at`, or the entry timestamp's. */
+function nodeIdOf(updatedAt: unknown, entry: AppSyncableRowEntry): string {
+  if (typeof updatedAt === "string") {
+    try {
+      return deserializeHLC(updatedAt).nodeId;
+    } catch {
+      // Not a serialized HLC — fall through to the entry timestamp.
+    }
+  }
+  return entry.timestamp.nodeId;
 }
 
 function rowToEntry(

@@ -6,6 +6,8 @@ export interface SqliteRow {
   type: string;
   created_at: string;
   updated_at: string;
+  /** Denormalized `updatedAt.nodeId`; must be rewritten with `updated_at`. */
+  node_id: string;
   deleted_at: string | null;
   version: number;
   content_hash: string;
@@ -24,6 +26,7 @@ export function recordToRow(record: DataRecord): SqliteRow {
     type: record.type,
     created_at: serializeHLC(record.createdAt),
     updated_at: serializeHLC(record.updatedAt),
+    node_id: record.updatedAt.nodeId,
     deleted_at: record.deletedAt ? serializeHLC(record.deletedAt) : null,
     version: record.version,
     content_hash: record.contentHash,

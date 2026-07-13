@@ -191,14 +191,19 @@ export function createAppSyncableTables(
       .join(", ");
     const pks = table.columns.filter((c) => c.primaryKey).map((c) => `"${c.name}"`);
     const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
-    // updated_at and deleted_at are reserved by the sync runtime for inline-HLC
-    // change tracking; they are appended automatically and must not be declared
-    // in the manifest.
+    // updated_at, node_id (denormalized from updated_at by the applier) and
+    // deleted_at are reserved by the sync runtime for inline-HLC change
+    // tracking; they are appended automatically and must not be declared in
+    // the manifest. (node_id, updated_at) backs the responder's per-node
+    // coverage watermark query.
     db.exec(
-      `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}, "updated_at" TEXT NOT NULL, "deleted_at" TEXT${pkClause})`,
+      `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}, "updated_at" TEXT NOT NULL, "node_id" TEXT NOT NULL, "deleted_at" TEXT${pkClause})`,
     );
     db.exec(
       `CREATE INDEX IF NOT EXISTS "idx_${fullName}_updated_at" ON "${fullName}"("updated_at")`,
+    );
+    db.exec(
+      `CREATE INDEX IF NOT EXISTS "idx_${fullName}_node_watermark" ON "${fullName}"("node_id", "updated_at")`,
     );
   }
 }
@@ -225,10 +230,13 @@ export function createReservedFileRecordsTable(
   );
   const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
   db.exec(
-    `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}, "updated_at" TEXT NOT NULL, "deleted_at" TEXT${pkClause})`,
+    `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}, "updated_at" TEXT NOT NULL, "node_id" TEXT NOT NULL, "deleted_at" TEXT${pkClause})`,
   );
   db.exec(
     `CREATE INDEX IF NOT EXISTS "idx_${fullName}_updated_at" ON "${fullName}"("updated_at")`,
+  );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS "idx_${fullName}_node_watermark" ON "${fullName}"("node_id", "updated_at")`,
   );
 }
 

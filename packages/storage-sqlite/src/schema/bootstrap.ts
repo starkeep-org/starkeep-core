@@ -30,6 +30,10 @@ export function initializeLocalSchema(db: DatabaseSync): void {
       type TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      -- Denormalized from updated_at (its nodeId component) on every write.
+      -- Feeds the sync responder's per-node coverage watermark via the
+      -- (node_id, updated_at) index without scanning the table.
+      node_id TEXT NOT NULL,
       deleted_at TEXT,
       version INTEGER NOT NULL DEFAULT 1,
       content_hash TEXT NOT NULL,
@@ -45,6 +49,9 @@ export function initializeLocalSchema(db: DatabaseSync): void {
     )
   `);
   db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_type ON shared_records(type)");
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_shared_records_node_watermark ON shared_records(node_id, updated_at)",
+  );
   db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_origin_app ON shared_records(origin_app_id)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_parent_id ON shared_records(parent_id)");
   // Duplicate-file prevention: (filename + bytes) is unique among live records.

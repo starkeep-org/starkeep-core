@@ -165,6 +165,10 @@ export async function initializeSharedSchema(
          type               text        NOT NULL,
          created_at         text        NOT NULL,
          updated_at         text        NOT NULL,
+         -- Denormalized from updated_at (its nodeId component) on every
+         -- write. Feeds the sync responder's per-node coverage watermark via
+         -- the (node_id, updated_at) index without scanning the table.
+         node_id            text        NOT NULL,
          deleted_at         text,
          version            integer     NOT NULL DEFAULT 1,
          content_hash       text        NOT NULL,
@@ -266,6 +270,17 @@ export async function initializeSharedSchema(
       `CREATE UNIQUE INDEX ASYNC uq_records_filename_hash
          ON shared.records (original_filename, content_hash, deleted_at)
          NULLS NOT DISTINCT`,
+    );
+
+    // Backs the sync responder's per-node coverage watermark
+    // (getNodeWatermarks): MAX(updated_at) GROUP BY node_id as an
+    // index-only scan instead of a per-exchange table scan.
+    await ensureIndex(
+      db,
+      "shared",
+      "idx_records_node_watermark",
+      `CREATE INDEX ASYNC idx_records_node_watermark
+         ON shared.records (node_id, updated_at)`,
     );
 
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The

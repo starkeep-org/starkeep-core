@@ -129,6 +129,16 @@ export interface World {
   driveOperation(op: Operation): Promise<void>;
   exchange(opts: ExchangeOpts): Promise<ExchangeResult[]>;
 
+  /**
+   * Model a cloud redeploy: hard-delete every cloud-side record, app row and
+   * blob while leaving the local side — including its `peerWatermarks`, which
+   * still claim the cloud holds everything — untouched. This seeds the
+   * inconsistent state a consistent sync history can't produce (the
+   * `cloud-lost-after-sync` scenario): recovery must come from the responder
+   * reporting its true coverage, not from local bookkeeping.
+   */
+  wipeCloud(): Promise<void>;
+
   recordExists(side: "local" | "cloud", id?: StarkeepId): Promise<boolean>;
   blobExists(side: "local" | "cloud", key?: string): Promise<boolean>;
   getRecord(
