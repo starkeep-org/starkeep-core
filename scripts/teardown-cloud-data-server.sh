@@ -251,6 +251,7 @@ echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
 echo "  CUR report   : $CUR_REPORT"
 echo "  IAM role     : $CDS_ROLE"
 echo "  Pulumi locks : s3://${PULUMI_STATE_BUCKET}/.pulumi/locks/ (cleared, bucket kept)"
+echo "  Config keys  : stale cloud-data-server keys stripped from $CONFIG_FILE"
 echo ""
 
 if [[ "$YES" != "true" ]]; then
@@ -540,6 +541,52 @@ fi
 # ── Step 8: cloud-data-server IAM role ────────────────────────────────────────
 
 delete_role "$CDS_ROLE"
+
+# ── Step 9: Strip stale cloud-data-server keys from config.json ───────────────
+# The installer writes these keys into ~/.starkeep/config.json as it creates
+# each resource. They all point at resources this script just destroyed, so a
+# subsequent fresh install would otherwise start with dangling values. We only
+# remove the keys the cloud-data-server install owns — bootstrap-level values
+# (Cognito pool ids, account, permissions boundaries, managerRoleArn,
+# pulumiStateBucket, nodeId, stackPrefix) survive cloud-data-server teardown
+# and are left untouched. Skipped silently if config.json is absent.
+
+step "Clearing stale cloud-data-server keys from $CONFIG_FILE"
+if [[ -f "$CONFIG_FILE" ]]; then
+  python3 - "$CONFIG_FILE" << 'PYEOF'
+import json, sys
+
+path = sys.argv[1]
+# Keys written by installCloudDataServer / cli-install-cloud-data-server as each
+# resource is created. Keep this list in sync with the installer's config writes.
+STALE = [
+    "apiGatewayUrl",
+    "publicBaseUrl",
+    "apiGatewayId",
+    "apiGatewayExecutionArn",
+    "authorizerId",
+    "s3Bucket",
+    "auroraEndpoint",
+]
+
+with open(path) as f:
+    config = json.load(f)
+
+removed = [k for k in STALE if k in config]
+for k in removed:
+    config.pop(k, None)
+
+if removed:
+    with open(path, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+    print("  Removed: " + ", ".join(removed))
+else:
+    print("  No stale keys present.")
+PYEOF
+else
+  skip
+fi
 
 echo ""
 echo "Cloud-data-server teardown complete."
