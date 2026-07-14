@@ -15,10 +15,10 @@ Starkeep is currently in alpha, pre-production status. The whole system and all 
 
 However, there are some significant known limitations, making Starkeep probably not yet suitable for "production" (that is personal use), yet:
 
-- Starkeep does not yet support non-default Lambda concurrency limits (i.e. beyond the new account default limit of 10). This is because increasing that limit requires making a request to Amazon and could complicate the setup, which we wanted to keep as simple as possible. We'll sort this out soon. Result: another source of cloud app slowness, but again: they work!
-- Starkeep does not yet provide a way to update its foundational bootstrap deployment. (Of course, you can update it yourself since it runs on your infra, but there's no out of the box update support yet.
+- Starkeep does not yet provide a way to update its foundational bootstrap deployment. Of course, you can update it yourself since it runs on your infra, but there's no out of the box update support yet.
 - Custom DNS support has not been added to the system yet.
-- The apps - essentially Drive (built in) and Photos (installable) - are mostly bare bones proof-of-concept level and lack the features you'd likely need to use these apps as real replacements for, say, your current Photos app. We'll get there!
+- Starkeep does not yet support non-default Lambda concurrency limits (i.e. beyond the new account default limit of 10). This is because increasing that limit requires making a request to Amazon and could complicate the setup, which we wanted to keep as simple as possible. We'll sort this out soon.
+- The apps - essentially Drive (built-in) and Photos (installable) - are mostly bare bones proof-of-concept level and lack the features you'd likely need to use these apps as real replacements for, say, your current Photos app. We'll get there!
 
 ## Overview
 
@@ -31,7 +31,7 @@ The Starkeep Core repo includes four built-in system apps:
 
 Beyond the core, Starkeep is designed for many "installable" apps to run on top by interacting with the Local and/or Cloud Data Servers. Each installable app declares the file types it can operate on in its manifest, and users accept the type permissions at install time.
 
-For now, we provide an example "Photos" app available in a separate repo, `starkeep-apps`.
+For now, we provide an example "Photos" app available in a separate repo, [`starkeep-apps`](https://github.com/starkeep-org/starkeep-apps).
 
 For the full picture of the parts and how data moves between them, see [`system-design.md`](system-design.md). For the trust boundaries between those parts, see [`data-roles-and-permissions.md`](data-roles-and-permissions.md).
 
