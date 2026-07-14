@@ -1,5 +1,28 @@
 # Starkeep cloud — Threat Model & Security Assessment (2026-06-30)
 
+## Reporting a vulnerability
+
+Please report vulnerabilities privately via GitHub's
+[private vulnerability reporting](https://github.com/starkeep-org/starkeep-core/security/advisories/new)
+rather than opening a public issue.
+
+We aim to acknowledge reports within a few days. Starkeep is pre-production and
+maintained by a small team, so please allow reasonable time for a fix before
+public disclosure.
+
+The threat model below is a deliberately candid account of the current posture,
+including what is *not* yet mitigated. A report that restates a limitation
+already documented here is useful to us as prioritization signal, but is not
+treated as a vulnerability report.
+
+## Project status
+
+Starkeep is pre-production software.
+
+---
+
+## Security assessment overview
+
 > **Scope.** The cloud-side security posture only: the cloud data server
 > (broker, DSQL, files bucket, API Gateway), cloud apps and their install /
 > uninstall lifecycle, Cognito + IAM bootstrap, and the cloud sync path. The
