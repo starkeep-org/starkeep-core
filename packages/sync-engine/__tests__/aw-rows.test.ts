@@ -125,7 +125,7 @@ describe("AW — app-syncable rows", () => {
     expect(await w.getAppRow("cloud")).toEqual(cloudBefore);
   });
 
-  it("S4-009: AW cR + both-same — local re-ships; no data drift", async () => {
+  it("S4-009: AW cR + both-same — stale-high peer cache against an intact cloud; no data drift", async () => {
     const w = await setupCase({
       dt: "AW",
       presence: "both-same",

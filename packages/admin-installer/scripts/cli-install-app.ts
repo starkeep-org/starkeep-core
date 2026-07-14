@@ -260,4 +260,8 @@ await installApp({
 }).catch(exitOnInstallFailure);
 
 console.log(`\nInstall complete. ${appId} app available at:`);
-console.log(`  ${config.apiGatewayUrl ?? ""}${config.apiGatewayUrl ? `/apps/${appId}/` : "(apiGatewayUrl not in config)"}`);
+// Surface the browser-facing origin (CloudFront distribution) so the app is
+// loaded same-origin with the shared image bytes it fetches; fall back to the
+// raw gateway URL for pre-CloudFront configs.
+const browserBase = config.publicBaseUrl ?? config.apiGatewayUrl;
+console.log(`  ${browserBase ?? ""}${browserBase ? `/apps/${appId}/` : "(publicBaseUrl/apiGatewayUrl not in config)"}`);

@@ -216,9 +216,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
       const outboundRecords: AnyRecord[] = [];
       const outboundAppRows: AppSyncableRowEntry[] = [];
-      const peerSafeAdvance = new Map<string, HLCTimestamp>();
 
-      for (const [nodeId, items] of outboundByNode) {
+      for (const items of outboundByNode.values()) {
         for (const item of items) {
           const manifest = outboundManifest(item);
           if (manifest) {
@@ -234,10 +233,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           }
           if (item.kind === "record") {
             outboundRecords.push(item.record);
-            peerSafeAdvance.set(nodeId, item.record.updatedAt);
           } else {
             outboundAppRows.push(item.entry);
-            peerSafeAdvance.set(nodeId, item.entry.timestamp);
           }
         }
       }
@@ -252,10 +249,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // ---------------------------------------------------------------------
       // Inbound: apply records (and pull their blobs) per nodeId in HLC order,
       // interleaving SR snapshots and AR/AW rows. Own watermark advances only
-      // past items that fully landed locally; peerWatermarks also advances
-      // past *every* item we received — the peer demonstrated it has them by
-      // shipping them — which prevents us re-shipping items that originated
-      // on the peer's side.
+      // past items that fully landed locally. peerWatermarks needs no
+      // per-item bookkeeping here: the responder reports its coverage in
+      // `responderWatermarks` (computed after applying our outbound), which
+      // replaces the whole map below.
       // ---------------------------------------------------------------------
       // A per-app channel (syncSharedRecords=false) must never apply shared
       // records. The responder shouldn't ship them, but guard inbound too so
@@ -275,15 +272,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       for (const [nodeId, items] of inboundByNode) {
         let contiguous = true;
         for (const item of items) {
-          const itemHlc = inboundItemHlc(item);
-
-          // The peer has this item (it sent it to us) — peerWatermarks
-          // can advance past it regardless of our local apply outcome.
-          const existing = peerSafeAdvance.get(nodeId);
-          if (!existing || compareHLC(itemHlc, existing) > 0) {
-            peerSafeAdvance.set(nodeId, itemHlc);
-          }
-
           if (item.kind === "record") {
             const snapshot = item.record;
             const current = await localDatabaseAdapter.get(snapshot.id);
@@ -372,11 +360,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
         await syncState.setWatermarks(nextOwnWatermarks);
 
-        const nextPeerWatermarks: Watermarks = { ...peerWatermarks };
-        for (const hlc of peerSafeAdvance.values()) {
-          advanceWatermark(nextPeerWatermarks, hlc);
-        }
-        await syncState.setPeerWatermarks(nextPeerWatermarks);
+        // Authoritative replace (never merge): the responder's coverage
+        // report is the truth about what it holds. Replacing lets the map
+        // move *down* after peer-side loss, which is what triggers re-ship.
+        await syncState.setPeerWatermarks(response.responderWatermarks);
       }
 
       if (appliedIds.length > 0) {

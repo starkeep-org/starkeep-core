@@ -207,7 +207,7 @@ export function createFileWatchManager(opts: {
         data_record_id = excluded.data_record_id,
         mtime = excluded.mtime,
         size_bytes = excluded.size_bytes
-    `).run(watchId, filePath, relativePath, contentHash, dataRecordId, mtime, sizeBytes);
+    `).run(filePath, watchId, relativePath, contentHash, dataRecordId, mtime, sizeBytes);
   }
 
   function deleteTrackingRecord(filePath: string): void {
@@ -258,9 +258,24 @@ export function createFileWatchManager(opts: {
       // Hash the file (streaming, no full buffer)
       const contentHash = await hashFile(filePath);
 
-      // Check if we already have a tracking record with this hash
+      // Check if we already have a tracking record with this hash. The content
+      // is unchanged (only the mtime moved — e.g. a re-save or a coalesced FS
+      // event), so there's nothing to re-ingest. Restore the synced entry with
+      // the new mtime; returning here without doing so would strand the file in
+      // the "pending" placeholder set above, permanently dropping syncedFiles
+      // below totalFiles (the "7/8, never synced" symptom).
       if (existing && existing.contentHash === contentHash) {
-        return; // No change
+        active.files.set(filePath, { ...existing, mtime: fileStat.mtimeMs, status: "synced" });
+        upsertTrackingRecord(
+          active.config.id,
+          filePath,
+          existing.relativePath,
+          existing.contentHash,
+          existing.dataRecordId,
+          fileStat.mtimeMs,
+          fileStat.size,
+        );
+        return;
       }
 
       // Dedup: check if another record already has this content

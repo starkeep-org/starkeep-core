@@ -123,16 +123,17 @@ describe("put / get / delete", () => {
     expect(await adapter.get(record.id)).toBeNull();
   });
 
-  it("delete writes a tombstone, bumping deleted_at and updated_at together", async () => {
+  it("delete writes a tombstone, bumping deleted_at, updated_at and node_id together", async () => {
     const record = sampleRecord();
     const hlc = clock.now();
     await adapter.delete(record.id, hlc);
     const [call] = client.calls;
     expect(call.text).toBe(
-      "UPDATE shared.records SET deleted_at = $1, updated_at = $2 WHERE id = $3",
+      "UPDATE shared.records SET deleted_at = $1, updated_at = $2, node_id = $3 WHERE id = $4",
     );
     expect(call.values![0]).toBe(call.values![1]);
-    expect(call.values![2]).toBe(record.id);
+    expect(call.values![2]).toBe(hlc.nodeId);
+    expect(call.values![3]).toBe(record.id);
   });
 });
 

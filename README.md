@@ -148,7 +148,9 @@ Three tiers:
 
 ## Security
 
-Starkeep's cloud-side security posture has been assessed in a written threat model: [`meta-docs/docs/threat-model-cloud-data-server-cloud-apps-2026-06-30.md`](meta-docs/docs/threat-model-cloud-data-server-cloud-apps-2026-06-30.md). It covers the cloud data server (broker, DSQL, files bucket, API Gateway), cloud apps and their install/uninstall lifecycle, the Cognito + IAM bootstrap, and the cloud sync path, working from the single-account, single-tenant trust boundary. Each threat carries an honest posture label — Strong, Adequate, Partial, Deferred by design, or Out of scope / accepted.
+Starkeep's cloud-side security posture has been assessed in a written threat model: [`security-assessment.md`](security-assessment.md). It covers the cloud data server (broker, DSQL, files bucket, API Gateway), cloud apps and their install/uninstall lifecycle, the Cognito + IAM bootstrap, and the cloud sync path, working from the single-account, single-tenant trust boundary. Each threat carries an honest posture label — Strong, Adequate, Partial, Deferred by design, or Out of scope / accepted.
+
+A companion breadth-first evaluation against the OWASP ASVS 5.0 standard — every chapter, high level — lives in [`owasp-asvs-evaluation.md`](owasp-asvs-evaluation.md).
 
 ## Further reading
 

@@ -209,7 +209,7 @@ describe("AR — app-record rows", () => {
     expect(await w.getAppRow("cloud")).toEqual(cloudBefore);
   });
 
-  it("S4-007: AR cR + both-same — local re-ships; cloud applies as no-op", async () => {
+  it("S4-007: AR cR + both-same — stale-high peer cache against an intact cloud; no data drift", async () => {
     const w = await setupCase({
       dt: "AR",
       presence: "both-same",

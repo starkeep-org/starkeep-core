@@ -2,13 +2,14 @@ import { describe, it, expect } from "vitest";
 import { setupCase } from "./sync-test-harness/index.js";
 
 /**
- * S4 — watermark reset × multi-homogeneous (SR single-record subset).
+ * S4 — watermark reset (SR).
  *
- * Multi-record cases (S4-010 specifically, and the `until-converged` shape
- * of every other S4 candidate) currently exercise the engine on one record
- * because the harness doesn't yet seed batches. The invariants under test
- * (rebuild watermarks without data drift / re-ship after reset) still hold
- * at N=1; multi-record will be revisited when the seeding extension lands.
+ * `wm: "cR"` seeds the *real* post-cloud-redeploy watermark state: both maps
+ * preserved, peerWatermarks still claiming the cloud holds everything. The
+ * actual data loss is modeled separately via `world.wipeCloud()` — see the
+ * S4-012+ redeploy-recovery cases, which are the regression tests for the
+ * push-is-peer-authoritative fix (they hang forever shipping nothing if the
+ * requester trusts its own cache instead of `responderWatermarks`).
  *
  * AR (S4-006/007) and AW (S4-008/009) live in their own files.
  */
@@ -34,7 +35,7 @@ describe("S4 — watermark reset (SR)", () => {
     expect(peer[w.local.nodeId]).toBeDefined();
   });
 
-  it("S4-002: cR + both-same — local re-ships; cloud applies as no-op; no data drift", async () => {
+  it("S4-002: cR + both-same — stale-high peer cache against an intact cloud is steady state; no spurious re-ship", async () => {
     const w = await setupCase({
       dt: "SR",
       presence: "both-same",
@@ -130,5 +131,55 @@ describe("S4 — watermark reset (SR)", () => {
 
     expect(await w.recordExists("cloud")).toBe(true);
     expect(await w.blobExists("cloud")).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------
+  // Redeploy-bug regressions (cloud-lost-after-sync): a fully-synced pair,
+  // then the cloud is wiped while local's peerWatermarks still claim the
+  // cloud holds everything. Recovery must be driven by the responder's
+  // coverage report — local bookkeeping alone can never detect this state.
+  // Before the peer-authoritative fix these tests fail: nothing ever ships
+  // because every record is "covered" by the stale cache.
+  // ---------------------------------------------------------------------
+
+  it("S4-012: cloud-lost-after-sync (single) — wiped cloud recovers record + blob without a manual watermark clear", async () => {
+    const w = await setupCase({
+      dt: "SR",
+      presence: "both-same",
+      blob: "bb",
+      wm: "cR",
+    });
+    await w.wipeCloud();
+    expect(await w.recordExists("cloud")).toBe(false);
+    expect(await w.blobExists("cloud")).toBe(false);
+    // The bug's precondition holds: local's cache still covers the record.
+    const { peer } = await w.watermarks();
+    expect(peer[w.local.nodeId]).toBeDefined();
+
+    await w.exchange({ rounds: "until-converged" });
+
+    expect(await w.recordExists("cloud")).toBe(true);
+    expect(await w.blobExists("cloud")).toBe(true);
+    expect(await w.getRecord("cloud")).toEqual(await w.getRecord("local"));
+  });
+
+  it("S4-013: cloud-lost-after-sync (multi, paginated) — full recovery across rounds", async () => {
+    const w = await setupCase({
+      dt: "SR",
+      presence: "both-same",
+      blob: "bb",
+      wm: "cR",
+      batch: "multi-homogeneous",
+      batchCount: 5,
+      pageLimit: 2,
+    });
+    await w.wipeCloud();
+
+    await w.exchange({ rounds: "until-converged" });
+
+    for (const id of w.subjectIds) {
+      expect(await w.recordExists("cloud", id)).toBe(true);
+      expect(await w.blobExists("cloud", w.objectKey(id))).toBe(true);
+    }
   });
 });

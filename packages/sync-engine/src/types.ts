@@ -80,6 +80,16 @@ export interface ScanCapableApplier extends AppSyncableApplier {
     sinceHlcStr: string,
     options?: ScanSinceOptions,
   ): Promise<ScanSincePage>;
+
+  /**
+   * Per-nodeId MAX(updated_at) over every stored row of one table
+   * (tombstones included) —
+   * the responder-side summary that feeds `responderWatermarks`. Backed by
+   * the denormalized `node_id` column + `(node_id, updated_at)` index so it
+   * doesn't scan the table. A missing table returns `{}` (same fail-safe
+   * direction as `scanSince`: an omitted node only causes a re-ship).
+   */
+  getNodeWatermarks(appId: string, table: string): Promise<Watermarks>;
 }
 
 /**
@@ -129,6 +139,25 @@ export interface SyncExchangeResponse {
   readonly records: AnyRecord[];
   /** Same delta logic per app schema. */
   readonly appSyncableRows: AppSyncableRowEntry[];
+  /**
+   * The responder's **coverage watermark** per nodeId, computed over its full
+   * channel state *after* applying this request's inbound payload.
+   *
+   * Coverage semantics, not "live MAX": `responderWatermarks[n] = h` asserts
+   * "I have durably incorporated everything from node `n` up to `h`; anything
+   * at-or-below `h` that I don't hold, I chose to discard." Today no
+   * discard/compaction mechanism exists, so the value is simply the per-node
+   * MAX(updated_at) over live rows — but callers must treat it as coverage so
+   * a future GC can fold a persisted compaction floor into this value
+   * (raising the floor before deleting) without a protocol change.
+   *
+   * The caller replaces (not merges) its `peerWatermarks` with this map.
+   * Replacement is what lets the watermark move *down* when the responder
+   * genuinely holds less (wipe, redeploy, failed apply), forcing a re-ship.
+   * Valid as a summary only because holdings stay a contiguous per-node
+   * prefix — both sides apply per node in HLC order and stop on failure.
+   */
+  readonly responderWatermarks: Watermarks;
   readonly hasMore: boolean;
 }
 
@@ -205,9 +234,11 @@ export interface SyncStateStore {
   setWatermarks(watermarks: Watermarks): Promise<void>;
 
   /**
-   * Last-known peer-side watermarks, returned by the peer on the previous
-   * exchange. Used by the caller to compute outbound deltas without an extra
-   * round-trip. Defaults to {} on first exchange.
+   * The peer's coverage watermarks as reported in `responderWatermarks` on
+   * the previous exchange — authoritative, replaced wholesale each round
+   * (never merged with local optimism). Used by the caller to compute
+   * outbound deltas without an extra round-trip. Defaults to {} on first
+   * exchange, which ships everything.
    */
   getPeerWatermarks(): Promise<Watermarks>;
   setPeerWatermarks(watermarks: Watermarks): Promise<void>;
@@ -225,14 +256,18 @@ export interface ExchangeResult {
 export interface SyncEngine {
   /**
    * One version-vector exchange round with the peer:
-   *   1. Read own + last-known peer watermarks
+   *   1. Read own + last-reported peer watermarks
    *   2. For each outbound record (peer hasn't seen): push its blob if any,
    *      then ship metadata. Blob push failure excludes that record from the
-   *      round; peerWatermarks stays behind it for an automatic retry.
+   *      round; the peer's reported watermarks stay behind it for an
+   *      automatic retry.
    *   3. For each inbound record: apply metadata, then pull its blob if any.
    *      Blob pull failure leaves own watermark behind it; next round the
    *      responder still ships it.
-   *   4. Persist updated watermarks.
+   *   4. Persist watermarks: own advances past fully-landed inbound items;
+   *      peer is **replaced** with `response.responderWatermarks` — the
+   *      peer's own coverage report, not local optimism — so peer-side loss
+   *      (wipe, redeploy, failed apply) is detected and re-shipped.
    */
   exchange(): Promise<ExchangeResult>;
   readonly changeNotifier: ChangeNotifier;

@@ -1,3 +1,4 @@
+import type { HLCTimestamp } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableApplier,
@@ -62,7 +63,7 @@ export class DsqlAppSyncableApplier
     pkColumns: string[],
     entry: AppSyncableRowEntry,
   ): Promise<void> {
-    const row = entry.row ?? {};
+    const row = withNodeId(entry.row ?? {}, entry);
     const cols = Object.keys(row);
     if (cols.length === 0) return;
 
@@ -103,7 +104,9 @@ export class DsqlAppSyncableApplier
     schemaTable: string,
     entry: AppSyncableRowEntry,
   ): Promise<void> {
-    const patch = entry.row ?? {};
+    // node_id rides along whenever updated_at changes (it's derived from it).
+    const rawPatch = entry.row ?? {};
+    const patch = rawPatch["updated_at"] ? withNodeId(rawPatch, entry) : rawPatch;
     const where = entry.where ?? {};
     const patchCols = Object.keys(patch);
     const whereCols = Object.keys(where);
@@ -139,18 +142,20 @@ export class DsqlAppSyncableApplier
     let paramIdx = 1;
     const tsIdx1 = paramIdx++;
     const tsIdx2 = paramIdx++;
+    const nodeIdx = paramIdx++;
     const conditions = whereCols.map((c) => `"${c}" = $${paramIdx++}`);
     conditions.push(`(updated_at IS NULL OR updated_at < $${paramIdx++})`);
     const whereClause = " WHERE " + conditions.join(" AND ");
 
     const params: unknown[] = [
       ts, ts,
+      nodeIdOf(ts, entry),
       ...whereCols.map((c) => where[c]),
       ts,
     ];
 
     await this.client.query(
-      `UPDATE ${schemaTable} SET deleted_at = $${tsIdx1}, updated_at = $${tsIdx2}${whereClause}`,
+      `UPDATE ${schemaTable} SET deleted_at = $${tsIdx1}, updated_at = $${tsIdx2}, node_id = $${nodeIdx}${whereClause}`,
       params,
     );
   }
@@ -199,6 +204,31 @@ export class DsqlAppSyncableApplier
     return { rows: entries, nextCursor, hasMore };
   }
 
+  /** See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`. */
+  async getNodeWatermarks(
+    appId: string,
+    table: string,
+  ): Promise<Record<string, HLCTimestamp>> {
+    const schemaTable = `app_${appId.replace(/-/g, "_")}."${table}"`;
+    let result: { rows: Record<string, unknown>[] };
+    try {
+      result = await this.client.query(
+        `SELECT node_id, MAX(updated_at) AS max_updated_at FROM ${schemaTable} GROUP BY node_id`,
+        [],
+      );
+    } catch {
+      // Table might not exist (app not installed) or not be readable by this
+      // channel's role. Omitting its nodes only understates the coverage
+      // watermark, which is the safe direction (re-ship, idempotent LWW).
+      return {};
+    }
+    const out: Record<string, HLCTimestamp> = {};
+    for (const row of result.rows) {
+      out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
+    }
+    return out;
+  }
+
   /** Support read path from the factory's queryRows. */
   async queryRows(
     appId: string,
@@ -214,6 +244,31 @@ export class DsqlAppSyncableApplier
     );
     return result.rows;
   }
+}
+
+/**
+ * Return `row` with `node_id` set from its `updated_at` (falling back to the
+ * entry timestamp). Writers can't be trusted to carry the column — locally
+ * authored entries and older wire rows don't — so the applier derives it at
+ * write time, keeping the NOT NULL invariant without touching every producer.
+ */
+function withNodeId(
+  row: Record<string, unknown>,
+  entry: AppSyncableRowEntry,
+): Record<string, unknown> {
+  return { ...row, node_id: nodeIdOf(row["updated_at"], entry) };
+}
+
+/** nodeId from a serialized-HLC `updated_at`, or the entry timestamp's. */
+function nodeIdOf(updatedAt: unknown, entry: AppSyncableRowEntry): string {
+  if (typeof updatedAt === "string") {
+    try {
+      return deserializeHLC(updatedAt).nodeId;
+    } catch {
+      // Not a serialized HLC — fall through to the entry timestamp.
+    }
+  }
+  return entry.timestamp.nodeId;
 }
 
 function rowToEntry(
