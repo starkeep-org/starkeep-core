@@ -8,9 +8,18 @@
  * `admin.json` holds the generated Cognito test-admin password (0600). It is
  * deliberately not a managed secret: the user it unlocks only exists in the
  * disposable test stack.
+ *
+ * The dir holds two KINDS of state, and the difference matters:
+ *
+ *   - **Cross-run state** — `config.json` and `admin.json`. These tie to a
+ *     kept-up cloud stack (its outputs; the password of a Cognito user that
+ *     still exists), so they must survive between runs.
+ *   - **Per-run local node state** — the registry `data.db`, `auth.json`,
+ *     `cloud-credentials.json`, `objects/`, `app-creds/`. These must be FRESH
+ *     every run; see `resetLocalNodeState`.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -65,6 +74,45 @@ export function readConfig(paths: RunPaths): TestStackConfig | undefined {
 export function writeConfig(paths: RunPaths, config: TestStackConfig): void {
   mkdirSync(paths.dataDir, { recursive: true });
   writeFileSync(paths.configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+}
+
+/**
+ * Per-run local node state that must NOT survive between runs. `config.json`
+ * and `admin.json` are deliberately left alone — they tie to the kept-up cloud
+ * stack (see the module header).
+ *
+ * Two independent reasons this has to happen, both learned the hard way:
+ *
+ *   - **Stale schema.** There is no migration system, by design: the local
+ *     schema bootstrap is fresh-start and states the precondition outright
+ *     ("the local-data-server's STARKEEP_DIR is fresh" — see
+ *     storage-sqlite/src/schema/bootstrap.ts). Because the DDL is
+ *     `CREATE TABLE IF NOT EXISTS`, a `data.db` written before a column was
+ *     added can never gain it; boot then dies on the first index that
+ *     references the new column. Reusing the dir across runs quietly violated
+ *     that precondition, so ANY local schema change broke the next run.
+ *
+ *   - **Stale auth.** The local-data-server WRITES `auth.json` itself when the
+ *     `/auth/tokens` handoff lands. Left behind, the next run boots already
+ *     authenticated ("Stored auth found") and its sync supervisor starts before
+ *     the handoff — defeating the boot step's whole point, which is that the
+ *     handoff is what starts sync. The later `shipped > 0` then passes for the
+ *     wrong reason.
+ */
+export function resetLocalNodeState(paths: RunPaths): void {
+  const perRun = [
+    "data.db",
+    "data.db-wal",
+    "data.db-shm",
+    "auth.json",
+    "cloud-credentials.json",
+    "cloud-config.json",
+    "objects",
+    "app-creds",
+  ];
+  for (const entry of perRun) {
+    rmSync(join(paths.dataDir, entry), { recursive: true, force: true });
+  }
 }
 
 export interface AdminCredentials {

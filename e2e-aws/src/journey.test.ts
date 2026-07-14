@@ -10,8 +10,8 @@
  * cold start.
  */
 
-import { describe, it, expect, afterAll, afterEach } from "vitest";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -44,6 +44,7 @@ import {
   runPaths,
   readConfig,
   writeConfig,
+  resetLocalNodeState,
   type TestStackConfig,
   type AdminCredentials,
 } from "./run-state.js";
@@ -120,11 +121,15 @@ function tamperSignature(sig: string): string {
 }
 
 /** Retry a fetch until it stops returning a propagation-time 5xx, or give up. */
-async function fetchWhenReady(url: string, attempts = 15): Promise<Response> {
-  let res = await fetch(url);
+async function fetchWhenReady(
+  url: string,
+  init?: RequestInit,
+  attempts = 15,
+): Promise<Response> {
+  let res = await fetch(url, init);
   for (let i = 0; i < attempts && res.status >= 500; i++) {
     await new Promise((r) => setTimeout(r, 4000));
-    res = await fetch(url);
+    res = await fetch(url, init);
   }
   return res;
 }
@@ -154,6 +159,16 @@ function runTeardownScript(script: string): void {
     let anyFailed = false;
     afterEach((ctx) => {
       if (ctx.task.result?.state === "fail") anyFailed = true;
+    });
+
+    // The run dir persists between runs so a kept-up cloud stack can be reused
+    // (config.json) and its admin user re-signed-in (admin.json) — but the
+    // LOCAL node state in that same dir must be fresh every run, or the last
+    // run's registry and auth leak into this one. See resetLocalNodeState for
+    // the two failure modes this prevents (stale schema; stale auth.json
+    // starting sync before the /auth/tokens handoff does).
+    beforeAll(() => {
+      resetLocalNodeState(paths);
     });
 
     afterAll(async () => {
@@ -255,6 +270,18 @@ function runTeardownScript(script: string): void {
       // ~/.starkeep in production. Pass the full on-disk config so the boot write
       // preserves the install's apiGatewayUrl/auroraEndpoint rather than clobbering
       // them. No auth.json is seeded — sign-in happens via /auth/tokens next.
+      //
+      // Assert that precondition rather than assume it. This comment has always
+      // claimed "no auth.json", but nothing checked, and the LDS *writes* that
+      // file itself on a successful handoff — so a prior run left one behind and
+      // the daemon booted already authenticated, starting sync before the
+      // handoff and making the later `shipped > 0` pass for the wrong reason.
+      // resetLocalNodeState clears it; this is the guard that keeps it true.
+      expect(
+        existsSync(join(paths.dataDir, "auth.json")),
+        "boot must be unauthenticated — the /auth/tokens handoff is what starts sync",
+      ).toBe(false);
+
       lds = await startLocalDataServer({
         starkeepDir: paths.dataDir,
         config: { ...config } as Record<string, unknown>,
@@ -539,22 +566,46 @@ function runTeardownScript(script: string): void {
       expect(Buffer.from(await blob.arrayBuffer()).equals(browserUploadBytes)).toBe(true);
     });
 
-    it("photos resize endpoint round-trips", async () => {
+    it("photos resize round-trips on the gateway AND through CloudFront (Bearer survives the edge)", async () => {
       // Unlike the broker's HMAC-gated data/sync/app-data planes, an app's own
       // routes (e.g. photos /api/resize) sit behind the gateway's Cognito JWT
       // authorizer — they're user-facing, so they take the signed-in user's id
       // token as a Bearer credential, not an app HMAC signature.
-      const res = await fetch(`${config.apiGatewayUrl}/apps/photos/api/resize`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.idToken}`,
-        },
-        // The handler takes { targetId } and resizes to its own fixed max
-        // width; there is no caller-supplied width.
-        body: JSON.stringify({ targetId: syncedRecordId }),
-      });
-      expect(res.status).toBe(200);
+      //
+      // Drive it through BOTH origins, because the CloudFront leg is the only
+      // place in this journey where an Authorization header crosses the edge.
+      // The real SPA sends this call to the distribution: resolveAppApiSource
+      // builds `${apiGatewayUrl}/apps/photos` from runtime config, and Part A
+      // fills that config value with publicBaseUrl (cli-install-app.ts), so
+      // CloudFront is the production path for every JWT-gated app route. The
+      // header only reaches the origin because the default cache behavior
+      // carries the AllViewerExceptHostHeader origin request policy; drop that
+      // policy and this 401s while every *unauthenticated* CloudFront assertion
+      // in this file still passes. Keeping the gateway leg disambiguates a
+      // failure: both legs failing implicates the authorizer or the handler,
+      // only the edge leg failing implicates header forwarding.
+      const post = (base: string) =>
+        fetchWhenReady(`${base}/apps/photos/api/resize`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.idToken}`,
+          },
+          // The handler takes { targetId } and resizes to its own fixed max
+          // width; there is no caller-supplied width.
+          body: JSON.stringify({ targetId: syncedRecordId }),
+        });
+
+      const viaGateway = await post(config.apiGatewayUrl!);
+      expect(viaGateway.status).toBe(200);
+
+      const viaEdge = await post(config.publicBaseUrl!);
+      expect(
+        viaEdge.status,
+        "JWT Bearer must survive CloudFront — check the default behavior's " +
+          "AllViewerExceptHostHeader origin request policy",
+      ).toBe(200);
+      expect((viaEdge.headers.get("via") ?? "").toLowerCase()).toContain("cloudfront");
     });
 
     it("writes a caption through the cloud /app-data plane", async () => {
@@ -630,14 +681,32 @@ function runTeardownScript(script: string): void {
       expect(first.status).toBe(200);
       expect(Buffer.from(await first.arrayBuffer()).equals(photoBytes)).toBe(true);
 
-      // Edge hit on re-fetch. The custom cache policy excludes query strings from
-      // the cache key (the signed-URL params are validated then dropped), so a
-      // freshly signed URL for the same path still hits the path-keyed cache —
-      // this is exactly what makes Part B deliver anything.
-      const xCache = await pollForEdgeHit(url);
-      expect(xCache, `no edge hit for shared object (last x-cache: ${xCache})`).toMatch(
-        /Hit from cloudfront/i,
-      );
+      // Edge hit — specifically on a FRESHLY SIGNED url, not a re-fetch of the
+      // same one. This is the property that makes Part B deliver anything: the
+      // shared/* cache policy excludes the signed-URL params
+      // (Expires/Signature/Key-Pair-Id) from the cache key, so a *new* signature
+      // for an already-cached path still hits. Re-fetching the identical url
+      // would pass even with `queryStringBehavior: "all"` — i.e. it would prove
+      // nothing, since every real request carries a newly minted signature.
+      await pollForEdgeHit(url); // prime the POP for this path
+
+      // Wait past a second boundary: Expires is `now + 3600` in integer seconds,
+      // so a mint within the same second is byte-identical to the first url and
+      // we'd just be re-testing one cache key again.
+      await new Promise((r) => setTimeout(r, 1500));
+      const freshRes = await cloudApp(drive).fetch(`/data/records/${syncedRecordId}/file-url`);
+      expect(freshRes.status).toBe(200);
+      const { url: freshUrl } = (await freshRes.json()) as { url: string };
+      expect(freshUrl, "second mint must produce a distinct signature").not.toBe(url);
+      // Same object, new signature — so any cache miss is the cache key, not the path.
+      expect(new URL(freshUrl).pathname).toBe(signed.pathname);
+
+      const xCache = await pollForEdgeHit(freshUrl);
+      expect(
+        xCache,
+        `freshly-signed url missed the edge (last x-cache: ${xCache}) — the shared/* ` +
+          "cache policy must exclude query strings from the cache key",
+      ).toMatch(/Hit from cloudfront/i);
 
       // Tampered signature → 403: CloudFront enforces the key-group signature.
       const tampered = new URL(url);

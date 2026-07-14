@@ -20,7 +20,7 @@ import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/protocol-primitives";
  * ~/.starkeep/data.db (or the local-data-server's STARKEEP_DIR is fresh)
  * before this code runs.
  */
-export function initializeLocalSchema(db: DatabaseSync): void {
+function applyLocalSchemaDdl(db: DatabaseSync): void {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
 
@@ -122,5 +122,26 @@ export function initializeLocalSchema(db: DatabaseSync): void {
   for (const c of CATEGORIES) {
     if (c.id === "other") continue;
     db.exec(sqliteMetadataDdl(c));
+  }
+}
+
+export function initializeLocalSchema(db: DatabaseSync): void {
+  try {
+    applyLocalSchemaDdl(db);
+  } catch (err) {
+    // The DDL above is all `CREATE ... IF NOT EXISTS`, so it is a no-op against
+    // an up-to-date DB and cannot fail on a fresh one. In practice the way it
+    // DOES fail is a pre-existing DB written before a column was added: the
+    // table already exists (so it is not recreated, and never gains the
+    // column), and the first statement referencing the new column dies with a
+    // bare "no such column: x". That message names the symptom, not the cause,
+    // and the cause is the fresh-start contract in this file's header. Say so.
+    throw new Error(
+      `Local schema bootstrap failed: ${(err as Error).message}. This usually ` +
+        `means the SQLite DB predates the current schema. There is no ` +
+        `migration system by design — delete the DB ($STARKEEP_DIR/data.db, ` +
+        `default ~/.starkeep/data.db) and it will be rebuilt on next start.`,
+      { cause: err },
+    );
   }
 }
