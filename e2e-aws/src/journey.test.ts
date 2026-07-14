@@ -10,8 +10,8 @@
  * cold start.
  */
 
-import { describe, it, expect, afterAll, afterEach } from "vitest";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -44,6 +44,7 @@ import {
   runPaths,
   readConfig,
   writeConfig,
+  resetLocalNodeState,
   type TestStackConfig,
   type AdminCredentials,
 } from "./run-state.js";
@@ -160,6 +161,16 @@ function runTeardownScript(script: string): void {
       if (ctx.task.result?.state === "fail") anyFailed = true;
     });
 
+    // The run dir persists between runs so a kept-up cloud stack can be reused
+    // (config.json) and its admin user re-signed-in (admin.json) — but the
+    // LOCAL node state in that same dir must be fresh every run, or the last
+    // run's registry and auth leak into this one. See resetLocalNodeState for
+    // the two failure modes this prevents (stale schema; stale auth.json
+    // starting sync before the /auth/tokens handoff does).
+    beforeAll(() => {
+      resetLocalNodeState(paths);
+    });
+
     afterAll(async () => {
       await lds?.stop();
       if (anyFailed) {
@@ -259,6 +270,18 @@ function runTeardownScript(script: string): void {
       // ~/.starkeep in production. Pass the full on-disk config so the boot write
       // preserves the install's apiGatewayUrl/auroraEndpoint rather than clobbering
       // them. No auth.json is seeded — sign-in happens via /auth/tokens next.
+      //
+      // Assert that precondition rather than assume it. This comment has always
+      // claimed "no auth.json", but nothing checked, and the LDS *writes* that
+      // file itself on a successful handoff — so a prior run left one behind and
+      // the daemon booted already authenticated, starting sync before the
+      // handoff and making the later `shipped > 0` pass for the wrong reason.
+      // resetLocalNodeState clears it; this is the guard that keeps it true.
+      expect(
+        existsSync(join(paths.dataDir, "auth.json")),
+        "boot must be unauthenticated — the /auth/tokens handoff is what starts sync",
+      ).toBe(false);
+
       lds = await startLocalDataServer({
         starkeepDir: paths.dataDir,
         config: { ...config } as Record<string, unknown>,
