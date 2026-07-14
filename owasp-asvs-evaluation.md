@@ -4,7 +4,7 @@
 > OWASP Application Security Verification Standard (ASVS) **5.0.0**, assessing how
 > Starkeep's cloud posture stands against each. 
 >
-> **Companion document.** This sits alongside [`security-assessment.md`](security-assessment.md),
+> **Companion document.** This sits alongside [`SECURITY.md`](SECURITY.md),
 > the threat model that reasons about *concrete attack paths* (T1–T11). Where a
 > chapter maps onto a threat there, this doc cites it (e.g. "see T8") rather than
 > restating it. Read the threat model for the *why*; read this for *coverage
