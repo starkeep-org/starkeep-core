@@ -21,7 +21,7 @@ import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "
 import type { LocalAppEntry } from "@/lib/app-types";
 
 export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
-  const [apiGatewayUrl, setApiGatewayUrl] = useState<string | null>(null);
+  const [browserBaseUrl, setBrowserBaseUrl] = useState<string | null>(null);
   // null = config not yet read; false = no usable cloud setup (missing config
   // or region), which gates installs. The cloud Data Server card above surfaces
   // the "Set up cloud" CTA, so this section only disables installs.
@@ -35,13 +35,16 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
   // every successful install. null = not yet loaded / cloud not configured.
   const [installedIds, setInstalledIds] = useState<Set<string> | null>(null);
 
-  // Resolve the API Gateway base URL from the persisted cloud config so each
-  // app's Open ↗ link (`${apiGatewayUrl}/apps/${appId}/`) survives a reload.
-  // Once cloud is set up, showing the link is harmless even before install.
+  // Resolve the browser-facing base URL from the persisted cloud config so each
+  // app's Open ↗ link (`${browserBaseUrl}/apps/${appId}/`) survives a reload.
+  // Prefer the CloudFront distribution (publicBaseUrl) so the app loads
+  // same-origin with the shared image bytes it fetches; fall back to the raw
+  // gateway for pre-CloudFront configs. Once cloud is set up, showing the link
+  // is harmless even before install.
   useEffect(() => {
     (async () => {
       const cfg = await readCloudConfig();
-      setApiGatewayUrl(cfg?.apiGatewayUrl ?? null);
+      setBrowserBaseUrl(cfg?.publicBaseUrl ?? cfg?.apiGatewayUrl ?? null);
       // A usable cloud setup needs config present with a derivable region
       // (region comes from the userPoolId). Without it, installs can't run.
       setCloudReady(!!cfg?.region);
@@ -129,7 +132,7 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
         // installable via the per-appId route, which drives the app's own
         // `bundle` script. No hardcoded installer registry.
         const endpoint = `/api/apps/${entry.appId}/cloud-install`;
-        const url = apiGatewayUrl ? `${apiGatewayUrl}/apps/${entry.appId}/` : null;
+        const url = browserBaseUrl ? `${browserBaseUrl}/apps/${entry.appId}/` : null;
         // `installedIds === null` means the registry hasn't been read yet
         // (user not signed in, cloud not set up, or the read errored). In
         // that case render no "Installed" badge rather than guessing.

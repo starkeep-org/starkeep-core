@@ -10,7 +10,11 @@
 #   - Permissions boundary policies attached to roles outside the stack
 #   - Any resources left in ROLLBACK_COMPLETE / partial-delete state
 #
-# Usage: ./teardown-bootstrap.sh [--yes|-y] --prefix <stack-prefix> --region <region>
+# --force disables DSQL deletion protection so a protected cloud-data-server
+# cluster can actually be removed (threaded through to
+# teardown-cloud-data-server.sh, which runs unattended here).
+#
+# Usage: ./teardown-bootstrap.sh [--yes|-y] [--force] --prefix <stack-prefix> --region <region>
 #
 # --prefix and --region are both required: together they scope the teardown to
 # one deployment in one place, and neither is ever inferred from config. A
@@ -51,12 +55,14 @@ CONFIG_FILE="$STARKEEP_DIR/config.json"
 # ── Parse flags ───────────────────────────────────────────────────────────────
 
 YES=false
+FORCE=false
 FLAG_PREFIX=""
 FLAG_REGION=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes|-y) YES=true; shift ;;
+    --force) FORCE=true; shift ;;
     --prefix) FLAG_PREFIX="$2"; shift 2 ;;
     --region) FLAG_REGION="$2"; shift 2 ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
@@ -172,7 +178,14 @@ fi
 # ── Phase 1 + 2: Cloud apps and cloud-data-server ────────────────────────────
 echo ""
 echo ">>> Running teardown-cloud-data-server.sh (phases 1–2: apps, then cloud-data-server)..."
-"$SCRIPT_DIR/teardown-cloud-data-server.sh" --yes --prefix "$STACK_PREFIX" --region "$REGION"
+# Thread --force through: bootstrap teardown runs CDS teardown unattended
+# (--yes), so a deletion-protected DSQL cluster would be skipped unless the
+# operator opted in with --force here too.
+# Plain string (not an array): macOS ships bash 3.2, where expanding an empty
+# array under `set -u` errors. --force has no spaces, so unquoted is safe.
+CDS_FORCE_FLAG=""
+[[ "$FORCE" == "true" ]] && CDS_FORCE_FLAG="--force"
+"$SCRIPT_DIR/teardown-cloud-data-server.sh" --yes $CDS_FORCE_FLAG --prefix "$STACK_PREFIX" --region "$REGION"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

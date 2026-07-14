@@ -179,7 +179,12 @@ function Step1Bootstrap({
   // Step 1's region exists only to construct the CloudFormation console URL
   // and the bootstrap template's stack name. It is not persisted: once Step 2
   // captures the userPoolId, region is derived from that going forward.
-  const [region, setRegion] = useState(initialRegion || "us-east-1");
+  //
+  // No canned default: the operator must pick a region explicitly (empty →
+  // "Select a region" placeholder, and canContinue below stays false until
+  // they do). A silent us-east-1 default let installs drift into the wrong
+  // region when the intended deployment was elsewhere.
+  const [region, setRegion] = useState(initialRegion || "");
   const [stackPrefix, setStackPrefix] = useState(initialStackPrefix || "starkeep");
   const [downloaded, setDownloaded] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);

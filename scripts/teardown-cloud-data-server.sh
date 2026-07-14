@@ -14,8 +14,15 @@
 # interactive shell you'll be prompted for it; an unattended run (--yes or no
 # TTY) missing either errors out.
 #
+# Real (non-ephemeral) DSQL clusters are created with deletion protection ON by
+# design (see cloud-data-server-program.ts), so a plain delete-cluster fails on
+# them. Since removing the whole CDS stack is the entire point of this script,
+# it can disable that protection before deleting — but only with explicit
+# consent: pass --force, or answer the interactive y/N prompt. Without either,
+# a protected cluster is left intact and the run says so.
+#
 # Usage:
-#   ./teardown-cloud-data-server.sh [--yes|-y] --prefix <stack-prefix> --region <region>
+#   ./teardown-cloud-data-server.sh [--yes|-y] [--force] --prefix <stack-prefix> --region <region>
 
 set -euo pipefail
 
@@ -28,12 +35,14 @@ CONFIG_FILE="$STARKEEP_DIR/config.json"
 # ── Parse flags ───────────────────────────────────────────────────────────────
 
 YES=false
+FORCE=false
 FLAG_PREFIX=""
 FLAG_REGION=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes|-y) YES=true; shift ;;
+    --force) FORCE=true; shift ;;
     --prefix) FLAG_PREFIX="$2"; shift 2 ;;
     --region) FLAG_REGION="$2"; shift 2 ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
@@ -244,7 +253,7 @@ echo ""
 echo "  Stack prefix : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
 echo "  API Gateway  : $GATEWAY_NAME"
 echo "  Lambda       : $CDS_LAMBDA"
-echo "  DSQL cluster : (tagged starkeep:appId=cloud-data-server)"
+echo "  DSQL cluster : (tagged starkeep:appId=cloud-data-server)$([[ "$FORCE" == "true" ]] && echo "  [--force: will disable deletion protection]")"
 echo "  CloudFront   : distribution + OAC + cache policy + public key + key group (Part B)"
 echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
@@ -361,12 +370,38 @@ if [[ -z "$CLUSTER_IDS" ]]; then
   skip
 else
   for CID in $CLUSTER_IDS; do
+    # Real user clusters enable deletion protection by design, which makes
+    # delete-cluster fail. Removing the CDS stack is the whole point of this
+    # script, so it can lift that protection — but never silently: only with
+    # --force, or an explicit interactive y/N. Without consent the cluster is
+    # left intact and we say exactly how to remove it.
+    PROTECTED=$(aws dsql get-cluster --identifier "$CID" --region "$REGION" \
+      --query 'deletionProtectionEnabled' --output text 2>/dev/null || echo "unknown")
+    if [[ "$PROTECTED" == "True" || "$PROTECTED" == "true" ]]; then
+      DO_DISABLE=false
+      if [[ "$FORCE" == "true" ]]; then
+        DO_DISABLE=true
+      elif [[ "$YES" != "true" && -t 0 ]]; then
+        read -r -p "  Cluster $CID has deletion protection enabled. Disable it and delete the cluster? [y/N] " ans
+        [[ "$ans" == "y" || "$ans" == "Y" ]] && DO_DISABLE=true
+      fi
+      if [[ "$DO_DISABLE" != "true" ]]; then
+        echo "  WARN: $CID has deletion protection enabled — leaving it intact."
+        echo "        Re-run with --force (or answer 'y' at the prompt) to disable protection and delete it."
+        continue
+      fi
+      echo "  Disabling deletion protection on ${CID}..."
+      aws dsql update-cluster --identifier "$CID" --no-deletion-protection-enabled --region "$REGION" >/dev/null
+      # update-cluster is asynchronous; wait for the cluster to settle back to
+      # ACTIVE (protection cleared) before delete-cluster, or the delete races
+      # the in-flight update and fails.
+      aws dsql wait cluster-active --identifier "$CID" --region "$REGION" 2>/dev/null || true
+    fi
+
     echo "  Deleting cluster: $CID"
-    # Best-effort: a single cluster that refuses to delete (e.g. deletion
-    # protection still enabled, or it is already mid-delete) must NOT abort the
-    # whole teardown and leave the bootstrap layer half-removed. Warn and move
-    # on; a genuinely protected cluster is left for the operator to handle
-    # deliberately — teardown never silently bypasses deletion protection.
+    # Best-effort: a single cluster that refuses to delete (e.g. it is already
+    # mid-delete) must NOT abort the whole teardown and leave the bootstrap
+    # layer half-removed. Warn and move on.
     if aws dsql delete-cluster --identifier "$CID" --region "$REGION" 2>/tmp/dsql-del-err; then
       echo "  Delete initiated (DSQL deletion is asynchronous)."
     else
