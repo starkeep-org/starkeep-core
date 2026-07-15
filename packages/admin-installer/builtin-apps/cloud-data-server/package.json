@@ -10,19 +10,19 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@aws-sdk/client-ssm": "^3.700.0",
+    "@aws-sdk/client-sts": "^3.700.0",
+    "@aws-sdk/cloudfront-signer": "^3.700.0",
+    "@aws-sdk/dsql-signer": "^3.700.0",
+    "@aws-sdk/lib-storage": "^3.700.0",
+    "@aws-sdk/s3-request-presigner": "^3.700.0",
     "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/storage-aurora-dsql": "workspace:*",
     "@starkeep/storage-s3": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",
-    "@aws-sdk/client-s3": "^3.700.0",
-  "@aws-sdk/cloudfront-signer": "^3.700.0",
-    "@aws-sdk/client-ssm": "^3.700.0",
-    "@aws-sdk/client-sts": "^3.700.0",
-    "@aws-sdk/dsql-signer": "^3.700.0",
-    "@aws-sdk/lib-storage": "^3.700.0",
-    "@aws-sdk/s3-request-presigner": "^3.700.0",
     "pg": "^8.13.0"
   },
   "devDependencies": {
@@ -33,6 +33,6 @@
     "aws-sdk-client-mock": "^4.1.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.2.7"
   }
 }

@@ -36,7 +36,7 @@
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/storage-sqlite": "workspace:*",
-    "kysely": "^0.27.0",
+    "kysely": "^0.28.17",
     "pg": "^8.0.0"
   },
   "devDependencies": {
@@ -47,7 +47,7 @@
     "esbuild": "^0.24.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.7"
   },
   "peerDependencies": {
     "@starkeep/admin-manifest": "workspace:*"
