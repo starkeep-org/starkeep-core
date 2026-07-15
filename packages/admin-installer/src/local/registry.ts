@@ -1,10 +1,21 @@
 import type { DatabaseSync } from "node:sqlite";
+import { sql, type CompiledQuery } from "kysely";
 import type { AppManifest, FileAccess, SyncableTable } from "@starkeep/admin-manifest";
-import { appSyncableTableName } from "@starkeep/storage-sqlite";
+import { appSyncableTableName, sqliteCompiler as k } from "@starkeep/storage-sqlite";
 import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
 
 export type Operation = "install" | "uninstall";
 export type StepStatus = "pending" | "done" | "failed";
+
+type SqlParam = null | number | bigint | string | Uint8Array;
+
+function run(db: DatabaseSync, compiled: CompiledQuery): void {
+  db.prepare(compiled.sql).run(...(compiled.parameters as SqlParam[]));
+}
+
+function all<T>(db: DatabaseSync, compiled: CompiledQuery): T[] {
+  return db.prepare(compiled.sql).all(...(compiled.parameters as SqlParam[])) as T[];
+}
 
 export function recordStep(
   db: DatabaseSync,
@@ -14,12 +25,27 @@ export function recordStep(
   status: StepStatus,
   error?: string,
 ): void {
-  db.prepare(
-    `INSERT INTO shared_app_install_steps (app_id, operation, step, status, error, updated_at)
-     VALUES (?, ?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(app_id, operation, step)
-     DO UPDATE SET status = excluded.status, error = excluded.error, updated_at = datetime('now')`,
-  ).run(appId, operation, step, status, error ?? null);
+  run(
+    db,
+    k
+      .insertInto("shared_app_install_steps")
+      .values({
+        app_id: appId,
+        operation,
+        step,
+        status,
+        error: error ?? null,
+        updated_at: sql`datetime('now')`,
+      })
+      .onConflict((oc) =>
+        oc.columns(["app_id", "operation", "step"]).doUpdateSet((eb) => ({
+          status: eb.ref("excluded.status"),
+          error: eb.ref("excluded.error"),
+          updated_at: sql`datetime('now')`,
+        })),
+      )
+      .compile(),
+  );
 }
 
 export function getCompletedSteps(
@@ -27,16 +53,21 @@ export function getCompletedSteps(
   appId: string,
   operation: Operation,
 ): Set<string> {
-  const rows = db
-    .prepare(
-      "SELECT step FROM shared_app_install_steps WHERE app_id = ? AND operation = ? AND status = 'done'",
-    )
-    .all(appId, operation) as Array<{ step: string }>;
+  const rows = all<{ step: string }>(
+    db,
+    k
+      .selectFrom("shared_app_install_steps")
+      .select("step")
+      .where("app_id", "=", appId)
+      .where("operation", "=", operation)
+      .where("status", "=", "done")
+      .compile(),
+  );
   return new Set(rows.map((r) => r.step));
 }
 
 export function clearStepLedger(db: DatabaseSync, appId: string): void {
-  db.prepare("DELETE FROM shared_app_install_steps WHERE app_id = ?").run(appId);
+  run(db, k.deleteFrom("shared_app_install_steps").where("app_id", "=", appId).compile());
 }
 
 export interface InstallStepRow {
@@ -48,20 +79,23 @@ export interface InstallStepRow {
 }
 
 export function listInstallSteps(db: DatabaseSync, appId: string): InstallStepRow[] {
-  const rows = db
-    .prepare(
-      `SELECT operation, step, status, error, updated_at
-       FROM shared_app_install_steps
-       WHERE app_id = ?
-       ORDER BY updated_at ASC, operation ASC, step ASC`,
-    )
-    .all(appId) as Array<{
-      operation: string;
-      step: string;
-      status: string;
-      error: string | null;
-      updated_at: string;
-    }>;
+  const rows = all<{
+    operation: string;
+    step: string;
+    status: string;
+    error: string | null;
+    updated_at: string;
+  }>(
+    db,
+    k
+      .selectFrom("shared_app_install_steps")
+      .select(["operation", "step", "status", "error", "updated_at"])
+      .where("app_id", "=", appId)
+      .orderBy("updated_at", "asc")
+      .orderBy("operation", "asc")
+      .orderBy("step", "asc")
+      .compile(),
+  );
   return rows.map((r) => ({
     operation: r.operation as Operation,
     step: r.step,
@@ -71,14 +105,44 @@ export function listInstallSteps(db: DatabaseSync, appId: string): InstallStepRo
   }));
 }
 
+const APP_REGISTRY_COLUMNS = [
+  "app_id",
+  "name",
+  "version",
+  "tier",
+  "manifest",
+  "status",
+  "hmac_secret",
+  "installed_at",
+  "updated_at",
+] as const;
+
 export function appRegistryRow(db: DatabaseSync, appId: string): RegisteredApp | null {
-  const row = db
-    .prepare(
-      `SELECT app_id, name, version, tier, manifest, status, hmac_secret, installed_at, updated_at
-       FROM shared_app_registry WHERE app_id = ?`,
-    )
-    .get(appId) as unknown as RegisteredAppRow | undefined;
+  const [row] = all<RegisteredAppRow>(
+    db,
+    k
+      .selectFrom("shared_app_registry")
+      .select([...APP_REGISTRY_COLUMNS])
+      .where("app_id", "=", appId)
+      .compile(),
+  );
   if (!row) return null;
+  return toRegisteredApp(row);
+}
+
+export function listAppRegistry(db: DatabaseSync): RegisteredApp[] {
+  const rows = all<RegisteredAppRow>(
+    db,
+    k
+      .selectFrom("shared_app_registry")
+      .select([...APP_REGISTRY_COLUMNS])
+      .orderBy("installed_at", "asc")
+      .compile(),
+  );
+  return rows.map(toRegisteredApp);
+}
+
+function toRegisteredApp(row: RegisteredAppRow): RegisteredApp {
   return {
     appId: row.app_id,
     name: row.name,
@@ -92,36 +156,27 @@ export function appRegistryRow(db: DatabaseSync, appId: string): RegisteredApp |
   };
 }
 
-export function listAppRegistry(db: DatabaseSync): RegisteredApp[] {
-  const rows = db
-    .prepare(
-      `SELECT app_id, name, version, tier, manifest, status, hmac_secret, installed_at, updated_at
-       FROM shared_app_registry ORDER BY installed_at ASC`,
-    )
-    .all() as unknown as RegisteredAppRow[];
-  return rows.map((row) => ({
-    appId: row.app_id,
-    name: row.name,
-    version: row.version,
-    tier: row.tier,
-    manifest: JSON.parse(row.manifest) as AppManifest,
-    status: row.status as RegisteredApp["status"],
-    hmacSecret: row.hmac_secret,
-    installedAt: row.installed_at,
-    updatedAt: row.updated_at,
-  }));
-}
-
 export function insertAppRegistry(
   db: DatabaseSync,
   appId: string,
   manifest: AppManifest,
   hmacSecret: string,
 ): void {
-  db.prepare(
-    `INSERT INTO shared_app_registry (app_id, name, version, tier, manifest, status, hmac_secret)
-     VALUES (?, ?, ?, ?, ?, 'installing', ?)`,
-  ).run(appId, manifest.name, manifest.version, manifest.tier, JSON.stringify(manifest), hmacSecret);
+  run(
+    db,
+    k
+      .insertInto("shared_app_registry")
+      .values({
+        app_id: appId,
+        name: manifest.name,
+        version: manifest.version,
+        tier: manifest.tier,
+        manifest: JSON.stringify(manifest),
+        status: "installing",
+        hmac_secret: hmacSecret,
+      })
+      .compile(),
+  );
 }
 
 export function setAppStatus(
@@ -129,13 +184,18 @@ export function setAppStatus(
   appId: string,
   status: RegisteredApp["status"],
 ): void {
-  db.prepare(
-    "UPDATE shared_app_registry SET status = ?, updated_at = datetime('now') WHERE app_id = ?",
-  ).run(status, appId);
+  run(
+    db,
+    k
+      .updateTable("shared_app_registry")
+      .set({ status, updated_at: sql`datetime('now')` })
+      .where("app_id", "=", appId)
+      .compile(),
+  );
 }
 
 export function deleteAppRegistry(db: DatabaseSync, appId: string): void {
-  db.prepare("DELETE FROM shared_app_registry WHERE app_id = ?").run(appId);
+  run(db, k.deleteFrom("shared_app_registry").where("app_id", "=", appId).compile());
 }
 
 /**
@@ -149,31 +209,96 @@ export function insertAccessGrants(
   appId: string,
   fileAccess: FileAccess[],
 ): void {
-  const stmt = db.prepare(
-    `INSERT INTO shared_access_grants (app_id, type_id, access, metadata_write)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(app_id, type_id) DO UPDATE SET
-       access = excluded.access,
-       metadata_write = excluded.metadata_write`,
-  );
   for (const entry of fileAccess) {
     for (const type of entry.types) {
-      stmt.run(appId, type, entry.access, entry.metadataWrite ? 1 : 0);
+      run(
+        db,
+        k
+          .insertInto("shared_access_grants")
+          .values({
+            app_id: appId,
+            type_id: type,
+            access: entry.access,
+            metadata_write: entry.metadataWrite ? 1 : 0,
+          })
+          .onConflict((oc) =>
+            oc.columns(["app_id", "type_id"]).doUpdateSet((eb) => ({
+              access: eb.ref("excluded.access"),
+              metadata_write: eb.ref("excluded.metadata_write"),
+            })),
+          )
+          .compile(),
+      );
     }
   }
 }
 
 export function deleteAccessGrants(db: DatabaseSync, appId: string): void {
-  db.prepare("DELETE FROM shared_access_grants WHERE app_id = ?").run(appId);
+  run(db, k.deleteFrom("shared_access_grants").where("app_id", "=", appId).compile());
 }
 
-const SQLITE_COLUMN_TYPES: Record<SyncableTable["columns"][number]["type"], string> = {
-  text: "TEXT",
-  integer: "INTEGER",
-  real: "REAL",
-  blob: "BLOB",
-  boolean: "INTEGER",
+const SQLITE_COLUMN_TYPES: Record<SyncableTable["columns"][number]["type"], "text" | "integer" | "real" | "blob"> = {
+  text: "text",
+  integer: "integer",
+  real: "real",
+  blob: "blob",
+  boolean: "integer",
 };
+
+interface SyncableColumnDef {
+  name: string;
+  type: "text" | "integer" | "real" | "blob";
+  notNull: boolean;
+  primaryKey: boolean;
+}
+
+/**
+ * Emits the CREATE TABLE / CREATE INDEX statements shared by manifest-declared
+ * syncable tables and the reserved file-records table. updated_at, node_id
+ * (denormalized from updated_at by the applier) and deleted_at are reserved by
+ * the sync runtime for inline-HLC change tracking; they are appended
+ * automatically and must not be declared in the manifest. (node_id, updated_at)
+ * backs the responder's per-node coverage watermark query.
+ */
+function createSyncableTable(
+  db: DatabaseSync,
+  fullName: string,
+  columns: SyncableColumnDef[],
+): void {
+  let tb = k.schema
+    .createTable(fullName)
+    .ifNotExists();
+  for (const c of columns) {
+    tb = tb.addColumn(c.name, c.type, (col) =>
+      c.notNull || c.primaryKey ? col.notNull() : col,
+    );
+  }
+  tb = tb
+    .addColumn("updated_at", "text", (col) => col.notNull())
+    .addColumn("node_id", "text", (col) => col.notNull())
+    .addColumn("deleted_at", "text");
+  const pks = columns.filter((c) => c.primaryKey).map((c) => c.name);
+  if (pks.length > 0) {
+    tb = tb.addPrimaryKeyConstraint(`pk_${fullName}`, pks as never[]);
+  }
+  db.exec(tb.compile().sql);
+  db.exec(
+    k.schema
+      .createIndex(`idx_${fullName}_updated_at`)
+      .ifNotExists()
+      .on(fullName)
+      .column("updated_at")
+      .compile().sql,
+  );
+  db.exec(
+    k.schema
+      .createIndex(`idx_${fullName}_node_watermark`)
+      .ifNotExists()
+      .on(fullName)
+      .columns(["node_id", "updated_at"])
+      .compile().sql,
+  );
+}
 
 export function createAppSyncableTables(
   db: DatabaseSync,
@@ -181,29 +306,15 @@ export function createAppSyncableTables(
   tables: SyncableTable[],
 ): void {
   for (const table of tables) {
-    const fullName = appSyncableTableName(appId, table.name);
-    const columnDdl = table.columns
-      .map((c) => {
-        const parts = [`"${c.name}"`, SQLITE_COLUMN_TYPES[c.type]];
-        if (c.notNull || c.primaryKey) parts.push("NOT NULL");
-        return parts.join(" ");
-      })
-      .join(", ");
-    const pks = table.columns.filter((c) => c.primaryKey).map((c) => `"${c.name}"`);
-    const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
-    // updated_at, node_id (denormalized from updated_at by the applier) and
-    // deleted_at are reserved by the sync runtime for inline-HLC change
-    // tracking; they are appended automatically and must not be declared in
-    // the manifest. (node_id, updated_at) backs the responder's per-node
-    // coverage watermark query.
-    db.exec(
-      `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}, "updated_at" TEXT NOT NULL, "node_id" TEXT NOT NULL, "deleted_at" TEXT${pkClause})`,
-    );
-    db.exec(
-      `CREATE INDEX IF NOT EXISTS "idx_${fullName}_updated_at" ON "${fullName}"("updated_at")`,
-    );
-    db.exec(
-      `CREATE INDEX IF NOT EXISTS "idx_${fullName}_node_watermark" ON "${fullName}"("node_id", "updated_at")`,
+    createSyncableTable(
+      db,
+      appSyncableTableName(appId, table.name),
+      table.columns.map((c) => ({
+        name: c.name,
+        type: SQLITE_COLUMN_TYPES[c.type],
+        notNull: Boolean(c.notNull),
+        primaryKey: Boolean(c.primaryKey),
+      })),
     );
   }
 }
@@ -218,25 +329,15 @@ export function createReservedFileRecordsTable(
   db: DatabaseSync,
   appId: string,
 ): void {
-  const fullName = appSyncableTableName(appId, FILE_RECORDS_TABLE);
-  const columnDdl = FILE_RECORDS_COLUMNS.map((c) => {
-    const sqlType = c.type === "integer" ? "INTEGER" : "TEXT";
-    const parts = [`"${c.name}"`, sqlType];
-    if (c.notNull || c.primaryKey) parts.push("NOT NULL");
-    return parts.join(" ");
-  }).join(", ");
-  const pks = FILE_RECORDS_COLUMNS.filter((c) => c.primaryKey).map(
-    (c) => `"${c.name}"`,
-  );
-  const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
-  db.exec(
-    `CREATE TABLE IF NOT EXISTS "${fullName}" (${columnDdl}, "updated_at" TEXT NOT NULL, "node_id" TEXT NOT NULL, "deleted_at" TEXT${pkClause})`,
-  );
-  db.exec(
-    `CREATE INDEX IF NOT EXISTS "idx_${fullName}_updated_at" ON "${fullName}"("updated_at")`,
-  );
-  db.exec(
-    `CREATE INDEX IF NOT EXISTS "idx_${fullName}_node_watermark" ON "${fullName}"("node_id", "updated_at")`,
+  createSyncableTable(
+    db,
+    appSyncableTableName(appId, FILE_RECORDS_TABLE),
+    FILE_RECORDS_COLUMNS.map((c) => ({
+      name: c.name,
+      type: c.type === "integer" ? "integer" : "text",
+      notNull: Boolean(c.notNull),
+      primaryKey: Boolean(c.primaryKey),
+    })),
   );
 }
 
@@ -247,7 +348,7 @@ export function dropAppSyncableTables(
 ): void {
   for (const name of tableNames) {
     const fullName = appSyncableTableName(appId, name);
-    db.exec(`DROP TABLE IF EXISTS "${fullName}"`);
+    db.exec(k.schema.dropTable(fullName).ifExists().compile().sql);
   }
 }
 

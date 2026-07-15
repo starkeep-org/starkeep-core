@@ -25,7 +25,7 @@ import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/clie
 import { getSignedUrl as getCloudFrontSignedUrl } from "@aws-sdk/cloudfront-signer";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
-import { AuroraDsqlDatabaseAdapter } from "@starkeep/storage-aurora-dsql";
+import { AuroraDsqlDatabaseAdapter, postgresCompiler } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import {
   generateId,
@@ -479,10 +479,14 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 const CLOUD_NODE_ID = `cloud-${process.env.AWS_LAMBDA_LOG_STREAM_NAME ?? randomUUID()}`;
 
 async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
-  const result = await client.query(
-    "SELECT updated_at FROM shared.records WHERE updated_at LIKE $1 ORDER BY updated_at DESC LIMIT 1",
-    ["%:cloud-%"],
-  );
+  const seedQuery = postgresCompiler
+    .selectFrom("shared.records")
+    .select("updated_at")
+    .where("updated_at", "like", "%:cloud-%")
+    .orderBy("updated_at", "desc")
+    .limit(1)
+    .compile();
+  const result = await client.query(seedQuery.sql, [...seedQuery.parameters]);
   let initialState: { wallTime: number; counter: number } | undefined;
   if (result.rows.length > 0) {
     const row = result.rows[0] as { updated_at: string };

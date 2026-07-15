@@ -92,7 +92,11 @@ export interface DsqlDdlOptions {
   };
 }
 
-async function makeDb(opts: DsqlDdlOptions): Promise<Kysely<Record<string, never>>> {
+// Row types are validated by the live DSQL schema at runtime; the dynamic
+// record shape keeps the query builder usable across shared.* and app schemas.
+type DdlDb = Record<string, Record<string, unknown>>;
+
+async function makeDb(opts: DsqlDdlOptions): Promise<Kysely<DdlDb>> {
   // dsql:DbConnectAdmin is exercised at connect time when DSQL validates the
   // signed token against the caller's IAM policy. Manager has just attached
   // the temp-install-ddl-<appId> policy moments before this runs, and IAM
@@ -255,12 +259,21 @@ export async function runAppInstallDdl(
       // types, and its read/write authority is granted by app-id in the runtime
       // access path (see access-enforcer.ts).
       for (const g of grants) {
-        await sql`
-        INSERT INTO shared.access_grants (app_id, type_id, access, metadata_write)
-        VALUES (${appId}, ${g.type}, ${g.access}, ${g.metadataWrite})
-        ON CONFLICT (app_id, type_id) DO UPDATE
-          SET access = EXCLUDED.access, metadata_write = EXCLUDED.metadata_write
-      `.execute(db);
+        await db
+          .insertInto("shared.access_grants")
+          .values({
+            app_id: appId,
+            type_id: g.type,
+            access: g.access,
+            metadata_write: g.metadataWrite,
+          })
+          .onConflict((oc) =>
+            oc.columns(["app_id", "type_id"]).doUpdateSet((eb) => ({
+              access: eb.ref("excluded.access"),
+              metadata_write: eb.ref("excluded.metadata_write"),
+            })),
+          )
+          .execute();
       }
 
       // App-specific syncable tables under the app's private schema.
@@ -271,20 +284,22 @@ export async function runAppInstallDdl(
       // responder's per-node coverage watermark.
       const schemaName = `app_${appId.replace(/-/g, "_")}`;
       for (const table of appSyncableTables) {
-        const colDdl = table.columns
-          .map((c) => {
-            const pgType = DSQL_COLUMN_TYPES[c.type] ?? "text";
-            const notNull = c.notNull || c.primaryKey ? " NOT NULL" : "";
-            return `"${c.name}" ${pgType}${notNull}`;
-          })
-          .join(", ");
-        const pks = table.columns.filter((c) => c.primaryKey).map((c) => `"${c.name}"`);
-        const pkClause = pks.length > 0 ? `, PRIMARY KEY (${pks.join(", ")})` : "";
-        await sql
-          .raw(
-            `CREATE TABLE IF NOT EXISTS ${schemaName}."${table.name}" (${colDdl}, "updated_at" text NOT NULL, "node_id" text NOT NULL, "deleted_at" text${pkClause})`,
-          )
-          .execute(db);
+        let tb = db.schema.createTable(`${schemaName}.${table.name}`).ifNotExists();
+        for (const c of table.columns) {
+          const pgType = DSQL_COLUMN_TYPES[c.type] ?? "text";
+          tb = tb.addColumn(c.name, sql.raw(pgType), (col) =>
+            c.notNull || c.primaryKey ? col.notNull() : col,
+          );
+        }
+        tb = tb
+          .addColumn("updated_at", "text", (col) => col.notNull())
+          .addColumn("node_id", "text", (col) => col.notNull())
+          .addColumn("deleted_at", "text");
+        const pks = table.columns.filter((c) => c.primaryKey).map((c) => c.name);
+        if (pks.length > 0) {
+          tb = tb.addPrimaryKeyConstraint(`pk_${schemaName}_${table.name}`, pks as never[]);
+        }
+        await tb.execute();
         await sql
           .raw(
             `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${table.name}_updated_at" ON ${schemaName}."${table.name}"("updated_at")`,
@@ -306,20 +321,24 @@ export async function runAppInstallDdl(
       // updated_at/deleted_at HLC + GRANT pattern as the manifest-declared
       // syncable tables.
       if (appSyncableFilesEnabled) {
-        const reservedColDdl = FILE_RECORDS_COLUMNS.map((c) => {
-          const pgType = c.type === "integer" ? "bigint" : "text";
-          const notNull = c.notNull || c.primaryKey ? " NOT NULL" : "";
-          return `"${c.name}" ${pgType}${notNull}`;
-        }).join(", ");
-        const reservedPks = FILE_RECORDS_COLUMNS.filter((c) => c.primaryKey)
-          .map((c) => `"${c.name}"`)
-          .join(", ");
-        const reservedPkClause = reservedPks ? `, PRIMARY KEY (${reservedPks})` : "";
-        await sql
-          .raw(
-            `CREATE TABLE IF NOT EXISTS ${schemaName}."${FILE_RECORDS_TABLE}" (${reservedColDdl}, "updated_at" text NOT NULL, "node_id" text NOT NULL, "deleted_at" text${reservedPkClause})`,
-          )
-          .execute(db);
+        let tb = db.schema.createTable(`${schemaName}.${FILE_RECORDS_TABLE}`).ifNotExists();
+        for (const c of FILE_RECORDS_COLUMNS) {
+          tb = tb.addColumn(c.name, c.type === "integer" ? "bigint" : "text", (col) =>
+            c.notNull || c.primaryKey ? col.notNull() : col,
+          );
+        }
+        tb = tb
+          .addColumn("updated_at", "text", (col) => col.notNull())
+          .addColumn("node_id", "text", (col) => col.notNull())
+          .addColumn("deleted_at", "text");
+        const reservedPks = FILE_RECORDS_COLUMNS.filter((c) => c.primaryKey).map((c) => c.name);
+        if (reservedPks.length > 0) {
+          tb = tb.addPrimaryKeyConstraint(
+            `pk_${schemaName}_${FILE_RECORDS_TABLE}`,
+            reservedPks as never[],
+          );
+        }
+        await tb.execute();
         await sql
           .raw(
             `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_updated_at" ON ${schemaName}."${FILE_RECORDS_TABLE}"("updated_at")`,
@@ -347,12 +366,20 @@ export async function runAppInstallDdl(
           tablesInfo.push({ name: FILE_RECORDS_TABLE, pkColumns: ["id"] });
         }
         const tablesJson = JSON.stringify(tablesInfo);
-        await sql`
-        INSERT INTO shared.app_syncable_namespaces (app_id, tables_json, files_enabled)
-        VALUES (${appId}, ${tablesJson}, ${appSyncableFilesEnabled})
-        ON CONFLICT (app_id) DO UPDATE
-          SET tables_json = EXCLUDED.tables_json, files_enabled = EXCLUDED.files_enabled
-      `.execute(db);
+        await db
+          .insertInto("shared.app_syncable_namespaces")
+          .values({
+            app_id: appId,
+            tables_json: tablesJson,
+            files_enabled: appSyncableFilesEnabled,
+          })
+          .onConflict((oc) =>
+            oc.column("app_id").doUpdateSet((eb) => ({
+              tables_json: eb.ref("excluded.tables_json"),
+              files_enabled: eb.ref("excluded.files_enabled"),
+            })),
+          )
+          .execute();
       }
     } finally {
       await db.destroy().catch(() => {});
@@ -400,8 +427,8 @@ export async function runAppUninstallDdl(
       // nothing in `shared.*` still depends on the role.
       await sql`REVOKE USAGE ON SCHEMA shared FROM ${sql.raw(pgRole)}`.execute(db);
 
-      await sql`DELETE FROM shared.access_grants WHERE app_id = ${appId}`.execute(db);
-      await sql`DELETE FROM shared.app_syncable_namespaces WHERE app_id = ${appId}`.execute(db);
+      await db.deleteFrom("shared.access_grants").where("app_id", "=", appId).execute();
+      await db.deleteFrom("shared.app_syncable_namespaces").where("app_id", "=", appId).execute();
       await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
 
       // Revoke the DSQL-side IAM mapping before DROP ROLE — DROP ROLE fails if

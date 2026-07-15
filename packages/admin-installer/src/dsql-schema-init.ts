@@ -141,9 +141,7 @@ export async function initializeSharedSchema(
     await ensureRole(db, "user_data_owner", `CREATE ROLE user_data_owner`);
     await ensureRole(db, installer, `CREATE ROLE "${installer}" LOGIN`);
 
-    const statements: string[] = [
-      `CREATE SCHEMA IF NOT EXISTS shared`,
-
+    const grantStatements: string[] = [
       `GRANT CREATE, USAGE ON SCHEMA shared TO manager_ddl`,
       `GRANT ALL PRIVILEGES ON SCHEMA shared TO user_data_owner`,
       // Installer connects as <stackPrefix>_installer to read/write the
@@ -155,99 +153,129 @@ export async function initializeSharedSchema(
       // shared.app_syncable_namespaces are granted SELECT to PUBLIC below,
       // which is meaningless without schema USAGE.
       `GRANT USAGE ON SCHEMA shared TO PUBLIC`,
-
-      // shared.records — single flat table for all shared data types.
-      // parent_id is a plain text column: DSQL has no FK constraints, so the
-      // app must clear/repoint dangling parent_id values on delete.
-      // Every record is file-backed; no inline content column.
-      `CREATE TABLE IF NOT EXISTS shared.records (
-         id                 text        PRIMARY KEY,
-         type               text        NOT NULL,
-         created_at         text        NOT NULL,
-         updated_at         text        NOT NULL,
-         -- Denormalized from updated_at (its nodeId component) on every
-         -- write. Feeds the sync responder's per-node coverage watermark via
-         -- the (node_id, updated_at) index without scanning the table.
-         node_id            text        NOT NULL,
-         deleted_at         text,
-         version            integer     NOT NULL DEFAULT 1,
-         content_hash       text        NOT NULL,
-         object_storage_key text        NOT NULL,
-         mime_type          text,
-         size_bytes         bigint      NOT NULL,
-         original_filename  text,
-         origin_app_id      text        NOT NULL,
-         parent_id          text,
-         label              text
-       )`,
-
-      `ALTER DEFAULT PRIVILEGES IN SCHEMA shared GRANT ALL ON TABLES TO user_data_owner`,
-      `GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA shared TO user_data_owner`,
-
-      // shared.access_grants — source of truth for application-layer enforcement
-      `CREATE TABLE IF NOT EXISTS shared.access_grants (
-         app_id         text    NOT NULL,
-         type_id        text    NOT NULL,
-         access         text    NOT NULL,
-         metadata_write boolean NOT NULL DEFAULT false,
-         PRIMARY KEY (app_id, type_id)
-       )`,
-      `GRANT SELECT ON shared.access_grants TO PUBLIC`,
-      `GRANT INSERT, UPDATE, DELETE ON shared.access_grants TO "${installer}"`,
-
-      // Per-category metadata tables, generated from @starkeep/protocol-primitives's
-      // CATEGORIES. `other` has no metadata columns and gets no table.
-      // record_id is logically an FK to shared.records(id); DSQL has no FK
-      // constraints or ON DELETE CASCADE, so deletes must be performed in
-      // application code (delete the metadata row alongside the records row).
-      ...CATEGORIES.filter((c) => c.id !== "other").map((c) => pgMetadataDdl(c)),
-
-      // app_install_steps — per-step state for idempotent install/uninstall.
-      // PK is (app_id, operation, step): the same step name appears under
-      // both `install` and `uninstall` (e.g. `attach_temp_install_ddl_policy`
-      // is reused symmetrically by uninstall), so the operation must be part
-      // of the key. Mirrors local/registry.ts's shared_app_install_steps in
-      // sqlite.
-      `CREATE TABLE IF NOT EXISTS shared.app_install_steps (
-         app_id     text        NOT NULL,
-         operation  text        NOT NULL,
-         step       text        NOT NULL,
-         status     text        NOT NULL,
-         updated_at timestamptz NOT NULL DEFAULT now(),
-         error      text,
-         PRIMARY KEY (app_id, operation, step)
-       )`,
-      `GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_install_steps TO "${installer}"`,
-
-      // app_registry — one row per installed cloud app. Source of truth for
-      // "which apps are currently installed in this cloud stack" so the UI
-      // can surface install state without probing AWS resources.
-      `CREATE TABLE IF NOT EXISTS shared.app_registry (
-         app_id       text        NOT NULL PRIMARY KEY,
-         version      text        NOT NULL,
-         name         text,
-         installed_at timestamptz NOT NULL DEFAULT now(),
-         updated_at   timestamptz NOT NULL DEFAULT now()
-       )`,
-      `GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_registry TO "${installer}"`,
-
-      // App-specific syncable namespace registry. Mirrors the local SQLite
-      // app_syncable_namespaces table. One row per installed app that declared
-      // infraRequirements.appSpecificSyncable. The tables_json column is a JSON
-      // array of { name, pkColumns } objects. Read by the pull path to
-      // enumerate per-app tables for inline-HLC change synthesis.
-      `CREATE TABLE IF NOT EXISTS shared.app_syncable_namespaces (
-         app_id        text    NOT NULL PRIMARY KEY,
-         tables_json   text    NOT NULL,
-         files_enabled boolean NOT NULL DEFAULT false
-       )`,
-      `GRANT SELECT ON shared.app_syncable_namespaces TO PUBLIC`,
-      `GRANT INSERT, UPDATE, DELETE ON shared.app_syncable_namespaces TO "${installer}"`,
     ];
 
-    for (const stmt of statements) {
+    await db.schema.createSchema("shared").ifNotExists().execute();
+    for (const stmt of grantStatements) {
       await sql.raw(stmt).execute(db);
     }
+
+    // shared.records — single flat table for all shared data types.
+    // parent_id is a plain text column: DSQL has no FK constraints, so the
+    // app must clear/repoint dangling parent_id values on delete.
+    // Every record is file-backed; no inline content column.
+    // node_id is denormalized from updated_at (its nodeId component) on every
+    // write. Feeds the sync responder's per-node coverage watermark via the
+    // (node_id, updated_at) index without scanning the table.
+    await db.schema
+      .createTable("shared.records")
+      .ifNotExists()
+      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn("type", "text", (c) => c.notNull())
+      .addColumn("created_at", "text", (c) => c.notNull())
+      .addColumn("updated_at", "text", (c) => c.notNull())
+      .addColumn("node_id", "text", (c) => c.notNull())
+      .addColumn("deleted_at", "text")
+      .addColumn("version", "integer", (c) => c.notNull().defaultTo(1))
+      .addColumn("content_hash", "text", (c) => c.notNull())
+      .addColumn("object_storage_key", "text", (c) => c.notNull())
+      .addColumn("mime_type", "text")
+      .addColumn("size_bytes", "bigint", (c) => c.notNull())
+      .addColumn("original_filename", "text")
+      .addColumn("origin_app_id", "text", (c) => c.notNull())
+      .addColumn("parent_id", "text")
+      .addColumn("label", "text")
+      .execute();
+
+    await sql
+      .raw(`ALTER DEFAULT PRIVILEGES IN SCHEMA shared GRANT ALL ON TABLES TO user_data_owner`)
+      .execute(db);
+    await sql
+      .raw(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA shared TO user_data_owner`)
+      .execute(db);
+
+    // shared.access_grants — source of truth for application-layer enforcement
+    await db.schema
+      .createTable("shared.access_grants")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("type_id", "text", (c) => c.notNull())
+      .addColumn("access", "text", (c) => c.notNull())
+      .addColumn("metadata_write", "boolean", (c) => c.notNull().defaultTo(false))
+      .addPrimaryKeyConstraint("access_grants_pkey", ["app_id", "type_id"] as never[])
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.access_grants TO PUBLIC`).execute(db);
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE ON shared.access_grants TO "${installer}"`)
+      .execute(db);
+
+    // Per-category metadata tables, generated from @starkeep/protocol-primitives's
+    // CATEGORIES (plain-string DDL, executed via sql.raw). `other` has no
+    // metadata columns and gets no table. record_id is logically an FK to
+    // shared.records(id); DSQL has no FK constraints or ON DELETE CASCADE, so
+    // deletes must be performed in application code (delete the metadata row
+    // alongside the records row).
+    for (const c of CATEGORIES.filter((c) => c.id !== "other")) {
+      await sql.raw(pgMetadataDdl(c)).execute(db);
+    }
+
+    // app_install_steps — per-step state for idempotent install/uninstall.
+    // PK is (app_id, operation, step): the same step name appears under
+    // both `install` and `uninstall` (e.g. `attach_temp_install_ddl_policy`
+    // is reused symmetrically by uninstall), so the operation must be part
+    // of the key. Mirrors local/registry.ts's shared_app_install_steps in
+    // sqlite.
+    await db.schema
+      .createTable("shared.app_install_steps")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("operation", "text", (c) => c.notNull())
+      .addColumn("step", "text", (c) => c.notNull())
+      .addColumn("status", "text", (c) => c.notNull())
+      .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addColumn("error", "text")
+      .addPrimaryKeyConstraint("app_install_steps_pkey", [
+        "app_id",
+        "operation",
+        "step",
+      ] as never[])
+      .execute();
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_install_steps TO "${installer}"`)
+      .execute(db);
+
+    // app_registry — one row per installed cloud app. Source of truth for
+    // "which apps are currently installed in this cloud stack" so the UI
+    // can surface install state without probing AWS resources.
+    await db.schema
+      .createTable("shared.app_registry")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull().primaryKey())
+      .addColumn("version", "text", (c) => c.notNull())
+      .addColumn("name", "text")
+      .addColumn("installed_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_registry TO "${installer}"`)
+      .execute(db);
+
+    // App-specific syncable namespace registry. Mirrors the local SQLite
+    // app_syncable_namespaces table. One row per installed app that declared
+    // infraRequirements.appSpecificSyncable. The tables_json column is a JSON
+    // array of { name, pkColumns } objects. Read by the pull path to
+    // enumerate per-app tables for inline-HLC change synthesis.
+    await db.schema
+      .createTable("shared.app_syncable_namespaces")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull().primaryKey())
+      .addColumn("tables_json", "text", (c) => c.notNull())
+      .addColumn("files_enabled", "boolean", (c) => c.notNull().defaultTo(false))
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.app_syncable_namespaces TO PUBLIC`).execute(db);
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE ON shared.app_syncable_namespaces TO "${installer}"`)
+      .execute(db);
 
     // Duplicate-file prevention: (filename + bytes) is unique among live
     // records. DSQL doesn't support partial indexes (no `WHERE` on CREATE

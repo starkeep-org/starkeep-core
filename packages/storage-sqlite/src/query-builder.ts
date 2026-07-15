@@ -35,8 +35,8 @@ function mapField(field: string): string {
 // executes. The DummyDriver lets us reuse Kysely's compiler without pulling
 // in a real connection. `any` keeps it dialect-agnostic at the row level;
 // column names are validated against the live SQLite schema at runtime.
-type DB = Record<string, Record<string, unknown>>;
-const compiler = new Kysely<DB>({
+export type DB = Record<string, Record<string, unknown>>;
+export const compiler = new Kysely<DB>({
   dialect: {
     createAdapter: () => new SqliteAdapter(),
     createDriver: () => new DummyDriver(),

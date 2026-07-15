@@ -18,6 +18,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
 import { createStarkeepId, defaultTypeForExtension } from "@starkeep/protocol-primitives";
+import { sqliteCompiler as qb } from "@starkeep/storage-sqlite";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -138,17 +139,19 @@ export function createFileWatchManager(opts: {
   // Create the private watch_files table if it doesn't exist.
   // This table is owned entirely by the data-server and is never part of
   // the user data layer — no SDK, no records table, no sync engine.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS watch_files (
-      file_path TEXT PRIMARY KEY,
-      watch_id TEXT NOT NULL,
-      relative_path TEXT NOT NULL,
-      content_hash TEXT NOT NULL,
-      data_record_id TEXT NOT NULL,
-      mtime REAL NOT NULL,
-      size_bytes INTEGER NOT NULL
-    )
-  `);
+  db.exec(
+    qb.schema
+      .createTable("watch_files")
+      .ifNotExists()
+      .addColumn("file_path", "text", (c) => c.primaryKey())
+      .addColumn("watch_id", "text", (c) => c.notNull())
+      .addColumn("relative_path", "text", (c) => c.notNull())
+      .addColumn("content_hash", "text", (c) => c.notNull())
+      .addColumn("data_record_id", "text", (c) => c.notNull())
+      .addColumn("mtime", "real", (c) => c.notNull())
+      .addColumn("size_bytes", "integer", (c) => c.notNull())
+      .compile().sql,
+  );
 
   // -- Helpers --
 
@@ -164,9 +167,12 @@ export function createFileWatchManager(opts: {
   }
 
   function loadTrackingRecords(watchId: string): Map<string, WatchFileInfo> {
-    const rows = db.prepare(
-      "SELECT file_path, relative_path, content_hash, data_record_id, mtime FROM watch_files WHERE watch_id = ?",
-    ).all(watchId) as {
+    const query = qb
+      .selectFrom("watch_files")
+      .select(["file_path", "relative_path", "content_hash", "data_record_id", "mtime"])
+      .where("watch_id", "=", watchId)
+      .compile();
+    const rows = db.prepare(query.sql).all(...(query.parameters as string[])) as {
       file_path: string;
       relative_path: string;
       content_hash: string;
@@ -197,25 +203,39 @@ export function createFileWatchManager(opts: {
     mtime: number,
     sizeBytes: number,
   ): void {
-    db.prepare(`
-      INSERT INTO watch_files (file_path, watch_id, relative_path, content_hash, data_record_id, mtime, size_bytes)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(file_path) DO UPDATE SET
-        watch_id = excluded.watch_id,
-        relative_path = excluded.relative_path,
-        content_hash = excluded.content_hash,
-        data_record_id = excluded.data_record_id,
-        mtime = excluded.mtime,
-        size_bytes = excluded.size_bytes
-    `).run(filePath, watchId, relativePath, contentHash, dataRecordId, mtime, sizeBytes);
+    const query = qb
+      .insertInto("watch_files")
+      .values({
+        file_path: filePath,
+        watch_id: watchId,
+        relative_path: relativePath,
+        content_hash: contentHash,
+        data_record_id: dataRecordId,
+        mtime,
+        size_bytes: sizeBytes,
+      })
+      .onConflict((oc) =>
+        oc.column("file_path").doUpdateSet((eb) => ({
+          watch_id: eb.ref("excluded.watch_id"),
+          relative_path: eb.ref("excluded.relative_path"),
+          content_hash: eb.ref("excluded.content_hash"),
+          data_record_id: eb.ref("excluded.data_record_id"),
+          mtime: eb.ref("excluded.mtime"),
+          size_bytes: eb.ref("excluded.size_bytes"),
+        })),
+      )
+      .compile();
+    db.prepare(query.sql).run(...(query.parameters as (string | number)[]));
   }
 
   function deleteTrackingRecord(filePath: string): void {
-    db.prepare("DELETE FROM watch_files WHERE file_path = ?").run(filePath);
+    const query = qb.deleteFrom("watch_files").where("file_path", "=", filePath).compile();
+    db.prepare(query.sql).run(...(query.parameters as string[]));
   }
 
   function deleteTrackingRecords(watchId: string): void {
-    db.prepare("DELETE FROM watch_files WHERE watch_id = ?").run(watchId);
+    const query = qb.deleteFrom("watch_files").where("watch_id", "=", watchId).compile();
+    db.prepare(query.sql).run(...(query.parameters as string[]));
   }
 
   async function ingestFile(active: ActiveWatch, filePath: string): Promise<void> {

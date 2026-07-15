@@ -34,8 +34,8 @@ function mapField(field: string): string {
 // Compile-only Kysely instance (DummyDriver never executes). The dialect's
 // PostgresQueryCompiler produces `$1`-style placeholders that `pg.Client`
 // consumes directly.
-type DB = Record<string, Record<string, unknown>>;
-const compiler = new Kysely<DB>({
+export type DB = Record<string, Record<string, unknown>>;
+export const compiler = new Kysely<DB>({
   dialect: {
     createAdapter: () => new PostgresAdapter(),
     createDriver: () => new DummyDriver(),

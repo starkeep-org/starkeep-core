@@ -1,13 +1,25 @@
 import type { DatabaseSync } from "node:sqlite";
+import {
+  DummyDriver,
+  Kysely,
+  SqliteAdapter,
+  SqliteIntrospector,
+  SqliteQueryCompiler,
+  sql,
+} from "kysely";
 import type { SyncStateStore, Watermarks } from "./types.js";
 
-const CREATE_TABLE_SQL = `
-  CREATE TABLE IF NOT EXISTS sync_state (
-    key TEXT PRIMARY KEY,
-    value_json TEXT NOT NULL,
-    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-  )
-`;
+// Compile-only Kysely instance (DummyDriver never executes); statements run
+// synchronously through node:sqlite's prepare().
+type DB = Record<string, Record<string, unknown>>;
+const qb = new Kysely<DB>({
+  dialect: {
+    createAdapter: () => new SqliteAdapter(),
+    createDriver: () => new DummyDriver(),
+    createIntrospector: (db) => new SqliteIntrospector(db),
+    createQueryCompiler: () => new SqliteQueryCompiler(),
+  },
+});
 
 const WATERMARKS = "watermarks";
 const PEER_WATERMARKS = "peer_watermarks";
@@ -21,18 +33,41 @@ export function createSqliteSyncStateStore(
   options: SqliteSyncStateStoreOptions,
 ): SyncStateStore {
   const { db } = options;
-  db.exec(CREATE_TABLE_SQL);
+  db.exec(
+    qb.schema
+      .createTable("sync_state")
+      .ifNotExists()
+      .addColumn("key", "text", (c) => c.primaryKey())
+      .addColumn("value_json", "text", (c) => c.notNull())
+      .addColumn("updated_at", "integer", (c) =>
+        c.notNull().defaultTo(sql`(strftime('%s','now'))`),
+      )
+      .compile().sql,
+  );
 
-  const getStmt = db.prepare(
-    "SELECT value_json FROM sync_state WHERE key = ?",
-  );
-  const setStmt = db.prepare(
-    `INSERT INTO sync_state (key, value_json, updated_at)
-     VALUES (?, ?, strftime('%s','now'))
-     ON CONFLICT(key) DO UPDATE SET
-       value_json = excluded.value_json,
-       updated_at = excluded.updated_at`,
-  );
+  // sql.raw("?") leaves positional placeholders in the compiled SQL so the
+  // statements can be prepared once here and bound per call below.
+  const getQuery = qb
+    .selectFrom("sync_state")
+    .select("value_json")
+    .where("key", "=", sql.raw("?"))
+    .compile();
+  const getStmt = db.prepare(getQuery.sql);
+  const setQuery = qb
+    .insertInto("sync_state")
+    .values({
+      key: sql.raw("?"),
+      value_json: sql.raw("?"),
+      updated_at: sql`strftime('%s','now')`,
+    })
+    .onConflict((oc) =>
+      oc.column("key").doUpdateSet((eb) => ({
+        value_json: eb.ref("excluded.value_json"),
+        updated_at: eb.ref("excluded.updated_at"),
+      })),
+    )
+    .compile();
+  const setStmt = db.prepare(setQuery.sql);
 
   function getJson<T>(key: string): T | null {
     const row = getStmt.get(key) as { value_json: string } | undefined;

@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, 
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initializeLocalSchema } from "@starkeep/storage-sqlite";
+import { initializeLocalSchema, sqliteCompiler } from "@starkeep/storage-sqlite";
 import { insertAppRegistry } from "../src/local/registry";
 
 interface LedgerEntry {
@@ -248,7 +248,7 @@ describe("install", () => {
   // for the cloud side would just recreate the drift, so install fails loudly.
   it("fails when the app has no local registry row instead of minting a divergent secret", async () => {
     const db = new DatabaseSync(join(dataDir, "data.db"));
-    db.exec("DELETE FROM shared_app_registry");
+    db.exec(sqliteCompiler.deleteFrom("shared_app_registry").compile().sql);
     db.close();
 
     await expect(

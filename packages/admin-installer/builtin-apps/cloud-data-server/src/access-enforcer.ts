@@ -20,6 +20,7 @@ export {
   canWriteCategory,
 } from "@starkeep/protocol-primitives";
 import type { AccessGrants } from "@starkeep/protocol-primitives";
+import { postgresCompiler } from "@starkeep/storage-aurora-dsql";
 
 /** The User-Data-Owner app id — granted all-access by id, not by grant rows. */
 export const USER_DATA_OWNER_APP_ID = "starkeep-drive";
@@ -38,10 +39,12 @@ export async function loadAccessGrants(
   if (appId === USER_DATA_OWNER_APP_ID) {
     return buildAccessGrants([], { allAccess: true });
   }
-  const result = await client.query(
-    "SELECT type_id, access FROM shared.access_grants WHERE app_id = $1",
-    [appId],
-  );
+  const grantsQuery = postgresCompiler
+    .selectFrom("shared.access_grants")
+    .select(["type_id", "access"])
+    .where("app_id", "=", appId)
+    .compile();
+  const result = await client.query(grantsQuery.sql, [...grantsQuery.parameters]);
   const rows = (result.rows as Array<{ type_id: string; access: string }>).map((r) => ({
     typeId: r.type_id,
     access: r.access as GrantAccess,

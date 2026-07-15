@@ -42,6 +42,7 @@ import {
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
   appSyncableTableName,
+  sqliteCompiler,
 } from "@starkeep/storage-sqlite";
 import { FsObjectStorageAdapter } from "@starkeep/storage-fs";
 import {
@@ -477,7 +478,9 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     appRows(appId, table) {
       const fullName = appSyncableTableName(appId, table);
       try {
-        return db.prepare(`SELECT * FROM "${fullName}"`).all() as Array<Record<string, unknown>>;
+        return db
+          .prepare(sqliteCompiler.selectFrom(fullName).selectAll().compile().sql)
+          .all() as Array<Record<string, unknown>>;
       } catch {
         return [];
       }

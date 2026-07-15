@@ -18,6 +18,10 @@
 
 import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
+
+// Row types are validated by the live DSQL schema at runtime; the dynamic
+// record shape keeps the query builder usable across the shared.* tables.
+type RegistryDb = Record<string, Record<string, unknown>>;
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import { installerPgUser } from "./dsql-schema-init";
@@ -62,7 +66,7 @@ export interface Registry {
 
 export function createDsqlRegistry(opts: RegistryOptions): Registry {
   const pgUser = installerPgUser(opts.stackPrefix);
-  let dbPromise: Promise<Kysely<Record<string, never>>> | null = null;
+  let dbPromise: Promise<Kysely<RegistryDb>> | null = null;
 
   // DSQL DbConnect tokens are valid for 15 minutes. An install run can easily
   // exceed that (Pulumi up alone is multi-minute, and resume-on-failure may
@@ -70,7 +74,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
   // SQLSTATE 28P01 (auth failed — typically expired token), tear down and
   // reopen. Since the orchestrator writes infrequently per step, the simpler
   // path is to make every call self-healing.
-  async function open(): Promise<Kysely<Record<string, never>>> {
+  async function open(): Promise<Kysely<RegistryDb>> {
     const signer = new DsqlSigner({
       hostname: opts.hostname,
       region: opts.region,
@@ -89,12 +93,12 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
     return new Kysely({ dialect: new PostgresDialect({ pool }) });
   }
 
-  async function db(): Promise<Kysely<Record<string, never>>> {
+  async function db(): Promise<Kysely<RegistryDb>> {
     if (!dbPromise) dbPromise = open();
     return dbPromise;
   }
 
-  async function withRetry<T>(fn: (db: Kysely<Record<string, never>>) => Promise<T>): Promise<T> {
+  async function withRetry<T>(fn: (db: Kysely<RegistryDb>) => Promise<T>): Promise<T> {
     const maxAttempts = 6;
     let delay = 500;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -132,57 +136,74 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
   return {
     async recordStep(appId, operation, step, status, error) {
       await withRetry(async (k) => {
-        await sql`
-          INSERT INTO shared.app_install_steps
-            (app_id, operation, step, status, error, updated_at)
-          VALUES (${appId}, ${operation}, ${step}, ${status}, ${error ?? null}, now())
-          ON CONFLICT (app_id, operation, step) DO UPDATE
-            SET status = EXCLUDED.status,
-                error = EXCLUDED.error,
-                updated_at = now()
-        `.execute(k);
+        await k
+          .insertInto("shared.app_install_steps")
+          .values({
+            app_id: appId,
+            operation,
+            step,
+            status,
+            error: error ?? null,
+            updated_at: sql`now()`,
+          })
+          .onConflict((oc) =>
+            oc.columns(["app_id", "operation", "step"]).doUpdateSet((eb) => ({
+              status: eb.ref("excluded.status"),
+              error: eb.ref("excluded.error"),
+              updated_at: sql`now()`,
+            })),
+          )
+          .execute();
       });
     },
 
     async getCompletedSteps(appId, operation) {
       return await withRetry(async (k) => {
-        const result = await sql<{ step: string }>`
-          SELECT step FROM shared.app_install_steps
-          WHERE app_id = ${appId}
-            AND operation = ${operation}
-            AND status = 'done'
-        `.execute(k);
-        return new Set(result.rows.map((r) => r.step));
+        const rows = await k
+          .selectFrom("shared.app_install_steps")
+          .select("step")
+          .where("app_id", "=", appId)
+          .where("operation", "=", operation)
+          .where("status", "=", "done")
+          .execute();
+        return new Set(rows.map((r) => r.step as string));
       });
     },
 
     async registerApp(manifest, appId) {
       await withRetry(async (k) => {
-        await sql`
-          INSERT INTO shared.app_registry (app_id, version, name)
-          VALUES (${appId}, ${manifest.version}, ${manifest.name ?? null})
-          ON CONFLICT (app_id) DO UPDATE
-            SET version = EXCLUDED.version,
-                name = EXCLUDED.name,
-                updated_at = now()
-        `.execute(k);
+        await k
+          .insertInto("shared.app_registry")
+          .values({
+            app_id: appId,
+            version: manifest.version,
+            name: manifest.name ?? null,
+          })
+          .onConflict((oc) =>
+            oc.column("app_id").doUpdateSet((eb) => ({
+              version: eb.ref("excluded.version"),
+              name: eb.ref("excluded.name"),
+              updated_at: sql`now()`,
+            })),
+          )
+          .execute();
       });
     },
 
     async listInstalledApps() {
       return await withRetry(async (k) => {
-        const result = await sql<{
+        const rows = (await k
+          .selectFrom("shared.app_registry")
+          .select(["app_id", "version", "name", "installed_at", "updated_at"])
+          .orderBy("installed_at", "asc")
+          .execute()) as unknown as Array<{
           app_id: string;
           version: string;
           name: string | null;
           installed_at: Date | string;
           updated_at: Date | string;
-        }>`
-          SELECT app_id, version, name, installed_at, updated_at
-          FROM shared.app_registry
-          ORDER BY installed_at ASC
-        `.execute(k);
-        return result.rows.map((r) => ({
+        }>;
+        return rows.map((r) => ({
           appId: r.app_id,
           version: r.version,
           name: r.name,
@@ -195,8 +216,8 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
 
     async deleteAppRegistryEntry(appId) {
       await withRetry(async (k) => {
-        await sql`DELETE FROM shared.app_registry WHERE app_id = ${appId}`.execute(k);
-        await sql`DELETE FROM shared.app_install_steps WHERE app_id = ${appId}`.execute(k);
+        await k.deleteFrom("shared.app_registry").where("app_id", "=", appId).execute();
+        await k.deleteFrom("shared.app_install_steps").where("app_id", "=", appId).execute();
       });
     },
 

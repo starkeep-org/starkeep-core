@@ -1,8 +1,20 @@
 import type { DatabaseSync } from "node:sqlite";
+import { sql, type CompiledQuery } from "kysely";
 import type { HLCTimestamp } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSinceOptions, ScanSincePage } from "@starkeep/shared-space-api";
+import { compiler as qb } from "../query-builder.js";
 import { appSyncableTableName } from "./namespace.js";
+
+type SqlParam = null | number | bigint | string | Uint8Array;
+
+function runCompiled(db: DatabaseSync, compiled: CompiledQuery): void {
+  db.prepare(compiled.sql).run(...(compiled.parameters as SqlParam[]));
+}
+
+function allCompiled<T>(db: DatabaseSync, compiled: CompiledQuery): T[] {
+  return db.prepare(compiled.sql).all(...(compiled.parameters as SqlParam[])) as T[];
+}
 
 /**
  * SQLite-backed implementation of `AppSyncableApplier`.
@@ -58,37 +70,32 @@ export class SqliteAppSyncableApplier
     const cols = Object.keys(row);
     if (cols.length === 0) return;
 
-    const colList = cols.map(q).join(", ");
-    const placeholders = cols.map(() => "?").join(", ");
-    const values = cols.map((c) => row[c] as unknown);
-
-    if (pkColumns.length === 0) {
-      // No PK declared — just insert, ignoring duplicates.
-      this.db
-        .prepare(`INSERT OR IGNORE INTO ${q(fullName)} (${colList}) VALUES (${placeholders})`)
-        .run(...(values as never[]));
+    const updateCols = cols.filter((c) => !pkColumns.includes(c));
+    if (pkColumns.length === 0 || updateCols.length === 0) {
+      // No PK declared (or nothing beyond it) — just insert, ignoring duplicates.
+      runCompiled(
+        this.db,
+        qb.insertInto(fullName).orIgnore().values({ ...row }).compile(),
+      );
       return;
     }
 
     // UPSERT with LWW: only overwrite if the incoming updated_at is newer.
-    const conflictTarget = pkColumns.map(q).join(", ");
-    const updateCols = cols.filter((c) => !pkColumns.includes(c));
-    if (updateCols.length === 0) {
-      this.db
-        .prepare(
-          `INSERT OR IGNORE INTO ${q(fullName)} (${colList}) VALUES (${placeholders})`,
+    runCompiled(
+      this.db,
+      qb
+        .insertInto(fullName)
+        .values({ ...row })
+        .onConflict((oc) =>
+          oc
+            .columns(pkColumns as never[])
+            .doUpdateSet((eb) =>
+              Object.fromEntries(updateCols.map((c) => [c, eb.ref(`excluded.${c}`)])),
+            )
+            .where(sql.ref("excluded.updated_at"), ">", sql.ref(`${fullName}.updated_at`)),
         )
-        .run(...(values as never[]));
-      return;
-    }
-    const setClause = updateCols.map((c) => `${q(c)} = excluded.${q(c)}`).join(", ");
-    this.db
-      .prepare(
-        `INSERT INTO ${q(fullName)} (${colList}) VALUES (${placeholders})
-         ON CONFLICT(${conflictTarget}) DO UPDATE SET ${setClause}
-         WHERE excluded.updated_at > ${q(fullName)}.updated_at`,
-      )
-      .run(...(values as never[]));
+        .compile(),
+    );
   }
 
   private applyUpdate(fullName: string, entry: AppSyncableRowEntry): void {
@@ -100,22 +107,16 @@ export class SqliteAppSyncableApplier
     const whereCols = Object.keys(where);
     if (patchCols.length === 0) return;
 
-    const setClause = patchCols.map((c) => `${q(c)} = ?`).join(", ");
     // Only apply if the incoming updated_at is strictly newer (LWW).
     const incomingUpdatedAt = patch["updated_at"] as string | undefined;
-    const conditions: string[] = whereCols.map((c) => `${q(c)} = ?`);
-    if (incomingUpdatedAt) conditions.push(`updated_at < ?`);
-    const whereClause = conditions.length ? " WHERE " + conditions.join(" AND ") : "";
-
-    const params: unknown[] = [
-      ...patchCols.map((c) => patch[c]),
-      ...whereCols.map((c) => where[c]),
-    ];
-    if (incomingUpdatedAt) params.push(incomingUpdatedAt);
-
-    this.db
-      .prepare(`UPDATE ${q(fullName)} SET ${setClause}${whereClause}`)
-      .run(...(params as never[]));
+    let query = qb.updateTable(fullName).set({ ...patch });
+    for (const c of whereCols) {
+      query = query.where(c, "=", where[c]);
+    }
+    if (incomingUpdatedAt) {
+      query = query.where("updated_at", "<", incomingUpdatedAt);
+    }
+    runCompiled(this.db, query.compile());
   }
 
   private applyDelete(fullName: string, entry: AppSyncableRowEntry): void {
@@ -125,26 +126,17 @@ export class SqliteAppSyncableApplier
     const incomingUpdatedAt = entry.row?.["updated_at"] as string | undefined;
     const ts = incomingUpdatedAt ?? serializeHLC(entry.timestamp);
 
-    const conditions: string[] = [
-      ...whereCols.map((c) => `${q(c)} = ?`),
-      `(updated_at IS NULL OR updated_at < ?)`,
-    ];
-    const whereClause = " WHERE " + conditions.join(" AND ");
-
-    // params order: SET deleted_at=?, updated_at=?, node_id=?, then WHERE bindings
-    const params: unknown[] = [
-      ts,
-      ts,
-      nodeIdOf(ts, entry),
-      ...whereCols.map((c) => where[c]),
-      ts,  // for the LWW updated_at < ? condition
-    ];
-
-    this.db
-      .prepare(
-        `UPDATE ${q(fullName)} SET deleted_at = ?, updated_at = ?, node_id = ?${whereClause}`,
-      )
-      .run(...(params as never[]));
+    let query = qb
+      .updateTable(fullName)
+      .set({ deleted_at: ts, updated_at: ts, node_id: nodeIdOf(ts, entry) });
+    for (const c of whereCols) {
+      query = query.where(c, "=", where[c]);
+    }
+    // LWW guard: tombstone only rows the incoming timestamp supersedes.
+    query = query.where((eb) =>
+      eb.or([eb("updated_at", "is", null), eb("updated_at", "<", ts)]),
+    );
+    runCompiled(this.db, query.compile());
   }
 
   /** See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`. */
@@ -155,11 +147,14 @@ export class SqliteAppSyncableApplier
     const fullName = appSyncableTableName(appId, table);
     let rows: { node_id: string; max_updated_at: string }[];
     try {
-      rows = this.db
-        .prepare(
-          `SELECT node_id, MAX(updated_at) AS max_updated_at FROM ${q(fullName)} GROUP BY node_id`,
-        )
-        .all() as { node_id: string; max_updated_at: string }[];
+      rows = allCompiled<{ node_id: string; max_updated_at: string }>(
+        this.db,
+        qb
+          .selectFrom(fullName)
+          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
+          .groupBy("node_id")
+          .compile(),
+      );
     } catch {
       // Table might not exist yet (app not installed locally).
       return {};
@@ -192,19 +187,15 @@ export class SqliteAppSyncableApplier
     const limit = options?.limit;
     let rows: Record<string, unknown>[];
     try {
+      let query = qb
+        .selectFrom(fullName)
+        .selectAll()
+        .where("updated_at", ">", floor)
+        .orderBy("updated_at", "asc");
       if (limit !== undefined) {
-        rows = this.db
-          .prepare(
-            `SELECT * FROM ${q(fullName)} WHERE updated_at > ? ORDER BY updated_at ASC LIMIT ?`,
-          )
-          .all(floor, limit + 1) as Record<string, unknown>[];
-      } else {
-        rows = this.db
-          .prepare(
-            `SELECT * FROM ${q(fullName)} WHERE updated_at > ? ORDER BY updated_at ASC`,
-          )
-          .all(floor) as Record<string, unknown>[];
+        query = query.limit(limit + 1);
       }
+      rows = allCompiled<Record<string, unknown>>(this.db, query.compile());
     } catch {
       // Table might not exist yet (app not installed locally).
       return { rows: [], nextCursor: null, hasMore: false };
@@ -228,18 +219,12 @@ export class SqliteAppSyncableApplier
     const fullName = appSyncableTableName(appId, table);
     const whereCols = where ? Object.keys(where) : [];
     // Filter out soft-deleted rows by default.
-    const whereClause = [
-      "deleted_at IS NULL",
-      ...whereCols.map((c) => `${q(c)} = ?`),
-    ].join(" AND ");
-    return this.db
-      .prepare(`SELECT * FROM ${q(fullName)} WHERE ${whereClause}`)
-      .all(...(whereCols.map((c) => where![c]) as never[])) as Record<string, unknown>[];
+    let query = qb.selectFrom(fullName).selectAll().where("deleted_at", "is", null);
+    for (const c of whereCols) {
+      query = query.where(c, "=", where![c]);
+    }
+    return allCompiled<Record<string, unknown>>(this.db, query.compile());
   }
-}
-
-function q(name: string): string {
-  return `"${name}"`;
 }
 
 /**

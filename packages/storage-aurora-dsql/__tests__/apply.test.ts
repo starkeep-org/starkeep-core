@@ -70,9 +70,9 @@ function insertEntry(): AppSyncableRowEntry {
 
 describe("DsqlAppSyncableApplier OCC retry", () => {
   it("retries the LWW upsert past an OCC conflict", async () => {
-    client.conflictOnce(/INSERT INTO/, 2);
+    client.conflictOnce(/insert into/, 2);
     await applier.apply(insertEntry());
-    const inserts = client.calls.filter((c) => /INSERT INTO/.test(c.text));
+    const inserts = client.calls.filter((c) => /insert into/.test(c.text));
     expect(inserts).toHaveLength(3); // two conflicts + one that committed
   });
 
