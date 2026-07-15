@@ -37,7 +37,7 @@
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/sync-engine": "workspace:*",
-    "kysely": "^0.27.0"
+    "kysely": "^0.28.17"
   },
   "devDependencies": {
     "@types/node": "^25.4.0",

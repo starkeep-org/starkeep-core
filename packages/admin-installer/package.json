@@ -36,7 +36,7 @@
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/storage-sqlite": "workspace:*",
-    "kysely": "^0.27.0",
+    "kysely": "^0.28.17",
     "pg": "^8.0.0"
   },
   "devDependencies": {
