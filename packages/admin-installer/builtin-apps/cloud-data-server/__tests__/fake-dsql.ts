@@ -55,8 +55,8 @@ export function fakeDsqlWithGrants(
   grantRows: Array<{ type_id: string; access: string }> = [],
 ): FakeDsql {
   return new FakeDsql()
-    .on(/FROM shared\.access_grants/, grantRows)
-    .on(/FROM shared\.records WHERE updated_at LIKE/, []);
+    .on(/from "shared"\."access_grants"/, grantRows)
+    .on(/from "shared"\."records" where "updated_at" like/, []);
 }
 
 const TEST_HLC = serializeHLC({ wallTime: Date.UTC(2026, 0, 1), counter: 0, nodeId: "test" });

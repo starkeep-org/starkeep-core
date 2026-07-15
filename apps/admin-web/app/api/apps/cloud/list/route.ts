@@ -22,7 +22,25 @@ import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { NextRequest, NextResponse } from "next/server";
 import pg from "pg";
+import {
+  DummyDriver,
+  Kysely,
+  PostgresAdapter,
+  PostgresIntrospector,
+  PostgresQueryCompiler,
+} from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
+
+// Compile-only Kysely instance (DummyDriver never executes); the compiled
+// `$1`-style SQL runs through the pg pool below.
+const compiler = new Kysely<Record<string, Record<string, unknown>>>({
+  dialect: {
+    createAdapter: () => new PostgresAdapter(),
+    createDriver: () => new DummyDriver(),
+    createIntrospector: (db) => new PostgresIntrospector(db),
+    createQueryCompiler: () => new PostgresQueryCompiler(),
+  },
+});
 
 const STARKEEP_DIR = starkeepDir();
 const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
@@ -111,17 +129,18 @@ export async function POST(req: NextRequest) {
   });
 
   try {
+    const listQuery = compiler
+      .selectFrom("shared.app_registry")
+      .select(["app_id", "version", "name", "installed_at", "updated_at"])
+      .orderBy("installed_at", "asc")
+      .compile();
     const result = await pool.query<{
       app_id: string;
       version: string;
       name: string | null;
       installed_at: Date;
       updated_at: Date;
-    }>(
-      `SELECT app_id, version, name, installed_at, updated_at
-       FROM shared.app_registry
-       ORDER BY installed_at ASC`,
-    );
+    }>(listQuery.sql, [...listQuery.parameters]);
     return NextResponse.json({
       apps: result.rows.map((r) => ({
         appId: r.app_id,

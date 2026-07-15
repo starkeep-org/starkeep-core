@@ -19,8 +19,9 @@ import {
   columnsToMetadataRow,
   type PostgresRow,
 } from "./serialization.js";
-import { buildPostgresQuery } from "./query-builder.js";
+import { buildPostgresQuery, compiler } from "./query-builder.js";
 import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
+import { sql, type CompiledQuery } from "kysely";
 
 
 export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
@@ -50,7 +51,8 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async healthCheck(): Promise<boolean> {
     if (!this.client) return false;
     try {
-      await this.client.query("SELECT 1");
+      const ping = sql`SELECT 1`.compile(compiler);
+      await this.client.query(ping.sql, [...ping.parameters]);
       return true;
     } catch {
       return false;
@@ -64,6 +66,11 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return this.client;
   }
 
+  // Executes a kysely-compiled query through the raw client.
+  private async run(compiled: CompiledQuery) {
+    return this.getClient().query(compiled.sql, [...compiled.parameters]);
+  }
+
   async put(record: DataRecord): Promise<void> {
     await withOccRetry("put", () => this.putRaw(record));
   }
@@ -73,16 +80,20 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   // idempotent — safe for both the public `put` retry and inside batch/txn.
   private async putRaw(record: DataRecord): Promise<void> {
     const row = recordToRow(record);
-    const columns = Object.keys(row);
-    const values = Object.values(row);
-    const placeholders = columns.map((_, index) => `$${index + 1}`);
-    const updates = columns
-      .filter((column) => column !== "id")
-      .map((column) => `${column} = EXCLUDED.${column}`)
-      .join(", ");
-
-    const text = `INSERT INTO shared.records (${columns.join(", ")}) VALUES (${placeholders.join(", ")}) ON CONFLICT(id) DO UPDATE SET ${updates}`;
-    await this.getClient().query(text, values);
+    const updateColumns = Object.keys(row).filter((column) => column !== "id");
+    await this.run(
+      compiler
+        .insertInto("shared.records")
+        .values({ ...row })
+        .onConflict((oc) =>
+          oc.column("id").doUpdateSet((eb) =>
+            Object.fromEntries(
+              updateColumns.map((column) => [column, eb.ref(`excluded.${column}`)]),
+            ),
+          ),
+        )
+        .compile(),
+    );
   }
 
   async get(id: StarkeepId): Promise<DataRecord | null> {
@@ -90,9 +101,8 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   private async getRaw(id: StarkeepId): Promise<DataRecord | null> {
-    const result = await this.getClient().query(
-      "SELECT * FROM shared.records WHERE id = $1",
-      [id],
+    const result = await this.run(
+      compiler.selectFrom("shared.records").selectAll().where("id", "=", id).compile(),
     );
     if (result.rows.length === 0) return null;
     return rowToRecord(result.rows[0] as unknown as PostgresRow);
@@ -104,9 +114,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   private async deleteRaw(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     const ts = serializeHLC(hlc);
-    await this.getClient().query(
-      "UPDATE shared.records SET deleted_at = $1, updated_at = $2, node_id = $3 WHERE id = $4",
-      [ts, ts, hlc.nodeId, id],
+    await this.run(
+      compiler
+        .updateTable("shared.records")
+        .set({ deleted_at: ts, updated_at: ts, node_id: hlc.nodeId })
+        .where("id", "=", id)
+        .compile(),
     );
   }
 
@@ -115,9 +128,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       // Within one node_id group, updated_at is fixed-width hex up to the
       // nodeId suffix, so lexicographic MAX equals HLC MAX. The
       // (node_id, updated_at) index makes this an index-only scan.
-      const result = await this.getClient().query(
-        "SELECT node_id, MAX(updated_at) AS max_updated_at FROM shared.records GROUP BY node_id",
-        [],
+      const result = await this.run(
+        compiler
+          .selectFrom("shared.records")
+          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
+          .groupBy("node_id")
+          .compile(),
       );
       const out: Record<string, HLCTimestamp> = {};
       for (const raw of result.rows) {
@@ -210,30 +226,34 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   private async putMetadataRaw(typeId: string, row: MetadataRow): Promise<void> {
     const table = pgMetadataTableName(typeId);
-    const cols: string[] = ["record_id"];
-    const values: unknown[] = [row.recordId];
+    const values: Record<string, unknown> = { record_id: row.recordId };
     for (const [key, value] of Object.entries(row)) {
       if (key === "recordId") continue;
-      cols.push(key);
-      values.push(value);
+      values[key] = value;
     }
-    const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-    const updates = cols
-      .filter((c) => c !== "record_id")
-      .map((c) => `${c} = EXCLUDED.${c}`)
-      .join(", ");
-    const text = updates
-      ? `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO UPDATE SET ${updates}`
-      : `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO NOTHING`;
-    await this.getClient().query(text, values);
+    const updateColumns = Object.keys(values).filter((c) => c !== "record_id");
+    await this.run(
+      compiler
+        .insertInto(table)
+        .values(values)
+        .onConflict((oc) =>
+          updateColumns.length > 0
+            ? oc.column("record_id").doUpdateSet((eb) =>
+                Object.fromEntries(
+                  updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)]),
+                ),
+              )
+            : oc.column("record_id").doNothing(),
+        )
+        .compile(),
+    );
   }
 
   async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
     return withOccRetry("getMetadata", async () => {
       const table = pgMetadataTableName(typeId);
-      const result = await this.getClient().query(
-        `SELECT * FROM ${table} WHERE record_id = $1`,
-        [recordId],
+      const result = await this.run(
+        compiler.selectFrom(table).selectAll().where("record_id", "=", recordId).compile(),
       );
       if (result.rows.length === 0) return null;
       return columnsToMetadataRow(recordId, result.rows[0] as Record<string, unknown>);
@@ -248,10 +268,8 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return withOccRetry("getMetadataByIds", async () => {
       const result = new Map<StarkeepId, MetadataRow>();
       const table = pgMetadataTableName(typeId);
-      const placeholders = recordIds.map((_, i) => `$${i + 1}`).join(", ");
-      const dbResult = await this.getClient().query(
-        `SELECT * FROM ${table} WHERE record_id IN (${placeholders})`,
-        recordIds,
+      const dbResult = await this.run(
+        compiler.selectFrom(table).selectAll().where("record_id", "in", recordIds).compile(),
       );
       for (const raw of dbResult.rows) {
         const row = raw as Record<string, unknown>;
@@ -265,9 +283,8 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
     await withOccRetry("deleteMetadata", async () => {
       const table = pgMetadataTableName(typeId);
-      await this.getClient().query(
-        `DELETE FROM ${table} WHERE record_id = $1`,
-        [recordId],
+      await this.run(
+        compiler.deleteFrom(table).where("record_id", "=", recordId).compile(),
       );
     });
   }

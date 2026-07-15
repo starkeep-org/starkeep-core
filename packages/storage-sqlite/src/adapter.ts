@@ -11,8 +11,9 @@ import type {
   Transaction,
 } from "@starkeep/storage-adapter";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
+import { sql as kSql } from "kysely";
 import { recordToRow, rowToRecord, type SqliteRow } from "./serialization.js";
-import { buildSelectQuery } from "./query-builder.js";
+import { buildSelectQuery, compiler as qb } from "./query-builder.js";
 import { initializeLocalSchema } from "./schema/bootstrap.js";
 
 export interface SqliteDatabaseAdapterOptions {
@@ -47,7 +48,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   async healthCheck(): Promise<boolean> {
     if (!this.database) return false;
     try {
-      this.database.prepare("SELECT 1").get();
+      this.database.prepare(kSql`SELECT 1`.compile(qb).sql).get();
       return true;
     } catch {
       return false;
@@ -86,39 +87,47 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
 
   async put(record: DataRecord): Promise<void> {
     const row = recordToRow(record);
-    const columns = Object.keys(row);
-    const placeholders = columns.map(() => "?").join(", ");
-    const updates = columns
-      .filter((column) => column !== "id")
-      .map((column) => `${column} = excluded.${column}`)
-      .join(", ");
-    const sql = `INSERT INTO shared_records (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`;
-    this.runStmt(sql, ...Object.values(row));
+    const updateColumns = Object.keys(row).filter((column) => column !== "id");
+    const query = qb
+      .insertInto("shared_records")
+      .values({ ...row })
+      .onConflict((oc) =>
+        oc.column("id").doUpdateSet((eb) =>
+          Object.fromEntries(
+            updateColumns.map((column) => [column, eb.ref(`excluded.${column}`)]),
+          ),
+        ),
+      )
+      .compile();
+    this.runStmt(query.sql, ...query.parameters);
   }
 
   async get(id: StarkeepId): Promise<DataRecord | null> {
-    const row = this.getRow<SqliteRow>("SELECT * FROM shared_records WHERE id = ?", id);
+    const query = qb.selectFrom("shared_records").selectAll().where("id", "=", id).compile();
+    const row = this.getRow<SqliteRow>(query.sql, ...query.parameters);
     return row ? rowToRecord(row) : null;
   }
 
   async delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     const ts = serializeHLC(hlc);
-    this.runStmt(
-      "UPDATE shared_records SET deleted_at = ?, updated_at = ?, node_id = ? WHERE id = ?",
-      ts,
-      ts,
-      hlc.nodeId,
-      id,
-    );
+    const query = qb
+      .updateTable("shared_records")
+      .set({ deleted_at: ts, updated_at: ts, node_id: hlc.nodeId })
+      .where("id", "=", id)
+      .compile();
+    this.runStmt(query.sql, ...query.parameters);
   }
 
   async getNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
     // Within one node_id group, updated_at is fixed-width hex up to the
     // nodeId suffix, so lexicographic MAX equals HLC MAX. The
     // (node_id, updated_at) index makes this an index-only scan.
-    const rows = this.allRows<{ node_id: string; max_updated_at: string }>(
-      "SELECT node_id, MAX(updated_at) AS max_updated_at FROM shared_records GROUP BY node_id",
-    );
+    const watermarksQuery = qb
+      .selectFrom("shared_records")
+      .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
+      .groupBy("node_id")
+      .compile();
+    const rows = this.allRows<{ node_id: string; max_updated_at: string }>(watermarksQuery.sql);
     const out: Record<string, HLCTimestamp> = {};
     for (const row of rows) {
       out[row.node_id] = deserializeHLC(row.max_updated_at);
@@ -179,30 +188,30 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
 
   async putMetadata(typeId: string, row: MetadataRow): Promise<void> {
     const table = sqliteMetadataTableName(typeId);
-    const cols: string[] = ["record_id"];
-    const values: unknown[] = [row.recordId];
+    const values: Record<string, unknown> = { record_id: row.recordId };
     for (const [key, value] of Object.entries(row)) {
       if (key === "recordId") continue;
-      cols.push(key);
-      values.push(value);
+      values[key] = value;
     }
-    const placeholders = cols.map(() => "?").join(", ");
-    const updates = cols
-      .filter((c) => c !== "record_id")
-      .map((c) => `${c} = excluded.${c}`)
-      .join(", ");
-    const sql = updates
-      ? `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO UPDATE SET ${updates}`
-      : `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(record_id) DO NOTHING`;
-    this.runStmt(sql, ...values);
+    const updateColumns = Object.keys(values).filter((c) => c !== "record_id");
+    const query = qb
+      .insertInto(table)
+      .values(values)
+      .onConflict((oc) =>
+        updateColumns.length > 0
+          ? oc.column("record_id").doUpdateSet((eb) =>
+              Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
+            )
+          : oc.column("record_id").doNothing(),
+      )
+      .compile();
+    this.runStmt(query.sql, ...query.parameters);
   }
 
   async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
     const table = sqliteMetadataTableName(typeId);
-    const row = this.getRow<Record<string, unknown>>(
-      `SELECT * FROM ${table} WHERE record_id = ?`,
-      recordId,
-    );
+    const query = qb.selectFrom(table).selectAll().where("record_id", "=", recordId).compile();
+    const row = this.getRow<Record<string, unknown>>(query.sql, ...query.parameters);
     if (!row) return null;
     return columnsToMetadataRow(recordId, row);
   }
@@ -214,11 +223,8 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     const result = new Map<StarkeepId, MetadataRow>();
     if (recordIds.length === 0) return result;
     const table = sqliteMetadataTableName(typeId);
-    const placeholders = recordIds.map(() => "?").join(", ");
-    const rows = this.allRows<Record<string, unknown>>(
-      `SELECT * FROM ${table} WHERE record_id IN (${placeholders})`,
-      ...recordIds,
-    );
+    const query = qb.selectFrom(table).selectAll().where("record_id", "in", recordIds).compile();
+    const rows = this.allRows<Record<string, unknown>>(query.sql, ...query.parameters);
     for (const row of rows) {
       const recordId = row["record_id"] as StarkeepId;
       result.set(recordId, columnsToMetadataRow(recordId, row));
@@ -228,7 +234,8 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
 
   async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
     const table = sqliteMetadataTableName(typeId);
-    this.runStmt(`DELETE FROM ${table} WHERE record_id = ?`, recordId);
+    const query = qb.deleteFrom(table).where("record_id", "=", recordId).compile();
+    this.runStmt(query.sql, ...query.parameters);
   }
 
 }

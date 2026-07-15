@@ -8,8 +8,10 @@ import type {
   ScanSinceOptions,
   ScanSincePage,
 } from "@starkeep/shared-space-api";
+import { sql, type CompiledQuery } from "kysely";
 import type { DatabaseClient } from "../types.js";
 import { withOccRetry } from "../occ-retry.js";
+import { compiler as qb } from "../query-builder.js";
 
 /**
  * DSQL-backed implementation of `AppSyncableApplier`.
@@ -26,6 +28,12 @@ export class DsqlAppSyncableApplier
     private readonly client: DatabaseClient,
     private readonly namespace: AppSyncableNamespaceStore,
   ) {}
+
+  private async run(compiled: CompiledQuery): Promise<{ rows: Record<string, unknown>[] }> {
+    return (await this.client.query(compiled.sql, [...compiled.parameters])) as {
+      rows: Record<string, unknown>[];
+    };
+  }
 
   // Each branch is a single LWW-guarded statement (upsert / conditional
   // update / soft-delete keyed on `updated_at`), so replaying the whole
@@ -44,7 +52,7 @@ export class DsqlAppSyncableApplier
       );
     }
 
-    const schemaTable = `app_${entry.appId.replace(/-/g, "_")}."${entry.table}"`;
+    const schemaTable = `app_${entry.appId.replace(/-/g, "_")}.${entry.table}`;
     const { pkColumns } = tableInfo;
 
     await withOccRetry(`applier.apply(${entry.op})`, async () => {
@@ -67,36 +75,42 @@ export class DsqlAppSyncableApplier
     const cols = Object.keys(row);
     if (cols.length === 0) return;
 
-    const colList = cols.map((c) => `"${c}"`).join(", ");
-    const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-    const values = cols.map((c) => row[c]);
-
     if (pkColumns.length === 0) {
-      await this.client.query(
-        `INSERT INTO ${schemaTable} (${colList}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
-        values,
+      await this.run(
+        qb
+          .insertInto(schemaTable)
+          .values({ ...row })
+          .onConflict((oc) => oc.doNothing())
+          .compile(),
       );
       return;
     }
 
-    const conflictTarget = pkColumns.map((c) => `"${c}"`).join(", ");
     const updateCols = cols.filter((c) => !pkColumns.includes(c));
     if (updateCols.length === 0) {
-      await this.client.query(
-        `INSERT INTO ${schemaTable} (${colList}) VALUES (${placeholders}) ON CONFLICT (${conflictTarget}) DO NOTHING`,
-        values,
+      await this.run(
+        qb
+          .insertInto(schemaTable)
+          .values({ ...row })
+          .onConflict((oc) => oc.columns(pkColumns as never[]).doNothing())
+          .compile(),
       );
       return;
     }
 
-    const setClause = updateCols
-      .map((c) => `"${c}" = EXCLUDED."${c}"`)
-      .join(", ");
-    await this.client.query(
-      `INSERT INTO ${schemaTable} (${colList}) VALUES (${placeholders})
-       ON CONFLICT (${conflictTarget}) DO UPDATE SET ${setClause}
-       WHERE EXCLUDED.updated_at > ${schemaTable}.updated_at`,
-      values,
+    await this.run(
+      qb
+        .insertInto(schemaTable)
+        .values({ ...row })
+        .onConflict((oc) =>
+          oc
+            .columns(pkColumns as never[])
+            .doUpdateSet((eb) =>
+              Object.fromEntries(updateCols.map((c) => [c, eb.ref(`excluded.${c}`)])),
+            )
+            .where(sql.ref("excluded.updated_at"), ">", sql.ref(`${schemaTable}.updated_at`)),
+        )
+        .compile(),
     );
   }
 
@@ -112,23 +126,15 @@ export class DsqlAppSyncableApplier
     const whereCols = Object.keys(where);
     if (patchCols.length === 0) return;
 
-    let paramIdx = 1;
-    const setClause = patchCols.map((c) => `"${c}" = $${paramIdx++}`).join(", ");
-    const conditions = whereCols.map((c) => `"${c}" = $${paramIdx++}`);
     const incomingUpdatedAt = patch["updated_at"] as string | undefined;
-    if (incomingUpdatedAt) conditions.push(`updated_at < $${paramIdx++}`);
-    const whereClause = conditions.length ? " WHERE " + conditions.join(" AND ") : "";
-
-    const params: unknown[] = [
-      ...patchCols.map((c) => patch[c]),
-      ...whereCols.map((c) => where[c]),
-    ];
-    if (incomingUpdatedAt) params.push(incomingUpdatedAt);
-
-    await this.client.query(
-      `UPDATE ${schemaTable} SET ${setClause}${whereClause}`,
-      params,
-    );
+    let query = qb.updateTable(schemaTable).set({ ...patch });
+    for (const c of whereCols) {
+      query = query.where(c, "=", where[c]);
+    }
+    if (incomingUpdatedAt) {
+      query = query.where("updated_at", "<", incomingUpdatedAt);
+    }
+    await this.run(query.compile());
   }
 
   private async applyDelete(
@@ -139,25 +145,17 @@ export class DsqlAppSyncableApplier
     const whereCols = Object.keys(where);
     const ts = entry.row?.["updated_at"] as string ?? serializeHLC(entry.timestamp);
 
-    let paramIdx = 1;
-    const tsIdx1 = paramIdx++;
-    const tsIdx2 = paramIdx++;
-    const nodeIdx = paramIdx++;
-    const conditions = whereCols.map((c) => `"${c}" = $${paramIdx++}`);
-    conditions.push(`(updated_at IS NULL OR updated_at < $${paramIdx++})`);
-    const whereClause = " WHERE " + conditions.join(" AND ");
-
-    const params: unknown[] = [
-      ts, ts,
-      nodeIdOf(ts, entry),
-      ...whereCols.map((c) => where[c]),
-      ts,
-    ];
-
-    await this.client.query(
-      `UPDATE ${schemaTable} SET deleted_at = $${tsIdx1}, updated_at = $${tsIdx2}, node_id = $${nodeIdx}${whereClause}`,
-      params,
+    let query = qb
+      .updateTable(schemaTable)
+      .set({ deleted_at: ts, updated_at: ts, node_id: nodeIdOf(ts, entry) });
+    for (const c of whereCols) {
+      query = query.where(c, "=", where[c]);
+    }
+    // LWW guard: tombstone only rows the incoming timestamp supersedes.
+    query = query.where((eb) =>
+      eb.or([eb("updated_at", "is", null), eb("updated_at", "<", ts)]),
     );
+    await this.run(query.compile());
   }
 
   /**
@@ -172,7 +170,7 @@ export class DsqlAppSyncableApplier
     sinceHlcStr: string,
     options?: ScanSinceOptions,
   ): Promise<ScanSincePage> {
-    const schemaTable = `app_${appId.replace(/-/g, "_")}."${table}"`;
+    const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
     const floor =
       options?.cursor !== undefined && options.cursor > sinceHlcStr
         ? options.cursor
@@ -180,17 +178,15 @@ export class DsqlAppSyncableApplier
     const limit = options?.limit;
     let result: { rows: Record<string, unknown>[] };
     try {
+      let query = qb
+        .selectFrom(schemaTable)
+        .selectAll()
+        .where("updated_at", ">", floor)
+        .orderBy("updated_at", "asc");
       if (limit !== undefined) {
-        result = await this.client.query(
-          `SELECT * FROM ${schemaTable} WHERE updated_at > $1 ORDER BY updated_at ASC LIMIT $2`,
-          [floor, limit + 1],
-        );
-      } else {
-        result = await this.client.query(
-          `SELECT * FROM ${schemaTable} WHERE updated_at > $1 ORDER BY updated_at ASC`,
-          [floor],
-        );
+        query = query.limit(limit + 1);
       }
+      result = await this.run(query.compile());
     } catch {
       return { rows: [], nextCursor: null, hasMore: false };
     }
@@ -209,12 +205,15 @@ export class DsqlAppSyncableApplier
     appId: string,
     table: string,
   ): Promise<Record<string, HLCTimestamp>> {
-    const schemaTable = `app_${appId.replace(/-/g, "_")}."${table}"`;
+    const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
     let result: { rows: Record<string, unknown>[] };
     try {
-      result = await this.client.query(
-        `SELECT node_id, MAX(updated_at) AS max_updated_at FROM ${schemaTable} GROUP BY node_id`,
-        [],
+      result = await this.run(
+        qb
+          .selectFrom(schemaTable)
+          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
+          .groupBy("node_id")
+          .compile(),
       );
     } catch {
       // Table might not exist (app not installed) or not be readable by this
@@ -235,13 +234,13 @@ export class DsqlAppSyncableApplier
     table: string,
     where?: Record<string, unknown>,
   ): Promise<Record<string, unknown>[]> {
-    const schemaTable = `app_${appId.replace(/-/g, "_")}."${table}"`;
+    const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
     const whereCols = where ? Object.keys(where) : [];
-    const conditions = ["deleted_at IS NULL", ...whereCols.map((c, i) => `"${c}" = $${i + 1}`)];
-    const result = await this.client.query(
-      `SELECT * FROM ${schemaTable} WHERE ${conditions.join(" AND ")}`,
-      whereCols.map((c) => where![c]),
-    );
+    let query = qb.selectFrom(schemaTable).selectAll().where("deleted_at", "is", null);
+    for (const c of whereCols) {
+      query = query.where(c, "=", where![c]);
+    }
+    const result = await this.run(query.compile());
     return result.rows;
   }
 }

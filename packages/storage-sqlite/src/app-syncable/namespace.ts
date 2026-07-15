@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { compiler as qb } from "../query-builder.js";
 import type {
   AppSyncableNamespace,
   AppSyncableTableInfo,
@@ -38,37 +39,53 @@ export function upsertAppSyncableNamespace(
   tables: AppSyncableTableInfo[],
   filesEnabled: boolean,
 ): void {
-  db.prepare(
-    `INSERT INTO app_syncable_namespaces (app_id, tables_json, files_enabled)
-     VALUES (?, ?, ?)
-     ON CONFLICT(app_id) DO UPDATE SET
-       tables_json = excluded.tables_json,
-       files_enabled = excluded.files_enabled`,
-  ).run(appId, JSON.stringify(tables), filesEnabled ? 1 : 0);
+  const query = qb
+    .insertInto("app_syncable_namespaces")
+    .values({
+      app_id: appId,
+      tables_json: JSON.stringify(tables),
+      files_enabled: filesEnabled ? 1 : 0,
+    })
+    .onConflict((oc) =>
+      oc.column("app_id").doUpdateSet((eb) => ({
+        tables_json: eb.ref("excluded.tables_json"),
+        files_enabled: eb.ref("excluded.files_enabled"),
+      })),
+    )
+    .compile();
+  db.prepare(query.sql).run(...(query.parameters as (string | number)[]));
 }
 
 export function deleteAppSyncableNamespace(db: DatabaseSync, appId: string): void {
-  db.prepare("DELETE FROM app_syncable_namespaces WHERE app_id = ?").run(appId);
+  const query = qb.deleteFrom("app_syncable_namespaces").where("app_id", "=", appId).compile();
+  db.prepare(query.sql).run(...(query.parameters as string[]));
 }
 
 export function getAppSyncableNamespace(
   db: DatabaseSync,
   appId: string,
 ): AppSyncableNamespace | null {
+  const query = qb
+    .selectFrom("app_syncable_namespaces")
+    .select(["app_id", "tables_json", "files_enabled"])
+    .where("app_id", "=", appId)
+    .compile();
   const row = db
-    .prepare(
-      "SELECT app_id, tables_json, files_enabled FROM app_syncable_namespaces WHERE app_id = ?",
-    )
-    .get(appId) as { app_id: string; tables_json: string; files_enabled: number } | undefined;
+    .prepare(query.sql)
+    .get(...(query.parameters as string[])) as
+    | { app_id: string; tables_json: string; files_enabled: number }
+    | undefined;
   if (!row) return null;
   return rowToNamespace(row);
 }
 
 export function listAppSyncableNamespaces(db: DatabaseSync): AppSyncableNamespace[] {
+  const query = qb
+    .selectFrom("app_syncable_namespaces")
+    .select(["app_id", "tables_json", "files_enabled"])
+    .compile();
   const rows = db
-    .prepare(
-      "SELECT app_id, tables_json, files_enabled FROM app_syncable_namespaces",
-    )
+    .prepare(query.sql)
     .all() as Array<{ app_id: string; tables_json: string; files_enabled: number }>;
   return rows.map(rowToNamespace);
 }

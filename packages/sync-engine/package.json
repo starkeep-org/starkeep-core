@@ -34,7 +34,8 @@
   },
   "dependencies": {
     "@starkeep/protocol-primitives": "workspace:*",
-    "@starkeep/storage-adapter": "workspace:*"
+    "@starkeep/storage-adapter": "workspace:*",
+    "kysely": "^0.28.17"
   },
   "devDependencies": {
     "@types/node": "^25.4.0",

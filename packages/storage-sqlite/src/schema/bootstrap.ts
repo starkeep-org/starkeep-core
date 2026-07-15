@@ -1,5 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
+import { sql } from "kysely";
 import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/protocol-primitives";
+import { compiler as qb } from "../query-builder.js";
 
 /**
  * Local sqlite schema bootstrap.
@@ -24,97 +26,140 @@ function applyLocalSchemaDdl(db: DatabaseSync): void {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS shared_records (
-      id TEXT PRIMARY KEY,
-      type TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      -- Denormalized from updated_at (its nodeId component) on every write.
-      -- Feeds the sync responder's per-node coverage watermark via the
-      -- (node_id, updated_at) index without scanning the table.
-      node_id TEXT NOT NULL,
-      deleted_at TEXT,
-      version INTEGER NOT NULL DEFAULT 1,
-      content_hash TEXT NOT NULL,
-      object_storage_key TEXT NOT NULL,
-      mime_type TEXT,
-      size_bytes INTEGER NOT NULL,
-      original_filename TEXT,
-      origin_app_id TEXT NOT NULL,
-      parent_id TEXT,
-      -- Advisory appId/purpose interest-filter marker (e.g. photos/thumbnail);
-      -- NULL = general interest. See DataRecord.label.
-      label TEXT
-    )
-  `);
-  db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_type ON shared_records(type)");
+  // shared_records: node_id is denormalized from updated_at (its nodeId
+  // component) on every write — it feeds the sync responder's per-node
+  // coverage watermark via the (node_id, updated_at) index without scanning
+  // the table. label is an advisory appId/purpose interest-filter marker
+  // (e.g. photos/thumbnail); NULL = general interest. See DataRecord.label.
   db.exec(
-    "CREATE INDEX IF NOT EXISTS idx_shared_records_node_watermark ON shared_records(node_id, updated_at)",
+    qb.schema
+      .createTable("shared_records")
+      .ifNotExists()
+      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn("type", "text", (c) => c.notNull())
+      .addColumn("created_at", "text", (c) => c.notNull())
+      .addColumn("updated_at", "text", (c) => c.notNull())
+      .addColumn("node_id", "text", (c) => c.notNull())
+      .addColumn("deleted_at", "text")
+      .addColumn("version", "integer", (c) => c.notNull().defaultTo(1))
+      .addColumn("content_hash", "text", (c) => c.notNull())
+      .addColumn("object_storage_key", "text", (c) => c.notNull())
+      .addColumn("mime_type", "text")
+      .addColumn("size_bytes", "integer", (c) => c.notNull())
+      .addColumn("original_filename", "text")
+      .addColumn("origin_app_id", "text", (c) => c.notNull())
+      .addColumn("parent_id", "text")
+      .addColumn("label", "text")
+      .compile().sql,
   );
-  db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_origin_app ON shared_records(origin_app_id)");
-  db.exec("CREATE INDEX IF NOT EXISTS idx_shared_records_parent_id ON shared_records(parent_id)");
-  // Duplicate-file prevention: (filename + bytes) is unique among live records.
-  // Tombstoned rows (deleted_at IS NOT NULL) are excluded so a re-upload after
-  // delete is allowed. Records with NULL filename are not constrained — the
-  // rule requires both filename and content to match.
+  const sharedRecordsIndexes = [
+    qb.schema.createIndex("idx_shared_records_type").ifNotExists().on("shared_records").column("type"),
+    qb.schema
+      .createIndex("idx_shared_records_node_watermark")
+      .ifNotExists()
+      .on("shared_records")
+      .columns(["node_id", "updated_at"]),
+    qb.schema
+      .createIndex("idx_shared_records_origin_app")
+      .ifNotExists()
+      .on("shared_records")
+      .column("origin_app_id"),
+    qb.schema
+      .createIndex("idx_shared_records_parent_id")
+      .ifNotExists()
+      .on("shared_records")
+      .column("parent_id"),
+    // Duplicate-file prevention: (filename + bytes) is unique among live
+    // records. Tombstoned rows (deleted_at IS NOT NULL) are excluded so a
+    // re-upload after delete is allowed. Records with NULL filename are not
+    // constrained — the rule requires both filename and content to match.
+    qb.schema
+      .createIndex("uq_shared_records_filename_hash")
+      .ifNotExists()
+      .unique()
+      .on("shared_records")
+      .columns(["original_filename", "content_hash"])
+      .where(sql.ref("deleted_at"), "is", null)
+      .where(sql.ref("original_filename"), "is not", null),
+  ];
+  for (const index of sharedRecordsIndexes) {
+    db.exec(index.compile().sql);
+  }
+
   db.exec(
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_shared_records_filename_hash " +
-      "ON shared_records(original_filename, content_hash) " +
-      "WHERE deleted_at IS NULL AND original_filename IS NOT NULL",
+    qb.schema
+      .createTable("shared_access_grants")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("type_id", "text", (c) => c.notNull())
+      .addColumn("access", "text", (c) => c.notNull().check(sql`access IN ('read', 'readwrite')`))
+      .addColumn("metadata_write", "integer", (c) => c.notNull().defaultTo(0))
+      .addColumn("created_at", "text", (c) => c.notNull().defaultTo(sql`(datetime('now'))`))
+      .addPrimaryKeyConstraint("pk_shared_access_grants", ["app_id", "type_id"] as never[])
+      .compile().sql,
+  );
+  db.exec(
+    qb.schema
+      .createIndex("idx_shared_access_grants_app")
+      .ifNotExists()
+      .on("shared_access_grants")
+      .column("app_id")
+      .compile().sql,
   );
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS shared_access_grants (
-      app_id TEXT NOT NULL,
-      type_id TEXT NOT NULL,
-      access TEXT NOT NULL CHECK (access IN ('read', 'readwrite')),
-      metadata_write INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      PRIMARY KEY (app_id, type_id)
-    )
-  `);
-  db.exec("CREATE INDEX IF NOT EXISTS idx_shared_access_grants_app ON shared_access_grants(app_id)");
+  db.exec(
+    qb.schema
+      .createTable("shared_app_registry")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.primaryKey())
+      .addColumn("name", "text", (c) => c.notNull())
+      .addColumn("version", "text", (c) => c.notNull())
+      .addColumn("tier", "text", (c) => c.notNull().defaultTo("app"))
+      .addColumn("manifest", "text", (c) => c.notNull())
+      .addColumn("status", "text", (c) => c.notNull().defaultTo("installing"))
+      .addColumn("hmac_secret", "text", (c) => c.notNull())
+      .addColumn("installed_at", "text", (c) => c.notNull().defaultTo(sql`(datetime('now'))`))
+      .addColumn("updated_at", "text", (c) => c.notNull().defaultTo(sql`(datetime('now'))`))
+      .compile().sql,
+  );
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS shared_app_registry (
-      app_id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      version TEXT NOT NULL,
-      tier TEXT NOT NULL DEFAULT 'app',
-      manifest TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'installing',
-      hmac_secret TEXT NOT NULL,
-      installed_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS shared_app_install_steps (
-      app_id TEXT NOT NULL,
-      operation TEXT NOT NULL CHECK (operation IN ('install', 'uninstall')),
-      step TEXT NOT NULL,
-      status TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed')),
-      error TEXT,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      PRIMARY KEY (app_id, operation, step)
-    )
-  `);
+  db.exec(
+    qb.schema
+      .createTable("shared_app_install_steps")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("operation", "text", (c) =>
+        c.notNull().check(sql`operation IN ('install', 'uninstall')`),
+      )
+      .addColumn("step", "text", (c) => c.notNull())
+      .addColumn("status", "text", (c) =>
+        c.notNull().check(sql`status IN ('pending', 'done', 'failed')`),
+      )
+      .addColumn("error", "text")
+      .addColumn("updated_at", "text", (c) => c.notNull().defaultTo(sql`(datetime('now'))`))
+      .addPrimaryKeyConstraint("pk_shared_app_install_steps", [
+        "app_id",
+        "operation",
+        "step",
+      ] as never[])
+      .compile().sql,
+  );
 
   // App-specific syncable namespace registry. One row per installed app that
   // declared `infraRequirements.appSpecificSyncable`. Lists the tables the
   // installer materialized as `<app_id>_syncable_<name>` and whether the app
   // opted into the `apps/<app_id>/syncable/` file prefix. Read by the SDK to
   // gate row CRUD/file ops and by the sync engine to enumerate what to sync.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS app_syncable_namespaces (
-      app_id        TEXT PRIMARY KEY,
-      tables_json   TEXT NOT NULL,
-      files_enabled INTEGER NOT NULL DEFAULT 0,
-      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
+  db.exec(
+    qb.schema
+      .createTable("app_syncable_namespaces")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.primaryKey())
+      .addColumn("tables_json", "text", (c) => c.notNull())
+      .addColumn("files_enabled", "integer", (c) => c.notNull().defaultTo(0))
+      .addColumn("created_at", "text", (c) => c.notNull().defaultTo(sql`(datetime('now'))`))
+      .compile().sql,
+  );
 
   // Per-category metadata tables on parity with DSQL. Generated from CATEGORIES
   // so adding a category or a column is a single edit in @starkeep/protocol-primitives's

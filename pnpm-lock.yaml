@@ -101,6 +101,9 @@ importers:
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
+      kysely:
+        specifier: ^0.28.17
+        version: 0.28.17
       lucide-react:
         specifier: ^1.14.0
         version: 1.14.0(react@19.2.5)
@@ -168,6 +171,9 @@ importers:
       '@starkeep/app-client':
         specifier: workspace:*
         version: link:../../packages/app-client
+      kysely:
+        specifier: ^0.28.17
+        version: 0.28.17
       next:
         specifier: ^16.2.6
         version: 16.2.10(@babel/core@7.29.7)(@opentelemetry/api@1.9.1)(@playwright/test@1.60.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
@@ -235,6 +241,9 @@ importers:
       '@starkeep/sync-engine':
         specifier: workspace:*
         version: link:../../packages/sync-engine
+      kysely:
+        specifier: ^0.28.17
+        version: 0.28.17
       pg:
         specifier: ^8.13.0
         version: 8.20.0
@@ -819,6 +828,9 @@ importers:
       '@starkeep/storage-adapter':
         specifier: workspace:*
         version: link:../storage-adapter
+      kysely:
+        specifier: ^0.28.17
+        version: 0.28.17
     devDependencies:
       '@types/node':
         specifier: ^25.4.0

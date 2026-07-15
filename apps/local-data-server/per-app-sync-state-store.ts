@@ -1,4 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
+import { sql } from "kysely";
+import { sqliteCompiler as qb } from "@starkeep/storage-sqlite";
 import type { SyncStateStore, Watermarks } from "@starkeep/sync-engine";
 
 /**
@@ -16,15 +18,26 @@ export function createPerAppSyncStateStore(
   const watermarksKey = `${appId}:watermarks`;
   const peerWatermarksKey = `${appId}:peer_watermarks`;
 
+  // sql.raw("?") leaves positional placeholders in the compiled SQL so the
+  // statements can be prepared once here and bound per call below.
   const getStmt = db.prepare(
-    "SELECT value_json FROM sync_state WHERE key = ?",
+    qb.selectFrom("sync_state").select("value_json").where("key", "=", sql.raw("?")).compile().sql,
   );
   const setStmt = db.prepare(
-    `INSERT INTO sync_state (key, value_json, updated_at)
-     VALUES (?, ?, strftime('%s','now'))
-     ON CONFLICT(key) DO UPDATE SET
-       value_json = excluded.value_json,
-       updated_at = excluded.updated_at`,
+    qb
+      .insertInto("sync_state")
+      .values({
+        key: sql.raw("?"),
+        value_json: sql.raw("?"),
+        updated_at: sql`strftime('%s','now')`,
+      })
+      .onConflict((oc) =>
+        oc.column("key").doUpdateSet((eb) => ({
+          value_json: eb.ref("excluded.value_json"),
+          updated_at: eb.ref("excluded.updated_at"),
+        })),
+      )
+      .compile().sql,
   );
 
   function getJson<T>(key: string): T | null {

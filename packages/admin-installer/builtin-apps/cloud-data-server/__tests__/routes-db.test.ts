@@ -118,10 +118,10 @@ function bodyOf(res: { body: string }): Record<string, unknown> {
 }
 
 const RECORDS_SELECT = /select \* from "shared"\."records"/;
-const RECORDS_INSERT = /INSERT INTO shared\.records/;
+const RECORDS_INSERT = /insert into "shared"\."records"/;
 // The responder's coverage-watermark summary, computed on every exchange.
 const RECORDS_NODE_WATERMARKS =
-  /SELECT node_id, MAX\(updated_at\).*FROM shared\.records GROUP BY node_id/;
+  /select "node_id", max\("updated_at"\).*from "shared"\."records" group by "node_id"/;
 const VALID_HASH = "b".repeat(64);
 
 describe("grants parity on records routes", () => {
@@ -350,7 +350,7 @@ describe("record registration", () => {
   });
 });
 
-const IMAGE_META_SELECT = /from shared\.record_image_metadata where record_id in/i;
+const IMAGE_META_SELECT = /from "shared"\."record_image_metadata" where "record_id" in/i;
 
 describe("list metadata enrichment (?include=metadata)", () => {
   it("embeds each record's per-category metadata in one batched read", async () => {
@@ -426,7 +426,7 @@ describe("metadata routes", () => {
 
   it("writes valid metadata into the derived category's table", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
-      /INSERT INTO shared\.record_image_metadata/,
+      /insert into "shared"\."record_image_metadata"/,
       [],
     );
     setDbFactory(db);
@@ -440,7 +440,7 @@ describe("metadata routes", () => {
       context,
     );
     expect(res.statusCode).toBe(200);
-    const writes = db.calls(/INSERT INTO shared\.record_image_metadata/);
+    const writes = db.calls(/insert into "shared"\."record_image_metadata"/);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.values).toEqual(["r1", 100, 50]);
   });
@@ -462,7 +462,7 @@ describe("metadata routes", () => {
 
   it("reads metadata for a readable category and null for other", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
-      /FROM shared\.record_image_metadata WHERE record_id/,
+      /from "shared"\."record_image_metadata" where "record_id"/,
       [{ record_id: "r9", width: 640 }],
     );
     setDbFactory(db);
@@ -488,7 +488,7 @@ describe("metadata routes", () => {
 describe("per-record routes honor read/write grants", () => {
   it("403s file-url for a record whose type the caller cannot read", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
-      /FROM shared\.records WHERE id =/,
+      /from "shared"\."records" where "id" =/,
       [recordRow({ id: "v1", type: "audio/mp3" })],
     );
     setDbFactory(db);
@@ -501,8 +501,8 @@ describe("per-record routes honor read/write grants", () => {
 
   it("DELETE tombstones a writable record and 403s otherwise", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
-      .on(/FROM shared\.records WHERE id =/, [recordRow({ id: "d1", type: "image/jpeg" })])
-      .on(/UPDATE shared\.records SET deleted_at/, []);
+      .on(/from "shared"\."records" where "id" =/, [recordRow({ id: "d1", type: "image/jpeg" })])
+      .on(/update "shared"\."records" set "deleted_at"/, []);
     setDbFactory(db);
     const res = await handler(
       signedEvent({ appId: "pr2", method: "DELETE", subPath: "/data/records/d1" }),
@@ -510,10 +510,10 @@ describe("per-record routes honor read/write grants", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(bodyOf(res)).toEqual({ deleted: true });
-    expect(db.calls(/UPDATE shared\.records SET deleted_at/)).toHaveLength(1);
+    expect(db.calls(/update "shared"\."records" set "deleted_at"/)).toHaveLength(1);
 
     const dbRo = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
-      /FROM shared\.records WHERE id =/,
+      /from "shared"\."records" where "id" =/,
       [recordRow({ id: "d2", type: "image/jpeg" })],
     );
     setDbFactory(dbRo);
@@ -522,7 +522,7 @@ describe("per-record routes honor read/write grants", () => {
       context,
     );
     expect(resRo.statusCode).toBe(403);
-    expect(dbRo.calls(/UPDATE shared\.records SET deleted_at/)).toHaveLength(0);
+    expect(dbRo.calls(/update "shared"\."records" set "deleted_at"/)).toHaveLength(0);
   });
 
   it("chokepoint catches a route/data mismatch: readable type, foreign-category key", async () => {
@@ -531,7 +531,7 @@ describe("per-record routes honor read/write grants", () => {
     // read (audio). The pre-sign revalidation chokepoint re-checks the KEY, so
     // the single file-url route 403s instead of signing a foreign-category URL.
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
-      /FROM shared\.records WHERE id =/,
+      /from "shared"\."records" where "id" =/,
       [recordRow({ id: "mm1", type: "image/jpeg", object_storage_key: `shared/audio/ab/${"a".repeat(64)}` })],
     );
     setDbFactory(db);
@@ -651,7 +651,7 @@ describe("batch file-urls route", () => {
 
 describe("OCC retry on record read-modify-write", () => {
   const grants = [{ type_id: "image/jpeg", access: "readwrite" as const }];
-  const RECORD_BY_ID = /FROM shared\.records WHERE id =/;
+  const RECORD_BY_ID = /from "shared"\."records" where "id" =/;
 
   function occConflict(): Error {
     return Object.assign(new Error("change conflicts with another transaction"), {
@@ -744,7 +744,7 @@ describe("sync exchange channel split", () => {
 
   it("the Drive channel applies incoming shared records", async () => {
     const db = fakeDsqlWithGrants()
-      .on(/FROM shared\.records WHERE id =/, [])
+      .on(/from "shared"\."records" where "id" =/, [])
       .on(RECORDS_INSERT, [])
       .on(RECORDS_SELECT, [])
       .on(RECORDS_NODE_WATERMARKS, [
@@ -796,7 +796,7 @@ describe("sync exchange channel split", () => {
 
     // Round 2: the requester re-ships; the store accepts and now covers it.
     const db = fakeDsqlWithGrants()
-      .on(/FROM shared\.records WHERE id =/, [])
+      .on(/from "shared"\."records" where "id" =/, [])
       .on(RECORDS_INSERT, [])
       .on(RECORDS_SELECT, [])
       .on(RECORDS_NODE_WATERMARKS, [
@@ -821,7 +821,7 @@ describe("sync exchange channel split", () => {
 
   it("a per-app channel drops shared records and never scans shared.records", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
-      /FROM shared\.app_syncable_namespaces/,
+      /from "shared"\."app_syncable_namespaces"/,
       [],
     );
     setDbFactory(db);
@@ -837,13 +837,13 @@ describe("sync exchange channel split", () => {
     expect(res.statusCode).toBe(200);
     expect(bodyOf(res)).toMatchObject({ records: [], appSyncableRows: [] });
     expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
-    expect(db.calls(/FROM shared\.records WHERE id =/)).toHaveLength(0);
+    expect(db.calls(/from "shared"\."records" where "id" =/)).toHaveLength(0);
     expect(db.calls(RECORDS_SELECT)).toHaveLength(0);
   });
 });
 
 describe("/app-data routes", () => {
-  const NS_SELECT = /FROM shared\.app_syncable_namespaces/;
+  const NS_SELECT = /from "shared"\."app_syncable_namespaces"/;
   const notesNamespace = {
     app_id: "appdata1",
     tables_json: JSON.stringify([{ name: "notes", pkColumns: ["id"] }]),
@@ -863,7 +863,7 @@ describe("/app-data routes", () => {
   it("inserts rows into a declared table via the LWW applier", async () => {
     const db = fakeDsqlWithGrants()
       .on(NS_SELECT, [notesNamespace])
-      .on(/INSERT INTO app_appdata1\."notes"/, []);
+      .on(/insert into "app_appdata1"\."notes"/, []);
     setDbFactory(db);
     const res = await handler(
       signedEvent({
@@ -876,7 +876,7 @@ describe("/app-data routes", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(bodyOf(res)).toEqual({ ok: true });
-    const inserts = db.calls(/INSERT INTO app_appdata1\."notes"/);
+    const inserts = db.calls(/insert into "app_appdata1"\."notes"/);
     expect(inserts).toHaveLength(1);
     expect(inserts[0]!.values.slice(0, 2)).toEqual(["n1", "hi"]); // + updated_at, deleted_at
   });
@@ -884,7 +884,7 @@ describe("/app-data routes", () => {
   it("queries live rows of a declared table", async () => {
     const db = fakeDsqlWithGrants()
       .on(NS_SELECT, [notesNamespace])
-      .on(/SELECT \* FROM app_appdata1\."notes" WHERE deleted_at IS NULL/, [
+      .on(/select \* from "app_appdata1"\."notes" where "deleted_at" is null/, [
         { id: "n1", text: "hi" },
       ]);
     setDbFactory(db);
@@ -899,7 +899,7 @@ describe("/app-data routes", () => {
   it("updates and soft-deletes rows through the applier", async () => {
     const db = fakeDsqlWithGrants()
       .on(NS_SELECT, [notesNamespace])
-      .on(/UPDATE app_appdata1\."notes" SET/, []);
+      .on(/update "app_appdata1"\."notes" set/, []);
     setDbFactory(db);
     const patchRes = await handler(
       signedEvent({
@@ -924,9 +924,9 @@ describe("/app-data routes", () => {
     );
     expect(deleteRes.statusCode).toBe(200);
     expect(bodyOf(deleteRes)).toEqual({ changes: 1 });
-    const updates = db.calls(/UPDATE app_appdata1\."notes" SET/);
+    const updates = db.calls(/update "app_appdata1"\."notes" set/);
     expect(updates).toHaveLength(2);
-    expect(updates[1]!.text).toMatch(/SET deleted_at/);
+    expect(updates[1]!.text).toMatch(/set "deleted_at"/);
   });
 
   it("400s writes to an undeclared table", async () => {
@@ -971,8 +971,8 @@ describe("/app-data routes", () => {
     files_enabled: true,
   };
   // The reserved index table the applier reads/writes for app-private files.
-  const FILE_RECORDS_SELECT = /SELECT \* FROM app_appdata1\."_starkeep_sync_records"/;
-  const FILE_RECORDS_INSERT = /INSERT INTO app_appdata1\."_starkeep_sync_records"/;
+  const FILE_RECORDS_SELECT = /select \* from "app_appdata1"\."_starkeep_sync_records"/;
+  const FILE_RECORDS_INSERT = /insert into "app_appdata1"\."_starkeep_sync_records"/;
   const fileRow = {
     id: "apps/appdata1/syncable/cover",
     object_storage_key: "apps/appdata1/syncable/cover",

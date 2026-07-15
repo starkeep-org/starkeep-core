@@ -149,25 +149,25 @@ describe("install DDL for the photos manifest", () => {
 
   it("upserts one access_grants row per declared type", async () => {
     await installPhotos();
-    const grantInserts = stmts().filter((t) => t.includes("INSERT INTO shared.access_grants"));
+    const grantInserts = stmts().filter((t) => t.includes('insert into "shared"."access_grants"'));
     const typeCount = photosManifest.infraRequirements.fileAccess.reduce(
       (n, e) => n + e.types.length,
       0,
     );
     expect(grantInserts).toHaveLength(typeCount); // 9 types for photos
     for (const t of grantInserts) {
-      expect(t).toContain("ON CONFLICT (app_id, type_id) DO UPDATE");
+      expect(t).toContain('on conflict ("app_id", "type_id") do update');
     }
   });
 
   it("creates app syncable tables with reserved HLC columns, async index, and DML grant", async () => {
     await installPhotos();
     const s = stmts();
-    const createTable = s.find((t) => t.includes('CREATE TABLE IF NOT EXISTS app_photos."image_enriched"'));
+    const createTable = s.find((t) => t.includes('create table if not exists "app_photos"."image_enriched"'));
     expect(createTable).toBeDefined();
-    expect(createTable).toContain('"updated_at" text NOT NULL');
+    expect(createTable).toContain('"updated_at" text not null');
     expect(createTable).toContain('"deleted_at" text');
-    expect(createTable).toContain('PRIMARY KEY ("record_id")');
+    expect(createTable).toContain('primary key ("record_id")');
     expect(s.some((t) => t.includes('CREATE INDEX ASYNC IF NOT EXISTS "idx_app_photos_image_enriched_updated_at"'))).toBe(true);
     expect(s.some((t) => t.includes('GRANT SELECT, INSERT, UPDATE, DELETE ON app_photos."image_enriched"'))).toBe(true);
   });
@@ -175,10 +175,10 @@ describe("install DDL for the photos manifest", () => {
   it("creates the reserved file-records table when files sync is enabled, and registers the namespace", async () => {
     await installPhotos();
     const s = stmts();
-    expect(s.some((t) => t.includes('app_photos."_starkeep_sync_records"') && t.startsWith("CREATE TABLE"))).toBe(true);
-    const ns = s.find((t) => t.includes("INSERT INTO shared.app_syncable_namespaces"));
+    expect(s.some((t) => t.includes('"app_photos"."_starkeep_sync_records"') && t.startsWith("create table"))).toBe(true);
+    const ns = s.find((t) => t.includes('insert into "shared"."app_syncable_namespaces"'));
     expect(ns).toBeDefined();
-    expect(ns).toContain("ON CONFLICT (app_id) DO UPDATE");
+    expect(ns).toContain('on conflict ("app_id") do update');
   });
 });
 
@@ -186,7 +186,7 @@ describe("install DDL for Drive (fileAccessAll)", () => {
   it("writes zero access_grants rows but grants every category metadata table", async () => {
     await runAppInstallDdl(opts, "starkeep-drive", [], true, [], false);
     const s = stmts();
-    expect(s.some((t) => t.includes("INSERT INTO shared.access_grants"))).toBe(false);
+    expect(s.some((t) => t.includes('insert into "shared"."access_grants"'))).toBe(false);
     // Full write on shared.records
     expect(s.some((t) => t.includes("GRANT INSERT, UPDATE, DELETE ON shared.records TO starkeep_app_starkeep_drive"))).toBe(true);
     // Every grantable category's metadata table is granted (spot-check a few)
@@ -237,8 +237,8 @@ describe("uninstall DDL", () => {
     expect(s.some((t) => t.includes("REVOKE ALL ON shared.records FROM starkeep_app_photos"))).toBe(true);
     expect(s.some((t) => t.includes("REVOKE ALL ON shared.record_image_metadata"))).toBe(true);
     expect(s.some((t) => t.includes("REVOKE USAGE ON SCHEMA shared FROM starkeep_app_photos"))).toBe(true);
-    expect(s.some((t) => t.includes("DELETE FROM shared.access_grants WHERE app_id ="))).toBe(true);
-    expect(s.some((t) => t.includes("DELETE FROM shared.app_syncable_namespaces"))).toBe(true);
+    expect(s.some((t) => t.includes('delete from "shared"."access_grants" where "app_id" ='))).toBe(true);
+    expect(s.some((t) => t.includes('delete from "shared"."app_syncable_namespaces"'))).toBe(true);
     expect(s).toContain("DROP SCHEMA IF EXISTS app_photos CASCADE");
     expect(s).toContain(
       `AWS IAM REVOKE "starkeep_app_photos" FROM 'arn:aws:iam::111122223333:role/starkeep-app-photos-role'`,

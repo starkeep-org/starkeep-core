@@ -27,6 +27,7 @@ import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter
 import {
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
+  sqliteCompiler as qb,
 } from "../../packages/storage-sqlite/src/index.js";
 import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
@@ -95,11 +96,14 @@ function grantsForApp(db: DatabaseSync, appId: string): AppGrantRow[] {
   // access_grants are keyed by extension (type_id = extension); one row per
   // declared extension. Drive (the User-Data-Owner) writes no rows — it is
   // granted all-access by app id below — so this is a plain lookup.
+  const query = qb
+    .selectFrom("shared_access_grants")
+    .select(["type_id", "access", "metadata_write"])
+    .where("app_id", "=", appId)
+    .compile();
   return db
-    .prepare(
-      "SELECT type_id, access, metadata_write FROM shared_access_grants WHERE app_id = ?",
-    )
-    .all(appId) as unknown as AppGrantRow[];
+    .prepare(query.sql)
+    .all(...(query.parameters as string[])) as unknown as AppGrantRow[];
 }
 
 // All-access local identities: Starkeep Drive (the User-Data-Owner) and the
@@ -150,9 +154,15 @@ function appCanWriteMetadataCategory(db: DatabaseSync, appId: string, category: 
 }
 
 function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
+  const query = qb
+    .selectFrom("shared_app_registry")
+    .select("hmac_secret")
+    .where("app_id", "=", appId)
+    .where("status", "=", "active")
+    .compile();
   const row = db
-    .prepare("SELECT hmac_secret FROM shared_app_registry WHERE app_id = ? AND status = 'active'")
-    .get(appId) as { hmac_secret: string } | undefined;
+    .prepare(query.sql)
+    .get(...(query.parameters as string[])) as { hmac_secret: string } | undefined;
   return row?.hmac_secret ?? null;
 }
 

@@ -13,6 +13,26 @@
 import { createHmac } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { dataDbPath } from "@starkeep/app-client";
+import {
+  DummyDriver,
+  Kysely,
+  SqliteAdapter,
+  SqliteIntrospector,
+  SqliteQueryCompiler,
+} from "kysely";
+
+// Compile-only Kysely instance (DummyDriver never executes); statements run
+// synchronously through node:sqlite. Local to this file because the drive app
+// is bundled by Turbopack, which can't consume @starkeep/storage-sqlite's
+// live TS source (where the shared compiler lives).
+const sqliteCompiler = new Kysely<Record<string, Record<string, unknown>>>({
+  dialect: {
+    createAdapter: () => new SqliteAdapter(),
+    createDriver: () => new DummyDriver(),
+    createIntrospector: (db) => new SqliteIntrospector(db),
+    createQueryCompiler: () => new SqliteQueryCompiler(),
+  },
+});
 
 const DRIVE_APP_ID = "starkeep-drive";
 const DATA_DB_PATH = dataDbPath();
@@ -29,11 +49,15 @@ function readDriveSecret(): string | null {
   try {
     db = new DatabaseSync(DATA_DB_PATH, { readOnly: true });
     db.exec("PRAGMA busy_timeout = 2000");
+    const query = sqliteCompiler
+      .selectFrom("shared_app_registry")
+      .select("hmac_secret")
+      .where("app_id", "=", DRIVE_APP_ID)
+      .where("status", "=", "active")
+      .compile();
     const row = db
-      .prepare(
-        "SELECT hmac_secret FROM shared_app_registry WHERE app_id = ? AND status = 'active'",
-      )
-      .get(DRIVE_APP_ID) as { hmac_secret: string } | undefined;
+      .prepare(query.sql)
+      .get(...(query.parameters as string[])) as { hmac_secret: string } | undefined;
     return row?.hmac_secret ?? null;
   } catch {
     return null;

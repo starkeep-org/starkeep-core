@@ -4,6 +4,7 @@ import type {
   AppSyncableNamespaceStore,
 } from "@starkeep/sync-engine";
 import type { DatabaseClient } from "../types.js";
+import { compiler as qb } from "../query-builder.js";
 
 /**
  * DSQL-backed implementation of `AppSyncableNamespaceStore`.
@@ -37,9 +38,11 @@ export class DsqlAppSyncableNamespaceStore implements AppSyncableNamespaceStore 
   }
 
   async load(): Promise<void> {
-    const result = await this.client.query(
-      `SELECT app_id, tables_json, files_enabled FROM shared.app_syncable_namespaces`,
-    );
+    const query = qb
+      .selectFrom("shared.app_syncable_namespaces")
+      .select(["app_id", "tables_json", "files_enabled"])
+      .compile();
+    const result = await this.client.query(query.sql, [...query.parameters]);
     this.cache = new Map();
     for (const row of result.rows) {
       const tables: AppSyncableTableInfo[] = JSON.parse(row["tables_json"] as string);

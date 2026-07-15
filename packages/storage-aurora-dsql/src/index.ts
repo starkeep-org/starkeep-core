@@ -1,5 +1,5 @@
 export { AuroraDsqlDatabaseAdapter } from "./adapter.js";
-export { buildPostgresQuery } from "./query-builder.js";
+export { buildPostgresQuery, compiler as postgresCompiler } from "./query-builder.js";
 export type { BuiltPostgresQuery } from "./query-builder.js";
 export type {
   AuroraDsqlDatabaseAdapterOptions,
