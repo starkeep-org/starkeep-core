@@ -53,6 +53,45 @@ beforeAll(async () => {
   writeFileSync(join(appDir, "server.mjs"), SERVER_MJS);
   makeAppDir(parent, "norun-app", testAppManifest({ id: "norun-app" }));
 
+  // An app whose daemon prints an error and dies immediately (like a dev
+  // server with a broken build).
+  makeAppDir(
+    parent,
+    "doa-app",
+    testAppManifest({
+      id: "doa-app",
+      localRun: { command: process.execPath, args: ["crash.mjs"], portFlag: "--port" },
+    }),
+  );
+  writeFileSync(
+    join(parent, "doa-app", "crash.mjs"),
+    `console.error("boom: turbopack build failed"); process.exit(1);`,
+  );
+
+  // An app whose localRun command doesn't exist at all (like Node missing
+  // from PATH inside a sandbox).
+  makeAppDir(
+    parent,
+    "nocmd-app",
+    testAppManifest({
+      id: "nocmd-app",
+      localRun: { command: "starkeep-no-such-command-xyzzy", args: [] },
+    }),
+  );
+
+  // An app checkout that was never `pnpm install`ed: package.json present,
+  // node_modules missing.
+  makeAppDir(
+    parent,
+    "nodeps-app",
+    testAppManifest({
+      id: "nodeps-app",
+      localRun: { command: process.execPath, args: ["server.mjs"], portFlag: "--port" },
+    }),
+  );
+  writeFileSync(join(parent, "nodeps-app", "package.json"), JSON.stringify({ name: "nodeps-app" }));
+  writeFileSync(join(parent, "nodeps-app", "server.mjs"), SERVER_MJS);
+
   process.env.STARKEEP_DIR = dataDir;
   ({ POST: daemonPOST } = await import("../app/api/exec/daemon/route"));
   ({ GET: statusGET } = await import("../app/api/exec/daemon/status/route"));
@@ -189,5 +228,37 @@ describe("the ps guard on port-based stop", () => {
     expect(isAlive(squatter.pid!)).toBe(true);
     // The meta file must survive — nothing was stopped.
     expect(existsSync(join(pidsDir, "stale-app.meta.json"))).toBe(true);
+  });
+});
+
+describe("start failures are diagnosed, not silent", () => {
+  it("a daemon that dies at startup fails the start with its log tail", async () => {
+    const res = await act({ action: "start", id: "doa-app" });
+    expect(res.status).toBe(500);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain("exited during startup");
+    expect(error).toContain("boom: turbopack build failed");
+    // Confirmed-dead starts must not leave ghost pid/meta files behind.
+    expect(existsSync(join(pidsDir, "doa-app.pid"))).toBe(false);
+    expect(existsSync(join(pidsDir, "doa-app.meta.json"))).toBe(false);
+    expect((await status("doa-app")).running).toBe(false);
+  });
+
+  it("a nonexistent localRun command fails the start with the spawn error", async () => {
+    const res = await act({ action: "start", id: "nocmd-app" });
+    expect(res.status).toBe(500);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain("failed to spawn 'starkeep-no-such-command-xyzzy'");
+  });
+
+  it("an app with package.json but no node_modules is refused with a pnpm install hint", async () => {
+    const res = await act({ action: "start", id: "nodeps-app" });
+    expect(res.status).toBe(500);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain("pnpm install");
+    expect(error).toContain("nodeps-app");
+    // Refused before spawning: no pid/meta files, nothing running.
+    expect(existsSync(join(pidsDir, "nodeps-app.pid"))).toBe(false);
+    expect((await status("nodeps-app")).running).toBe(false);
   });
 });

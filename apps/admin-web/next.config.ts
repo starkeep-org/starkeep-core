@@ -12,6 +12,14 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: path.resolve(__dirname, "../.."),
   },
+  // Admin-web is operated from the same machine by default, and Next 16
+  // blocks cross-origin requests to the dev server. To reach it from another
+  // device on your LAN, list that device's view of this host (comma-separated
+  // hostnames/IPs, e.g. "192.168.1.51") in STARKEEP_ADMIN_DEV_ORIGINS — the
+  // repo-root .env is loaded above, so it can live there.
+  ...(process.env.STARKEEP_ADMIN_DEV_ORIGINS
+    ? { allowedDevOrigins: process.env.STARKEEP_ADMIN_DEV_ORIGINS.split(",").map((s) => s.trim()) }
+    : {}),
   // admin-installer is intentionally NOT transpiled here — admin-web spawns
   // its CLI as a child process (see app/api/cloud-data-server/install). Adding
   // it back would pull @pulumi/* into the dev bundle and OOM the dev server.

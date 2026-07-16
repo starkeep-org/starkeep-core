@@ -1,8 +1,8 @@
 import "server-only";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { starkeepDir } from "@starkeep/app-client";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "./exec-commands";
 
 const STARKEEP_DIR = starkeepDir();
@@ -34,7 +34,9 @@ export function isAlive(pid: number): boolean {
 }
 
 function pidByPort(port: number): number | null {
-  const result = spawnSync("lsof", ["-ti", `tcp:${port}`], { encoding: "utf-8" });
+  // -sTCP:LISTEN: only the process listening on the port — a bare tcp:PORT
+  // also matches client sockets (e.g. a health probe's lingering connection).
+  const result = spawnSync("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], { encoding: "utf-8" });
   const pid = parseInt(result.stdout?.trim(), 10);
   return isNaN(pid) ? null : pid;
 }
@@ -125,34 +127,254 @@ export function stopById(id: string): StopResult {
   return { stopped: false, error: "Not running (no PID file)" };
 }
 
-export interface StartResult {
-  pid: number | undefined;
+export interface StartSuccess {
+  ok: true;
+  pid: number;
   logPath: string;
   port?: number;
+  // True when start found an orphaned instance already bound to the fixed
+  // port and re-recorded it instead of spawning a duplicate.
+  adopted?: boolean;
+}
+
+export interface StartFailure {
+  ok: false;
+  error: string;
+  logPath?: string;
+}
+
+export type StartOutcome = StartSuccess | StartFailure;
+
+// How long we give a spawned daemon to bind its port before reporting the
+// start as successful-but-unconfirmed. Confirmed death (pid gone, port
+// unbound) fails immediately, whenever it happens inside this window.
+const START_BIND_TIMEOUT_MS = 20_000;
+// For daemons without a known port, all we can do is check the process
+// survived its first moments.
+const START_LIVENESS_DELAY_MS = 1_500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Last chunk of a daemon log, for embedding in start-failure errors.
+export function readLogTail(logPath: string, maxBytes = 2_000): string {
+  try {
+    const buf = readFileSync(logPath);
+    const text =
+      buf.length > maxBytes
+        ? "…" + buf.subarray(buf.length - maxBytes).toString("utf-8")
+        : buf.toString("utf-8");
+    return text.trim();
+  } catch {
+    return "";
+  }
+}
+
+// If the daemon's working directory is npm-shaped (a package.json in scope)
+// but dependencies were never installed, spawning it produces a cryptic
+// module-resolution failure. Detect that up front and name the directory to
+// run `pnpm install` in. Returns null when deps look fine or the directory
+// isn't npm-shaped at all.
+function missingDepsInstallDir(cwd: string): string | null {
+  let pkgDir: string | null = null;
+  let wsRoot: string | null = null;
+  for (let dir = cwd; ; dir = dirname(dir)) {
+    if (!pkgDir && existsSync(join(dir, "package.json"))) pkgDir = dir;
+    if (!wsRoot && existsSync(join(dir, "pnpm-workspace.yaml"))) wsRoot = dir;
+    if (dirname(dir) === dir) break;
+  }
+  if (!pkgDir) return null;
+  if (existsSync(join(pkgDir, "node_modules"))) return null;
+  if (wsRoot && existsSync(join(wsRoot, "node_modules"))) return null;
+  return wsRoot ?? pkgDir;
+}
+
+// Functional probe of the environment a daemon needs: this Node must be able
+// to spawn a child that reads the daemon's working directory and writes under
+// ~/.starkeep. Run only after a start has already failed, to say *why*. The
+// probe is packaging-agnostic; the env-var checks below it just decorate the
+// message with the likely culprit (they're allowed to be incomplete).
+export function diagnoseSpawnEnvironment(cwd: string): string | null {
+  const notes: string[] = [];
+  const probeFile = join(PIDS_DIR, ".spawn-probe");
+  const probe = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      "const fs=require('fs');fs.accessSync(process.argv[1]);fs.writeFileSync(process.argv[2],'ok');fs.unlinkSync(process.argv[2]);",
+      cwd,
+      probeFile,
+    ],
+    { encoding: "utf-8", timeout: 5_000 },
+  );
+  if (probe.error || probe.status !== 0) {
+    const detail = probe.error
+      ? probe.error.message
+      : probe.stderr?.trim().split("\n").pop() ?? `exit code ${probe.status}`;
+    notes.push(
+      `Environment check failed: this Node runtime could not spawn a child process that reads ${cwd} and writes under ${PIDS_DIR} (${detail}). No daemon can start until this is fixed.`,
+    );
+  }
+  if (process.env.SNAP) {
+    notes.push(
+      "Node.js is running from a Snap package (SNAP is set in the environment). Snap confinement is a known cause of silent daemon failures — install Node via nvm or a system package instead.",
+    );
+  }
+  if (process.env.FLATPAK_ID) {
+    notes.push(
+      "This process is running inside a Flatpak sandbox (FLATPAK_ID is set), which restricts spawning processes and accessing files outside the sandbox.",
+    );
+  }
+  return notes.length > 0 ? notes.join("\n") : null;
+}
+
+export interface SpawnDaemonOptions {
+  id: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  port?: number;
+}
+
+// Shared spawn path for all daemons (fixed workspace daemons and installed
+// apps' localRun). Unlike a bare detached spawn, this records spawn errors and
+// early exits in the log file and verifies the daemon actually came up before
+// reporting success — a child that dies in its first moments (sandboxed Node,
+// missing deps, port collision) produces an actionable error instead of a
+// green light and an empty log.
+export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<StartOutcome> {
+  const { id, command, args, cwd, port } = opts;
+  mkdirSync(PIDS_DIR, { recursive: true });
+
+  const installDir = missingDepsInstallDir(cwd);
+  if (installDir) {
+    return {
+      ok: false,
+      error: `Dependencies are not installed for '${id}' — run \`pnpm install\` in ${installDir}, then try again.`,
+    };
+  }
+
+  const logPath = resolve(PIDS_DIR, `${id}.log`);
+  const logFd = openSync(logPath, "w");
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    cwd,
+  });
+  // A detached child fails asynchronously (ENOENT/EACCES arrive as an 'error'
+  // event) and dies silently; put both in the log so the tail below has
+  // something to show.
+  child.on("error", (err) => {
+    try {
+      appendFileSync(logPath, `\n[admin-web] failed to spawn '${command}': ${err.message}\n`);
+    } catch { /* log no longer writable — nothing better to do */ }
+  });
+  child.once("exit", (code, signal) => {
+    try {
+      appendFileSync(
+        logPath,
+        `\n[admin-web] '${command} ${args.join(" ")}' exited (code ${code}, signal ${signal})\n`,
+      );
+    } catch { /* ditto */ }
+  });
+  child.unref();
+
+  if (child.pid !== undefined) {
+    writeFileSync(pidFile(id), String(child.pid));
+    writeFileSync(
+      metaFile(id),
+      JSON.stringify({ pid: child.pid, logPath, ...(port ? { port } : {}) }),
+    );
+  }
+
+  const failure = (): StartFailure => {
+    // Confirmed dead: clean up so status doesn't keep reporting a ghost.
+    try { unlinkSync(pidFile(id)); } catch { /* never written */ }
+    try { unlinkSync(metaFile(id)); } catch { /* never written */ }
+    const tail = readLogTail(logPath);
+    const diagnosis = diagnoseSpawnEnvironment(cwd);
+    return {
+      ok: false,
+      logPath,
+      error: [
+        `'${id}' exited during startup.`,
+        tail ? `Last log output (${logPath}):\n${tail}` : `The log file (${logPath}) is empty.`,
+        diagnosis,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    };
+  };
+
+  const success = (): StartSuccess => ({
+    ok: true,
+    pid: child.pid!,
+    logPath,
+    ...(port ? { port } : {}),
+  });
+
+  if (port === undefined) {
+    await sleep(START_LIVENESS_DELAY_MS);
+    return child.pid !== undefined && isAlive(child.pid) ? success() : failure();
+  }
+
+  // Port known: poll until it's bound (up), the process dies unbound (failed),
+  // or the window closes (assume a slow first build and report success — the
+  // status route's port probe takes over from here).
+  const deadline = Date.now() + START_BIND_TIMEOUT_MS;
+  for (;;) {
+    await sleep(500);
+    if (pidByPort(port) !== null) return success();
+    if (child.pid === undefined || !isAlive(child.pid)) return failure();
+    if (Date.now() > deadline) return success();
+  }
+}
+
+// An orphaned workspace daemon: its fixed port is bound by a daemon-looking
+// process but we have no pid file for it (lost in a crash or a bad stop).
+// Re-record it as ours so status shows it running and Stop works. Returns null
+// when the port is free or bound by something we won't claim.
+export function adoptOrphanWorkspaceDaemon(id: DaemonId): { pid: number; port: number } | null {
+  const port = DAEMON_COMMANDS[id].port;
+  if (!port) return null;
+  const pid = pidByPort(port);
+  if (!pid) return null;
+  const cmd = processCommand(pid);
+  if (!cmd || !looksLikeAppDaemon(cmd)) return null;
+  mkdirSync(PIDS_DIR, { recursive: true });
+  const logPath = resolve(PIDS_DIR, `${id}.log`);
+  writeFileSync(pidFile(id), String(pid));
+  writeFileSync(metaFile(id), JSON.stringify({ pid, logPath, port }));
+  return { pid, port };
 }
 
 // Spawn a fixed workspace daemon (local-data-server / drive) detached, recording
 // its pid + port the same way POST /api/exec/daemon does. Shared so callers that
 // need to (re)start a daemon out-of-band — e.g. after a cloud install rewrites
 // ~/.starkeep/config.json — go through one implementation.
-export function startWorkspaceDaemon(id: DaemonId): StartResult {
-  mkdirSync(PIDS_DIR, { recursive: true });
+export async function startWorkspaceDaemon(id: DaemonId): Promise<StartOutcome> {
   const daemon = DAEMON_COMMANDS[id];
+
+  // Fixed port, so a collision is knowable up front: adopt an orphaned
+  // instance instead of spawning a doomed duplicate, and refuse clearly when
+  // the squatter isn't ours to claim.
+  if (daemon.port) {
+    const squatter = pidByPort(daemon.port);
+    if (squatter) {
+      const adopted = adoptOrphanWorkspaceDaemon(id);
+      if (adopted) {
+        return { ok: true, ...adopted, logPath: resolve(PIDS_DIR, `${id}.log`), adopted: true };
+      }
+      return {
+        ok: false,
+        error: `Port ${daemon.port} is already in use by pid ${squatter} (${processCommand(squatter) ?? "unreadable command"}), which does not look like a Starkeep daemon. Stop that process, then start '${id}' again.`,
+      };
+    }
+  }
+
   const [cmd, ...args] = daemon.args;
-  const logPath = resolve(PIDS_DIR, `${id}.log`);
-  const logFd = openSync(logPath, "w");
-  const child = spawn(cmd, args, {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    cwd: REPO_ROOT,
-  });
-  child.unref();
-  writeFileSync(pidFile(id), String(child.pid));
-  writeFileSync(
-    metaFile(id),
-    JSON.stringify({ pid: child.pid, logPath, ...(daemon.port ? { port: daemon.port } : {}) }),
-  );
-  return { pid: child.pid, logPath, ...(daemon.port ? { port: daemon.port } : {}) };
+  return spawnDaemon({ id, command: cmd, args, cwd: REPO_ROOT, port: daemon.port });
 }
 
 // True if the daemon's recorded pid is alive. Used to decide whether a restart
@@ -168,8 +390,15 @@ export function isWorkspaceDaemonRunning(id: DaemonId): boolean {
 // Restart a running workspace daemon so it re-reads boot-time config (the
 // local-data-server captures ~/.starkeep/config.json once at startup). No-op
 // when the daemon isn't running.
-export function restartWorkspaceDaemonIfRunning(id: DaemonId): StartResult | null {
+export async function restartWorkspaceDaemonIfRunning(id: DaemonId): Promise<StartOutcome | null> {
   if (!isWorkspaceDaemonRunning(id)) return null;
   stopById(id);
+  // Wait for the old instance to release its fixed port; otherwise the start
+  // preflight would see it still bound and "adopt" the dying process.
+  const port = DAEMON_COMMANDS[id].port;
+  if (port) {
+    const deadline = Date.now() + 5_000;
+    while (pidByPort(port) !== null && Date.now() < deadline) await sleep(200);
+  }
   return startWorkspaceDaemon(id);
 }
