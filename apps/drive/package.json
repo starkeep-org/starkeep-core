@@ -4,9 +4,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 9830",
+    "dev": "next dev -p ${STARKEEP_DRIVE_PORT:-9830}",
     "build": "next build",
-    "start": "next start -p 9830",
+    "start": "next start -p ${STARKEEP_DRIVE_PORT:-9830}",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
