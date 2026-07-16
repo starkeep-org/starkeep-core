@@ -64,6 +64,8 @@ The admin app is the command center, allowing you to install and start other app
 pnpm --filter admin-web dev
 ```
 
+The admin app is meant to be opened from the same machine (`http://localhost:3000`). If you want to reach it from another device on your LAN, Next.js blocks cross-origin access to the dev server by default — set `STARKEEP_ADMIN_DEV_ORIGINS` (comma-separated hostnames/IPs as the other device sees this host, e.g. `STARKEEP_ADMIN_DEV_ORIGINS=192.168.1.51`) in the repo-root `.env` and restart.
+
 ### 3. Start the local data-server
 
 The data-server is the on-device hub for all data operations: every app on the machine shares its database, type registry, and (later) sync connection. From the admin **Dashboard**, start the **local-data-server** daemon. It listens on port **9820**.
@@ -86,7 +88,8 @@ Apps are discovered from directories you register with the admin panel. `starkee
 
 1. Open the **Dashboard** in admin-web.
 2. If Photos isn't listed, make sure you have a local checkout of the `starkeep-apps` repo. Use the **App discovery** card to add the parent directory that contains it (e.g. the absolute path to `starkeep-apps/`).
-3. Click **Install** on the Photos card. Admin reads and validates the app's `starkeep.manifest.json`, prompts you to approve the file-type grants it requests, and registers the app with the data-server.
+3. Run `pnpm install` in the `starkeep-apps` checkout — installed apps run out of their source checkout, so their dependencies must be installed before the app can start.
+4. Click **Install** on the Photos card. Admin reads and validates the app's `starkeep.manifest.json`, prompts you to approve the file-type grants it requests, and registers the app with the data-server.
 
 ### 7. Start the Photos app
 

@@ -134,6 +134,12 @@ export interface PlatformStack {
   driveUrl: string | null;
   /** admin-web's STARKEEP_DIR (config.json, app-creds/, pids/). */
   adminDataDir: string;
+  /**
+   * The ports admin-web believes its workspace daemons use — reserved free
+   * ports, never the real 9820/9830 (see the env it is booted with). Tests that
+   * need to occupy a daemon's port bind these.
+   */
+  daemonPorts: { localDataServer: number; drive: number };
   stop(): Promise<void>;
 }
 
@@ -155,6 +161,16 @@ export async function startPlatformStack(
     JSON.stringify({ appParentDirs: options.appParentDirs ?? [DEFAULT_APPS_DIR] }, null, 2),
   );
 
+  // admin-web resolves its workspace daemons' ports from the same env vars the
+  // daemons themselves read (see exec-commands). Point them at reserved free
+  // ports so a test can never probe — or adopt, or SIGTERM on teardown — a real
+  // daemon the operator is running on 9820/9830. The stack's own LDS and drive
+  // are started here on their own ephemeral ports, not through these.
+  const daemonPorts = {
+    localDataServer: await getFreePort(),
+    drive: await getFreePort(),
+  };
+
   let admin: NextDevServer | undefined;
   let drive: NextDevServer | undefined;
   try {
@@ -164,6 +180,8 @@ export async function startPlatformStack(
       env: {
         STARKEEP_DIR: adminDataDir,
         STARKEEP_LOCAL_DATA_SERVER_URL: lds.url,
+        STARKEEP_PORT: String(daemonPorts.localDataServer),
+        STARKEEP_DRIVE_PORT: String(daemonPorts.drive),
       },
     });
     if (options.drive !== false) {
@@ -201,6 +219,7 @@ export async function startPlatformStack(
     adminUrl: admin.url,
     driveUrl: drive?.url ?? null,
     adminDataDir,
+    daemonPorts,
     stop,
   };
 }

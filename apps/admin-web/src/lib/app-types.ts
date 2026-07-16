@@ -34,6 +34,9 @@ export interface DaemonStatus {
   running: boolean;
   pid?: number;
   port?: number;
+  // Reported when the status probe found an orphaned fixed-port workspace
+  // daemon and re-recorded it (see adoptOrphanWorkspaceDaemon).
+  adopted?: boolean;
 }
 
 export interface InstallStep {

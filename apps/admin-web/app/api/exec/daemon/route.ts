@@ -1,16 +1,13 @@
-import { spawn } from "node:child_process";
-import { mkdirSync, openSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import {
-  PIDS_DIR,
   isWorkspaceDaemonId,
-  metaFile,
-  pidFile,
   restartWorkspaceDaemonIfRunning,
+  spawnDaemon,
   startWorkspaceDaemon,
   stopById,
+  type StartOutcome,
 } from "../../../../src/lib/daemon-control";
 import { findApp } from "../../../../src/lib/app-scan";
 
@@ -42,6 +39,17 @@ interface LocalRunBlock {
   cwd?: string;
 }
 
+// Start outcomes carry either a verified success or a diagnosed failure
+// (log tail + environment diagnosis); map the latter to a 500 so the UI
+// shows the reason instead of a spinner that times out.
+function startResponse(outcome: StartOutcome): NextResponse {
+  if (outcome.ok) return NextResponse.json(outcome);
+  return NextResponse.json(
+    { error: outcome.error, ...(outcome.logPath ? { logPath: outcome.logPath } : {}) },
+    { status: 500 },
+  );
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json() as { action: "start" | "stop" | "restart"; id: string };
   const { action, id } = body;
@@ -58,8 +66,10 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
-    const result = restartWorkspaceDaemonIfRunning(id);
-    return NextResponse.json(result ? { restarted: true, ...result } : { restarted: false });
+    const result = await restartWorkspaceDaemonIfRunning(id);
+    if (result === null) return NextResponse.json({ restarted: false });
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: 500 });
+    return NextResponse.json({ restarted: true, ...result });
   }
 
   if (action === "stop") {
@@ -74,14 +84,11 @@ export async function POST(req: NextRequest) {
   }
 
   if (action === "start") {
-    mkdirSync(PIDS_DIR, { recursive: true });
-
     if (isWorkspaceDaemonId(id)) {
-      // Record the fixed port so the status route can use port-based liveness:
-      // for pnpm-launched dev/start servers the recorded pid is pnpm's launcher,
-      // which may exit once the real server takes over — a port probe is more
-      // reliable than checking that pid.
-      return NextResponse.json(startWorkspaceDaemon(id));
+      // Fixed-port workspace daemon: startWorkspaceDaemon preflights the port
+      // (adopting an orphaned instance rather than colliding with it) and
+      // verifies the spawn actually came up.
+      return startResponse(await startWorkspaceDaemon(id));
     }
 
     // Installed-app daemon: spawn shape comes from the app's manifest, not a
@@ -105,20 +112,9 @@ export async function POST(req: NextRequest) {
       spawnArgs.push(localRun.portFlag, String(port));
     }
     const cwd = resolve(found.appDir, localRun.cwd ?? ".");
-    const logPath = resolve(PIDS_DIR, `${id}.log`);
-    const logFd = openSync(logPath, "w");
-    const child = spawn(localRun.command, spawnArgs, {
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-      cwd,
-    });
-    child.unref();
-    writeFileSync(pidFile(id), String(child.pid));
-    writeFileSync(
-      metaFile(id),
-      JSON.stringify({ pid: child.pid, logPath, ...(port ? { port } : {}) }),
+    return startResponse(
+      await spawnDaemon({ id, command: localRun.command, args: spawnArgs, cwd, port }),
     );
-    return NextResponse.json({ pid: child.pid, logPath, ...(port ? { port } : {}) });
   }
 
   return NextResponse.json({ error: "Invalid action" }, { status: 400 });

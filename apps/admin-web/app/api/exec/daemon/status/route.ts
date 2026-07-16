@@ -2,7 +2,13 @@ import { createConnection } from "node:net";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
-import { PIDS_DIR, isAlive, pidFile } from "../../../../../src/lib/daemon-control";
+import {
+  PIDS_DIR,
+  adoptOrphanWorkspaceDaemon,
+  isAlive,
+  isWorkspaceDaemonId,
+  pidFile,
+} from "../../../../../src/lib/daemon-control";
 
 interface DaemonMeta { pid: number; port: number; }
 
@@ -28,6 +34,16 @@ export async function GET(req: NextRequest) {
 
   const pf = pidFile(id);
   if (!existsSync(pf)) {
+    // No pid file, but a workspace daemon has a fixed port we can still check:
+    // an orphaned instance (pid file lost in a crash or bad stop) would
+    // otherwise show as not-running, offering a Start that collides with the
+    // port. Adopt it so the UI shows Running and Stop works.
+    if (isWorkspaceDaemonId(id)) {
+      const adopted = adoptOrphanWorkspaceDaemon(id);
+      if (adopted) {
+        return NextResponse.json({ running: true, pid: adopted.pid, port: adopted.port, adopted: true });
+      }
+    }
     return NextResponse.json({ running: false });
   }
 
