@@ -64,6 +64,14 @@ import {
   canWriteCategory,
   type AccessGrants,
 } from "./access-enforcer.js";
+import {
+  handleCapabilityInvoke,
+  handleCapabilityReport,
+  type CapabilityInvokeBody,
+  type ContentReadResult,
+} from "./capability-handler.js";
+import { loadGrantedCapabilities } from "./capability-store.js";
+import { getBedrockInvoker, type BedrockImageInput } from "./bedrock-client.js";
 
 // ---------------------------------------------------------------------------
 // Per-app credential cache (STS sessions ~15 min, refreshed at 14 min)
@@ -261,6 +269,67 @@ async function getAppCreds(appId: string, accountId: string): Promise<CachedCred
   };
   credentialCache.set(appId, creds);
   return creds;
+}
+
+// ---------------------------------------------------------------------------
+// Capability-broker role assume (plan §3.3/§3.4)
+// ---------------------------------------------------------------------------
+//
+// The capability path borrows Bedrock-invoke power per request: the CDS assumes
+// the dedicated ${prefix}-capability-broker-role (whose ceiling is Bedrock
+// invoke only, nothing else) for the duration of the call. This is the same
+// "borrow it per request" shape as the per-app data assume — the CDS's own
+// standing identity never carries bedrock:InvokeModel. Cached like app creds.
+
+const capabilityCredsCache = new Map<string, CachedCreds>();
+
+async function getCapabilityBrokerCreds(accountId: string): Promise<CachedCreds> {
+  const cached = capabilityCredsCache.get("capability-broker");
+  if (cached && cached.expiresAt - Date.now() > CRED_REFRESH_BUFFER_MS) return cached;
+
+  const stackPrefix = process.env.STACK_PREFIX;
+  const region = process.env.AWS_REGION ?? "us-east-1";
+  if (!stackPrefix) throw new Error("STACK_PREFIX env var is required");
+
+  const roleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-capability-broker-role`;
+  const sts = new STSClient({ region });
+  const result = await sts.send(
+    new AssumeRoleCommand({
+      RoleArn: roleArn,
+      RoleSessionName: `cds-capability-${Date.now()}`,
+      DurationSeconds: 900,
+    }),
+  );
+  const c = result.Credentials;
+  if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken || !c.Expiration) {
+    throw new Error("Failed to assume capability-broker role");
+  }
+  const creds: CachedCreds = {
+    accessKeyId: c.AccessKeyId,
+    secretAccessKey: c.SecretAccessKey,
+    sessionToken: c.SessionToken,
+    expiresAt: c.Expiration.getTime(),
+  };
+  capabilityCredsCache.set("capability-broker", creds);
+  return creds;
+}
+
+// Map a stored mime type to a Bedrock Converse image format, or null when the
+// bytes aren't an image Bedrock accepts (the request then runs text-only).
+function mimeToImageFormat(mime: string | null | undefined): BedrockImageInput["format"] | null {
+  switch ((mime ?? "").toLowerCase()) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpeg";
+    case "image/gif":
+      return "gif";
+    case "image/webp":
+      return "webp";
+    default:
+      return null;
+  }
 }
 
 // Account ID parsed from the Lambda invocation context's ARN. Lambda does not
@@ -1452,6 +1521,136 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
 
       return clientErr("Not found", 404);
+    }
+
+    // GET /apps/{appId}/capabilities — the app's granted capabilities (so an
+    // app can run degraded, runtime-config style). Plan §3.7.
+    if (method === "GET" && subPath === "/capabilities") {
+      const capClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+      try {
+        const grants = await loadGrantedCapabilities(capClient, appId);
+        return ok({
+          capabilities: grants.map((g) => ({
+            name: g.capabilityName,
+            models: g.models,
+            reports: g.reports,
+          })),
+        });
+      } finally {
+        await capClient.end();
+      }
+    }
+
+    // POST /apps/{appId}/capabilities/:name/report — best-effort app-reported
+    // OUTPUT quantities for a completed invocation (plan §3.5/§3.7).
+    const capabilityReportMatch = subPath.match(/^\/capabilities\/([^/]+)\/report$/);
+    if (capabilityReportMatch && method === "POST") {
+      const capabilityName = decodeURIComponent(capabilityReportMatch[1]!);
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      let reportBody: { invocationId?: string; reports?: Record<string, number> };
+      try {
+        reportBody = JSON.parse(rawBody);
+      } catch {
+        return clientErr("Invalid JSON body", 400);
+      }
+      if (!reportBody.invocationId) return clientErr("invocationId is required", 400);
+      const capClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+      toClose.push(() => capClient.end());
+      const result = await handleCapabilityReport({
+        appId,
+        capabilityName,
+        invocationId: reportBody.invocationId,
+        reports: reportBody.reports ?? {},
+        capClient,
+      });
+      return ok(result.body, result.statusCode);
+    }
+
+    // POST /apps/{appId}/capabilities/:name/invoke — cloud capability broker
+    // (plan §3.4). Only bedrock.invoke is wired; the handler 404s other names.
+    // Auth (HMAC/JWT) + appId are already established above; this reuses the
+    // per-app data path for by-reference content authorization, then borrows the
+    // capability-broker role to invoke Bedrock. Kept in its own module so a bug
+    // here can't corrupt data-path auth.
+    const capabilityMatch = subPath.match(/^\/capabilities\/([^/]+)\/invoke$/);
+    if (capabilityMatch && method === "POST") {
+      const capabilityName = decodeURIComponent(capabilityMatch[1]!);
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      let capBody: CapabilityInvokeBody;
+      try {
+        capBody = JSON.parse(rawBody) as CapabilityInvokeBody;
+      } catch {
+        return clientErr("Invalid JSON body", 400);
+      }
+
+      // Dedicated per-app DSQL connection for the capability tables (grants,
+      // gates, ledger). Closed via toClose.
+      const capClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+      toClose.push(() => capClient.end());
+
+      // Read the referenced item BY REFERENCE under this request's app role +
+      // grants — the source of truth for what the app may feed Bedrock. No
+      // inline-bytes path from the caller.
+      const readContent = async (
+        ref: NonNullable<CapabilityInvokeBody["contentRef"]>,
+      ): Promise<ContentReadResult> => {
+        let key: string | null = null;
+        let mime: string | null = null;
+        let recordSize: number | null = null;
+        if (ref.recordId) {
+          const record = await db.get(ref.recordId as StarkeepId);
+          if (!record || record.deletedAt) return { ok: false, status: 404, message: "content_not_found" };
+          if (!canRead(grants, record.type)) return { ok: false, status: 403, message: "content_forbidden" };
+          if (!record.objectStorageKey) return { ok: false, status: 404, message: "content_has_no_bytes" };
+          key = record.objectStorageKey;
+          mime = record.mimeType ?? null;
+          recordSize = record.sizeBytes ?? null;
+        } else if (ref.objectKey) {
+          key = ref.objectKey;
+        } else {
+          return { ok: false, status: 400, message: "contentRef requires recordId or objectKey" };
+        }
+        // Belt: re-authorize the key against the caller's grants (namespace,
+        // shape, category) even for a record-derived key.
+        const keyCheck = parseObjectKey(appId, key, grants, "read");
+        if (!keyCheck.ok) return { ok: false, status: keyCheck.status, message: keyCheck.message };
+        const got = await storage.get(key);
+        if (!got) return { ok: false, status: 404, message: "content_not_resident" };
+        const bytes = new Uint8Array(got.data as Buffer);
+        const format = mimeToImageFormat(mime ?? got.contentType ?? null);
+        return {
+          ok: true,
+          content: {
+            bytes,
+            sizeBytes: recordSize ?? got.size ?? bytes.byteLength,
+            ...(format ? { image: { format, bytes } } : {}),
+          },
+        };
+      };
+
+      const result = await handleCapabilityInvoke({
+        appId,
+        capabilityName,
+        body: capBody,
+        capClient,
+        readContent,
+        assumeCapabilityCreds: async () => {
+          const c = await getCapabilityBrokerCreds(accountId);
+          return {
+            accessKeyId: c.accessKeyId,
+            secretAccessKey: c.secretAccessKey,
+            sessionToken: c.sessionToken,
+          };
+        },
+        invoker: getBedrockInvoker(),
+        region,
+        timeZone: process.env.STARKEEP_CAPABILITY_TZ ?? "UTC",
+      });
+      return ok(result.body, result.statusCode);
     }
 
     // POST /apps/{appId}/sync/exchange — version-vector exchange.

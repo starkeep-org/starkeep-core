@@ -45,10 +45,11 @@ describe("bootstrap template structure", () => {
     });
   });
 
-  it("creates exactly the five permissions boundaries", () => {
+  it("creates exactly the six permissions boundaries", () => {
     expect(resourcesOfType("AWS::IAM::ManagedPolicy").sort()).toEqual([
       "AppFoundationalPermissionsBoundary",
       "AppPermissionsBoundary",
+      "CapabilityBrokerPermissionsBoundary",
       "InstallDdlPermissionsBoundary",
       "InstallInfraPermissionsBoundary",
       "UserDataOwnerPermissionsBoundary",
@@ -155,6 +156,7 @@ describe("stack outputs", () => {
         "AppPermissionsBoundaryArn",
         "AppFoundationalPermissionsBoundaryArn",
         "UserDataOwnerPermissionsBoundaryArn",
+        "CapabilityBrokerPermissionsBoundaryArn",
         "InstallDdlRoleArn",
         "InstallInfraRoleArn",
         "PulumiStateBucketName",

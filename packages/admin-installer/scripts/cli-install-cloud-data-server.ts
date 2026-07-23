@@ -58,6 +58,7 @@ interface StarkeepConfig {
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
   userDataOwnerPermissionsBoundaryArn?: string;
+  capabilityBrokerPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   pulumiStateBucket?: string;
   // populated by this script after a successful install:
@@ -155,6 +156,9 @@ const foundationalPermissionsBoundaryArn =
 const userDataOwnerPermissionsBoundaryArn =
   config.userDataOwnerPermissionsBoundaryArn
   ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
+const capabilityBrokerPermissionsBoundaryArn =
+  config.capabilityBrokerPermissionsBoundaryArn
+  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-capability-broker-permissions-boundary`;
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
 
@@ -197,6 +201,7 @@ const outputs = await installCloudDataServer({
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
   userDataOwnerPermissionsBoundaryArn,
+  capabilityBrokerPermissionsBoundaryArn,
   managerRoleArn,
   pulumiStateBucket,
   userPoolId: config.userPoolId,

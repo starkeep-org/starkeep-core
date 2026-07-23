@@ -5,3 +5,4 @@ export * from "./schema/index.js";
 export * from "./types/index.js";
 export * from "./storage/index.js";
 export * from "./access/index.js";
+export * from "./capabilities/index.js";

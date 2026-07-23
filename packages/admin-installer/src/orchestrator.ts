@@ -253,6 +253,9 @@ async function installAppInner(
       ir.fileAccessAll,
       ir.appSpecificSyncable.tables,
       ir.appSpecificSyncable.files,
+      // Approved capability grants (plan §3.2). The manifest's declared set is
+      // granted; the admin UI drops denied optional capabilities before install.
+      ir.capabilities,
     );
   });
 

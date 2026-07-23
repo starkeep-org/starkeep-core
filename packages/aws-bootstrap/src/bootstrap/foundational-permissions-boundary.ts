@@ -318,6 +318,12 @@ export function foundationalPermissionsBoundaryStatements(
       // `broker-power` policy grants the same action; without this matching
       // statement in the boundary, the intersection cap denies AssumeRole at
       // runtime and every /apps/{appId}/sync/{pull,push} ends in 403.
+      // Capability broker (plan §3.3): the ${stackPrefix}-app-capability-broker-role
+      // (reserved appId "capability-broker") is a ${stackPrefix}-app-* role, so
+      // this same statement lets the CDS single-hop assume it to borrow Bedrock-
+      // invoke power — no separate statement needed. The CDS's own boundary
+      // carries no bedrock:* verb; it only assumes that role, whose own boundary
+      // caps it at Bedrock-invoke-only.
       Sid: "FoundationalBrokerAssumeAppRoles",
       Effect: "Allow",
       Action: "sts:AssumeRole",

@@ -10,5 +10,7 @@ export { managerPolicyStatements } from "./manager-policy.js";
 export { adminAppPolicyStatements } from "./admin-app-policy.js";
 export { appPermissionsBoundaryStatements } from "./permissions-boundary.js";
 export { foundationalPermissionsBoundaryStatements } from "./foundational-permissions-boundary.js";
+export { userDataOwnerPermissionsBoundaryStatements } from "./user-data-owner-permissions-boundary.js";
+export { capabilityBrokerPermissionsBoundaryStatements } from "./capability-broker-permissions-boundary.js";
 export { installDdlBoundaryStatements } from "./install-ddl-boundary.js";
 export { installInfraBoundaryStatements } from "./install-infra-boundary.js";

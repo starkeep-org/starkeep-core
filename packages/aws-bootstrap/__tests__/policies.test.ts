@@ -94,6 +94,7 @@ describe("manager policy (the install/uninstall allow-list)", () => {
       `arn:aws:iam::*:policy/${PREFIX}-app-permissions-boundary`,
       `arn:aws:iam::*:policy/${PREFIX}-foundational-permissions-boundary`,
       `arn:aws:iam::*:policy/${PREFIX}-user-data-owner-permissions-boundary`,
+      `arn:aws:iam::*:policy/${PREFIX}-capability-broker-permissions-boundary`,
     ]);
   });
 

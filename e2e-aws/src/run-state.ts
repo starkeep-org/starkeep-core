@@ -52,6 +52,7 @@ export interface TestStackConfig {
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
   userDataOwnerPermissionsBoundaryArn?: string;
+  capabilityBrokerPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   pulumiStateBucket?: string;
   apiGatewayUrl?: string;

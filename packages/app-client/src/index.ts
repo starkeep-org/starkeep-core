@@ -27,3 +27,15 @@ export {
   getRuntimeConfig,
   createRuntimeConfigHandler,
 } from "./runtime-config";
+export {
+  type RequestModality,
+  type CapabilityContentRef,
+  type InvokeCapabilityRequest,
+  type CapabilityUsage,
+  type InvokeCapabilityResult,
+  type GrantedCapability,
+  CapabilityUnavailableError,
+  invokeCapability,
+  getGrantedCapabilities,
+  reportCapabilityOutput,
+} from "./capability";

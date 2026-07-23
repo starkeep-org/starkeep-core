@@ -288,3 +288,90 @@ describe("targets and localRun", () => {
     expect(result.errors.some((e) => e.startsWith("tier:"))).toBe(true);
   });
 });
+
+describe("capability requirements (plan §3.1)", () => {
+  function withCap(cap: Record<string, unknown>): Record<string, unknown> {
+    return minimal({ infraRequirements: { capabilities: [cap] } });
+  }
+
+  it("accepts a well-formed bedrock.invoke capability", () => {
+    const result = validateManifest(
+      withCap({
+        name: "bedrock.invoke",
+        models: ["anthropic.claude-haiku-4-5", "openai.gpt-oss-120b"],
+        required: false,
+        requestedMonthlyBudgetUsd: 20,
+        reports: ["input:megapixels", "output:megapixels"],
+        rationale: "Generate captions and tags for your photos.",
+      }),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
+    const cap = result.manifest!.infraRequirements.capabilities[0];
+    expect(cap.name).toBe("bedrock.invoke");
+    expect(cap.required).toBe(false);
+    // required defaults to true when omitted
+    const dflt = validateManifest(
+      withCap({ name: "bedrock.invoke", models: ["anthropic.claude-haiku-4-5"], rationale: "x" }),
+    );
+    expect(dflt.manifest!.infraRequirements.capabilities[0].required).toBe(true);
+  });
+
+  it("rejects an unknown capability name", () => {
+    const result = validateManifest(
+      withCap({ name: "totally.madeup", models: ["anthropic.claude-haiku-4-5"], rationale: "x" }),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("not a known platform capability"))).toBe(true);
+  });
+
+  it("rejects a reserved capability name", () => {
+    const result = validateManifest(
+      withCap({ name: "bedrock.knowledgeBase", models: ["anthropic.claude-haiku-4-5"], rationale: "x" }),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("reserved"))).toBe(true);
+  });
+
+  it("rejects a malformed model id at the schema level", () => {
+    const result = validateManifest(
+      withCap({ name: "bedrock.invoke", models: ["NotAModelId!"], rationale: "x" }),
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects an unknown dimension in reports", () => {
+    const result = validateManifest(
+      withCap({ name: "bedrock.invoke", models: ["anthropic.claude-haiku-4-5"], reports: ["input:furlongs"], rationale: "x" }),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("not a known dimension/unit"))).toBe(true);
+  });
+
+  it("rejects a generic (CDS-measured) dimension in reports", () => {
+    const result = validateManifest(
+      withCap({ name: "bedrock.invoke", models: ["anthropic.claude-haiku-4-5"], reports: ["cost:usd"], rationale: "x" }),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("generic"))).toBe(true);
+  });
+
+  it("rejects a duplicate capability", () => {
+    const result = validateManifest(
+      minimal({
+        infraRequirements: {
+          capabilities: [
+            { name: "bedrock.invoke", models: ["anthropic.claude-haiku-4-5"], rationale: "a" },
+            { name: "bedrock.invoke", models: ["anthropic.claude-opus-4-8"], rationale: "b" },
+          ],
+        },
+      }),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("duplicate capability"))).toBe(true);
+  });
+
+  it("defaults capabilities to an empty array", () => {
+    expect(validateManifest(minimal()).manifest!.infraRequirements.capabilities).toEqual([]);
+  });
+});

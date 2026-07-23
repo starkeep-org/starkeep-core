@@ -38,9 +38,12 @@ import {
   appRoleExists,
   attachTempInstallCloudDataServerPolicy,
   createAppRole,
+  createCapabilityBrokerRole,
   deleteAppRoleWithPolicies,
+  deleteCapabilityBrokerRole,
   detachTempInstallCloudDataServerPolicy,
   updateAppRoleTrustPolicy,
+  CAPABILITY_BROKER_APP_ID,
 } from "./iam";
 import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
@@ -97,6 +100,11 @@ export interface CloudDataServerInstallConfig {
   permissionsBoundaryArn: string;
   foundationalPermissionsBoundaryArn: string;
   userDataOwnerPermissionsBoundaryArn: string;
+  /** Boundary for the capability-broker role minted below (plan §3.3).
+   * Optional so a pre-capability bootstrap stack (whose CFN outputs lack it)
+   * still installs — the capability-broker role is simply skipped until the
+   * bootstrap stack is updated. */
+  capabilityBrokerPermissionsBoundaryArn?: string;
   managerRoleArn: string;
   pulumiStateBucket: string;
   /** Cognito user-pool resources from the bootstrap CFN stack. */
@@ -292,6 +300,24 @@ export async function installCloudDataServer(
     // role's trust policy pointing at the dead AROA). Idempotent.
     console.log("Refreshing app role trust policy…");
     await updateAppRoleTrustPolicy(config.stackPrefix, appId, config.accountId, managerCreds);
+  }
+
+  // Step 1b: Mint the capability-broker role (plan §3.3). Depends on the CDS
+  // role existing (its trust names the CDS role). Idempotent. Skipped when the
+  // bootstrap stack predates the capability broker (no boundary ARN output yet).
+  if (config.capabilityBrokerPermissionsBoundaryArn) {
+    console.log(`Ensuring ${config.stackPrefix}-app-${CAPABILITY_BROKER_APP_ID}-role…`);
+    await createCapabilityBrokerRole({
+      stackPrefix: config.stackPrefix,
+      accountId: config.accountId,
+      capabilityBrokerPermissionsBoundaryArn: config.capabilityBrokerPermissionsBoundaryArn,
+      managerCreds,
+    });
+  } else {
+    console.log(
+      "No capability-broker boundary ARN in config — skipping capability-broker role " +
+        "(update the bootstrap stack to enable Bedrock capabilities).",
+    );
   }
 
   // Step 2: Attach the wider temp-install-cloud-data-server policy.
@@ -509,6 +535,11 @@ export async function uninstallCloudDataServer(
     stackPrefix: config.stackPrefix,
     awsCreds: appCreds,
   });
+
+  // Delete the capability-broker role (plan §3.3) — minted alongside the CDS,
+  // torn down with it. Idempotent; a stack that never had one is a no-op.
+  console.log("Deleting capability-broker role…");
+  await deleteCapabilityBrokerRole({ stackPrefix: config.stackPrefix, managerCreds });
 
   console.log("Deleting app role…");
   await deleteAppRoleWithPolicies(config.stackPrefix, appId, managerCreds);

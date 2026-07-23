@@ -4,6 +4,7 @@ import { adminAppPolicyStatements } from "./admin-app-policy.js";
 import { appPermissionsBoundaryStatements } from "./permissions-boundary.js";
 import { foundationalPermissionsBoundaryStatements } from "./foundational-permissions-boundary.js";
 import { userDataOwnerPermissionsBoundaryStatements } from "./user-data-owner-permissions-boundary.js";
+import { capabilityBrokerPermissionsBoundaryStatements } from "./capability-broker-permissions-boundary.js";
 import { installDdlBoundaryStatements } from "./install-ddl-boundary.js";
 import { installInfraBoundaryStatements } from "./install-infra-boundary.js";
 
@@ -59,6 +60,10 @@ export function generateBootstrapTemplate(
   );
   const userDataOwnerBoundaryPolicyYaml = renderStatementsYaml(
     userDataOwnerPermissionsBoundaryStatements(stackPrefix),
+    10,
+  );
+  const capabilityBrokerBoundaryPolicyYaml = renderStatementsYaml(
+    capabilityBrokerPermissionsBoundaryStatements(stackPrefix),
     10,
   );
   const installDdlBoundaryPolicyYaml = renderStatementsYaml(
@@ -205,6 +210,26 @@ ${foundationalBoundaryPolicyYaml}
         Version: '2012-10-17'
         Statement:
 ${userDataOwnerBoundaryPolicyYaml}
+
+  # ---------------------------------------------------------------------------
+  # Capability-Broker Permissions Boundary — ceiling for the single
+  # \${StackPrefix}-capability-broker-role minted at cloud-data-server deploy.
+  # All-Bedrock-invoke only (all-or-nothing ARN scope, by decision), plus the
+  # IAM-mutation deny. No data, no other services. The CDS assumes this role per
+  # capability request; the CDS's own boundary carries no bedrock:* verb.
+  # ---------------------------------------------------------------------------
+  CapabilityBrokerPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '\${StackPrefix}-capability-broker-permissions-boundary'
+      Description: >-
+        Maximum permissions for the capability-broker role. Permits Bedrock
+        InvokeModel / Converse (and their streaming variants) on all Bedrock
+        models and inference profiles, and nothing else.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+${capabilityBrokerBoundaryPolicyYaml}
 
   # ---------------------------------------------------------------------------
   # Admin App Role — federated entry point + admin-app runtime identity
@@ -444,6 +469,10 @@ Outputs:
   UserDataOwnerPermissionsBoundaryArn:
     Description: ARN of the permissions boundary for the User-Data-Owner (Starkeep Drive) role
     Value: !Ref UserDataOwnerPermissionsBoundary
+
+  CapabilityBrokerPermissionsBoundaryArn:
+    Description: ARN of the permissions boundary for the capability-broker role (Bedrock invoke only)
+    Value: !Ref CapabilityBrokerPermissionsBoundary
 
   InstallDdlRoleArn:
     Description: ARN of the install-DDL role (the only identity that can connect to DSQL as PG admin)

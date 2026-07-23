@@ -48,6 +48,7 @@ pnpm exec playwright install chromium
 | `STARKEEP_AWS_TESTS` | _(unset)_ | Must be `1` to run; otherwise the suite skips. |
 | `STARKEEP_AWS_STACK_PREFIX` | `sktest` | Dedicated test stack prefix. **Never** point this at a live deployment's prefix. |
 | `STARKEEP_AWS_REGION` | `us-east-2` | Region for a from-scratch bootstrap (an existing stack's own region always wins via its pool ID). |
+| `STARKEEP_AWS_BEDROCK` | _(unset)_ | Set `1` to run the live capability-broker Bedrock invoke step (captions the synced photo). Requires **Bedrock model access enabled** in the test account+region for `anthropic.claude-haiku-4-5` (a one-time console step under Bedrock → Model access) and incurs a small model charge. The grant/authorization capability steps (403/404) always run and make no Bedrock call. |
 | `STARKEEP_AWS_TEARDOWN` | `all` | What to tear down **after a fully passing run**: `all` (default) → `teardown-bootstrap.sh`; `apps` → `teardown-cloud-data-server.sh`; `none` → keep everything up. A run with **any failed step never tears down**, so a broken stack is left for debugging. |
 | `HMAC_CACHE_TTL_MS` | `0` (in this suite) | Baked into the broker Lambda at install. The suite sets `0` so a just-rotated/revoked app secret isn't served from the broker's cache. Real installs leave it unset → broker keeps its 5-min default. |
 

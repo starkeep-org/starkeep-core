@@ -1,6 +1,13 @@
 import type { AppManifest } from "./schema.js";
 import { appManifestSchema } from "./schema.js";
-import { isKnownType, typeCategory } from "@starkeep/protocol-primitives";
+import {
+  isKnownType,
+  typeCategory,
+  isKnownCapability,
+  isReservedCapabilityName,
+  isKnownDimensionUnit,
+  isNonGenericDimensionUnit,
+} from "@starkeep/protocol-primitives";
 
 export interface ValidationResult {
   valid: boolean;
@@ -91,6 +98,44 @@ export function validateManifest(raw: unknown): ValidationResult {
     errors.push(
       `infraRequirements.brokerPower may only be true for the "cloud-data-server" app (got "${manifest.id}")`,
     );
+  }
+
+  // Capability requirements (plan §3.1). Author-time = shape only: the capability
+  // name must be a known, non-reserved platform capability; each `reports` entry
+  // must be a known NON-GENERIC dimension/unit. `models[]` membership is checked
+  // at INSTALL against the operator's effective registry, not here.
+  const seenCapabilities = new Set<string>();
+  for (const cap of manifest.infraRequirements.capabilities) {
+    if (seenCapabilities.has(cap.name)) {
+      errors.push(`capabilities: duplicate capability "${cap.name}"`);
+    }
+    seenCapabilities.add(cap.name);
+
+    if (isReservedCapabilityName(cap.name)) {
+      errors.push(
+        `capabilities: "${cap.name}" is a reserved platform capability and cannot be declared by an app`,
+      );
+    } else if (!isKnownCapability(cap.name)) {
+      errors.push(
+        `capabilities: "${cap.name}" is not a known platform capability. Apps may only declare capabilities from the platform registry.`,
+      );
+    }
+
+    for (const r of cap.reports) {
+      const [dimension, unit] = r.split(":");
+      if (!dimension || !unit || !isKnownDimensionUnit(dimension, unit)) {
+        errors.push(`capabilities[${cap.name}]: reports entry "${r}" is not a known dimension/unit`);
+        continue;
+      }
+      // Generic dimensions (requests, bytes, cost) are CDS-measured and must not
+      // be declared — an app declaring them implies it measures what only the
+      // CDS may.
+      if (!isNonGenericDimensionUnit(dimension, unit)) {
+        errors.push(
+          `capabilities[${cap.name}]: reports entry "${r}" is a generic (CDS-measured) dimension and must not be declared`,
+        );
+      }
+    }
   }
 
   return {

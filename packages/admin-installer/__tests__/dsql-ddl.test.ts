@@ -256,3 +256,49 @@ describe("uninstall DDL", () => {
     expect(s.some((t) => t.startsWith("DROP ROLE"))).toBe(false);
   });
 });
+
+describe("capability grants (plan §3.2)", () => {
+  const caps = [
+    {
+      name: "bedrock.invoke",
+      models: ["anthropic.claude-haiku-4-5"],
+      required: false,
+      requestedMonthlyBudgetUsd: 20,
+      reports: ["input:megapixels"],
+      rationale: "captions",
+    },
+  ];
+
+  it("writes a capability_grants row, a consent cost gate, and the ledger write grant", async () => {
+    await runAppInstallDdl(opts, "photos", [], false, [], false, caps);
+    const s = stmts();
+    expect(s.some((t) => t.includes("capability_grants"))).toBe(true);
+    expect(s.some((t) => t.includes("capability_gates"))).toBe(true);
+    expect(
+      s.some((t) => t.includes("GRANT INSERT, UPDATE ON shared.capability_ledger TO starkeep_app_photos")),
+    ).toBe(true);
+  });
+
+  it("blocks the install when a declared model is not in the effective registry", async () => {
+    await expect(
+      runAppInstallDdl(opts, "photos", [], false, [], false, [
+        { name: "bedrock.invoke", models: ["nope.nope"], required: true, reports: [], rationale: "x" },
+      ]),
+    ).rejects.toThrow(/neither platform-known nor operator-defined/);
+  });
+
+  it("writes no capability SQL when the app declares none", async () => {
+    await runAppInstallDdl(opts, "photos", [], false, [], false, []);
+    const s = stmts();
+    expect(s.some((t) => t.includes("capability_grants"))).toBe(false);
+  });
+
+  it("uninstall deletes grants, app-scoped gates, ledger rows and revokes the write grant", async () => {
+    await runAppUninstallDdl(opts, "photos", [], false);
+    const s = stmts();
+    expect(s.some((t) => t.includes("REVOKE ALL ON shared.capability_ledger"))).toBe(true);
+    expect(s.some((t) => t.includes("capability_grants"))).toBe(true);
+    expect(s.some((t) => t.includes("capability_gates"))).toBe(true);
+    expect(s.some((t) => t.includes("capability_ledger"))).toBe(true);
+  });
+});

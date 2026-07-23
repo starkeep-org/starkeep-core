@@ -37,6 +37,9 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
             SUB(`arn:aws:iam::*:policy/${stackPrefix}-app-permissions-boundary`),
             SUB(`arn:aws:iam::*:policy/${stackPrefix}-foundational-permissions-boundary`),
             SUB(`arn:aws:iam::*:policy/${stackPrefix}-user-data-owner-permissions-boundary`),
+            // Capability broker (plan §3.3): the reserved-appId capability-broker
+            // role is minted under its own Bedrock-invoke-only boundary.
+            SUB(`arn:aws:iam::*:policy/${stackPrefix}-capability-broker-permissions-boundary`),
           ],
         },
       },

@@ -253,6 +253,83 @@ app in an auth gate that checks for a refresh token and shows a sign-in form
 otherwise — see `src/lib/AuthGate.tsx` and `SignInForm.tsx`. For local builds the
 gate is a no-op (`not-required`).
 
+### 9. Capabilities — brokered cloud AI (Bedrock invoke)
+
+Apps can use metered cloud capabilities the platform brokers on their behalf —
+currently **`bedrock.invoke`** (on-demand Amazon Bedrock model calls for
+captioning, tagging, summarization). Your app never holds Bedrock (or any AWS)
+credentials: it calls a cloud endpoint, and the broker runs the model under a
+dedicated capability role, enforcing per-app spend limits.
+
+Declare what you need under `infraRequirements.capabilities[]`:
+
+```jsonc
+"capabilities": [
+  {
+    "name": "bedrock.invoke",
+    "models": ["anthropic.claude-haiku-4-5"], // approved model ids
+    "required": false,                         // false → app runs degraded if denied
+    "requestedMonthlyBudgetUsd": 20,           // user-consent spend figure → a per-app cost gate
+    "reports": ["input:megapixels"],           // non-generic units your app can measure
+    "rationale": "Generate captions for your photos with a cloud vision model."
+  }
+]
+```
+
+- `name` — from the platform capability registry; apps cannot invent capabilities.
+- `models` — validated at **install** against the operator's effective model
+  registry. A model the operator hasn't enabled blocks the install until they do.
+- `required: false` — if the user denies it, no grant is written and the install
+  still proceeds; your code branches on the "not granted" result and runs degraded.
+- `reports` — the **non-generic** `"dimension:unit"` quantities your app can
+  measure and report (e.g. `input:megapixels`, `output:megapixels`). Generic
+  dimensions (`requests`, `input:bytes`/`output:bytes`, `cost:usd`) are measured by
+  the broker and must **not** be declared. If the operator sets a limit on a
+  dimension you didn't declare, a matching request is denied (fail-closed).
+
+**Content is by reference only.** There is no bytes parameter — you name a
+cloud-stored item (`contentRef`) and the broker reads it server-side under your
+app's own data grants. Content that isn't in readable cloud storage (unsynced
+local items) must sync first.
+
+Call it from `@starkeep/app-client`:
+
+```ts
+import { invokeCapability, getGrantedCapabilities } from "@starkeep/app-client";
+
+// Optional: discover grants up front so you can run degraded.
+const caps = await getGrantedCapabilities("photos");
+
+const result = await invokeCapability("photos", "bedrock.invoke", {
+  model: "anthropic.claude-haiku-4-5",
+  prompt: "Describe this image in one short sentence.",
+  contentRef: { recordId },        // a cloud-stored record you can read
+  maxTokens: 100,
+  reports: { "input:megapixels": 0.3 }, // only declared, non-generic input units
+});
+
+if (!result.granted) {
+  // user denied the optional capability — degrade gracefully
+} else if (result.ok) {
+  console.log(result.text, result.estCostUsd);
+} else {
+  // result.status/error: e.g. 429 gate_exceeded, 502 invoke_failed
+}
+```
+
+Capabilities are **always cloud-served** (only the cloud holds the capability
+role), so `invokeCapability` resolves a cloud endpoint regardless of whether your
+data target is local or cloud. A purely local install with no cloud plane can't
+invoke capabilities — it throws `CapabilityUnavailableError`.
+
+**Two trust levels for reported metrics.** CDS-measured dimensions (request
+count, bytes, tokens, derived cost) hold against a hostile app — the spend cap
+rests on these. App-reported dimensions (megapixels, pages, duration, …) are
+operator cost-shaping conveniences you can under-report; they never bound spend.
+For app-reported **output** quantities you can only know after the call, report
+them with `reportCapabilityOutput(appId, capability, invocationId, {...})`
+(best-effort; a missing report never hard-blocks).
+
 ---
 
 ## Installing it

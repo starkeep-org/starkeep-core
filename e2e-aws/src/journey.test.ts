@@ -209,6 +209,7 @@ function runTeardownScript(script: string): void {
         permissionsBoundaryArn: outputs.appPermissionsBoundaryArn,
         foundationalPermissionsBoundaryArn: outputs.appFoundationalPermissionsBoundaryArn,
         userDataOwnerPermissionsBoundaryArn: outputs.userDataOwnerPermissionsBoundaryArn,
+        capabilityBrokerPermissionsBoundaryArn: outputs.capabilityBrokerPermissionsBoundaryArn,
         pulumiStateBucket: outputs.pulumiStateBucketName,
         appParentDirs: [STARKEEP_APPS_DIR],
       };
@@ -624,6 +625,75 @@ function runTeardownScript(script: string): void {
       const body = await query.text();
       expect(body).toContain("tier-3 caption");
     });
+
+    it("exposes the photos bedrock.invoke capability grant written at install", async () => {
+      // The photos manifest declares an optional bedrock.invoke capability; the
+      // install grant step writes the capability_grants row + consent gate. The
+      // granted-capabilities query surfaces it so an app can run degraded.
+      const res = await cloudApp(photos).fetch("/capabilities");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { capabilities: Array<{ name: string; models: string[] }> };
+      const cap = body.capabilities.find((c) => c.name === "bedrock.invoke");
+      expect(cap, "photos should have a bedrock.invoke grant after install").toBeTruthy();
+      expect(cap!.models).toContain("anthropic.claude-haiku-4-5");
+    });
+
+    it("enforces by-reference authorization on the capability broker (403/404, no Bedrock call)", async () => {
+      // A model outside the approved set is rejected before any invoke.
+      const badModel = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/invoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic.claude-opus-4-8", prompt: "hi" }),
+      });
+      expect(badModel.status).toBe(403);
+
+      // A bogus content reference the app can't read is rejected (by-reference
+      // authorization runs under the app's own role) — no bytes reach Bedrock.
+      const badRef = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/invoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "anthropic.claude-haiku-4-5",
+          prompt: "describe",
+          contentRef: { recordId: "rec_does_not_exist" },
+        }),
+      });
+      expect(badRef.status).toBe(404);
+    });
+
+    // Live Bedrock invoke. Gated on STARKEEP_AWS_BEDROCK=1 because it requires
+    // Bedrock model access enabled in the test account+region (a one-time
+    // account step) and incurs a small model charge. When enabled it exercises
+    // the whole path end to end: grant → model → by-reference content read →
+    // gate reserve → assume capability-broker role → Bedrock Converse →
+    // ledger reconcile.
+    (process.env.STARKEEP_AWS_BEDROCK === "1" ? it : it.skip)(
+      "captions the synced photo through the capability broker (real Bedrock)",
+      async () => {
+        const res = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/invoke", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "anthropic.claude-haiku-4-5",
+            prompt: "Describe this image in one short sentence.",
+            contentRef: { recordId: syncedRecordId },
+            maxTokens: 100,
+            reports: { "input:megapixels": 0.3 },
+          }),
+        });
+        expect(res.status, await res.text().catch(() => "")).toBe(200);
+        const body = (await res.json()) as {
+          text: string;
+          usage: { inputTokens: number; outputTokens: number };
+          estCostUsd: number;
+          invocationId: string;
+        };
+        expect(body.text.length).toBeGreaterThan(0);
+        expect(body.usage.outputTokens).toBeGreaterThan(0);
+        expect(body.estCostUsd).toBeGreaterThan(0);
+        expect(body.invocationId).toBeTruthy();
+      },
+    );
 
     it("Part A: SPA + _next/static served through the CloudFront distribution (edge hit)", async () => {
       // The whole point of Part A: browser-facing traffic goes to the CloudFront

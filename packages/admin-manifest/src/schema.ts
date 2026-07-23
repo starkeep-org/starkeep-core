@@ -77,8 +77,37 @@ export const appSpecificSyncableSchema = z.object({
   files: z.boolean().default(false),
 });
 
+/**
+ * A capability the app declares it needs (plan §3.1) — a metered AWS-service
+ * power the cloud broker lends to apps (currently only `bedrock.invoke`). The
+ * user approves these at install alongside file-access grants.
+ *
+ * Shape-only here (author-time). Whether each `models[]` id is actually
+ * installable is validated at INSTALL time against the operator's *effective*
+ * model registry (platform ∪ operator overrides), not here — the author has no
+ * operator context.
+ */
+export const capabilityRequirementSchema = z.object({
+  // Platform-owned capability name; validated against the registry in validate.ts.
+  name: z.string().min(1),
+  // Bedrock model ids the app may call. Shape check only (a provider-prefixed
+  // id); effective-registry membership is an install-time check.
+  models: z.array(z.string().regex(/^[a-z0-9]+\.[a-z0-9][a-z0-9._-]*$/)).min(1),
+  // false → app runs degraded if the user denies; true (default) → install blocked.
+  required: z.boolean().default(true),
+  // User-facing consent figure; becomes a per-app cost gate on approval.
+  requestedMonthlyBudgetUsd: z.number().nonnegative().optional(),
+  // Non-generic "dimension:unit" pairs the app can measure and report (e.g.
+  // "input:megapixels"). Generic dimensions (requests, bytes, cost) are never
+  // declared. Validated against the reportable set in validate.ts.
+  reports: z.array(z.string().regex(/^[a-z_]+:[a-z0-9_]+$/)).default([]),
+  rationale: z.string(),
+});
+
 export const infraRequirementsSchema = z.object({
   fileAccess: z.array(fileAccessSchema).default([]),
+  // Metered capabilities the broker lends this app (plan §3.1).
+  capabilities: z.array(capabilityRequirementSchema).default([]),
   // All-access over every type + the `other` catch-all. Only the
   // `starkeep-drive` (User-Data-Owner) app may set this true; the validator
   // enforces that. Grants Drive the `shared/*` IAM ceiling. Installable apps
@@ -139,6 +168,7 @@ export const appManifestSchema = z.object({
 export type AppTier = z.infer<typeof appTierSchema>;
 export type AppTarget = z.infer<typeof appTargetSchema>;
 export type FileAccess = z.infer<typeof fileAccessSchema>;
+export type CapabilityRequirement = z.infer<typeof capabilityRequirementSchema>;
 export type SharedResourceRequirement = z.infer<typeof sharedResourceRequirementSchema>;
 export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;
 export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;

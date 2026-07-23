@@ -277,6 +277,134 @@ export async function initializeSharedSchema(
       .raw(`GRANT INSERT, UPDATE, DELETE ON shared.app_syncable_namespaces TO "${installer}"`)
       .execute(db);
 
+    // -----------------------------------------------------------------------
+    // Cloud capability broker (plan §3.2/§3.5/§3.6). Four shared tables:
+    //   capability_grants          — per-(app, capability) approved models+reports
+    //   capability_gates           — operator usage limits (the cost-governance
+    //                                control); the security-critical table
+    //   capability_ledger          — append-only per-measurement reservation +
+    //                                reconciliation rows (reserve-on-ledger)
+    //   capability_model_overrides — sparse operator overrides over the platform
+    //                                model registry
+    //
+    // SELECT is PUBLIC on all four: the broker reads them under the calling
+    // app's per-app PG role, and the ledger SUM for global/per-provider gates
+    // spans every app's rows. Apps never hold DSQL credentials (only the CDS
+    // Lambda does, via assumed roles), so PUBLIC SELECT mirrors shared.access_
+    // grants and is defense-in-depth, not the primary boundary. Writes are the
+    // installer's (grants/gates/overrides) and the broker's (ledger, granted to
+    // each capability-holding app role at install — see dsql-ddl.ts).
+    // -----------------------------------------------------------------------
+    await db.schema
+      .createTable("shared.capability_grants")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("capability_name", "text", (c) => c.notNull())
+      // JSON arrays: approved model ids, and declared "dimension:unit" reports.
+      .addColumn("models_json", "text", (c) => c.notNull())
+      .addColumn("reports_json", "text", (c) => c.notNull())
+      .addPrimaryKeyConstraint("capability_grants_pkey", [
+        "app_id",
+        "capability_name",
+      ] as never[])
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.capability_grants TO PUBLIC`).execute(db);
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE ON shared.capability_grants TO "${installer}"`)
+      .execute(db);
+
+    // capability_gates — one row per operator/consent limit. `limit_value`
+    // avoids the reserved word `limit`. scope_* NULL = wildcard (global if all
+    // NULL). window_kind ∈ {calendar, burst}; calendar carries window_period
+    // ∈ {week, month}; burst carries window_seconds.
+    await db.schema
+      .createTable("shared.capability_gates")
+      .ifNotExists()
+      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn("capability_name", "text", (c) => c.notNull())
+      .addColumn("dimension", "text", (c) => c.notNull())
+      .addColumn("unit", "text", (c) => c.notNull())
+      .addColumn("scope_provider", "text")
+      .addColumn("scope_model", "text")
+      .addColumn("scope_app_id", "text")
+      .addColumn("window_kind", "text", (c) => c.notNull())
+      .addColumn("window_period", "text")
+      .addColumn("window_seconds", "integer")
+      .addColumn("limit_value", "double precision", (c) => c.notNull())
+      .addColumn("on_exceed", "text", (c) => c.notNull().defaultTo("deny"))
+      .addColumn("origin", "text") // 'operator' | 'app-consent'
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.capability_gates TO PUBLIC`).execute(db);
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE ON shared.capability_gates TO "${installer}"`)
+      .execute(db);
+
+    // capability_ledger — append-only, one row per (invocation, dimension, unit)
+    // measurement. status ∈ {reserved, committed, released}; the gate SUM
+    // includes reserved+committed (a released reservation from a failed call is
+    // excluded). Each invoke writes its OWN distinct rows, so there is no hot
+    // counter row to contend on under a burst (plan §3.5). INSERT/UPDATE is
+    // granted to each capability-holding app role at install (dsql-ddl.ts).
+    await db.schema
+      .createTable("shared.capability_ledger")
+      .ifNotExists()
+      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn("invocation_id", "text", (c) => c.notNull())
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("capability_name", "text", (c) => c.notNull())
+      .addColumn("provider", "text", (c) => c.notNull())
+      .addColumn("model", "text", (c) => c.notNull())
+      .addColumn("dimension", "text", (c) => c.notNull())
+      .addColumn("unit", "text", (c) => c.notNull())
+      .addColumn("quantity", "double precision", (c) => c.notNull())
+      .addColumn("status", "text", (c) => c.notNull())
+      .addColumn("ts", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.capability_ledger TO PUBLIC`).execute(db);
+    // Indexes backing the scoped SUM (window + dimension + scope). Fold scope
+    // columns into the key so the SUM is index-served at realistic volumes.
+    await ensureIndex(
+      db,
+      "shared",
+      "idx_cap_ledger_dim_ts",
+      `CREATE INDEX ASYNC idx_cap_ledger_dim_ts
+         ON shared.capability_ledger (dimension, unit, status, ts)`,
+    );
+    await ensureIndex(
+      db,
+      "shared",
+      "idx_cap_ledger_app_dim_ts",
+      `CREATE INDEX ASYNC idx_cap_ledger_app_dim_ts
+         ON shared.capability_ledger (app_id, dimension, unit, status, ts)`,
+    );
+    await ensureIndex(
+      db,
+      "shared",
+      "idx_cap_ledger_invocation",
+      `CREATE INDEX ASYNC idx_cap_ledger_invocation
+         ON shared.capability_ledger (invocation_id)`,
+    );
+
+    // capability_model_overrides — sparse operator overrides. NULL = fall
+    // through to the platform default; `inference_profile_cleared` distinguishes
+    // "operator explicitly cleared the profile" from "not overridden".
+    await db.schema
+      .createTable("shared.capability_model_overrides")
+      .ifNotExists()
+      .addColumn("model_id", "text", (c) => c.primaryKey())
+      .addColumn("provider", "text")
+      .addColumn("inference_profile_id", "text")
+      .addColumn("inference_profile_cleared", "boolean", (c) => c.notNull().defaultTo(false))
+      .addColumn("vision", "boolean")
+      .addColumn("pricing_json", "text")
+      .addColumn("estimates_json", "text")
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.capability_model_overrides TO PUBLIC`).execute(db);
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE ON shared.capability_model_overrides TO "${installer}"`)
+      .execute(db);
+
     // Duplicate-file prevention: (filename + bytes) is unique among live
     // records. DSQL doesn't support partial indexes (no `WHERE` on CREATE
     // INDEX), so we include `deleted_at` in the key and use NULLS NOT

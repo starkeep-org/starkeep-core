@@ -26,6 +26,7 @@ export interface StarkeepCliConfig {
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
   userDataOwnerPermissionsBoundaryArn?: string;
+  capabilityBrokerPermissionsBoundaryArn?: string;
   managerRoleArn?: string;
   installDdlRoleArn?: string;
   installInfraRoleArn?: string;
@@ -125,6 +126,7 @@ export interface DerivedInstallerArns {
   permissionsBoundaryArn: string;
   foundationalPermissionsBoundaryArn: string;
   userDataOwnerPermissionsBoundaryArn: string;
+  capabilityBrokerPermissionsBoundaryArn: string;
   pulumiStateBucket: string;
   artifactsBucket: string;
 }
@@ -158,6 +160,9 @@ export function deriveInstallerArns(
     userDataOwnerPermissionsBoundaryArn:
       config.userDataOwnerPermissionsBoundaryArn ??
       `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`,
+    capabilityBrokerPermissionsBoundaryArn:
+      config.capabilityBrokerPermissionsBoundaryArn ??
+      `arn:aws:iam::${accountId}:policy/${stackPrefix}-capability-broker-permissions-boundary`,
     pulumiStateBucket:
       config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`,
     // Suffixed with account+region to keep the bucket globally unique (the

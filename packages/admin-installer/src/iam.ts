@@ -14,6 +14,7 @@ import {
   DeleteRolePolicyCommand,
   UpdateAssumeRolePolicyCommand,
   EntityAlreadyExistsException,
+  NoSuchEntityException,
 } from "@aws-sdk/client-iam";
 import type { AwsCredentials } from "./session";
 import {
@@ -108,6 +109,16 @@ export const USER_DATA_OWNER_APP_ID = "starkeep-drive";
 export const LOCAL_WATCHER_APP_ID = "local-watcher";
 
 /**
+ * The reserved appId of the cloud capability-broker role (plan §3.3). Its role
+ * (`${stackPrefix}-app-capability-broker-role`) holds the borrowed Bedrock-invoke
+ * power the CDS assumes per capability request; it is NOT a real app (no
+ * manifest, no data plane, no PG role). Reserved so no third-party app can claim
+ * the name, and routed to the capability-broker boundary by the magic-string
+ * check in `createCapabilityBrokerRole`.
+ */
+export const CAPABILITY_BROKER_APP_ID = "capability-broker";
+
+/**
  * App ids that only built-in installs may claim. Third-party installs are
  * rejected on these so no manifest can impersonate cloud-data-server, Starkeep
  * Drive (the User-Data-Owner), or the local watcher. Built-in install paths opt
@@ -119,6 +130,7 @@ export const RESERVED_APP_IDS: ReadonlySet<string> = new Set([
   FOUNDATIONAL_APP_ID,
   USER_DATA_OWNER_APP_ID,
   LOCAL_WATCHER_APP_ID,
+  CAPABILITY_BROKER_APP_ID,
   "local-data-sync",
 ]);
 
@@ -516,6 +528,102 @@ export function buildAppRoleTrustPolicy(
     });
   }
   return JSON.stringify({ Version: "2012-10-17", Statement: statements });
+}
+
+/**
+ * Mint (or update) the capability-broker role (plan §3.3), minted at
+ * cloud-data-server deploy under the Bedrock-invoke-only capability-broker
+ * boundary, trusting the CDS role as principal (single-hop assume — the same
+ * shape as per-app data roles). Idempotent.
+ *
+ * The role name is `${stackPrefix}-app-capability-broker-role`, so the CDS's
+ * existing broker-power `sts:AssumeRole` on `${stackPrefix}-app-*` (and the
+ * matching foundational-boundary ceiling) already permit the assume with no
+ * further change. This role carries an inline `capability-invoke` policy Allowing
+ * Bedrock invoke on ALL models/inference profiles — the boundary is the ceiling,
+ * this is the grant, and the intersection is Bedrock-invoke-only. All
+ * provider/model restriction lives in the usage-limitation framework, not here.
+ */
+export async function createCapabilityBrokerRole(input: {
+  stackPrefix: string;
+  accountId: string;
+  capabilityBrokerPermissionsBoundaryArn: string;
+  managerCreds: AwsCredentials;
+}): Promise<string> {
+  const { stackPrefix, accountId, capabilityBrokerPermissionsBoundaryArn, managerCreds } = input;
+  const iam = makeIamClient(managerCreds);
+  const roleName = `${stackPrefix}-app-${CAPABILITY_BROKER_APP_ID}-role`;
+  // Trust names the CDS role (single-hop assume) plus Manager (for management);
+  // the standard app trust policy with the CDS principal included.
+  const assumeRolePolicy = buildAppRoleTrustPolicy(stackPrefix, accountId, true);
+  try {
+    await iam.send(
+      new CreateRoleCommand({
+        RoleName: roleName,
+        AssumeRolePolicyDocument: assumeRolePolicy,
+        PermissionsBoundary: capabilityBrokerPermissionsBoundaryArn,
+        Tags: [
+          { Key: "starkeep:appId", Value: CAPABILITY_BROKER_APP_ID },
+          { Key: "starkeep:managed", Value: "true" },
+        ],
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof EntityAlreadyExistsException)) throw err;
+    await iam.send(
+      new UpdateAssumeRolePolicyCommand({ RoleName: roleName, PolicyDocument: assumeRolePolicy }),
+    );
+  }
+
+  await iam.send(
+    new PutRolePolicyCommand({
+      RoleName: roleName,
+      PolicyName: "capability-invoke",
+      PolicyDocument: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Sid: "CapabilityBedrockInvoke",
+            Effect: "Allow",
+            Action: [
+              "bedrock:InvokeModel",
+              "bedrock:InvokeModelWithResponseStream",
+              "bedrock:Converse",
+              "bedrock:ConverseStream",
+            ],
+            Resource: [
+              "arn:aws:bedrock:*::foundation-model/*",
+              `arn:aws:bedrock:*:${accountId}:inference-profile/*`,
+              `arn:aws:bedrock:*:${accountId}:application-inference-profile/*`,
+            ],
+          },
+        ],
+      }),
+    }),
+  );
+
+  return `arn:aws:iam::${accountId}:role/${roleName}`;
+}
+
+/** Delete the capability-broker role (its inline policy first). Idempotent —
+ * absent role/policy is a no-op. Called on cloud-data-server teardown. */
+export async function deleteCapabilityBrokerRole(input: {
+  stackPrefix: string;
+  managerCreds: AwsCredentials;
+}): Promise<void> {
+  const { stackPrefix, managerCreds } = input;
+  const iam = makeIamClient(managerCreds);
+  const roleName = `${stackPrefix}-app-${CAPABILITY_BROKER_APP_ID}-role`;
+  try {
+    await iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: "capability-invoke" }));
+  } catch (err) {
+    if (!(err instanceof NoSuchEntityException)) throw err;
+  }
+  try {
+    await iam.send(new DeleteRoleCommand({ RoleName: roleName }));
+  } catch (err) {
+    if (!(err instanceof NoSuchEntityException)) throw err;
+  }
 }
 
 export async function updateAppRoleTrustPolicy(

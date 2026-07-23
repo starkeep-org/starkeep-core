@@ -26,6 +26,7 @@ export interface BootstrapOutputs {
   appPermissionsBoundaryArn: string;
   appFoundationalPermissionsBoundaryArn: string;
   userDataOwnerPermissionsBoundaryArn: string;
+  capabilityBrokerPermissionsBoundaryArn: string;
   installDdlRoleArn: string;
   installInfraRoleArn: string;
   pulumiStateBucketName: string;
@@ -41,6 +42,7 @@ const REQUIRED_OUTPUT_KEYS: Record<keyof BootstrapOutputs, string> = {
   appPermissionsBoundaryArn: "AppPermissionsBoundaryArn",
   appFoundationalPermissionsBoundaryArn: "AppFoundationalPermissionsBoundaryArn",
   userDataOwnerPermissionsBoundaryArn: "UserDataOwnerPermissionsBoundaryArn",
+  capabilityBrokerPermissionsBoundaryArn: "CapabilityBrokerPermissionsBoundaryArn",
   installDdlRoleArn: "InstallDdlRoleArn",
   installInfraRoleArn: "InstallInfraRoleArn",
   pulumiStateBucketName: "PulumiStateBucketName",

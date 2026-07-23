@@ -396,6 +396,10 @@ delete_managed_policy "${STACK_PREFIX}-app-permissions-boundary"
 delete_managed_policy "${STACK_PREFIX}-foundational-permissions-boundary"
 delete_managed_policy "${STACK_PREFIX}-install-ddl-permissions-boundary"
 delete_managed_policy "${STACK_PREFIX}-install-infra-permissions-boundary"
+# Capability-broker boundary (plan §3.3). Detach from the externally-minted
+# ${STACK_PREFIX}-app-capability-broker-role (normally already deleted by the
+# cloud-data-server uninstall in phase 2) so CFN can drop the managed policy.
+delete_managed_policy "${STACK_PREFIX}-capability-broker-permissions-boundary"
 
 # ── Step 4: Delete CloudFormation stack ──────────────────────────────────────
 # All resources that CF would trip over are already gone; this is fast and

@@ -17,11 +17,14 @@
 import { Kysely, PostgresDialect, sql } from "kysely";
 import pg from "pg";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import type { FileAccess, SyncableTable } from "@starkeep/admin-manifest";
+import type { FileAccess, SyncableTable, CapabilityRequirement } from "@starkeep/admin-manifest";
 import {
   APP_GRANTABLE_CATEGORIES,
   typeCategory,
+  generateId,
+  isModelInEffectiveRegistry,
   type Category,
+  type OperatorModelOverride,
 } from "@starkeep/protocol-primitives";
 import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
 import { retryOnAccessDenied, retryOnTransientDbError } from "./retry-on-access-denied";
@@ -78,6 +81,119 @@ function categoriesFromGrants(grants: TypeGrant[], fileAccessAll: boolean): Cate
     byCategory.set(category, existing);
   }
   return [...byCategory.values()];
+}
+
+/**
+ * Load the operator's sparse model overrides from `shared.capability_model_
+ * overrides` so install-time `models[]` validation runs against the EFFECTIVE
+ * registry (platform ∪ operator overrides), per plan §3.1. `db` is the admin
+ * connection already open in the install/uninstall DDL body.
+ */
+async function loadModelOverrides(
+  db: Kysely<DdlDb>,
+): Promise<OperatorModelOverride[]> {
+  const rows = await sql<{
+    model_id: string;
+    provider: string | null;
+    inference_profile_id: string | null;
+    inference_profile_cleared: boolean;
+    vision: boolean | null;
+    pricing_json: string | null;
+    estimates_json: string | null;
+  }>`SELECT model_id, provider, inference_profile_id, inference_profile_cleared,
+            vision, pricing_json, estimates_json
+       FROM shared.capability_model_overrides`.execute(db);
+  return rows.rows.map((r) => {
+    const o: OperatorModelOverride = { modelId: r.model_id };
+    if (r.provider) o.provider = r.provider as OperatorModelOverride["provider"];
+    if (r.inference_profile_cleared) o.inferenceProfileId = null;
+    else if (r.inference_profile_id) o.inferenceProfileId = r.inference_profile_id;
+    if (r.vision !== null) o.vision = r.vision;
+    if (r.pricing_json) o.pricing = JSON.parse(r.pricing_json) as Record<string, number>;
+    if (r.estimates_json) o.estimates = JSON.parse(r.estimates_json) as OperatorModelOverride["estimates"];
+    return o;
+  });
+}
+
+/**
+ * Persist an app's approved capability grants (plan §3.2). For each capability:
+ *   1. validate every `models[]` id against the EFFECTIVE registry — an unknown
+ *      model FAILS the install with a clear error until the operator defines it;
+ *   2. write the `capability_grants` row (approved models + declared reports);
+ *   3. if a monthly budget was consented, write it as one per-app `cost`/`usd`
+ *      calendar-month gate (origin `app-consent`), which the operator can later
+ *      tighten or supplement.
+ * Also grants the app's PG role INSERT/UPDATE on the ledger so the broker can
+ * write reservations under the per-app connection.
+ *
+ * `capabilities` is the already-approved subset (the admin UI drops denied
+ * `required:false` capabilities before install; a denied `required:true` blocks
+ * the install upstream). No grant row → the broker returns "not granted".
+ */
+async function writeCapabilityGrants(
+  db: Kysely<DdlDb>,
+  appId: string,
+  pgRole: string,
+  capabilities: CapabilityRequirement[],
+): Promise<void> {
+  if (capabilities.length === 0) return;
+  const overrides = await loadModelOverrides(db);
+
+  for (const cap of capabilities) {
+    for (const modelId of cap.models) {
+      if (!isModelInEffectiveRegistry(modelId, overrides)) {
+        throw new Error(
+          `capability "${cap.name}": model "${modelId}" is neither platform-known ` +
+            `nor operator-defined. Define it in the model registry before installing this app.`,
+        );
+      }
+    }
+    await db
+      .insertInto("shared.capability_grants")
+      .values({
+        app_id: appId,
+        capability_name: cap.name,
+        models_json: JSON.stringify(cap.models),
+        reports_json: JSON.stringify(cap.reports ?? []),
+      })
+      .onConflict((oc) =>
+        oc.columns(["app_id", "capability_name"]).doUpdateSet((eb) => ({
+          models_json: eb.ref("excluded.models_json"),
+          reports_json: eb.ref("excluded.reports_json"),
+        })),
+      )
+      .execute();
+
+    // Consent budget → one per-app monthly cost gate. Deterministic id so a
+    // reinstall updates rather than duplicates it.
+    if (cap.requestedMonthlyBudgetUsd !== undefined) {
+      const gateId = `consent:${appId}:${cap.name}`;
+      await db
+        .insertInto("shared.capability_gates")
+        .values({
+          id: gateId,
+          capability_name: cap.name,
+          dimension: "cost",
+          unit: "usd",
+          scope_provider: null,
+          scope_model: null,
+          scope_app_id: appId,
+          window_kind: "calendar",
+          window_period: "month",
+          window_seconds: null,
+          limit_value: cap.requestedMonthlyBudgetUsd,
+          on_exceed: "deny",
+          origin: "app-consent",
+        })
+        .onConflict((oc) =>
+          oc.column("id").doUpdateSet((eb) => ({ limit_value: eb.ref("excluded.limit_value") })),
+        )
+        .execute();
+    }
+  }
+
+  // The broker writes ledger reservation/reconcile rows under the app's PG role.
+  await sql`GRANT INSERT, UPDATE ON shared.capability_ledger TO ${sql.raw(pgRole)}`.execute(db);
 }
 
 export interface DsqlDdlOptions {
@@ -167,6 +283,7 @@ export async function runAppInstallDdl(
   fileAccessAll: boolean,
   appSyncableTables: SyncableTable[] = [],
   appSyncableFilesEnabled: boolean = false,
+  capabilities: CapabilityRequirement[] = [],
 ): Promise<void> {
   const pgRole = appIdToPgRole(opts.stackPrefix, appId);
   // Every statement below is idempotent (IF [NOT] EXISTS, probe-then-act,
@@ -381,6 +498,9 @@ export async function runAppInstallDdl(
           )
           .execute();
       }
+
+      // Capability grants + consent gate + ledger write grant (plan §3.2).
+      await writeCapabilityGrants(db, appId, pgRole, capabilities);
     } finally {
       await db.destroy().catch(() => {});
     }
@@ -429,6 +549,16 @@ export async function runAppUninstallDdl(
 
       await db.deleteFrom("shared.access_grants").where("app_id", "=", appId).execute();
       await db.deleteFrom("shared.app_syncable_namespaces").where("app_id", "=", appId).execute();
+
+      // Capability broker cleanup (plan §3.2): drop the app's grants, its
+      // app-scoped gates (incl. the consent gate), and its ledger rows, then
+      // revoke the ledger write grant so DROP ROLE below doesn't trip on a
+      // lingering dependency. Operator-set global/provider gates are untouched.
+      await sql`REVOKE ALL ON shared.capability_ledger FROM ${sql.raw(pgRole)}`.execute(db);
+      await db.deleteFrom("shared.capability_grants").where("app_id", "=", appId).execute();
+      await db.deleteFrom("shared.capability_gates").where("scope_app_id", "=", appId).execute();
+      await db.deleteFrom("shared.capability_ledger").where("app_id", "=", appId).execute();
+
       await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
 
       // Revoke the DSQL-side IAM mapping before DROP ROLE — DROP ROLE fails if
