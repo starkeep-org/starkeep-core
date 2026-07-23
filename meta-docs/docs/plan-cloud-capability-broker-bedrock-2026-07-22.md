@@ -1,6 +1,6 @@
 # Plan — Cloud capability broker (Bedrock on-demand invoke)
 
-**Date:** 2026-07-22 (revised 2026-07-23 after review)
+**Date:** 2026-07-22 (revised 2026-07-23 after review; adapter set set to Anthropic/OpenAI/Kimi/Qwen/GLM)
 **Status:** Proposed (design settled in discussion; not yet implemented)
 **Scope topic:** cloud-apps / roles-and-permissions / cloud-data-server
 
@@ -104,7 +104,7 @@ Add an optional `infraRequirements.capabilities[]` block:
 "capabilities": [
   {
     "name": "bedrock.invoke",
-    "models": ["anthropic.claude-haiku-4-5", "amazon.nova-lite"],
+    "models": ["anthropic.claude-haiku-4-5", "openai.gpt-oss-120b"],
     "required": false,                  // optional → app runs degraded if the user denies it
     "requestedMonthlyBudgetUsd": 20,    // user-facing consent figure; becomes a per-app cost gate on approval
     "reports": ["input:megapixels", "output:megapixels"],  // non-generic dimensions the app can measure/report
@@ -182,11 +182,16 @@ Effective-registry membership of `models` is checked at install, not here.
   keeping IAM out of provider/model policy entirely is worth more than the defense-in-depth a
   provider wildcard would add.**
   - **Note — the *adapter* set is still a deliberate multi-provider choice; that is a framework
-    concern, not an IAM one.** We ship **two** provider adapters from day one (Anthropic and
-    Amazon Nova — see §3.6); which providers the broker can *form valid requests for* is decided
-    in code and the registry, while IAM stays all-Bedrock. Adding a third provider is adapter +
+    concern, not an IAM one.** We ship **five** provider adapters from day one (Anthropic, OpenAI,
+    Kimi, Qwen, GLM — see §3.6); which providers the broker can *form valid requests for* is decided
+    in code and the registry, while IAM stays all-Bedrock. Adding a further provider is adapter +
     registry work with **no boundary change** — which is the whole point of keeping IAM
-    all-or-nothing.
+    all-or-nothing. (All five are reached **through Bedrock invoke**; the all-Bedrock boundary is
+    what makes the multi-provider set free of IAM churn. Bedrock availability + exact model IDs for
+    each provider must be confirmed at implementation — see §3.6 — since some non-Anthropic
+    providers are reached via Bedrock Marketplace/serverless rather than on-demand foundation
+    models, and any provider *not* reachable through Bedrock invoke falls outside this increment's
+    all-Bedrock premise.)
 
 - **Deploy (CDS Phase 2, or a small dedicated step):** mint `...-capability-broker-role`
   under that boundary, with a **trust policy naming the CDS role** as principal (single-hop
@@ -392,13 +397,24 @@ S3-location path) a session policy that must deny every key but the referenced o
 
 - **Adapters and the Converse API.** The broker speaks to models through provider **request/
   response adapters**. The Bedrock **Converse API** normalizes request/response across providers
-  for the text/vision path, so the two shipped adapters (**Anthropic** and **Amazon Nova**) share
-  most of that path — this is what makes the deliberate multi-provider choice (§3.3) cheap. Raw
-  `InvokeModel` with provider-specific bodies is the fallback for models Converse doesn't cover;
-  image/video *generation* uses `InvokeModel` / `StartAsyncInvoke` (the latter deferred, §3.8).
+  for the text/vision path, so any of the five shipped adapters that Converse covers share most of
+  that path — this is what makes the deliberate multi-provider choice (§3.3) cheap. Raw
+  `InvokeModel` with provider-specific bodies is the fallback for models Converse doesn't cover
+  (expected for some of the non-Anthropic providers below); image/video *generation* uses
+  `InvokeModel` / `StartAsyncInvoke` (the latter deferred, §3.8).
+- **Shipped adapter set (five, from day one):** **Anthropic, OpenAI, Kimi, Qwen, GLM.** Each is a
+  provider request/response adapter over Bedrock — Converse where covered, raw `InvokeModel`
+  otherwise. Vision support varies by model (the motivating captioning case needs a vision-capable
+  model per provider); the registry (below) records per-model capabilities. **Availability +
+  exact Bedrock model IDs must be confirmed at implementation** — Anthropic, OpenAI (gpt-oss open
+  weights), and Qwen are Bedrock-hosted today; Kimi (Moonshot) and GLM (Zhipu) availability and
+  the route (on-demand foundation model vs Bedrock Marketplace/serverless) need verification, and
+  any provider not reachable through Bedrock invoke is out of this increment (§3.3 premise).
 - **Model IDs (Bedrock):** carry a provider prefix — e.g. `anthropic.claude-haiku-4-5`,
-  `anthropic.claude-sonnet-5`, `anthropic.claude-opus-4-8`, `amazon.nova-lite`, `amazon.nova-pro`.
-  Default to cost-sensitive models (Haiku 4.5 / Nova Lite) for app workloads.
+  `anthropic.claude-sonnet-5`, `anthropic.claude-opus-4-8`, `openai.gpt-oss-120b`,
+  `qwen.qwen3-...`, plus the Kimi/GLM ids once confirmed. Prefixes and precise ids for the
+  non-Anthropic providers are **confirm-at-implementation**. Default to cost-sensitive models per
+  provider for app workloads.
 - **Cross-region inference profiles:** newer models often require an **inference profile** for
   on-demand throughput rather than direct foundation-model invocation. The profile id is
   region-prefixed (e.g. `us.anthropic.claude-sonnet-5`). The boundary's all-Bedrock wildcard ARN
@@ -439,10 +455,12 @@ S3-location path) a session policy that must deny every key but the referenced o
   derived (§3.5), which is why exact-unit gates exist alongside the derived `cost` gate.
 - **Pricing defaults for `cost` gates + the ledger** (first-party per-MTok reference; confirm
   Bedrock's published, region-specific rates) — these seed the registry `defaults.pricing`:
-  - Haiku 4.5 — $1 in / $5 out
-  - Sonnet 5 — $3 in / $15 out ($2 / $10 introductory through 2026-08-31)
-  - Opus 4.8 — $5 in / $25 out
-  - Amazon Nova Lite / Pro — confirm current per-MTok rates at implementation.
+  - Anthropic Haiku 4.5 — $1 in / $5 out
+  - Anthropic Sonnet 5 — $3 in / $15 out ($2 / $10 introductory through 2026-08-31)
+  - Anthropic Opus 4.8 — $5 in / $25 out
+  - OpenAI (gpt-oss), Kimi (Moonshot), Qwen (Alibaba), GLM (Zhipu) — confirm current Bedrock
+    per-MTok rates (and, for marketplace/serverless-hosted models, any hosting cost) at
+    implementation.
 - **Account-level enablement (one-time foundational):** Bedrock model access must be enabled per
   account + region before any invoke succeeds. One-time platform/foundational step (not per-app,
   not per-call) — document in the deploy runbook and, if scriptable, fold into the CDS
@@ -581,8 +599,9 @@ modules:
   images) to declare and actually call `bedrock.invoke`, so the path is exercised end to end.
 - e2e (`e2e-aws`) coverage: install an app with a capability grant → invoke by-reference →
   observe a real Bedrock response → observe the ledger row → exceed a gate → observe the 429.
-  Cover **both providers** in the shipped adapter set (Anthropic + Amazon Nova) so the
-  multi-provider path is real, not latent.
+  Cover the shipped adapter set (**Anthropic, OpenAI, Kimi, Qwen, GLM**) so the multi-provider
+  path is real, not latent — at minimum Anthropic plus one non-Anthropic provider live, and the
+  remaining adapters exercised against their real Bedrock model ids as availability is confirmed.
 - Cover both origins (§4): cloud-origin by-reference, and local-origin by-reference via the
   proxy (item already synced to cloud); assert that an unsynced/local-only reference is
   rejected, not byte-ingested.
@@ -613,8 +632,8 @@ Resolved in discussion:
    (registry + grant `models` + per-provider/per-model gates), not in the boundary. Considered and
    **rejected** scoping IAM to the adapter/provider set — keeping IAM out of provider/model policy
    is worth more than the defense-in-depth a provider wildcard would add. The *adapter* set is
-   still a deliberate multi-provider choice (Anthropic + Amazon Nova), but that lives in code/registry,
-   not IAM. §3.3.
+   still a deliberate multi-provider choice (Anthropic, OpenAI, Kimi, Qwen, GLM), but that lives in
+   code/registry, not IAM. §3.3.
 8. **Dimension model** — `certainty` dropped; replaced by two orthogonal axes (timing;
    measurement source = CDS-measured vs app-reported). `requests` takes a modality unit
    `[all,text,image,audio,video]`; type-specific quantities are **units of `input`/`output`**;
@@ -628,9 +647,14 @@ Remaining truly-open items:
     per-assume inline session policies correctly narrowing S3 access to a single key. **Prove this
     out first** (§7 step 1); if it fails, fall back to inline-only for the initial increment and
     revisit. Until proven, treat the S3-location path as provisional.
-11. **Other-provider request shaping (beyond the initial two)** — a third provider needs its own
+11. **Other-provider request shaping (beyond the initial five)** — a further provider needs its own
     adapter (or Converse coverage) and a registry entry; **no boundary change** (IAM is
     all-Bedrock). §3.3, §3.6.
+12. **Bedrock availability of the initial five** — Anthropic, OpenAI (gpt-oss), and Qwen are
+    Bedrock-hosted today; **Kimi (Moonshot) and GLM (Zhipu) availability, the invoke route
+    (on-demand foundation model vs Bedrock Marketplace/serverless), and exact model IDs must be
+    confirmed at implementation.** Any of the five not reachable through Bedrock invoke falls
+    outside this increment's all-Bedrock premise (§3.3) and would need separate treatment. §3.6.
 
 ---
 
@@ -652,7 +676,8 @@ Remaining truly-open items:
    admin consent & degraded-grant UI (with the app-reported / best-effort labels).
 5. Broker route in CDS: auth → grant check → by-reference data authorization (per-app role) →
    gate check (reserve-on-ledger) → assume capability role → Bedrock invoke via Converse
-   (buffered) → ledger reconcile → return. Both shipped providers.
+   (buffered) → ledger reconcile → return. All five shipped provider adapters (Converse where
+   covered, raw `InvokeModel` otherwise).
 6. Gate/cost-governance subsystem (open dimension set, two-axis enforcement, calendar week/month
    windows, reserve-on-ledger concurrency with burst-bounded overage, price/estimate overrides,
    global kill switch) + adversarial tests.
