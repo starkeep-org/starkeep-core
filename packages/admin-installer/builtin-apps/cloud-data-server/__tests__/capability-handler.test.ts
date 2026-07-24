@@ -9,6 +9,7 @@ import { describe, it, expect } from "vitest";
 import type { DatabaseClient } from "@starkeep/storage-aurora-dsql";
 import {
   handleCapabilityInvoke,
+  handleCapabilityInvokeStream,
   type CapabilityHandlerDeps,
   type ContentReadResult,
 } from "../src/capability-handler.js";
@@ -287,5 +288,83 @@ describe("capability handler", () => {
     const db = new InMemoryCapabilityDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
     const res = await handleCapabilityInvoke(baseDeps(db, { capabilityName: "bedrock.knowledgeBase" }));
     expect(res.statusCode).toBe(404);
+  });
+});
+
+const streamInvoker: BedrockInvoker = {
+  async converse() {
+    throw new Error("not used");
+  },
+  async *converseStream() {
+    yield { type: "text", text: "a cat " };
+    yield { type: "text", text: "on a mat" };
+    yield { type: "done", inputTokens: 1200, outputTokens: 8 };
+  },
+};
+
+describe("capability handler — streaming", () => {
+  it("yields text chunks then a done event and reconciles the ledger to actuals", async () => {
+    const db = new InMemoryCapabilityDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
+    const result = await handleCapabilityInvokeStream(baseDeps(db, { invoker: streamInvoker }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected an open stream");
+
+    const events = [];
+    for await (const evt of result.stream) events.push(evt);
+    const text = events.filter((e) => e.type === "text").map((e) => (e.type === "text" ? e.text : "")).join("");
+    expect(text).toBe("a cat on a mat");
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type).toBe("done");
+    if (done?.type === "done") {
+      expect(done.usage.outputTokens).toBe(8);
+      // cost re-derived from actual tokens (1200*$1/MTok + 8*$5/MTok)
+      expect(done.estCostUsd).toBeCloseTo((1200 * 1) / 1e6 + (8 * 5) / 1e6);
+    }
+    // Reserved rows promoted to committed actuals on stream completion.
+    const committed = db.ledger.filter((r) => r.status === "committed");
+    expect(committed.some((r) => r.dimension === "output" && r.unit === "tokens" && r.quantity === 8)).toBe(true);
+  });
+
+  it("rejects pre-stream (not_granted 403) without opening a stream", async () => {
+    const db = new InMemoryCapabilityDb(null, []);
+    const result = await handleCapabilityInvokeStream(baseDeps(db, { invoker: streamInvoker }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.statusCode).toBe(403);
+  });
+
+  it("rejects pre-stream on a gate breach (429) and releases the reservation", async () => {
+    // A tiny output-token gate the worst-case reservation (maxTokens) breaches.
+    const db = new InMemoryCapabilityDb(
+      { models: ["anthropic.claude-haiku-4-5"], reports: [] },
+      [{ dimension: "output", unit: "tokens", limit_value: 1 }],
+    );
+    const result = await handleCapabilityInvokeStream(baseDeps(db, { invoker: streamInvoker }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.statusCode).toBe(429);
+    expect(db.ledger.every((r) => r.status === "released")).toBe(true);
+  });
+
+  it("releases the reservation and emits an error event when the stream throws", async () => {
+    const db = new InMemoryCapabilityDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
+    const result = await handleCapabilityInvokeStream(
+      baseDeps(db, {
+        invoker: {
+          async converse() {
+            throw new Error("not used");
+          },
+          // eslint-disable-next-line require-yield
+          async *converseStream() {
+            throw new Error("bedrock stream exploded");
+          },
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected an open stream");
+    const events = [];
+    for await (const evt of result.stream) events.push(evt);
+    const err = events.find((e) => e.type === "error");
+    expect(err?.type).toBe("error");
+    expect(db.ledger.every((r) => r.status === "released")).toBe(true);
   });
 });

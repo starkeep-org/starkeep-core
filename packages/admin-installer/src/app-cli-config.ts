@@ -41,6 +41,10 @@ export interface StarkeepCliConfig {
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
+  /** Name of the RESPONSE_STREAM CDS Lambda for the streaming capability broker
+   * (§3.6) — invoked directly via InvokeWithResponseStream, not a Function URL —
+   * threaded into per-app Lambdas as STARKEEP_CLOUD_STREAM_FUNCTION. */
+  capabilityStreamFunction?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
   appParentDirs?: string[];

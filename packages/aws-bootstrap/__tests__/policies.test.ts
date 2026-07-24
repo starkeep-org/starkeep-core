@@ -72,6 +72,10 @@ describe("manager policy (the install/uninstall allow-list)", () => {
         "kms:Encrypt",
         "kms:GenerateDataKey",
         "kms:Decrypt",
+        // Foundational one-time account setup: submit the Bedrock use-case form
+        // so gated providers can be invoked (plan §3.6). Account config, not a
+        // data-plane verb — the negatives below still hold.
+        "bedrock:*UseCaseForModelAccess",
       ].sort(),
     );
     // The load-bearing negatives: Manager can never read user data or app secrets.

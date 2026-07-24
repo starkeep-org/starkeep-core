@@ -778,6 +778,18 @@ export function buildRuntimePolicy(
       Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-${appId}-*`,
     },
     {
+      // Streaming capability broker (plan §3.6/§3.7): invoke the cloud-data-
+      // server streaming Lambda via the InvokeWithResponseStream API (the AWS
+      // SDK signs the call; lambda:InvokeFunction authorizes it). The handler's
+      // HMAC verification + grant check remain the real authorization — this
+      // only permits reaching the one streaming function. NOT the app's own
+      // namespace, so it's a distinct statement from AppInvokeOwnLambdas above.
+      Sid: "AppInvokeCapabilityStream",
+      Effect: "Allow",
+      Action: "lambda:InvokeFunction",
+      Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-cloud-data-server-api-stream`,
+    },
+    {
       Sid: "AppLogWrites",
       Effect: "Allow",
       Action: ["logs:CreateLogStream", "logs:PutLogEvents"],

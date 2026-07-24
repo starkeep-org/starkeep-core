@@ -15,6 +15,7 @@ import {
   UpdateAssumeRolePolicyCommand,
   EntityAlreadyExistsException,
   NoSuchEntityException,
+  MalformedPolicyDocumentException,
 } from "@aws-sdk/client-iam";
 import type { AwsCredentials } from "./session";
 import {
@@ -556,20 +557,54 @@ export async function createCapabilityBrokerRole(input: {
   // Trust names the CDS role (single-hop assume) plus Manager (for management);
   // the standard app trust policy with the CDS principal included.
   const assumeRolePolicy = buildAppRoleTrustPolicy(stackPrefix, accountId, true);
-  try {
-    await iam.send(
-      new CreateRoleCommand({
-        RoleName: roleName,
-        AssumeRolePolicyDocument: assumeRolePolicy,
-        PermissionsBoundary: capabilityBrokerPermissionsBoundaryArn,
-        Tags: [
-          { Key: "starkeep:appId", Value: CAPABILITY_BROKER_APP_ID },
-          { Key: "starkeep:managed", Value: "true" },
-        ],
-      }),
-    );
-  } catch (err) {
-    if (!(err instanceof EntityAlreadyExistsException)) throw err;
+  // The trust policy names the CDS role, which step 1a of this same install
+  // created moments earlier. IAM's trust-policy validator is eventually
+  // consistent about brand-new role principals, so a CreateRole issued right
+  // after the CDS role is minted can 400 with MalformedPolicyDocumentException
+  // ("Invalid principal in policy: ...cloud-data-server-role") until the new
+  // principal propagates. Retry with backoff — a live-only race the fake-backed
+  // unit tests never exercised (README §Gotchas: "IAM propagation can exceed a
+  // couple of minutes"). EntityAlreadyExists means the role predates this run
+  // (CDS role long-propagated), so no retry is needed on the update path.
+  const started = Date.now();
+  const maxWaitMs = 120_000;
+  let alreadyExisted = false;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await iam.send(
+        new CreateRoleCommand({
+          RoleName: roleName,
+          AssumeRolePolicyDocument: assumeRolePolicy,
+          PermissionsBoundary: capabilityBrokerPermissionsBoundaryArn,
+          Tags: [
+            { Key: "starkeep:appId", Value: CAPABILITY_BROKER_APP_ID },
+            { Key: "starkeep:managed", Value: "true" },
+          ],
+        }),
+      );
+      break;
+    } catch (err) {
+      if (err instanceof EntityAlreadyExistsException) {
+        alreadyExisted = true;
+        break;
+      }
+      const isPrincipalPropagation =
+        err instanceof MalformedPolicyDocumentException &&
+        /invalid principal/i.test(err.message ?? "");
+      if (isPrincipalPropagation && Date.now() - started < maxWaitMs) {
+        const delayMs = Math.min(8000, 1000 * 2 ** attempt);
+        console.log(
+          `capability-broker-role trust principal not yet visible (IAM propagation); ` +
+            `retrying in ${delayMs}ms…`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  if (alreadyExisted) {
+    // Heal trust drift (e.g. manager role recreated with a new RoleId).
     await iam.send(
       new UpdateAssumeRolePolicyCommand({ RoleName: roleName, PolicyDocument: assumeRolePolicy }),
     );

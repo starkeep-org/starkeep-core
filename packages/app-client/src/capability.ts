@@ -19,7 +19,13 @@
  * result (never throws) so an app can run degraded.
  */
 
-import { signedFetch } from "./sign";
+import {
+  signedFetch,
+  signRequest,
+  APP_ID_HEADER,
+  APP_SIG_HEADER,
+  APP_TS_HEADER,
+} from "./sign";
 import { loadAppCredentials, type AppCredentials } from "./credentials";
 
 export type RequestModality = "text" | "image" | "audio" | "video";
@@ -174,6 +180,210 @@ export async function getGrantedCapabilities(appId: string): Promise<GrantedCapa
   if (resp.status !== 200) return [];
   const parsed = (await resp.json().catch(() => ({}))) as { capabilities?: GrantedCapability[] };
   return parsed.capabilities ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (plan §3.6/§3.7)
+// ---------------------------------------------------------------------------
+
+/** An SSE event from the streaming broker: incremental `text`, a terminal
+ * `done` (usage + derived cost), or a mid-stream `error`. */
+export type CapabilityStreamEvent =
+  | { type: "text"; text: string }
+  | {
+      type: "done";
+      model: string;
+      usage: CapabilityUsage;
+      estCostUsd: number;
+      invocationId: string;
+    }
+  | { type: "error"; status: number; error: string; message?: string };
+
+export type InvokeCapabilityStreamResult =
+  | { granted: false }
+  | { granted: true; ok: false; status: number; error: string; detail?: unknown }
+  | { granted: true; ok: true; stream: AsyncGenerator<CapabilityStreamEvent> };
+
+/**
+ * Resolve the streaming target: the app's credentials (for HMAC signing) plus
+ * the cloud-data-server streaming Lambda's NAME.
+ *
+ * The buffering API Gateway can't emit SSE, so streaming is served by a second
+ * CDS Lambda invoked DIRECTLY via `InvokeWithResponseStream` — there is no
+ * Function URL (this account blocks public NONE URLs, and CloudFront OAC can't
+ * sign a RESPONSE_STREAM URL). The caller must therefore hold a per-app role
+ * permitting `lambda:InvokeFunction` on that function; the AWS SDK signs the
+ * invoke (SigV4) and the handler still verifies the HMAC over the payload.
+ * The function name is threaded into per-app Lambdas as
+ * `STARKEEP_CLOUD_STREAM_FUNCTION`.
+ */
+async function loadStreamTarget(
+  appId: string,
+): Promise<{ creds: AppCredentials; functionName: string }> {
+  const creds = await loadAppCredentials(appId);
+  if (!creds) {
+    throw new CapabilityUnavailableError(
+      `App "${appId}" is not installed / has no credentials on this host`,
+    );
+  }
+  const functionName = process.env.STARKEEP_CLOUD_STREAM_FUNCTION;
+  if (!functionName) {
+    throw new CapabilityUnavailableError(
+      "Streaming capabilities require the cloud streaming broker. Set " +
+        "STARKEEP_CLOUD_STREAM_FUNCTION (the cloud-data-server streaming Lambda " +
+        "name; the caller must hold a per-app role permitting " +
+        "lambda:InvokeFunction on it).",
+    );
+  }
+  return { creds, functionName };
+}
+
+// The subset of a RESPONSE_STREAM Lambda's event-stream we consume: incremental
+// payload chunks and the terminal completion (which may carry a function error).
+interface LambdaStreamEvent {
+  PayloadChunk?: { Payload?: Uint8Array };
+  InvokeComplete?: { ErrorCode?: string; ErrorDetails?: string };
+}
+
+/**
+ * Decode a RESPONSE_STREAM Lambda event-stream into `CapabilityStreamEvent`s.
+ * The handler writes raw SSE frames (`data: <json>\n\n`) with no HTTP prelude
+ * (direct invoke has none), so we reassemble frames across chunk boundaries and
+ * parse each `data:` payload. A Lambda-level failure at completion (function
+ * error / throttle) surfaces as a synthetic `error` event.
+ */
+async function* parseLambdaSseStream(
+  events: AsyncIterable<LambdaStreamEvent>,
+): AsyncGenerator<CapabilityStreamEvent> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const ev of events) {
+    if (ev.PayloadChunk?.Payload) {
+      buffer += decoder.decode(ev.PayloadChunk.Payload, { stream: true });
+      let sep: number;
+      // SSE frames are separated by a blank line ("\n\n").
+      while ((sep = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const json = line.slice(5).trim();
+          if (!json) continue;
+          try {
+            yield JSON.parse(json) as CapabilityStreamEvent;
+          } catch {
+            /* skip a malformed frame rather than aborting the whole stream */
+          }
+        }
+      }
+    } else if (ev.InvokeComplete?.ErrorCode) {
+      yield {
+        type: "error",
+        status: 502,
+        error: "stream_invoke_failed",
+        message: ev.InvokeComplete.ErrorDetails ?? ev.InvokeComplete.ErrorCode,
+      };
+    }
+  }
+}
+
+// Lazy AWS Lambda client (kept off the load path in local/non-streaming use,
+// mirroring credentials.ts's lazy client-ssm import). Constructed once per
+// process; aws-sdk-client-mock intercepts at the client level so tests still
+// see it regardless of when it's created.
+let lambdaClientSingleton: unknown = null;
+async function getLambdaClient(): Promise<{
+  send: (cmd: unknown) => Promise<{ EventStream?: AsyncIterable<LambdaStreamEvent> }>;
+}> {
+  const { LambdaClient } = await import("@aws-sdk/client-lambda");
+  if (!lambdaClientSingleton) {
+    lambdaClientSingleton = new LambdaClient({
+      region: process.env.AWS_REGION ?? "us-east-1",
+    });
+  }
+  return lambdaClientSingleton as {
+    send: (cmd: unknown) => Promise<{ EventStream?: AsyncIterable<LambdaStreamEvent> }>;
+  };
+}
+
+/**
+ * Invoke a capability with a STREAMED (SSE) response over direct Lambda
+ * `InvokeWithResponseStream`. Because a raw invoke stream has no HTTP status,
+ * pre-flight rejections arrive IN-BAND as a leading `error` frame: this reads
+ * the first event and, if it's an error, maps it back to the same shape as
+ * {@link invokeCapability} — `{ granted: false }` on `not_granted`, a structured
+ * `ok: false` otherwise. On a real stream it returns `{ ok: true, stream }`
+ * whose events end in a terminal `done` (or mid-invoke `error`). Throws only
+ * when the streaming broker is unreachable (no `STARKEEP_CLOUD_STREAM_FUNCTION`).
+ */
+export async function invokeCapabilityStream(
+  appId: string,
+  capability: string,
+  request: InvokeCapabilityRequest,
+): Promise<InvokeCapabilityStreamResult> {
+  const { creds, functionName } = await loadStreamTarget(appId);
+  const subPath = `/capabilities/${encodeURIComponent(capability)}/invoke-stream`;
+  const bodyStr = JSON.stringify(request);
+  // HMAC headers over method + subPath + body — the SAME signature the buffered
+  // route uses, verified by the handler against the per-app SecureString.
+  const sigHeaders = signRequest({
+    appId: creds.appId,
+    hmacSecret: creds.hmacSecret,
+    method: "POST",
+    path: subPath,
+    body: bodyStr,
+  });
+  // HTTP-shaped payload: the handler routes on rawPath and re-verifies the HMAC
+  // from these headers, so a direct invoke is indistinguishable from a gateway
+  // request to it. Header keys are lowercased (the handler normalizes anyway).
+  const payload = {
+    rawPath: `/apps/${appId}${subPath}`,
+    requestContext: { http: { method: "POST" } },
+    headers: {
+      "content-type": "application/json",
+      [APP_ID_HEADER.toLowerCase()]: sigHeaders[APP_ID_HEADER],
+      [APP_SIG_HEADER.toLowerCase()]: sigHeaders[APP_SIG_HEADER],
+      [APP_TS_HEADER.toLowerCase()]: sigHeaders[APP_TS_HEADER],
+    },
+    body: bodyStr,
+    isBase64Encoded: false,
+  };
+
+  const { InvokeWithResponseStreamCommand } = await import("@aws-sdk/client-lambda");
+  const client = await getLambdaClient();
+  const resp = await client.send(
+    new InvokeWithResponseStreamCommand({
+      FunctionName: functionName,
+      Payload: Buffer.from(JSON.stringify(payload), "utf8"),
+    }),
+  );
+  if (!resp.EventStream) {
+    return { granted: true, ok: false, status: 502, error: "no_stream" };
+  }
+
+  const gen = parseLambdaSseStream(resp.EventStream);
+  // Peek the first event: a pre-flight rejection is a leading `error` frame.
+  const first = await gen.next();
+  if (first.done) {
+    return { granted: true, ok: false, status: 502, error: "empty_stream" };
+  }
+  const firstEvt = first.value;
+  if (firstEvt.type === "error") {
+    if (firstEvt.error === "not_granted") return { granted: false };
+    return {
+      granted: true,
+      ok: false,
+      status: firstEvt.status,
+      error: firstEvt.error,
+      detail: firstEvt.message,
+    };
+  }
+  // Real stream — re-emit the peeked event, then the remainder.
+  async function* full(): AsyncGenerator<CapabilityStreamEvent> {
+    yield firstEvt;
+    yield* gen;
+  }
+  return { granted: true, ok: true, stream: full() };
 }
 
 /**

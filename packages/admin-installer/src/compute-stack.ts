@@ -75,6 +75,14 @@ export interface ComputeContext {
    * can call the broker over HTTPS via @starkeep/app-client.
    */
   apiGatewayUrl: string;
+  /**
+   * Name of the RESPONSE_STREAM CDS Lambda for the streaming capability broker,
+   * invoked directly via InvokeWithResponseStream (not a Function URL). Injected
+   * into per-app Lambdas as STARKEEP_CLOUD_STREAM_FUNCTION so app-client's
+   * `invokeCapabilityStream` can reach it (the buffering gateway can't do SSE).
+   * Empty when the CDS predates the streaming broker.
+   */
+  capabilityStreamFunction?: string;
   authorizerId: string;
   region: string;
   accountId: string;

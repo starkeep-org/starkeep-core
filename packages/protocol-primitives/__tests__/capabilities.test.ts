@@ -92,7 +92,9 @@ describe("model registry", () => {
     expect(m?.source).toBe("platform");
     expect(m?.provider).toBe("anthropic");
     expect(m?.vision).toBe(true);
-    expect(bedrockInvokeTarget(m!)).toBe("us.anthropic.claude-haiku-4-5");
+    // haiku-4-5 has no unversioned cross-region profile alias (unlike
+    // sonnet-5 / opus-4-8), so its on-demand target is the dated id.
+    expect(bedrockInvokeTarget(m!)).toBe("us.anthropic.claude-haiku-4-5-20251001-v1:0");
     expect(m?.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(perMTok(1));
   });
 

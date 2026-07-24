@@ -35,6 +35,7 @@ import {
   CAPABILITY_BEDROCK_INVOKE,
   type RequestModality,
   type CapabilityRequestContext,
+  type EffectiveModel,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseClient } from "@starkeep/storage-aurora-dsql";
 import {
@@ -115,36 +116,74 @@ function estimateTextTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-export async function handleCapabilityInvoke(
+/** A prepared, gate-cleared request with a LIVE ledger reservation that the
+ * caller MUST reconcile (success) or release (failure). */
+interface PreparedInvoke {
+  model: EffectiveModel;
+  ctx: CapabilityRequestContext;
+  content?: ResolvedContent;
+  maxTokens: number;
+  ledgerKey: LedgerKey;
+  invocationId: string;
+  /** App-reported non-generic INPUT quantities (declared + filtered). */
+  appReports: Record<string, number>;
+}
+
+type PrepareResult =
+  | { ok: false; response: CapabilityHandlerResponse }
+  | { ok: true; prepared: PreparedInvoke };
+
+/**
+ * Shared pre-flight for the buffered and streaming invoke paths — plan §3.4
+ * steps 1–4, i.e. everything up to (but not including) the Bedrock call:
+ * validate capability + model, read the referenced content under the app's own
+ * role, fail-closed on undeclared non-generic gates, RESERVE the worst-case
+ * projection on the ledger, then SUM-check every matching gate.
+ *
+ * Because the reservation covers the full `maxTokens` output ceiling AND the
+ * gate check passes against it, the subsequent invoke — buffered OR streamed —
+ * provably cannot push any gate past its limit. That is precisely what lets the
+ * streaming path reuse this unchanged: worst-case reservation already gives the
+ * "can't blow the gate" guarantee, so a mid-stream abort would be redundant for
+ * safety; streaming only adds incremental delivery + reconcile-to-actuals.
+ *
+ * Returns a rejection response OR the prepared request holding a live
+ * reservation the caller is obligated to reconcile/release.
+ */
+async function prepareInvoke(
   deps: CapabilityHandlerDeps,
-): Promise<CapabilityHandlerResponse> {
-  const { appId, capabilityName, body, capClient, invoker } = deps;
-  const nowMs = deps.nowMs ?? Date.now;
-  const timeZone = deps.timeZone ?? "UTC";
+  nowMs: () => number,
+  timeZone: string,
+): Promise<PrepareResult> {
+  const { appId, capabilityName, body, capClient } = deps;
+  const reject = (statusCode: number, bodyObj: unknown): PrepareResult => ({
+    ok: false,
+    response: { statusCode, body: bodyObj },
+  });
 
   // Only bedrock.invoke is wired; unknown capability names 404 at the router.
   if (capabilityName !== CAPABILITY_BEDROCK_INVOKE) {
-    return { statusCode: 404, body: { error: `Unknown capability: ${capabilityName}` } };
+    return reject(404, { error: `Unknown capability: ${capabilityName}` });
   }
-  if (!body.model) return { statusCode: 400, body: { error: "model is required" } };
-  if (!body.prompt) return { statusCode: 400, body: { error: "prompt is required" } };
+  if (!body.model) return reject(400, { error: "model is required" });
+  if (!body.prompt) return reject(400, { error: "prompt is required" });
 
   // (1) Grant.
   const grantRow = await loadCapabilityGrant(capClient, appId, capabilityName);
   if (!grantRow) {
     // Well-defined "not granted" result the app can branch on (degraded mode).
-    return { statusCode: 403, body: { error: "not_granted", capability: capabilityName } };
+    return reject(403, { error: "not_granted", capability: capabilityName });
   }
   const grant = buildCapabilityGrant(grantRow);
 
   // (2) Model: approved by grant + resolvable in the effective registry.
   if (!canInvokeModel(grant, body.model)) {
-    return { statusCode: 403, body: { error: "model_not_granted", model: body.model } };
+    return reject(403, { error: "model_not_granted", model: body.model });
   }
   const overrides = await loadModelOverrides(capClient);
   const model = effectiveModel(body.model, overrides);
   if (!model) {
-    return { statusCode: 400, body: { error: "unknown_model", model: body.model } };
+    return reject(400, { error: "unknown_model", model: body.model });
   }
 
   // (3) By-reference content read under the app's own role (source of truth for
@@ -153,13 +192,12 @@ export async function handleCapabilityInvoke(
   if (body.contentRef) {
     const read = await deps.readContent(body.contentRef);
     if (!read.ok) {
-      return { statusCode: read.status ?? 403, body: { error: read.message ?? "forbidden" } };
+      return reject(read.status ?? 403, { error: read.message ?? "forbidden" });
     }
     content = read.content;
   }
 
-  const modality: RequestModality =
-    body.modality ?? (content?.image ? "image" : "text");
+  const modality: RequestModality = body.modality ?? (content?.image ? "image" : "text");
   const ctx: CapabilityRequestContext = {
     appId,
     provider: model.provider,
@@ -185,10 +223,7 @@ export async function handleCapabilityInvoke(
     }
   }
 
-  const maxTokens = Math.min(
-    HARD_MAX_TOKENS,
-    Math.max(1, body.maxTokens ?? DEFAULT_MAX_TOKENS),
-  );
+  const maxTokens = Math.min(HARD_MAX_TOKENS, Math.max(1, body.maxTokens ?? DEFAULT_MAX_TOKENS));
 
   // (4) Gate chokepoint.
   const gates = await loadGates(capClient, capabilityName);
@@ -199,10 +234,11 @@ export async function handleCapabilityInvoke(
     if (!gateMatches(gate, ctx)) continue;
     const key = dimensionUnitKey(gate.dimension, gate.unit);
     if (isNonGenericDimensionUnit(gate.dimension, gate.unit) && !grant.reports.has(key)) {
-      return {
-        statusCode: 403,
-        body: { error: "undeclared_dimension", dimension: gate.dimension, unit: gate.unit },
-      };
+      return reject(403, {
+        error: "undeclared_dimension",
+        dimension: gate.dimension,
+        unit: gate.unit,
+      });
     }
   }
 
@@ -240,19 +276,29 @@ export async function handleCapabilityInvoke(
   });
   if (!decision.allowed) {
     await release(capClient, invocationId);
-    return {
-      statusCode: 429,
-      body: {
-        error: "gate_exceeded",
-        breaches: decision.breaches.map((b) => ({
-          dimension: b.gate.dimension,
-          unit: b.gate.unit,
-          limit: b.gate.limit,
-          current: b.current,
-        })),
-      },
-    };
+    return reject(429, {
+      error: "gate_exceeded",
+      breaches: decision.breaches.map((b) => ({
+        dimension: b.gate.dimension,
+        unit: b.gate.unit,
+        limit: b.gate.limit,
+        current: b.current,
+      })),
+    });
   }
+
+  return { ok: true, prepared: { model, ctx, content, maxTokens, ledgerKey, invocationId, appReports } };
+}
+
+export async function handleCapabilityInvoke(
+  deps: CapabilityHandlerDeps,
+): Promise<CapabilityHandlerResponse> {
+  const nowMs = deps.nowMs ?? Date.now;
+  const timeZone = deps.timeZone ?? "UTC";
+  const prep = await prepareInvoke(deps, nowMs, timeZone);
+  if (!prep.ok) return prep.response;
+  const { model, ctx, content, maxTokens, ledgerKey, invocationId, appReports } = prep.prepared;
+  const { capClient, invoker, body } = deps;
 
   // (5) Assume the capability-broker role and invoke Bedrock.
   let result;
@@ -262,7 +308,7 @@ export async function handleCapabilityInvoke(
       target: bedrockInvokeTarget(model),
       region: deps.region,
       provider: model.provider,
-      prompt: body.prompt,
+      prompt: body.prompt!,
       images: content?.image ? [content.image] : undefined,
       maxTokens,
       credentials: creds,
@@ -302,6 +348,107 @@ export async function handleCapabilityInvoke(
       invocationId,
     },
   };
+}
+
+/** SSE events emitted by the streaming broker path (plan §3.6/§3.7). */
+export type CapabilityStreamEvent =
+  | { type: "text"; text: string }
+  | {
+      type: "done";
+      model: string;
+      usage: { inputTokens: number; outputTokens: number };
+      estCostUsd: number;
+      invocationId: string;
+    }
+  | { type: "error"; status: number; error: string; message?: string };
+
+export type CapabilityStreamResult =
+  | { ok: false; response: CapabilityHandlerResponse }
+  | { ok: true; invocationId: string; stream: AsyncGenerator<CapabilityStreamEvent> };
+
+/**
+ * Streaming sibling of {@link handleCapabilityInvoke} (plan §3.6/§3.7). All
+ * pre-flight (grant/model/content/gate reservation) runs FIRST via the shared
+ * {@link prepareInvoke}; if it rejects, the caller emits a normal buffered error
+ * response and never opens the SSE stream (so a 403/429 keeps its real status
+ * code — you can't change status once streaming has begun).
+ *
+ * Once cleared, `stream` yields `text` chunks as Bedrock produces them and a
+ * terminal `done` (usage + derived cost + invocationId) after the ledger is
+ * reconciled to actuals. A mid-invoke failure releases the reservation and
+ * yields a single `error` event. The worst-case reservation from prepareInvoke
+ * already bounds spend, so there is no separate mid-stream gate abort.
+ */
+export async function handleCapabilityInvokeStream(
+  deps: CapabilityHandlerDeps,
+): Promise<CapabilityStreamResult> {
+  const nowMs = deps.nowMs ?? Date.now;
+  const timeZone = deps.timeZone ?? "UTC";
+  const prep = await prepareInvoke(deps, nowMs, timeZone);
+  if (!prep.ok) return { ok: false, response: prep.response };
+  const { model, ctx, content, maxTokens, ledgerKey, invocationId, appReports } = prep.prepared;
+  const { capClient, invoker, body } = deps;
+
+  async function* stream(): AsyncGenerator<CapabilityStreamEvent> {
+    let text = "";
+    let inputTokens = 0;
+    let outputTokens = 0;
+    try {
+      const creds = await deps.assumeCapabilityCreds();
+      for await (const evt of invoker.converseStream({
+        target: bedrockInvokeTarget(model),
+        region: deps.region,
+        provider: model.provider,
+        prompt: body.prompt!,
+        images: content?.image ? [content.image] : undefined,
+        maxTokens,
+        credentials: creds,
+      })) {
+        if (evt.type === "text" && evt.text) {
+          text += evt.text;
+          yield { type: "text", text: evt.text };
+        } else if (evt.type === "done") {
+          inputTokens = evt.inputTokens ?? 0;
+          outputTokens = evt.outputTokens ?? 0;
+        }
+      }
+    } catch (err) {
+      // Failed/aborted stream must not hold a reservation.
+      await release(capClient, invocationId);
+      yield {
+        type: "error",
+        status: 502,
+        error: "invoke_failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
+      return;
+    }
+
+    // Reconcile to actuals on stream completion.
+    const outputBytes = Buffer.byteLength(text, "utf8");
+    const reconciled = reconcileMeasurements({
+      model,
+      ctx,
+      inputTokens,
+      outputTokens,
+      inputBytes: content?.sizeBytes,
+      outputBytes,
+      appReports,
+    });
+    await reconcile(capClient, ledgerKey, reconciled);
+    const estCostUsd =
+      reconciled.find((m) => m.dimension === "cost" && m.unit === "usd")?.quantity ?? 0;
+
+    yield {
+      type: "done",
+      model: body.model!,
+      usage: { inputTokens, outputTokens },
+      estCostUsd,
+      invocationId,
+    };
+  }
+
+  return { ok: true, invocationId, stream: stream() };
 }
 
 export interface CapabilityReportDeps {

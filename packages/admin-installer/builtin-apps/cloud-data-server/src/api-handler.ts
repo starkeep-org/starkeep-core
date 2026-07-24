@@ -66,8 +66,10 @@ import {
 } from "./access-enforcer.js";
 import {
   handleCapabilityInvoke,
+  handleCapabilityInvokeStream,
   handleCapabilityReport,
   type CapabilityInvokeBody,
+  type CapabilityStreamEvent,
   type ContentReadResult,
 } from "./capability-handler.js";
 import { loadGrantedCapabilities } from "./capability-store.js";
@@ -1756,3 +1758,216 @@ function isAccessDenied(err: unknown): boolean {
   const status = (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
   return status === 403;
 }
+
+// ---------------------------------------------------------------------------
+// Streaming entrypoint — direct Lambda InvokeWithResponseStream (no Function URL)
+// ---------------------------------------------------------------------------
+//
+// The buffering API Gateway cannot emit Server-Sent Events, so the streaming
+// capability path is a SECOND function over this same bundle (handler =
+// api-handler.streamHandler, wrapped in awslambda.streamifyResponse). It has NO
+// Function URL: this account blocks public (NONE) Function URLs, and CloudFront
+// OAC cannot produce a signature a RESPONSE_STREAM URL accepts. Instead a caller
+// holding a per-app role invokes it via the Lambda InvokeWithResponseStream API;
+// the AWS SDK signs the request (SigV4) and lambda:InvokeFunction authorizes
+// reaching this one function. App identity is still established the SAME way as
+// the gateway data plane — the in-handler HMAC verifier over the payload — so an
+// IAM-authorized caller cannot spoof another app. The only route served is
+//   POST /apps/{appId}/capabilities/{name}/invoke-stream
+// everything else emits a single error event. Spend stays bounded by the
+// capability gate framework: prepareInvoke reserves the worst case BEFORE the
+// first byte streams. Request-rate is bounded by who may assume a per-app role
+// (no public entry at all), and the cost-governance layer bounds *spend*, the
+// load-bearing control.
+//
+// Because InvokeWithResponseStream returns a RAW byte stream (there is no HTTP
+// status prelude — awslambda.HttpResponseStream.from was a Function-URL-only
+// convenience), EVERY outcome is encoded in-band as an SSE event. A pre-flight
+// rejection (bad path, HMAC, grant, model, gate) becomes a single `error` frame
+// carrying the real status + machine code; the client maps a leading `error`
+// frame back to a structured rejection (and `not_granted` → degraded mode).
+
+// The Lambda Node runtime injects `awslambda` when the function is invoked in
+// RESPONSE_STREAM mode; it is not part of @types/aws-lambda, so declare the one
+// member we use. (HttpResponseStream is deliberately absent — see above.)
+declare const awslambda: {
+  streamifyResponse: (
+    fn: (
+      event: APIGatewayEvent,
+      responseStream: NodeJS.WritableStream,
+      context: LambdaContext,
+    ) => Promise<void>,
+  ) => (event: APIGatewayEvent, context: LambdaContext) => Promise<void>;
+};
+
+const STREAM_INVOKE_RE = /^\/capabilities\/([^/]+)\/invoke-stream$/;
+
+// One SSE frame per event. The event union (text | done | error) is shared with
+// the app-client, so the client parses these frames directly.
+function writeSseEvent(stream: NodeJS.WritableStream, evt: CapabilityStreamEvent): void {
+  stream.write(`data: ${JSON.stringify(evt)}\n\n`);
+}
+
+const streamHandlerImpl = async (
+  event: APIGatewayEvent,
+  responseStream: NodeJS.WritableStream,
+  context: LambdaContext,
+): Promise<void> => {
+    const toClose: Array<() => Promise<void>> = [];
+    // In-band rejection: a raw invoke stream carries no HTTP status, so a
+    // pre-flight failure is a single `error` SSE frame, then end. `error` is a
+    // short machine code; `message` is optional human detail.
+    const fail = (status: number, error: string, message?: string): void => {
+      writeSseEvent(responseStream, {
+        type: "error",
+        status,
+        error,
+        ...(message ? { message } : {}),
+      });
+      responseStream.end();
+    };
+    try {
+      const method = event.requestContext.http.method.toUpperCase();
+      const parsed = parseAppPath(event.rawPath);
+      if (!parsed) return fail(404, "not_found");
+      const { appId, subPath } = parsed;
+      const match = subPath.match(STREAM_INVOKE_RE);
+      if (!match || method !== "POST") return fail(404, "not_found");
+      const capabilityName = decodeURIComponent(match[1]!);
+
+      // HMAC gate — identical to the gateway data plane (verifies against the
+      // per-app SecureString). The signature covers method + subPath + body, not
+      // host, so the payload the caller signs verifies here unchanged.
+      const hmacSecret = await loadAppHmacSecret(appId);
+      if (!hmacSecret) return fail(401, "unknown_app", `Unknown app: ${appId}`);
+      const bodyBytes = event.body
+        ? (event.isBase64Encoded
+          ? Buffer.from(event.body, "base64")
+          : Buffer.from(event.body, "utf8"))
+        : Buffer.alloc(0);
+      const normalizedHeaders: Record<string, string | undefined> = {};
+      for (const [k, v] of Object.entries(event.headers ?? {})) {
+        if (typeof v === "string") normalizedHeaders[k.toLowerCase()] = v;
+      }
+      const hmacCheck = validateAppHmac(appId, method, subPath, normalizedHeaders, bodyBytes, hmacSecret);
+      if (!hmacCheck.ok) return fail(hmacCheck.status, "unauthorized", hmacCheck.message);
+
+      let capBody: CapabilityInvokeBody;
+      try {
+        capBody = JSON.parse(bodyBytes.length ? bodyBytes.toString("utf8") : "{}") as CapabilityInvokeBody;
+      } catch {
+        return fail(400, "invalid_body", "Invalid JSON body");
+      }
+
+      const accountId = getAccountId(context.invokedFunctionArn);
+      const creds = await getAppCreds(appId, accountId);
+      const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
+      await db.init();
+      toClose.push(() => db.close());
+
+      const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+      let grants: AccessGrants;
+      try {
+        grants = await loadAccessGrants(grantClient, appId);
+      } finally {
+        await grantClient.end();
+      }
+
+      // By-reference content read under the app's own role — the same source of
+      // truth for what the app may feed Bedrock as the buffered route.
+      const readContent = async (
+        ref: NonNullable<CapabilityInvokeBody["contentRef"]>,
+      ): Promise<ContentReadResult> => {
+        let key: string | null = null;
+        let mime: string | null = null;
+        let recordSize: number | null = null;
+        if (ref.recordId) {
+          const record = await db.get(ref.recordId as StarkeepId);
+          if (!record || record.deletedAt) return { ok: false, status: 404, message: "content_not_found" };
+          if (!canRead(grants, record.type)) return { ok: false, status: 403, message: "content_forbidden" };
+          if (!record.objectStorageKey) return { ok: false, status: 404, message: "content_has_no_bytes" };
+          key = record.objectStorageKey;
+          mime = record.mimeType ?? null;
+          recordSize = record.sizeBytes ?? null;
+        } else if (ref.objectKey) {
+          key = ref.objectKey;
+        } else {
+          return { ok: false, status: 400, message: "contentRef requires recordId or objectKey" };
+        }
+        const keyCheck = parseObjectKey(appId, key, grants, "read");
+        if (!keyCheck.ok) return { ok: false, status: keyCheck.status, message: keyCheck.message };
+        const got = await storage.get(key);
+        if (!got) return { ok: false, status: 404, message: "content_not_resident" };
+        const bytes = new Uint8Array(got.data as Buffer);
+        const format = mimeToImageFormat(mime ?? got.contentType ?? null);
+        return {
+          ok: true,
+          content: {
+            bytes,
+            sizeBytes: recordSize ?? got.size ?? bytes.byteLength,
+            ...(format ? { image: { format, bytes } } : {}),
+          },
+        };
+      };
+
+      const capClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+      toClose.push(() => capClient.end());
+
+      const result = await handleCapabilityInvokeStream({
+        appId,
+        capabilityName,
+        body: capBody,
+        capClient,
+        readContent,
+        assumeCapabilityCreds: async () => {
+          const c = await getCapabilityBrokerCreds(accountId);
+          return {
+            accessKeyId: c.accessKeyId,
+            secretAccessKey: c.secretAccessKey,
+            sessionToken: c.sessionToken,
+          };
+        },
+        invoker: getBedrockInvoker(),
+        region,
+        timeZone: process.env.STARKEEP_CAPABILITY_TZ ?? "UTC",
+      });
+
+      // Pre-flight rejection (grant/model/content/gate) → single in-band error
+      // frame carrying the real status + machine code, then end.
+      if (!result.ok) {
+        const body = result.response.body as { error?: string; message?: string };
+        return fail(
+          result.response.statusCode,
+          typeof body?.error === "string" ? body.error : `http_${result.response.statusCode}`,
+          typeof body?.message === "string" ? body.message : undefined,
+        );
+      }
+
+      // Approved → pipe events (text… then a terminal done/error) as raw SSE.
+      for await (const evt of result.stream) {
+        writeSseEvent(responseStream, evt);
+      }
+      responseStream.end();
+    } catch (e) {
+      console.error("Stream handler error:", e);
+      // Best-effort: harmless if bytes were already written (the client sees a
+      // truncated stream); an unstarted stream gets a clean error frame.
+      try {
+        fail(500, "internal_error");
+      } catch {
+        /* stream already committed — nothing more we can do */
+      }
+    } finally {
+      await Promise.allSettled(toClose.map((close) => close()));
+    }
+};
+
+// `awslambda` is injected only by the Lambda RESPONSE_STREAM runtime; in unit
+// tests / local it is absent, so decide the wrap by reading it off globalThis
+// (a bare top-level `awslambda.streamifyResponse(...)` would blow up on import).
+// Outside Lambda the unwrapped impl is exported and simply never invoked.
+const lambdaRuntime = (globalThis as { awslambda?: typeof awslambda }).awslambda;
+export const streamHandler =
+  lambdaRuntime && typeof lambdaRuntime.streamifyResponse === "function"
+    ? lambdaRuntime.streamifyResponse(streamHandlerImpl)
+    : streamHandlerImpl;

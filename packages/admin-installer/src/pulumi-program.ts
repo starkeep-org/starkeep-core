@@ -59,6 +59,13 @@ export function buildPulumiProgram(
             // packages/app-client/src/credentials.ts.
             STARKEEP_APP_CLIENT_MODE: "cloud",
             STARKEEP_CLOUD_DATA_BASE: ctx.apiGatewayUrl,
+            // Streaming capability broker: the RESPONSE_STREAM CDS Lambda name,
+            // invoked directly via InvokeWithResponseStream (not a Function URL).
+            // Only set when the CDS exposes it; app-client falls back to a clear
+            // "streaming unavailable" error otherwise.
+            ...(ctx.capabilityStreamFunction
+              ? { STARKEEP_CLOUD_STREAM_FUNCTION: ctx.capabilityStreamFunction }
+              : {}),
             STARKEEP_APP_CREDS_PARAMETER_NAME: `/${ctx.stackPrefix}/app-creds/${ctx.appId}`,
             ...handler.env,
           },

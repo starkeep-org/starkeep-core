@@ -266,6 +266,58 @@ export function buildCloudDataServerProgram(
     );
 
     // -----------------------------------------------------------------------
+    // Streaming Lambda (plan §3.6/§3.7)
+    //
+    // The buffering API Gateway can't emit Server-Sent Events, so the streaming
+    // capability broker is a SECOND function over the SAME bundle whose handler
+    // is the streamifyResponse-wrapped `api-handler.streamHandler`. It is invoked
+    // directly via the Lambda **InvokeWithResponseStream** API — NOT a Function
+    // URL: this account blocks public (NONE) Function URLs, and CloudFront OAC
+    // cannot produce a signature a RESPONSE_STREAM URL will accept. Instead the
+    // caller (which holds a per-app role) invokes the function under IAM and the
+    // AWS SDK signs the request. The handler still verifies HMAC from the payload
+    // (app identity — an IAM-authorized caller can't spoof another app), and
+    // spend stays bounded by the gate framework (reservation taken before the
+    // first byte). The caller sends an HTTP-shaped event as the payload, so the
+    // handler code is identical to a Function-URL invocation.
+    // -----------------------------------------------------------------------
+    const streamLambdaName = `${lambdaName}-stream`;
+    const streamLogGroup = new aws.cloudwatch.LogGroup("api-stream-log-group", {
+      name: `/aws/lambda/${streamLambdaName}`,
+      retentionInDays: 14,
+      tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
+    });
+    const streamFn = new aws.lambda.Function(
+      "api-stream",
+      {
+        name: streamLambdaName,
+        role: ctx.appRoleArn,
+        runtime: aws.lambda.Runtime.NodeJS22dX,
+        handler: "api-handler.streamHandler",
+        code: new pulumi.asset.FileArchive(ctx.distZipPath),
+        sourceCodeHash: ctx.bundleHash,
+        memorySize: 256,
+        // Streaming responses can run longer than the buffered 30s path.
+        timeout: 120,
+        environment: {
+          variables: {
+            AURORA_ENDPOINT: auroraHostname,
+            S3_BUCKET: bucket.bucket,
+            STACK_PREFIX: ctx.stackPrefix,
+            STARKEEP_APP_ID: "cloud-data-server",
+            STARKEEP_STACK_PREFIX: ctx.stackPrefix,
+            CLOUDFRONT_SIGNING_PARAM: cloudfrontSigningParamName,
+            ...(process.env.HMAC_CACHE_TTL_MS !== undefined
+              ? { HMAC_CACHE_TTL_MS: process.env.HMAC_CACHE_TTL_MS }
+              : {}),
+          },
+        },
+        tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
+      },
+      { dependsOn: [streamLogGroup] },
+    );
+
+    // -----------------------------------------------------------------------
     // API Gateway v2 + Cognito JWT authorizer + explicit reserved sub-namespaces
     //
     // The cloud-data-server lambda is reached via:
@@ -401,6 +453,26 @@ export function buildCloudDataServerProgram(
     new aws.apigatewayv2.Route("route-app-data-proxy", {
       apiId: api.id,
       routeKey: "ANY /apps/{appId}/app-data/{proxy+}",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
+    // Capability broker (plan §3.4). Two routes because APIGW v2 `{proxy+}`
+    // requires at least one trailing segment, and the granted-capabilities
+    // query hits the BARE `/capabilities`:
+    //   - GET  /apps/{appId}/capabilities                    (granted list)
+    //   - POST /apps/{appId}/capabilities/{name}/invoke      (broker invoke)
+    //   - POST /apps/{appId}/capabilities/{name}/report      (best-effort report)
+    // Handler logic lives in api-handler.ts (capability-handler.ts); identity
+    // is the HMAC verifier, same as the data plane. Without these the broker
+    // handlers are unreachable through the gateway (the Tier-3 e2e caught this).
+    new aws.apigatewayv2.Route("route-capabilities-list", {
+      apiId: api.id,
+      routeKey: "ANY /apps/{appId}/capabilities",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+    new aws.apigatewayv2.Route("route-capabilities-proxy", {
+      apiId: api.id,
+      routeKey: "ANY /apps/{appId}/capabilities/{proxy+}",
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
@@ -764,6 +836,11 @@ export function buildCloudDataServerProgram(
       cloudfrontSigningPrivateKey: signingKey.privateKeyPem,
       authorizerId: authorizer.id,
       functionArn: fn.arn,
+      // Streaming capability broker (plan §3.6/§3.7): the streaming Lambda's
+      // name. Callers with a per-app role invoke it via the Lambda
+      // InvokeWithResponseStream API (the SDK signs the request); there is no
+      // Function URL. Threaded to per-app Lambdas as STARKEEP_CLOUD_STREAM_FUNCTION.
+      capabilityStreamFunction: streamFn.name,
       region: ctx.region,
     };
   };

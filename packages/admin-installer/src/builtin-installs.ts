@@ -46,6 +46,7 @@ import {
   CAPABILITY_BROKER_APP_ID,
 } from "./iam";
 import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
+import { ensureBedrockUseCaseForm } from "./bedrock-usecase";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import { putCloudFrontSigningParameter } from "./app-creds";
@@ -154,6 +155,9 @@ export interface CloudDataServerInstallOutputs {
   apiGatewayExecutionArn: string;
   authorizerId: string;
   functionArn: string;
+  /** Name of the RESPONSE_STREAM CDS Lambda for the streaming capability broker
+   * (§3.6) — invoked directly via InvokeWithResponseStream, not a Function URL. */
+  capabilityStreamFunction: string;
   region: string;
 }
 
@@ -320,6 +324,30 @@ export async function installCloudDataServer(
     );
   }
 
+  // Step 1c: Submit the Bedrock use-case-details form (plan §3.6) — a one-time,
+  // account-global foundational action so gated providers (Anthropic) can be
+  // invoked on demand. Idempotent; form-free models (Amazon Nova) work without
+  // it. Run under Manager creds. Best-effort: a failure here must not block the
+  // whole cloud install (the broker still serves form-free models), so we warn
+  // and continue rather than abort.
+  try {
+    console.log("Ensuring Bedrock use-case form is submitted…");
+    const outcome = await ensureBedrockUseCaseForm({
+      region: config.region,
+      credentials: managerCreds,
+    });
+    console.log(
+      outcome === "submitted"
+        ? "Bedrock use-case form submitted (allow ~15 min for gated models to activate)."
+        : "Bedrock use-case form already on file.",
+    );
+  } catch (err) {
+    console.warn(
+      `Could not submit the Bedrock use-case form (gated providers may 502 until it is ` +
+        `filled out): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   // Step 2: Attach the wider temp-install-cloud-data-server policy.
   // Returns true when PutRolePolicy was actually called (policy is new or changed).
   // Skips the IAM call — and the propagation delay — when the policy is already
@@ -403,6 +431,7 @@ export async function installCloudDataServer(
     const publicBaseUrl = String(outputs.publicBaseUrl);
     const authorizerId = String(outputs.authorizerId);
     const functionArn = String(outputs.functionArn);
+    const capabilityStreamFunction = String(outputs.capabilityStreamFunction);
     const region = String(outputs.region);
 
     // Step 4.5: Persist the CloudFront URL-signing config (Part B) as a
@@ -469,6 +498,7 @@ export async function installCloudDataServer(
       apiGatewayExecutionArn,
       authorizerId,
       functionArn,
+      capabilityStreamFunction,
       region,
     };
   } catch (err) {

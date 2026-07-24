@@ -143,5 +143,17 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
         StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
       },
     },
+    {
+      // Foundational, one-time account setup: submit the Bedrock provider
+      // use-case-details form so on-demand invoke of gated models (e.g.
+      // Anthropic) is permitted. Account-global (Resource "*"), not per-app and
+      // not a data-plane verb — Manager is the install hub that performs it once
+      // during the cloud-data-server foundational install (idempotent: Get, then
+      // Put only if absent). *UseCaseForModelAccess = Get + Put.
+      Sid: "ManagerBedrockUseCaseForm",
+      Effect: "Allow",
+      Action: "bedrock:*UseCaseForModelAccess",
+      Resource: "*",
+    },
   ];
 }

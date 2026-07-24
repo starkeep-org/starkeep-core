@@ -30,11 +30,19 @@ import {
   solidPng,
   type LdsApp,
 } from "@starkeep/e2e";
-import { signedFetch, type AppCredentials } from "@starkeep/app-client";
+import {
+  signedFetch,
+  signRequest,
+  APP_ID_HEADER,
+  APP_SIG_HEADER,
+  APP_TS_HEADER,
+  type AppCredentials,
+} from "@starkeep/app-client";
 import { cloudDataServerBundleSha256Base64 } from "@starkeep/admin-installer";
 import {
   LambdaClient,
   GetFunctionConfigurationCommand,
+  InvokeWithResponseStreamCommand,
 } from "@aws-sdk/client-lambda";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
@@ -87,6 +95,85 @@ function cloudApp(local: AppCredentials): LdsApp {
     dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(local.appId)}`,
   };
   return { ...creds, fetch: (path, init) => signedFetch(creds, path, init) };
+}
+
+/** One decoded SSE event from the streaming broker. */
+interface CapabilityStreamEvt {
+  type: string;
+  text?: string;
+  usage?: { inputTokens?: number; outputTokens?: number };
+  estCostUsd?: number;
+  invocationId?: string;
+  status?: number;
+  error?: string;
+}
+
+/**
+ * Invoke the STREAMING capability broker the way a per-app Lambda does: NOT a
+ * Function URL / gateway fetch, but a direct Lambda `InvokeWithResponseStream`
+ * on the `${prefix}-app-cloud-data-server-api-stream` function (this account
+ * blocks public NONE Function URLs). The AWS SDK signs the invoke under the
+ * ambient operator creds (mirroring the GetFunctionConfiguration read above);
+ * the handler still verifies the per-app HMAC from the payload headers — so we
+ * build the same HTTP-shaped event + HMAC signature the app-client sends, then
+ * reassemble the raw SSE frames the RESPONSE_STREAM handler writes.
+ */
+async function streamCapability(
+  local: AppCredentials,
+  request: unknown,
+): Promise<CapabilityStreamEvt[]> {
+  const subPath = "/capabilities/bedrock.invoke/invoke-stream";
+  const body = JSON.stringify(request);
+  const sig = signRequest({
+    appId: local.appId,
+    hmacSecret: local.hmacSecret,
+    method: "POST",
+    path: subPath,
+    body,
+  });
+  const payload = {
+    rawPath: `/apps/${encodeURIComponent(local.appId)}${subPath}`,
+    requestContext: { http: { method: "POST" } },
+    headers: {
+      "content-type": "application/json",
+      [APP_ID_HEADER.toLowerCase()]: sig[APP_ID_HEADER],
+      [APP_SIG_HEADER.toLowerCase()]: sig[APP_SIG_HEADER],
+      [APP_TS_HEADER.toLowerCase()]: sig[APP_TS_HEADER],
+    },
+    body,
+    isBase64Encoded: false,
+  };
+  const lambda = new LambdaClient({ region: REGION });
+  const resp = await lambda.send(
+    new InvokeWithResponseStreamCommand({
+      FunctionName: config.capabilityStreamFunction,
+      Payload: Buffer.from(JSON.stringify(payload), "utf8"),
+    }),
+  );
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const events: CapabilityStreamEvt[] = [];
+  const drainFrames = (): void => {
+    let sep: number;
+    while ((sep = buffer.indexOf("\n\n")) >= 0) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      for (const line of frame.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const json = line.slice(5).trim();
+        if (json) events.push(JSON.parse(json) as CapabilityStreamEvt);
+      }
+    }
+  };
+  for await (const ev of resp.EventStream ?? []) {
+    if (ev.PayloadChunk?.Payload) {
+      buffer += decoder.decode(ev.PayloadChunk.Payload, { stream: true });
+      drainFrames();
+    }
+  }
+  buffer += decoder.decode();
+  drainFrames();
+  return events;
 }
 
 /**
@@ -674,15 +761,22 @@ function runTeardownScript(script: string): void {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "anthropic.claude-haiku-4-5",
+            // Amazon Nova Lite — form-free vision model, so this live step doesn't
+            // depend on the Anthropic use-case-form gate (see the foundational
+            // submit step). haiku stays granted for when that gate clears.
+            model: "amazon.nova-lite",
             prompt: "Describe this image in one short sentence.",
             contentRef: { recordId: syncedRecordId },
             maxTokens: 100,
             reports: { "input:megapixels": 0.3 },
           }),
         });
-        expect(res.status, await res.text().catch(() => "")).toBe(200);
-        const body = (await res.json()) as {
+        // Read the body ONCE — using it both as the assertion message and the
+        // parsed payload (fetch bodies are single-use; reading text() then
+        // json() throws "Body has already been read").
+        const bodyText = await res.text();
+        expect(res.status, bodyText).toBe(200);
+        const body = JSON.parse(bodyText) as {
           text: string;
           usage: { inputTokens: number; outputTokens: number };
           estCostUsd: number;
@@ -692,6 +786,44 @@ function runTeardownScript(script: string): void {
         expect(body.usage.outputTokens).toBeGreaterThan(0);
         expect(body.estCostUsd).toBeGreaterThan(0);
         expect(body.invocationId).toBeTruthy();
+      },
+    );
+
+    // Streaming path (plan §3.6/§3.7): a direct `InvokeWithResponseStream` on the
+    // second (RESPONSE_STREAM) CDS Lambda — NOT a Function URL / the buffering
+    // gateway. Same by-reference request; the response arrives as raw SSE frames.
+    (process.env.STARKEEP_AWS_BEDROCK === "1" ? it : it.skip)(
+      "streams a caption through the capability broker stream Lambda (real Bedrock SSE)",
+      async () => {
+        expect(
+          config.capabilityStreamFunction,
+          "cloud-data-server install must persist the streaming Lambda name",
+        ).toBeTruthy();
+        const events = await streamCapability(photos, {
+          // Form-free vision model (see the buffered step above).
+          model: "amazon.nova-lite",
+          prompt: "Describe this image in one short sentence.",
+          contentRef: { recordId: syncedRecordId },
+          maxTokens: 100,
+          reports: { "input:megapixels": 0.3 },
+        });
+
+        // No in-band pre-flight error frame; incremental `text` then terminal `done`.
+        const errorEvt = events.find((e) => e.type === "error");
+        expect(errorEvt, `unexpected stream error: ${JSON.stringify(errorEvt)}`).toBeUndefined();
+        const streamedText = events
+          .filter((e) => e.type === "text")
+          .map((e) => e.text ?? "")
+          .join("");
+        const done = events.find((e) => e.type === "done");
+        expect(
+          streamedText.length,
+          `expected streamed text; events=${JSON.stringify(events)}`,
+        ).toBeGreaterThan(0);
+        expect(done, "a terminal done event").toBeTruthy();
+        expect(done!.usage!.outputTokens).toBeGreaterThan(0);
+        expect(done!.estCostUsd!).toBeGreaterThan(0);
+        expect(done!.invocationId).toBeTruthy();
       },
     );
 

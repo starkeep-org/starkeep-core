@@ -61,6 +61,9 @@ export interface TestStackConfig {
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
+  /** Name of the RESPONSE_STREAM CDS Lambda for the streaming capability broker
+   * (§3.6); invoked directly via InvokeWithResponseStream, not a Function URL. */
+  capabilityStreamFunction?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
   appParentDirs?: string[];

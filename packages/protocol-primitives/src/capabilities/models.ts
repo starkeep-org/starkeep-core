@@ -21,7 +21,7 @@
 
 import { dimensionUnitKey } from "./dimensions.js";
 
-export type ModelProvider = "anthropic" | "openai" | "qwen" | "kimi" | "glm";
+export type ModelProvider = "anthropic" | "openai" | "qwen" | "kimi" | "glm" | "amazon";
 
 /** Per-`(dimension:unit)` price, in USD per single unit. Token rates are stored
  * here already divided down from the conventional $/MTok (see {@link perMTok}). */
@@ -90,9 +90,23 @@ export const PLATFORM_MODEL_REGISTRY: readonly PlatformModelEntry[] = [
   {
     modelId: "anthropic.claude-haiku-4-5",
     provider: "anthropic",
-    inferenceProfileId: "us.anthropic.claude-haiku-4-5",
+    // Unversioned aliases exist for sonnet-5/opus-4-8, but NOT for haiku-4-5 —
+    // its only on-demand cross-region profile is the dated id (confirmed live in
+    // us-east-2/us-east-1 via bedrock list-inference-profiles).
+    inferenceProfileId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     vision: true,
     defaults: { pricing: tokenPricing(1, 5), estimates: { imageTokens: 1600 } },
+  },
+  {
+    // Amazon Nova Lite — vision-capable, on the Converse path, and (being
+    // Amazon's own model) reachable WITHOUT the Anthropic use-case-form gate,
+    // so it is the form-free vision option for captioning. On-demand via the
+    // cross-region inference profile. Pricing per Bedrock: ~$0.06/$0.24 per MTok.
+    modelId: "amazon.nova-lite",
+    provider: "amazon",
+    inferenceProfileId: "us.amazon.nova-lite-v1:0",
+    vision: true,
+    defaults: { pricing: tokenPricing(0.06, 0.24), estimates: { imageTokens: 1300 } },
   },
   {
     modelId: "anthropic.claude-sonnet-5",

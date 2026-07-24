@@ -2,11 +2,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mockClient } from "aws-sdk-client-mock";
+import { LambdaClient, InvokeWithResponseStreamCommand } from "@aws-sdk/client-lambda";
 import {
   invokeCapability,
+  invokeCapabilityStream,
   getGrantedCapabilities,
   CapabilityUnavailableError,
   clearAppCredentialsCache,
+  type CapabilityStreamEvent,
 } from "../src/index.js";
 
 let dir: string;
@@ -25,8 +29,42 @@ function writeCreds(over: Record<string, unknown> = {}): void {
 function jsonResponse(status: number, body: unknown): Response {
   return {
     status,
+    headers: { get: (k: string) => (k.toLowerCase() === "content-type" ? "application/json" : null) },
     json: async () => body,
   } as unknown as Response;
+}
+
+const lambdaMock = mockClient(LambdaClient);
+
+/**
+ * A Lambda RESPONSE_STREAM result whose `EventStream` carries the given SSE
+ * events (the wire format the streaming handler writes: `data: <json>\n\n`).
+ * The bytes are sliced into small `PayloadChunk`s so the test also exercises
+ * the client's cross-chunk SSE-frame reassembly, and a terminal `InvokeComplete`
+ * closes the stream — mirroring a real `InvokeWithResponseStream` response.
+ */
+function lambdaSseStream(events: unknown[], chunkSize = 7): { EventStream: AsyncIterable<unknown> } {
+  const wire = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+  const bytes = new TextEncoder().encode(wire);
+  async function* gen(): AsyncGenerator<unknown> {
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      yield { PayloadChunk: { Payload: bytes.slice(i, i + chunkSize) } };
+    }
+    yield { InvokeComplete: {} };
+  }
+  return { EventStream: gen() };
+}
+
+/** The HTTP-shaped payload the client sends as the direct-invoke `Payload`. */
+function lastStreamPayload(): {
+  rawPath: string;
+  requestContext: { http: { method: string } };
+  headers: Record<string, string>;
+  body: string;
+} {
+  const calls = lambdaMock.commandCalls(InvokeWithResponseStreamCommand);
+  const input = calls[calls.length - 1]!.args[0].input as { Payload: Uint8Array };
+  return JSON.parse(Buffer.from(input.Payload).toString("utf8"));
 }
 
 beforeEach(() => {
@@ -37,12 +75,14 @@ beforeEach(() => {
   clearAppCredentialsCache();
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
+  lambdaMock.reset();
 });
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
   vi.unstubAllGlobals();
   delete process.env.STARKEEP_CLOUD_DATA_BASE;
+  delete process.env.STARKEEP_CLOUD_STREAM_FUNCTION;
   clearAppCredentialsCache();
 });
 
@@ -116,6 +156,88 @@ describe("invokeCapability", () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { text: "ok", usage: {}, model: "m" }));
     const res = await invokeCapability(APP_ID, "bedrock.invoke", { model: "m", prompt: "p" });
     expect(res.granted).toBe(true);
+  });
+});
+
+describe("invokeCapabilityStream", () => {
+  const STREAM_FN = "sk-dev-cloud-data-server-api-stream";
+
+  it("directly invokes the streaming Lambda and yields text chunks then a done event", async () => {
+    writeCreds();
+    process.env.STARKEEP_CLOUD_STREAM_FUNCTION = STREAM_FN;
+    lambdaMock.on(InvokeWithResponseStreamCommand).resolves(
+      lambdaSseStream([
+        { type: "text", text: "a " },
+        { type: "text", text: "dog" },
+        {
+          type: "done",
+          model: "anthropic.claude-haiku-4-5",
+          usage: { inputTokens: 100, outputTokens: 2 },
+          estCostUsd: 0.0001,
+          invocationId: "inv1",
+        },
+      ]),
+    );
+    const res = await invokeCapabilityStream(APP_ID, "bedrock.invoke", {
+      model: "anthropic.claude-haiku-4-5",
+      prompt: "caption",
+      contentRef: { recordId: "rec1" },
+    });
+    expect(res.granted).toBe(true);
+    if (!(res.granted && res.ok)) throw new Error("expected an open stream");
+
+    const events: CapabilityStreamEvent[] = [];
+    for await (const evt of res.stream) events.push(evt);
+    const text = events.filter((e) => e.type === "text").map((e) => (e.type === "text" ? e.text : "")).join("");
+    expect(text).toBe("a dog");
+    const done = events.find((e) => e.type === "done");
+    expect(done && done.type === "done" && done.invocationId).toBe("inv1");
+
+    // Invoked the configured stream function by NAME (no fetch / Function URL).
+    expect(fetchMock).not.toHaveBeenCalled();
+    const calls = lambdaMock.commandCalls(InvokeWithResponseStreamCommand);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args[0].input.FunctionName).toBe(STREAM_FN);
+    // The HTTP-shaped payload targets the invoke-stream sub-path under /apps/<appId>
+    // and carries the HMAC headers the handler re-verifies.
+    const payload = lastStreamPayload();
+    expect(payload.rawPath).toBe("/apps/photos/capabilities/bedrock.invoke/invoke-stream");
+    expect(payload.requestContext.http.method).toBe("POST");
+    expect(payload.headers["x-starkeep-app-id"]).toBe(APP_ID);
+    expect(payload.headers["x-starkeep-app-sig"]).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("returns { granted: false } on a not_granted pre-flight (in-band error frame, no stream)", async () => {
+    writeCreds();
+    process.env.STARKEEP_CLOUD_STREAM_FUNCTION = STREAM_FN;
+    lambdaMock
+      .on(InvokeWithResponseStreamCommand)
+      .resolves(lambdaSseStream([{ type: "error", status: 403, error: "not_granted" }]));
+    const res = await invokeCapabilityStream(APP_ID, "bedrock.invoke", { model: "m", prompt: "p" });
+    expect(res).toEqual({ granted: false });
+  });
+
+  it("surfaces a gate 429 pre-flight as a structured failure, still granted", async () => {
+    writeCreds();
+    process.env.STARKEEP_CLOUD_STREAM_FUNCTION = STREAM_FN;
+    lambdaMock
+      .on(InvokeWithResponseStreamCommand)
+      .resolves(lambdaSseStream([{ type: "error", status: 429, error: "gate_exceeded" }]));
+    const res = await invokeCapabilityStream(APP_ID, "bedrock.invoke", { model: "m", prompt: "p" });
+    expect(res.granted).toBe(true);
+    if (res.granted && !res.ok) {
+      expect(res.status).toBe(429);
+      expect(res.error).toBe("gate_exceeded");
+    } else throw new Error("expected failure");
+  });
+
+  it("throws CapabilityUnavailableError when no streaming function is configured", async () => {
+    writeCreds();
+    delete process.env.STARKEEP_CLOUD_STREAM_FUNCTION;
+    clearAppCredentialsCache();
+    await expect(
+      invokeCapabilityStream(APP_ID, "bedrock.invoke", { model: "m", prompt: "p" }),
+    ).rejects.toBeInstanceOf(CapabilityUnavailableError);
   });
 });
 

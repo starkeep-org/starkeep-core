@@ -34,8 +34,11 @@ export {
   type CapabilityUsage,
   type InvokeCapabilityResult,
   type GrantedCapability,
+  type CapabilityStreamEvent,
+  type InvokeCapabilityStreamResult,
   CapabilityUnavailableError,
   invokeCapability,
+  invokeCapabilityStream,
   getGrantedCapabilities,
   reportCapabilityOutput,
 } from "./capability";

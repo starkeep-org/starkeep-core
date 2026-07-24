@@ -81,6 +81,11 @@ export interface InstallerConfig {
    * `/apps/<appId>/...` on the same gateway.
    */
   apiGatewayUrl: string;
+  /** Name of the RESPONSE_STREAM CDS Lambda for the streaming capability broker
+   * (§3.6), invoked directly via InvokeWithResponseStream (not a Function URL);
+   * injected into per-app Lambdas as STARKEEP_CLOUD_STREAM_FUNCTION. Optional so a
+   * CDS that predates streaming still installs apps. */
+  capabilityStreamFunction?: string;
   permissionsBoundaryArn: string;
   foundationalPermissionsBoundaryArn: string;
   userDataOwnerPermissionsBoundaryArn: string;
@@ -233,34 +238,64 @@ async function installAppInner(
     });
   });
 
-  await runStep(registry, appId, "install", "attach_temp_install_ddl_policy", done, () =>
-    attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+  // alwaysRun: the app-install DDL is desired-state reconciliation, not a
+  // one-shot. A redeploy must re-apply the CURRENT manifest — new shared-type
+  // access grants, new capability models/reports, added app tables — none of
+  // which land if the DDL is skipped as "done" from a prior install. The DDL is
+  // built to be replayed (upserts / IF NOT EXISTS / ON CONFLICT), so re-running
+  // it is safe, and the temp DB-admin bracket must run alongside it. (Before
+  // this, changing an app's manifest and redeploying silently kept the old
+  // grants until a full uninstall — the Tier-3 e2e caught it via a new model.)
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "attach_temp_install_ddl_policy",
+    done,
+    () => attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+    { alwaysRun: true },
   );
 
-  await runStep(registry, appId, "install", "run_dsql_ddl", done, async () => {
-    const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
-    const dsqlOpts: DsqlDdlOptions = {
-      hostname: config.dsqlHostname,
-      region: config.region,
-      stackPrefix: config.stackPrefix,
-      accountId: config.accountId,
-      credentials: ddlCreds,
-    };
-    await runAppInstallDdl(
-      dsqlOpts,
-      appId,
-      ir.fileAccess,
-      ir.fileAccessAll,
-      ir.appSpecificSyncable.tables,
-      ir.appSpecificSyncable.files,
-      // Approved capability grants (plan §3.2). The manifest's declared set is
-      // granted; the admin UI drops denied optional capabilities before install.
-      ir.capabilities,
-    );
-  });
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "run_dsql_ddl",
+    done,
+    async () => {
+      const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
+      const dsqlOpts: DsqlDdlOptions = {
+        hostname: config.dsqlHostname,
+        region: config.region,
+        stackPrefix: config.stackPrefix,
+        accountId: config.accountId,
+        credentials: ddlCreds,
+      };
+      await runAppInstallDdl(
+        dsqlOpts,
+        appId,
+        ir.fileAccess,
+        ir.fileAccessAll,
+        ir.appSpecificSyncable.tables,
+        ir.appSpecificSyncable.files,
+        // Approved capability grants (plan §3.2). The manifest's declared set is
+        // granted; the admin UI drops denied optional capabilities before install.
+        ir.capabilities,
+      );
+    },
+    { alwaysRun: true },
+  );
 
-  await runStep(registry, appId, "install", "detach_temp_install_ddl_policy", done, () =>
-    detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+  // alwaysRun to pair with the always-run DDL above: the DB-admin temp policy is
+  // attached fresh each deploy, so it must be detached each deploy too.
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "detach_temp_install_ddl_policy",
+    done,
+    () => detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+    { alwaysRun: true },
   );
 
   // App creds: derived fresh (not persisted) — always re-assume on resume.
@@ -336,6 +371,7 @@ async function installAppInner(
           apiGatewayId: config.apiGatewayId,
           apiGatewayExecutionArn: config.apiGatewayExecutionArn,
           apiGatewayUrl: config.apiGatewayUrl,
+          capabilityStreamFunction: config.capabilityStreamFunction,
           authorizerId: config.authorizerId,
           region: config.region,
           accountId: config.accountId,

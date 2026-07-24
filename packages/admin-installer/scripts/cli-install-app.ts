@@ -184,6 +184,34 @@ const manifestPath = resolve(appDir, "starkeep.manifest.json");
 const rawManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
 const manifest = appManifestSchema.parse(rawManifest);
 
+// Operator consent (plan §3.2): the admin UI approves declared capabilities and
+// passes the OPTIONAL ones it denied via STARKEEP_DENIED_CAPABILITIES (comma-
+// separated names). Drop those before install so no grant row is written and the
+// app runs degraded. A `required` capability can't be dropped this way — denying
+// it blocks the install, which is the UI's job to surface, not silently skip.
+const deniedCapabilities = new Set(
+  (process.env.STARKEEP_DENIED_CAPABILITIES ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+if (deniedCapabilities.size > 0 && manifest.infraRequirements.capabilities) {
+  for (const cap of manifest.infraRequirements.capabilities) {
+    if (deniedCapabilities.has(cap.name) && cap.required) {
+      console.error(
+        `Cannot deny required capability "${cap.name}" — it is marked required by ` +
+          `${appId}'s manifest. Aborting install.`,
+      );
+      process.exit(1);
+    }
+  }
+  manifest.infraRequirements.capabilities = manifest.infraRequirements.capabilities.filter(
+    (cap) => !deniedCapabilities.has(cap.name),
+  );
+  const droppedNames = [...deniedCapabilities].join(", ");
+  console.log(`Operator denied optional capabilities: ${droppedNames} (app runs degraded).`);
+}
+
 console.log(`\nStarkeep ${appId} cloud install`);
 console.log(`  Region : ${region}`);
 console.log(`  Stage  : ${stackPrefix}`);
@@ -249,6 +277,7 @@ await installApp({
     apiGatewayId: config.apiGatewayId,
     apiGatewayExecutionArn,
     apiGatewayUrl: config.apiGatewayUrl ?? "",
+    capabilityStreamFunction: config.capabilityStreamFunction,
     authorizerId: config.authorizerId,
     permissionsBoundaryArn,
     foundationalPermissionsBoundaryArn,
