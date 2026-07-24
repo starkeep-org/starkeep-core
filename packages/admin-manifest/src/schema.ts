@@ -91,8 +91,10 @@ export const capabilityRequirementSchema = z.object({
   // Platform-owned capability name; validated against the registry in validate.ts.
   name: z.string().min(1),
   // Bedrock model ids the app may call. Shape check only (a provider-prefixed
-  // id); effective-registry membership is an install-time check.
-  models: z.array(z.string().regex(/^[a-z0-9]+\.[a-z0-9][a-z0-9._-]*$/)).min(1),
+  // id); effective-registry membership is an install-time check. Real Bedrock ids
+  // carry a colon-delimited version suffix (e.g. `amazon.nova-canvas-v1:0`,
+  // `amazon.nova-reel-v1:1`, `amazon.nova-lite-v1:0:24k`), so `:` is allowed.
+  models: z.array(z.string().regex(/^[a-z0-9]+\.[a-z0-9][a-z0-9._:-]*$/)).min(1),
   // false → app runs degraded if the user denies; true (default) → install blocked.
   required: z.boolean().default(true),
   // User-facing consent figure; becomes a per-app cost gate on approval.

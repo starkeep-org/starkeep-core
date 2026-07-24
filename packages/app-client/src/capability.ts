@@ -162,6 +162,98 @@ export async function invokeCapability(
   };
 }
 
+export interface InvokeCapabilityImageRequest {
+  model: string;
+  prompt: string;
+  /** Optional conditioning item (image-to-image), by reference. */
+  contentRef?: CapabilityContentRef;
+  /** Generation params (width/height/cfgScale/seed/quality). */
+  generation?: {
+    width?: number;
+    height?: number;
+    cfgScale?: number;
+    seed?: number;
+    quality?: "standard" | "premium";
+  };
+  /** App-reported non-generic INPUT quantities, keyed by "dimension:unit". */
+  reports?: Record<string, number>;
+}
+
+/** The image object(s) the CDS wrote to the app's syncable area (`sync-s3`). The
+ * app ingests them as normal records via its ordinary data routes. */
+export interface CapabilityImageOutput {
+  bucket: string;
+  keyPrefix: string;
+  keys: string[];
+  totalBytes: number;
+}
+
+export type InvokeCapabilityImageResult =
+  | { granted: false }
+  | { granted: true; ok: false; status: number; error: string; detail?: unknown }
+  | {
+      granted: true;
+      ok: true;
+      model: string;
+      output: CapabilityImageOutput;
+      estCostUsd: number;
+      invocationId: string;
+    };
+
+/**
+ * Generate an image via a `sync-s3` model (Nova Canvas), plan §3.8. Served by the
+ * same synchronous `/invoke` route as text, but the CDS writes the generated
+ * bytes to the app's syncable area under the app role and returns the object
+ * key(s) (there is no inline image body in the response). The app then ingests
+ * `output.keys` as normal records. `{ granted: false }` in degraded mode.
+ */
+export async function invokeCapabilityImage(
+  appId: string,
+  capability: string,
+  request: InvokeCapabilityImageRequest,
+): Promise<InvokeCapabilityImageResult> {
+  const creds = await loadCloudCapabilityCreds(appId);
+  const path = `/capabilities/${encodeURIComponent(capability)}/invoke`;
+  const resp = await signedFetch(creds, path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  const parsed = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+
+  if (resp.status === 200) {
+    const out = (parsed.output as CapabilityImageOutput) ?? {
+      bucket: "",
+      keyPrefix: "",
+      keys: [],
+      totalBytes: 0,
+    };
+    return {
+      granted: true,
+      ok: true,
+      model: String(parsed.model ?? request.model),
+      output: {
+        bucket: out.bucket,
+        keyPrefix: out.keyPrefix,
+        keys: out.keys ?? [],
+        totalBytes: Number(out.totalBytes ?? 0),
+      },
+      estCostUsd: Number(parsed.estCostUsd ?? 0),
+      invocationId: String(parsed.invocationId ?? ""),
+    };
+  }
+  if (resp.status === 403 && parsed.error === "not_granted") {
+    return { granted: false };
+  }
+  return {
+    granted: true,
+    ok: false,
+    status: resp.status,
+    error: typeof parsed.error === "string" ? parsed.error : `http_${resp.status}`,
+    detail: parsed,
+  };
+}
+
 /**
  * List the capabilities granted to this app (runtime-config style) so it can
  * decide up front what to attempt. Returns [] when the cloud plane is

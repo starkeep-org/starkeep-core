@@ -1,7 +1,14 @@
 # Plan — Cloud capability broker (Bedrock on-demand invoke)
 
-**Date:** 2026-07-22 (revised 2026-07-23 after review; adapter set set to Anthropic/OpenAI/Kimi/Qwen/GLM)
-**Status:** Proposed (design settled in discussion; not yet implemented)
+**Date:** 2026-07-22 (revised 2026-07-23 after review; adapter set set to Anthropic/OpenAI/Kimi/Qwen/GLM.
+Revised 2026-07-25: small-synchronous-binary image output built as CDS-writes-to-S3, delivery model
+reworked to three channels via `outputDelivery()`, e2e split into normal vs rarely-run-video tiers.)
+**Status:** Largely implemented (see §7 status markers). Built: manifest/registry/grants/gates/ledger,
+broker route (buffered + streaming + S3-location input), sync-image (`sync-s3`) + async-video
+(`async-s3`) output, app-client surface, admin UI. Live e2e: cheap text + image-gen in the normal
+suite, video behind a separate rare flag. Remaining live e2e breadth (§7 step 9): a live gate-breach
+429 (gate/ledger enforcement is unit-covered today), local-origin-proxy, degraded-grant, and
+non-Anthropic-provider live coverage.
 **Scope topic:** cloud-apps / roles-and-permissions / cloud-data-server
 
 ---
@@ -512,30 +519,69 @@ stateless request/response Lambda): the app starts a job and polls a status rout
 `GetAsyncInvoke`s on each poll and the completing poll reconciles the ledger. Output is written by
 Bedrock to a per-invocation folder in the **app's own syncable area**; on completion the CDS returns
 the output key(s) and the **app ingests them as normal records via the ordinary data plane under its
-own role** (the capability role never writes records). **Delivery channel is DERIVED from the model's
-`outputModality`** (registry), not a separate flag: `text` → inline (sync `/invoke`) or streamed
-(`/invoke-stream`), the app's choice; `image`/`audio`/`video` → always async S3 (`/invoke-async` +
-poll) — `outputIsAsyncS3(modality) = modality !== "text"` is the whole routing rule, guarded
-symmetrically on both route families. Wired across: `projectAsyncReservation` + `outputModality` on
-the model registry (`amazon.nova-reel` → `video`) (protocol-primitives); `StartAsyncInvoke`/`GetAsyncInvoke`
-client + Nova Reel body adapter (bedrock-client); `capability_async_jobs` tracking table +
-`commitReservation` (store); `handleCapabilityInvokeAsyncStart`/`…Status` (capability-handler);
+own role** (the capability role never writes records). Wired across: `projectAsyncReservation` +
+`outputModality` on the model registry (`amazon.nova-reel` → `video`) (protocol-primitives);
+`StartAsyncInvoke`/`GetAsyncInvoke` client + Nova Reel body adapter (bedrock-client);
+`capability_async_jobs` tracking table + `commitReservation` (store);
+`handleCapabilityInvokeAsyncStart`/`…Status` (capability-handler);
 `POST /capabilities/:name/invoke-async` + `GET /capabilities/:name/async/:id` (api-handler);
 `invokeCapabilityAsync`/`getCapabilityAsyncStatus` (app-client); boundary + identity policy gain
 `s3:PutObject` (files bucket, never `*`) and `bedrock:StartAsyncInvoke`/`GetAsyncInvoke`/
 `ListAsyncInvokes`, with a per-assume single-prefix PutObject session policy. Unit-tested with
-injected deps (no AWS); live `e2e-aws` against real Nova Reel deferred (availability/cost). The
-**small synchronous binary** case below remains unbuilt.
+injected deps (no AWS); live `e2e-aws` against real Nova Reel is a **separate, rarely-run** suite
+(video is expensive — see §5).
 
-The wired text increment returns **text** (captioning/tagging), reconciled inline. Non-text output
-splits three ways:
+**✅ Small-synchronous-binary (image) path BUILT 2026-07-25.** Cheap image generation (Amazon Nova
+Canvas) is **synchronous** — a single `InvokeModel` returns the image bytes (base64) in the response
+body; it has **no** `StartAsyncInvoke`/S3-output config (that exists only on the async video API).
+Verified against the live Bedrock catalog: `amazon.nova-canvas-v1:0` is `ON_DEMAND`, non-streaming,
+`outputModalities: [IMAGE]`; the async path does not apply to it.
 
-- **Text** (in scope) — returned inline in the sync/stream response; CDS reconciles tokens/cost.
-- **Small synchronous binary** (image/audio; e.g. Nova Canvas returns base64) — the CDS gets the
-  bytes back like text. To stay type-agnostic and keep the capability role write-free, **return
-  the bytes to the app and let the app write them via the normal data plane under its own role**
-  (mirror of by-reference input). Large binary through the broker response hits the same
-  size/timeout wall as inline input. *Buildable next, low complexity — but out of the first cut.*
+- **Revised delivery model — two axes, not the old `outputIsAsyncS3` one-liner.** Delivery is no
+  longer "text = inline, everything-else = async S3." A model's output is characterized by TWO
+  orthogonal facts, both derived from its `outputModality`: **destination** (inline-in-response vs
+  written-to-S3) and **invocation timing** (synchronous vs asynchronous). This yields three delivery
+  channels — `outputDelivery(modality)`:
+  - `text`  → **`inline`**   — sync `InvokeModel`/Converse, bytes in the response (or streamed).
+  - `image` → **`sync-s3`**  — sync `InvokeModel`, bytes returned to the CDS, **the CDS writes them
+    to S3** and returns the key(s).
+  - `audio`/`video` → **`async-s3`** — `StartAsyncInvoke`; **Bedrock** writes to S3; app-polled.
+- **Who writes, and under which role — the load-bearing asymmetry.** Because the *sync-s3* bytes
+  come back **through the CDS**, the CDS writes them itself, into the app's own syncable area, **under
+  the app's own per-app role** (the same role it already assumed in §3.4 step 4 for the by-reference
+  read). So the **capability role needs NO `PutObject` for the sync-image path** — it stays write-free
+  there; only the *async* path (where Bedrock is the writer and cannot assume the app role) needs the
+  session-scoped capability-role `PutObject`. Both channels then converge on the identical shape:
+  *output lands in the app's S3 area → CDS returns the key(s) → app ingests as a normal record under
+  its own role.* This supersedes the earlier §3.8 sketch ("return the bytes to the app, let the app
+  write them"): pushing to S3 once from the CDS avoids double-transferring multi-MB base64
+  (CDS→app→re-upload), and unifies image and video onto one delivery shape distinguished only by
+  *who writes* and *timing*. A single 1024×1024 PNG (~1.5–2 MB base64) is well within Lambda's 6 MB /
+  API-Gateway's 10 MB sync-response limit, so returning one image through the CDS is fine.
+- **Metering.** Nova Canvas returns **no tokens** and Bedrock returns no dollar cost, so cost is
+  **CDS-derived per generated image** — priced on `requests:image` (the CDS controls
+  `numberOfImages`, so this count is CDS-measured here, the same "CDS controls the generation
+  parameter" reasoning the async video path uses for `output:duration_s`). `output:bytes` is
+  CDS-measured post-call from what the CDS wrote. The token-shaped `projectReservation` /
+  `reconcileMeasurements` are reused unchanged — the spurious `output:tokens` rows simply price to
+  zero under Canvas's non-token price table, and cost falls out of `requests:image`.
+- Wired across: `amazon.nova-canvas-v1:0` (`outputModality: image`, per-image pricing) +
+  `outputDelivery()` (protocol-primitives); `generateImage` sync image adapter + Nova Canvas
+  `TEXT_IMAGE` body (bedrock-client); the `/invoke` handler branches text→converse vs image→generate
+  + `writeSyncOutput` under the app role (capability-handler); `/invoke` route wires `writeSyncOutput`
+  via `storage.put` under the app role (api-handler); `invokeCapabilityImage` (app-client). **No
+  boundary/IAM change** — the capability role gains nothing for this path.
+
+Output splits three ways by `outputDelivery(modality)`:
+
+- **Text** — `inline`, in scope — returned inline in the sync/stream response; CDS reconciles
+  tokens/cost.
+- **Small synchronous binary** (image; e.g. Nova Canvas returns base64) — `sync-s3`, **✅ BUILT
+  2026-07-25**. The CDS gets the bytes back like text, then **writes them to the app's syncable area
+  under the app's own role** and returns the key(s) (see the revised delivery model above). The
+  capability role stays write-free on this path. `numberOfImages` is capped at 1 for this increment
+  (one image per request, the cheap e2e case); multi-image is a trivial later bump. Audio synchronous
+  output is not wired (no cheap synchronous audio model in scope).
 - **Video / large / long-running, asynchronous** (**✅ BUILT 2026-07-24**) — `StartAsyncInvoke` writes
   output **directly to an S3 URI** you supply (`outputDataConfig.s3OutputDataConfig.s3Uri`; e.g. Nova
   Reel writes `output.mp4` + `manifest.json` + `generation-status.json` under an invocation-id
@@ -628,11 +674,30 @@ modules:
 
 - Extend an existing first-party app (Photos is the natural fit — captioning/tagging over
   images) to declare and actually call `bedrock.invoke`, so the path is exercised end to end.
-- e2e (`e2e-aws`) coverage: install an app with a capability grant → invoke by-reference →
-  observe a real Bedrock response → observe the ledger row → exceed a gate → observe the 429.
-  Cover the shipped adapter set (**Anthropic, OpenAI, Kimi, Qwen, GLM**) so the multi-provider
-  path is real, not latent — at minimum Anthropic plus one non-Anthropic provider live, and the
-  remaining adapters exercised against their real Bedrock model ids as availability is confirmed.
+- **Two live-Bedrock e2e tiers, split by cost (decided 2026-07-25):**
+  - **Normal capability suite** (`STARKEEP_AWS_BEDROCK=1`) — the cheap paths, safe to run
+    routinely: text captioning (buffered + streamed, Nova Lite) and **cheap image generation
+    (Nova Canvas, `sync-s3`)** as the first non-text test — the image test asserts the CDS wrote the
+    image to the app's syncable area (verified by a real S3 HEAD of the returned key) and that the
+    ledger-reconciled per-image `estCostUsd` came back (its presence is the live ledger signal — the
+    handler only surfaces it after a reserve + reconcile).
+  - **Separate, rarely-run video suite** (its own flag, `STARKEEP_AWS_BEDROCK_VIDEO=1`) — Nova Reel
+    (`amazon.nova-reel-v1:1`) async video generation, start → poll → completed → output key(s).
+    **Video is expensive**, so it is NOT part of the normally-run suite; run it deliberately and
+    infrequently.
+- **Gate/ledger enforcement is covered at the UNIT level** (no AWS, injected fakes), not by a live
+  breach test: `capability-handler.test.ts` exercises the reserve → scoped-SUM gate check → 429 →
+  release cycle, per-image cost derivation, and the ledger reconcile end to end against an in-memory
+  DatabaseClient. A live gate-breach e2e would need operator gate-injection into DSQL (no query/insert
+  path from the e2e harness today) — deferred; the gate-LOAD + evaluate path is already live-exercised
+  on every real invoke (the per-app consent cost gate is summed on each call).
+- Unit-level (no AWS, injected fakes): the sync-image handler branch (generate → write-under-app-
+  role → reconcile), `buildImageModelInput` (Nova Canvas body), the `outputDelivery` routing guards on
+  all three route families (incl. `output_not_streamable` for an image model on the stream route), and
+  the async video path already covered.
+- Cover the shipped adapter set (**Anthropic, OpenAI, Kimi, Qwen, GLM**) so the multi-provider
+  path is real, not latent — at minimum Anthropic/Amazon plus one non-Anthropic provider live, and
+  the remaining adapters exercised against their real Bedrock model ids as availability is confirmed.
 - Cover both origins (§4): cloud-origin by-reference, and local-origin by-reference via the
   proxy (item already synced to cloud); assert that an unsynced/local-only reference is
   rejected, not byte-ingested.
@@ -754,16 +819,39 @@ Remaining truly-open items:
 8. `app-client` `invokeCapability` + `invokeCapabilityStream` (cloud endpoint resolution, local
    proxy forwarding, granted-capabilities query, `reports` in/out, base-path-safe browser
    streaming) + `authoring-an-app.md` docs.
+   **✅ DONE** — steps 2 (manifest + validator + capability registry), 4 (two-table model registry,
+   `capability_grants` + gate table + append-only ledger, install/uninstall wiring, admin consent +
+   degraded-grant UI), 6 (gate/cost-governance subsystem + adversarial unit tests), 7 (streaming), and
+   8 (`app-client` surface + `authoring-an-app.md`) are all implemented and unit-tested.
 9. Photos integration + `e2e-aws` coverage (both providers, both origins, degraded-grant path,
    trust-boundary assertions).
+   **◑ PARTIAL (2026-07-25).** The `journey.test.ts` capability harness covers: the granted-
+   capabilities query, by-reference 403/404 authorization (no Bedrock call), live text captioning
+   **buffered + streamed** (Nova Lite), and — added 2026-07-25 — the cheap **image-generation** live
+   test (Nova Canvas `sync-s3`, normal `STARKEEP_AWS_BEDROCK=1` suite; asserts the returned key + a
+   real S3 HEAD + reconciled cost) and the **video** live test (Nova Reel, gated behind the separate
+   `STARKEEP_AWS_BEDROCK_VIDEO=1` flag — expensive, run rarely). Gate/ledger enforcement is unit-
+   covered (see §5), not a live breach test. Still open: a live gate-breach 429, local-origin-via-proxy
+   live path, degraded-grant path, and the non-Anthropic providers exercised live.
 
-10. **✅ DONE 2026-07-24 — async S3-output/video via `StartAsyncInvoke` with app-polled job tracking
+11. **✅ DONE 2026-07-25 — small-synchronous-binary (image) output via sync `InvokeModel` + CDS-writes-
+    to-S3-under-app-role (§3.8).** `amazon.nova-canvas-v1:0` (`outputModality: image`, per-image
+    pricing) + `outputDelivery()` three-way routing (protocol-primitives) → `generateImage` sync
+    adapter + Nova Canvas `TEXT_IMAGE` body (bedrock-client) → `/invoke` handler text-vs-image branch +
+    `writeSyncOutput` under the app role (capability-handler) → `/invoke` route wires `writeSyncOutput`
+    via `storage.put` (api-handler) → `invokeCapabilityImage` (app-client). **No boundary/IAM change**
+    (capability role stays write-free on this path). Unit-tested with injected deps; cheap live e2e in
+    the normal suite (step 9).
+
+12. **✅ DONE 2026-07-24 — async S3-output/video via `StartAsyncInvoke` with app-polled job tracking
     (§3.8).** Pure logic (`projectAsyncReservation`, `amazon.nova-reel` async-output model) →
     async client (`Start`/`GetAsyncInvoke` + Nova Reel body) → `capability_async_jobs` table +
     `commitReservation` store → `handleCapabilityInvokeAsyncStart`/`…Status` → api-handler routes
     (`invoke-async` / `async/:id`) with a single-prefix PutObject session policy → app-client
     (`invokeCapabilityAsync`/`getCapabilityAsyncStatus`) + docs. Boundary + identity policy gained
     `s3:PutObject` (files bucket, never `*`) and the async Bedrock verbs. Unit-tested with injected
-    deps; live `e2e-aws` against real Nova Reel deferred (availability/cost).
+    deps; live `e2e-aws` against real Nova Reel is a **separate, rarely-run** suite
+    (`STARKEEP_AWS_BEDROCK_VIDEO=1`) — video is expensive, so it is kept out of the normal run.
 
-*(Deferred to a later increment, not built now: small synchronous binary output — §3.8.)*
+*(Deferred to a later increment, not built now: synchronous **audio** output, and multi-image
+`numberOfImages > 1` — §3.8.)*

@@ -194,7 +194,7 @@ function startDeps(
   return {
     appId: "photos",
     capabilityName: "bedrock.invoke",
-    body: { model: "amazon.nova-reel", prompt: "a cat surfing", generation: { durationSeconds: 6 } },
+    body: { model: "amazon.nova-reel-v1:1", prompt: "a cat surfing", generation: { durationSeconds: 6 } },
     capClient: db,
     assumeCapabilityCreds: async () => ({ accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" }),
     asyncInvoker: makeAsyncInvoker(),
@@ -226,7 +226,7 @@ function statusDeps(
 
 describe("async capability start (plan §3.8)", () => {
   it("reserves, starts the job, records it, and returns 202 with the output location", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] });
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
     let capturedStart: BedrockAsyncStartRequest | undefined;
     let capturedScope: unknown;
     const res = await handleCapabilityInvokeAsyncStart(
@@ -282,7 +282,7 @@ describe("async capability start (plan §3.8)", () => {
   });
 
   it("denies (429) on a cost gate and releases the reservation without starting a job", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] }, [
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] }, [
       { dimension: "cost", unit: "usd", scope_app_id: "photos", limit_value: 0 },
     ]);
     let started = false;
@@ -303,7 +303,7 @@ describe("async capability start (plan §3.8)", () => {
   });
 
   it("releases the reservation and 502s when StartAsyncInvoke throws", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] });
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
     const res = await handleCapabilityInvokeAsyncStart(
       startDeps(db, {
         asyncInvoker: makeAsyncInvoker({
@@ -330,12 +330,12 @@ const s3ImageContent = async (): Promise<ContentReadResult> => ({
 
 describe("async capability start — conditioning image (S3-location input)", () => {
   it("scopes the assume to BOTH the output prefix and the input key", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] });
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
     let capturedScope: { s3Keys?: unknown[]; s3PutKeyPrefixes?: unknown[] } | undefined;
     const res = await handleCapabilityInvokeAsyncStart(
       startDeps(db, {
         body: {
-          model: "amazon.nova-reel",
+          model: "amazon.nova-reel-v1:1",
           prompt: "animate this",
           contentRef: { recordId: "rec_1" },
           generation: { durationSeconds: 6 },
@@ -360,7 +360,7 @@ describe("async capability status (plan §3.8)", () => {
   }
 
   it("returns running while the job is in progress (no ledger change)", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] });
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
     const id = await startOne(db);
     const res = await handleCapabilityInvokeAsyncStatus(
       statusDeps(db, id, { asyncInvoker: makeAsyncInvoker({ async getAsyncStatus() { return { status: "InProgress" }; } }) }),
@@ -373,7 +373,7 @@ describe("async capability status (plan §3.8)", () => {
   });
 
   it("on completion commits the reservation, records output bytes, and returns the output keys", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] });
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
     const id = await startOne(db);
     const res = await handleCapabilityInvokeAsyncStatus(
       statusDeps(db, id, {
@@ -401,7 +401,7 @@ describe("async capability status (plan §3.8)", () => {
   });
 
   it("a second poll after completion replays idempotently without a double reconcile", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] });
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
     const id = await startOne(db);
     const completed = makeAsyncInvoker({ async getAsyncStatus() { return { status: "Completed" }; } });
     await handleCapabilityInvokeAsyncStatus(statusDeps(db, id, { asyncInvoker: completed }));
@@ -415,7 +415,7 @@ describe("async capability status (plan §3.8)", () => {
   });
 
   it("on failure releases the reservation and reports failed", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] });
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
     const id = await startOne(db);
     const res = await handleCapabilityInvokeAsyncStatus(
       statusDeps(db, id, {
@@ -430,7 +430,7 @@ describe("async capability status (plan §3.8)", () => {
   });
 
   it("404s an unknown invocation, and won't reveal another app's job", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] });
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
     const id = await startOne(db);
     // Same id but a different app must not resolve the job — the app_id-scoped
     // job lookup returns 404 (never leaks another app's job) even though this
@@ -442,7 +442,7 @@ describe("async capability status (plan §3.8)", () => {
   });
 
   it("a transient poll error leaves the job running (no state change)", async () => {
-    const db = new InMemoryDb({ models: ["amazon.nova-reel"], reports: [] });
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
     const id = await startOne(db);
     const res = await handleCapabilityInvokeAsyncStatus(
       statusDeps(db, id, {
@@ -458,7 +458,7 @@ describe("async capability status (plan §3.8)", () => {
 describe("buildAsyncModelInput (Nova Reel body)", () => {
   it("builds a TEXT_VIDEO body with the requested duration", () => {
     const body = buildAsyncModelInput({
-      target: "amazon.nova-reel",
+      target: "amazon.nova-reel-v1:1",
       region: "us-east-1",
       provider: "amazon",
       prompt: "a cat surfing",

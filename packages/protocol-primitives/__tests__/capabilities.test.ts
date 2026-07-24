@@ -15,6 +15,8 @@ import {
   isModelInEffectiveRegistry,
   bedrockInvokeTarget,
   outputIsAsyncS3,
+  outputDelivery,
+  outputIsSyncInvoke,
   perMTok,
   type OperatorModelOverride,
   // gates
@@ -325,7 +327,7 @@ describe("reconciliation", () => {
 
 describe("output modality → delivery channel (plan §3.8)", () => {
   it("resolves Nova Reel as a video-output model priced per output second", () => {
-    const m = effectiveModel("amazon.nova-reel")!;
+    const m = effectiveModel("amazon.nova-reel-v1:1")!;
     expect(m.outputModality).toBe("video");
     expect(outputIsAsyncS3(m.outputModality)).toBe(true); // video ⇒ async S3
     expect(m.provider).toBe("amazon");
@@ -338,11 +340,35 @@ describe("output modality → delivery channel (plan §3.8)", () => {
     expect(outputIsAsyncS3(m.outputModality)).toBe(false);
   });
 
-  it("outputIsAsyncS3 is true for every non-text modality", () => {
+  it("outputDelivery routes the three channels by modality (§3.8)", () => {
+    // text = inline; image = sync-s3 (CDS-written, synchronous); audio/video = async-s3.
+    expect(outputDelivery("text")).toBe("inline");
+    expect(outputDelivery("image")).toBe("sync-s3");
+    expect(outputDelivery("audio")).toBe("async-s3");
+    expect(outputDelivery("video")).toBe("async-s3");
+  });
+
+  it("outputIsAsyncS3 is async ONLY — image is sync-s3, not async (Nova Canvas is synchronous)", () => {
     expect(outputIsAsyncS3("text")).toBe(false);
-    expect(outputIsAsyncS3("image")).toBe(true);
+    expect(outputIsAsyncS3("image")).toBe(false); // sync image, was true before 2026-07-25
     expect(outputIsAsyncS3("audio")).toBe(true);
     expect(outputIsAsyncS3("video")).toBe(true);
+  });
+
+  it("outputIsSyncInvoke covers the synchronous /invoke channels (text + image)", () => {
+    expect(outputIsSyncInvoke("text")).toBe(true);
+    expect(outputIsSyncInvoke("image")).toBe(true);
+    expect(outputIsSyncInvoke("audio")).toBe(false);
+    expect(outputIsSyncInvoke("video")).toBe(false);
+  });
+
+  it("Nova Canvas is a synchronous sync-s3 image model priced per image", () => {
+    const m = effectiveModel("amazon.nova-canvas-v1:0")!;
+    expect(m.outputModality).toBe("image");
+    expect(outputDelivery(m.outputModality)).toBe("sync-s3");
+    expect(outputIsAsyncS3(m.outputModality)).toBe(false);
+    expect(m.provider).toBe("amazon");
+    expect(m.pricing[dimensionUnitKey("requests", "image")]).toBeCloseTo(0.04);
   });
 
   it("an operator DEFINES a new non-text model's modality (add-a-custom-model, no platform row)", () => {
@@ -373,11 +399,11 @@ describe("output modality → delivery channel (plan §3.8)", () => {
 });
 
 describe("async reservation + reconciliation (plan §3.8)", () => {
-  const NOVA = effectiveModel("amazon.nova-reel")!;
+  const NOVA = effectiveModel("amazon.nova-reel-v1:1")!;
   const videoCtx: CapabilityRequestContext = {
     appId: "photos",
     provider: "amazon",
-    model: "amazon.nova-reel",
+    model: "amazon.nova-reel-v1:1",
     modality: "video",
   };
 

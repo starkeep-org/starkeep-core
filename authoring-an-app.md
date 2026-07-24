@@ -330,6 +330,27 @@ For app-reported **output** quantities you can only know after the call, report
 them with `reportCapabilityOutput(appId, capability, invocationId, {...})`
 (best-effort; a missing report never hard-blocks).
 
+**Image generation (synchronous).** A cheap image model (Amazon Nova Canvas)
+generates **synchronously** — but its bytes aren't returned inline. The broker
+writes the generated image into your app's own syncable area under your role and
+returns the object key(s), which you ingest as normal records (the mirror of
+by-reference input, and of the async flow below — just synchronous):
+
+```ts
+import { invokeCapabilityImage } from "@starkeep/app-client";
+
+const img = await invokeCapabilityImage("photos", "bedrock.invoke", {
+  model: "amazon.nova-canvas-v1:0",
+  prompt: "A watercolor painting of a sleeping cat.",
+  generation: { width: 1024, height: 1024 },   // optional
+});
+if (img.granted && img.ok) {
+  // img.output.keys are objects in YOUR syncable area — read + register them as
+  // records via the normal /data + /files routes under your own role.
+  // img.estCostUsd is the CDS-derived per-image cost.
+}
+```
+
 **Async generation (video / large output).** Some models don't return their
 output inline — they generate it **asynchronously** and write it to storage (e.g.
 Amazon Nova Reel video). For those, start a job and **poll** for completion; the
@@ -359,14 +380,22 @@ if (status.granted && status.ok && status.status === "completed") {
 }
 ```
 
-The delivery path follows the model's **output modality**: `text` is delivered
-inline — `invokeCapability` (sync) or `invokeCapabilityStream` (streamed), your
-choice; `image`/`audio`/`video` are always written to S3 asynchronously —
-`invokeCapabilityAsync`. Cross them and you get a clear 400: a text model on
-`invokeCapabilityAsync` returns `output_not_async`, and a non-text model on
-`invokeCapability` returns `output_requires_async`. The spend cap still holds: the
-reservation is taken at start from the CDS-derived generation size (e.g. requested
-duration), and the completing poll records the measured `output:bytes`.
+The delivery path follows the model's **output modality**, across three channels:
+- **`text`** → delivered inline — `invokeCapability` (sync) or
+  `invokeCapabilityStream` (streamed), your choice.
+- **`image`** → generated **synchronously** but written to S3 by the broker (under
+  your role) — `invokeCapabilityImage`, which returns the object key(s).
+- **`audio`/`video`** → generated **asynchronously**, written to S3 —
+  `invokeCapabilityAsync` + poll.
+
+Cross them and you get a clear 400: a non-text model on `invokeCapability` returns
+`output_requires_async` (video) or is handled as the sync-image path (image); a
+text model on `invokeCapabilityAsync` returns `output_not_async`; and an image
+model on `invokeCapabilityStream` returns `output_not_streamable`. The spend cap
+holds across all three: `text` reconciles from returned tokens, `image` derives
+cost per generated image (Bedrock returns no tokens for it), and async reserves
+from the CDS-derived generation size (e.g. requested duration) and records the
+measured `output:bytes` on the completing poll.
 
 ---
 

@@ -44,6 +44,7 @@ import {
   GetFunctionConfigurationCommand,
   InvokeWithResponseStreamCommand,
 } from "@aws-sdk/client-lambda";
+import { S3Client, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
@@ -825,6 +826,97 @@ function runTeardownScript(script: string): void {
         expect(done!.estCostUsd!).toBeGreaterThan(0);
         expect(done!.invocationId).toBeTruthy();
       },
+    );
+
+    // First NON-TEXT live test — CHEAP image generation (Amazon Nova Canvas,
+    // ~$0.04/image). Part of the NORMAL Bedrock suite (STARKEEP_AWS_BEDROCK=1)
+    // precisely because it is cheap. Nova Canvas is SYNCHRONOUS (`sync-s3`, plan
+    // §3.8): a single InvokeModel returns the bytes, which the CDS writes to the
+    // app's OWN syncable area under the app role and returns the key(s). Video
+    // generation is deliberately NOT here — see the separate expensive suite below.
+    (process.env.STARKEEP_AWS_BEDROCK === "1" ? it : it.skip)(
+      "generates an image through the capability broker (real Bedrock, Nova Canvas sync-s3)",
+      async () => {
+        const res = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/invoke", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "amazon.nova-canvas-v1:0",
+            prompt: "A minimalist watercolor of a single green leaf on a white background.",
+            // Smallest standard tier keeps the charge at the ~$0.04 floor.
+            generation: { width: 512, height: 512 },
+          }),
+        });
+        const bodyText = await res.text();
+        expect(res.status, bodyText).toBe(200);
+        const body = JSON.parse(bodyText) as {
+          output: { bucket: string; keyPrefix: string; keys: string[]; totalBytes: number };
+          estCostUsd: number;
+          invocationId: string;
+        };
+        // The CDS WROTE the image to the app's own syncable area (not inline bytes)
+        // and returned the object key(s) — the `sync-s3` delivery shape.
+        expect(body.output.keys.length).toBeGreaterThan(0);
+        expect(body.output.keys[0]).toContain("apps/photos/syncable/capability-image/");
+        expect(body.output.totalBytes).toBeGreaterThan(0);
+        // estCostUsd is the LEDGER-reconciled per-image cost (image gen returns no
+        // tokens; cost is CDS-derived from requests:image). Its presence proves a
+        // ledger row was reserved AND reconciled for this invocation.
+        expect(body.estCostUsd).toBeGreaterThan(0);
+        expect(body.invocationId).toBeTruthy();
+
+        // The object the CDS claims it wrote actually exists in the files bucket,
+        // under the app's own syncable prefix — a real HEAD, proving the write
+        // landed (not just an echoed key). Uses the ambient operator creds.
+        const s3 = new S3Client({ region: REGION });
+        const head = await s3.send(
+          new HeadObjectCommand({ Bucket: config.s3Bucket!, Key: body.output.keys[0]! }),
+        );
+        expect(head.ContentLength).toBe(body.output.totalBytes);
+      },
+    );
+
+    // EXPENSIVE video generation (Amazon Nova Reel async). Gated behind its OWN
+    // flag (STARKEEP_AWS_BEDROCK_VIDEO=1), SEPARATE from the normal Bedrock suite,
+    // because a single Nova Reel clip costs meaningfully more than the cheap tests
+    // above and takes minutes — so it is run rarely and deliberately, never as
+    // part of a routine STARKEEP_AWS_BEDROCK=1 run. Exercises the async `async-s3`
+    // path: StartAsyncInvoke → app-polled GetAsyncInvoke → completing poll commits
+    // the reservation, records output:bytes, and returns the output key(s).
+    (process.env.STARKEEP_AWS_BEDROCK_VIDEO === "1" ? it : it.skip)(
+      "generates a short video through the async capability broker (real Bedrock, Nova Reel) — EXPENSIVE, separate run",
+      async () => {
+        const start = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/invoke-async", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "amazon.nova-reel-v1:1",
+            prompt: "A calm ocean wave rolling onto a sandy beach at sunset, cinematic.",
+            generation: { durationSeconds: 6 }, // shortest single-shot clip
+          }),
+        });
+        const startText = await start.text();
+        expect(start.status, startText).toBe(202);
+        const started = JSON.parse(startText) as { invocationId: string; status: string };
+        expect(started.invocationId).toBeTruthy();
+        expect(started.status).toBe("running");
+
+        // Poll to completion. Nova Reel takes a few minutes; poll every 15s.
+        const invId = encodeURIComponent(started.invocationId);
+        let final: { status: string; output?: { keys: string[]; totalBytes: number } } | undefined;
+        for (let i = 0; i < 40; i++) {
+          await new Promise((r) => setTimeout(r, 15_000));
+          const st = await cloudApp(photos).fetch(`/capabilities/bedrock.invoke/async/${invId}`);
+          final = JSON.parse(await st.text());
+          if (final!.status !== "running") break;
+        }
+        expect(final?.status, `async job did not complete: ${JSON.stringify(final)}`).toBe("completed");
+        expect(final!.output!.keys.length).toBeGreaterThan(0);
+        expect(final!.output!.totalBytes).toBeGreaterThan(0);
+        // The output landed in the app's own syncable area (async prefix).
+        expect(final!.output!.keys[0]).toContain("apps/photos/syncable/capability-async/");
+      },
+      12 * 60 * 1000, // Nova Reel generation + polling headroom.
     );
 
     it("Part A: SPA + _next/static served through the CloudFront distribution (edge hit)", async () => {

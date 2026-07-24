@@ -25,6 +25,7 @@ import {
   effectiveModel,
   bedrockInvokeTarget,
   outputIsAsyncS3,
+  outputDelivery,
   buildCapabilityGrant,
   canInvokeModel,
   evaluateGates,
@@ -60,8 +61,10 @@ import {
 import type {
   BedrockImageInput,
   BedrockInvoker,
+  BedrockImageInvoker,
   BedrockAsyncInvoker,
   AsyncGenerationParams,
+  ImageGenerationParams,
 } from "./bedrock-client.js";
 
 export interface CapabilityInvokeBody {
@@ -71,8 +74,19 @@ export interface CapabilityInvokeBody {
   contentRef?: { recordId?: string; objectKey?: string };
   maxTokens?: number;
   modality?: RequestModality;
+  /** Generation params for a `sync-s3` image model (Nova Canvas). Ignored for
+   * text models. */
+  generation?: ImageGenerationParams;
   /** App-reported non-generic input quantities, keyed by "dimension:unit". */
   reports?: Record<string, number>;
+}
+
+/** One image the CDS wrote to the app's S3 area (sync-s3 output, plan §3.8). */
+export interface SyncImageOutput {
+  bucket: string;
+  keyPrefix: string;
+  keys: string[];
+  totalBytes: number;
 }
 
 /**
@@ -132,6 +146,13 @@ export interface CapabilityHandlerDeps {
    * an inline session policy to (single-key downscoping, plan §3.4). */
   assumeCapabilityCreds: (scope?: CapabilityAssumeScope) => Promise<CapabilityCreds>;
   invoker: BedrockInvoker;
+  /** Sync image generator (Nova Canvas). Required only to serve a `sync-s3`
+   * (image) model on `/invoke`; text-only callers may omit it. */
+  imageInvoker?: BedrockImageInvoker;
+  /** Write the generated image bytes to the app's OWN syncable area UNDER THE APP
+   * ROLE (the capability role stays write-free on the sync-s3 path, plan §3.8),
+   * returning the object location. Required only for the image path. */
+  writeSyncOutput?: (invocationId: string, images: Uint8Array[], contentType: string) => Promise<SyncImageOutput>;
   region: string;
   nowMs?: () => number;
   timeZone?: string;
@@ -230,8 +251,9 @@ async function prepareInvoke(
   if (!model) {
     return reject(400, { error: "unknown_model", model: body.model });
   }
-  // This (inline sync/stream) route is only for TEXT output; non-text output is
-  // delivered as async S3 and must use /invoke-async (plan §3.8).
+  // The synchronous /invoke route serves the two SYNCHRONOUS delivery channels —
+  // `inline` (text) and `sync-s3` (image); `async-s3` (audio/video) output must
+  // use /invoke-async (plan §3.8).
   if (outputIsAsyncS3(model.outputModality)) {
     return reject(400, { error: "output_requires_async", model: body.model });
   }
@@ -247,7 +269,13 @@ async function prepareInvoke(
     content = read.content;
   }
 
-  const modality: RequestModality = body.modality ?? (content?.image ? "image" : "text");
+  // For a GENERATION model the request modality is the model's own OUTPUT modality
+  // (Nova Canvas → "image"), which drives the `requests/<modality>` gate + the
+  // per-image cost derivation; for a text model it reflects whether an image was
+  // fed as INPUT (captioning). The caller may override.
+  const modality: RequestModality =
+    body.modality ??
+    (model.outputModality !== "text" ? model.outputModality : content?.image ? "image" : "text");
   const ctx: CapabilityRequestContext = {
     appId,
     provider: model.provider,
@@ -350,6 +378,12 @@ export async function handleCapabilityInvoke(
   const { model, ctx, content, maxTokens, ledgerKey, invocationId, appReports } = prep.prepared;
   const { capClient, invoker, body } = deps;
 
+  // `sync-s3` (image) output — synchronous generate, then the CDS writes the bytes
+  // to the app's own area UNDER THE APP ROLE and returns the key(s) (plan §3.8).
+  if (outputDelivery(model.outputModality) === "sync-s3") {
+    return handleSyncImageInvoke(deps, prep.prepared);
+  }
+
   // (5) Assume the capability-broker role and invoke Bedrock. On the
   // S3-location path the assume carries a single-key session policy (plan §3.4).
   let result;
@@ -401,6 +435,79 @@ export async function handleCapabilityInvoke(
   };
 }
 
+/**
+ * The `sync-s3` (image) branch of the synchronous /invoke handler (plan §3.8).
+ * Generates the image synchronously via `InvokeModel`, then the CDS writes the
+ * returned bytes to the app's OWN syncable area UNDER THE APP ROLE
+ * (`writeSyncOutput`) and returns the key(s) — the capability role never writes on
+ * this path. Bedrock returns no token usage, so cost is CDS-derived per generated
+ * image (from `requests:<modality>` pricing) and `output:bytes` is measured from
+ * what the CDS actually wrote.
+ */
+async function handleSyncImageInvoke(
+  deps: CapabilityHandlerDeps,
+  prepared: PreparedInvoke,
+): Promise<CapabilityHandlerResponse> {
+  const { model, ctx, content, ledgerKey, invocationId, appReports } = prepared;
+  const { capClient, imageInvoker, writeSyncOutput, body } = deps;
+
+  if (!imageInvoker || !writeSyncOutput) {
+    // Misconfigured route (no image deps wired) — don't strand the reservation.
+    await release(capClient, invocationId);
+    return { statusCode: 500, body: { error: "image_output_unsupported" } };
+  }
+
+  let output: SyncImageOutput;
+  try {
+    // The capability role needs no S3 WRITE here (the CDS writes the output under
+    // the app role). A session policy is attached only if a CONDITIONING image is
+    // delivered by S3 location (single-key GetObject, plan §3.4).
+    const creds = await deps.assumeCapabilityCreds(assumeScopeFor(content));
+    const generated = await imageInvoker.generateImage({
+      target: bedrockInvokeTarget(model),
+      region: deps.region,
+      provider: model.provider,
+      prompt: body.prompt!,
+      image: content?.image,
+      generation: body.generation,
+      credentials: creds,
+    });
+    output = await writeSyncOutput(invocationId, generated.images, `image/${generated.format}`);
+  } catch (err) {
+    await release(capClient, invocationId);
+    return {
+      statusCode: 502,
+      body: { error: "invoke_failed", message: err instanceof Error ? err.message : String(err) },
+    };
+  }
+
+  // Reconcile: image generation has no tokens (0/0); cost falls out of the
+  // requests:<modality> pricing and output:bytes is CDS-measured from the write.
+  const reconciled = reconcileMeasurements({
+    model,
+    ctx,
+    inputTokens: 0,
+    outputTokens: 0,
+    inputBytes: content?.sizeBytes,
+    outputBytes: output.totalBytes,
+    appReports,
+  });
+  await reconcile(capClient, ledgerKey, reconciled);
+  const estCostUsd =
+    reconciled.find((m) => m.dimension === "cost" && m.unit === "usd")?.quantity ?? 0;
+
+  return {
+    statusCode: 200,
+    body: {
+      model: body.model,
+      output,
+      usage: { inputTokens: 0, outputTokens: 0 },
+      estCostUsd,
+      invocationId,
+    },
+  };
+}
+
 /** SSE events emitted by the streaming broker path (plan §3.6/§3.7). */
 export type CapabilityStreamEvent =
   | { type: "text"; text: string }
@@ -439,6 +546,14 @@ export async function handleCapabilityInvokeStream(
   if (!prep.ok) return { ok: false, response: prep.response };
   const { model, ctx, content, maxTokens, ledgerKey, invocationId, appReports } = prep.prepared;
   const { capClient, invoker, body } = deps;
+
+  // Streaming is only for `inline` (text) output; a `sync-s3` image model cleared
+  // prepareInvoke (it isn't async) but can't be streamed — reject and release the
+  // reservation rather than opening a stream that would fail at Bedrock.
+  if (outputDelivery(model.outputModality) !== "inline") {
+    await release(capClient, invocationId);
+    return { ok: false, response: { statusCode: 400, body: { error: "output_not_streamable", model: body.model } } };
+  }
 
   async function* stream(): AsyncGenerator<CapabilityStreamEvent> {
     let text = "";

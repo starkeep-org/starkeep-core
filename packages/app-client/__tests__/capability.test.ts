@@ -6,6 +6,7 @@ import { mockClient } from "aws-sdk-client-mock";
 import { LambdaClient, InvokeWithResponseStreamCommand } from "@aws-sdk/client-lambda";
 import {
   invokeCapability,
+  invokeCapabilityImage,
   invokeCapabilityStream,
   invokeCapabilityAsync,
   getCapabilityAsyncStatus,
@@ -161,6 +162,48 @@ describe("invokeCapability", () => {
   });
 });
 
+describe("invokeCapabilityImage (sync-s3, plan §3.8)", () => {
+  it("returns the written output key(s) + derived cost on 200", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        model: "amazon.nova-canvas-v1:0",
+        output: {
+          bucket: "stk-files-1",
+          keyPrefix: "apps/photos/syncable/capability-image/inv1",
+          keys: ["apps/photos/syncable/capability-image/inv1/image-0.png"],
+          totalBytes: 12345,
+        },
+        estCostUsd: 0.04,
+        invocationId: "inv1",
+      }),
+    );
+    const res = await invokeCapabilityImage(APP_ID, "bedrock.invoke", {
+      model: "amazon.nova-canvas-v1:0",
+      prompt: "a watercolor cat",
+    });
+    expect(res.granted && res.ok).toBe(true);
+    if (!res.granted || !res.ok) throw new Error("expected ok");
+    expect(res.output.keys).toHaveLength(1);
+    expect(res.output.totalBytes).toBe(12345);
+    expect(res.estCostUsd).toBeCloseTo(0.04, 5);
+    // Uses the synchronous /invoke route (not /invoke-async).
+    const url = fetchMock.mock.calls[0]![0] as string;
+    expect(url).toContain("/capabilities/bedrock.invoke/invoke");
+    expect(url).not.toContain("invoke-async");
+  });
+
+  it("returns { granted: false } in degraded mode", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(jsonResponse(403, { error: "not_granted" }));
+    const res = await invokeCapabilityImage(APP_ID, "bedrock.invoke", {
+      model: "amazon.nova-canvas-v1:0",
+      prompt: "p",
+    });
+    expect(res.granted).toBe(false);
+  });
+});
+
 describe("invokeCapabilityStream", () => {
   const STREAM_FN = "sk-dev-cloud-data-server-api-stream";
 
@@ -254,7 +297,7 @@ describe("invokeCapabilityAsync (plan §3.8)", () => {
       }),
     );
     const res = await invokeCapabilityAsync(APP_ID, "bedrock.invoke", {
-      model: "amazon.nova-reel",
+      model: "amazon.nova-reel-v1:1",
       prompt: "a cat surfing",
       generation: { durationSeconds: 6 },
     });
@@ -271,7 +314,7 @@ describe("invokeCapabilityAsync (plan §3.8)", () => {
   it("returns { granted: false } when the app has no grant", async () => {
     writeCreds();
     fetchMock.mockResolvedValue(jsonResponse(403, { error: "not_granted" }));
-    const res = await invokeCapabilityAsync(APP_ID, "bedrock.invoke", { model: "amazon.nova-reel", prompt: "p" });
+    const res = await invokeCapabilityAsync(APP_ID, "bedrock.invoke", { model: "amazon.nova-reel-v1:1", prompt: "p" });
     expect(res).toEqual({ granted: false });
   });
 

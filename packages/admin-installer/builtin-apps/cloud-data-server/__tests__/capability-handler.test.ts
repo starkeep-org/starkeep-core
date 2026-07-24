@@ -12,8 +12,14 @@ import {
   handleCapabilityInvokeStream,
   type CapabilityHandlerDeps,
   type ContentReadResult,
+  type SyncImageOutput,
 } from "../src/capability-handler.js";
-import type { BedrockInvoker } from "../src/bedrock-client.js";
+import {
+  buildImageModelInput,
+  type BedrockInvoker,
+  type BedrockImageInvoker,
+  type BedrockImageGenRequest,
+} from "../src/bedrock-client.js";
 
 interface LedgerRow {
   invocation_id: string;
@@ -302,9 +308,9 @@ describe("capability handler", () => {
   });
 
   it("rejects a non-text (video) model on the inline route — must use async (§3.8)", async () => {
-    const db = new InMemoryCapabilityDb({ models: ["amazon.nova-reel"], reports: [] }, []);
+    const db = new InMemoryCapabilityDb({ models: ["amazon.nova-reel-v1:1"], reports: [] }, []);
     const res = await handleCapabilityInvoke(
-      baseDeps(db, { body: { model: "amazon.nova-reel", prompt: "a cat surfing" } }),
+      baseDeps(db, { body: { model: "amazon.nova-reel-v1:1", prompt: "a cat surfing" } }),
     );
     expect(res.statusCode).toBe(400);
     expect((res.body as { error: string }).error).toBe("output_requires_async");
@@ -464,5 +470,201 @@ describe("capability handler — streaming", () => {
     const err = events.find((e) => e.type === "error");
     expect(err?.type).toBe("error");
     expect(db.ledger.every((r) => r.status === "released")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sync-s3 (image) output — Nova Canvas, plan §3.8
+// ---------------------------------------------------------------------------
+
+const IMAGE_MODEL = "amazon.nova-canvas-v1:0";
+
+/** A fake sync image generator returning fixed PNG bytes, capturing the request. */
+function fakeImageInvoker(
+  onReq?: (r: BedrockImageGenRequest) => void,
+  images: Uint8Array[] = [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4])],
+): BedrockImageInvoker {
+  return {
+    async generateImage(req) {
+      onReq?.(req);
+      return { images, format: "png" };
+    },
+  };
+}
+
+/** Deps for a prompt-only image-generation request (no contentRef). Captures
+ * what the CDS wrote via writeSyncOutput. */
+function imageDeps(
+  db: InMemoryCapabilityDb,
+  written: { calls: { invocationId: string; images: Uint8Array[]; contentType: string }[] },
+  over: Partial<CapabilityHandlerDeps> = {},
+): CapabilityHandlerDeps {
+  return {
+    appId: "photos",
+    capabilityName: "bedrock.invoke",
+    body: { model: IMAGE_MODEL, prompt: "a watercolor cat" },
+    capClient: db,
+    assumeCapabilityCreds: async () => ({ accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" }),
+    invoker: fakeInvoker,
+    imageInvoker: fakeImageInvoker(),
+    writeSyncOutput: async (invocationId, images, contentType): Promise<SyncImageOutput> => {
+      written.calls.push({ invocationId, images, contentType });
+      const total = images.reduce((n, im) => n + im.byteLength, 0);
+      return {
+        bucket: "stk-files-1",
+        keyPrefix: `apps/photos/syncable/capability-image/${invocationId}`,
+        keys: images.map((_, i) => `apps/photos/syncable/capability-image/${invocationId}/image-${i}.png`),
+        totalBytes: total,
+      };
+    },
+    region: "us-east-1",
+    timeZone: "UTC",
+    ...over,
+  };
+}
+
+describe("capability handler — sync-s3 image output (plan §3.8)", () => {
+  it("generates, writes the bytes under the app role, and returns the output key(s) + derived cost", async () => {
+    const db = new InMemoryCapabilityDb({ models: [IMAGE_MODEL], reports: [] }, []);
+    const written = { calls: [] as { invocationId: string; images: Uint8Array[]; contentType: string }[] };
+    const res = await handleCapabilityInvoke(imageDeps(db, written));
+
+    expect(res.statusCode).toBe(200);
+    const body = res.body as {
+      model: string;
+      output: { bucket: string; keyPrefix: string; keys: string[]; totalBytes: number };
+      usage: { inputTokens: number; outputTokens: number };
+      estCostUsd: number;
+      invocationId: string;
+    };
+    // The CDS wrote exactly one image to the app's syncable area (not inlined).
+    expect(written.calls).toHaveLength(1);
+    expect(written.calls[0]!.contentType).toBe("image/png");
+    expect(body.output.keys).toHaveLength(1);
+    expect(body.output.keys[0]).toContain("apps/photos/syncable/capability-image/");
+    // No tokens for image gen; cost is CDS-derived per image (requests:image $0.04).
+    expect(body.usage.outputTokens).toBe(0);
+    expect(body.estCostUsd).toBeCloseTo(0.04, 5);
+
+    // Ledger: a committed cost row equal to the per-image price, a committed
+    // requests:image, and a committed output:bytes measured from the write.
+    const committed = db.ledger.filter((r) => r.status === "committed");
+    const cost = committed.find((r) => r.dimension === "cost" && r.unit === "usd");
+    expect(cost?.quantity).toBeCloseTo(0.04, 5);
+    expect(committed.some((r) => r.dimension === "requests" && r.unit === "image")).toBe(true);
+    const outBytes = committed.find((r) => r.dimension === "output" && r.unit === "bytes");
+    expect(outBytes?.quantity).toBe(written.calls[0]!.images[0]!.byteLength);
+    // No reservation left dangling.
+    expect(db.ledger.some((r) => r.status === "reserved")).toBe(false);
+  });
+
+  it("passes the prompt + generation params to the image invoker", async () => {
+    const db = new InMemoryCapabilityDb({ models: [IMAGE_MODEL], reports: [] }, []);
+    let captured: BedrockImageGenRequest | undefined;
+    const written = { calls: [] as { invocationId: string; images: Uint8Array[]; contentType: string }[] };
+    const res = await handleCapabilityInvoke(
+      imageDeps(db, written, {
+        body: { model: IMAGE_MODEL, prompt: "a red bicycle", generation: { width: 512, height: 512, seed: 7 } },
+        imageInvoker: fakeImageInvoker((r) => (captured = r)),
+      }),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(captured?.prompt).toBe("a red bicycle");
+    expect(captured?.generation).toMatchObject({ width: 512, height: 512, seed: 7 });
+    expect(captured?.provider).toBe("amazon");
+  });
+
+  it("denies (429) on a cost gate BEFORE generating, and releases the reservation", async () => {
+    // A cost gate below the per-image price is breached by the reservation.
+    const db = new InMemoryCapabilityDb(
+      { models: [IMAGE_MODEL], reports: [] },
+      [{ dimension: "cost", unit: "usd", limit_value: 0.01 }],
+    );
+    let generated = false;
+    const written = { calls: [] as { invocationId: string; images: Uint8Array[]; contentType: string }[] };
+    const res = await handleCapabilityInvoke(
+      imageDeps(db, written, {
+        imageInvoker: fakeImageInvoker(() => (generated = true)),
+      }),
+    );
+    expect(res.statusCode).toBe(429);
+    expect(generated).toBe(false);
+    expect(written.calls).toHaveLength(0);
+    expect(db.ledger.every((r) => r.status === "released")).toBe(true);
+  });
+
+  it("releases the reservation and 502s when the image invoker throws (nothing written)", async () => {
+    const db = new InMemoryCapabilityDb({ models: [IMAGE_MODEL], reports: [] }, []);
+    const written = { calls: [] as { invocationId: string; images: Uint8Array[]; contentType: string }[] };
+    const res = await handleCapabilityInvoke(
+      imageDeps(db, written, {
+        imageInvoker: {
+          async generateImage() {
+            throw new Error("canvas exploded");
+          },
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(502);
+    expect(written.calls).toHaveLength(0);
+    expect(db.ledger.every((r) => r.status === "released")).toBe(true);
+  });
+
+  it("500s (releasing the reservation) if the image deps are not wired", async () => {
+    const db = new InMemoryCapabilityDb({ models: [IMAGE_MODEL], reports: [] }, []);
+    const written = { calls: [] as { invocationId: string; images: Uint8Array[]; contentType: string }[] };
+    const deps = imageDeps(db, written);
+    delete (deps as Partial<CapabilityHandlerDeps>).imageInvoker;
+    delete (deps as Partial<CapabilityHandlerDeps>).writeSyncOutput;
+    const res = await handleCapabilityInvoke(deps);
+    expect(res.statusCode).toBe(500);
+    expect(db.ledger.every((r) => r.status === "released")).toBe(true);
+  });
+
+  it("rejects an image (sync-s3) model on the streaming route — not streamable", async () => {
+    const db = new InMemoryCapabilityDb({ models: [IMAGE_MODEL], reports: [] }, []);
+    const written = { calls: [] as { invocationId: string; images: Uint8Array[]; contentType: string }[] };
+    const res = await handleCapabilityInvokeStream(imageDeps(db, written));
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected a rejection");
+    expect(res.response.statusCode).toBe(400);
+    expect((res.response.body as { error: string }).error).toBe("output_not_streamable");
+    // The pre-flight reservation was released, not stranded.
+    expect(db.ledger.every((r) => r.status === "released")).toBe(true);
+  });
+});
+
+describe("buildImageModelInput (Nova Canvas body)", () => {
+  it("builds a TEXT_IMAGE body with one image at the requested size", () => {
+    const body = buildImageModelInput({
+      target: "amazon.nova-canvas-v1:0",
+      region: "us-east-1",
+      provider: "amazon",
+      prompt: "a watercolor cat",
+      generation: { width: 512, height: 512, seed: 7 },
+      credentials: { accessKeyId: "A", secretAccessKey: "S", sessionToken: "T" },
+    }) as {
+      taskType: string;
+      textToImageParams: { text: string };
+      imageGenerationConfig: { numberOfImages: number; width: number; height: number; seed: number };
+    };
+    expect(body.taskType).toBe("TEXT_IMAGE");
+    expect(body.textToImageParams.text).toBe("a watercolor cat");
+    // numberOfImages is capped at 1 for this increment (plan §3.8).
+    expect(body.imageGenerationConfig.numberOfImages).toBe(1);
+    expect(body.imageGenerationConfig.width).toBe(512);
+    expect(body.imageGenerationConfig.seed).toBe(7);
+  });
+
+  it("throws for a provider without a sync-image adapter", () => {
+    expect(() =>
+      buildImageModelInput({
+        target: "anthropic.x",
+        region: "us-east-1",
+        provider: "anthropic",
+        prompt: "x",
+        credentials: { accessKeyId: "A", secretAccessKey: "S", sessionToken: "T" },
+      }),
+    ).toThrow(/not supported/);
   });
 });

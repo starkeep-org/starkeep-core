@@ -182,14 +182,39 @@ export const PLATFORM_MODEL_REGISTRY: readonly PlatformModelEntry[] = [
     // second of generated video, which the CDS controls via the request's
     // requested duration — so cost is CDS-derived (priced on output:duration_s)
     // and the load-bearing cost gate holds without any app self-report. Exact
-    // model id and per-second rate are confirm-at-implementation (open question
-    // 12); seeded so the async path is exercised and overridable by the operator.
-    modelId: "amazon.nova-reel",
+    // per-second rate is confirm-at-implementation (open question 12); seeded so
+    // the async path is exercised and overridable by the operator. `amazon.nova-
+    // reel-v1:1` is the real invocable id (confirmed live in the account catalog),
+    // taken bare by StartAsyncInvoke (no inference profile for on-demand async).
+    modelId: "amazon.nova-reel-v1:1",
     provider: "amazon",
     vision: false,
     outputModality: "video",
     defaults: {
       pricing: { [dimensionUnitKey("output", "duration_s")]: 0.08 },
+      estimates: {},
+    },
+  },
+  {
+    // Amazon Nova Canvas — image generation. Unlike Nova Reel (video), Canvas is
+    // SYNCHRONOUS: a single InvokeModel returns the image bytes (base64) in the
+    // response — it has no StartAsyncInvoke / S3-output config. So its `image`
+    // output modality routes to the `sync-s3` delivery channel (see
+    // {@link outputDelivery}): the CDS gets the bytes back and writes them to the
+    // app's syncable area under the APP role (the capability role stays write-free
+    // on this path). Billed PER IMAGE, not per token — Bedrock returns no token
+    // usage — so cost is CDS-derived from `requests:image` (the CDS controls
+    // numberOfImages, so the count is CDS-measured here, same reasoning as the
+    // async video path pricing on the CDS-controlled duration). `amazon.nova-
+    // canvas-v1:0` is ON_DEMAND (no inference profile); this is the real invocable
+    // id (confirmed live in the account catalog). ~$0.04/image for standard
+    // 1024×1024 per Bedrock pricing; operator-overridable.
+    modelId: "amazon.nova-canvas-v1:0",
+    provider: "amazon",
+    vision: false,
+    outputModality: "image",
+    defaults: {
+      pricing: { [dimensionUnitKey("requests", "image")]: 0.04 },
       estimates: {},
     },
   },
@@ -296,12 +321,41 @@ export function bedrockInvokeTarget(model: EffectiveModel): string {
 }
 
 /**
- * Whether a model's output is delivered as ASYNC S3 output (plan §3.8), derived
- * solely from its output modality: non-text (image/audio/video) is always written
- * to S3 by StartAsyncInvoke; text is inline (sync) or streamed. This single
- * predicate is the routing rule — text ⇒ `/invoke`(+stream), non-text ⇒
- * `/invoke-async`.
+ * The delivery channel a model's output uses (plan §3.8), derived from its output
+ * modality along TWO orthogonal axes — destination (inline-in-response vs written-
+ * to-S3) and invocation timing (synchronous vs asynchronous):
+ *
+ *   - `inline`   (text)        — sync InvokeModel/Converse; bytes returned in the
+ *                                response (or streamed via `/invoke-stream`).
+ *   - `sync-s3`  (image)       — sync InvokeModel; bytes come back to the CDS,
+ *                                which writes them to the app's S3 area UNDER THE
+ *                                APP ROLE and returns the key(s). Served by
+ *                                `/invoke`. The capability role needs no PutObject.
+ *   - `async-s3` (audio/video) — StartAsyncInvoke; BEDROCK writes to S3 under the
+ *                                capability role (session-scoped PutObject); app-
+ *                                polled. Served by `/invoke-async` + `/async/:id`.
+ *
+ * The earlier "non-text ⇒ async S3" one-liner was too coarse: cheap image
+ * generation (Nova Canvas) is synchronous base64, not async — so `image` is
+ * `sync-s3`, distinct from `async-s3` video. Only `audio`/`video` are async.
  */
+export type OutputDelivery = "inline" | "sync-s3" | "async-s3";
+
+export function outputDelivery(modality: OutputModality): OutputDelivery {
+  if (modality === "text") return "inline";
+  if (modality === "image") return "sync-s3";
+  return "async-s3"; // audio, video
+}
+
+/** True if the model's output is written to S3 asynchronously (StartAsyncInvoke).
+ * The `/invoke-async` route guard — video/audio only, NOT sync-s3 image. */
 export function outputIsAsyncS3(modality: OutputModality): boolean {
-  return modality !== "text";
+  return outputDelivery(modality) === "async-s3";
+}
+
+/** True if the model's output is delivered in the synchronous `/invoke` response
+ * path (either inline text or a CDS-written sync-s3 image). The `/invoke` route
+ * guard — everything that is NOT async S3. */
+export function outputIsSyncInvoke(modality: OutputModality): boolean {
+  return outputDelivery(modality) !== "async-s3";
 }

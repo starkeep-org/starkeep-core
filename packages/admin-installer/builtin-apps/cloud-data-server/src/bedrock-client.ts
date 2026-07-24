@@ -18,6 +18,7 @@ import {
   BedrockRuntimeClient,
   ConverseCommand,
   ConverseStreamCommand,
+  InvokeModelCommand,
   StartAsyncInvokeCommand,
   GetAsyncInvokeCommand,
   type ContentBlock,
@@ -166,6 +167,118 @@ export function getBedrockInvoker(): BedrockInvoker {
   if (invokerOverride) return invokerOverride;
   if (!defaultInvoker) defaultInvoker = makeConverseInvoker();
   return defaultInvoker;
+}
+
+// ---------------------------------------------------------------------------
+// Synchronous image generation (InvokeModel) — plan §3.8 `sync-s3` channel
+// ---------------------------------------------------------------------------
+//
+// Cheap image generation (Amazon Nova Canvas) is SYNCHRONOUS: a single
+// InvokeModel returns the image bytes (base64) in the response body — there is no
+// StartAsyncInvoke / S3-output config for it. So unlike the async video path, the
+// bytes come back HERE, through the CDS, which then writes them to the app's S3
+// area under the APP role (the capability role stays write-free). This is raw
+// InvokeModel with a provider-specific body (Converse doesn't cover generation),
+// behind its own {@link BedrockImageInvoker} test seam.
+
+/** Generation parameters for a synchronous image request. All CDS-known pre-call,
+ * so the reservation/cost math stays CDS-derived. `numberOfImages` is capped at 1
+ * for this increment (plan §3.8). */
+export interface ImageGenerationParams {
+  width?: number;
+  height?: number;
+  cfgScale?: number;
+  seed?: number;
+  quality?: "standard" | "premium";
+}
+
+export interface BedrockImageGenRequest {
+  /** Model id to invoke (Nova Canvas takes the bare foundation-model id). */
+  target: string;
+  region: string;
+  provider: ModelProvider;
+  prompt: string;
+  /** Optional conditioning image (inline or S3) for image-to-image. */
+  image?: BedrockImageInput;
+  generation?: ImageGenerationParams;
+  credentials: BedrockInvokeRequest["credentials"];
+}
+
+export interface BedrockImageGenResult {
+  /** Decoded image bytes, one per generated image. */
+  images: Uint8Array[];
+  /** Output image format (Nova Canvas returns PNG). */
+  format: ImageFormat;
+}
+
+export interface BedrockImageInvoker {
+  generateImage(req: BedrockImageGenRequest): Promise<BedrockImageGenResult>;
+}
+
+/**
+ * Build the provider-specific InvokeModel body for a synchronous image request.
+ * Pure and testable. Only the Amazon Nova Canvas `TEXT_IMAGE` shape is wired in
+ * this increment (§3.8); any other provider throws until an adapter is added —
+ * with NO IAM change (the boundary is all-Bedrock, §3.3).
+ */
+export function buildImageModelInput(req: BedrockImageGenRequest): Record<string, unknown> {
+  if (req.provider !== "amazon") {
+    throw new Error(`sync image generation not supported for provider "${req.provider}"`);
+  }
+  const g = req.generation ?? {};
+  const textToImageParams: Record<string, unknown> = { text: req.prompt };
+  if (req.image && "bytes" in req.image) {
+    // Nova Canvas conditioning images are inline base64 (image-to-image).
+    textToImageParams.conditionImage = Buffer.from(req.image.bytes).toString("base64");
+  }
+  return {
+    taskType: "TEXT_IMAGE",
+    textToImageParams,
+    imageGenerationConfig: {
+      // numberOfImages capped at 1 for this increment (one image per request).
+      numberOfImages: 1,
+      width: g.width ?? 1024,
+      height: g.height ?? 1024,
+      cfgScale: g.cfgScale ?? 6.5,
+      quality: g.quality ?? "standard",
+      seed: g.seed ?? 0,
+    },
+  };
+}
+
+export function makeImageInvoker(): BedrockImageInvoker {
+  return {
+    async generateImage(req) {
+      const client = new BedrockRuntimeClient({ region: req.region, credentials: req.credentials });
+      const out = await client.send(
+        new InvokeModelCommand({
+          modelId: req.target,
+          contentType: "application/json",
+          accept: "application/json",
+          body: JSON.stringify(buildImageModelInput(req)),
+        }),
+      );
+      const decoded = JSON.parse(Buffer.from(out.body).toString("utf8")) as {
+        images?: string[];
+        error?: string | null;
+      };
+      if (decoded.error) throw new Error(`Nova Canvas error: ${decoded.error}`);
+      const images = (decoded.images ?? []).map((b64) => new Uint8Array(Buffer.from(b64, "base64")));
+      if (images.length === 0) throw new Error("image generation returned no images");
+      return { images, format: "png" };
+    },
+  };
+}
+
+let imageInvokerOverride: BedrockImageInvoker | null = null;
+export function __setBedrockImageInvokerForTests(invoker: BedrockImageInvoker | null): void {
+  imageInvokerOverride = invoker;
+}
+let defaultImageInvoker: BedrockImageInvoker | null = null;
+export function getBedrockImageInvoker(): BedrockImageInvoker {
+  if (imageInvokerOverride) return imageInvokerOverride;
+  if (!defaultImageInvoker) defaultImageInvoker = makeImageInvoker();
+  return defaultImageInvoker;
 }
 
 // ---------------------------------------------------------------------------
