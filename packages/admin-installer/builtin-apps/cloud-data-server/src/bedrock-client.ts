@@ -18,15 +18,26 @@ import {
   BedrockRuntimeClient,
   ConverseCommand,
   ConverseStreamCommand,
+  StartAsyncInvokeCommand,
+  GetAsyncInvokeCommand,
   type ContentBlock,
   type ImageFormat,
 } from "@aws-sdk/client-bedrock-runtime";
 import type { ModelProvider } from "@starkeep/protocol-primitives";
 
-export interface BedrockImageInput {
-  format: ImageFormat; // "png" | "jpeg" | "gif" | "webp"
-  bytes: Uint8Array;
-}
+/**
+ * An image fed to Bedrock, delivered one of two ways (plan §3.4, "pick per
+ * request size"):
+ *  - INLINE: the CDS read the bytes under the app role and base64-inlines them
+ *    (small single images — the capability role needs no S3 access).
+ *  - S3 LOCATION: the CDS passes the object URI and Bedrock reads it directly
+ *    under the capability role (large/many images that would blow the inline
+ *    request-size/timeout limit). Reached under a single-key session policy the
+ *    broker attaches on the assume — see api-handler getCapabilityBrokerCreds.
+ */
+export type BedrockImageInput =
+  | { format: ImageFormat; bytes: Uint8Array } // "png" | "jpeg" | "gif" | "webp"
+  | { format: ImageFormat; s3Uri: string; bucketOwner?: string };
 
 export interface BedrockInvokeRequest {
   /** The Bedrock target: inference profile id when present, else the model id. */
@@ -73,7 +84,23 @@ export function providerAdapterMode(_provider: ModelProvider): "converse" | "inv
 function buildContent(req: BedrockInvokeRequest): ContentBlock[] {
   const content: ContentBlock[] = [{ text: req.prompt }];
   for (const img of req.images ?? []) {
-    content.push({ image: { format: img.format, source: { bytes: img.bytes } } });
+    if ("bytes" in img) {
+      content.push({ image: { format: img.format, source: { bytes: img.bytes } } });
+    } else {
+      // S3-location delivery: Bedrock reads the object under the capability
+      // role (narrowed to this key by the per-assume session policy).
+      content.push({
+        image: {
+          format: img.format,
+          source: {
+            s3Location: {
+              uri: img.s3Uri,
+              ...(img.bucketOwner ? { bucketOwner: img.bucketOwner } : {}),
+            },
+          },
+        },
+      });
+    }
   }
   return content;
 }
@@ -139,4 +166,164 @@ export function getBedrockInvoker(): BedrockInvoker {
   if (invokerOverride) return invokerOverride;
   if (!defaultInvoker) defaultInvoker = makeConverseInvoker();
   return defaultInvoker;
+}
+
+// ---------------------------------------------------------------------------
+// Async generation (StartAsyncInvoke) — plan §3.8
+// ---------------------------------------------------------------------------
+//
+// Generation models (video / large image) don't return their output inline; the
+// caller supplies an S3 output URI and Bedrock writes the result there
+// asynchronously under the INVOKING (capability) principal — the mirror of the
+// S3-location input problem (plan §3.4). The broker therefore assumes the
+// capability role under a session policy scoped to that single output prefix
+// (see api-handler getCapabilityBrokerCreds). The job is then polled to
+// completion via GetAsyncInvoke. This is kept a thin AWS wrapper behind the
+// {@link BedrockAsyncInvoker} test seam; the provider-specific request body is
+// built by the pure {@link buildAsyncModelInput}.
+
+/** Normalized async status, collapsing the SDK's `AsyncInvokeStatus` strings. */
+export type AsyncStatus = "InProgress" | "Completed" | "Failed";
+
+/** Generation parameters the app requested, threaded to the provider body. Only
+ * fields the CDS knows pre-call (so the reservation/cost math is CDS-derived). */
+export interface AsyncGenerationParams {
+  /** Requested video length in seconds — the CDS-derived cost basis (§3.8). */
+  durationSeconds?: number;
+  fps?: number;
+  /** e.g. "1280x720". */
+  dimension?: string;
+  seed?: number;
+}
+
+export interface BedrockAsyncStartRequest {
+  /** Model id to invoke (async foundation models take the bare id). */
+  target: string;
+  region: string;
+  provider: ModelProvider;
+  prompt: string;
+  /** Optional reference image (inline or S3) for image-conditioned generation. */
+  image?: BedrockImageInput;
+  generation?: AsyncGenerationParams;
+  /** s3:// URI (a per-invocation folder) Bedrock writes the output under. */
+  outputS3Uri: string;
+  /** Pin the output bucket to this account (confused-deputy guard). */
+  outputBucketOwner?: string;
+  credentials: BedrockInvokeRequest["credentials"];
+}
+
+export interface BedrockAsyncStartResult {
+  invocationArn: string;
+}
+
+export interface BedrockAsyncStatusRequest {
+  invocationArn: string;
+  region: string;
+  credentials: BedrockInvokeRequest["credentials"];
+}
+
+export interface BedrockAsyncStatusResult {
+  status: AsyncStatus;
+  failureMessage?: string;
+  /** The output folder URI Bedrock reports (echoes what we supplied at start). */
+  outputS3Uri?: string;
+}
+
+export interface BedrockAsyncInvoker {
+  startAsync(req: BedrockAsyncStartRequest): Promise<BedrockAsyncStartResult>;
+  getAsyncStatus(req: BedrockAsyncStatusRequest): Promise<BedrockAsyncStatusResult>;
+}
+
+/**
+ * Build the provider-specific `modelInput` for an async generation request. Pure
+ * and testable. Only the Amazon Nova (Reel) video shape is wired in this
+ * increment (§3.8); any other provider throws until an adapter is added — with
+ * NO IAM change (the boundary is all-Bedrock, §3.3).
+ */
+export function buildAsyncModelInput(req: BedrockAsyncStartRequest): Record<string, unknown> {
+  if (req.provider !== "amazon") {
+    throw new Error(`async generation not supported for provider "${req.provider}"`);
+  }
+  const g = req.generation ?? {};
+  const textToVideoParams: Record<string, unknown> = { text: req.prompt };
+  if (req.image) {
+    // Nova Reel accepts a conditioning image inline (base64) only.
+    if ("bytes" in req.image) {
+      textToVideoParams.images = [
+        {
+          format: req.image.format,
+          source: { bytes: Buffer.from(req.image.bytes).toString("base64") },
+        },
+      ];
+    } else {
+      textToVideoParams.images = [
+        { format: req.image.format, source: { s3Location: { uri: req.image.s3Uri } } },
+      ];
+    }
+  }
+  return {
+    taskType: "TEXT_VIDEO",
+    textToVideoParams,
+    videoGenerationConfig: {
+      ...(g.durationSeconds !== undefined ? { durationSeconds: g.durationSeconds } : {}),
+      ...(g.fps !== undefined ? { fps: g.fps } : {}),
+      ...(g.dimension !== undefined ? { dimension: g.dimension } : {}),
+      seed: g.seed ?? 0,
+    },
+  };
+}
+
+function normalizeAsyncStatus(status: string | undefined): AsyncStatus {
+  // Unknown/absent → treat as in progress (never a spurious Completed/Failed).
+  return status === "Completed" || status === "Failed" ? status : "InProgress";
+}
+
+export function makeAsyncInvoker(): BedrockAsyncInvoker {
+  function clientFor(region: string, credentials: BedrockInvokeRequest["credentials"]) {
+    return new BedrockRuntimeClient({ region, credentials });
+  }
+  return {
+    async startAsync(req) {
+      const client = clientFor(req.region, req.credentials);
+      const out = await client.send(
+        new StartAsyncInvokeCommand({
+          modelId: req.target,
+          modelInput: buildAsyncModelInput(req) as never,
+          outputDataConfig: {
+            s3OutputDataConfig: {
+              s3Uri: req.outputS3Uri,
+              ...(req.outputBucketOwner ? { bucketOwner: req.outputBucketOwner } : {}),
+            },
+          },
+        }),
+      );
+      if (!out.invocationArn) throw new Error("StartAsyncInvoke returned no invocationArn");
+      return { invocationArn: out.invocationArn };
+    },
+
+    async getAsyncStatus(req) {
+      const client = clientFor(req.region, req.credentials);
+      const out = await client.send(
+        new GetAsyncInvokeCommand({ invocationArn: req.invocationArn }),
+      );
+      return {
+        status: normalizeAsyncStatus(out.status),
+        ...(out.failureMessage ? { failureMessage: out.failureMessage } : {}),
+        ...(out.outputDataConfig?.s3OutputDataConfig?.s3Uri
+          ? { outputS3Uri: out.outputDataConfig.s3OutputDataConfig.s3Uri }
+          : {}),
+      };
+    },
+  };
+}
+
+let asyncInvokerOverride: BedrockAsyncInvoker | null = null;
+export function __setBedrockAsyncInvokerForTests(invoker: BedrockAsyncInvoker | null): void {
+  asyncInvokerOverride = invoker;
+}
+let defaultAsyncInvoker: BedrockAsyncInvoker | null = null;
+export function getBedrockAsyncInvoker(): BedrockAsyncInvoker {
+  if (asyncInvokerOverride) return asyncInvokerOverride;
+  if (!defaultAsyncInvoker) defaultAsyncInvoker = makeAsyncInvoker();
+  return defaultAsyncInvoker;
 }

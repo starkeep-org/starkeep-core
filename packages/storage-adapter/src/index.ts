@@ -13,6 +13,7 @@ export type { ObjectStorageAdapter } from "./object-storage/adapter.js";
 export type {
   PutOptions,
   GetResult,
+  HeadResult,
   ListOptions,
   ListResult,
   SignedUrlOptions,

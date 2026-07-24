@@ -440,6 +440,14 @@ S3-location path) a session policy that must deny every key but the referenced o
   - **Clearing an override** = delete that field's override row → `effective()` re-adopts the
     platform default. No special case.
   - `provider` lets per-provider gates (§3.5) target a model's provider.
+  - **`outputModality` is DEFINITIONAL, not overridable (added 2026-07-24, §3.8).** Unlike the
+    drift-prone override fields (pricing, inference profile, vision), a model's output modality is
+    intrinsic — you never re-purpose a text model as a video model — so a platform row's modality
+    ALWAYS wins; an override's `outputModality` is honored **only for an operator-DEFINED model** (a
+    `modelId` with no platform row), i.e. it belongs to "add a custom model", not "override a platform
+    model". A model that genuinely supports multiple output modalities is represented as **separate
+    platform entries** (multi-purpose), never one entry an override re-points. (Same class as
+    `provider`; both are identity, not tuning.)
   - Manifest `models` membership is validated at install against this **effective registry**
     (platform ∪ operator overrides), per §3.1.
 
@@ -496,13 +504,31 @@ S3-location path) a session policy that must deny every key but the referenced o
   file-access grant note), including the `reports` contract and the app-reported vs best-effort
   distinction.
 
-### 3.8 Non-text output modalities (design sketch — deferred, not built now)
+### 3.8 Non-text output modalities
 
-The wired increment returns **text** (captioning/tagging), reconciled inline. Non-text output is
-sketched here so the gate model and the session-policy pattern are designed to extend to it, but
-**none of this is implemented in the initial stage** — revisit once the text path is working.
+**✅ Async S3-output path BUILT 2026-07-24** (video / large asynchronous generation via
+`StartAsyncInvoke`). The completion model is **app-polled** (no EventBridge infra — the CDS is a
+stateless request/response Lambda): the app starts a job and polls a status route; the CDS
+`GetAsyncInvoke`s on each poll and the completing poll reconciles the ledger. Output is written by
+Bedrock to a per-invocation folder in the **app's own syncable area**; on completion the CDS returns
+the output key(s) and the **app ingests them as normal records via the ordinary data plane under its
+own role** (the capability role never writes records). **Delivery channel is DERIVED from the model's
+`outputModality`** (registry), not a separate flag: `text` → inline (sync `/invoke`) or streamed
+(`/invoke-stream`), the app's choice; `image`/`audio`/`video` → always async S3 (`/invoke-async` +
+poll) — `outputIsAsyncS3(modality) = modality !== "text"` is the whole routing rule, guarded
+symmetrically on both route families. Wired across: `projectAsyncReservation` + `outputModality` on
+the model registry (`amazon.nova-reel` → `video`) (protocol-primitives); `StartAsyncInvoke`/`GetAsyncInvoke`
+client + Nova Reel body adapter (bedrock-client); `capability_async_jobs` tracking table +
+`commitReservation` (store); `handleCapabilityInvokeAsyncStart`/`…Status` (capability-handler);
+`POST /capabilities/:name/invoke-async` + `GET /capabilities/:name/async/:id` (api-handler);
+`invokeCapabilityAsync`/`getCapabilityAsyncStatus` (app-client); boundary + identity policy gain
+`s3:PutObject` (files bucket, never `*`) and `bedrock:StartAsyncInvoke`/`GetAsyncInvoke`/
+`ListAsyncInvokes`, with a per-assume single-prefix PutObject session policy. Unit-tested with
+injected deps (no AWS); live `e2e-aws` against real Nova Reel deferred (availability/cost). The
+**small synchronous binary** case below remains unbuilt.
 
-Output splits three ways:
+The wired text increment returns **text** (captioning/tagging), reconciled inline. Non-text output
+splits three ways:
 
 - **Text** (in scope) — returned inline in the sync/stream response; CDS reconciles tokens/cost.
 - **Small synchronous binary** (image/audio; e.g. Nova Canvas returns base64) — the CDS gets the
@@ -510,18 +536,23 @@ Output splits three ways:
   the bytes to the app and let the app write them via the normal data plane under its own role**
   (mirror of by-reference input). Large binary through the broker response hits the same
   size/timeout wall as inline input. *Buildable next, low complexity — but out of the first cut.*
-- **Video / large / long-running, asynchronous** (deferred) — `StartAsyncInvoke` writes output
-  **directly to an S3 URI** you supply (`outputDataConfig.s3OutputDataConfig.s3Uri`; e.g. Nova
+- **Video / large / long-running, asynchronous** (**✅ BUILT 2026-07-24**) — `StartAsyncInvoke` writes
+  output **directly to an S3 URI** you supply (`outputDataConfig.s3OutputDataConfig.s3Uri`; e.g. Nova
   Reel writes `output.mp4` + `manifest.json` + `generation-status.json` under an invocation-id
   folder). This is the **mirror image** of the S3-location *input* problem: Bedrock's S3 *write*
-  happens under the capability role, so it needs a **session-scoped `s3:PutObject`** to a single
-  per-invocation output key (same downscoping pattern and same risk callout as §3.4), after which
-  the object is **ingested as a normal starkeep record under the app role**. Async also **breaks
-  the synchronous reserve→invoke→reconcile flow**: reserve on projection, kick off the job, and
-  reconcile on *completion* via poll/`GetAsyncInvoke` or an EventBridge job-completion signal
-  (needs `bedrock:GetAsyncInvoke`/`ListAsyncInvokes` too). That job-tracking control-flow is the
-  main reason it's deferred. Output `bytes` gating works across all three modalities (response
-  size, or post-completion S3 HEAD); type-specific output (image megapixels, video duration) is
+  happens under the capability role, so it needs a **session-scoped `s3:PutObject`** to the single
+  per-invocation output prefix (same downscoping pattern and same risk callout as §3.4), after which
+  the object is **ingested as a normal starkeep record under the app role** — the CDS returns the
+  output key(s) and the app registers them via the ordinary data routes. Async also **breaks the
+  synchronous reserve→invoke→reconcile flow**: reserve on projection, kick off the job, and reconcile
+  on *completion*. **Resolved: app-polled `GetAsyncInvoke`** (not EventBridge — no background worker /
+  infra in the stateless Lambda CDS); the completing poll commits the reservation as-is (the
+  CDS-derived generation size equals actuals for fixed-duration output) and appends the measured
+  `output:bytes` from an S3 HEAD. A `capability_async_jobs` row tracks each in-flight job so a later
+  poll (a different Lambda invocation) recovers the job ARN + output location and reconciles once
+  (status flips only from `running`, guarding double-reconcile). Output `bytes` gating works across
+  all three modalities (response size, or post-completion S3 HEAD); type-specific output (image
+  megapixels, video duration) is
   app-reported best-effort per §3.5.
 
 ---
@@ -647,6 +678,29 @@ Remaining truly-open items:
     per-assume inline session policies correctly narrowing S3 access to a single key. **Prove this
     out first** (§7 step 1); if it fails, fall back to inline-only for the initial increment and
     revisit. Until proven, treat the S3-location path as provisional.
+    **RESOLVED 2026-07-24 — PoC PASSED against real AWS** (`e2e-aws/src/s3-session-policy-poc.ts`,
+    run via `STARKEEP_AWS_TESTS=1 pnpm --filter @starkeep/e2e-aws poc:s3`). Three cases against a
+    disposable role+bucket under a capability-broker-shaped boundary:
+    - **TC1 — downscoping works:** a broad-read role assumed with an inline session policy scoped to
+      one key reads exactly that key and gets `AccessDenied` on every other. The mechanism the plan
+      relies on is real.
+    - **TC2 — the standing role is broad:** assumed *without* the session policy, the same role reads
+      the whole bucket. Session-policy narrowing is a **belt the broker must fasten on every assume**;
+      it is not a standing property of the role.
+    - **TC3 — a session policy cannot GRANT:** a role with no `s3:GetObject` in its *identity* policy,
+      assumed with a session policy that tries to grant the key, is still denied — effective perms are
+      the **intersection** of identity ∩ boundary ∩ session policy. So the plan's literal aspiration
+      ("standing role holds *no* object access; each assume scopes it to one key") is **not achievable
+      with session policies alone**.
+    **Consequences for implementation (the achievable design):** (a) the capability-broker boundary
+    must permit `s3:GetObject` **scoped to the app-data area** (S3 prefix/bucket), never `*` — TC2
+    means whatever the standing role *can* reach is the blast radius of a missing session policy;
+    (b) the role's identity policy must carry that same broad-within-app-data read (TC3 — a session
+    policy can only trim it); (c) the broker must attach a correct single-key session policy on **every**
+    capability assume; and (d) the §3.4-step-4 app-role read stays the **independent, load-bearing**
+    authorization for *which* object may be fed to Bedrock (it does not become redundant once the
+    session policy exists — it is the suspenders to the session policy's belt). The S3-location path is
+    **viable**; proceed with these constraints baked into §3.3/§3.4.
 11. **Other-provider request shaping (beyond the initial five)** — a further provider needs its own
     adapter (or Converse coverage) and a registry entry; **no boundary change** (IAM is
     all-Bedrock). §3.3, §3.6.
@@ -665,11 +719,20 @@ Remaining truly-open items:
    object key and denies all others. If it holds, the S3-location input path (and, later, the
    async S3-output path in §3.8) is viable; if not, scope the initial increment to inline-base64
    only and revisit. Gate the §3.3/§3.4 S3 decisions on this result.
+   **✅ DONE 2026-07-24 — PASSED** (`e2e-aws/src/s3-session-policy-poc.{ts,test.ts}`; run with
+   `STARKEEP_AWS_TESTS=1 pnpm --filter @starkeep/e2e-aws poc:s3`). S3-location path is viable; see
+   open-question 10 for the empirical result and the three constraints it imposes on §3.3/§3.4
+   (boundary S3 scoped to the app-data area, broad-within-app-data identity read, single-key session
+   policy on every assume, app-role read kept as the independent authorization).
 2. Manifest schema + author-time validator (`capabilities[]`, `required`, `reports`) and the
    platform capability registry.
 3. Capability-broker boundary in bootstrap (all-Bedrock invoke, all-or-nothing per §3.3; include
    session-scoped S3 only if step 1 passed) + teardown-script update; capability role mint at
    deploy with CDS-only trust; `sts:AssumeRole` add to CDS boundary.
+   **✅ DONE — incl. S3-location (2026-07-24).** Boundary + the role's `capability-invoke`
+   identity policy now permit `s3:GetObject` on the app-data area (`${prefix}-files-*/*`, never `*`)
+   per the PoC constraints (open-Q10 TC2/TC3). No teardown-script change: the boundary is CFN-managed
+   and the S3 grant lives inside the existing name-deleted inline policy.
 4. Model registry (two layered tables: platform registry + operator overrides); `capability_grants`
    + dimension-generic gate table + append-only ledger; install/uninstall wiring (incl.
    install-time effective-registry validation of `models`, consent gate, `reports` persistence) +
@@ -678,6 +741,11 @@ Remaining truly-open items:
    gate check (reserve-on-ledger) → assume capability role → Bedrock invoke via Converse
    (buffered) → ledger reconcile → return. All five shipped provider adapters (Converse where
    covered, raw `InvokeModel` otherwise).
+   **✅ S3-location delivery DONE (2026-07-24).** `makeCapabilityContentReader` (shared by the
+   buffered + streaming routes) picks inline-base64 vs S3-location by a no-download HEAD-derived size
+   (`INLINE_MAX_BYTES`, env-overridable); the S3-location branch passes the object by `s3://` URI and
+   the assume attaches a single-key inline session policy (re-Allowing invoke + `s3:GetObject` on
+   exactly that key, uncached), while the step-4 app-role read stays the independent authorization.
 6. Gate/cost-governance subsystem (open dimension set, two-axis enforcement, calendar week/month
    windows, reserve-on-ledger concurrency with burst-bounded overage, price/estimate overrides,
    global kill switch) + adversarial tests.
@@ -689,5 +757,13 @@ Remaining truly-open items:
 9. Photos integration + `e2e-aws` coverage (both providers, both origins, degraded-grant path,
    trust-boundary assertions).
 
-*(Deferred to a later increment, not built now: small synchronous binary output; async
-S3-output/video via `StartAsyncInvoke` with job tracking — §3.8.)*
+10. **✅ DONE 2026-07-24 — async S3-output/video via `StartAsyncInvoke` with app-polled job tracking
+    (§3.8).** Pure logic (`projectAsyncReservation`, `amazon.nova-reel` async-output model) →
+    async client (`Start`/`GetAsyncInvoke` + Nova Reel body) → `capability_async_jobs` table +
+    `commitReservation` store → `handleCapabilityInvokeAsyncStart`/`…Status` → api-handler routes
+    (`invoke-async` / `async/:id`) with a single-prefix PutObject session policy → app-client
+    (`invokeCapabilityAsync`/`getCapabilityAsyncStatus`) + docs. Boundary + identity policy gained
+    `s3:PutObject` (files bucket, never `*`) and the async Bedrock verbs. Unit-tested with injected
+    deps; live `e2e-aws` against real Nova Reel deferred (availability/cost).
+
+*(Deferred to a later increment, not built now: small synchronous binary output — §3.8.)*

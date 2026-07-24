@@ -98,10 +98,11 @@ async function loadModelOverrides(
     inference_profile_id: string | null;
     inference_profile_cleared: boolean;
     vision: boolean | null;
+    output_modality: string | null;
     pricing_json: string | null;
     estimates_json: string | null;
   }>`SELECT model_id, provider, inference_profile_id, inference_profile_cleared,
-            vision, pricing_json, estimates_json
+            vision, output_modality, pricing_json, estimates_json
        FROM shared.capability_model_overrides`.execute(db);
   return rows.rows.map((r) => {
     const o: OperatorModelOverride = { modelId: r.model_id };
@@ -109,6 +110,7 @@ async function loadModelOverrides(
     if (r.inference_profile_cleared) o.inferenceProfileId = null;
     else if (r.inference_profile_id) o.inferenceProfileId = r.inference_profile_id;
     if (r.vision !== null) o.vision = r.vision;
+    if (r.output_modality !== null) o.outputModality = r.output_modality as OperatorModelOverride["outputModality"];
     if (r.pricing_json) o.pricing = JSON.parse(r.pricing_json) as Record<string, number>;
     if (r.estimates_json) o.estimates = JSON.parse(r.estimates_json) as OperatorModelOverride["estimates"];
     return o;
@@ -194,6 +196,8 @@ async function writeCapabilityGrants(
 
   // The broker writes ledger reservation/reconcile rows under the app's PG role.
   await sql`GRANT INSERT, UPDATE ON shared.capability_ledger TO ${sql.raw(pgRole)}`.execute(db);
+  // …and async-job tracking rows for the StartAsyncInvoke path (plan §3.8).
+  await sql`GRANT INSERT, UPDATE ON shared.capability_async_jobs TO ${sql.raw(pgRole)}`.execute(db);
 }
 
 export interface DsqlDdlOptions {
@@ -555,9 +559,11 @@ export async function runAppUninstallDdl(
       // revoke the ledger write grant so DROP ROLE below doesn't trip on a
       // lingering dependency. Operator-set global/provider gates are untouched.
       await sql`REVOKE ALL ON shared.capability_ledger FROM ${sql.raw(pgRole)}`.execute(db);
+      await sql`REVOKE ALL ON shared.capability_async_jobs FROM ${sql.raw(pgRole)}`.execute(db);
       await db.deleteFrom("shared.capability_grants").where("app_id", "=", appId).execute();
       await db.deleteFrom("shared.capability_gates").where("scope_app_id", "=", appId).execute();
       await db.deleteFrom("shared.capability_ledger").where("app_id", "=", appId).execute();
+      await db.deleteFrom("shared.capability_async_jobs").where("app_id", "=", appId).execute();
 
       await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
 

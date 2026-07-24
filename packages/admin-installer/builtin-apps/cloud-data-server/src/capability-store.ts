@@ -30,6 +30,7 @@ const GRANTS = "shared.capability_grants";
 const GATES = "shared.capability_gates";
 const LEDGER = "shared.capability_ledger";
 const OVERRIDES = "shared.capability_model_overrides";
+const ASYNC_JOBS = "shared.capability_async_jobs";
 
 /** Load the caller app's grant for one capability; null if not granted. */
 export async function loadCapabilityGrant(
@@ -162,6 +163,7 @@ export async function loadModelOverrides(
       "inference_profile_id",
       "inference_profile_cleared",
       "vision",
+      "output_modality",
       "pricing_json",
       "estimates_json",
     ])
@@ -173,6 +175,8 @@ export async function loadModelOverrides(
     if (r.inference_profile_cleared) o.inferenceProfileId = null;
     else if (r.inference_profile_id) o.inferenceProfileId = r.inference_profile_id;
     if (r.vision !== null && r.vision !== undefined) o.vision = r.vision;
+    if (r.output_modality !== null && r.output_modality !== undefined)
+      o.outputModality = r.output_modality as OperatorModelOverride["outputModality"];
     if (r.pricing_json) o.pricing = safeJsonObject(r.pricing_json);
     if (r.estimates_json) o.estimates = safeJsonObject(r.estimates_json);
     return o;
@@ -304,6 +308,27 @@ export async function reconcile(
   }
 }
 
+/**
+ * Commit an ASYNC reservation as-is on job completion (plan §3.8): flip every
+ * still-`reserved` row for the invocation to `committed`. Unlike the synchronous
+ * {@link reconcile}, the quantities are NOT trued up — the reservation already
+ * carried the CDS-derived worst case, which equals actuals for a fixed-duration
+ * generation. The one genuinely-post-call CDS measurement (`output:bytes` from an
+ * S3 HEAD) is appended separately via {@link appendReportedOutput}.
+ */
+export async function commitReservation(
+  client: DatabaseClient,
+  invocationId: string,
+): Promise<void> {
+  const q = postgresCompiler
+    .updateTable(LEDGER)
+    .set({ status: "committed" })
+    .where("invocation_id", "=", invocationId)
+    .where("status", "=", "reserved")
+    .compile();
+  await client.query(q.sql, [...q.parameters]);
+}
+
 /** Mark a reservation released (failed/aborted call) so its rows drop out of
  * every gate SUM. */
 export async function release(client: DatabaseClient, invocationId: string): Promise<void> {
@@ -312,6 +337,104 @@ export async function release(client: DatabaseClient, invocationId: string): Pro
     .set({ status: "released" })
     .where("invocation_id", "=", invocationId)
     .where("status", "=", "reserved")
+    .compile();
+  await client.query(q.sql, [...q.parameters]);
+}
+
+// ---------------------------------------------------------------------------
+// Async jobs — StartAsyncInvoke tracking (plan §3.8)
+// ---------------------------------------------------------------------------
+
+export type AsyncJobStatus = "running" | "completed" | "failed";
+
+export interface AsyncJobRow {
+  invocationId: string;
+  appId: string;
+  capabilityName: string;
+  provider: string;
+  model: string;
+  invocationArn: string;
+  outputBucket: string;
+  outputKeyPrefix: string;
+  status: AsyncJobStatus;
+}
+
+/** Persist a newly-started async job so a later status poll can recover it. */
+export async function insertAsyncJob(client: DatabaseClient, job: AsyncJobRow): Promise<void> {
+  const q = postgresCompiler
+    .insertInto(ASYNC_JOBS)
+    .values({
+      invocation_id: job.invocationId,
+      app_id: job.appId,
+      capability_name: job.capabilityName,
+      provider: job.provider,
+      model: job.model,
+      invocation_arn: job.invocationArn,
+      output_bucket: job.outputBucket,
+      output_key_prefix: job.outputKeyPrefix,
+      status: job.status,
+    })
+    .compile();
+  await client.query(q.sql, [...q.parameters]);
+}
+
+/** Load one async job by id, scoped to the requesting app (a PUBLIC-SELECT
+ * table, so the app_id filter is what prevents cross-app status reads). */
+export async function loadAsyncJob(
+  client: DatabaseClient,
+  invocationId: string,
+  appId: string,
+): Promise<AsyncJobRow | null> {
+  const q = postgresCompiler
+    .selectFrom(ASYNC_JOBS)
+    .select([
+      "invocation_id",
+      "app_id",
+      "capability_name",
+      "provider",
+      "model",
+      "invocation_arn",
+      "output_bucket",
+      "output_key_prefix",
+      "status",
+    ])
+    .where("invocation_id", "=", invocationId)
+    .where("app_id", "=", appId)
+    .limit(1)
+    .compile();
+  const { rows } = await client.query(q.sql, [...q.parameters]);
+  const r = rows[0] as Record<string, string> | undefined;
+  if (!r) return null;
+  return {
+    invocationId: r.invocation_id,
+    appId: r.app_id,
+    capabilityName: r.capability_name,
+    provider: r.provider,
+    model: r.model,
+    invocationArn: r.invocation_arn,
+    outputBucket: r.output_bucket,
+    outputKeyPrefix: r.output_key_prefix,
+    status: r.status as AsyncJobStatus,
+  };
+}
+
+/**
+ * Transition a job's status, but ONLY from `running` — so a concurrent double
+ * poll can't both reconcile. `DatabaseClient` doesn't surface a row count, so the
+ * caller treats "was it still running when I read it" as the reconcile guard
+ * (the read + this guarded update are the check; a lost race just no-ops here and
+ * the winner's reconcile stands).
+ */
+export async function markAsyncJobStatus(
+  client: DatabaseClient,
+  invocationId: string,
+  status: Exclude<AsyncJobStatus, "running">,
+): Promise<void> {
+  const q = postgresCompiler
+    .updateTable(ASYNC_JOBS)
+    .set({ status })
+    .where("invocation_id", "=", invocationId)
+    .where("status", "=", "running")
     .compile();
   await client.query(q.sql, [...q.parameters]);
 }
@@ -354,6 +477,7 @@ interface OverrideRow {
   inference_profile_id: string | null;
   inference_profile_cleared: boolean | null;
   vision: boolean | null;
+  output_modality: string | null;
   pricing_json: string | null;
   estimates_json: string | null;
 }

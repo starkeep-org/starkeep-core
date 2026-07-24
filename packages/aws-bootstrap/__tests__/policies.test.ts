@@ -6,6 +6,7 @@ import {
   foundationalPermissionsBoundaryStatements,
   installDdlBoundaryStatements,
   installInfraBoundaryStatements,
+  capabilityBrokerPermissionsBoundaryStatements,
 } from "../src/bootstrap/index.js";
 import { userDataOwnerPermissionsBoundaryStatements } from "../src/bootstrap/user-data-owner-permissions-boundary.js";
 import { MAX_STACK_PREFIX_LENGTH } from "../src/bootstrap/index.js";
@@ -187,6 +188,48 @@ describe("user-data-owner boundary (Drive's layer-2 hard floor)", () => {
   it("denies mutating IAM", () => expectDeniesMutatingIam(statements));
 });
 
+describe("capability-broker boundary (Bedrock invoke + S3-location I/O ceiling)", () => {
+  const statements = capabilityBrokerPermissionsBoundaryStatements(PREFIX);
+
+  it("permits all-Bedrock invoke incl. async generation (all-or-nothing, plan §3.3/§3.8)", () => {
+    const invoke = byId(statements, "CapabilityBedrockInvoke");
+    expect(invoke.Action).toContain("bedrock:InvokeModel");
+    expect(invoke.Action).toContain("bedrock:Converse");
+    expect(invoke.Action).toContain("bedrock:ConverseStream");
+    // Async generation verbs (§3.8) + the async-invoke resource ARN.
+    expect(invoke.Action).toContain("bedrock:StartAsyncInvoke");
+    expect(invoke.Action).toContain("bedrock:GetAsyncInvoke");
+    const resources = Array.isArray(invoke.Resource) ? invoke.Resource : [invoke.Resource];
+    const rstrs = resources.map((r) => cfnString(r as CfnValue));
+    expect(rstrs).toContain("arn:aws:bedrock:*::foundation-model/*");
+    expect(rstrs).toContain("arn:aws:bedrock:*:*:async-invoke/*");
+  });
+
+  it("scopes S3-location I/O (read + async-output write) to the files bucket, never *", () => {
+    const s3 = byId(statements, "CapabilitySessionScopedS3IO");
+    // GetObject (input, §3.4) + PutObject (async output, §3.8), nothing else.
+    expect(s3.Action).toEqual(["s3:GetObject", "s3:PutObject"]);
+    expect(cfnString(s3.Resource as CfnValue)).toBe(`arn:aws:s3:::${PREFIX}-files-*/*`);
+    // The blast radius (TC2) must not reach billing/pulumi-state/artifacts or *.
+    const s3Resources = statements
+      .filter((st) => st.Effect === "Allow")
+      .flatMap((st) => (Array.isArray(st.Resource) ? st.Resource : [st.Resource]))
+      .map((r) => cfnString(r as CfnValue))
+      .filter((r) => r.startsWith("arn:aws:s3"));
+    expect(s3Resources).toEqual([`arn:aws:s3:::${PREFIX}-files-*/*`]);
+  });
+
+  it("grants no other service power (no data DB, no other AWS services; no S3 delete)", () => {
+    const actions = actionsOf(statements);
+    expect(actions.every((a) => a.startsWith("bedrock:") || a.startsWith("s3:"))).toBe(true);
+    // S3 is confined to Get/Put on the files bucket — never Delete/List/etc.
+    expect(actions.filter((a) => a.startsWith("s3:")).sort()).toEqual(["s3:GetObject", "s3:PutObject"]);
+    expect(actions.some((a) => a.startsWith("s3:Delete"))).toBe(false);
+  });
+
+  it("denies mutating IAM", () => expectDeniesMutatingIam(statements));
+});
+
 describe("install-ddl boundary", () => {
   const statements = installDdlBoundaryStatements(PREFIX);
 
@@ -277,13 +320,14 @@ describe("managed-policy size (AWS 6144-char ceiling)", () => {
     return JSON.stringify(doc).replace(/\s/g, "").length;
   }
 
-  // Every managed policy in the bootstrap template = the five boundaries.
+  // Every managed policy in the bootstrap template = the six boundaries.
   const managedPolicies: Record<string, (p: string) => IamStatement[]> = {
     "app-permissions-boundary": appPermissionsBoundaryStatements,
     "foundational-permissions-boundary": foundationalPermissionsBoundaryStatements,
     "user-data-owner-permissions-boundary": userDataOwnerPermissionsBoundaryStatements,
     "install-ddl-permissions-boundary": installDdlBoundaryStatements,
     "install-infra-permissions-boundary": installInfraBoundaryStatements,
+    "capability-broker-permissions-boundary": capabilityBrokerPermissionsBoundaryStatements,
   };
 
   for (const [name, build] of Object.entries(managedPolicies)) {

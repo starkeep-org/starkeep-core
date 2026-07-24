@@ -24,10 +24,12 @@
 import {
   effectiveModel,
   bedrockInvokeTarget,
+  outputIsAsyncS3,
   buildCapabilityGrant,
   canInvokeModel,
   evaluateGates,
   projectReservation,
+  projectAsyncReservation,
   reconcileMeasurements,
   gateMatches,
   isNonGenericDimensionUnit,
@@ -36,6 +38,7 @@ import {
   type RequestModality,
   type CapabilityRequestContext,
   type EffectiveModel,
+  type Measurement,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseClient } from "@starkeep/storage-aurora-dsql";
 import {
@@ -45,12 +48,21 @@ import {
   reserve,
   reconcile,
   release,
+  commitReservation,
   sumForGate,
   lookupInvocation,
   appendReportedOutput,
+  insertAsyncJob,
+  loadAsyncJob,
+  markAsyncJobStatus,
   type LedgerKey,
 } from "./capability-store.js";
-import type { BedrockImageInput, BedrockInvoker } from "./bedrock-client.js";
+import type {
+  BedrockImageInput,
+  BedrockInvoker,
+  BedrockAsyncInvoker,
+  AsyncGenerationParams,
+} from "./bedrock-client.js";
 
 export interface CapabilityInvokeBody {
   model?: string;
@@ -63,11 +75,34 @@ export interface CapabilityInvokeBody {
   reports?: Record<string, number>;
 }
 
-/** Bytes + shape of a by-reference content item, resolved under the app role. */
+/**
+ * A by-reference content item resolved under the app role. Delivered to Bedrock
+ * one of two ways (plan §3.4, "pick per request size"):
+ *  - INLINE: `image` carries the base64 bytes the CDS read under the app role.
+ *  - S3 LOCATION: `image` carries an s3Uri and `s3Key` names the concrete
+ *    bucket/key the broker must scope the capability role's per-assume session
+ *    policy to (the single-key belt from open-question 10's TC1). Bedrock reads
+ *    the object under the capability role, so the object was NOT downloaded here.
+ */
 export interface ResolvedContent {
-  bytes: Uint8Array;
   sizeBytes: number;
   image?: BedrockImageInput;
+  /** Set only on the S3-location path — the key to scope the session policy to. */
+  s3Key?: { bucket: string; key: string };
+}
+
+/** The S3 keys/prefixes and Bedrock verbs a capability assume must be
+ * session-policy-scoped to. Empty/absent → inline or text-only, assumed with no
+ * session policy.
+ *   - `s3Keys` — single-object GetObject (S3-location INPUT, plan §3.4);
+ *   - `s3PutKeyPrefixes` — single-prefix PutObject (async S3 OUTPUT, plan §3.8);
+ *   - `bedrockAsync` — the session policy must also re-Allow the async invoke
+ *     verbs (StartAsyncInvoke/GetAsyncInvoke), since a session policy is the
+ *     intersection over the whole session and would otherwise deny them. */
+export interface CapabilityAssumeScope {
+  s3Keys?: { bucket: string; key: string }[];
+  s3PutKeyPrefixes?: { bucket: string; keyPrefix: string }[];
+  bedrockAsync?: boolean;
 }
 
 export interface ContentReadResult {
@@ -92,8 +127,10 @@ export interface CapabilityHandlerDeps {
   /** Read the referenced item under the app's own role + grants. Omit for a
    * text-only request (no contentRef). */
   readContent: (ref: NonNullable<CapabilityInvokeBody["contentRef"]>) => Promise<ContentReadResult>;
-  /** Assume the capability-broker role (single hop, per request). */
-  assumeCapabilityCreds: () => Promise<CapabilityCreds>;
+  /** Assume the capability-broker role (single hop, per request). On the
+   * S3-location path, `scope.s3Keys` names the object(s) the assume must attach
+   * an inline session policy to (single-key downscoping, plan §3.4). */
+  assumeCapabilityCreds: (scope?: CapabilityAssumeScope) => Promise<CapabilityCreds>;
   invoker: BedrockInvoker;
   region: string;
   nowMs?: () => number;
@@ -114,6 +151,14 @@ const HARD_MAX_TOKENS = 8192;
  * count post-call; this only sizes the reservation). */
 function estimateTextTokens(text: string): number {
   return Math.ceil(text.length / 4);
+}
+
+/** The session-policy scope for the capability assume: the single S3 key when
+ * content is delivered by S3 location, else undefined (inline / text-only →
+ * assume with no session policy). Keeping this next to the invoke call sites
+ * makes the "session policy on EVERY S3-location assume" obligation explicit. */
+function assumeScopeFor(content: ResolvedContent | undefined): CapabilityAssumeScope | undefined {
+  return content?.s3Key ? { s3Keys: [content.s3Key] } : undefined;
 }
 
 /** A prepared, gate-cleared request with a LIVE ledger reservation that the
@@ -184,6 +229,11 @@ async function prepareInvoke(
   const model = effectiveModel(body.model, overrides);
   if (!model) {
     return reject(400, { error: "unknown_model", model: body.model });
+  }
+  // This (inline sync/stream) route is only for TEXT output; non-text output is
+  // delivered as async S3 and must use /invoke-async (plan §3.8).
+  if (outputIsAsyncS3(model.outputModality)) {
+    return reject(400, { error: "output_requires_async", model: body.model });
   }
 
   // (3) By-reference content read under the app's own role (source of truth for
@@ -300,10 +350,11 @@ export async function handleCapabilityInvoke(
   const { model, ctx, content, maxTokens, ledgerKey, invocationId, appReports } = prep.prepared;
   const { capClient, invoker, body } = deps;
 
-  // (5) Assume the capability-broker role and invoke Bedrock.
+  // (5) Assume the capability-broker role and invoke Bedrock. On the
+  // S3-location path the assume carries a single-key session policy (plan §3.4).
   let result;
   try {
-    const creds = await deps.assumeCapabilityCreds();
+    const creds = await deps.assumeCapabilityCreds(assumeScopeFor(content));
     result = await invoker.converse({
       target: bedrockInvokeTarget(model),
       region: deps.region,
@@ -394,7 +445,7 @@ export async function handleCapabilityInvokeStream(
     let inputTokens = 0;
     let outputTokens = 0;
     try {
-      const creds = await deps.assumeCapabilityCreds();
+      const creds = await deps.assumeCapabilityCreds(assumeScopeFor(content));
       for await (const evt of invoker.converseStream({
         target: bedrockInvokeTarget(model),
         region: deps.region,
@@ -508,4 +559,368 @@ export async function handleCapabilityReport(
     );
   }
   return { statusCode: 200, body: { ok: true, recorded: measurements.length } };
+}
+
+// ---------------------------------------------------------------------------
+// Async generation (StartAsyncInvoke) — plan §3.8
+// ---------------------------------------------------------------------------
+//
+// Non-text output (video / large image) is written to S3 ASYNCHRONOUSLY, so the
+// synchronous reserve → invoke → reconcile flow splits in two:
+//   START  — reserve the worst case, kick off StartAsyncInvoke to a per-invocation
+//            output prefix in the app's OWN syncable area, and record the job so a
+//            later poll can find it;
+//   STATUS — the app polls; each poll GetAsyncInvokes; the COMPLETING poll commits
+//            the reservation, records the CDS-measured output:bytes (S3 HEAD), and
+//            returns the output key(s) for the app to ingest as a normal record
+//            via the ordinary data plane (under its own role — the capability role
+//            is never a record writer).
+// Bedrock writes the output under the capability role, so — mirroring the
+// S3-location INPUT path — the start assume carries a session policy scoped to
+// exactly the one output prefix (single-prefix PutObject) plus the async invoke
+// verbs; the app-role read of any conditioning image stays the independent
+// authorization for the input side.
+
+/** Default requested video length (seconds) when the app doesn't specify one —
+ * also the CDS-derived cost basis, so it is sent to Bedrock unchanged. */
+const DEFAULT_VIDEO_SECONDS = 6;
+
+export interface CapabilityAsyncInvokeBody {
+  model?: string;
+  prompt?: string;
+  /** Optional conditioning item (e.g. an image for image-to-video), by reference. */
+  contentRef?: { recordId?: string; objectKey?: string };
+  modality?: RequestModality;
+  generation?: AsyncGenerationParams;
+  /** App-reported non-generic INPUT quantities, keyed by "dimension:unit". */
+  reports?: Record<string, number>;
+}
+
+/** The S3 output target for a job: a per-invocation folder in the app's syncable
+ * area that Bedrock writes the generated output under. */
+export interface AsyncOutputTarget {
+  bucket: string;
+  /** Key prefix (folder) — the session PutObject policy is scoped to this. */
+  keyPrefix: string;
+  /** `s3://bucket/keyPrefix/` URI passed to StartAsyncInvoke. */
+  s3Uri: string;
+}
+
+export interface CapabilityAsyncStartDeps {
+  appId: string;
+  capabilityName: string;
+  body: CapabilityAsyncInvokeBody;
+  capClient: DatabaseClient;
+  /** Read an optional conditioning item under the app role. Omit for prompt-only. */
+  readContent?: (ref: NonNullable<CapabilityAsyncInvokeBody["contentRef"]>) => Promise<ContentReadResult>;
+  assumeCapabilityCreds: (scope?: CapabilityAssumeScope) => Promise<CapabilityCreds>;
+  asyncInvoker: BedrockAsyncInvoker;
+  region: string;
+  /** Pin the output bucket to this account (confused-deputy guard). */
+  accountId: string;
+  /** Resolve the S3 output target for the freshly-minted invocationId. */
+  resolveOutputTarget: (invocationId: string) => AsyncOutputTarget;
+  nowMs?: () => number;
+  timeZone?: string;
+}
+
+/** Filter app-reported quantities to those the app declared + that are
+ * non-generic + finite (shared by the sync and async paths). */
+function filterAppReports(
+  raw: Record<string, number> | undefined,
+  declared: ReadonlySet<string>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    const [dim, unit] = key.split(":");
+    if (
+      dim &&
+      unit &&
+      declared.has(key) &&
+      isNonGenericDimensionUnit(dim, unit) &&
+      typeof value === "number" &&
+      Number.isFinite(value)
+    ) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/**
+ * Start an async generation job (plan §3.8). Runs the same grant/model/content/
+ * gate pre-flight as the synchronous path (reserve-on-ledger against the
+ * worst-case projection), then kicks off StartAsyncInvoke and records the job.
+ * Returns 202 with the invocationId + output location the app polls/ingests.
+ */
+export async function handleCapabilityInvokeAsyncStart(
+  deps: CapabilityAsyncStartDeps,
+): Promise<CapabilityHandlerResponse> {
+  const nowMs = deps.nowMs ?? Date.now;
+  const timeZone = deps.timeZone ?? "UTC";
+  const { appId, capabilityName, body, capClient } = deps;
+  const reject = (statusCode: number, bodyObj: unknown): CapabilityHandlerResponse => ({
+    statusCode,
+    body: bodyObj,
+  });
+
+  if (capabilityName !== CAPABILITY_BEDROCK_INVOKE) {
+    return reject(404, { error: `Unknown capability: ${capabilityName}` });
+  }
+  if (!body.model) return reject(400, { error: "model is required" });
+  if (!body.prompt) return reject(400, { error: "prompt is required" });
+
+  const grantRow = await loadCapabilityGrant(capClient, appId, capabilityName);
+  if (!grantRow) return reject(403, { error: "not_granted", capability: capabilityName });
+  const grant = buildCapabilityGrant(grantRow);
+
+  if (!canInvokeModel(grant, body.model)) {
+    return reject(403, { error: "model_not_granted", model: body.model });
+  }
+  const overrides = await loadModelOverrides(capClient);
+  const model = effectiveModel(body.model, overrides);
+  if (!model) return reject(400, { error: "unknown_model", model: body.model });
+  // This route is only for models whose output is async S3 (non-text, §3.8); a
+  // text model must use /invoke(+stream). Keeps the two flows from being crossed.
+  if (!outputIsAsyncS3(model.outputModality)) {
+    return reject(400, { error: "output_not_async", model: body.model });
+  }
+
+  // Optional conditioning item read under the app role (source of truth for what
+  // the app may feed Bedrock). Prompt-only requests skip this.
+  let content: ResolvedContent | undefined;
+  if (body.contentRef) {
+    if (!deps.readContent) return reject(400, { error: "contentRef not supported here" });
+    const read = await deps.readContent(body.contentRef);
+    if (!read.ok) return reject(read.status ?? 403, { error: read.message ?? "forbidden" });
+    content = read.content;
+  }
+
+  // The request modality comes from the model's OUTPUT modality (e.g. Nova Reel →
+  // "video"), which drives the requests/<modality> gate; the caller may override.
+  const modality: RequestModality = body.modality ?? model.outputModality;
+  const ctx: CapabilityRequestContext = { appId, provider: model.provider, model: body.model, modality };
+  const appReports = filterAppReports(body.reports, grant.reports);
+
+  // Fail-closed BEFORE reserving on any matching gate whose non-generic dimension
+  // the app didn't declare (same contract as the sync path).
+  const gates = await loadGates(capClient, capabilityName);
+  for (const gate of gates) {
+    if (!gateMatches(gate, ctx)) continue;
+    const key = dimensionUnitKey(gate.dimension, gate.unit);
+    if (isNonGenericDimensionUnit(gate.dimension, gate.unit) && !grant.reports.has(key)) {
+      return reject(403, { error: "undeclared_dimension", dimension: gate.dimension, unit: gate.unit });
+    }
+  }
+
+  // CDS-derived generation output → drives both the reservation and the derived
+  // cost gate (the CDS controls the requested duration, so this is CDS-measured).
+  const durationSeconds = body.generation?.durationSeconds ?? DEFAULT_VIDEO_SECONDS;
+  const output: Measurement[] = [{ dimension: "output", unit: "duration_s", quantity: durationSeconds }];
+
+  const projected = projectAsyncReservation({
+    model,
+    ctx,
+    inputBytes: content?.sizeBytes,
+    output,
+    appReports,
+  });
+
+  const invocationId = `${appId}:${capabilityName}:async:${nowMs()}:${Math.random().toString(36).slice(2, 10)}`;
+  const ledgerKey: LedgerKey = {
+    invocationId,
+    appId,
+    capabilityName,
+    provider: model.provider,
+    model: body.model,
+  };
+  await reserve(capClient, ledgerKey, projected);
+
+  const decision = await evaluateGates({
+    gates,
+    ctx,
+    appReports: grant.reports,
+    projected: [],
+    getSum: (gate) => sumForGate(capClient, gate, nowMs(), timeZone),
+  });
+  if (!decision.allowed) {
+    await release(capClient, invocationId);
+    return reject(429, {
+      error: "gate_exceeded",
+      breaches: decision.breaches.map((b) => ({
+        dimension: b.gate.dimension,
+        unit: b.gate.unit,
+        limit: b.gate.limit,
+        current: b.current,
+      })),
+    });
+  }
+
+  // Output goes to a per-invocation folder in the app's OWN syncable area; the
+  // start assume is scoped to that one prefix (PutObject) + the input key (if the
+  // conditioning image is delivered by S3 location) + the async invoke verbs.
+  const target = deps.resolveOutputTarget(invocationId);
+  const scope: CapabilityAssumeScope = {
+    bedrockAsync: true,
+    s3PutKeyPrefixes: [{ bucket: target.bucket, keyPrefix: target.keyPrefix }],
+    ...(content?.s3Key ? { s3Keys: [content.s3Key] } : {}),
+  };
+
+  let started;
+  try {
+    const creds = await deps.assumeCapabilityCreds(scope);
+    started = await deps.asyncInvoker.startAsync({
+      target: bedrockInvokeTarget(model),
+      region: deps.region,
+      provider: model.provider,
+      prompt: body.prompt,
+      image: content?.image,
+      generation: { ...body.generation, durationSeconds },
+      outputS3Uri: target.s3Uri,
+      outputBucketOwner: deps.accountId,
+      credentials: creds,
+    });
+  } catch (err) {
+    // Failed to start → the reservation must not linger.
+    await release(capClient, invocationId);
+    return reject(502, {
+      error: "async_start_failed",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Record the job so a later poll can reconcile it. If this insert fails the job
+  // is already running in Bedrock; we deliberately do NOT release the reservation
+  // (that would under-count real spend) — the stuck reservation is the safe,
+  // over-counting direction for a spend cap.
+  await insertAsyncJob(capClient, {
+    invocationId,
+    appId,
+    capabilityName,
+    provider: model.provider,
+    model: body.model,
+    invocationArn: started.invocationArn,
+    outputBucket: target.bucket,
+    outputKeyPrefix: target.keyPrefix,
+    status: "running",
+  });
+
+  return {
+    statusCode: 202,
+    body: {
+      invocationId,
+      status: "running",
+      output: { bucket: target.bucket, keyPrefix: target.keyPrefix },
+    },
+  };
+}
+
+export interface CapabilityAsyncStatusDeps {
+  appId: string;
+  capabilityName: string;
+  invocationId: string;
+  capClient: DatabaseClient;
+  assumeCapabilityCreds: (scope?: CapabilityAssumeScope) => Promise<CapabilityCreds>;
+  asyncInvoker: BedrockAsyncInvoker;
+  region: string;
+  /** List + total the output objects under the prefix, under the APP role (the
+   * output lives in the app's own syncable area, so no capability creds needed). */
+  headOutput: (bucket: string, keyPrefix: string) => Promise<{ keys: string[]; totalBytes: number }>;
+}
+
+/**
+ * Poll an async generation job (plan §3.8). While the job is running each call
+ * GetAsyncInvokes; the COMPLETING poll commits the reservation, records the
+ * CDS-measured output:bytes (S3 HEAD), marks the job done, and returns the output
+ * key(s). A failed job releases the reservation. Terminal jobs replay
+ * idempotently without touching the ledger again.
+ */
+export async function handleCapabilityInvokeAsyncStatus(
+  deps: CapabilityAsyncStatusDeps,
+): Promise<CapabilityHandlerResponse> {
+  const { appId, capabilityName, invocationId, capClient } = deps;
+  if (capabilityName !== CAPABILITY_BEDROCK_INVOKE) {
+    return { statusCode: 404, body: { error: `Unknown capability: ${capabilityName}` } };
+  }
+  const grantRow = await loadCapabilityGrant(capClient, appId, capabilityName);
+  if (!grantRow) return { statusCode: 403, body: { error: "not_granted" } };
+
+  const job = await loadAsyncJob(capClient, invocationId, appId);
+  if (!job) return { statusCode: 404, body: { error: "unknown_invocation" } };
+
+  const outputBody = async () => {
+    const out = await deps.headOutput(job.outputBucket, job.outputKeyPrefix);
+    return { bucket: job.outputBucket, keyPrefix: job.outputKeyPrefix, keys: out.keys, totalBytes: out.totalBytes };
+  };
+
+  // Terminal → idempotent replay (no re-reconcile).
+  if (job.status === "completed") {
+    return { statusCode: 200, body: { status: "completed", output: await outputBody() } };
+  }
+  if (job.status === "failed") {
+    return { statusCode: 200, body: { status: "failed" } };
+  }
+
+  // Running → poll Bedrock. A transient poll error leaves the job running.
+  let st;
+  try {
+    const creds = await deps.assumeCapabilityCreds({ bedrockAsync: true });
+    st = await deps.asyncInvoker.getAsyncStatus({
+      invocationArn: job.invocationArn,
+      region: deps.region,
+      credentials: creds,
+    });
+  } catch (err) {
+    return {
+      statusCode: 502,
+      body: {
+        status: "running",
+        error: "async_status_failed",
+        message: err instanceof Error ? err.message : String(err),
+      },
+    };
+  }
+
+  if (st.status === "InProgress") {
+    return { statusCode: 200, body: { status: "running" } };
+  }
+
+  const ledgerKey: LedgerKey = {
+    invocationId,
+    appId,
+    capabilityName,
+    provider: job.provider,
+    model: job.model,
+  };
+
+  if (st.status === "Failed") {
+    await release(capClient, invocationId);
+    await markAsyncJobStatus(capClient, invocationId, "failed");
+    return {
+      statusCode: 200,
+      body: { status: "failed", error: st.failureMessage ?? "generation_failed" },
+    };
+  }
+
+  // Completed. Commit the reservation as-is (CDS-derived worst case == actuals for
+  // fixed-duration generation) and record the post-call CDS-measured output bytes.
+  // Concurrency note: two racing polls can both reach here; commitReservation is
+  // idempotent, and a duplicated output:bytes append doesn't affect the
+  // (duration-derived) spend cap — the tolerated small overage per plan §3.5.
+  const out = await deps.headOutput(job.outputBucket, job.outputKeyPrefix);
+  await commitReservation(capClient, invocationId);
+  if (out.totalBytes > 0) {
+    await appendReportedOutput(capClient, ledgerKey, [
+      { dimension: "output", unit: "bytes", quantity: out.totalBytes },
+    ]);
+  }
+  await markAsyncJobStatus(capClient, invocationId, "completed");
+
+  return {
+    statusCode: 200,
+    body: {
+      status: "completed",
+      output: { bucket: job.outputBucket, keyPrefix: job.outputKeyPrefix, keys: out.keys, totalBytes: out.totalBytes },
+    },
+  };
 }

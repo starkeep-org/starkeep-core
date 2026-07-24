@@ -7,6 +7,8 @@ import { LambdaClient, InvokeWithResponseStreamCommand } from "@aws-sdk/client-l
 import {
   invokeCapability,
   invokeCapabilityStream,
+  invokeCapabilityAsync,
+  getCapabilityAsyncStatus,
   getGrantedCapabilities,
   CapabilityUnavailableError,
   clearAppCredentialsCache,
@@ -238,6 +240,84 @@ describe("invokeCapabilityStream", () => {
     await expect(
       invokeCapabilityStream(APP_ID, "bedrock.invoke", { model: "m", prompt: "p" }),
     ).rejects.toBeInstanceOf(CapabilityUnavailableError);
+  });
+});
+
+describe("invokeCapabilityAsync (plan §3.8)", () => {
+  it("starts a job and returns the running result + output location on 202", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(
+      jsonResponse(202, {
+        invocationId: "inv-async-1",
+        status: "running",
+        output: { bucket: "stk-files-1", keyPrefix: "apps/photos/syncable/capability-async/inv-async-1" },
+      }),
+    );
+    const res = await invokeCapabilityAsync(APP_ID, "bedrock.invoke", {
+      model: "amazon.nova-reel",
+      prompt: "a cat surfing",
+      generation: { durationSeconds: 6 },
+    });
+    expect(res.granted && res.ok).toBe(true);
+    if (res.granted && res.ok) {
+      expect(res.invocationId).toBe("inv-async-1");
+      expect(res.status).toBe("running");
+      expect(res.output.keyPrefix).toContain("capability-async");
+    }
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toBe("https://cloud.example.test/apps/photos/capabilities/bedrock.invoke/invoke-async");
+  });
+
+  it("returns { granted: false } when the app has no grant", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(jsonResponse(403, { error: "not_granted" }));
+    const res = await invokeCapabilityAsync(APP_ID, "bedrock.invoke", { model: "amazon.nova-reel", prompt: "p" });
+    expect(res).toEqual({ granted: false });
+  });
+
+  it("surfaces a text-model rejection as a structured failure", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(jsonResponse(400, { error: "output_not_async", model: "anthropic.claude-haiku-4-5" }));
+    const res = await invokeCapabilityAsync(APP_ID, "bedrock.invoke", { model: "anthropic.claude-haiku-4-5", prompt: "p" });
+    expect(res.granted && !res.ok).toBe(true);
+    if (res.granted && !res.ok) expect(res.error).toBe("output_not_async");
+  });
+});
+
+describe("getCapabilityAsyncStatus (plan §3.8)", () => {
+  it("maps running / completed (with output keys) / failed", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { status: "running" }));
+    const running = await getCapabilityAsyncStatus(APP_ID, "bedrock.invoke", "inv1");
+    expect(running.granted && running.ok && running.status).toBe("running");
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toBe("https://cloud.example.test/apps/photos/capabilities/bedrock.invoke/async/inv1");
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        status: "completed",
+        output: { bucket: "stk-files-1", keyPrefix: "apps/photos/syncable/capability-async/inv1", keys: ["output.mp4"], totalBytes: 2500000 },
+      }),
+    );
+    const done = await getCapabilityAsyncStatus(APP_ID, "bedrock.invoke", "inv1");
+    expect(done.granted && done.ok && done.status).toBe("completed");
+    if (done.granted && done.ok && done.status === "completed") {
+      expect(done.output.keys).toEqual(["output.mp4"]);
+      expect(done.output.totalBytes).toBe(2500000);
+    }
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { status: "failed", error: "content filtered" }));
+    const failed = await getCapabilityAsyncStatus(APP_ID, "bedrock.invoke", "inv1");
+    expect(failed.granted && failed.ok && failed.status).toBe("failed");
+    if (failed.granted && failed.ok && failed.status === "failed") expect(failed.error).toBe("content filtered");
+  });
+
+  it("URL-encodes the invocationId (colons from the id become %3A)", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(jsonResponse(200, { status: "running" }));
+    await getCapabilityAsyncStatus(APP_ID, "bedrock.invoke", "photos:bedrock.invoke:async:1:ab");
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toContain("/async/photos%3Abedrock.invoke%3Aasync%3A1%3Aab");
   });
 });
 

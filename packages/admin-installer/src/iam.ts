@@ -544,6 +544,15 @@ export function buildAppRoleTrustPolicy(
  * Bedrock invoke on ALL models/inference profiles — the boundary is the ceiling,
  * this is the grant, and the intersection is Bedrock-invoke-only. All
  * provider/model restriction lives in the usage-limitation framework, not here.
+ *
+ * It ALSO carries a broad-within-app-data `s3:GetObject`+`s3:PutObject` on the
+ * files bucket for the S3-location I/O path (plan §3.4 input read / §3.8 async
+ * output write, open-question 10). Per the §7-step-1 PoC (TC3), a per-assume
+ * session policy can only TRIM this — never grant beyond it — so the standing
+ * grant MUST be present here for the broker's single-key/prefix session policy to
+ * narrow. The blast radius of a forgotten session policy is bounded to the files
+ * bucket (never `*`), and the §3.4-step-4 app-role read stays the independent
+ * authorization for which object may actually be fed to Bedrock.
  */
 export async function createCapabilityBrokerRole(input: {
   stackPrefix: string;
@@ -625,12 +634,29 @@ export async function createCapabilityBrokerRole(input: {
               "bedrock:InvokeModelWithResponseStream",
               "bedrock:Converse",
               "bedrock:ConverseStream",
+              // Async generation (§3.8): output written to S3, polled to completion.
+              "bedrock:StartAsyncInvoke",
+              "bedrock:GetAsyncInvoke",
+              "bedrock:ListAsyncInvokes",
             ],
             Resource: [
               "arn:aws:bedrock:*::foundation-model/*",
               `arn:aws:bedrock:*:${accountId}:inference-profile/*`,
               `arn:aws:bedrock:*:${accountId}:application-inference-profile/*`,
+              `arn:aws:bedrock:*:${accountId}:async-invoke/*`,
             ],
+          },
+          {
+            // Broad-within-app-data S3 read+write for the S3-location I/O path
+            // (plan §3.4 input GetObject / §3.8 async output PutObject). Scoped to
+            // the files bucket, never `*`. The broker's per-assume session policy
+            // narrows this to a single key/prefix (TC1); this standing grant must
+            // exist for that narrowing to have anything to trim (TC3). The boundary
+            // permits exactly this and no wider.
+            Sid: "CapabilitySessionScopedS3IO",
+            Effect: "Allow",
+            Action: ["s3:GetObject", "s3:PutObject"],
+            Resource: `arn:aws:s3:::${stackPrefix}-files-*/*`,
           },
         ],
       }),

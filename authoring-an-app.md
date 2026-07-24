@@ -330,6 +330,44 @@ For app-reported **output** quantities you can only know after the call, report
 them with `reportCapabilityOutput(appId, capability, invocationId, {...})`
 (best-effort; a missing report never hard-blocks).
 
+**Async generation (video / large output).** Some models don't return their
+output inline — they generate it **asynchronously** and write it to storage (e.g.
+Amazon Nova Reel video). For those, start a job and **poll** for completion; the
+broker writes the result into your app's own syncable area and hands you the
+object key(s) on completion, which you then ingest as normal records via the
+ordinary data routes (the capability role never writes records for you):
+
+```ts
+import { invokeCapabilityAsync, getCapabilityAsyncStatus } from "@starkeep/app-client";
+
+const start = await invokeCapabilityAsync("photos", "bedrock.invoke", {
+  model: "amazon.nova-reel",
+  prompt: "A cat surfing a wave, cinematic.",
+  generation: { durationSeconds: 6 },   // the CDS-derived cost basis
+});
+if (!start.granted || !start.ok) return; // degraded / rejected
+
+// Poll until terminal.
+let status = await getCapabilityAsyncStatus("photos", "bedrock.invoke", start.invocationId);
+while (status.granted && status.ok && status.status === "running") {
+  await sleep(5000);
+  status = await getCapabilityAsyncStatus("photos", "bedrock.invoke", start.invocationId);
+}
+if (status.granted && status.ok && status.status === "completed") {
+  // status.output.keys are objects in YOUR syncable area — read + register them
+  // as records via the normal /data + /files routes under your own role.
+}
+```
+
+The delivery path follows the model's **output modality**: `text` is delivered
+inline — `invokeCapability` (sync) or `invokeCapabilityStream` (streamed), your
+choice; `image`/`audio`/`video` are always written to S3 asynchronously —
+`invokeCapabilityAsync`. Cross them and you get a clear 400: a text model on
+`invokeCapabilityAsync` returns `output_not_async`, and a non-text model on
+`invokeCapability` returns `output_requires_async`. The spend cap still holds: the
+reservation is taken at start from the CDS-derived generation size (e.g. requested
+duration), and the completing poll records the measured `output:bytes`.
+
 ---
 
 ## Installing it

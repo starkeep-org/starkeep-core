@@ -14,6 +14,7 @@ import {
   effectiveModel,
   isModelInEffectiveRegistry,
   bedrockInvokeTarget,
+  outputIsAsyncS3,
   perMTok,
   type OperatorModelOverride,
   // gates
@@ -21,6 +22,7 @@ import {
   evaluateGates,
   projectReservation,
   reconcileMeasurements,
+  projectAsyncReservation,
   deriveCostUsd,
   type Gate,
   type Measurement,
@@ -318,6 +320,95 @@ describe("reconciliation", () => {
     expect(byKey("output", "tokens")).toBe(88);
     expect(byKey("output", "megapixels")).toBe(4);
     expect(byKey("cost", "usd")).toBeCloseTo(perMTok(1) * 1234 + perMTok(5) * 88);
+  });
+});
+
+describe("output modality → delivery channel (plan §3.8)", () => {
+  it("resolves Nova Reel as a video-output model priced per output second", () => {
+    const m = effectiveModel("amazon.nova-reel")!;
+    expect(m.outputModality).toBe("video");
+    expect(outputIsAsyncS3(m.outputModality)).toBe(true); // video ⇒ async S3
+    expect(m.provider).toBe("amazon");
+    expect(m.pricing[dimensionUnitKey("output", "duration_s")]).toBeCloseTo(0.08);
+  });
+
+  it("a text model defaults to text output (inline/streamed, not async)", () => {
+    const m = effectiveModel("anthropic.claude-haiku-4-5")!;
+    expect(m.outputModality).toBe("text");
+    expect(outputIsAsyncS3(m.outputModality)).toBe(false);
+  });
+
+  it("outputIsAsyncS3 is true for every non-text modality", () => {
+    expect(outputIsAsyncS3("text")).toBe(false);
+    expect(outputIsAsyncS3("image")).toBe(true);
+    expect(outputIsAsyncS3("audio")).toBe(true);
+    expect(outputIsAsyncS3("video")).toBe(true);
+  });
+
+  it("an operator DEFINES a new non-text model's modality (add-a-custom-model, no platform row)", () => {
+    const m = effectiveModel("acme.video-1", [
+      {
+        modelId: "acme.video-1",
+        provider: "amazon",
+        outputModality: "video",
+        pricing: { [dimensionUnitKey("output", "duration_s")]: 0.2 },
+      },
+    ])!;
+    expect(m.outputModality).toBe("video");
+    expect(m.source).toBe("user");
+  });
+
+  it("output modality is intrinsic: an override CANNOT re-point a platform model's modality", () => {
+    const m = effectiveModel("anthropic.claude-haiku-4-5", [
+      { modelId: "anthropic.claude-haiku-4-5", outputModality: "video" },
+    ])!;
+    // Platform wins — Haiku stays text output; the override's modality is ignored.
+    expect(m.outputModality).toBe("text");
+    // Other (drift-prone) fields still override normally.
+    const priced = effectiveModel("anthropic.claude-haiku-4-5", [
+      { modelId: "anthropic.claude-haiku-4-5", outputModality: "video", pricing: { [dimensionUnitKey("input", "tokens")]: perMTok(9) } },
+    ])!;
+    expect(priced.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(perMTok(9));
+  });
+});
+
+describe("async reservation + reconciliation (plan §3.8)", () => {
+  const NOVA = effectiveModel("amazon.nova-reel")!;
+  const videoCtx: CapabilityRequestContext = {
+    appId: "photos",
+    provider: "amazon",
+    model: "amazon.nova-reel",
+    modality: "video",
+  };
+
+  it("reserves requests + input bytes + CDS-derived duration, and prices cost from it", () => {
+    const p = projectAsyncReservation({
+      model: NOVA,
+      ctx: videoCtx,
+      inputBytes: 4096,
+      output: [{ dimension: "output", unit: "duration_s", quantity: 6 }],
+    });
+    const byKey = (d: string, u: string) => p.find((m) => m.dimension === d && m.unit === u)?.quantity;
+    expect(byKey("requests", "all")).toBe(1);
+    expect(byKey("requests", "video")).toBe(1);
+    expect(byKey("input", "bytes")).toBe(4096);
+    expect(byKey("output", "duration_s")).toBe(6);
+    // No output-token ceiling for generation.
+    expect(byKey("output", "tokens")).toBeUndefined();
+    // Load-bearing cost gate is CDS-derived from the requested duration.
+    expect(byKey("cost", "usd")).toBeCloseTo(6 * 0.08);
+  });
+
+  it("reserves app-reported input quantities but never an output-token ceiling", () => {
+    const p = projectAsyncReservation({
+      model: NOVA,
+      ctx: videoCtx,
+      output: [{ dimension: "output", unit: "duration_s", quantity: 6 }],
+      appReports: { [dimensionUnitKey("input", "megapixels")]: 2 },
+    });
+    const byKey = (d: string, u: string) => p.find((m) => m.dimension === d && m.unit === u)?.quantity;
+    expect(byKey("input", "megapixels")).toBe(2);
+    expect(byKey("output", "tokens")).toBeUndefined();
   });
 });
 

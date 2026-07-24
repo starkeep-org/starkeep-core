@@ -1,5 +1,5 @@
 import type { ObjectStorageAdapter } from "../object-storage/adapter.js";
-import type { PutOptions, GetResult, ListOptions, ListResult } from "../object-storage/types.js";
+import type { PutOptions, GetResult, HeadResult, ListOptions, ListResult } from "../object-storage/types.js";
 
 export class MockObjectStorageAdapter implements ObjectStorageAdapter {
   private store = new Map<
@@ -47,6 +47,12 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
 
   async has(key: string): Promise<boolean> {
     return this.store.has(key);
+  }
+
+  async head(key: string): Promise<HeadResult | null> {
+    const entry = this.store.get(key);
+    if (!entry) return null;
+    return { size: entry.data.length, contentType: entry.contentType };
   }
 
   async delete(key: string): Promise<void> {

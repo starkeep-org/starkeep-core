@@ -300,6 +300,73 @@ export function projectReservation(input: ReservationInput): Measurement[] {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Async (StartAsyncInvoke) output — plan §3.8
+// ---------------------------------------------------------------------------
+//
+// Generation models (video/large image) don't return tokens; their output is
+// written to S3 asynchronously and the job is reconciled on completion. So the
+// token-shaped projection above doesn't apply — async billing rests on:
+//   - `requests` (+ modality) — CDS-measured;
+//   - `input:bytes` — CDS-measured (S3 HEAD of the referenced input);
+//   - CDS-DERIVED generation output measurements the caller computes from the
+//     request's own generation parameters (e.g. requested video `duration_s`).
+//     Because the CDS controls what it asked Bedrock to generate, these are
+//     CDS-measured for the purpose of reservation AND reconciliation — the
+//     load-bearing `cost` gate is derived from them and holds without any app
+//     self-report;
+//   - `output:bytes` — CDS-measured post-completion via S3 HEAD (reconcile only,
+//     unknown pre-call);
+//   - app-reported non-generic quantities — best-effort per §3.5.
+
+export interface AsyncReservationInput {
+  model: EffectiveModel;
+  ctx: CapabilityRequestContext;
+  /** CDS-measured input byte size of the referenced object (S3 HEAD). */
+  inputBytes?: number;
+  /** CDS-derived worst-case generation output measurements from the request's
+   * own parameters (e.g. `[{ output, duration_s, 6 }]` for 6s of video). Priced
+   * and reserved; trued up to the same CDS-known value on completion. */
+  output?: readonly Measurement[];
+  /** App-reported non-generic INPUT quantities, keyed by `"dimension:unit"`. */
+  appReports?: Readonly<Record<string, number>>;
+}
+
+/**
+ * The worst-case reservation for an ASYNC generation request (plan §3.8), the
+ * measurement set the broker appends to the ledger BEFORE calling
+ * StartAsyncInvoke. Mirrors {@link projectReservation} but omits the token
+ * ceiling (generation has no output tokens) and reserves the CDS-derived
+ * generation output instead. Reconciled on job completion (see
+ * {@link reconcileAsyncMeasurements}).
+ */
+export function projectAsyncReservation(input: AsyncReservationInput): Measurement[] {
+  const { model, ctx, inputBytes, output, appReports } = input;
+  const out: Measurement[] = [{ dimension: "requests", unit: "all", quantity: 1 }];
+  if (ctx.modality) out.push({ dimension: "requests", unit: ctx.modality, quantity: 1 });
+  if (inputBytes !== undefined) out.push({ dimension: "input", unit: "bytes", quantity: inputBytes });
+  for (const m of output ?? []) out.push({ dimension: m.dimension, unit: m.unit, quantity: m.quantity });
+
+  for (const [key, value] of Object.entries(appReports ?? {})) {
+    const [dimension, unit] = key.split(":");
+    if (dimension && unit && dimension === "input" && isNonGenericDimensionUnit(dimension, unit)) {
+      out.push({ dimension, unit, quantity: value });
+    }
+  }
+
+  const costUsd = deriveCostUsd(model.pricing, out);
+  if (costUsd > 0) out.push({ dimension: "cost", unit: "usd", quantity: costUsd });
+  return out;
+}
+
+// Async reconciliation is intentionally NOT a token-shaped re-derivation. Because
+// the reservation already captured the CDS-DERIVED worst case (which equals
+// actuals for a fixed-duration generation), the broker commits the reservation
+// as-is on completion and records the single genuinely-post-call CDS measurement
+// — `output:bytes` from an S3 HEAD (see the CDS `commitReservation` +
+// output-bytes append in capability-store). Type-specific output (duration,
+// frames, megapixels) is app-reported best-effort via the ordinary report path.
+
 export interface ReconcileInput {
   model: EffectiveModel;
   ctx: CapabilityRequestContext;

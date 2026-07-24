@@ -13,6 +13,7 @@ import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type {
   PutOptions,
   GetResult,
+  HeadResult,
   ListOptions,
   ListResult,
   SignedUrlOptions,
@@ -127,6 +128,27 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       if (isMissingOrForbidden(error)) {
         return null;
       }
+      throw error;
+    }
+  }
+
+  async head(key: string): Promise<HeadResult | null> {
+    try {
+      const response = await this.getClient().send(
+        new HeadObjectCommand({
+          Bucket: this.options.bucketName,
+          Key: this.resolveKey(key),
+        }),
+      );
+      return {
+        size: response.ContentLength ?? 0,
+        contentType: response.ContentType,
+      };
+    } catch (error: unknown) {
+      // Missing OR forbidden — S3 collapses both to 403 for a caller without
+      // ListBucket on the prefix (see the note in has()), so null means "cannot
+      // confirm readable" and a non-null result is positive proof of readability.
+      if (isMissingOrForbidden(error)) return null;
       throw error;
     }
   }

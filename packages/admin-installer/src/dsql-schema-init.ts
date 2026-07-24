@@ -278,7 +278,7 @@ export async function initializeSharedSchema(
       .execute(db);
 
     // -----------------------------------------------------------------------
-    // Cloud capability broker (plan §3.2/§3.5/§3.6). Four shared tables:
+    // Cloud capability broker (plan §3.2/§3.5/§3.6). Five shared tables:
     //   capability_grants          — per-(app, capability) approved models+reports
     //   capability_gates           — operator usage limits (the cost-governance
     //                                control); the security-critical table
@@ -286,6 +286,11 @@ export async function initializeSharedSchema(
     //                                reconciliation rows (reserve-on-ledger)
     //   capability_model_overrides — sparse operator overrides over the platform
     //                                model registry
+    //   capability_async_jobs      — in-flight async (StartAsyncInvoke) generation
+    //                                jobs, tracked so a later status poll (a
+    //                                different Lambda invocation) can recover the
+    //                                job ARN + output location and reconcile once
+    //                                (plan §3.8)
     //
     // SELECT is PUBLIC on all four: the broker reads them under the calling
     // app's per-app PG role, and the ledger SUM for global/per-provider gates
@@ -397,6 +402,13 @@ export async function initializeSharedSchema(
       .addColumn("inference_profile_id", "text")
       .addColumn("inference_profile_cleared", "boolean", (c) => c.notNull().defaultTo(false))
       .addColumn("vision", "boolean")
+      // output_modality — the output type (and thus delivery channel, §3.8) of an
+      // operator-DEFINED model (a modelId the platform doesn't ship). It is a
+      // definition field, NOT an override: a platform model's modality is
+      // intrinsic and always wins, so this is ignored for platform models (see
+      // effectiveModel). NULL for override-only rows and for definitions that
+      // default to "text".
+      .addColumn("output_modality", "text")
       .addColumn("pricing_json", "text")
       .addColumn("estimates_json", "text")
       .execute();
@@ -404,6 +416,31 @@ export async function initializeSharedSchema(
     await sql
       .raw(`GRANT INSERT, UPDATE, DELETE ON shared.capability_model_overrides TO "${installer}"`)
       .execute(db);
+
+    // capability_async_jobs — one row per in-flight StartAsyncInvoke generation
+    // job (plan §3.8). The synchronous invoke reconciles inline, but an async job
+    // completes out-of-band: a LATER status poll (a different Lambda invocation /
+    // warm container) must recover the job's ARN, provider/model, and output
+    // location to GetAsyncInvoke and reconcile the ledger exactly once. `status`
+    // ∈ {running, completed, failed}; the poll only reconciles while it is still
+    // `running`, so a double-poll can't double-reconcile. INSERT/UPDATE is granted
+    // to each capability-holding app role at install (dsql-ddl.ts); the app role
+    // reads its OWN rows (the store filters by app_id).
+    await db.schema
+      .createTable("shared.capability_async_jobs")
+      .ifNotExists()
+      .addColumn("invocation_id", "text", (c) => c.primaryKey())
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("capability_name", "text", (c) => c.notNull())
+      .addColumn("provider", "text", (c) => c.notNull())
+      .addColumn("model", "text", (c) => c.notNull())
+      .addColumn("invocation_arn", "text", (c) => c.notNull())
+      .addColumn("output_bucket", "text", (c) => c.notNull())
+      .addColumn("output_key_prefix", "text", (c) => c.notNull())
+      .addColumn("status", "text", (c) => c.notNull())
+      .addColumn("ts", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.capability_async_jobs TO PUBLIC`).execute(db);
 
     // Duplicate-file prevention: (filename + bytes) is unique among live
     // records. DSQL doesn't support partial indexes (no `WHERE` on CREATE

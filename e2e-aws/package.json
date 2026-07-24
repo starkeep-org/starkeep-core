@@ -5,10 +5,14 @@
   "type": "module",
   "scripts": {
     "test:aws": "vitest run",
+    "poc:s3": "vitest run s3-session-policy-poc",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@aws-sdk/client-cloudformation": "^3.700.0",
+    "@aws-sdk/client-iam": "^3.700.0",
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@aws-sdk/client-sts": "^3.700.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
     "@aws-sdk/client-lambda": "^3.700.0",
     "@starkeep/admin-installer": "workspace:*",

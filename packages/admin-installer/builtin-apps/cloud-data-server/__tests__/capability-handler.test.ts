@@ -148,7 +148,18 @@ const fakeInvoker: BedrockInvoker = {
 
 const imageContent = async (): Promise<ContentReadResult> => ({
   ok: true,
-  content: { bytes: new Uint8Array([1, 2, 3]), sizeBytes: 2048, image: { format: "jpeg", bytes: new Uint8Array([1, 2, 3]) } },
+  content: { sizeBytes: 2048, image: { format: "jpeg", bytes: new Uint8Array([1, 2, 3]) } },
+});
+
+/** S3-location content: no inline bytes, an s3Uri image + the s3Key the broker
+ * must scope the capability assume's session policy to (plan §3.4). */
+const s3LocationContent = async (): Promise<ContentReadResult> => ({
+  ok: true,
+  content: {
+    sizeBytes: 12_000_000,
+    image: { format: "jpeg", s3Uri: "s3://stk-files-1/shared/image/ab/cd/pic.jpg", bucketOwner: "111122223333" },
+    s3Key: { bucket: "stk-files-1", key: "shared/image/ab/cd/pic.jpg" },
+  },
 });
 
 function baseDeps(
@@ -288,6 +299,93 @@ describe("capability handler", () => {
     const db = new InMemoryCapabilityDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
     const res = await handleCapabilityInvoke(baseDeps(db, { capabilityName: "bedrock.knowledgeBase" }));
     expect(res.statusCode).toBe(404);
+  });
+
+  it("rejects a non-text (video) model on the inline route — must use async (§3.8)", async () => {
+    const db = new InMemoryCapabilityDb({ models: ["amazon.nova-reel"], reports: [] }, []);
+    const res = await handleCapabilityInvoke(
+      baseDeps(db, { body: { model: "amazon.nova-reel", prompt: "a cat surfing" } }),
+    );
+    expect(res.statusCode).toBe(400);
+    expect((res.body as { error: string }).error).toBe("output_requires_async");
+    // Guard fires before any reservation is written.
+    expect(db.ledger).toHaveLength(0);
+  });
+});
+
+describe("capability handler — S3-location delivery (plan §3.4)", () => {
+  it("passes NO session scope on the inline path", async () => {
+    const db = new InMemoryCapabilityDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
+    let capturedScope: unknown = "unset";
+    const res = await handleCapabilityInvoke(
+      baseDeps(db, {
+        readContent: imageContent,
+        assumeCapabilityCreds: async (scope) => {
+          capturedScope = scope;
+          return { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" };
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(200);
+    // Inline: the capability role is assumed with no session policy (cacheable).
+    expect(capturedScope).toBeUndefined();
+  });
+
+  it("scopes the capability assume to exactly the referenced S3 key, and delivers by s3Uri", async () => {
+    const db = new InMemoryCapabilityDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
+    let capturedScope: { s3Keys?: { bucket: string; key: string }[] } | undefined;
+    let capturedImages: unknown;
+    const spyInvoker: BedrockInvoker = {
+      async converse(req) {
+        capturedImages = req.images;
+        return { text: "ok", inputTokens: 10, outputTokens: 2 };
+      },
+      // eslint-disable-next-line require-yield
+      async *converseStream() {
+        throw new Error("not used");
+      },
+    };
+    const res = await handleCapabilityInvoke(
+      baseDeps(db, {
+        readContent: s3LocationContent,
+        invoker: spyInvoker,
+        assumeCapabilityCreds: async (scope) => {
+          capturedScope = scope;
+          return { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" };
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(200);
+    // The broker must fasten the single-key belt on the S3-location assume.
+    expect(capturedScope?.s3Keys).toEqual([
+      { bucket: "stk-files-1", key: "shared/image/ab/cd/pic.jpg" },
+    ]);
+    // Bedrock receives the image by S3 URI, not inline bytes.
+    expect(capturedImages).toEqual([
+      { format: "jpeg", s3Uri: "s3://stk-files-1/shared/image/ab/cd/pic.jpg", bucketOwner: "111122223333" },
+    ]);
+  });
+
+  it("scopes the session on the streaming S3-location path too", async () => {
+    const db = new InMemoryCapabilityDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
+    let capturedScope: { s3Keys?: { bucket: string; key: string }[] } | undefined;
+    const result = await handleCapabilityInvokeStream(
+      baseDeps(db, {
+        readContent: s3LocationContent,
+        invoker: streamInvoker,
+        assumeCapabilityCreds: async (scope) => {
+          capturedScope = scope;
+          return { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" };
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected an open stream");
+    // Drain the stream so the invoke (and thus the assume) actually runs.
+    for await (const _evt of result.stream) void _evt;
+    expect(capturedScope?.s3Keys).toEqual([
+      { bucket: "stk-files-1", key: "shared/image/ab/cd/pic.jpg" },
+    ]);
   });
 });
 

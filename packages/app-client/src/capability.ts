@@ -386,6 +386,157 @@ export async function invokeCapabilityStream(
   return { granted: true, ok: true, stream: full() };
 }
 
+// ---------------------------------------------------------------------------
+// Async generation (StartAsyncInvoke) — plan §3.8
+// ---------------------------------------------------------------------------
+//
+// Non-text output (video / large image) is produced ASYNCHRONOUSLY: the broker
+// kicks off a job that writes the result to the app's OWN syncable area, and the
+// app POLLS for completion. On completion the CDS returns the output object
+// key(s); the app then ingests them as normal records via its ordinary data
+// routes (POST /data/records) — the capability role never writes records.
+
+/** Generation parameters passed to the async model (e.g. Nova Reel). */
+export interface AsyncGenerationParams {
+  /** Requested video length in seconds (also the CDS-derived cost basis). */
+  durationSeconds?: number;
+  fps?: number;
+  /** e.g. "1280x720". */
+  dimension?: string;
+  seed?: number;
+}
+
+export interface InvokeCapabilityAsyncRequest {
+  model: string;
+  prompt: string;
+  /** Optional conditioning item (e.g. an image for image-to-video), by reference. */
+  contentRef?: CapabilityContentRef;
+  modality?: RequestModality;
+  generation?: AsyncGenerationParams;
+  /** App-reported non-generic INPUT quantities, keyed by "dimension:unit". */
+  reports?: Record<string, number>;
+}
+
+/** The S3 output location the job writes under (in the app's syncable area). */
+export interface AsyncOutputLocation {
+  bucket: string;
+  keyPrefix: string;
+}
+
+export type InvokeCapabilityAsyncResult =
+  | { granted: false }
+  | { granted: true; ok: false; status: number; error: string; detail?: unknown }
+  | { granted: true; ok: true; invocationId: string; status: "running"; output: AsyncOutputLocation };
+
+export type CapabilityAsyncStatusResult =
+  | { granted: false }
+  | { granted: true; ok: false; status: number; error: string; detail?: unknown }
+  | { granted: true; ok: true; status: "running" }
+  | {
+      granted: true;
+      ok: true;
+      status: "completed";
+      /** The output object key(s) the app should ingest as records, and their
+       * total size. */
+      output: AsyncOutputLocation & { keys: string[]; totalBytes: number };
+    }
+  | { granted: true; ok: true; status: "failed"; error?: string };
+
+/**
+ * Start an async generation job (plan §3.8). Returns `{ granted: false }` when
+ * the app has no grant, a `running` start result with the output location on
+ * 202, or a structured failure otherwise. Poll {@link getCapabilityAsyncStatus}
+ * with the returned `invocationId` until it is `completed`/`failed`.
+ */
+export async function invokeCapabilityAsync(
+  appId: string,
+  capability: string,
+  request: InvokeCapabilityAsyncRequest,
+): Promise<InvokeCapabilityAsyncResult> {
+  const creds = await loadCloudCapabilityCreds(appId);
+  const path = `/capabilities/${encodeURIComponent(capability)}/invoke-async`;
+  const resp = await signedFetch(creds, path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  const parsed = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+  if (resp.status === 202) {
+    return {
+      granted: true,
+      ok: true,
+      invocationId: String(parsed.invocationId ?? ""),
+      status: "running",
+      output: (parsed.output as AsyncOutputLocation) ?? { bucket: "", keyPrefix: "" },
+    };
+  }
+  if (resp.status === 403 && parsed.error === "not_granted") {
+    return { granted: false };
+  }
+  return {
+    granted: true,
+    ok: false,
+    status: resp.status,
+    error: typeof parsed.error === "string" ? parsed.error : `http_${resp.status}`,
+    detail: parsed,
+  };
+}
+
+/**
+ * Poll an async generation job (plan §3.8). Returns `running` while in progress,
+ * `completed` with the output key(s) to ingest, or `failed`. `{ granted: false }`
+ * when the app has no grant. Throws only when the cloud plane is unreachable.
+ */
+export async function getCapabilityAsyncStatus(
+  appId: string,
+  capability: string,
+  invocationId: string,
+): Promise<CapabilityAsyncStatusResult> {
+  const creds = await loadCloudCapabilityCreds(appId);
+  const path = `/capabilities/${encodeURIComponent(capability)}/async/${encodeURIComponent(invocationId)}`;
+  const resp = await signedFetch(creds, path, { method: "GET" });
+  const parsed = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+  if (resp.status === 200) {
+    const status = String(parsed.status ?? "");
+    if (status === "completed") {
+      const out = (parsed.output as AsyncOutputLocation & { keys?: string[]; totalBytes?: number }) ?? {
+        bucket: "",
+        keyPrefix: "",
+      };
+      return {
+        granted: true,
+        ok: true,
+        status: "completed",
+        output: {
+          bucket: out.bucket,
+          keyPrefix: out.keyPrefix,
+          keys: out.keys ?? [],
+          totalBytes: Number(out.totalBytes ?? 0),
+        },
+      };
+    }
+    if (status === "failed") {
+      return {
+        granted: true,
+        ok: true,
+        status: "failed",
+        ...(typeof parsed.error === "string" ? { error: parsed.error } : {}),
+      };
+    }
+    return { granted: true, ok: true, status: "running" };
+  }
+  if (resp.status === 403 && parsed.error === "not_granted") {
+    return { granted: false };
+  }
+  return {
+    granted: true,
+    ok: false,
+    status: resp.status,
+    error: typeof parsed.error === "string" ? parsed.error : `http_${resp.status}`,
+    detail: parsed,
+  };
+}
+
 /**
  * Report app-measured OUTPUT quantities for a completed invocation (best-effort;
  * §3.5/§3.7). Reconciled into the ledger for best-effort output gates; a missing

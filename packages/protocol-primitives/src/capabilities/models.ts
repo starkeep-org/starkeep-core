@@ -23,6 +23,19 @@ import { dimensionUnitKey } from "./dimensions.js";
 
 export type ModelProvider = "anthropic" | "openai" | "qwen" | "kimi" | "glm" | "amazon";
 
+/**
+ * What kind of output a model produces. This single fact determines the delivery
+ * channel (plan §3.8):
+ *   - `text`  → delivered INLINE (sync `/invoke`) or STREAMED (`/invoke-stream`),
+ *     the app's per-request choice of endpoint;
+ *   - `image` | `audio` | `video` → always written to S3 and produced
+ *     ASYNCHRONOUSLY (`/invoke-async` + poll). There is no inline path for
+ *     non-text output.
+ * So "async S3 output" is DERIVED from the modality (see {@link outputIsAsyncS3}),
+ * not a separate model flag.
+ */
+export type OutputModality = "text" | "image" | "audio" | "video";
+
 /** Per-`(dimension:unit)` price, in USD per single unit. Token rates are stored
  * here already divided down from the conventional $/MTok (see {@link perMTok}). */
 export type PricingTable = Readonly<Record<string, number>>;
@@ -48,6 +61,10 @@ export interface PlatformModelEntry {
   inferenceProfileId?: string;
   /** Whether the model accepts image input (needed for the captioning case). */
   vision: boolean;
+  /** The model's output modality (plan §3.8). Defaults to `text` when omitted.
+   * Non-text modalities are delivered as async S3 output; text is inline/streamed.
+   * The delivery channel is DERIVED from this — see {@link outputIsAsyncS3}. */
+  outputModality?: OutputModality;
   defaults: ModelDefaults;
 }
 
@@ -59,6 +76,12 @@ export interface OperatorModelOverride {
   provider?: ModelProvider;
   inferenceProfileId?: string | null;
   vision?: boolean;
+  /** Output modality for an operator-DEFINED model (a modelId the platform
+   * registry doesn't contain) — this is part of "add a custom model", NOT an
+   * override of a platform model. A platform model's modality is intrinsic and
+   * always wins; this field is ignored when a platform row exists (see
+   * {@link effectiveModel}). */
+  outputModality?: OutputModality;
   /** Per-`(dimension:unit)` USD/unit overrides, merged over the platform table. */
   pricing?: Readonly<Record<string, number>>;
   estimates?: ModelEstimates;
@@ -152,6 +175,24 @@ export const PLATFORM_MODEL_REGISTRY: readonly PlatformModelEntry[] = [
     vision: false,
     defaults: { pricing: tokenPricing(0.6, 2.2), estimates: {} },
   },
+  {
+    // Amazon Nova Reel — video generation. Its `video` output modality means the
+    // output is written asynchronously to S3 by StartAsyncInvoke (plan §3.8) —
+    // the async start/poll flow, NOT the synchronous Converse path. Billed per
+    // second of generated video, which the CDS controls via the request's
+    // requested duration — so cost is CDS-derived (priced on output:duration_s)
+    // and the load-bearing cost gate holds without any app self-report. Exact
+    // model id and per-second rate are confirm-at-implementation (open question
+    // 12); seeded so the async path is exercised and overridable by the operator.
+    modelId: "amazon.nova-reel",
+    provider: "amazon",
+    vision: false,
+    outputModality: "video",
+    defaults: {
+      pricing: { [dimensionUnitKey("output", "duration_s")]: 0.08 },
+      estimates: {},
+    },
+  },
 ];
 
 const PLATFORM_BY_ID = new Map<string, PlatformModelEntry>(
@@ -168,6 +209,10 @@ export interface EffectiveModel {
   provider: ModelProvider;
   inferenceProfileId?: string;
   vision: boolean;
+  /** Resolved output modality (plan §3.8). Drives metering + the delivery channel
+   * (text = inline/streamed; image/audio/video = async S3 — see
+   * {@link outputIsAsyncS3}). */
+  outputModality: OutputModality;
   pricing: PricingTable;
   estimates: ModelEstimates;
   source: "platform" | "user";
@@ -219,6 +264,15 @@ export function effectiveModel(
     provider,
     ...(inferenceProfileId ? { inferenceProfileId } : {}),
     vision: override?.vision ?? platform?.vision ?? false,
+    // outputModality is DEFINITIONAL, not an override: a platform model's output
+    // modality is intrinsic (you never re-purpose Haiku as a video model), so the
+    // platform value always wins when a platform row exists. An override's
+    // outputModality is honored ONLY for an operator-DEFINED model (no platform
+    // row) — it is part of "add a custom model", never "override a platform
+    // model". A model that genuinely supports multiple output modalities is
+    // represented as SEPARATE platform entries (multi-purpose), not one entry an
+    // override re-points.
+    outputModality: platform ? (platform.outputModality ?? "text") : (override?.outputModality ?? "text"),
     pricing,
     estimates,
     source: platform ? "platform" : "user",
@@ -239,4 +293,15 @@ export function isModelInEffectiveRegistry(
  * for on-demand throughput on newer models), else the bare model id. */
 export function bedrockInvokeTarget(model: EffectiveModel): string {
   return model.inferenceProfileId ?? model.modelId;
+}
+
+/**
+ * Whether a model's output is delivered as ASYNC S3 output (plan §3.8), derived
+ * solely from its output modality: non-text (image/audio/video) is always written
+ * to S3 by StartAsyncInvoke; text is inline (sync) or streamed. This single
+ * predicate is the routing rule — text ⇒ `/invoke`(+stream), non-text ⇒
+ * `/invoke-async`.
+ */
+export function outputIsAsyncS3(modality: OutputModality): boolean {
+  return modality !== "text";
 }

@@ -68,12 +68,20 @@ import {
   handleCapabilityInvoke,
   handleCapabilityInvokeStream,
   handleCapabilityReport,
+  handleCapabilityInvokeAsyncStart,
+  handleCapabilityInvokeAsyncStatus,
   type CapabilityInvokeBody,
+  type CapabilityAsyncInvokeBody,
   type CapabilityStreamEvent,
   type ContentReadResult,
+  type CapabilityAssumeScope,
 } from "./capability-handler.js";
 import { loadGrantedCapabilities } from "./capability-store.js";
-import { getBedrockInvoker, type BedrockImageInput } from "./bedrock-client.js";
+import {
+  getBedrockInvoker,
+  getBedrockAsyncInvoker,
+  type BedrockImageInput,
+} from "./bedrock-client.js";
 
 // ---------------------------------------------------------------------------
 // Per-app credential cache (STS sessions ~15 min, refreshed at 14 min)
@@ -285,35 +293,109 @@ async function getAppCreds(appId: string, accountId: string): Promise<CachedCred
 
 const capabilityCredsCache = new Map<string, CachedCreds>();
 
-async function getCapabilityBrokerCreds(accountId: string): Promise<CachedCreds> {
-  const cached = capabilityCredsCache.get("capability-broker");
-  if (cached && cached.expiresAt - Date.now() > CRED_REFRESH_BUFFER_MS) return cached;
-
-  const stackPrefix = process.env.STACK_PREFIX;
-  const region = process.env.AWS_REGION ?? "us-east-1";
-  if (!stackPrefix) throw new Error("STACK_PREFIX env var is required");
-
-  const roleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-capability-broker-role`;
+/** Assume the capability-broker role, optionally under an inline session policy. */
+async function assumeCapabilityBroker(
+  roleArn: string,
+  region: string,
+  sessionPolicy: string | undefined,
+): Promise<CachedCreds> {
   const sts = new STSClient({ region });
   const result = await sts.send(
     new AssumeRoleCommand({
       RoleArn: roleArn,
       RoleSessionName: `cds-capability-${Date.now()}`,
       DurationSeconds: 900,
+      ...(sessionPolicy ? { Policy: sessionPolicy } : {}),
     }),
   );
   const c = result.Credentials;
   if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken || !c.Expiration) {
     throw new Error("Failed to assume capability-broker role");
   }
-  const creds: CachedCreds = {
+  return {
     accessKeyId: c.AccessKeyId,
     secretAccessKey: c.SecretAccessKey,
     sessionToken: c.SessionToken,
     expiresAt: c.Expiration.getTime(),
   };
-  capabilityCredsCache.set("capability-broker", creds);
-  return creds;
+}
+
+async function getCapabilityBrokerCreds(
+  accountId: string,
+  scope?: CapabilityAssumeScope,
+): Promise<CachedCreds> {
+  const stackPrefix = process.env.STACK_PREFIX;
+  const region = process.env.AWS_REGION ?? "us-east-1";
+  if (!stackPrefix) throw new Error("STACK_PREFIX env var is required");
+  const roleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-capability-broker-role`;
+
+  const s3Keys = scope?.s3Keys ?? [];
+  const s3PutPrefixes = scope?.s3PutKeyPrefixes ?? [];
+  const needsSessionPolicy = s3Keys.length > 0 || s3PutPrefixes.length > 0;
+
+  // Pure Bedrock-invoke session (no S3 narrowing): identical across requests and
+  // safe to cache. Covers the inline/text-only sync path AND the async STATUS
+  // poll (`bedrockAsync` with no S3 scope) — the standing identity policy already
+  // permits Get/ListAsyncInvoke, so no session policy is needed to narrow.
+  if (!needsSessionPolicy) {
+    const cached = capabilityCredsCache.get("capability-broker");
+    if (cached && cached.expiresAt - Date.now() > CRED_REFRESH_BUFFER_MS) return cached;
+    const creds = await assumeCapabilityBroker(roleArn, region, undefined);
+    capabilityCredsCache.set("capability-broker", creds);
+    return creds;
+  }
+
+  // S3-narrowed path (plan §3.4 input read / §3.8 async output write,
+  // open-question 10): attach an inline session policy scoping S3 to EXACTLY the
+  // referenced key (GetObject, single object step-4 proved readable) and/or the
+  // per-invocation output prefix (PutObject), and NEVER cache it (each request's
+  // key/prefix differs).
+  //
+  // A session policy is the INTERSECTION over the whole session, so it must ALSO
+  // re-Allow the Bedrock verbs — otherwise the invoke would be denied (TC1: a
+  // session policy can only restrict, never grant). The role's identity policy +
+  // boundary already permit both within the app-data area; this narrows the S3
+  // reach while keeping invoke intact. TC2/TC3: the standing role holds BROAD
+  // read+write on the files bucket (a session policy can't add access), so
+  // fastening this belt on every S3-narrowed assume is load-bearing.
+  const bedrockActions = [
+    "bedrock:InvokeModel",
+    "bedrock:InvokeModelWithResponseStream",
+    "bedrock:Converse",
+    "bedrock:ConverseStream",
+  ];
+  const bedrockResources = [
+    "arn:aws:bedrock:*::foundation-model/*",
+    `arn:aws:bedrock:*:${accountId}:inference-profile/*`,
+    `arn:aws:bedrock:*:${accountId}:application-inference-profile/*`,
+  ];
+  if (scope?.bedrockAsync) {
+    bedrockActions.push("bedrock:StartAsyncInvoke", "bedrock:GetAsyncInvoke", "bedrock:ListAsyncInvokes");
+    bedrockResources.push(`arn:aws:bedrock:*:${accountId}:async-invoke/*`);
+  }
+  const statements: unknown[] = [
+    { Sid: "SessionBedrockInvoke", Effect: "Allow", Action: bedrockActions, Resource: bedrockResources },
+  ];
+  if (s3Keys.length > 0) {
+    statements.push({
+      Sid: "SessionS3OneKey",
+      Effect: "Allow",
+      Action: "s3:GetObject",
+      Resource: s3Keys.map((k) => `arn:aws:s3:::${k.bucket}/${k.key}`),
+    });
+  }
+  if (s3PutPrefixes.length > 0) {
+    // PutObject narrowed to the single per-invocation output FOLDER (Bedrock
+    // writes output.mp4 + manifest.json + generation-status.json under it, §3.8).
+    statements.push({
+      Sid: "SessionS3OutputPrefix",
+      Effect: "Allow",
+      Action: "s3:PutObject",
+      Resource: s3PutPrefixes.map((p) => `arn:aws:s3:::${p.bucket}/${p.keyPrefix}/*`),
+    });
+  }
+  const sessionPolicy = JSON.stringify({ Version: "2012-10-17", Statement: statements });
+  return assumeCapabilityBroker(roleArn, region, sessionPolicy);
 }
 
 // Map a stored mime type to a Bedrock Converse image format, or null when the
@@ -332,6 +414,98 @@ function mimeToImageFormat(mime: string | null | undefined): BedrockImageInput["
     default:
       return null;
   }
+}
+
+// Deliver inline up to this size; larger objects go by S3 location (plan §3.4,
+// "pick per request size") to sidestep Bedrock's inline request-size/timeout
+// limit. Base64 inflates ~33% on the wire, so the default keeps inlined payloads
+// modest. Operator-overridable for tuning against real model limits.
+const INLINE_MAX_BYTES = Number(
+  process.env.STARKEEP_CAPABILITY_INLINE_MAX_BYTES ?? 4 * 1024 * 1024,
+);
+
+/**
+ * Build the by-reference content reader shared by the buffered and streaming
+ * capability routes (plan §3.4 step 4). It resolves the ref under the app's own
+ * role + grants — the source of truth for what the app may feed Bedrock — and
+ * picks the delivery mode by size:
+ *
+ *  - a HEAD under the app role authorizes readability WITHOUT a download and
+ *    gives the size (open-question 10: this app-role read stays the independent,
+ *    load-bearing authorization even when bytes are later delivered by S3 URI);
+ *  - small images are downloaded and inlined (capability role needs no S3);
+ *  - large images are delivered by S3 location — the object is NOT downloaded;
+ *    the broker later assumes the capability role under a session policy scoped
+ *    to exactly `s3Key` (see getCapabilityBrokerCreds).
+ *
+ * There is no inline-bytes path from the caller — only a grant-checked read of a
+ * resident cloud object.
+ */
+function makeCapabilityContentReader(ctx: {
+  appId: string;
+  grants: AccessGrants;
+  db: ReturnType<typeof makeAdapters>["db"];
+  storage: ReturnType<typeof makeAdapters>["storage"];
+  s3Bucket: string;
+  accountId: string;
+}): (ref: NonNullable<CapabilityInvokeBody["contentRef"]>) => Promise<ContentReadResult> {
+  const { appId, grants, db, storage, s3Bucket, accountId } = ctx;
+  return async (ref) => {
+    let key: string | null = null;
+    let mime: string | null = null;
+    let recordSize: number | null = null;
+    if (ref.recordId) {
+      const record = await db.get(ref.recordId as StarkeepId);
+      if (!record || record.deletedAt) return { ok: false, status: 404, message: "content_not_found" };
+      if (!canRead(grants, record.type)) return { ok: false, status: 403, message: "content_forbidden" };
+      if (!record.objectStorageKey) return { ok: false, status: 404, message: "content_has_no_bytes" };
+      key = record.objectStorageKey;
+      mime = record.mimeType ?? null;
+      recordSize = record.sizeBytes ?? null;
+    } else if (ref.objectKey) {
+      key = ref.objectKey;
+    } else {
+      return { ok: false, status: 400, message: "contentRef requires recordId or objectKey" };
+    }
+
+    // Belt: re-authorize the key against the caller's grants (namespace, shape,
+    // category) even for a record-derived key.
+    const keyCheck = parseObjectKey(appId, key, grants, "read");
+    if (!keyCheck.ok) return { ok: false, status: keyCheck.status, message: keyCheck.message };
+
+    // Step-4 authorization + sizing without a download. A non-null HEAD under
+    // the app role is positive proof the app role can read the key (S3 collapses
+    // missing/forbidden to null), so it doubles as the readability check.
+    const head = await storage.head(key);
+    if (!head) return { ok: false, status: 404, message: "content_not_resident" };
+    const sizeBytes = recordSize ?? head.size;
+    const format = mimeToImageFormat(mime ?? head.contentType ?? null);
+
+    // Non-image bytes Bedrock can't take as an image → run text-only (no bytes
+    // sent), without downloading the object.
+    if (!format) return { ok: true, content: { sizeBytes } };
+
+    // Small image → inline base64 (capability role needs no S3 access).
+    if (sizeBytes <= INLINE_MAX_BYTES) {
+      const got = await storage.get(key);
+      if (!got) return { ok: false, status: 404, message: "content_not_resident" };
+      const bytes = new Uint8Array(got.data as Buffer);
+      return {
+        ok: true,
+        content: { sizeBytes: recordSize ?? got.size ?? bytes.byteLength, image: { format, bytes } },
+      };
+    }
+
+    // Large image → S3 location. Bedrock reads it under the capability role,
+    // narrowed to exactly this key by the per-assume session policy. bucketOwner
+    // pins the read to this account (confused-deputy guard). No download here.
+    const image: BedrockImageInput = {
+      format,
+      s3Uri: `s3://${s3Bucket}/${key}`,
+      bucketOwner: accountId,
+    };
+    return { ok: true, content: { sizeBytes, image, s3Key: { bucket: s3Bucket, key } } };
+  };
 }
 
 // Account ID parsed from the Lambda invocation context's ARN. Lambda does not
@@ -520,7 +694,7 @@ function makeAdapters(appId: string, creds: CachedCreds) {
     },
   });
 
-  return { db, storage, clientFactory, auroraEndpoint, region };
+  return { db, storage, clientFactory, auroraEndpoint, region, s3Bucket };
 }
 
 // Seed the cloud HLC clock from the highest cloud-stamped timestamp visible
@@ -846,7 +1020,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     const accountId = getAccountId(context.invokedFunctionArn);
     const creds = await getAppCreds(appId, accountId);
-    const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
+    const { db, storage, clientFactory, auroraEndpoint, region, s3Bucket } = makeAdapters(appId, creds);
 
     await db.init();
     toClose.push(() => db.close());
@@ -1596,43 +1770,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
       // Read the referenced item BY REFERENCE under this request's app role +
       // grants — the source of truth for what the app may feed Bedrock. No
-      // inline-bytes path from the caller.
-      const readContent = async (
-        ref: NonNullable<CapabilityInvokeBody["contentRef"]>,
-      ): Promise<ContentReadResult> => {
-        let key: string | null = null;
-        let mime: string | null = null;
-        let recordSize: number | null = null;
-        if (ref.recordId) {
-          const record = await db.get(ref.recordId as StarkeepId);
-          if (!record || record.deletedAt) return { ok: false, status: 404, message: "content_not_found" };
-          if (!canRead(grants, record.type)) return { ok: false, status: 403, message: "content_forbidden" };
-          if (!record.objectStorageKey) return { ok: false, status: 404, message: "content_has_no_bytes" };
-          key = record.objectStorageKey;
-          mime = record.mimeType ?? null;
-          recordSize = record.sizeBytes ?? null;
-        } else if (ref.objectKey) {
-          key = ref.objectKey;
-        } else {
-          return { ok: false, status: 400, message: "contentRef requires recordId or objectKey" };
-        }
-        // Belt: re-authorize the key against the caller's grants (namespace,
-        // shape, category) even for a record-derived key.
-        const keyCheck = parseObjectKey(appId, key, grants, "read");
-        if (!keyCheck.ok) return { ok: false, status: keyCheck.status, message: keyCheck.message };
-        const got = await storage.get(key);
-        if (!got) return { ok: false, status: 404, message: "content_not_resident" };
-        const bytes = new Uint8Array(got.data as Buffer);
-        const format = mimeToImageFormat(mime ?? got.contentType ?? null);
-        return {
-          ok: true,
-          content: {
-            bytes,
-            sizeBytes: recordSize ?? got.size ?? bytes.byteLength,
-            ...(format ? { image: { format, bytes } } : {}),
-          },
-        };
-      };
+      // inline-bytes path from the caller. Picks inline vs S3-location by size.
+      const readContent = makeCapabilityContentReader({
+        appId,
+        grants,
+        db,
+        storage,
+        s3Bucket,
+        accountId,
+      });
 
       const result = await handleCapabilityInvoke({
         appId,
@@ -1640,8 +1786,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         body: capBody,
         capClient,
         readContent,
-        assumeCapabilityCreds: async () => {
-          const c = await getCapabilityBrokerCreds(accountId);
+        assumeCapabilityCreds: async (scope) => {
+          const c = await getCapabilityBrokerCreds(accountId, scope);
           return {
             accessKeyId: c.accessKeyId,
             secretAccessKey: c.secretAccessKey,
@@ -1651,6 +1797,96 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         invoker: getBedrockInvoker(),
         region,
         timeZone: process.env.STARKEEP_CAPABILITY_TZ ?? "UTC",
+      });
+      return ok(result.body, result.statusCode);
+    }
+
+    // POST /apps/{appId}/capabilities/:name/invoke-async — START an async
+    // generation job (plan §3.8). Reserves + kicks off StartAsyncInvoke writing
+    // output to a per-invocation folder in the app's OWN syncable area; the app
+    // then polls the status route below. Only async-output models are accepted.
+    const capabilityAsyncStartMatch = subPath.match(/^\/capabilities\/([^/]+)\/invoke-async$/);
+    if (capabilityAsyncStartMatch && method === "POST") {
+      const capabilityName = decodeURIComponent(capabilityAsyncStartMatch[1]!);
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      let capBody: CapabilityAsyncInvokeBody;
+      try {
+        capBody = JSON.parse(rawBody) as CapabilityAsyncInvokeBody;
+      } catch {
+        return clientErr("Invalid JSON body", 400);
+      }
+
+      const capClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+      toClose.push(() => capClient.end());
+
+      const readContent = makeCapabilityContentReader({ appId, grants, db, storage, s3Bucket, accountId });
+
+      const result = await handleCapabilityInvokeAsyncStart({
+        appId,
+        capabilityName,
+        body: capBody,
+        capClient,
+        readContent,
+        assumeCapabilityCreds: async (scope) => {
+          const c = await getCapabilityBrokerCreds(accountId, scope);
+          return { accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, sessionToken: c.sessionToken };
+        },
+        asyncInvoker: getBedrockAsyncInvoker(),
+        region,
+        accountId,
+        // Output → the app's OWN syncable area (readable/writable by the app's
+        // files routes), one folder per invocation. The invocationId is
+        // path-sanitized; the exact prefix is stored on the job row.
+        resolveOutputTarget: (invocationId: string) => {
+          const safe = invocationId.replace(/[^a-zA-Z0-9_-]/g, "-");
+          const keyPrefix = `apps/${appId}/syncable/capability-async/${safe}`;
+          return { bucket: s3Bucket, keyPrefix, s3Uri: `s3://${s3Bucket}/${keyPrefix}/` };
+        },
+        timeZone: process.env.STARKEEP_CAPABILITY_TZ ?? "UTC",
+      });
+      return ok(result.body, result.statusCode);
+    }
+
+    // GET /apps/{appId}/capabilities/:name/async/:invocationId — POLL an async
+    // job (plan §3.8). The completing poll commits the reservation, records the
+    // output bytes, and returns the output key(s) for the app to ingest via its
+    // ordinary data routes.
+    const capabilityAsyncStatusMatch = subPath.match(/^\/capabilities\/([^/]+)\/async\/(.+)$/);
+    if (capabilityAsyncStatusMatch && method === "GET") {
+      const capabilityName = decodeURIComponent(capabilityAsyncStatusMatch[1]!);
+      const invocationId = decodeURIComponent(capabilityAsyncStatusMatch[2]!);
+
+      const capClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+      toClose.push(() => capClient.end());
+
+      const result = await handleCapabilityInvokeAsyncStatus({
+        appId,
+        capabilityName,
+        invocationId,
+        capClient,
+        assumeCapabilityCreds: async (scope) => {
+          const c = await getCapabilityBrokerCreds(accountId, scope);
+          return { accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, sessionToken: c.sessionToken };
+        },
+        asyncInvoker: getBedrockAsyncInvoker(),
+        region,
+        // List + total the output objects under the APP role (the output lives in
+        // the app's own syncable area, so no capability creds are needed here).
+        headOutput: async (_bucket, keyPrefix) => {
+          const listed = await storage.list(`${keyPrefix}/`);
+          let totalBytes = 0;
+          const keys: string[] = [];
+          for (const key of listed.keys) {
+            const h = await storage.head(key);
+            if (h) {
+              totalBytes += h.size;
+              keys.push(key);
+            }
+          }
+          return { keys, totalBytes };
+        },
       });
       return ok(result.body, result.statusCode);
     }
@@ -1861,7 +2097,7 @@ const streamHandlerImpl = async (
 
       const accountId = getAccountId(context.invokedFunctionArn);
       const creds = await getAppCreds(appId, accountId);
-      const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
+      const { db, storage, clientFactory, auroraEndpoint, region, s3Bucket } = makeAdapters(appId, creds);
       await db.init();
       toClose.push(() => db.close());
 
@@ -1875,40 +2111,14 @@ const streamHandlerImpl = async (
 
       // By-reference content read under the app's own role — the same source of
       // truth for what the app may feed Bedrock as the buffered route.
-      const readContent = async (
-        ref: NonNullable<CapabilityInvokeBody["contentRef"]>,
-      ): Promise<ContentReadResult> => {
-        let key: string | null = null;
-        let mime: string | null = null;
-        let recordSize: number | null = null;
-        if (ref.recordId) {
-          const record = await db.get(ref.recordId as StarkeepId);
-          if (!record || record.deletedAt) return { ok: false, status: 404, message: "content_not_found" };
-          if (!canRead(grants, record.type)) return { ok: false, status: 403, message: "content_forbidden" };
-          if (!record.objectStorageKey) return { ok: false, status: 404, message: "content_has_no_bytes" };
-          key = record.objectStorageKey;
-          mime = record.mimeType ?? null;
-          recordSize = record.sizeBytes ?? null;
-        } else if (ref.objectKey) {
-          key = ref.objectKey;
-        } else {
-          return { ok: false, status: 400, message: "contentRef requires recordId or objectKey" };
-        }
-        const keyCheck = parseObjectKey(appId, key, grants, "read");
-        if (!keyCheck.ok) return { ok: false, status: keyCheck.status, message: keyCheck.message };
-        const got = await storage.get(key);
-        if (!got) return { ok: false, status: 404, message: "content_not_resident" };
-        const bytes = new Uint8Array(got.data as Buffer);
-        const format = mimeToImageFormat(mime ?? got.contentType ?? null);
-        return {
-          ok: true,
-          content: {
-            bytes,
-            sizeBytes: recordSize ?? got.size ?? bytes.byteLength,
-            ...(format ? { image: { format, bytes } } : {}),
-          },
-        };
-      };
+      const readContent = makeCapabilityContentReader({
+        appId,
+        grants,
+        db,
+        storage,
+        s3Bucket,
+        accountId,
+      });
 
       const capClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
       toClose.push(() => capClient.end());
@@ -1919,8 +2129,8 @@ const streamHandlerImpl = async (
         body: capBody,
         capClient,
         readContent,
-        assumeCapabilityCreds: async () => {
-          const c = await getCapabilityBrokerCreds(accountId);
+        assumeCapabilityCreds: async (scope) => {
+          const c = await getCapabilityBrokerCreds(accountId, scope);
           return {
             accessKeyId: c.accessKeyId,
             secretAccessKey: c.secretAccessKey,

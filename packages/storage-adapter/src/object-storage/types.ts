@@ -12,6 +12,12 @@ export interface GetResult {
   size: number;
 }
 
+/** Metadata for an object without its body — a cheap HEAD, no download. */
+export interface HeadResult {
+  contentType?: string;
+  size: number;
+}
+
 export interface ListOptions {
   limit?: number;
   cursor?: string;
