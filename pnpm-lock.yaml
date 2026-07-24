@@ -92,6 +92,9 @@ importers:
       '@starkeep/aws-bootstrap':
         specifier: workspace:*
         version: link:../../packages/aws-bootstrap
+      '@starkeep/protocol-primitives':
+        specifier: workspace:*
+        version: link:../../packages/protocol-primitives
       '@tailwindcss/postcss':
         specifier: ^4.3.0
         version: 4.3.0

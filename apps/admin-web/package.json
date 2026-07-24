@@ -21,6 +21,7 @@
     "@aws-sdk/dsql-signer": "^3.0.0",
     "@starkeep/app-client": "workspace:*",
     "@starkeep/aws-bootstrap": "workspace:*",
+    "@starkeep/protocol-primitives": "workspace:*",
     "@tailwindcss/postcss": "^4.3.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
