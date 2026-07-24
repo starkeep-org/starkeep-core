@@ -37,6 +37,9 @@ export async function POST(
     secretAccessKey: string;
     sessionToken: string;
     region: string;
+    /** Optional capability names the operator denied at the consent step
+     * (plan §3.2); forwarded to the installer as STARKEEP_DENIED_CAPABILITIES. */
+    deniedCapabilities?: string[];
   };
 
   if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken || !body.region) {
@@ -58,6 +61,10 @@ export async function POST(
     AWS_SECRET_ACCESS_KEY: body.secretAccessKey,
     AWS_SESSION_TOKEN: body.sessionToken,
     AWS_REGION: body.region,
+    // Operator-denied optional capabilities from the consent step (plan §3.2).
+    ...(body.deniedCapabilities && body.deniedCapabilities.length > 0
+      ? { STARKEEP_DENIED_CAPABILITIES: body.deniedCapabilities.join(",") }
+      : {}),
     ...(PULUMI_VERBOSE_TRACE
       ? {
           TF_LOG: "DEBUG",

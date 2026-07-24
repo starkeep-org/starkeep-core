@@ -11,6 +11,20 @@ export interface FileAccess {
   rationale: string;
 }
 
+/** A capability the app declares in `infraRequirements.capabilities` (plan §3.1).
+ * Surfaced at install so the operator can consent per-capability. */
+export interface CapabilityRequirement {
+  name: string;
+  models?: string[];
+  /** true (default): install blocked if denied; false: app runs degraded. */
+  required?: boolean;
+  /** User-facing consent figure → becomes a per-app cost gate on approval. */
+  requestedMonthlyBudgetUsd?: number;
+  /** Non-generic dimensions the app can measure/report ("dimension:unit"). */
+  reports?: string[];
+  rationale?: string;
+}
+
 export interface ManifestSummary {
   id?: string;
   name?: string;
@@ -20,6 +34,7 @@ export interface ManifestSummary {
   infraRequirements?: {
     fileAccess?: FileAccess[];
     fileAccessAll?: boolean;
+    capabilities?: CapabilityRequirement[];
   };
 }
 

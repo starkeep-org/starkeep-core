@@ -18,7 +18,8 @@ import {
   writeCognitoSession,
 } from "@/lib/cloud-config";
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
-import type { LocalAppEntry } from "@/lib/app-types";
+import type { LocalAppEntry, CapabilityRequirement } from "@/lib/app-types";
+import { CapabilityConsent } from "@/components/CapabilityConsent";
 
 export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
   const [browserBaseUrl, setBrowserBaseUrl] = useState<string | null>(null);
@@ -28,7 +29,12 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
   const [cloudReady, setCloudReady] = useState<boolean | null>(null);
   const [credError, setCredError] = useState<string | null>(null);
   // The app whose install modal is currently open (null when closed).
-  const [installing, setInstalling] = useState<{ appId: string; appName: string; endpoint: string } | null>(null);
+  const [installing, setInstalling] = useState<{
+    appId: string;
+    appName: string;
+    endpoint: string;
+    capabilities: CapabilityRequirement[];
+  } | null>(null);
   const [credentials, setCredentials] = useState<(STSCredentials & { region?: string }) | null>(null);
   // Apps that the cloud registry reports as installed. Loaded from
   // `shared.app_registry` via POST /api/apps/cloud/list; refreshed after
@@ -89,7 +95,12 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
     refreshRegistry();
   }, [refreshRegistry]);
 
-  const handleInstall = async (appId: string, appName: string, endpoint: string) => {
+  const handleInstall = async (
+    appId: string,
+    appName: string,
+    endpoint: string,
+    capabilities: CapabilityRequirement[],
+  ) => {
     setCredError(null);
     const cfg = await readCloudConfig();
     if (!cfg) { setCredError("Cloud is not configured. Complete the cloud setup first."); return; }
@@ -109,7 +120,7 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
     }
 
     setCredentials({ ...creds, region: cfg.region });
-    setInstalling({ appId, appName, endpoint });
+    setInstalling({ appId, appName, endpoint, capabilities });
   };
 
   return (
@@ -153,7 +164,14 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
                 <Button
                   variant="link"
                   size="sm"
-                  onClick={() => handleInstall(entry.appId, name, endpoint)}
+                  onClick={() =>
+                    handleInstall(
+                      entry.appId,
+                      name,
+                      endpoint,
+                      entry.manifest.infraRequirements?.capabilities ?? [],
+                    )
+                  }
                   disabled={!cloudReady}
                   title={cloudReady ? undefined : "Set up cloud before installing apps"}
                 >
@@ -185,6 +203,7 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
         appId={installing?.appId ?? null}
         appName={installing?.appName ?? null}
         endpoint={installing?.endpoint ?? null}
+        capabilities={installing?.capabilities ?? []}
         credentials={credentials}
         onClose={() => { setInstalling(null); setCredentials(null); }}
         onSuccess={() => { refreshRegistry(); }}
@@ -197,6 +216,7 @@ function CloudAppInstallModal({
   opened,
   appName,
   endpoint,
+  capabilities,
   credentials,
   onClose,
   onSuccess,
@@ -205,6 +225,7 @@ function CloudAppInstallModal({
   appId: string | null;
   appName: string | null;
   endpoint: string | null;
+  capabilities: CapabilityRequirement[];
   credentials: STSCredentials | null;
   onClose: () => void;
   onSuccess?: () => void;
@@ -214,9 +235,23 @@ function CloudAppInstallModal({
   // Bumped by the Retry button to re-drive the install effect. Most install
   // failures are transient (IAM/S3 eventual consistency) and clear on retry.
   const [retryNonce, setRetryNonce] = useState(0);
+  // Consent phase (plan §3.2): when the app declares capabilities, the operator
+  // reviews + approves them before the install runs. `started` gates the install
+  // effect; `denied` holds the optional capabilities toggled off.
+  const [started, setStarted] = useState(false);
+  const [denied, setDenied] = useState<Set<string>>(new Set());
+  const needsConsent = capabilities.length > 0;
+
+  // Reset consent state each time the modal (re)opens. Apps with no capabilities
+  // start immediately, preserving the original one-click behavior.
+  useEffect(() => {
+    if (!opened) return;
+    setDenied(new Set());
+    setStarted(!needsConsent);
+  }, [opened, needsConsent]);
 
   useEffect(() => {
-    if (!opened || !credentials || !endpoint) return;
+    if (!opened || !credentials || !endpoint || !started) return;
 
     setLines([]);
     setStatus("running");
@@ -232,6 +267,7 @@ function CloudAppInstallModal({
             secretAccessKey: credentials!.secretAccessKey,
             sessionToken: credentials!.sessionToken,
             region: (credentials as STSCredentials & { region?: string }).region ?? "",
+            deniedCapabilities: [...denied],
           }),
         });
 
@@ -288,7 +324,9 @@ function CloudAppInstallModal({
 
     run();
     return () => { aborted = true; };
-  }, [opened, credentials, endpoint, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [opened, credentials, endpoint, started, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const inConsent = needsConsent && !started;
 
   return (
     <Dialog open={opened} onOpenChange={(open) => { if (!open && status !== "running") onClose(); }}>
@@ -296,19 +334,43 @@ function CloudAppInstallModal({
         <DialogHeader>
           <DialogTitle>Install {appName ?? "app"} in cloud</DialogTitle>
         </DialogHeader>
-        <CommandOutput lines={lines} status={status} />
-        {status !== "running" && (
-          <div className="flex items-center justify-end gap-3">
-            {status === "failure" && (
-              <>
-                <p className="mr-auto text-sm text-muted-foreground">
-                  Most failures are transitory and fixed with a retry.
-                </p>
-                <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
-              </>
+
+        {inConsent ? (
+          <>
+            <CapabilityConsent
+              capabilities={capabilities}
+              denied={denied}
+              onToggle={(name, approve) =>
+                setDenied((prev) => {
+                  const next = new Set(prev);
+                  if (approve) next.delete(name);
+                  else next.add(name);
+                  return next;
+                })
+              }
+            />
+            <div className="flex items-center justify-end gap-3">
+              <Button variant="outline" onClick={onClose}>Cancel</Button>
+              <Button onClick={() => setStarted(true)}>Approve &amp; install</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <CommandOutput lines={lines} status={status} />
+            {status !== "running" && (
+              <div className="flex items-center justify-end gap-3">
+                {status === "failure" && (
+                  <>
+                    <p className="mr-auto text-sm text-muted-foreground">
+                      Most failures are transitory and fixed with a retry.
+                    </p>
+                    <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
+                  </>
+                )}
+                <Button variant="outline" onClick={onClose}>Close</Button>
+              </div>
             )}
-            <Button variant="outline" onClick={onClose}>Close</Button>
-          </div>
+          </>
         )}
       </DialogContent>
     </Dialog>

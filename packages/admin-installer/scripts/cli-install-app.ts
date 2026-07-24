@@ -43,6 +43,7 @@ import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { appManifestSchema } from "@starkeep/admin-manifest";
 import { installApp } from "../src/orchestrator";
 import { exitOnInstallFailure } from "../src/cli-exit";
+import { parseDeniedCapabilities, applyCapabilityDenials } from "../src/capability-consent";
 import {
   regionFromUserPoolId,
   cognitoPasswordAuth,
@@ -189,27 +190,26 @@ const manifest = appManifestSchema.parse(rawManifest);
 // separated names). Drop those before install so no grant row is written and the
 // app runs degraded. A `required` capability can't be dropped this way — denying
 // it blocks the install, which is the UI's job to surface, not silently skip.
-const deniedCapabilities = new Set(
-  (process.env.STARKEEP_DENIED_CAPABILITIES ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
-);
+const deniedCapabilities = parseDeniedCapabilities(process.env.STARKEEP_DENIED_CAPABILITIES);
 if (deniedCapabilities.size > 0 && manifest.infraRequirements.capabilities) {
-  for (const cap of manifest.infraRequirements.capabilities) {
-    if (deniedCapabilities.has(cap.name) && cap.required) {
-      console.error(
-        `Cannot deny required capability "${cap.name}" — it is marked required by ` +
-          `${appId}'s manifest. Aborting install.`,
-      );
-      process.exit(1);
-    }
-  }
-  manifest.infraRequirements.capabilities = manifest.infraRequirements.capabilities.filter(
-    (cap) => !deniedCapabilities.has(cap.name),
+  const { kept, droppedOptional, droppedRequired } = applyCapabilityDenials(
+    manifest.infraRequirements.capabilities,
+    deniedCapabilities,
   );
-  const droppedNames = [...deniedCapabilities].join(", ");
-  console.log(`Operator denied optional capabilities: ${droppedNames} (app runs degraded).`);
+  if (droppedRequired.length > 0) {
+    console.error(
+      `Cannot deny required capabilit${droppedRequired.length > 1 ? "ies" : "y"} ` +
+        `${droppedRequired.map((n) => `"${n}"`).join(", ")} — marked required by ` +
+        `${appId}'s manifest. Aborting install.`,
+    );
+    process.exit(1);
+  }
+  manifest.infraRequirements.capabilities = kept;
+  if (droppedOptional.length > 0) {
+    console.log(
+      `Operator denied optional capabilities: ${droppedOptional.join(", ")} (app runs degraded).`,
+    );
+  }
 }
 
 console.log(`\nStarkeep ${appId} cloud install`);
