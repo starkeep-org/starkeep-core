@@ -117,3 +117,89 @@ describe("overrideInputToColumns", () => {
     expect(back).toEqual(input);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Malformed / partial stored values
+// ---------------------------------------------------------------------------
+
+describe("malformed stored JSON", () => {
+  it("treats an unparseable pricing/estimates blob as no override rather than throwing", () => {
+    // A hand-edited or truncated row must degrade to the platform default, not
+    // take the whole registry read down.
+    const rows = buildModelRows([
+      row({ model_id: HAIKU, pricing_json: "{not json", estimates_json: "[[" }),
+    ]);
+    const haiku = rows.find((r) => r.modelId === HAIKU)!;
+    expect(haiku.effective.inputPerMTok).toBe(1); // platform default
+    expect(haiku.effective.imageTokens).toBe(1600);
+    expect(haiku.override).toEqual({});
+  });
+
+  it("treats a non-object JSON value (array / scalar / null) as no override", () => {
+    for (const blob of ["[1,2,3]", '"nope"', "42", "null"]) {
+      const rows = buildModelRows([row({ model_id: HAIKU, pricing_json: blob })]);
+      const haiku = rows.find((r) => r.modelId === HAIKU)!;
+      expect(haiku.effective.inputPerMTok, blob).toBe(1);
+      expect(haiku.override.inputPerMTok, blob).toBeUndefined();
+    }
+  });
+
+  it("ignores a pricing blob whose values are not numbers", () => {
+    const rows = buildModelRows([
+      row({ model_id: HAIKU, pricing_json: JSON.stringify({ "input:tokens": "2" }) }),
+    ]);
+    const haiku = rows.find((r) => r.modelId === HAIKU)!;
+    expect(haiku.override.inputPerMTok).toBeUndefined();
+  });
+
+  it("surfaces only the half of a partially-priced row that is a number", () => {
+    const rows = buildModelRows([
+      row({ model_id: HAIKU, pricing_json: JSON.stringify({ "input:tokens": 2 / 1e6 }) }),
+    ]);
+    const haiku = rows.find((r) => r.modelId === HAIKU)!;
+    expect(haiku.override.inputPerMTok).toBe(2);
+    expect(haiku.override.outputPerMTok).toBeUndefined();
+    // …and the un-overridden half still falls through to the platform rate.
+    expect(haiku.effective.outputPerMTok).toBe(5);
+  });
+});
+
+describe("overrideInputToColumns — the pricing pair", () => {
+  it("writes pricing_json ONLY when both halves are numbers", () => {
+    expect(overrideInputToColumns({ inputPerMTok: 2, outputPerMTok: 8 }).pricing_json).toBe(
+      JSON.stringify({ "input:tokens": 2 / 1e6, "output:tokens": 8 / 1e6 }),
+    );
+    // A half-set pair writes NO pricing at all — the API rejects it upstream,
+    // but if it ever got here the row must not silently persist half a rate.
+    expect(overrideInputToColumns({ inputPerMTok: 2 }).pricing_json).toBeNull();
+    expect(overrideInputToColumns({ outputPerMTok: 8 }).pricing_json).toBeNull();
+  });
+
+  it("writes a zero-priced pair (0 is a rate, not 'unset')", () => {
+    expect(overrideInputToColumns({ inputPerMTok: 0, outputPerMTok: 0 }).pricing_json).toBe(
+      JSON.stringify({ "input:tokens": 0, "output:tokens": 0 }),
+    );
+  });
+
+  it("OVERWRITES pricing_json wholesale — non-token rates set elsewhere are dropped", () => {
+    // Known limitation: the editor can only express token pricing, so saving any
+    // override through it replaces the whole pricing table. A model priced on
+    // requests:image / output:duration_s loses that rate on save.
+    const cols = overrideInputToColumns({ inputPerMTok: 1, outputPerMTok: 2 });
+    expect(JSON.parse(cols.pricing_json!)).toEqual({
+      "input:tokens": 1e-6,
+      "output:tokens": 2e-6,
+    });
+    expect(JSON.parse(cols.pricing_json!)["requests:image"]).toBeUndefined();
+  });
+
+  it("writes estimates_json only for a numeric imageTokens", () => {
+    expect(overrideInputToColumns({ imageTokens: 900 }).estimates_json).toBe(
+      JSON.stringify({ imageTokens: 900 }),
+    );
+    expect(overrideInputToColumns({}).estimates_json).toBeNull();
+    expect(overrideInputToColumns({ imageTokens: 0 }).estimates_json).toBe(
+      JSON.stringify({ imageTokens: 0 }),
+    );
+  });
+});

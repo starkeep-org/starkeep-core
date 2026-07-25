@@ -386,4 +386,82 @@ describe("capability requirements (plan §3.1)", () => {
   it("defaults capabilities to an empty array", () => {
     expect(validateManifest(minimal()).manifest!.infraRequirements.capabilities).toEqual([]);
   });
+
+  it("defaults reports to an empty array when omitted", () => {
+    const result = validateManifest(
+      withCap({ name: "bedrock.invoke", models: ["anthropic.claude-haiku-4-5"], rationale: "x" }),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.manifest!.infraRequirements.capabilities[0].reports).toEqual([]);
+  });
+
+  it("leaves requestedMonthlyBudgetUsd undefined when omitted (no gate is written)", () => {
+    const result = validateManifest(
+      withCap({ name: "bedrock.invoke", models: ["anthropic.claude-haiku-4-5"], rationale: "x" }),
+    );
+    // Distinct from 0: an absent budget means "unbounded until the operator sets
+    // a gate", while 0 means "deny everything".
+    expect(result.manifest!.infraRequirements.capabilities[0].requestedMonthlyBudgetUsd).toBeUndefined();
+  });
+
+  it("accepts a zero budget but REJECTS a negative one", () => {
+    expect(
+      validateManifest(
+        withCap({
+          name: "bedrock.invoke",
+          models: ["anthropic.claude-haiku-4-5"],
+          requestedMonthlyBudgetUsd: 0,
+          rationale: "x",
+        }),
+      ).valid,
+    ).toBe(true);
+    // A negative limit would make the gate's `sum > limit` comparison deny
+    // every request while reading like a generous budget.
+    const negative = validateManifest(
+      withCap({
+        name: "bedrock.invoke",
+        models: ["anthropic.claude-haiku-4-5"],
+        requestedMonthlyBudgetUsd: -5,
+        rationale: "x",
+      }),
+    );
+    expect(negative.valid).toBe(false);
+  });
+
+  it("rejects an EMPTY models list (a capability with no approvable model)", () => {
+    const result = validateManifest(
+      withCap({ name: "bedrock.invoke", models: [], rationale: "x" }),
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects a capability with no models field at all", () => {
+    expect(validateManifest(withCap({ name: "bedrock.invoke", rationale: "x" })).valid).toBe(false);
+  });
+
+  it("requires a rationale (it is the consent screen's explanation)", () => {
+    expect(
+      validateManifest(withCap({ name: "bedrock.invoke", models: ["anthropic.claude-haiku-4-5"] }))
+        .valid,
+    ).toBe(false);
+  });
+
+  it("rejects an empty capability name", () => {
+    expect(
+      validateManifest(withCap({ name: "", models: ["anthropic.claude-haiku-4-5"], rationale: "x" }))
+        .valid,
+    ).toBe(false);
+  });
+
+  it("accepts every reportable non-generic dimension", () => {
+    const result = validateManifest(
+      withCap({
+        name: "bedrock.invoke",
+        models: ["anthropic.claude-haiku-4-5"],
+        reports: ["input:megapixels", "output:frames", "credits:count", "requests:image"],
+        rationale: "x",
+      }),
+    );
+    expect(result.errors).toEqual([]);
+  });
 });

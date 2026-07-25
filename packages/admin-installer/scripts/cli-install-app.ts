@@ -43,7 +43,7 @@ import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { appManifestSchema } from "@starkeep/admin-manifest";
 import { installApp } from "../src/orchestrator";
 import { exitOnInstallFailure } from "../src/cli-exit";
-import { parseDeniedCapabilities, applyCapabilityDenials } from "../src/capability-consent";
+import { resolveConsentedCapabilities } from "../src/capability-consent";
 import {
   regionFromUserPoolId,
   cognitoPasswordAuth,
@@ -190,26 +190,20 @@ const manifest = appManifestSchema.parse(rawManifest);
 // separated names). Drop those before install so no grant row is written and the
 // app runs degraded. A `required` capability can't be dropped this way — denying
 // it blocks the install, which is the UI's job to surface, not silently skip.
-const deniedCapabilities = parseDeniedCapabilities(process.env.STARKEEP_DENIED_CAPABILITIES);
-if (deniedCapabilities.size > 0 && manifest.infraRequirements.capabilities) {
-  const { kept, droppedOptional, droppedRequired } = applyCapabilityDenials(
-    manifest.infraRequirements.capabilities,
-    deniedCapabilities,
+const consent = resolveConsentedCapabilities(
+  manifest.infraRequirements.capabilities ?? [],
+  process.env.STARKEEP_DENIED_CAPABILITIES,
+  appId,
+);
+if (consent.abortMessage) {
+  console.error(consent.abortMessage);
+  process.exit(1);
+}
+manifest.infraRequirements.capabilities = consent.kept;
+if (consent.droppedOptional.length > 0) {
+  console.log(
+    `Operator denied optional capabilities: ${consent.droppedOptional.join(", ")} (app runs degraded).`,
   );
-  if (droppedRequired.length > 0) {
-    console.error(
-      `Cannot deny required capabilit${droppedRequired.length > 1 ? "ies" : "y"} ` +
-        `${droppedRequired.map((n) => `"${n}"`).join(", ")} — marked required by ` +
-        `${appId}'s manifest. Aborting install.`,
-    );
-    process.exit(1);
-  }
-  manifest.infraRequirements.capabilities = kept;
-  if (droppedOptional.length > 0) {
-    console.log(
-      `Operator denied optional capabilities: ${droppedOptional.join(", ")} (app runs degraded).`,
-    );
-  }
 }
 
 console.log(`\nStarkeep ${appId} cloud install`);

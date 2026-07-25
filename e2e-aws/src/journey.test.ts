@@ -45,6 +45,13 @@ import {
   InvokeWithResponseStreamCommand,
 } from "@aws-sdk/client-lambda";
 import { S3Client, HeadObjectCommand } from "@aws-sdk/client-s3";
+import {
+  connectOperatorDsql,
+  readLedgerRows,
+  readGate,
+  upsertGate,
+  deleteGate,
+} from "./dsql-operator.js";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
@@ -87,6 +94,21 @@ const photoBytes = solidPng(
   [...randomBytes(3)] as [number, number, number],
   16 + (randomBytes(1)[0] % 48), // 16–63 px; still tiny, still a valid PNG
 );
+
+// The invocationId minted by the live buffered invoke, reused by the ledger and
+// report steps that follow it.
+let lastInvocationId: string | undefined;
+
+/** A one-connection DSQL pool as the installer role, under the admin session's
+ * credentials (the same mapping admin-web's operator routes use). */
+function operatorDsql() {
+  return connectOperatorDsql({
+    hostname: config.auroraEndpoint!,
+    region: REGION,
+    stackPrefix: STACK_PREFIX,
+    credentials: session.awsCredentials,
+  });
+}
 
 /** HMAC-signed fetch against the real broker: `${apiGatewayUrl}/apps/{appId}`. */
 function cloudApp(local: AppCredentials): LdsApp {
@@ -787,6 +809,164 @@ function runTeardownScript(script: string): void {
         expect(body.usage.outputTokens).toBeGreaterThan(0);
         expect(body.estCostUsd).toBeGreaterThan(0);
         expect(body.invocationId).toBeTruthy();
+        lastInvocationId = body.invocationId;
+      },
+    );
+
+    // The cost-governance layer's semantics live in SQL — the scoped SUM over a
+    // window, and the reserved→committed transition. The unit tests' in-memory
+    // ledger is precisely what can't prove those, so these steps read (and, for
+    // the denial, write) the REAL DSQL tables. They follow the live invoke above
+    // and reuse its invocationId.
+    (process.env.STARKEEP_AWS_BEDROCK === "1" ? it : it.skip)(
+      "reconciles the real DSQL ledger for the live invocation (reserve → commit)",
+      async () => {
+        expect(lastInvocationId, "the live invoke step must run first").toBeTruthy();
+        const pool = await operatorDsql();
+        try {
+          const rows = await readLedgerRows(pool, lastInvocationId!);
+          expect(rows.length, "the invocation must have written ledger rows").toBeGreaterThan(0);
+          // Nothing may be left reserved once the call reconciled.
+          expect(rows.filter((r) => r.status === "reserved")).toHaveLength(0);
+          expect(rows.every((r) => r.status === "committed")).toBe(true);
+
+          const by = (d: string, u: string) =>
+            rows.find((r) => r.dimension === d && r.unit === u);
+          // CDS-measured dimensions: the request count, the S3-HEAD input size,
+          // Bedrock's returned token counts, and the derived cost.
+          expect(by("requests", "all")?.quantity).toBe(1);
+          expect(by("input", "bytes")?.quantity).toBeGreaterThan(0);
+          expect(by("output", "tokens")?.quantity).toBeGreaterThan(0);
+          expect(by("cost", "usd")?.quantity).toBeGreaterThan(0);
+          // The app-reported input dimension it DECLARED was metered too.
+          expect(by("input", "megapixels")?.quantity).toBeCloseTo(0.3, 5);
+          // Rows carry the resolved provider/model, which the report route
+          // recovers from the ledger rather than trusting the caller.
+          expect(rows[0]!.provider).toBe("amazon");
+          expect(rows[0]!.model).toBe("amazon.nova-lite");
+        } finally {
+          await pool.end();
+        }
+      },
+    );
+
+    (process.env.STARKEEP_AWS_BEDROCK === "1" ? it : it.skip)(
+      "records the install-time consent budget as a real per-app monthly cost gate",
+      async () => {
+        const pool = await operatorDsql();
+        try {
+          const gate = await readGate(pool, `consent:photos:bedrock.invoke`);
+          expect(gate, "the install must write the consent gate").toBeTruthy();
+          expect(gate!.dimension).toBe("cost");
+          expect(gate!.unit).toBe("usd");
+          expect(gate!.window_kind).toBe("calendar");
+          expect(gate!.window_period).toBe("month");
+          expect(gate!.scope_app_id).toBe("photos");
+          expect(gate!.scope_provider).toBeNull();
+          expect(gate!.origin).toBe("app-consent");
+          expect(Number(gate!.limit_value)).toBeGreaterThan(0);
+        } finally {
+          await pool.end();
+        }
+      },
+    );
+
+    // The highest-value live assertion: a gate breach decided by a real scoped
+    // SUM over a real time window against real ledger rows. Uses a temporary
+    // operator gate (there is no operator gate API yet), removed in a finally so
+    // a kept-up stack isn't left with photos permanently denied.
+    (process.env.STARKEEP_AWS_BEDROCK === "1" ? it : it.skip)(
+      "denies (429) on a real gate breach and releases the reservation",
+      async () => {
+        const gateId = `e2e:photos:cost-zero:${Date.now()}`;
+        const pool = await operatorDsql();
+        try {
+          // A $0 monthly cost cap scoped to photos: any priced reservation
+          // breaches it, and the decision is made by DSQL's SUM, not a fake.
+          await upsertGate(pool, {
+            id: gateId,
+            capabilityName: "bedrock.invoke",
+            dimension: "cost",
+            unit: "usd",
+            scopeAppId: "photos",
+            limitValue: 0,
+          });
+
+          const res = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/invoke", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "amazon.nova-lite",
+              prompt: "This request must never reach Bedrock.",
+              maxTokens: 50,
+            }),
+          });
+          const text = await res.text();
+          expect(res.status, text).toBe(429);
+          const denied = JSON.parse(text) as {
+            error: string;
+            breaches: Array<{ dimension: string; unit: string; limit: number; current: number }>;
+          };
+          expect(denied.error).toBe("gate_exceeded");
+          expect(denied.breaches.some((b) => b.dimension === "cost" && b.unit === "usd")).toBe(true);
+
+          // The denied request's reservation must not linger in the window —
+          // otherwise every later request would inherit its phantom spend.
+          const { rows } = await pool.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM shared.capability_ledger
+              WHERE app_id = 'photos' AND status = 'reserved'`,
+          );
+          expect(Number(rows[0]!.n)).toBe(0);
+        } finally {
+          await deleteGate(pool, gateId).catch(() => {});
+          await pool.end();
+        }
+      },
+    );
+
+    (process.env.STARKEEP_AWS_BEDROCK === "1" ? it : it.skip)(
+      "accepts an app output report and filters it to the app's DECLARED dimensions",
+      async () => {
+        expect(lastInvocationId, "the live invoke step must run first").toBeTruthy();
+        // photos declares `input:megapixels` only, so an OUTPUT report is
+        // accepted by the route but recorded zero times — the filter is what
+        // stops an app metering itself on dimensions it never declared.
+        const undeclared = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            invocationId: lastInvocationId,
+            reports: { "output:megapixels": 4, "output:bytes": 999 },
+          }),
+        });
+        const body = JSON.parse(await undeclared.text()) as { ok: boolean; recorded: number };
+        expect(undeclared.status).toBe(200);
+        expect(body).toEqual({ ok: true, recorded: 0 });
+
+        // …and nothing was appended to the real ledger.
+        const pool = await operatorDsql();
+        try {
+          const rows = await readLedgerRows(pool, lastInvocationId!);
+          expect(rows.some((r) => r.dimension === "output" && r.unit === "megapixels")).toBe(false);
+        } finally {
+          await pool.end();
+        }
+
+        // An invocation that isn't this app's is refused outright.
+        const unknown = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ invocationId: "photos:bedrock.invoke:0:nope", reports: {} }),
+        });
+        expect(unknown.status).toBe(404);
+
+        // A body with no invocationId is a 400, not a silent no-op.
+        const noId = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reports: { "output:megapixels": 1 } }),
+        });
+        expect(noId.status).toBe(400);
       },
     );
 

@@ -11,6 +11,7 @@ import {
   invokeCapabilityAsync,
   getCapabilityAsyncStatus,
   getGrantedCapabilities,
+  reportCapabilityOutput,
   CapabilityUnavailableError,
   clearAppCredentialsCache,
   type CapabilityStreamEvent,
@@ -376,5 +377,204 @@ describe("getGrantedCapabilities", () => {
     delete process.env.STARKEEP_CLOUD_DATA_BASE;
     clearAppCredentialsCache();
     expect(await getGrantedCapabilities(APP_ID)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stream decoding edge cases
+// ---------------------------------------------------------------------------
+
+/** A Lambda event stream built from raw wire bytes (not well-formed frames). */
+function lambdaRawStream(wire: string, tail: unknown[] = [{ InvokeComplete: {} }]) {
+  const bytes = new TextEncoder().encode(wire);
+  async function* gen(): AsyncGenerator<unknown> {
+    if (bytes.length > 0) yield { PayloadChunk: { Payload: bytes } };
+    for (const t of tail) yield t;
+  }
+  return { EventStream: gen() };
+}
+
+describe("invokeCapabilityStream — stream decoding edge cases", () => {
+  const STREAM_FN = "sk-dev-cloud-data-server-api-stream";
+
+  beforeEach(() => {
+    writeCreds();
+    process.env.STARKEEP_CLOUD_STREAM_FUNCTION = STREAM_FN;
+  });
+
+  const start = () =>
+    invokeCapabilityStream(APP_ID, "bedrock.invoke", { model: "m", prompt: "p" });
+
+  it("reports no_stream when the invoke returns no EventStream at all", async () => {
+    lambdaMock.on(InvokeWithResponseStreamCommand).resolves({});
+    const res = await start();
+    expect(res.granted).toBe(true);
+    if (res.granted && !res.ok) {
+      expect(res.status).toBe(502);
+      expect(res.error).toBe("no_stream");
+    } else throw new Error("expected failure");
+  });
+
+  it("reports empty_stream when the stream closes without a single frame", async () => {
+    lambdaMock.on(InvokeWithResponseStreamCommand).resolves(lambdaRawStream(""));
+    const res = await start();
+    if (res.granted && !res.ok) {
+      expect(res.error).toBe("empty_stream");
+      expect(res.status).toBe(502);
+    } else throw new Error("expected failure");
+  });
+
+  it("turns a Lambda-level failure at completion into a synthetic error event", async () => {
+    // A function error / throttle arrives on InvokeComplete, not as an SSE
+    // frame — without this mapping the caller would just see a short stream.
+    lambdaMock.on(InvokeWithResponseStreamCommand).resolves(
+      lambdaRawStream("", [
+        { InvokeComplete: { ErrorCode: "Unhandled", ErrorDetails: "Runtime exited" } },
+      ]),
+    );
+    const res = await start();
+    if (res.granted && !res.ok) {
+      expect(res.error).toBe("stream_invoke_failed");
+      expect(res.status).toBe(502);
+      expect(res.detail).toBe("Runtime exited");
+    } else throw new Error("expected failure");
+  });
+
+  it("falls back to the ErrorCode when no ErrorDetails are supplied", async () => {
+    lambdaMock
+      .on(InvokeWithResponseStreamCommand)
+      .resolves(lambdaRawStream("", [{ InvokeComplete: { ErrorCode: "Throttled" } }]));
+    const res = await start();
+    if (res.granted && !res.ok) {
+      expect(res.detail).toBe("Throttled");
+    } else throw new Error("expected failure");
+  });
+
+  it("surfaces a Lambda failure that arrives AFTER a partial stream as a mid-stream error", async () => {
+    lambdaMock.on(InvokeWithResponseStreamCommand).resolves(
+      lambdaRawStream(`data: ${JSON.stringify({ type: "text", text: "a" })}\n\n`, [
+        { InvokeComplete: { ErrorCode: "Unhandled" } },
+      ]),
+    );
+    const res = await start();
+    if (!(res.granted && res.ok)) throw new Error("expected an open stream");
+    const events: CapabilityStreamEvent[] = [];
+    for await (const evt of res.stream) events.push(evt);
+    expect(events.map((e) => e.type)).toEqual(["text", "error"]);
+  });
+
+  it("skips a malformed frame instead of aborting the whole stream", async () => {
+    const wire =
+      `data: ${JSON.stringify({ type: "text", text: "a " })}\n\n` +
+      `data: {not json\n\n` +
+      `data: ${JSON.stringify({ type: "text", text: "dog" })}\n\n` +
+      `data: ${JSON.stringify({ type: "done", model: "m", usage: { inputTokens: 1, outputTokens: 1 }, estCostUsd: 0, invocationId: "i" })}\n\n`;
+    lambdaMock.on(InvokeWithResponseStreamCommand).resolves(lambdaRawStream(wire));
+    const res = await start();
+    if (!(res.granted && res.ok)) throw new Error("expected an open stream");
+    const events: CapabilityStreamEvent[] = [];
+    for await (const evt of res.stream) events.push(evt);
+    expect(events.map((e) => e.type)).toEqual(["text", "text", "done"]);
+    expect(
+      events.filter((e) => e.type === "text").map((e) => (e.type === "text" ? e.text : "")).join(""),
+    ).toBe("a dog");
+  });
+
+  it("ignores non-data lines and blank data payloads inside a frame", async () => {
+    const wire =
+      `: keep-alive comment\ndata: ${JSON.stringify({ type: "text", text: "hi" })}\n\n` +
+      `data:\n\n` +
+      `event: ping\n\n`;
+    lambdaMock.on(InvokeWithResponseStreamCommand).resolves(lambdaRawStream(wire));
+    const res = await start();
+    if (!(res.granted && res.ok)) throw new Error("expected an open stream");
+    const events: CapabilityStreamEvent[] = [];
+    for await (const evt of res.stream) events.push(evt);
+    expect(events).toEqual([{ type: "text", text: "hi" }]);
+  });
+
+  it("drops a trailing partial frame that never reached its blank-line terminator", async () => {
+    const wire =
+      `data: ${JSON.stringify({ type: "text", text: "ok" })}\n\n` +
+      `data: {"type":"text","text":"trunc`;
+    lambdaMock.on(InvokeWithResponseStreamCommand).resolves(lambdaRawStream(wire));
+    const res = await start();
+    if (!(res.granted && res.ok)) throw new Error("expected an open stream");
+    const events: CapabilityStreamEvent[] = [];
+    for await (const evt of res.stream) events.push(evt);
+    expect(events).toEqual([{ type: "text", text: "ok" }]);
+  });
+
+  it("reassembles a multi-byte character split across chunk boundaries", async () => {
+    // The decoder is used in streaming mode precisely so a UTF-8 sequence cut
+    // in half by a chunk boundary isn't turned into replacement characters.
+    lambdaMock.on(InvokeWithResponseStreamCommand).resolves(
+      lambdaSseStream([{ type: "text", text: "wörld — ok" }], 3),
+    );
+    const res = await start();
+    if (!(res.granted && res.ok)) throw new Error("expected an open stream");
+    const events: CapabilityStreamEvent[] = [];
+    for await (const evt of res.stream) events.push(evt);
+    expect(events).toEqual([{ type: "text", text: "wörld — ok" }]);
+  });
+
+  it("maps any other leading error frame to a structured failure with its status", async () => {
+    lambdaMock
+      .on(InvokeWithResponseStreamCommand)
+      .resolves(lambdaSseStream([{ type: "error", status: 404, error: "not_found" }]));
+    const res = await start();
+    if (res.granted && !res.ok) {
+      expect(res.status).toBe(404);
+      expect(res.error).toBe("not_found");
+    } else throw new Error("expected failure");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reportCapabilityOutput
+// ---------------------------------------------------------------------------
+
+describe("reportCapabilityOutput", () => {
+  it("posts the invocation's app-measured output quantities to the report route", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(jsonResponse(200, { ok: true, recorded: 1 }));
+    await reportCapabilityOutput(APP_ID, "bedrock.invoke", "inv-1", {
+      "output:megapixels": 4,
+    });
+    const [url, init] = fetchMock.mock.calls[0] as [string, { method: string; body: string; headers: Record<string, string> }];
+    expect(url).toBe("https://cloud.example.test/apps/photos/capabilities/bedrock.invoke/report");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({
+      invocationId: "inv-1",
+      reports: { "output:megapixels": 4 },
+    });
+    // Signed like every other app→cloud call.
+    expect(init.headers["X-Starkeep-App-Sig"] ?? init.headers["x-starkeep-app-sig"]).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+  });
+
+  it("URL-encodes the capability name", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(jsonResponse(200, { ok: true, recorded: 0 }));
+    await reportCapabilityOutput(APP_ID, "vendor/cap name", "inv-1", {});
+    expect(fetchMock.mock.calls[0][0] as string).toContain(
+      "/capabilities/vendor%2Fcap%20name/report",
+    );
+  });
+
+  it("is best-effort: a non-200 response does not throw (the report never hard-blocks)", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(jsonResponse(404, { error: "unknown_invocation" }));
+    await expect(
+      reportCapabilityOutput(APP_ID, "bedrock.invoke", "gone", { "output:frames": 30 }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("posts an empty reports object without special-casing it", async () => {
+    writeCreds();
+    fetchMock.mockResolvedValue(jsonResponse(200, { ok: true, recorded: 0 }));
+    await reportCapabilityOutput(APP_ID, "bedrock.invoke", "inv-1", {});
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body).reports).toEqual({});
   });
 });

@@ -92,6 +92,11 @@ import {
   attachTempInstallInfraPolicy,
   detachTempInstallInfraPolicy,
 } from "../src/iam";
+import {
+  attachTempInstallDdlPolicy,
+  detachTempInstallDdlPolicy,
+} from "../src/iam";
+import { runAppInstallDdl } from "../src/dsql-ddl";
 import { putAppCredsParameter } from "../src/app-creds";
 import { putAppKeepFile, uploadAppBundle } from "../src/s3";
 import { installComputeStack } from "../src/compute-stack";
@@ -339,6 +344,80 @@ describe("install", () => {
     expect(
       ledger.filter((e) => e.step === "install_compute_stack" && e.status === "done"),
     ).toHaveLength(2);
+  });
+
+  // Regression (same shape as the redeploy one above, different step): the
+  // app-install DDL is desired-state reconciliation, not a one-shot. Before it
+  // was made alwaysRun, changing a manifest and redeploying silently kept the
+  // OLD grants — new shared-type access, new capability models/reports and new
+  // app tables never landed until a full uninstall. Its temp DB-admin policy
+  // bracket must re-run with it, or the replayed DDL would hit AccessDenied.
+  it("re-runs the app-install DDL and its temp-policy bracket on a redeploy", async () => {
+    const drive = () =>
+      installApp({
+        appId: "photos",
+        manifest: photosManifest,
+        zipBuffer: Buffer.from("zip"),
+        version: "0.1.0",
+        config,
+        registryCredentials,
+      });
+
+    await drive();
+    await drive();
+
+    expect(vi.mocked(runAppInstallDdl)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(attachTempInstallDdlPolicy)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(detachTempInstallDdlPolicy)).toHaveBeenCalledTimes(2);
+    // …and the ledger records the re-run, rather than the step being skipped.
+    expect(ledger.filter((e) => e.step === "run_dsql_ddl" && e.status === "done")).toHaveLength(2);
+  });
+
+  // The DDL is what writes capability_grants + the consent cost gate, so a
+  // manifest's capabilities have to actually reach it. Nothing else in the
+  // install path carries them.
+  it("passes the manifest's declared capabilities through to the install DDL", async () => {
+    const withCapability: AppManifest = {
+      ...photosManifest,
+      infraRequirements: {
+        ...photosManifest.infraRequirements,
+        capabilities: [
+          {
+            name: "bedrock.invoke",
+            models: ["anthropic.claude-haiku-4-5"],
+            required: false,
+            requestedMonthlyBudgetUsd: 20,
+            reports: ["input:megapixels"],
+            rationale: "captions",
+          },
+        ],
+      },
+    };
+    await installApp({
+      appId: "photos",
+      manifest: withCapability,
+      zipBuffer: Buffer.from("zip"),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    const call = vi.mocked(runAppInstallDdl).mock.calls[0]!;
+    // Positional arg 7 (index 6) is the approved capability set.
+    expect(call[6]).toEqual(withCapability.infraRequirements.capabilities);
+  });
+
+  it("passes an empty capability list for a manifest that declares none", async () => {
+    await installApp({
+      appId: "photos",
+      manifest: photosManifest,
+      zipBuffer: Buffer.from("zip"),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    expect(vi.mocked(runAppInstallDdl).mock.calls[0]![6]).toEqual(
+      photosManifest.infraRequirements.capabilities,
+    );
   });
 
   it("rejects reserved app ids before recording any step, unless explicitly allowed", async () => {

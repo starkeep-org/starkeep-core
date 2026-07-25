@@ -8,14 +8,37 @@ import {
 
 describe("reserved app ids", () => {
   it("rejects every built-in id for third-party installs", () => {
-    for (const id of ["cloud-data-server", "starkeep-drive", "local-watcher", "local-data-sync"]) {
-      expect(RESERVED_APP_IDS.has(id)).toBe(true);
-      expect(() => assertNotReservedAppId(id)).toThrow(/reserved for a built-in app/);
+    for (const id of [
+      "cloud-data-server",
+      "starkeep-drive",
+      "local-watcher",
+      "local-data-sync",
+      // The capability-broker role's id: not a real app (no manifest, no data
+      // plane), reserved so no manifest can claim the name and inherit the one
+      // identity in the system that carries Bedrock invoke.
+      "capability-broker",
+    ]) {
+      expect(RESERVED_APP_IDS.has(id), id).toBe(true);
+      expect(() => assertNotReservedAppId(id), id).toThrow(/reserved for a built-in app/);
     }
+  });
+
+  it("enumerates exactly the reserved set (a new built-in must be added here)", () => {
+    // The hand-written list above is only as good as its completeness; this
+    // pins the set so adding a reserved id without a case is a failure.
+    expect([...RESERVED_APP_IDS].sort()).toEqual([
+      "capability-broker",
+      "cloud-data-server",
+      "local-data-sync",
+      "local-watcher",
+      "starkeep-drive",
+    ]);
   });
 
   it("passes ordinary app ids through", () => {
     expect(() => assertNotReservedAppId("photos")).not.toThrow();
+    // A near-miss is NOT reserved — the guard is exact-match, not prefix.
+    expect(() => assertNotReservedAppId("capability-broker2")).not.toThrow();
   });
 });
 

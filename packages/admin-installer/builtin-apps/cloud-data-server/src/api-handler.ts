@@ -321,7 +321,13 @@ async function assumeCapabilityBroker(
   };
 }
 
-async function getCapabilityBrokerCreds(
+/** Test seam: the unscoped-assume cache is module state, so a test that wants to
+ * observe the cache decision has to be able to start from empty. */
+export function __resetCapabilityCredsCacheForTests(): void {
+  capabilityCredsCache.clear();
+}
+
+export async function getCapabilityBrokerCreds(
   accountId: string,
   scope?: CapabilityAssumeScope,
 ): Promise<CachedCreds> {
