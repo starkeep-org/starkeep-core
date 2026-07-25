@@ -81,7 +81,7 @@ describe("config & lifecycle", () => {
     }
   });
 
-  it("PATCH /config persists the patch, exits, and the replacement respawns serving it", { timeout: 30_000 }, async () => {
+  it("PATCH /config persists the patch, exits, and the replacement respawns serving it", async () => {
     const server = await startLocalDataServer();
     const { port, starkeepDir } = server;
     try {

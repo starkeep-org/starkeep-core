@@ -54,6 +54,12 @@ async function syncNow(app: InstalledApp): Promise<{ applied: number; shipped: n
 /**
  * Alternate /sync/now on A and B until both report a quiet round (nothing
  * shipped or applied) — multi-round by design so small pageLimits drain.
+ *
+ * A quiet round only means "converged" while these are the ONLY exchanges
+ * running: an exchange that overlaps a background one reports 0/0 because the
+ * other holds the pending blobs in flight (file-sync-engine's inFlightKeys),
+ * which is indistinguishable here from having nothing left to do. Both servers
+ * therefore run with automatic nudges effectively disabled — see serverConfig.
  */
 async function converge(maxRounds = 30): Promise<void> {
   for (let i = 0; i < maxRounds; i++) {
@@ -77,7 +83,14 @@ function serverConfig(cloudUrl: string) {
   return {
     apiGatewayUrl: cloudUrl,
     pullIntervalMs: 600_000,
-    pushDebounceMs: 50,
+    // Both the tick and the local-write nudge are effectively infinite, so every
+    // exchange in this file is one the test asked for. A short debounce here
+    // used to fire nudges that overlapped the explicit rounds, and converge()
+    // read the resulting 0/0 as convergence — the tests then asserted against a
+    // cloud whose upload was still in flight, failing in ~100 ms roughly once in
+    // five runs on a loaded machine. Nudge behaviour is owned by
+    // sync-orchestration.test.ts, which drives it deliberately.
+    pushDebounceMs: 600_000,
     syncPageLimit: PAGE_LIMIT,
   };
 }
@@ -103,7 +116,7 @@ afterAll(async () => {
 });
 
 describe("shared records across the wire", () => {
-  it("a record created on A arrives on B with its blob resident, kicking B's /events", { timeout: 30_000 }, async () => {
+  it("a record created on A arrives on B with its blob resident, kicking B's /events", async () => {
     const sseB = openSse(`${serverB.url}/events`);
     try {
       const { record } = await createRecordWithBytes(driveA, {
@@ -163,8 +176,7 @@ describe("shared records across the wire", () => {
 
   it("drains more than one page of records with the small pageLimit", async () => {
     const count = PAGE_LIMIT * 2 + 2;
-    // Clear before creating: the 50 ms debounce nudge starts shipping pages
-    // while the creation loop is still running, and those rounds count too.
+    // Only this test's rounds may be counted below; earlier tests shipped too.
     cloud.clearExchangeLog();
     const created: string[] = [];
     for (let i = 0; i < count; i++) {
@@ -248,7 +260,7 @@ describe("app-specific files across the wire", () => {
     return bytes.text();
   }
 
-  it("a cover set on A uploads to the cloud and resolves on B with its bytes", { timeout: 30_000 }, async () => {
+  it("a cover set on A uploads to the cloud and resolves on B with its bytes", async () => {
     await putAppFile(filesA, "cover", "cover-from-A", "image/png");
     await converge();
 
@@ -267,7 +279,7 @@ describe("app-specific files across the wire", () => {
     });
   });
 
-  it("a cover set on the cloud syncs down to a local server", { timeout: 30_000 }, async () => {
+  it("a cover set on the cloud syncs down to a local server", async () => {
     // Originates the write on the cloud side, as the cloud-served app would
     // via the broker's presign → upload → register flow.
     await cloud.setAppFile("files-app", "banner", "cover-from-cloud", "image/png");

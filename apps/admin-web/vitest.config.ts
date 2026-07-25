@@ -19,6 +19,7 @@ export default defineConfig({
     // `// @vitest-environment jsdom` docblock.
     environment: "node",
     include: ["__tests__/**/*.test.ts", "__tests__/**/*.test.tsx"],
+    setupFiles: ["./__tests__/setup-testing-library.ts"],
     testTimeout: 30_000,
     hookTimeout: 90_000,
   },

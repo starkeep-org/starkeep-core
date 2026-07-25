@@ -84,8 +84,19 @@ function installCalls(): Array<Record<string, unknown>> {
     .map((c) => JSON.parse((c[1] as { body: string }).body) as Record<string, unknown>);
 }
 
+/**
+ * Click Install, once it is actually clickable.
+ *
+ * The button renders from the first paint but starts `disabled` — `cloudReady`
+ * is null until the mount effect's `readCloudConfig()` resolves. Clicking it
+ * before then is silently a no-op, and the test fails several seconds later on
+ * a dialog that was never asked to open. Waiting for the enabled state is the
+ * whole fix; on a loaded machine that effect lost the race often enough to fail
+ * roughly one run in fifteen.
+ */
 async function clickInstall() {
-  const btn = await screen.findByText("Install in cloud");
+  const btn = await screen.findByRole("button", { name: "Install in cloud" });
+  await waitFor(() => expect(btn.hasAttribute("disabled")).toBe(false));
   fireEvent.click(btn);
 }
 
