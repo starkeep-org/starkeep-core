@@ -41,6 +41,10 @@ import {
 } from "@/lib/cloud-config";
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
 import {
+  isCostGateKey,
+  limitToFieldValue,
+  fieldValueToLimit,
+  limitFieldLabel,
   gateCaveat,
   describeScope,
   describeWindow,
@@ -215,7 +219,9 @@ export function CapabilityGatesSection() {
                     </TableCell>
                     <TableCell className="text-xs">{describeScope(gate.scope)}</TableCell>
                     <TableCell className="text-xs">{describeWindow(gate.window)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{gate.limit}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {isCostGateKey(key) ? `$${limitToFieldValue(key, gate.limit)}` : gate.limit}
+                    </TableCell>
                     <TableCell>
                       {gate.origin === "app-consent" ? (
                         <Badge variant="outline" className="text-[10px] border-sky-400 text-sky-700 dark:text-sky-300">app consent</Badge>
@@ -274,11 +280,11 @@ interface Draft {
 function seedDraft(gate: GateView | null, capabilities: string[], options: GateDimensionOption[]): Draft {
   return {
     capabilityName: gate?.capabilityName ?? capabilities[0] ?? "",
-    dimensionKey: gate ? `${gate.dimension}:${gate.unit}` : (options[0]?.key ?? "cost:usd"),
+    dimensionKey: gate ? `${gate.dimension}:${gate.unit}` : (options[0]?.key ?? "cost:usd_micros"),
     windowKind: gate?.window.kind ?? "calendar",
     period: gate?.window.kind === "calendar" ? gate.window.period : "month",
     seconds: gate?.window.kind === "burst" ? String(gate.window.seconds) : "60",
-    limit: gate ? String(gate.limit) : "",
+    limit: gate ? limitToFieldValue(`${gate.dimension}:${gate.unit}`, gate.limit) : "",
     provider: gate?.scope.provider ?? "",
     model: gate?.scope.model ?? "",
     appId: gate?.scope.appId ?? "",
@@ -313,9 +319,18 @@ function GateEditDialog({
   const build = (): { gate: GateInput } | { error: string } => {
     const [dimension, unit] = draft.dimensionKey.split(":");
     if (!dimension || !unit) return { error: "Pick what the gate meters." };
-    const limit = Number(draft.limit);
-    if (draft.limit.trim() === "" || !Number.isFinite(limit) || limit < 0) {
-      return { error: "Limit must be a non-negative number." };
+    // Display units leave the form HERE: a cost limit is typed in dollars and
+    // converted to canonical micros exactly; a count limit must be a whole number.
+    let limit: number;
+    try {
+      if (draft.limit.trim() === "") throw new RangeError("empty");
+      limit = fieldValueToLimit(draft.dimensionKey, draft.limit);
+    } catch {
+      return {
+        error: isCostGateKey(draft.dimensionKey)
+          ? "Limit must be a non-negative dollar amount."
+          : "Limit must be a non-negative whole number.",
+      };
     }
     let window: GateInput["window"];
     if (draft.windowKind === "burst") {
@@ -408,13 +423,13 @@ function GateEditDialog({
             )}
           </Field>
 
-          <Field label="Limit">
+          <Field label={limitFieldLabel(draft.dimensionKey)}>
             <Input
               className="w-40"
               type="number"
               min={0}
               step="any"
-              aria-label="Limit"
+              aria-label={limitFieldLabel(draft.dimensionKey)}
               value={draft.limit}
               onChange={(e) => set("limit", e.currentTarget.value)}
             />

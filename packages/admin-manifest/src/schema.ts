@@ -97,7 +97,10 @@ export const capabilityRequirementSchema = z.object({
   models: z.array(z.string().regex(/^[a-z0-9]+\.[a-z0-9][a-z0-9._:-]*$/)).min(1),
   // false → app runs degraded if the user denies; true (default) → install blocked.
   required: z.boolean().default(true),
-  // User-facing consent figure; becomes a per-app cost gate on approval.
+  // User-facing consent figure, quoted in whole dollars because a manifest is an
+  // author-facing external document. This is the ONE place currency appears in a
+  // non-canonical unit; it is converted to canonical micros at install
+  // (usdDecimalToMicros in dsql-ddl.ts) and nothing downstream sees dollars.
   requestedMonthlyBudgetUsd: z.number().nonnegative().optional(),
   // Non-generic "dimension:unit" pairs the app can measure and report (e.g.
   // "input:megapixels"). Generic dimensions (requests, bytes, cost) are never

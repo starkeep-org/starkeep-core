@@ -82,7 +82,7 @@ function gate(over: Partial<GateInput> = {}): GateInput {
   return {
     capabilityName: "bedrock.invoke",
     dimension: "cost",
-    unit: "usd",
+    unit: "usd_micros",
     window: { kind: "calendar", period: "month" },
     limit: 50,
     ...over,
@@ -95,7 +95,7 @@ function dbRow(over: Record<string, unknown> = {}): Record<string, unknown> {
     id: "operator:01ABC",
     capability_name: "bedrock.invoke",
     dimension: "cost",
-    unit: "usd",
+    unit: "usd_micros",
     scope_provider: null,
     scope_model: null,
     scope_app_id: null,

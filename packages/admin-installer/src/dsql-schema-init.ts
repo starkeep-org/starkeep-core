@@ -335,7 +335,11 @@ export async function initializeSharedSchema(
       .addColumn("window_kind", "text", (c) => c.notNull())
       .addColumn("window_period", "text")
       .addColumn("window_seconds", "integer")
-      .addColumn("limit_value", "double precision", (c) => c.notNull())
+      // numeric, not double precision: a limit is an exact integer in the
+      // dimension's canonical unit (micros for `cost`, a plain count otherwise),
+      // and `double precision` would neither express nor enforce that. See
+      // money.ts. Read back as a string by node-postgres — the store parses it.
+      .addColumn("limit_value", "numeric(38, 0)", (c) => c.notNull())
       .addColumn("on_exceed", "text", (c) => c.notNull().defaultTo("deny"))
       .addColumn("origin", "text") // 'operator' | 'app-consent'
       .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
@@ -362,7 +366,12 @@ export async function initializeSharedSchema(
       .addColumn("model", "text", (c) => c.notNull())
       .addColumn("dimension", "text", (c) => c.notNull())
       .addColumn("unit", "text", (c) => c.notNull())
-      .addColumn("quantity", "double precision", (c) => c.notNull())
+      // numeric, not double precision: the spend cap is enforced as
+      // SUM(quantity) > limit_value, so the sum must be EXACT. `numeric` sums
+      // exactly and without overflow; float would accumulate error into a
+      // security-critical control. Quantities are canonical integers — tokens,
+      // bytes, pixels, milliseconds, or micros for `cost` (see money.ts).
+      .addColumn("quantity", "numeric(38, 0)", (c) => c.notNull())
       .addColumn("status", "text", (c) => c.notNull())
       .addColumn("ts", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
       .execute();

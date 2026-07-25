@@ -125,7 +125,7 @@ interface CapabilityStreamEvt {
   type: string;
   text?: string;
   usage?: { inputTokens?: number; outputTokens?: number };
-  estCostUsd?: number;
+  estCostMicros?: number;
   invocationId?: string;
   status?: number;
   error?: string;
@@ -791,7 +791,7 @@ function runTeardownScript(script: string): void {
             prompt: "Describe this image in one short sentence.",
             contentRef: { recordId: syncedRecordId },
             maxTokens: 100,
-            reports: { "input:megapixels": 0.3 },
+            reports: { "input:pixels": 300_000 }, // 0.3 MP
           }),
         });
         // Read the body ONCE — using it both as the assertion message and the
@@ -802,12 +802,12 @@ function runTeardownScript(script: string): void {
         const body = JSON.parse(bodyText) as {
           text: string;
           usage: { inputTokens: number; outputTokens: number };
-          estCostUsd: number;
+          estCostMicros: number;
           invocationId: string;
         };
         expect(body.text.length).toBeGreaterThan(0);
         expect(body.usage.outputTokens).toBeGreaterThan(0);
-        expect(body.estCostUsd).toBeGreaterThan(0);
+        expect(body.estCostMicros).toBeGreaterThan(0);
         expect(body.invocationId).toBeTruthy();
         lastInvocationId = body.invocationId;
       },
@@ -839,7 +839,7 @@ function runTeardownScript(script: string): void {
           expect(by("output", "tokens")?.quantity).toBeGreaterThan(0);
           expect(by("cost", "usd")?.quantity).toBeGreaterThan(0);
           // The app-reported input dimension it DECLARED was metered too.
-          expect(by("input", "megapixels")?.quantity).toBeCloseTo(0.3, 5);
+          expect(by("input", "pixels")?.quantity).toBe(300_000);
           // Rows carry the resolved provider/model, which the report route
           // recovers from the ledger rather than trusting the caller.
           expect(rows[0]!.provider).toBe("amazon");
@@ -928,7 +928,7 @@ function runTeardownScript(script: string): void {
       "accepts an app output report and filters it to the app's DECLARED dimensions",
       async () => {
         expect(lastInvocationId, "the live invoke step must run first").toBeTruthy();
-        // photos declares `input:megapixels` only, so an OUTPUT report is
+        // photos declares `input:pixels` only, so an OUTPUT report is
         // accepted by the route but recorded zero times — the filter is what
         // stops an app metering itself on dimensions it never declared.
         const undeclared = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/report", {
@@ -936,7 +936,7 @@ function runTeardownScript(script: string): void {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             invocationId: lastInvocationId,
-            reports: { "output:megapixels": 4, "output:bytes": 999 },
+            reports: { "output:pixels": 4_000_000, "output:bytes": 999 },
           }),
         });
         const body = JSON.parse(await undeclared.text()) as { ok: boolean; recorded: number };
@@ -947,7 +947,7 @@ function runTeardownScript(script: string): void {
         const pool = await operatorDsql();
         try {
           const rows = await readLedgerRows(pool, lastInvocationId!);
-          expect(rows.some((r) => r.dimension === "output" && r.unit === "megapixels")).toBe(false);
+          expect(rows.some((r) => r.dimension === "output" && r.unit === "pixels")).toBe(false);
         } finally {
           await pool.end();
         }
@@ -964,7 +964,7 @@ function runTeardownScript(script: string): void {
         const noId = await cloudApp(photos).fetch("/capabilities/bedrock.invoke/report", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reports: { "output:megapixels": 1 } }),
+          body: JSON.stringify({ reports: { "output:pixels": 1_000_000 } }),
         });
         expect(noId.status).toBe(400);
       },
@@ -986,7 +986,7 @@ function runTeardownScript(script: string): void {
           prompt: "Describe this image in one short sentence.",
           contentRef: { recordId: syncedRecordId },
           maxTokens: 100,
-          reports: { "input:megapixels": 0.3 },
+          reports: { "input:pixels": 300_000 }, // 0.3 MP
         });
 
         // No in-band pre-flight error frame; incremental `text` then terminal `done`.
@@ -1003,7 +1003,7 @@ function runTeardownScript(script: string): void {
         ).toBeGreaterThan(0);
         expect(done, "a terminal done event").toBeTruthy();
         expect(done!.usage!.outputTokens).toBeGreaterThan(0);
-        expect(done!.estCostUsd!).toBeGreaterThan(0);
+        expect(done!.estCostMicros!).toBeGreaterThan(0);
         expect(done!.invocationId).toBeTruthy();
       },
     );
@@ -1031,7 +1031,7 @@ function runTeardownScript(script: string): void {
         expect(res.status, bodyText).toBe(200);
         const body = JSON.parse(bodyText) as {
           output: { bucket: string; keyPrefix: string; keys: string[]; totalBytes: number };
-          estCostUsd: number;
+          estCostMicros: number;
           invocationId: string;
         };
         // The CDS WROTE the image to the app's own syncable area (not inline bytes)
@@ -1039,10 +1039,10 @@ function runTeardownScript(script: string): void {
         expect(body.output.keys.length).toBeGreaterThan(0);
         expect(body.output.keys[0]).toContain("apps/photos/syncable/capability-image/");
         expect(body.output.totalBytes).toBeGreaterThan(0);
-        // estCostUsd is the LEDGER-reconciled per-image cost (image gen returns no
+        // estCostMicros is the LEDGER-reconciled per-image cost, in canonical micros (image gen returns no
         // tokens; cost is CDS-derived from requests:image). Its presence proves a
         // ledger row was reserved AND reconciled for this invocation.
-        expect(body.estCostUsd).toBeGreaterThan(0);
+        expect(body.estCostMicros).toBeGreaterThan(0);
         expect(body.invocationId).toBeTruthy();
 
         // The object the CDS claims it wrote actually exists in the files bucket,

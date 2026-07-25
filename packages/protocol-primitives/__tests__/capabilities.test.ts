@@ -19,7 +19,6 @@ import {
   outputIsAsyncS3,
   outputDelivery,
   outputIsSyncInvoke,
-  perMTok,
   type OperatorModelOverride,
   // gates
   gateMatches,
@@ -27,7 +26,7 @@ import {
   projectReservation,
   reconcileMeasurements,
   projectAsyncReservation,
-  deriveCostUsd,
+  deriveCostMicros,
   type Gate,
   type Measurement,
   type CapabilityRequestContext,
@@ -48,23 +47,23 @@ describe("dimension model", () => {
     expect(isCdsMeasured("output", "bytes")).toBe(true);
     expect(isCdsMeasured("input", "tokens")).toBe(true);
     expect(isCdsMeasured("output", "tokens")).toBe(true);
-    expect(isCdsMeasured("cost", "usd")).toBe(true);
+    expect(isCdsMeasured("cost", "usd_micros")).toBe(true);
     // App-reported: only as trustworthy as the app.
-    expect(isCdsMeasured("input", "megapixels")).toBe(false);
-    expect(isCdsMeasured("output", "duration_s")).toBe(false);
+    expect(isCdsMeasured("input", "pixels")).toBe(false);
+    expect(isCdsMeasured("output", "duration_ms")).toBe(false);
     expect(isCdsMeasured("requests", "image")).toBe(false);
     expect(isCdsMeasured("credits", "count")).toBe(false);
   });
 
   it("marks generic pairs non-declarable and non-generic pairs declarable", () => {
     expect(isNonGenericDimensionUnit("requests", "all")).toBe(false);
-    expect(isNonGenericDimensionUnit("cost", "usd")).toBe(false);
+    expect(isNonGenericDimensionUnit("cost", "usd_micros")).toBe(false);
     expect(isNonGenericDimensionUnit("input", "bytes")).toBe(false);
-    expect(isNonGenericDimensionUnit("input", "megapixels")).toBe(true);
+    expect(isNonGenericDimensionUnit("input", "pixels")).toBe(true);
     expect(isNonGenericDimensionUnit("requests", "image")).toBe(true);
     // reportable set == exactly the non-generic pairs
-    expect(REPORTABLE_DIMENSION_UNITS).toContain(dimensionUnitKey("input", "megapixels"));
-    expect(REPORTABLE_DIMENSION_UNITS).not.toContain(dimensionUnitKey("cost", "usd"));
+    expect(REPORTABLE_DIMENSION_UNITS).toContain(dimensionUnitKey("input", "pixels"));
+    expect(REPORTABLE_DIMENSION_UNITS).not.toContain(dimensionUnitKey("cost", "usd_micros"));
   });
 
   it("rejects unknown dimension/unit pairs", () => {
@@ -77,9 +76,9 @@ describe("dimension model", () => {
     // The operator gate editor renders its "app-reported" / "best-effort"
     // caveats straight off this spec, so an absent or wrong one silently
     // presents a soft limit as a hard cap.
-    expect(lookupDimensionUnit("cost", "usd")).toEqual({
+    expect(lookupDimensionUnit("cost", "usd_micros")).toEqual({
       dimension: "cost",
-      unit: "usd",
+      unit: "usd_micros",
       source: "cds",
       timing: "post",
       generic: true,
@@ -95,13 +94,13 @@ describe("dimension model", () => {
     expect(timing("input", "bytes")).toBe("pre");
     // App-supplied input quantities are knowable pre-call too (the app hands
     // them over with the request), which is why they can pre-deny.
-    expect(timing("input", "megapixels")).toBe("pre");
+    expect(timing("input", "pixels")).toBe("pre");
     // Estimated to reserve, exact from Bedrock's usage afterwards.
     expect(timing("input", "tokens")).toBe("estimated");
     // Only known after / during generation.
     expect(timing("output", "tokens")).toBe("post");
     expect(timing("output", "bytes")).toBe("post");
-    expect(timing("output", "megapixels")).toBe("post");
+    expect(timing("output", "pixels")).toBe("post");
     expect(timing("credits", "count")).toBe("post");
   });
 
@@ -151,7 +150,7 @@ describe("model registry", () => {
     // haiku-4-5 has no unversioned cross-region profile alias (unlike
     // sonnet-5 / opus-4-8), so its on-demand target is the dated id.
     expect(bedrockInvokeTarget(m!)).toBe("us.anthropic.claude-haiku-4-5-20251001-v1:0");
-    expect(m?.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(perMTok(1));
+    expect(m?.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(1);
   });
 
   it("returns undefined for an unknown model", () => {
@@ -161,13 +160,13 @@ describe("model registry", () => {
 
   it("an operator override wins per-field; unset fields fall through", () => {
     const overrides: OperatorModelOverride[] = [
-      { modelId: "anthropic.claude-sonnet-5", pricing: { [dimensionUnitKey("input", "tokens")]: perMTok(2) } },
+      { modelId: "anthropic.claude-sonnet-5", pricing: { [dimensionUnitKey("input", "tokens")]: 2 } },
     ];
     const m = effectiveModel("anthropic.claude-sonnet-5", overrides)!;
     // overridden field
-    expect(m.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(perMTok(2));
+    expect(m.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(2);
     // untouched field keeps the platform default
-    expect(m.pricing[dimensionUnitKey("output", "tokens")]).toBeCloseTo(perMTok(15));
+    expect(m.pricing[dimensionUnitKey("output", "tokens")]).toBeCloseTo(15);
     expect(m.source).toBe("platform");
   });
 
@@ -177,7 +176,7 @@ describe("model registry", () => {
         modelId: "anthropic.claude-future-9",
         provider: "anthropic",
         vision: true,
-        pricing: { [dimensionUnitKey("input", "tokens")]: perMTok(4) },
+        pricing: { [dimensionUnitKey("input", "tokens")]: 4 },
       },
     ];
     expect(isModelInEffectiveRegistry("anthropic.claude-future-9", overrides)).toBe(true);
@@ -211,11 +210,11 @@ describe("capability grants", () => {
       appId: "photos",
       capabilityName: CAPABILITY_BEDROCK_INVOKE,
       models: ["anthropic.claude-haiku-4-5"],
-      reports: [dimensionUnitKey("input", "megapixels")],
+      reports: [dimensionUnitKey("input", "pixels")],
     });
     expect(canInvokeModel(grant, "anthropic.claude-haiku-4-5")).toBe(true);
     expect(canInvokeModel(grant, "anthropic.claude-opus-4-8")).toBe(false);
-    expect(grant.reports.has("input:megapixels")).toBe(true);
+    expect(grant.reports.has("input:pixels")).toBe(true);
   });
 });
 
@@ -242,12 +241,12 @@ function gate(partial: Partial<Gate> & Pick<Gate, "dimension" | "unit" | "limit"
 
 describe("gate matching", () => {
   it("wildcards omitted scope keys; matches on set keys", () => {
-    expect(gateMatches(gate({ dimension: "cost", unit: "usd", limit: 1 }), ctx)).toBe(true);
-    expect(gateMatches(gate({ dimension: "cost", unit: "usd", limit: 1, scope: { appId: "photos" } }), ctx)).toBe(true);
-    expect(gateMatches(gate({ dimension: "cost", unit: "usd", limit: 1, scope: { appId: "notes" } }), ctx)).toBe(false);
-    expect(gateMatches(gate({ dimension: "cost", unit: "usd", limit: 1, scope: { provider: "anthropic" } }), ctx)).toBe(true);
-    expect(gateMatches(gate({ dimension: "cost", unit: "usd", limit: 1, scope: { provider: "openai" } }), ctx)).toBe(false);
-    expect(gateMatches(gate({ dimension: "cost", unit: "usd", limit: 1, scope: { model: "anthropic.claude-haiku-4-5" } }), ctx)).toBe(true);
+    expect(gateMatches(gate({ dimension: "cost", unit: "usd_micros", limit: 1 }), ctx)).toBe(true);
+    expect(gateMatches(gate({ dimension: "cost", unit: "usd_micros", limit: 1, scope: { appId: "photos" } }), ctx)).toBe(true);
+    expect(gateMatches(gate({ dimension: "cost", unit: "usd_micros", limit: 1, scope: { appId: "notes" } }), ctx)).toBe(false);
+    expect(gateMatches(gate({ dimension: "cost", unit: "usd_micros", limit: 1, scope: { provider: "anthropic" } }), ctx)).toBe(true);
+    expect(gateMatches(gate({ dimension: "cost", unit: "usd_micros", limit: 1, scope: { provider: "openai" } }), ctx)).toBe(false);
+    expect(gateMatches(gate({ dimension: "cost", unit: "usd_micros", limit: 1, scope: { model: "anthropic.claude-haiku-4-5" } }), ctx)).toBe(true);
   });
 });
 
@@ -263,7 +262,7 @@ function makeLedger(rows: Measurement[]) {
 }
 
 const ALL_DECLARED = new Set([
-  dimensionUnitKey("input", "megapixels"),
+  dimensionUnitKey("input", "pixels"),
   dimensionUnitKey("requests", "image"),
 ]);
 
@@ -277,7 +276,7 @@ describe("gate evaluation", () => {
   it("denies when a matching cost gate would be exceeded", async () => {
     const projected = projectReservation({ model: HAIKU, ctx, imageCount: 1, maxTokens: 1_000_000 });
     // reservation cost = 1600 imgTok * $1/MTok + 1e6 outTok * $5/MTok ≈ $5.0016
-    const g = gate({ dimension: "cost", unit: "usd", limit: 1 });
+    const g = gate({ dimension: "cost", unit: "usd_micros", limit: 1 });
     const d = await evaluateGates({ gates: [g], ctx, appReports: ALL_DECLARED, projected, getSum: makeLedger([]) });
     expect(d.allowed).toBe(false);
     expect(d.breaches[0].kind).toBe("exceeded");
@@ -307,8 +306,8 @@ describe("gate evaluation", () => {
 
   it("FAILS CLOSED on a gate targeting an undeclared non-generic dimension", async () => {
     const projected = projectReservation({ model: HAIKU, ctx, imageCount: 1, maxTokens: 10 });
-    const g = gate({ dimension: "input", unit: "megapixels", limit: 1_000_000 });
-    // app has NOT declared input:megapixels
+    const g = gate({ dimension: "input", unit: "pixels", limit: 1_000_000 });
+    // app has NOT declared input:pixels
     const d = await evaluateGates({
       gates: [g],
       ctx,
@@ -328,10 +327,10 @@ describe("gate evaluation", () => {
       ctx,
       imageCount: 1,
       maxTokens: 10,
-      appReports: { [dimensionUnitKey("input", "megapixels")]: 0 },
+      appReports: { [dimensionUnitKey("input", "pixels")]: 0 },
     });
     const gates = [
-      gate({ dimension: "input", unit: "megapixels", limit: 100 }), // app dodges this
+      gate({ dimension: "input", unit: "pixels", limit: 100 }), // app dodges this
       gate({ dimension: "requests", unit: "all", limit: 0 }), // CDS-measured, hard
     ];
     const d = await evaluateGates({ gates, ctx, appReports: ALL_DECLARED, projected, getSum: makeLedger([]) });
@@ -354,7 +353,7 @@ describe("reservation projection", () => {
     expect(byKey("input", "tokens")).toBe(1600); // imageTokens default
     expect(byKey("output", "tokens")).toBe(500); // ceiling
     // cost = 1600*$1/MTok + 500*$5/MTok
-    expect(byKey("cost", "usd")).toBeCloseTo(perMTok(1) * 1600 + perMTok(5) * 500);
+    expect(byKey("cost", "usd_micros")).toBeCloseTo(1 * 1600 + 5 * 500);
   });
 });
 
@@ -367,13 +366,13 @@ describe("reconciliation", () => {
       outputTokens: 88,
       inputBytes: 2048,
       outputBytes: 300,
-      appReports: { [dimensionUnitKey("output", "megapixels")]: 4 },
+      appReports: { [dimensionUnitKey("output", "pixels")]: 4 },
     });
     const byKey = (d: string, u: string) => r.find((m) => m.dimension === d && m.unit === u)?.quantity;
     expect(byKey("input", "tokens")).toBe(1234);
     expect(byKey("output", "tokens")).toBe(88);
-    expect(byKey("output", "megapixels")).toBe(4);
-    expect(byKey("cost", "usd")).toBeCloseTo(perMTok(1) * 1234 + perMTok(5) * 88);
+    expect(byKey("output", "pixels")).toBe(4);
+    expect(byKey("cost", "usd_micros")).toBeCloseTo(1 * 1234 + 5 * 88);
   });
 });
 
@@ -383,7 +382,7 @@ describe("output modality → delivery channel (plan §3.8)", () => {
     expect(m.outputModality).toBe("video");
     expect(outputIsAsyncS3(m.outputModality)).toBe(true); // video ⇒ async S3
     expect(m.provider).toBe("amazon");
-    expect(m.pricing[dimensionUnitKey("output", "duration_s")]).toBeCloseTo(0.08);
+    expect(m.pricing[dimensionUnitKey("output", "duration_ms")]).toBe(80); // $0.08/s
   });
 
   it("a text model defaults to text output (inline/streamed, not async)", () => {
@@ -420,7 +419,7 @@ describe("output modality → delivery channel (plan §3.8)", () => {
     expect(outputDelivery(m.outputModality)).toBe("sync-s3");
     expect(outputIsAsyncS3(m.outputModality)).toBe(false);
     expect(m.provider).toBe("amazon");
-    expect(m.pricing[dimensionUnitKey("requests", "image")]).toBeCloseTo(0.04);
+    expect(m.pricing[dimensionUnitKey("requests", "image")]).toBe(40_000); // $0.04/image
   });
 
   it("an operator DEFINES a new non-text model's modality (add-a-custom-model, no platform row)", () => {
@@ -429,7 +428,7 @@ describe("output modality → delivery channel (plan §3.8)", () => {
         modelId: "acme.video-1",
         provider: "amazon",
         outputModality: "video",
-        pricing: { [dimensionUnitKey("output", "duration_s")]: 0.2 },
+        pricing: { [dimensionUnitKey("output", "duration_ms")]: 0.2 },
       },
     ])!;
     expect(m.outputModality).toBe("video");
@@ -444,9 +443,9 @@ describe("output modality → delivery channel (plan §3.8)", () => {
     expect(m.outputModality).toBe("text");
     // Other (drift-prone) fields still override normally.
     const priced = effectiveModel("anthropic.claude-haiku-4-5", [
-      { modelId: "anthropic.claude-haiku-4-5", outputModality: "video", pricing: { [dimensionUnitKey("input", "tokens")]: perMTok(9) } },
+      { modelId: "anthropic.claude-haiku-4-5", outputModality: "video", pricing: { [dimensionUnitKey("input", "tokens")]: 9 } },
     ])!;
-    expect(priced.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(perMTok(9));
+    expect(priced.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(9);
   });
 });
 
@@ -464,40 +463,40 @@ describe("async reservation + reconciliation (plan §3.8)", () => {
       model: NOVA,
       ctx: videoCtx,
       inputBytes: 4096,
-      output: [{ dimension: "output", unit: "duration_s", quantity: 6 }],
+      output: [{ dimension: "output", unit: "duration_ms", quantity: 6_000 }], // 6s
     });
     const byKey = (d: string, u: string) => p.find((m) => m.dimension === d && m.unit === u)?.quantity;
     expect(byKey("requests", "all")).toBe(1);
     expect(byKey("requests", "video")).toBe(1);
     expect(byKey("input", "bytes")).toBe(4096);
-    expect(byKey("output", "duration_s")).toBe(6);
+    expect(byKey("output", "duration_ms")).toBe(6_000);
     // No output-token ceiling for generation.
     expect(byKey("output", "tokens")).toBeUndefined();
     // Load-bearing cost gate is CDS-derived from the requested duration.
-    expect(byKey("cost", "usd")).toBeCloseTo(6 * 0.08);
+    expect(byKey("cost", "usd_micros")).toBe(480_000); // 6000ms x 80 micros/ms = $0.48
   });
 
   it("reserves app-reported input quantities but never an output-token ceiling", () => {
     const p = projectAsyncReservation({
       model: NOVA,
       ctx: videoCtx,
-      output: [{ dimension: "output", unit: "duration_s", quantity: 6 }],
-      appReports: { [dimensionUnitKey("input", "megapixels")]: 2 },
+      output: [{ dimension: "output", unit: "duration_ms", quantity: 6 }],
+      appReports: { [dimensionUnitKey("input", "pixels")]: 2 },
     });
     const byKey = (d: string, u: string) => p.find((m) => m.dimension === d && m.unit === u)?.quantity;
-    expect(byKey("input", "megapixels")).toBe(2);
+    expect(byKey("input", "pixels")).toBe(2);
     expect(byKey("output", "tokens")).toBeUndefined();
   });
 });
 
-describe("deriveCostUsd", () => {
+describe("deriveCostMicros", () => {
   it("prices only priced dimensions", () => {
-    const usd = deriveCostUsd(HAIKU.pricing, [
+    const micros = deriveCostMicros(HAIKU.pricing, [
       { dimension: "input", unit: "tokens", quantity: 1_000_000 },
       { dimension: "output", unit: "tokens", quantity: 1_000_000 },
-      { dimension: "input", unit: "megapixels", quantity: 999 }, // unpriced → ignored
+      { dimension: "input", unit: "pixels", quantity: 999 }, // unpriced → ignored
     ]);
-    expect(usd).toBeCloseTo(1 + 5);
+    expect(micros).toBe(6_000_000); // 1M tok @ $1/MTok + 1M tok @ $5/MTok = $6
   });
 });
 
@@ -552,8 +551,8 @@ describe("gate evaluation completeness", () => {
     const projected: Measurement[] = [{ dimension: "requests", unit: "all", quantity: 1 }];
     const gates = [
       gate({ dimension: "requests", unit: "all", limit: 0 }),
-      gate({ dimension: "cost", unit: "usd", limit: 0 }),
-      gate({ dimension: "input", unit: "megapixels", limit: 1 }), // undeclared
+      gate({ dimension: "cost", unit: "usd_micros", limit: 0 }),
+      gate({ dimension: "input", unit: "pixels", limit: 1 }), // undeclared
     ];
     const d = await evaluateGates({
       gates,
@@ -562,7 +561,7 @@ describe("gate evaluation completeness", () => {
       projected,
       getSum: makeLedger([
         { dimension: "requests", unit: "all", quantity: 5 },
-        { dimension: "cost", unit: "usd", quantity: 1 },
+        { dimension: "cost", unit: "usd_micros", quantity: 1 },
       ]),
     });
     expect(d.allowed).toBe(false);
@@ -574,9 +573,9 @@ describe("gate evaluation completeness", () => {
     const asked: string[] = [];
     const d = await evaluateGates({
       gates: [
-        gate({ dimension: "cost", unit: "usd", limit: 100 }),
+        gate({ dimension: "cost", unit: "usd_micros", limit: 100 }),
         gate({ dimension: "requests", unit: "all", limit: 100 }),
-        gate({ dimension: "cost", unit: "usd", limit: 100, scope: { appId: "someone-else" } }),
+        gate({ dimension: "cost", unit: "usd_micros", limit: 100, scope: { appId: "someone-else" } }),
       ],
       ctx,
       appReports: ALL_DECLARED,
@@ -587,13 +586,13 @@ describe("gate evaluation completeness", () => {
       },
     });
     expect(d.allowed).toBe(true);
-    expect(asked).toEqual(["cost:usd", "requests:all"]);
+    expect(asked).toEqual(["cost:usd_micros", "requests:all"]);
   });
 
   it("does not sum a gate it already failed closed on (undeclared short-circuits that gate only)", async () => {
     let sums = 0;
     await evaluateGates({
-      gates: [gate({ dimension: "input", unit: "megapixels", limit: 1 })],
+      gates: [gate({ dimension: "input", unit: "pixels", limit: 1 })],
       ctx,
       appReports: new Set<string>(),
       projected: [],
@@ -621,7 +620,7 @@ describe("gate evaluation completeness", () => {
 
   it("ignores projected measurements on a different (dimension, unit)", async () => {
     const d = await evaluateGates({
-      gates: [gate({ dimension: "cost", unit: "usd", limit: 0 })],
+      gates: [gate({ dimension: "cost", unit: "usd_micros", limit: 0 })],
       ctx,
       appReports: ALL_DECLARED,
       projected: [{ dimension: "requests", unit: "all", quantity: 999 }],
@@ -730,12 +729,12 @@ describe("projectReservation edges", () => {
       ctx,
       maxTokens: 10,
       appReports: {
-        [dimensionUnitKey("input", "megapixels")]: 3,
-        [dimensionUnitKey("output", "megapixels")]: 9,
+        [dimensionUnitKey("input", "pixels")]: 3,
+        [dimensionUnitKey("output", "pixels")]: 9,
       },
     });
-    expect(p.find((m) => m.unit === "megapixels" && m.dimension === "input")?.quantity).toBe(3);
-    expect(p.some((m) => m.dimension === "output" && m.unit === "megapixels")).toBe(false);
+    expect(p.find((m) => m.unit === "pixels" && m.dimension === "input")?.quantity).toBe(3);
+    expect(p.some((m) => m.dimension === "output" && m.unit === "pixels")).toBe(false);
   });
 
   it("drops an appReport on a GENERIC dimension (an app may not substitute a CDS measure)", () => {
@@ -758,7 +757,7 @@ describe("projectReservation edges", () => {
       ctx: { appId: "photos", provider: "amazon", model: canvas.modelId, modality: "image" },
       maxTokens: 1,
     });
-    expect(p.find((m) => m.dimension === "cost")?.quantity).toBeCloseTo(0.04, 5);
+    expect(p.find((m) => m.dimension === "cost")?.quantity).toBe(40_000); // $0.04
   });
 });
 
@@ -825,7 +824,7 @@ describe("the Timing axis", () => {
     expect(timing("requests", "all")).toBe("pre");
     expect(timing("requests", "image")).toBe("pre");
     expect(timing("input", "bytes")).toBe("pre");
-    expect(timing("input", "megapixels")).toBe("pre");
+    expect(timing("input", "pixels")).toBe("pre");
   });
 
   it("marks input tokens `estimated` — the one dimension reserved from a guess", () => {
@@ -835,10 +834,10 @@ describe("the Timing axis", () => {
   });
 
   it("marks every OUTPUT unit and derived cost `post`", () => {
-    for (const unit of ["bytes", "tokens", "megapixels", "duration_s", "frames"]) {
+    for (const unit of ["bytes", "tokens", "pixels", "duration_ms", "frames"]) {
       expect(timing("output", unit), unit).toBe("post");
     }
-    expect(timing("cost", "usd")).toBe("post");
+    expect(timing("cost", "usd_micros")).toBe("post");
     expect(timing("credits", "count")).toBe("post");
   });
 
@@ -916,17 +915,17 @@ describe("model overrides beyond pricing", () => {
     // The store maps rows straight from DSQL; model_id is the primary key there,
     // but the pure resolver must still be deterministic if handed duplicates.
     const m = effectiveModel("anthropic.claude-haiku-4-5", [
-      { modelId: "anthropic.claude-haiku-4-5", pricing: { [dimensionUnitKey("input", "tokens")]: perMTok(2) } },
-      { modelId: "anthropic.claude-haiku-4-5", pricing: { [dimensionUnitKey("input", "tokens")]: perMTok(9) } },
+      { modelId: "anthropic.claude-haiku-4-5", pricing: { [dimensionUnitKey("input", "tokens")]: 2 } },
+      { modelId: "anthropic.claude-haiku-4-5", pricing: { [dimensionUnitKey("input", "tokens")]: 9 } },
     ])!;
-    expect(m.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(perMTok(2));
+    expect(m.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(2);
   });
 
   it("ignores overrides that target a different model", () => {
     const m = effectiveModel("anthropic.claude-haiku-4-5", [
-      { modelId: "anthropic.claude-sonnet-5", pricing: { [dimensionUnitKey("input", "tokens")]: perMTok(99) } },
+      { modelId: "anthropic.claude-sonnet-5", pricing: { [dimensionUnitKey("input", "tokens")]: 99 } },
     ])!;
-    expect(m.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(perMTok(1));
+    expect(m.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(1);
   });
 
   it("merges pricing per-key rather than replacing the whole table", () => {
@@ -934,8 +933,8 @@ describe("model overrides beyond pricing", () => {
       { modelId: "amazon.nova-canvas-v1:0", pricing: { [dimensionUnitKey("output", "bytes")]: 0.001 } },
     ])!;
     // The platform's per-image price survives an unrelated added key.
-    expect(m.pricing[dimensionUnitKey("requests", "image")]).toBeCloseTo(0.04);
-    expect(m.pricing[dimensionUnitKey("output", "bytes")]).toBeCloseTo(0.001);
+    expect(m.pricing[dimensionUnitKey("requests", "image")]).toBe(40_000);
+    expect(m.pricing[dimensionUnitKey("output", "bytes")]).toBe(0.001);
   });
 });
 
@@ -953,7 +952,7 @@ describe("platform registry invariants", () => {
   });
 
   it("every pricing key is a KNOWN dimension:unit pair (catches a typo'd rate)", () => {
-    // A typo'd key silently prices nothing — deriveCostUsd just wouldn't match
+    // A typo'd key silently prices nothing — deriveCostMicros just wouldn't match
     // it — so the cost gate would under-count with no error anywhere.
     for (const m of PLATFORM_MODEL_REGISTRY) {
       for (const key of Object.keys(m.defaults.pricing)) {
@@ -1016,8 +1015,8 @@ describe("amazon.nova-lite (the form-free vision model in the photos manifest)",
   });
 
   it("prices tokens at its own (much cheaper) rates", () => {
-    expect(NOVA_LITE.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(perMTok(0.06));
-    expect(NOVA_LITE.pricing[dimensionUnitKey("output", "tokens")]).toBeCloseTo(perMTok(0.24));
+    expect(NOVA_LITE.pricing[dimensionUnitKey("input", "tokens")]).toBeCloseTo(0.06);
+    expect(NOVA_LITE.pricing[dimensionUnitKey("output", "tokens")]).toBeCloseTo(0.24);
   });
 
   it("projects and reconciles a captioning request off its own image-token estimate", () => {
@@ -1036,7 +1035,7 @@ describe("amazon.nova-lite (the form-free vision model in the photos manifest)",
     });
     const byKey = (d: string, u: string) => p.find((m) => m.dimension === d && m.unit === u)?.quantity;
     expect(byKey("input", "tokens")).toBe(1300);
-    expect(byKey("cost", "usd")).toBeCloseTo(perMTok(0.06) * 1300 + perMTok(0.24) * 100);
+    expect(byKey("cost", "usd_micros")).toBe(102); // ceil(1300*0.06) + ceil(100*0.24) = 78 + 24
 
     const r = reconcile2({
       model: NOVA_LITE,
@@ -1045,9 +1044,8 @@ describe("amazon.nova-lite (the form-free vision model in the photos manifest)",
       outputTokens: 42,
       inputBytes: 2048,
     });
-    expect(r.find((m) => m.dimension === "cost")?.quantity).toBeCloseTo(
-      perMTok(0.06) * 1290 + perMTok(0.24) * 42,
-    );
+    // Per-line ceiling is visible here: 77.4 -> 78 and 10.08 -> 11.
+    expect(r.find((m) => m.dimension === "cost")?.quantity).toBe(78 + 11);
   });
 });
 

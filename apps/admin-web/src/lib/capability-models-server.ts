@@ -5,23 +5,24 @@
  *
  * Pricing is carried as a WHOLE per-`"dimension:unit"` table rather than a pair
  * of token rates: the platform registry prices Nova Canvas on `requests:image`
- * and Nova Reel on `output:duration_s`, and an editor that could only express
+ * and Nova Reel on `output:duration_ms`, and an editor that could only express
  * token rates both hid those prices and silently dropped them on save (it
- * rewrote `pricing_json` wholesale). The DB stores USD per single unit; the
- * wire uses display units (token keys per MTok — see `toDisplayPrice`).
+ * rewrote `pricing_json` wholesale). The DB, the wire, and the metering path all
+ * use the SAME canonical units: micros of currency per one canonical quantity
+ * unit. Display units exist only inside the editor's form fields.
  */
 
 import {
   PLATFORM_MODEL_REGISTRY,
   isKnownDimensionUnit,
+  parsePricingTable,
+  type MicrosPerUnit,
   type OperatorModelOverride,
   type ModelProvider,
   type OutputModality,
   type PlatformModelEntry,
 } from "@starkeep/protocol-primitives";
 import {
-  toDisplayPricing,
-  toStoredPricing,
   type ModelRow,
   type ModelRowValues,
   type ModelOverrideInput,
@@ -51,14 +52,11 @@ function parseObj(json: string | null): Record<string, unknown> {
   }
 }
 
-/** The numeric entries of a stored pricing blob; non-numeric values (a
- * hand-edited row) are dropped rather than poisoning the merge. */
-function parsePricing(json: string | null): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(parseObj(json))) {
-    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
-  }
-  return out;
+/** The valid rate entries of a stored pricing blob, in canonical micros per unit.
+ * Delegates to money.ts so this loader and the installer's cannot disagree about
+ * what a stored blob means. */
+function parsePricing(json: string | null): Record<string, MicrosPerUnit> {
+  return parsePricingTable(json);
 }
 
 /** A DSQL override row → the sparse override the platform-merge logic consumes. */
@@ -84,7 +82,7 @@ export function rowToOverrideInput(row: OverrideRow): ModelOverrideInput {
   else if (row.inference_profile_id) out.inferenceProfileId = row.inference_profile_id;
   if (row.vision !== null && row.vision !== undefined) out.vision = row.vision;
   if (row.output_modality) out.outputModality = row.output_modality as OutputModality;
-  const pricing = toDisplayPricing(parsePricing(row.pricing_json));
+  const pricing = parsePricing(row.pricing_json);
   if (Object.keys(pricing).length > 0) out.pricing = pricing;
   const estimates = parseObj(row.estimates_json);
   if (typeof estimates.imageTokens === "number") out.imageTokens = estimates.imageTokens;
@@ -97,7 +95,7 @@ function platformValues(p: PlatformModelEntry): ModelRowValues {
     inferenceProfileId: p.inferenceProfileId ?? null,
     vision: p.vision,
     outputModality: p.outputModality ?? "text",
-    pricing: toDisplayPricing(p.defaults.pricing),
+    pricing: { ...p.defaults.pricing },
     imageTokens: p.defaults.estimates.imageTokens ?? null,
   };
 }
@@ -114,9 +112,9 @@ export function buildModelRows(rows: OverrideRow[]): ModelRow[] {
 
   const effectiveOf = (modelId: string, platform: PlatformModelEntry | null): ModelRowValues => {
     // Re-derive the merged view field-by-field so pricing/estimates merge the
-    // same way the broker's effectiveModel() does, but in display units.
+    // same way the broker's effectiveModel() does. No unit change: canonical throughout.
     const ov = overrides.find((o) => o.modelId === modelId);
-    const pricing: Record<string, number> = { ...(platform?.defaults.pricing ?? {}) };
+    const pricing: Record<string, MicrosPerUnit> = { ...(platform?.defaults.pricing ?? {}) };
     if (ov?.pricing) for (const [k, v] of Object.entries(ov.pricing)) pricing[k] = v;
     let inferenceProfileId: string | null;
     if (ov && "inferenceProfileId" in ov) inferenceProfileId = ov.inferenceProfileId ?? null;
@@ -130,7 +128,7 @@ export function buildModelRows(rows: OverrideRow[]): ModelRow[] {
       outputModality: platform
         ? (platform.outputModality ?? "text")
         : (ov?.outputModality ?? "text"),
-      pricing: toDisplayPricing(pricing),
+      pricing,
       imageTokens: (ov?.estimates?.imageTokens ?? platform?.defaults.estimates.imageTokens) ?? null,
     };
   };
@@ -170,13 +168,15 @@ export interface OverrideColumns {
 }
 
 export function overrideInputToColumns(input: ModelOverrideInput): OverrideColumns {
-  const displayPricing = input.pricing ?? {};
-  const numericPricing: Record<string, number> = {};
-  for (const [k, v] of Object.entries(displayPricing)) {
-    if (typeof v === "number" && Number.isFinite(v)) numericPricing[k] = v;
+  // Already canonical (micros per unit) — the route validated it and the client
+  // converted any display field through money.ts. Nothing to convert here, which
+  // is the point: there is exactly one representation from the form to the row.
+  const canonicalPricing: Record<string, MicrosPerUnit> = {};
+  for (const [k, v] of Object.entries(input.pricing ?? {})) {
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) canonicalPricing[k] = v as MicrosPerUnit;
   }
   const pricing_json =
-    Object.keys(numericPricing).length > 0 ? JSON.stringify(toStoredPricing(numericPricing)) : null;
+    Object.keys(canonicalPricing).length > 0 ? JSON.stringify(canonicalPricing) : null;
 
   const estimates_json =
     typeof input.imageTokens === "number"
@@ -219,7 +219,7 @@ export function isEmptyOverride(cols: OverrideColumns): boolean {
 /**
  * Validate a posted pricing table. Every key must be a `(dimension, unit)` the
  * platform meters — a price on an unknown key would never be applied by
- * `deriveCostUsd`, so it would silently read as "priced" while contributing
+ * `deriveCostMicros`, so it would silently read as "priced" while contributing
  * nothing to the cost gate. The two token rates must be set together for the
  * same reason the pair was always enforced: a model priced on input tokens but
  * not output under-counts every call.

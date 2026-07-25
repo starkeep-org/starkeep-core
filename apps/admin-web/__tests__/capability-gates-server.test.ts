@@ -45,7 +45,7 @@ function gate(over: Partial<GateInput> = {}): GateInput {
   return {
     capabilityName: CAP,
     dimension: "cost",
-    unit: "usd",
+    unit: "usd_micros",
     window: { kind: "calendar", period: "month" },
     limit: 50,
     ...over,
@@ -71,7 +71,7 @@ function dbRow(over: Partial<GateDbRow> = {}): GateDbRow {
     id: `${OPERATOR_GATE_PREFIX}01ABC`,
     capability_name: CAP,
     dimension: "cost",
-    unit: "usd",
+    unit: "usd_micros",
     scope_provider: null,
     scope_model: null,
     scope_app_id: null,
@@ -105,7 +105,7 @@ describe("GATE_DIMENSION_OPTIONS", () => {
   });
 
   it("offers the CDS-measured spend cap the whole design rests on", () => {
-    const cost = GATE_DIMENSION_OPTIONS.find((o) => o.key === "cost:usd")!;
+    const cost = GATE_DIMENSION_OPTIONS.find((o) => o.key === "cost:usd_micros")!;
     expect(cost.source).toBe("cds");
     expect(gateCaveat(cost)).toBeNull();
   });
@@ -119,14 +119,14 @@ describe("GATE_DIMENSION_OPTIONS", () => {
 
 describe("gateCaveat", () => {
   it("is silent for CDS-measured dimensions (they are hard limits)", () => {
-    for (const key of ["cost:usd", "requests:all", "input:bytes", "output:tokens"]) {
+    for (const key of ["cost:usd_micros", "requests:all", "input:bytes", "output:tokens"]) {
       const opt = GATE_DIMENSION_OPTIONS.find((o) => o.key === key)!;
       expect(gateCaveat(opt), key).toBeNull();
     }
   });
 
   it("warns that a pre-call app-reported value can be under-reported", () => {
-    const opt = GATE_DIMENSION_OPTIONS.find((o) => o.key === "input:megapixels")!;
+    const opt = GATE_DIMENSION_OPTIONS.find((o) => o.key === "input:pixels")!;
     expect(gateCaveat(opt)).toMatch(/under-report/);
   });
 
@@ -181,7 +181,7 @@ describe("validateGateInput — the enforceable-gate rule", () => {
     expect(columnsFor(gate())).toMatchObject({
       capability_name: CAP,
       dimension: "cost",
-      unit: "usd",
+      unit: "usd_micros",
       scope_provider: null,
       scope_model: null,
       scope_app_id: null,
@@ -341,7 +341,7 @@ describe("rowToGateView", () => {
       id: `${OPERATOR_GATE_PREFIX}01ABC`,
       capabilityName: CAP,
       dimension: "cost",
-      unit: "usd",
+      unit: "usd_micros",
       scope: {},
       window: { kind: "calendar", period: "month" },
       limit: 50,

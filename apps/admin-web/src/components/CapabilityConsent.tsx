@@ -10,6 +10,7 @@
 
 import { Badge } from "@/components/ui/badge";
 import type { CapabilityRequirement } from "@/lib/app-types";
+import { formatMicrosAsUsd, usdDecimalToMicros } from "@starkeep/protocol-primitives";
 
 /** A reports entry is "dimension:unit"; input dims are app-reported, output dims
  * are best-effort (see plan §3.5). Generic dims never appear in `reports`. */
@@ -74,7 +75,9 @@ export function CapabilityConsent({
                 <>
                   <dt className="text-muted-foreground">Budget</dt>
                   <dd>
-                    up to ~${cap.requestedMonthlyBudgetUsd}/mo{" "}
+                    {/* Rendered through the same conversion the installer uses, so the
+                        figure consented to is exactly the gate limit that gets stored. */}
+                    up to ~{formatMicrosAsUsd(usdDecimalToMicros(cap.requestedMonthlyBudgetUsd))}/mo{" "}
                     <span className="text-muted-foreground">
                       (stored as a per-app cost gate you can tighten later)
                     </span>

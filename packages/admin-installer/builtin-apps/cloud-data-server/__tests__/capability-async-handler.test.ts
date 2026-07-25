@@ -252,9 +252,9 @@ describe("async capability start (plan §3.8)", () => {
     expect(db.jobs[0].status).toBe("running");
     // Reservation on the ledger: CDS-derived duration + derived cost, NO output tokens.
     const reserved = db.ledger.filter((r) => r.status === "reserved");
-    expect(reserved.some((r) => r.dimension === "output" && r.unit === "duration_s" && r.quantity === 6)).toBe(true);
+    expect(reserved.some((r) => r.dimension === "output" && r.unit === "duration_ms" && r.quantity === 6_000)).toBe(true);
     expect(reserved.some((r) => r.dimension === "output" && r.unit === "tokens")).toBe(false);
-    expect(reserved.some((r) => r.dimension === "cost" && r.unit === "usd" && r.quantity === 6 * 0.08)).toBe(true);
+    expect(reserved.some((r) => r.dimension === "cost" && r.unit === "usd_micros" && r.quantity === 480_000)).toBe(true);
     // Start assume is scoped to the single output PREFIX + async verbs.
     expect(capturedScope).toMatchObject({
       bedrockAsync: true,
@@ -283,7 +283,7 @@ describe("async capability start (plan §3.8)", () => {
 
   it("denies (429) on a cost gate and releases the reservation without starting a job", async () => {
     const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] }, [
-      { dimension: "cost", unit: "usd", scope_app_id: "photos", limit_value: 0 },
+      { dimension: "cost", unit: "usd_micros", scope_app_id: "photos", limit_value: 0 },
     ]);
     let started = false;
     const res = await handleCapabilityInvokeAsyncStart(
@@ -394,7 +394,7 @@ describe("async capability status (plan §3.8)", () => {
     ).toBe(true);
     // Cost stays the CDS-derived reservation value.
     expect(
-      db.ledger.some((r) => r.status === "committed" && r.dimension === "cost" && r.unit === "usd" && r.quantity === 6 * 0.08),
+      db.ledger.some((r) => r.status === "committed" && r.dimension === "cost" && r.unit === "usd_micros" && r.quantity === 480_000),
     ).toBe(true);
     // Job marked completed.
     expect(db.jobs[0].status).toBe("completed");

@@ -41,6 +41,8 @@ import {
   MODEL_OUTPUT_MODALITIES,
   PRICEABLE_DIMENSION_UNITS,
   priceUnitLabel,
+  rateToFieldValue,
+  fieldValueToRate,
   type ModelRow,
   type ModelOverrideInput,
 } from "@/lib/capability-models";
@@ -71,7 +73,7 @@ async function resolveOperatorCreds(): Promise<CredState> {
 /** The whole price table as compact `key $rate` lines — a model priced per
  * image or per second of video has no token rate to show in a token column. */
 function priceLines(pricing: Record<string, number>): string[] {
-  return Object.entries(pricing).map(([k, v]) => `${k} $${v}`);
+  return Object.entries(pricing).map(([k, v]) => `${k} $${rateToFieldValue(k, v)}`);
 }
 
 export function CapabilityModelsSection() {
@@ -281,7 +283,13 @@ function seedDraft(row: ModelRow | null, isNew: boolean): Draft {
   // rate (including per-image / per-second ones) instead of dropping the keys
   // the editor doesn't happen to show.
   const seedPricing = o.pricing ?? eff?.pricing ?? {};
-  const prices = Object.entries(seedPricing).map(([key, value]) => ({ key, value: String(value) }));
+  // Form fields carry DISPLAY units ($/MTok for token keys, $/unit otherwise);
+  // fieldValueToRate converts back to canonical micros on submit. Nothing in
+  // between ever holds a display-unit value.
+  const prices = Object.entries(seedPricing).map(([key, value]) => ({
+    key,
+    value: String(rateToFieldValue(key, value)),
+  }));
   return {
     modelId: isNew ? "" : row?.modelId ?? "",
     provider: (o.provider ?? eff?.provider ?? MODEL_PROVIDERS[0]) as string,
@@ -339,11 +347,17 @@ function ModelEditDialog({
       for (const p of draft.prices) {
         if (!p.key) continue;
         if (p.key in pricing) return { error: `Duplicate price for "${p.key}".` };
-        const n = Number(p.value);
-        if (p.value.trim() === "" || !Number.isFinite(n) || n < 0) {
+        if (p.value.trim() === "") {
           return { error: `Rate for "${p.key}" must be a non-negative number.` };
         }
-        pricing[p.key] = n;
+        // Display units leave the form HERE and nowhere else. fieldValueToRate
+        // throws on anything that is not a usable rate, which doubles as the
+        // field's validation.
+        try {
+          pricing[p.key] = fieldValueToRate(p.key, p.value.trim());
+        } catch {
+          return { error: `Rate for "${p.key}" must be a non-negative number.` };
+        }
       }
       // The two token rates are metered as a pair; sending half under-counts.
       const hasIn = "input:tokens" in pricing;
@@ -446,7 +460,7 @@ function ModelEditDialog({
             hint={
               platform
                 ? Object.keys(platform.pricing).length > 0
-                  ? `platform: ${Object.entries(platform.pricing).map(([k, v]) => `${k} $${v}`).join(", ")}`
+                  ? `platform: ${Object.entries(platform.pricing).map(([k, v]) => `${k} $${rateToFieldValue(k, v)}`).join(", ")}`
                   : "platform default"
                 : undefined
             }

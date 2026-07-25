@@ -387,7 +387,7 @@ describe("install", () => {
             models: ["anthropic.claude-haiku-4-5"],
             required: false,
             requestedMonthlyBudgetUsd: 20,
-            reports: ["input:megapixels"],
+            reports: ["input:pixels"],
             rationale: "captions",
           },
         ],

@@ -78,7 +78,7 @@ describe("sumForGate SQL", () => {
       c,
       gate({
         dimension: "cost",
-        unit: "usd",
+        unit: "usd_micros",
         limit: 20,
         scope: { appId: "photos", provider: "anthropic", model: "m-1" },
       }),
@@ -95,7 +95,7 @@ describe("sumForGate SQL", () => {
     );
     expect(params).toEqual([
       "cost",
-      "usd",
+      "usd_micros",
       "reserved",
       "committed",
       "2026-07-01T00:00:00.000Z", // month window start, UTC
@@ -124,7 +124,7 @@ describe("sumForGate SQL", () => {
 
   it("sums reserved + committed only (a released reservation drops out)", async () => {
     const c = new RecordingClient(() => [{ total: "0" }]);
-    await sumForGate(c, gate({ dimension: "cost", unit: "usd", limit: 1 }), NOW, "UTC");
+    await sumForGate(c, gate({ dimension: "cost", unit: "usd_micros", limit: 1 }), NOW, "UTC");
     expect(c.last().params.slice(2, 4)).toEqual(["reserved", "committed"]);
     expect(c.last().params).not.toContain("released");
   });
@@ -135,7 +135,7 @@ describe("sumForGate SQL", () => {
     // starts 2026-06-01T00:00 local = 2026-06-01T07:00Z.
     await sumForGate(
       c,
-      gate({ dimension: "cost", unit: "usd", limit: 1 }),
+      gate({ dimension: "cost", unit: "usd_micros", limit: 1 }),
       Date.UTC(2026, 6, 1, 2, 0),
       "America/Los_Angeles",
     );
@@ -154,7 +154,7 @@ describe("sumForGate SQL", () => {
   });
 
   it("coalesces an empty window (SQL NULL) to 0 and coerces a numeric string", async () => {
-    const g = gate({ dimension: "cost", unit: "usd", limit: 1 });
+    const g = gate({ dimension: "cost", unit: "usd_micros", limit: 1 });
     expect(await sumForGate(new RecordingClient(() => [{ total: null }]), g, NOW, "UTC")).toBe(0);
     // No row at all (defensive) is also 0.
     expect(await sumForGate(new RecordingClient(() => []), g, NOW, "UTC")).toBe(0);
@@ -212,16 +212,16 @@ describe("sumForGate windows (ts-aware ledger)", () => {
   it("a calendar month rollover resets the window sum", async () => {
     const db = dbAt(NOW);
     db.now = () => Date.UTC(2026, 5, 15); // June — the previous month
-    db.seedLedger({ dimension: "cost", unit: "usd", quantity: 19 });
+    db.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 19 });
 
-    const monthly = gate({ dimension: "cost", unit: "usd", limit: 20 });
+    const monthly = gate({ dimension: "cost", unit: "usd_micros", limit: 20 });
     // Still June: the $19 counts and the $20 budget is nearly spent.
     expect(await sumForGate(db, monthly, Date.UTC(2026, 5, 20), "UTC")).toBe(19);
 
     // July: June's spend has rolled out of the window entirely.
     expect(await sumForGate(db, monthly, NOW, "UTC")).toBe(0);
     db.now = () => Date.UTC(2026, 6, 2);
-    db.seedLedger({ dimension: "cost", unit: "usd", quantity: 3 });
+    db.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 3 });
     expect(await sumForGate(db, monthly, NOW, "UTC")).toBe(3);
   });
 
@@ -230,8 +230,8 @@ describe("sumForGate windows (ts-aware ledger)", () => {
     // afternoon of June 30 in Los Angeles. Both call it June; the two zones
     // disagree only about where the CURRENT month starts.
     const db = new InMemoryCapabilityDb({ now: () => Date.UTC(2026, 5, 30, 23, 0) });
-    db.seedLedger({ dimension: "cost", unit: "usd", quantity: 5 });
-    const monthly = gate({ dimension: "cost", unit: "usd", limit: 20 });
+    db.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 5 });
+    const monthly = gate({ dimension: "cost", unit: "usd_micros", limit: 20 });
     const now = Date.UTC(2026, 6, 1, 3, 0);
     // UTC says it is already July → the June row is outside the window.
     expect(await sumForGate(db, monthly, now, "UTC")).toBe(0);
@@ -241,18 +241,18 @@ describe("sumForGate windows (ts-aware ledger)", () => {
 
   it("scopes the sum by app / provider / model", async () => {
     const db = dbAt(NOW);
-    db.seedLedger({ dimension: "cost", unit: "usd", quantity: 1, app_id: "photos" });
-    db.seedLedger({ dimension: "cost", unit: "usd", quantity: 10, app_id: "notes" });
-    db.seedLedger({ dimension: "cost", unit: "usd", quantity: 100, provider: "amazon", app_id: "photos" });
+    db.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 1, app_id: "photos" });
+    db.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 10, app_id: "notes" });
+    db.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 100, provider: "amazon", app_id: "photos" });
 
-    expect(await sumForGate(db, gate({ dimension: "cost", unit: "usd", limit: 1 }), NOW, "UTC")).toBe(111);
+    expect(await sumForGate(db, gate({ dimension: "cost", unit: "usd_micros", limit: 1 }), NOW, "UTC")).toBe(111);
     expect(
-      await sumForGate(db, gate({ dimension: "cost", unit: "usd", limit: 1, scope: { appId: "photos" } }), NOW, "UTC"),
+      await sumForGate(db, gate({ dimension: "cost", unit: "usd_micros", limit: 1, scope: { appId: "photos" } }), NOW, "UTC"),
     ).toBe(101);
     expect(
       await sumForGate(
         db,
-        gate({ dimension: "cost", unit: "usd", limit: 1, scope: { appId: "photos", provider: "amazon" } }),
+        gate({ dimension: "cost", unit: "usd_micros", limit: 1, scope: { appId: "photos", provider: "amazon" } }),
         NOW,
         "UTC",
       ),
@@ -261,8 +261,8 @@ describe("sumForGate windows (ts-aware ledger)", () => {
 
   it("excludes released reservations from the window sum", async () => {
     const db = dbAt(NOW);
-    await reserve(db, KEY, [{ dimension: "cost", unit: "usd", quantity: 4 }]);
-    const g = gate({ dimension: "cost", unit: "usd", limit: 10 });
+    await reserve(db, KEY, [{ dimension: "cost", unit: "usd_micros", quantity: 4 }]);
+    const g = gate({ dimension: "cost", unit: "usd_micros", limit: 10 });
     expect(await sumForGate(db, g, NOW, "UTC")).toBe(4);
     await release(db, KEY.invocationId);
     expect(await sumForGate(db, g, NOW, "UTC")).toBe(0);
@@ -352,7 +352,7 @@ describe("release / commitReservation status guards", () => {
 
   it("commitReservation flips reserved → committed and is idempotent on a double poll", async () => {
     const db = new InMemoryCapabilityDb();
-    await reserve(db, KEY, [{ dimension: "output", unit: "duration_s", quantity: 6 }]);
+    await reserve(db, KEY, [{ dimension: "output", unit: "duration_ms", quantity: 6 }]);
     await commitReservation(db, KEY.invocationId);
     expect(db.ledger[0]!.status).toBe("committed");
     // A second (racing) poll finds nothing still reserved — no change, no error.
@@ -363,7 +363,7 @@ describe("release / commitReservation status guards", () => {
 
   it("release after commit cannot un-commit (the WHERE status guard holds)", async () => {
     const db = new InMemoryCapabilityDb();
-    await reserve(db, KEY, [{ dimension: "output", unit: "duration_s", quantity: 6 }]);
+    await reserve(db, KEY, [{ dimension: "output", unit: "duration_ms", quantity: 6 }]);
     await commitReservation(db, KEY.invocationId);
     await release(db, KEY.invocationId);
     expect(db.ledger[0]!.status).toBe("committed");
@@ -486,7 +486,7 @@ describe("loadGates row mapping", () => {
   const base = {
     id: "g-1",
     dimension: "cost",
-    unit: "usd",
+    unit: "usd_micros",
     scope_provider: null,
     scope_model: null,
     scope_app_id: null,
@@ -502,7 +502,7 @@ describe("loadGates row mapping", () => {
     expect(g).toEqual({
       id: "g-1",
       dimension: "cost",
-      unit: "usd",
+      unit: "usd_micros",
       scope: {},
       window: { kind: "calendar", period: "month" },
       limit: 20,
@@ -652,14 +652,14 @@ describe("grant JSON coercion", () => {
 
   it("maps every granted capability for an app", async () => {
     const c = new RecordingClient(() => [
-      { capability_name: "bedrock.invoke", models_json: '["m1"]', reports_json: '["input:megapixels"]' },
+      { capability_name: "bedrock.invoke", models_json: '["m1"]', reports_json: '["input:pixels"]' },
     ]);
     expect(await loadGrantedCapabilities(c, "photos")).toEqual([
       {
         appId: "photos",
         capabilityName: "bedrock.invoke",
         models: ["m1"],
-        reports: ["input:megapixels"],
+        reports: ["input:pixels"],
       },
     ]);
   });
@@ -668,12 +668,12 @@ describe("grant JSON coercion", () => {
 describe("appendReportedOutput", () => {
   it("appends committed rows carrying the invocation's provider/model", async () => {
     const db = new InMemoryCapabilityDb();
-    await appendReportedOutput(db, KEY, [{ dimension: "output", unit: "megapixels", quantity: 4 }]);
+    await appendReportedOutput(db, KEY, [{ dimension: "output", unit: "pixels", quantity: 4 }]);
     expect(db.ledger).toHaveLength(1);
     expect(db.ledger[0]).toMatchObject({
       status: "committed",
       dimension: "output",
-      unit: "megapixels",
+      unit: "pixels",
       quantity: 4,
       provider: "anthropic",
       model: "anthropic.claude-haiku-4-5",

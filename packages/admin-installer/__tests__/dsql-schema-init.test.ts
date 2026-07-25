@@ -179,7 +179,7 @@ describe("capability tables — creation and columns", () => {
     }
     // `limit` is reserved, hence limit_value; double precision so a fractional
     // dollar budget isn't silently truncated.
-    expect(ddl).toContain('"limit_value" double precision not null');
+    expect(ddl).toContain('"limit_value" numeric(38, 0) not null');
     expect(ddl).not.toContain('"limit" ');
   });
 
@@ -200,7 +200,7 @@ describe("capability tables — creation and columns", () => {
     }
     // Quantities are fractional (cost in USD), and `ts` must default so an
     // INSERT that omits it still lands inside the current gate window.
-    expect(ddl).toContain('"quantity" double precision not null');
+    expect(ddl).toContain('"quantity" numeric(38, 0) not null');
     expect(ddl).toContain('"ts" timestamptz default now() not null');
   });
 

@@ -23,6 +23,10 @@ import {
   typeCategory,
   generateId,
   isModelInEffectiveRegistry,
+  usdDecimalToMicros,
+  parsePricingTable,
+  COST_DIMENSION,
+  COST_UNIT,
   type Category,
   type OperatorModelOverride,
 } from "@starkeep/protocol-primitives";
@@ -111,7 +115,7 @@ async function loadModelOverrides(
     else if (r.inference_profile_id) o.inferenceProfileId = r.inference_profile_id;
     if (r.vision !== null) o.vision = r.vision;
     if (r.output_modality !== null) o.outputModality = r.output_modality as OperatorModelOverride["outputModality"];
-    if (r.pricing_json) o.pricing = JSON.parse(r.pricing_json) as Record<string, number>;
+    if (r.pricing_json) o.pricing = parsePricingTable(r.pricing_json);
     if (r.estimates_json) o.estimates = JSON.parse(r.estimates_json) as OperatorModelOverride["estimates"];
     return o;
   });
@@ -180,15 +184,18 @@ async function writeCapabilityGrants(
         .values({
           id: gateId,
           capability_name: cap.name,
-          dimension: "cost",
-          unit: "usd",
+          dimension: COST_DIMENSION,
+          unit: COST_UNIT,
           scope_provider: null,
           scope_model: null,
           scope_app_id: appId,
           window_kind: "calendar",
           window_period: "month",
           window_seconds: null,
-          limit_value: cap.requestedMonthlyBudgetUsd,
+          // The manifest quotes the consent budget in whole dollars because it is
+          // an author-facing external document; this is the ingest point that
+          // converts it to canonical micros, and nothing downstream sees dollars.
+          limit_value: usdDecimalToMicros(cap.requestedMonthlyBudgetUsd),
           on_exceed: "deny",
           origin: "app-consent",
         })

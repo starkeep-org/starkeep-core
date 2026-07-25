@@ -1,3 +1,4 @@
+export * from "./money.js";
 export * from "./dimensions.js";
 export * from "./registry.js";
 export * from "./models.js";

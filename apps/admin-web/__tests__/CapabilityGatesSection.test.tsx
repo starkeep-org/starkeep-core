@@ -33,12 +33,12 @@ vi.mock("@/lib/cognito-auth", () => ({
 const { CapabilityGatesSection } = await import("@/components/CapabilityGatesSection");
 
 const DIMENSIONS: GateListResponse["dimensions"] = [
-  { key: "cost:usd", dimension: "cost", unit: "usd", source: "cds", timing: "post", generic: true },
+  { key: "cost:usd_micros", dimension: "cost", unit: "usd_micros", source: "cds", timing: "post", generic: true },
   { key: "requests:all", dimension: "requests", unit: "all", source: "cds", timing: "pre", generic: true },
   {
-    key: "input:megapixels",
+    key: "input:pixels",
     dimension: "input",
-    unit: "megapixels",
+    unit: "pixels",
     source: "app",
     timing: "pre",
     generic: false,
@@ -50,10 +50,10 @@ function gateView(over: Partial<GateView> = {}): GateView {
     id: "operator:01ABC",
     capabilityName: "bedrock.invoke",
     dimension: "cost",
-    unit: "usd",
+    unit: "usd_micros",
     scope: {},
     window: { kind: "calendar", period: "month" },
-    limit: 50,
+    limit: 50_000_000, // $50
     origin: "operator",
     editable: true,
     createdAt: null,
@@ -123,10 +123,10 @@ describe("gate table", () => {
   it("renders a gate's meter, scope, window and limit", async () => {
     await renderReady([gateView()]);
     const row = screen.getByText("bedrock.invoke").closest("tr")!;
-    expect(within(row).getByText("cost:usd")).toBeTruthy();
+    expect(within(row).getByText("cost:usd_micros")).toBeTruthy();
     expect(within(row).getByText("global")).toBeTruthy();
     expect(within(row).getByText("per month")).toBeTruthy();
-    expect(within(row).getByText("50")).toBeTruthy();
+    expect(within(row).getByText("$50")).toBeTruthy(); // 50_000_000 micros
   });
 
   it("summarizes a scoped burst gate", async () => {
@@ -150,14 +150,14 @@ describe("gate table", () => {
   });
 
   it("flags a limit on an app-reported dimension rather than showing it as a hard cap", async () => {
-    await renderReady([gateView({ dimension: "input", unit: "megapixels", limit: 1000 })]);
-    const row = screen.getByText("input:megapixels").closest("tr")!;
+    await renderReady([gateView({ dimension: "input", unit: "pixels", limit: 1000 })]);
+    const row = screen.getByText("input:pixels").closest("tr")!;
     expect(within(row).getByText("app-reported")).toBeTruthy();
   });
 
   it("does NOT flag a CDS-measured dimension", async () => {
     await renderReady([gateView()]);
-    const row = screen.getByText("cost:usd").closest("tr")!;
+    const row = screen.getByText("cost:usd_micros").closest("tr")!;
     expect(within(row).queryByText("app-reported")).toBeNull();
   });
 
@@ -175,7 +175,7 @@ describe("gate table", () => {
         id: "consent:photos:bedrock.invoke",
         origin: "app-consent",
         scope: { appId: "photos" },
-        limit: 20,
+        limit: 20_000_000, // typed "20" in the $ field
         editable: false,
       }),
     ]);
@@ -218,24 +218,24 @@ describe("adding a gate", () => {
   it("posts a global monthly cost cap", async () => {
     await renderReady([]);
     await openAdd();
-    fireEvent.change(screen.getByLabelText("Limit"), { target: { value: "100" } });
+    fireEvent.change(screen.getByLabelText("Limit ($)"), { target: { value: "100" } });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(writeCalls()).toHaveLength(1));
     expect(writeCalls()[0]!.method).toBe("POST");
     expect(writeCalls()[0]!.body.gate).toEqual({
       capabilityName: "bedrock.invoke",
       dimension: "cost",
-      unit: "usd",
+      unit: "usd_micros",
       scope: {},
       window: { kind: "calendar", period: "month" },
-      limit: 100,
+      limit: 100_000_000, // typed "100" in the $ field -> canonical micros
     });
   });
 
   it("omits blank scope fields so they stay wildcards", async () => {
     await renderReady([]);
     await openAdd();
-    fireEvent.change(screen.getByLabelText("Limit"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("Limit ($)"), { target: { value: "10" } });
     fireEvent.change(screen.getByLabelText("Scope model"), { target: { value: "   " } });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(writeCalls()).toHaveLength(1));
@@ -245,7 +245,7 @@ describe("adding a gate", () => {
   it("posts each scope key the operator does fill in", async () => {
     await renderReady([]);
     await openAdd();
-    fireEvent.change(screen.getByLabelText("Limit"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("Limit ($)"), { target: { value: "10" } });
     fireEvent.change(screen.getByLabelText("Scope provider"), { target: { value: "amazon" } });
     fireEvent.change(screen.getByLabelText("Scope model"), { target: { value: "amazon.nova-lite" } });
     fireEvent.change(screen.getByLabelText("Scope app"), { target: { value: "photos" } });
@@ -262,6 +262,8 @@ describe("adding a gate", () => {
     await renderReady([]);
     await openAdd();
     fireEvent.change(screen.getByLabelText("Meters"), { target: { value: "requests:all" } });
+    // A count dimension: the field is "Limit", not "Limit ($)" — the label
+    // tracks the selected meter, so a count is never typed as dollars.
     fireEvent.change(screen.getByLabelText("Limit"), { target: { value: "20" } });
     fireEvent.change(screen.getByLabelText("Window kind"), { target: { value: "burst" } });
     fireEvent.change(screen.getByLabelText("Burst seconds"), { target: { value: "10" } });
@@ -277,7 +279,7 @@ describe("adding a gate", () => {
   it("warns before saving that an app-reported meter also DENIES apps that don't declare it", async () => {
     await renderReady([]);
     await openAdd();
-    fireEvent.change(screen.getByLabelText("Meters"), { target: { value: "input:megapixels" } });
+    fireEvent.change(screen.getByLabelText("Meters"), { target: { value: "input:pixels" } });
     expect(screen.getByText(/under-report/)).toBeTruthy();
     expect(screen.getByText(/DENIES any app/)).toBeTruthy();
   });
@@ -292,17 +294,17 @@ describe("adding a gate", () => {
     await renderReady([]);
     await openAdd();
     fireEvent.click(screen.getByText("Save"));
-    await waitFor(() => expect(screen.getByText(/Limit must be a non-negative number/)).toBeTruthy());
-    fireEvent.change(screen.getByLabelText("Limit"), { target: { value: "-5" } });
+    await waitFor(() => expect(screen.getByText(/Limit must be a non-negative dollar amount/)).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Limit ($)"), { target: { value: "-5" } });
     fireEvent.click(screen.getByText("Save"));
-    await waitFor(() => expect(screen.getByText(/Limit must be a non-negative number/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Limit must be a non-negative dollar amount/)).toBeTruthy());
     expect(writeCalls()).toHaveLength(0);
   });
 
   it("rejects a fractional burst window locally", async () => {
     await renderReady([]);
     await openAdd();
-    fireEvent.change(screen.getByLabelText("Limit"), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText("Limit ($)"), { target: { value: "5" } });
     fireEvent.change(screen.getByLabelText("Window kind"), { target: { value: "burst" } });
     fireEvent.change(screen.getByLabelText("Burst seconds"), { target: { value: "0.5" } });
     fireEvent.click(screen.getByText("Save"));
@@ -315,7 +317,7 @@ describe("adding a gate", () => {
   it("surfaces a server rejection and keeps the dialog open", async () => {
     await renderReady([], { status: 400, body: { error: "Unknown provider \"acme\"." } });
     await openAdd();
-    fireEvent.change(screen.getByLabelText("Limit"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("Limit ($)"), { target: { value: "10" } });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(screen.getByText('Unknown provider "acme".')).toBeTruthy());
     expect(screen.getByRole("dialog")).toBeTruthy();
@@ -330,15 +332,15 @@ describe("editing and deleting a gate", () => {
 
   it("pre-fills the dialog from the gate and posts its id back", async () => {
     await renderReady([
-      gateView({ id: "operator:FIXED", scope: { appId: "photos" }, limit: 20 }),
+      gateView({ id: "operator:FIXED", scope: { appId: "photos" }, limit: 20_000_000 }),
     ]);
     await openEdit();
-    expect((screen.getByLabelText("Limit") as HTMLInputElement).value).toBe("20");
+    expect((screen.getByLabelText("Limit ($)") as HTMLInputElement).value).toBe("20");
     expect((screen.getByLabelText("Scope app") as HTMLInputElement).value).toBe("photos");
-    fireEvent.change(screen.getByLabelText("Limit"), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText("Limit ($)"), { target: { value: "5" } });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(writeCalls()).toHaveLength(1));
-    expect(writeCalls()[0]!.body.gate).toMatchObject({ id: "operator:FIXED", limit: 5 });
+    expect(writeCalls()[0]!.body.gate).toMatchObject({ id: "operator:FIXED", limit: 5_000_000 });
   });
 
   it("pre-fills a burst window's seconds", async () => {

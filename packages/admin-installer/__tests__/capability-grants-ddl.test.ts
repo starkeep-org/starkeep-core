@@ -95,7 +95,7 @@ const PHOTOS_CAP = {
   models: ["anthropic.claude-haiku-4-5", "amazon.nova-lite"],
   required: true,
   requestedMonthlyBudgetUsd: 20,
-  reports: ["input:megapixels"],
+  reports: ["input:pixels"],
   rationale: "captions",
 };
 
@@ -123,7 +123,7 @@ describe("capability_grants row values", () => {
       "photos",
       "bedrock.invoke",
       JSON.stringify(["anthropic.claude-haiku-4-5", "amazon.nova-lite"]),
-      JSON.stringify(["input:megapixels"]),
+      JSON.stringify(["input:pixels"]),
     ]);
   });
 
@@ -167,14 +167,14 @@ describe("consent budget → capability_gates row", () => {
       "consent:photos:bedrock.invoke",
       "bedrock.invoke",
       "cost",
-      "usd",
+      "usd_micros",
       null,
       null,
       "photos",
       "calendar",
       "month",
       null,
-      20,
+      20_000_000, // the manifest's $20 budget, converted at install
       "deny",
       "app-consent",
     ]);
@@ -203,7 +203,8 @@ describe("consent budget → capability_gates row", () => {
 
   it("carries a changed budget through on reinstall", async () => {
     await install([{ ...PHOTOS_CAP, requestedMonthlyBudgetUsd: 5 }]);
-    expect(one("capability_gates").values[10]).toBe(5);
+    // The manifest's dollars are converted at install: $5 -> 5_000_000 micros.
+    expect(one("capability_gates").values[10]).toBe(5_000_000);
   });
 
   it("writes NO gate when the app requested no budget (unbounded until the operator sets one)", async () => {

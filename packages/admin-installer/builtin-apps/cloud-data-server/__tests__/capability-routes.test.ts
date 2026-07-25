@@ -214,12 +214,12 @@ beforeEach(() => {
 
 describe("capability route matching", () => {
   it("GET /capabilities lists the app's grants (runtime config for degraded mode)", async () => {
-    setDbFactory(new CapabilityDsqlFactory(capDb({ models: [MODEL], reports: ["input:megapixels"] })));
+    setDbFactory(new CapabilityDsqlFactory(capDb({ models: [MODEL], reports: ["input:pixels"] })));
     const res = await handler(signedEvent({ method: "GET", subPath: "/capabilities" }), context);
     expect(res.statusCode).toBe(200);
     expect(bodyOf(res)).toEqual({
       capabilities: [
-        { name: "bedrock.invoke", models: [MODEL], reports: ["input:megapixels"] },
+        { name: "bedrock.invoke", models: [MODEL], reports: ["input:pixels"] },
       ],
     });
   });
@@ -364,7 +364,7 @@ describe("POST /capabilities/:name/report", () => {
   const reportPath = "/capabilities/bedrock.invoke/report";
 
   async function seededDb() {
-    const cap = capDb({ reports: ["output:megapixels", "output:frames"] });
+    const cap = capDb({ reports: ["output:pixels", "output:frames"] });
     // A prior invocation to report against.
     cap.seedLedger({ dimension: "requests", unit: "all", quantity: 1, invocation_id: "inv-1" });
     return cap;
@@ -373,7 +373,7 @@ describe("POST /capabilities/:name/report", () => {
   it("400s a body with no invocationId", async () => {
     setDbFactory(new CapabilityDsqlFactory(await seededDb()));
     const res = await handler(
-      signedEvent({ method: "POST", subPath: reportPath, body: { reports: { "output:megapixels": 4 } } }),
+      signedEvent({ method: "POST", subPath: reportPath, body: { reports: { "output:pixels": 4 } } }),
       context,
     );
     expect(res.statusCode).toBe(400);
@@ -387,7 +387,7 @@ describe("POST /capabilities/:name/report", () => {
       signedEvent({
         method: "POST",
         subPath: reportPath,
-        body: { invocationId: "someone-elses", reports: { "output:megapixels": 4 } },
+        body: { invocationId: "someone-elses", reports: { "output:pixels": 4 } },
       }),
       context,
     );
@@ -425,7 +425,7 @@ describe("POST /capabilities/:name/report", () => {
       signedEvent({
         method: "POST",
         subPath: reportPath,
-        body: { invocationId: "inv-1", reports: { "output:megapixels": 4, "output:frames": 30 } },
+        body: { invocationId: "inv-1", reports: { "output:pixels": 4, "output:frames": 30 } },
       }),
       context,
     );
@@ -433,7 +433,7 @@ describe("POST /capabilities/:name/report", () => {
     expect(bodyOf(res)).toEqual({ ok: true, recorded: 2 });
     const appended = cap.ledger.filter((r) => r.dimension === "output");
     expect(appended.map((r) => [r.unit, r.quantity, r.status])).toEqual([
-      ["megapixels", 4, "committed"],
+      ["pixels", 4, "committed"],
       ["frames", 30, "committed"],
     ]);
     // The provider/model are recovered from the original invocation, not the body.
@@ -452,14 +452,14 @@ describe("POST /capabilities/:name/report", () => {
   });
 
   it("ignores INPUT dimensions on the output-report route", async () => {
-    const cap = capDb({ reports: ["input:megapixels", "output:megapixels"] });
+    const cap = capDb({ reports: ["input:pixels", "output:pixels"] });
     cap.seedLedger({ dimension: "requests", unit: "all", quantity: 1, invocation_id: "inv-1" });
     setDbFactory(new CapabilityDsqlFactory(cap));
     const res = await handler(
       signedEvent({
         method: "POST",
         subPath: reportPath,
-        body: { invocationId: "inv-1", reports: { "input:megapixels": 9, "output:megapixels": 4 } },
+        body: { invocationId: "inv-1", reports: { "input:pixels": 9, "output:pixels": 4 } },
       }),
       context,
     );
@@ -468,7 +468,7 @@ describe("POST /capabilities/:name/report", () => {
   });
 
   it("ignores undeclared, generic, and non-finite report values", async () => {
-    const cap = capDb({ reports: ["output:megapixels"] });
+    const cap = capDb({ reports: ["output:pixels"] });
     cap.seedLedger({ dimension: "requests", unit: "all", quantity: 1, invocation_id: "inv-1" });
     setDbFactory(new CapabilityDsqlFactory(cap));
     const res = await handler(
@@ -480,7 +480,7 @@ describe("POST /capabilities/:name/report", () => {
           reports: {
             "output:frames": 30, // not declared
             "output:bytes": 100, // generic — CDS-measured, never app-reported
-            "output:megapixels": "4", // not a number
+            "output:pixels": "4", // not a number
             nonsense: 1, // no dimension:unit split
           },
         },

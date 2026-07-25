@@ -87,7 +87,7 @@ describe("capability handler", () => {
     const db = makeDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
     const res = await handleCapabilityInvoke(baseDeps(db));
     expect(res.statusCode).toBe(200);
-    const body = res.body as { text: string; usage: { inputTokens: number }; estCostUsd: number };
+    const body = res.body as { text: string; usage: { inputTokens: number }; estCostMicros: number };
     expect(body.text).toBe("a cat on a mat");
     expect(body.usage.inputTokens).toBe(1200);
     // ledger reconciled: reserved rows promoted to committed with actuals.
@@ -95,7 +95,7 @@ describe("capability handler", () => {
     expect(committed.some((r) => r.dimension === "input" && r.unit === "tokens" && r.quantity === 1200)).toBe(true);
     expect(committed.some((r) => r.dimension === "output" && r.unit === "tokens" && r.quantity === 8)).toBe(true);
     // cost re-derived from actual tokens (1200*$1/MTok + 8*$5/MTok)
-    expect(body.estCostUsd).toBeCloseTo((1200 * 1) / 1e6 + (8 * 5) / 1e6);
+    expect(body.estCostMicros).toBe(1200 * 1 + 8 * 5); // micros: $1/MTok in, $5/MTok out
   });
 
   it("returns not_granted (403) when the app has no capability grant", async () => {
@@ -125,7 +125,7 @@ describe("capability handler", () => {
     // A $0-limit per-app cost gate: any reservation cost > 0 breaches.
     const db = makeDb(
       { models: ["anthropic.claude-haiku-4-5"], reports: [] },
-      [{ dimension: "cost", unit: "usd", scope_app_id: "photos", limit_value: 0 }],
+      [{ dimension: "cost", unit: "usd_micros", scope_app_id: "photos", limit_value: 0 }],
     );
     const res = await handleCapabilityInvoke(baseDeps(db));
     expect(res.statusCode).toBe(429);
@@ -148,7 +148,7 @@ describe("capability handler", () => {
   it("FAILS CLOSED (403) when a gate targets an undeclared non-generic dimension", async () => {
     const db = makeDb(
       { models: ["anthropic.claude-haiku-4-5"], reports: [] }, // no reports declared
-      [{ dimension: "input", unit: "megapixels", scope_app_id: "photos", limit_value: 1000 }],
+      [{ dimension: "input", unit: "pixels", scope_app_id: "photos", limit_value: 1000 }],
     );
     const res = await handleCapabilityInvoke(baseDeps(db));
     expect(res.statusCode).toBe(403);
@@ -159,8 +159,8 @@ describe("capability handler", () => {
 
   it("allows an app-reported dimension gate once declared", async () => {
     const db = makeDb(
-      { models: ["anthropic.claude-haiku-4-5"], reports: ["input:megapixels"] },
-      [{ dimension: "input", unit: "megapixels", scope_app_id: "photos", limit_value: 1000 }],
+      { models: ["anthropic.claude-haiku-4-5"], reports: ["input:pixels"] },
+      [{ dimension: "input", unit: "pixels", scope_app_id: "photos", limit_value: 1000 }],
     );
     const res = await handleCapabilityInvoke(
       baseDeps(db, {
@@ -169,7 +169,7 @@ describe("capability handler", () => {
           prompt: "caption",
           contentRef: { recordId: "rec_1" },
           maxTokens: 50,
-          reports: { "input:megapixels": 12 },
+          reports: { "input:pixels": 12 },
         },
       }),
     );
@@ -254,10 +254,10 @@ describe("capability handler — gate windows", () => {
   it("a calendar-month gate resets at the month rollover", async () => {
     // $20/month, and a prior-month spend that has already consumed it.
     const { db, advance, deps } = clocked(
-      [{ dimension: "cost", unit: "usd", scope_app_id: "photos", limit_value: 20 }],
+      [{ dimension: "cost", unit: "usd_micros", scope_app_id: "photos", limit_value: 20_000_000 }],
       Date.UTC(2026, 5, 15), // June 15
     );
-    db.seedLedger({ dimension: "cost", unit: "usd", quantity: 20, app_id: "photos" });
+    db.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 20_000_000, app_id: "photos" });
     // Still June: the budget is spent.
     expect((await handleCapabilityInvoke(deps())).statusCode).toBe(429);
     // July 1: June's spend is outside the window, so the app can invoke again.
@@ -268,7 +268,7 @@ describe("capability handler — gate windows", () => {
   it("aligns the month window to STARKEEP_CAPABILITY_TZ, not UTC", async () => {
     // The spend lands 2026-06-30T23:00Z — June everywhere. `now` is
     // 2026-07-01T03:00Z: July in UTC, but still June 30 in Los Angeles.
-    const gates: GateSeed[] = [{ dimension: "cost", unit: "usd", scope_app_id: "photos", limit_value: 20 }];
+    const gates: GateSeed[] = [{ dimension: "cost", unit: "usd_micros", scope_app_id: "photos", limit_value: 20_000_000 }];
     const spentAt = Date.UTC(2026, 5, 30, 23, 0);
     const now = Date.UTC(2026, 6, 1, 3, 0);
 
@@ -277,7 +277,7 @@ describe("capability handler — gate windows", () => {
       gates,
       now: () => spentAt,
     });
-    utc.seedLedger({ dimension: "cost", unit: "usd", quantity: 20, app_id: "photos" });
+    utc.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 20_000_000, app_id: "photos" });
     // UTC has already rolled into July → last month's spend no longer counts.
     expect(
       (await handleCapabilityInvoke(baseDeps(utc, { nowMs: () => now, timeZone: "UTC" }))).statusCode,
@@ -288,7 +288,7 @@ describe("capability handler — gate windows", () => {
       gates,
       now: () => spentAt,
     });
-    la.seedLedger({ dimension: "cost", unit: "usd", quantity: 20, app_id: "photos" });
+    la.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 20_000_000, app_id: "photos" });
     // Los Angeles is still in June → the budget is still spent.
     expect(
       (await handleCapabilityInvoke(baseDeps(la, { nowMs: () => now, timeZone: "America/Los_Angeles" })))
@@ -298,18 +298,19 @@ describe("capability handler — gate windows", () => {
 
   it("only counts spend inside the window, so an old row never blocks a new month", async () => {
     const { db, deps } = clocked([
-      { dimension: "cost", unit: "usd", scope_app_id: "photos", limit_value: 0.001 },
+      { dimension: "cost", unit: "usd_micros", scope_app_id: "photos", limit_value: 1_000 },
     ]);
     // A large spend from the previous month.
     db.now = () => Date.UTC(2026, 5, 1);
-    db.seedLedger({ dimension: "cost", unit: "usd", quantity: 1000, app_id: "photos" });
+    db.seedLedger({ dimension: "cost", unit: "usd_micros", quantity: 1_000_000_000, app_id: "photos" });
     db.now = () => T0;
     // The tiny in-window budget is what decides — and this request breaches it.
     const res = await handleCapabilityInvoke(deps());
     expect(res.statusCode).toBe(429);
     const breaches = (res.body as { breaches: { current: number }[] }).breaches;
-    // `current` reflects only this month's reservation, not last month's $1000.
-    expect(breaches[0]!.current).toBeLessThan(1);
+    // `current` reflects only this month's reservation, not last month's $1000
+    // (1e9 micros) — so it stays under a dollar rather than dwarfing the limit.
+    expect(breaches[0]!.current).toBeLessThan(1_000_000);
   });
 });
 
@@ -392,7 +393,7 @@ describe("capability handler — reserve-on-ledger concurrency (plan §3.5)", ()
       grant: { models: ["anthropic.claude-haiku-4-5"], reports: [] },
       // Worst-case reservation for maxTokens=100 is ~$0.0005; a $0.001 cap
       // affords two of them, no more.
-      gates: [{ dimension: "cost", unit: "usd", scope_app_id: "photos", limit_value: 0.001 }],
+      gates: [{ dimension: "cost", unit: "usd_micros", scope_app_id: "photos", limit_value: 1_000 }],
     });
     const db = new HoldSumsUntilAllReserved(inner, 5);
     const results = await Promise.all(
@@ -494,7 +495,7 @@ describe("capability handler — appReports filtering (hostile-app input path)",
   /** Run with the given `reports` and return the reserved app-reported rows. */
   async function reservedReports(
     reports: Record<string, unknown>,
-    declared: string[] = ["input:megapixels"],
+    declared: string[] = ["input:pixels"],
   ) {
     const db = makeDb({ models: ["anthropic.claude-haiku-4-5"], reports: declared }, []);
     await handleCapabilityInvoke(
@@ -507,16 +508,16 @@ describe("capability handler — appReports filtering (hostile-app input path)",
         },
       }),
     );
-    return db.ledger.filter((r) => r.unit === "megapixels" || r.unit === "count" || r.unit === "pages");
+    return db.ledger.filter((r) => r.unit === "pixels" || r.unit === "count" || r.unit === "pages");
   }
 
   it("records a declared, non-generic, finite value", async () => {
-    const rows = await reservedReports({ "input:megapixels": 12 });
-    expect(rows.map((r) => [r.dimension, r.unit, r.quantity])).toContainEqual(["input", "megapixels", 12]);
+    const rows = await reservedReports({ "input:pixels": 12 });
+    expect(rows.map((r) => [r.dimension, r.unit, r.quantity])).toContainEqual(["input", "pixels", 12]);
   });
 
   it("ignores an UNDECLARED key even when it is otherwise valid", async () => {
-    expect(await reservedReports({ "input:pages": 5 }, ["input:megapixels"])).toHaveLength(0);
+    expect(await reservedReports({ "input:pages": 5 }, ["input:pixels"])).toHaveLength(0);
   });
 
   it("ignores a GENERIC key an app may not self-report", async () => {
@@ -536,11 +537,11 @@ describe("capability handler — appReports filtering (hostile-app input path)",
   });
 
   it("drops NaN / Infinity / non-numeric values", async () => {
-    expect(await reservedReports({ "input:megapixels": NaN })).toHaveLength(0);
-    expect(await reservedReports({ "input:megapixels": Infinity })).toHaveLength(0);
-    expect(await reservedReports({ "input:megapixels": -Infinity })).toHaveLength(0);
-    expect(await reservedReports({ "input:megapixels": "12" })).toHaveLength(0);
-    expect(await reservedReports({ "input:megapixels": null })).toHaveLength(0);
+    expect(await reservedReports({ "input:pixels": NaN })).toHaveLength(0);
+    expect(await reservedReports({ "input:pixels": Infinity })).toHaveLength(0);
+    expect(await reservedReports({ "input:pixels": -Infinity })).toHaveLength(0);
+    expect(await reservedReports({ "input:pixels": "12" })).toHaveLength(0);
+    expect(await reservedReports({ "input:pixels": null })).toHaveLength(0);
   });
 
   it("ignores a malformed key with no dimension:unit split", async () => {
@@ -550,20 +551,20 @@ describe("capability handler — appReports filtering (hostile-app input path)",
 
   it("keeps the valid entries when a hostile app mixes in junk", async () => {
     const rows = await reservedReports({
-      "input:megapixels": 7,
+      "input:pixels": 7,
       "input:bytes": 999_999,
-      "cost:usd": -1000,
+      "cost:usd_micros": -1000,
       nonsense: 1,
     });
     expect(rows.map((r) => r.quantity)).toEqual([7]);
   });
 
   it("an undeclared report cannot dodge a declared gate's fail-closed check", async () => {
-    // The gate targets input:megapixels but the app declared nothing → deny,
+    // The gate targets input:pixels but the app declared nothing → deny,
     // regardless of what the app tried to report.
     const db = makeDb(
       { models: ["anthropic.claude-haiku-4-5"], reports: [] },
-      [{ dimension: "input", unit: "megapixels", limit_value: 1000 }],
+      [{ dimension: "input", unit: "pixels", limit_value: 1000 }],
     );
     const res = await handleCapabilityInvoke(
       baseDeps(db, {
@@ -571,7 +572,7 @@ describe("capability handler — appReports filtering (hostile-app input path)",
           model: "anthropic.claude-haiku-4-5",
           prompt: "caption",
           maxTokens: 50,
-          reports: { "input:megapixels": 0 },
+          reports: { "input:pixels": 0 },
         },
       }),
     );
@@ -683,7 +684,7 @@ describe("capability handler — streaming", () => {
     if (done?.type === "done") {
       expect(done.usage.outputTokens).toBe(8);
       // cost re-derived from actual tokens (1200*$1/MTok + 8*$5/MTok)
-      expect(done.estCostUsd).toBeCloseTo((1200 * 1) / 1e6 + (8 * 5) / 1e6);
+      expect(done.estCostMicros).toBe(1200 * 1 + 8 * 5);
     }
     // Reserved rows promoted to committed actuals on stream completion.
     const committed = db.ledger.filter((r) => r.status === "committed");
@@ -800,7 +801,7 @@ describe("capability handler — sync-s3 image output (plan §3.8)", () => {
       model: string;
       output: { bucket: string; keyPrefix: string; keys: string[]; totalBytes: number };
       usage: { inputTokens: number; outputTokens: number };
-      estCostUsd: number;
+      estCostMicros: number;
       invocationId: string;
     };
     // The CDS wrote exactly one image to the app's syncable area (not inlined).
@@ -810,13 +811,13 @@ describe("capability handler — sync-s3 image output (plan §3.8)", () => {
     expect(body.output.keys[0]).toContain("apps/photos/syncable/capability-image/");
     // No tokens for image gen; cost is CDS-derived per image (requests:image $0.04).
     expect(body.usage.outputTokens).toBe(0);
-    expect(body.estCostUsd).toBeCloseTo(0.04, 5);
+    expect(body.estCostMicros).toBe(40_000); // $0.04/image
 
     // Ledger: a committed cost row equal to the per-image price, a committed
     // requests:image, and a committed output:bytes measured from the write.
     const committed = db.ledger.filter((r) => r.status === "committed");
-    const cost = committed.find((r) => r.dimension === "cost" && r.unit === "usd");
-    expect(cost?.quantity).toBeCloseTo(0.04, 5);
+    const cost = committed.find((r) => r.dimension === "cost" && r.unit === "usd_micros");
+    expect(cost?.quantity).toBe(40_000);
     expect(committed.some((r) => r.dimension === "requests" && r.unit === "image")).toBe(true);
     const outBytes = committed.find((r) => r.dimension === "output" && r.unit === "bytes");
     expect(outBytes?.quantity).toBe(written.calls[0]!.images[0]!.byteLength);
@@ -844,7 +845,7 @@ describe("capability handler — sync-s3 image output (plan §3.8)", () => {
     // A cost gate below the per-image price is breached by the reservation.
     const db = makeDb(
       { models: [IMAGE_MODEL], reports: [] },
-      [{ dimension: "cost", unit: "usd", limit_value: 0.01 }],
+      [{ dimension: "cost", unit: "usd_micros", limit_value: 10_000 }],
     );
     let generated = false;
     const written = { calls: [] as { invocationId: string; images: Uint8Array[]; contentType: string }[] };

@@ -36,6 +36,9 @@ import {
   isNonGenericDimensionUnit,
   dimensionUnitKey,
   CAPABILITY_BEDROCK_INVOKE,
+  COST_DIMENSION,
+  COST_UNIT,
+  isQuantity,
   type RequestModality,
   type CapabilityRequestContext,
   type EffectiveModel,
@@ -294,8 +297,11 @@ async function prepareInvoke(
       unit &&
       grant.reports.has(key) &&
       isNonGenericDimensionUnit(dim, unit) &&
-      typeof value === "number" &&
-      Number.isFinite(value)
+      // isQuantity, not merely isFinite: a fractional or NEGATIVE report is junk
+      // to be ignored here, and a negative one would otherwise credit spend back
+      // against the cost gate. Sharing the predicate with assertQuantity keeps
+      // this filter and the metering path from disagreeing (see money.ts).
+      isQuantity(value)
     ) {
       appReports[key] = value;
     }
@@ -420,8 +426,8 @@ export async function handleCapabilityInvoke(
   });
   await reconcile(capClient, ledgerKey, reconciled);
 
-  const estCostUsd =
-    reconciled.find((m) => m.dimension === "cost" && m.unit === "usd")?.quantity ?? 0;
+  const estCostMicros =
+    reconciled.find((m) => m.dimension === COST_DIMENSION && m.unit === COST_UNIT)?.quantity ?? 0;
 
   return {
     statusCode: 200,
@@ -429,7 +435,7 @@ export async function handleCapabilityInvoke(
       model: body.model,
       text: result.text,
       usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
-      estCostUsd,
+      estCostMicros,
       invocationId,
     },
   };
@@ -493,8 +499,8 @@ async function handleSyncImageInvoke(
     appReports,
   });
   await reconcile(capClient, ledgerKey, reconciled);
-  const estCostUsd =
-    reconciled.find((m) => m.dimension === "cost" && m.unit === "usd")?.quantity ?? 0;
+  const estCostMicros =
+    reconciled.find((m) => m.dimension === COST_DIMENSION && m.unit === COST_UNIT)?.quantity ?? 0;
 
   return {
     statusCode: 200,
@@ -502,7 +508,7 @@ async function handleSyncImageInvoke(
       model: body.model,
       output,
       usage: { inputTokens: 0, outputTokens: 0 },
-      estCostUsd,
+      estCostMicros,
       invocationId,
     },
   };
@@ -515,7 +521,8 @@ export type CapabilityStreamEvent =
       type: "done";
       model: string;
       usage: { inputTokens: number; outputTokens: number };
-      estCostUsd: number;
+      /** Reconciled cost of this invocation in canonical micros (money.ts). */
+      estCostMicros: number;
       invocationId: string;
     }
   | { type: "error"; status: number; error: string; message?: string };
@@ -602,14 +609,14 @@ export async function handleCapabilityInvokeStream(
       appReports,
     });
     await reconcile(capClient, ledgerKey, reconciled);
-    const estCostUsd =
-      reconciled.find((m) => m.dimension === "cost" && m.unit === "usd")?.quantity ?? 0;
+    const estCostMicros =
+      reconciled.find((m) => m.dimension === COST_DIMENSION && m.unit === COST_UNIT)?.quantity ?? 0;
 
     yield {
       type: "done",
       model: body.model!,
       usage: { inputTokens, outputTokens },
-      estCostUsd,
+      estCostMicros,
       invocationId,
     };
   }
@@ -654,8 +661,7 @@ export async function handleCapabilityReport(
       unit &&
       grant.reports.has(key) &&
       isNonGenericDimensionUnit(dim, unit) &&
-      typeof value === "number" &&
-      Number.isFinite(value)
+      isQuantity(value)
     ) {
       measurements.push({ dimension: dim, unit, quantity: value });
     }
@@ -753,8 +759,7 @@ function filterAppReports(
       unit &&
       declared.has(key) &&
       isNonGenericDimensionUnit(dim, unit) &&
-      typeof value === "number" &&
-      Number.isFinite(value)
+      isQuantity(value)
     ) {
       out[key] = value;
     }
@@ -831,7 +836,12 @@ export async function handleCapabilityInvokeAsyncStart(
   // CDS-derived generation output → drives both the reservation and the derived
   // cost gate (the CDS controls the requested duration, so this is CDS-measured).
   const durationSeconds = body.generation?.durationSeconds ?? DEFAULT_VIDEO_SECONDS;
-  const output: Measurement[] = [{ dimension: "output", unit: "duration_s", quantity: durationSeconds }];
+  // The request quotes whole seconds because Bedrock's own generation parameter
+  // does; metering is in canonical `duration_ms`, converted here at the boundary
+  // so no seconds-denominated quantity travels further (see money.ts).
+  const output: Measurement[] = [
+    { dimension: "output", unit: "duration_ms", quantity: durationSeconds * 1000 },
+  ];
 
   const projected = projectAsyncReservation({
     model,

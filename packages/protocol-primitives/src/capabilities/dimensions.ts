@@ -5,7 +5,13 @@
  * A usage gate meters one `(dimension, unit)` pair. The set is deliberately
  * **open** — AI services bill on genuinely different well-defined units and new
  * ones arrive on the provider's cadence, not the platform's — so nothing here is
- * a closed enum the schema hardcodes. This module is the single home for:
+ * a closed enum the schema hardcodes.
+ *
+ * Units here are CANONICAL in the sense money.ts defines: every metered quantity
+ * is an exact integer in the finest natural quantum, and derived cost is integer
+ * micros. Nothing in this module converts units — money.ts owns that.
+ *
+ * This module is the single home for:
  *
  *   - which `(dimension, unit)` pairs the wired `bedrock.invoke` capability
  *     understands,
@@ -23,6 +29,8 @@
  * app cannot under-report any of it.
  */
 
+import { COST_DIMENSION, COST_UNIT } from "./money.js";
+
 /** The metering dimensions the broker understands. Open by convention: the
  * gate row stores free strings, but these are the ones with defined semantics. */
 export type Dimension = "requests" | "input" | "output" | "credits" | "cost";
@@ -32,7 +40,7 @@ export type Dimension = "requests" | "input" | "output" | "credits" | "cost";
  *   - "cds"  — measured directly by the CDS (request count, S3 object size,
  *              Bedrock-returned token usage, derived cost). Holds against a
  *              hostile app.
- *   - "app"  — supplied by the app (megapixels, pages, frames, the modality
+ *   - "app"  — supplied by the app (pixels, pages, frames, the modality
  *              classification of a request, …). Only as trustworthy as the app;
  *              an operator cost-shaping convenience, never a boundary.
  */
@@ -44,7 +52,7 @@ export type MeasurementSource = "cds" | "app";
  *   - "estimated" — estimated before, exact after (input tokens: estimate to
  *                   reserve, reconcile from Bedrock's returned count).
  *   - "post"      — only known after / during generation (output tokens/bytes,
- *                   derived cost, output megapixels/duration).
+ *                   derived cost, output pixels/duration).
  */
 export type Timing = "pre" | "estimated" | "post";
 
@@ -65,16 +73,25 @@ export interface DimensionUnitSpec {
 // The `input` and `output` dimensions share a unit set. `bytes`/`tokens` are
 // CDS-measured; the type-specific quantities are app-reported (the CDS stays
 // type-agnostic and won't parse file internals).
+//
+// EVERY unit here is the FINEST natural quantum of the thing it meters, so a
+// quantity is always an exact non-negative integer (see money.ts on why that
+// matters: an unvalidated fractional or NaN quantity is a fail-open on the spend
+// cap). Hence `pixels` not megapixels, `duration_ms` not seconds, and
+// `pixel_frames` not megapixel-seconds — a 1024x1024 frame is 1.048576
+// megapixels but exactly 1048576 pixels. Magnitude is not a reason to coarsen a
+// unit: rates are micros per single unit and absorb any scale (see
+// PricingTable).
 const IO_UNITS: ReadonlyArray<{ unit: string; source: MeasurementSource }> = [
   { unit: "bytes", source: "cds" },
   { unit: "tokens", source: "cds" },
   { unit: "characters", source: "app" },
   { unit: "pages", source: "app" },
   { unit: "frames", source: "app" },
-  { unit: "megapixels", source: "app" },
+  { unit: "pixels", source: "app" },
   { unit: "tiles", source: "app" },
-  { unit: "duration_s", source: "app" },
-  { unit: "megapixel_seconds", source: "app" },
+  { unit: "duration_ms", source: "app" },
+  { unit: "pixel_frames", source: "app" },
 ];
 
 function ioSpec(dimension: "input" | "output"): DimensionUnitSpec[] {
@@ -122,8 +139,10 @@ export const DIMENSION_UNIT_SPECS: readonly DimensionUnitSpec[] = [
   // credits: generic model-defined units, but the count is app-reported (only
   // the model/app knows how many credits a call consumed) → non-generic.
   { dimension: "credits", unit: "count", source: "app", timing: "post", generic: false },
-  // cost: always derived by the CDS from usage × the price table.
-  { dimension: "cost", unit: "usd", source: "cds", timing: "post", generic: true },
+  // cost: always derived by the CDS from usage × the price table. The unit names
+  // the canonical representation (integer micros — see money.ts), so a ledger
+  // row or gate limit is self-describing and can never be read as dollars.
+  { dimension: COST_DIMENSION, unit: COST_UNIT, source: "cds", timing: "post", generic: true },
 ];
 
 const SPEC_BY_KEY = new Map<string, DimensionUnitSpec>(

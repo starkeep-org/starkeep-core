@@ -29,7 +29,8 @@ import {
   dimensionUnitKey,
   isNonGenericDimensionUnit,
 } from "./dimensions.js";
-import type { EffectiveModel, ModelProvider, PricingTable } from "./models.js";
+import type { EffectiveModel, ModelProvider } from "./models.js";
+import { COST_DIMENSION, COST_UNIT, assertQuantity, deriveCostMicros } from "./money.js";
 
 export type CalendarPeriod = "week" | "month";
 export type RequestModality = "text" | "image" | "audio" | "video";
@@ -61,6 +62,11 @@ export interface Gate {
 export interface Measurement {
   dimension: string;
   unit: string;
+  /**
+   * An exact non-negative INTEGER in the canonical unit for `(dimension, unit)`
+   * — tokens, bytes, pixels, milliseconds, or micros for `cost`. Never a
+   * fractional or coarsened unit; see money.ts and dimensions.ts.
+   */
   quantity: number;
 }
 
@@ -232,18 +238,16 @@ export async function evaluateGates(params: {
   return { allowed: breaches.length === 0, breaches };
 }
 
-/** Derive `cost:usd` from a measurement set and a model's price table: each
- * priced `(dimension:unit)` measurement contributes quantity × USD/unit. */
-export function deriveCostUsd(
-  pricing: PricingTable,
-  measurements: readonly Measurement[],
-): number {
-  let usd = 0;
-  for (const m of measurements) {
-    const rate = pricing[dimensionUnitKey(m.dimension, m.unit)];
-    if (rate !== undefined) usd += m.quantity * rate;
-  }
-  return usd;
+/**
+ * Append the derived `cost` measurement to a measurement set, in place.
+ *
+ * Cost derivation itself lives in money.ts (the single home for anything that
+ * multiplies a quantity by a rate); this helper exists only so the three
+ * projection/reconciliation paths below cannot drift in how they attach it.
+ */
+function pushDerivedCost(out: Measurement[], model: EffectiveModel): void {
+  const cost = deriveCostMicros(model.pricing, out);
+  if (cost > 0) out.push({ dimension: COST_DIMENSION, unit: COST_UNIT, quantity: cost });
 }
 
 export interface ReservationInput {
@@ -258,7 +262,7 @@ export interface ReservationInput {
   /** Output ceiling for the reservation — the request's `max_tokens`. */
   maxTokens: number;
   /** App-reported non-generic INPUT quantities, keyed by `"dimension:unit"`
-   * (e.g. `{ "input:megapixels": 12 }`). Only used if declared/known pre-call. */
+   * (e.g. `{ "input:pixels": 12000000 }`). Only used if declared/known pre-call. */
   appReports?: Readonly<Record<string, number>>;
 }
 
@@ -288,15 +292,17 @@ export function projectReservation(input: ReservationInput): Measurement[] {
   out.push({ dimension: "output", unit: "tokens", quantity: maxTokens });
 
   // App-reported input quantities (only non-generic keys; the app declared it).
+  // assertQuantity here is security-relevant, not hygiene: an app-supplied NaN
+  // would poison the window SUM, and `NaN > limit` is false — the gate would then
+  // ALLOW every request. Reject at the boundary so that is unrepresentable.
   for (const [key, value] of Object.entries(appReports ?? {})) {
     const [dimension, unit] = key.split(":");
     if (dimension && unit && dimension === "input" && isNonGenericDimensionUnit(dimension, unit)) {
-      out.push({ dimension, unit, quantity: value });
+      out.push({ dimension, unit, quantity: assertQuantity(value, `app-reported ${key}`) });
     }
   }
 
-  const costUsd = deriveCostUsd(model.pricing, out);
-  if (costUsd > 0) out.push({ dimension: "cost", unit: "usd", quantity: costUsd });
+  pushDerivedCost(out, model);
   return out;
 }
 
@@ -310,7 +316,7 @@ export function projectReservation(input: ReservationInput): Measurement[] {
 //   - `requests` (+ modality) — CDS-measured;
 //   - `input:bytes` — CDS-measured (S3 HEAD of the referenced input);
 //   - CDS-DERIVED generation output measurements the caller computes from the
-//     request's own generation parameters (e.g. requested video `duration_s`).
+//     request's own generation parameters (e.g. requested video `duration_ms`).
 //     Because the CDS controls what it asked Bedrock to generate, these are
 //     CDS-measured for the purpose of reservation AND reconciliation — the
 //     load-bearing `cost` gate is derived from them and holds without any app
@@ -325,7 +331,7 @@ export interface AsyncReservationInput {
   /** CDS-measured input byte size of the referenced object (S3 HEAD). */
   inputBytes?: number;
   /** CDS-derived worst-case generation output measurements from the request's
-   * own parameters (e.g. `[{ output, duration_s, 6 }]` for 6s of video). Priced
+   * own parameters (e.g. `[{ output, duration_ms, 6000 }]` for 6s of video). Priced
    * and reserved; trued up to the same CDS-known value on completion. */
   output?: readonly Measurement[];
   /** App-reported non-generic INPUT quantities, keyed by `"dimension:unit"`. */
@@ -350,12 +356,11 @@ export function projectAsyncReservation(input: AsyncReservationInput): Measureme
   for (const [key, value] of Object.entries(appReports ?? {})) {
     const [dimension, unit] = key.split(":");
     if (dimension && unit && dimension === "input" && isNonGenericDimensionUnit(dimension, unit)) {
-      out.push({ dimension, unit, quantity: value });
+      out.push({ dimension, unit, quantity: assertQuantity(value, `app-reported ${key}`) });
     }
   }
 
-  const costUsd = deriveCostUsd(model.pricing, out);
-  if (costUsd > 0) out.push({ dimension: "cost", unit: "usd", quantity: costUsd });
+  pushDerivedCost(out, model);
   return out;
 }
 
@@ -365,7 +370,7 @@ export function projectAsyncReservation(input: AsyncReservationInput): Measureme
 // as-is on completion and records the single genuinely-post-call CDS measurement
 // — `output:bytes` from an S3 HEAD (see the CDS `commitReservation` +
 // output-bytes append in capability-store). Type-specific output (duration,
-// frames, megapixels) is app-reported best-effort via the ordinary report path.
+// frames, pixels) is app-reported best-effort via the ordinary report path.
 
 export interface ReconcileInput {
   model: EffectiveModel;
@@ -403,11 +408,10 @@ export function reconcileMeasurements(input: ReconcileInput): Measurement[] {
       (dimension === "input" || dimension === "output" || dimension === "credits") &&
       isNonGenericDimensionUnit(dimension, unit)
     ) {
-      out.push({ dimension, unit, quantity: value });
+      out.push({ dimension, unit, quantity: assertQuantity(value, `app-reported ${key}`) });
     }
   }
 
-  const costUsd = deriveCostUsd(model.pricing, out);
-  if (costUsd > 0) out.push({ dimension: "cost", unit: "usd", quantity: costUsd });
+  pushDerivedCost(out, model);
   return out;
 }

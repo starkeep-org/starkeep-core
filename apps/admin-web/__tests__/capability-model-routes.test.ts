@@ -121,7 +121,7 @@ describe("POST /api/capabilities/models", () => {
         inference_profile_cleared: null,
         vision: null,
         output_modality: null,
-        pricing_json: JSON.stringify({ "input:tokens": 2 / 1e6, "output:tokens": 8 / 1e6 }),
+        pricing_json: JSON.stringify({ "input:tokens": 2, "output:tokens": 8 }),
         estimates_json: null,
       },
     ];
@@ -138,10 +138,10 @@ describe("POST /api/capabilities/models", () => {
     const res = await modelsPOST(jsonReq(CREDS));
     const body = (await res.json()) as RegistryBody;
     const canvas = body.models.find((m) => m.modelId === "amazon.nova-canvas-v1:0")!;
-    expect(canvas.effective.pricing).toEqual({ "requests:image": 0.04 });
+    expect(canvas.effective.pricing).toEqual({ "requests:image": 40_000 }); // $0.04/image
     expect(canvas.effective.outputModality).toBe("image");
     const reel = body.models.find((m) => m.modelId === "amazon.nova-reel-v1:1")!;
-    expect(reel.effective.pricing).toEqual({ "output:duration_s": 0.08 });
+    expect(reel.effective.pricing).toEqual({ "output:duration_ms": 80 }); // $0.08/s
     expect(reel.effective.outputModality).toBe("video");
   });
 
@@ -200,7 +200,7 @@ describe("POST /api/capabilities/models/override — validation", () => {
       jsonReq({
         ...CREDS,
         modelId: "amazon.nova-reel-v1:1",
-        override: { pricing: { "output:duration_s": 0.1 } },
+        override: { pricing: { "output:duration_ms": 0.1 } },
       }),
     );
     expect(res.status).toBe(200);
@@ -312,7 +312,7 @@ describe("POST /api/capabilities/models/override — output modality", () => {
         override: {
           provider: "amazon",
           outputModality: "video",
-          pricing: { "output:duration_s": 0.05 },
+          pricing: { "output:duration_ms": 0.05 },
         },
       }),
     );
@@ -382,7 +382,7 @@ describe("POST /api/capabilities/models/override — writes", () => {
     expect(q.params[0]).toBe("anthropic.claude-haiku-4-5");
     // $/MTok is stored divided down to USD per single token.
     expect(String(q.params.find((p) => typeof p === "string" && p.includes("input:tokens")))).toBe(
-      JSON.stringify({ "input:tokens": 2 / 1e6, "output:tokens": 8 / 1e6 }),
+      JSON.stringify({ "input:tokens": 2, "output:tokens": 8 }),
     );
     expect(pgState.ended).toBe(1);
   });

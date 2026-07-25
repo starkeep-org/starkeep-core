@@ -52,6 +52,7 @@ import {
   projectFullMonth,
   type ServiceCost,
 } from "../../src/lib/cost-usage-report";
+import { formatMicrosAsUsd, assertMicros } from "@starkeep/protocol-primitives";
 import { localDataServerUrl } from "../../src/lib/runtime-config";
 
 // ---------------------------------------------------------------------------
@@ -572,15 +573,15 @@ export default function DashboardPage() {
                         return (
                           <TableRow key={row.service}>
                             <TableCell>{row.service}</TableCell>
-                            <TableCell className="text-right">${row.amount.toFixed(2)}</TableCell>
-                            <TableCell className="text-right text-muted-foreground">${(proj?.amount ?? 0).toFixed(2)}</TableCell>
+                            <TableCell className="text-right">{formatMicrosAsUsd(assertMicros(row.amountMicros))}</TableCell>
+                            <TableCell className="text-right text-muted-foreground">{formatMicrosAsUsd(assertMicros(proj?.amountMicros ?? 0))}</TableCell>
                           </TableRow>
                         );
                       })}
                       <TableRow className="font-medium">
                         <TableCell>Total</TableCell>
-                        <TableCell className="text-right">${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
-                        <TableCell className="text-right text-muted-foreground">${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
+                        <TableCell className="text-right">{formatMicrosAsUsd(assertMicros(costs.reduce((s, r) => s + r.amountMicros, 0)))}</TableCell>
+                        <TableCell className="text-right text-muted-foreground">{formatMicrosAsUsd(assertMicros((costProjection ?? []).reduce((s, r) => s + r.amountMicros, 0)))}</TableCell>
                       </TableRow>
                     </TableBody>
                   </Table>

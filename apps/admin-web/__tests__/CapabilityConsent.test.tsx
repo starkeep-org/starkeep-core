@@ -21,7 +21,7 @@ const BEDROCK: CapabilityRequirement = {
   required: false,
   models: ["anthropic.claude-haiku-4-5", "amazon.nova-lite"],
   requestedMonthlyBudgetUsd: 20,
-  reports: ["input:megapixels", "output:duration_s"],
+  reports: ["input:pixels", "output:duration_ms"],
   rationale: "Generate photo captions.",
 };
 
@@ -54,7 +54,7 @@ describe("rendering", () => {
     expect(screen.getByText("bedrock.invoke")).toBeTruthy();
     expect(screen.getByText("Generate photo captions.")).toBeTruthy();
     // The consented figure the operator is agreeing to.
-    expect(screen.getByText(/up to ~\$20\/mo/)).toBeTruthy();
+    expect(screen.getByText(/up to ~\$20\.00\/mo/)).toBeTruthy();
     expect(screen.getByText("anthropic.claude-haiku-4-5")).toBeTruthy();
     expect(screen.getByText("amazon.nova-lite")).toBeTruthy();
   });
@@ -67,7 +67,7 @@ describe("rendering", () => {
 
   it("shows a $0 budget rather than hiding it", () => {
     renderConsent([{ ...BEDROCK, requestedMonthlyBudgetUsd: 0 }]);
-    expect(screen.getByText(/up to ~\$0\/mo/)).toBeTruthy();
+    expect(screen.getByText(/up to ~\$0\.00\/mo/)).toBeTruthy();
   });
 
   it("omits the models and reports rows when empty", () => {
@@ -139,9 +139,9 @@ describe("required vs optional", () => {
 describe("report-dimension honesty labels (plan §3.5)", () => {
   it("labels an INPUT dimension app-reported and an OUTPUT dimension best-effort", () => {
     renderConsent([BEDROCK]);
-    const megapixels = screen.getByText("input:megapixels").parentElement!;
+    const megapixels = screen.getByText("input:pixels").parentElement!;
     expect(within(megapixels).getByText("app-reported")).toBeTruthy();
-    const duration = screen.getByText("output:duration_s").parentElement!;
+    const duration = screen.getByText("output:duration_ms").parentElement!;
     expect(within(duration).getByText("best-effort")).toBeTruthy();
   });
 
@@ -152,7 +152,7 @@ describe("report-dimension honesty labels (plan §3.5)", () => {
   });
 
   it("labels every output unit best-effort, whatever the unit", () => {
-    renderConsent([{ ...BEDROCK, reports: ["output:frames", "output:megapixels"] }]);
+    renderConsent([{ ...BEDROCK, reports: ["output:frames", "output:pixels"] }]);
     expect(screen.getAllByText("best-effort")).toHaveLength(2);
     expect(screen.queryByText("app-reported")).toBeNull();
   });

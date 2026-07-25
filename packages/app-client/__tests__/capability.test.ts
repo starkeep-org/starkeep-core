@@ -98,7 +98,7 @@ describe("invokeCapability", () => {
         model: "anthropic.claude-haiku-4-5",
         text: "a dog",
         usage: { inputTokens: 100, outputTokens: 5 },
-        estCostUsd: 0.000125,
+        estCostMicros: 125,
         invocationId: "inv1",
       }),
     );
@@ -175,7 +175,7 @@ describe("invokeCapabilityImage (sync-s3, plan §3.8)", () => {
           keys: ["apps/photos/syncable/capability-image/inv1/image-0.png"],
           totalBytes: 12345,
         },
-        estCostUsd: 0.04,
+        estCostMicros: 40_000, // $0.04
         invocationId: "inv1",
       }),
     );
@@ -187,7 +187,7 @@ describe("invokeCapabilityImage (sync-s3, plan §3.8)", () => {
     if (!res.granted || !res.ok) throw new Error("expected ok");
     expect(res.output.keys).toHaveLength(1);
     expect(res.output.totalBytes).toBe(12345);
-    expect(res.estCostUsd).toBeCloseTo(0.04, 5);
+    expect(res.estCostMicros).toBe(40_000);
     // Uses the synchronous /invoke route (not /invoke-async).
     const url = fetchMock.mock.calls[0]![0] as string;
     expect(url).toContain("/capabilities/bedrock.invoke/invoke");
@@ -219,7 +219,7 @@ describe("invokeCapabilityStream", () => {
           type: "done",
           model: "anthropic.claude-haiku-4-5",
           usage: { inputTokens: 100, outputTokens: 2 },
-          estCostUsd: 0.0001,
+          estCostMicros: 100,
           invocationId: "inv1",
         },
       ]),
@@ -468,7 +468,7 @@ describe("invokeCapabilityStream — stream decoding edge cases", () => {
       `data: ${JSON.stringify({ type: "text", text: "a " })}\n\n` +
       `data: {not json\n\n` +
       `data: ${JSON.stringify({ type: "text", text: "dog" })}\n\n` +
-      `data: ${JSON.stringify({ type: "done", model: "m", usage: { inputTokens: 1, outputTokens: 1 }, estCostUsd: 0, invocationId: "i" })}\n\n`;
+      `data: ${JSON.stringify({ type: "done", model: "m", usage: { inputTokens: 1, outputTokens: 1 }, estCostMicros: 0, invocationId: "i" })}\n\n`;
     lambdaMock.on(InvokeWithResponseStreamCommand).resolves(lambdaRawStream(wire));
     const res = await start();
     if (!(res.granted && res.ok)) throw new Error("expected an open stream");
@@ -539,14 +539,14 @@ describe("reportCapabilityOutput", () => {
     writeCreds();
     fetchMock.mockResolvedValue(jsonResponse(200, { ok: true, recorded: 1 }));
     await reportCapabilityOutput(APP_ID, "bedrock.invoke", "inv-1", {
-      "output:megapixels": 4,
+      "output:pixels": 4_000_000,
     });
     const [url, init] = fetchMock.mock.calls[0] as [string, { method: string; body: string; headers: Record<string, string> }];
     expect(url).toBe("https://cloud.example.test/apps/photos/capabilities/bedrock.invoke/report");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body)).toEqual({
       invocationId: "inv-1",
-      reports: { "output:megapixels": 4 },
+      reports: { "output:pixels": 4_000_000 },
     });
     // Signed like every other app→cloud call.
     expect(init.headers["X-Starkeep-App-Sig"] ?? init.headers["x-starkeep-app-sig"]).toMatch(

@@ -5,11 +5,15 @@ import {
 } from "@aws-sdk/client-s3";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import type { STSCredentials } from "./cognito-auth";
+import { usdDecimalToMicros, assertMicros } from "@starkeep/protocol-primitives";
 
 
 export interface ServiceCost {
   service: string;
-  amount: number;
+  /** Canonical micros. AWS's Cost & Usage Report quotes decimal USD; that is an
+   * external source, converted at the parse boundary below and never carried
+   * onward in dollars. */
+  amountMicros: number;
 }
 
 const SERVICE_LABELS: Record<string, string> = {
@@ -135,10 +139,19 @@ function parseCsvCosts(csv: string): Record<string, number> {
     const cols = parseRow(line);
     if (typeIdx !== -1 && SKIP_LINE_ITEM_TYPES.has(cols[typeIdx] ?? "")) continue;
     const service = cols[productCodeIdx] ?? "";
-    const amount = parseFloat(cols[costIdx] ?? "0");
-    if (service && !isNaN(amount)) {
-      totals[service] = (totals[service] ?? 0) + amount;
+    if (!service) continue;
+    // The cell is already exact decimal text, so it goes straight to micros
+    // rather than through parseFloat — a float sum of thousands of CUR line
+    // items would accumulate error into the figure shown as the month's spend.
+    // A negative or malformed cell (credits, refunds, a truncated file) is
+    // skipped rather than allowed to corrupt a service total.
+    let micros: number;
+    try {
+      micros = usdDecimalToMicros(cols[costIdx] ?? "0");
+    } catch {
+      continue;
     }
+    totals[service] = (totals[service] ?? 0) + micros;
   }
   return totals;
 }
@@ -177,21 +190,21 @@ export async function fetchMtdCostsByService(
     const bytes = await obj.Body!.transformToByteArray();
     const csv = await decompressGzip(bytes);
     const chunk = parseCsvCosts(csv);
-    for (const [service, amount] of Object.entries(chunk)) {
-      rawByService[service] = (rawByService[service] ?? 0) + amount;
+    for (const [service, micros] of Object.entries(chunk)) {
+      rawByService[service] = (rawByService[service] ?? 0) + micros;
     }
   }
 
   const knownOrder = Object.keys(SERVICE_LABELS);
   const known: ServiceCost[] = knownOrder
-    .map((code) => ({ service: SERVICE_LABELS[code]!, amount: rawByService[code] ?? 0 }))
-    .filter(({ amount }) => amount > 0);
+    .map((code) => ({ service: SERVICE_LABELS[code]!, amountMicros: rawByService[code] ?? 0 }))
+    .filter(({ amountMicros }) => amountMicros > 0);
 
   const unknown: ServiceCost[] = Object.entries(rawByService)
     .filter(([code]) => !KNOWN_SERVICES.has(code))
-    .filter(([, amount]) => amount > 0)
-    .map(([code, amount]) => ({ service: code, amount }))
-    .sort((a, b) => b.amount - a.amount);
+    .filter(([, amountMicros]) => amountMicros > 0)
+    .map(([code, amountMicros]) => ({ service: code, amountMicros }))
+    .sort((a, b) => b.amountMicros - a.amountMicros);
 
   return [...known, ...unknown];
 }
@@ -201,8 +214,10 @@ export function projectFullMonth(costs: ServiceCost[], today = new Date()): Serv
   // Days elapsed = day-of-month (1-based), minimum 1 to avoid division by zero.
   const daysElapsed = Math.max(today.getDate(), 1);
   const factor = daysInMonth / daysElapsed;
-  return costs.map(({ service, amount }) => ({
+  // Round UP, consistently with every other currency computation: a projection
+  // shown to an operator watching spend should not read low.
+  return costs.map(({ service, amountMicros }) => ({
     service,
-    amount: amount * factor,
+    amountMicros: assertMicros(Math.ceil(amountMicros * factor), "projected spend"),
   }));
 }

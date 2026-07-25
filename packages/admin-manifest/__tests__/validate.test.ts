@@ -301,7 +301,7 @@ describe("capability requirements (plan §3.1)", () => {
         models: ["anthropic.claude-haiku-4-5", "openai.gpt-oss-120b"],
         required: false,
         requestedMonthlyBudgetUsd: 20,
-        reports: ["input:megapixels", "output:megapixels"],
+        reports: ["input:pixels", "output:pixels"],
         rationale: "Generate captions and tags for your photos.",
       }),
     );
@@ -362,7 +362,7 @@ describe("capability requirements (plan §3.1)", () => {
 
   it("rejects a generic (CDS-measured) dimension in reports", () => {
     const result = validateManifest(
-      withCap({ name: "bedrock.invoke", models: ["anthropic.claude-haiku-4-5"], reports: ["cost:usd"], rationale: "x" }),
+      withCap({ name: "bedrock.invoke", models: ["anthropic.claude-haiku-4-5"], reports: ["cost:usd_micros"], rationale: "x" }),
     );
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("generic"))).toBe(true);
@@ -458,7 +458,7 @@ describe("capability requirements (plan §3.1)", () => {
       withCap({
         name: "bedrock.invoke",
         models: ["anthropic.claude-haiku-4-5"],
-        reports: ["input:megapixels", "output:frames", "credits:count", "requests:image"],
+        reports: ["input:pixels", "output:frames", "credits:count", "requests:image"],
         rationale: "x",
       }),
     );

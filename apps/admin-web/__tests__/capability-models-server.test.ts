@@ -3,7 +3,7 @@
  *
  * The load-bearing property here is that the editor can express EVERY price the
  * platform registry ships — not just token rates. Bedrock prices Nova Canvas per
- * `requests:image` and Nova Reel per `output:duration_s`; when this projection
+ * `requests:image` and Nova Reel per `output:duration_ms`; when this projection
  * only understood `input:tokens`/`output:tokens` those models showed no price at
  * all and any save through the editor rewrote `pricing_json` wholesale, silently
  * deleting the rate the cost gate is derived from.
@@ -25,8 +25,8 @@ import {
 } from "../src/lib/capability-models-server";
 import {
   PRICEABLE_DIMENSION_UNITS,
-  toDisplayPrice,
-  toStoredPrice,
+  rateToFieldValue,
+  fieldValueToRate,
   priceUnitLabel,
   type ModelOverrideInput,
 } from "../src/lib/capability-models";
@@ -51,29 +51,40 @@ const REEL = "amazon.nova-reel-v1:1";
 const TOK_IN = "input:tokens";
 const TOK_OUT = "output:tokens";
 const REQ_IMAGE = "requests:image";
-const DURATION = "output:duration_s";
+const DURATION = "output:duration_ms";
 
 const find = (rows: ReturnType<typeof buildModelRows>, id: string) =>
   rows.find((r) => r.modelId === id)!;
 
 // ---------------------------------------------------------------------------
-// Display units
+// Form-field display units (canonical-units exception 2)
 // ---------------------------------------------------------------------------
 
-describe("price display units", () => {
-  it("shows only the TOKEN rates per million; every other rate is per unit", () => {
-    expect(toDisplayPrice(TOK_IN, 3 / 1e6)).toBe(3);
-    expect(toDisplayPrice(TOK_OUT, 15 / 1e6)).toBe(15);
-    // A per-image or per-second rate is already quoted per unit — scaling it by
-    // a million would show $40,000 per image.
-    expect(toDisplayPrice(REQ_IMAGE, 0.04)).toBe(0.04);
-    expect(toDisplayPrice(DURATION, 0.08)).toBe(0.08);
+describe("price form fields", () => {
+  it("shows a token rate untouched, because $/MTok IS micros/token", () => {
+    // The identity that removed the old toDisplayPrice/toStoredPrice pair: the
+    // stored canonical rate is already the figure the provider publishes.
+    expect(rateToFieldValue(TOK_IN, 3)).toBe(3);
+    expect(rateToFieldValue(TOK_OUT, 15)).toBe(15);
+    expect(rateToFieldValue(TOK_IN, 0.06)).toBe(0.06);
   });
 
-  it("round-trips display ↔ stored for both conventions", () => {
-    for (const [key, display] of [[TOK_IN, 3], [REQ_IMAGE, 0.04], [DURATION, 0.08]] as const) {
-      expect(toDisplayPrice(key, toStoredPrice(key, display))).toBe(display);
+  it("shows a per-unit rate as whole dollars, how the provider quotes it", () => {
+    expect(rateToFieldValue(REQ_IMAGE, 40_000)).toBe(0.04); // $0.04/image
+    expect(rateToFieldValue(DURATION, 80)).toBe(0.00008); // $0.08/s = 80 micros/ms
+  });
+
+  it("round-trips field ↔ canonical for both conventions", () => {
+    for (const [key, canonical] of [[TOK_IN, 3], [TOK_IN, 0.06], [REQ_IMAGE, 40_000]] as const) {
+      expect(fieldValueToRate(key, String(rateToFieldValue(key, canonical)))).toBe(canonical);
     }
+  });
+
+  it("parses a per-unit field exactly, not via a float multiply", () => {
+    // "4.03" * 1e6 is 4030000.0000000005, so a float path would store a rate a
+    // micro off. The exact decimal parser in money.ts is used instead.
+    expect(fieldValueToRate(REQ_IMAGE, "4.03")).toBe(4_030_000);
+    expect(fieldValueToRate(REQ_IMAGE, "0.04")).toBe(40_000);
   });
 
   it("labels the unit so the operator knows which convention a field uses", () => {
@@ -81,16 +92,18 @@ describe("price display units", () => {
     expect(priceUnitLabel(REQ_IMAGE)).toBe("$/unit");
   });
 
-  it("kills float noise from the per-token round-trip", () => {
-    // 0.06 / 1e6 * 1e6 is 0.06000000000000001 without the rounding.
-    expect(toDisplayPrice(TOK_IN, 0.06 / 1e6)).toBe(0.06);
+  it("rejects an unusable field value rather than storing a broken rate", () => {
+    for (const bad of ["", "abc", "-1"]) {
+      expect(() => fieldValueToRate(REQ_IMAGE, bad)).toThrow();
+      expect(() => fieldValueToRate(TOK_IN, bad)).toThrow();
+    }
   });
 });
 
 describe("PRICEABLE_DIMENSION_UNITS", () => {
   it("is exactly the platform's metered pairs minus cost:usd (which IS the price)", () => {
     const expected = DIMENSION_UNIT_SPECS.map((s) => dimensionUnitKey(s.dimension, s.unit)).filter(
-      (k) => k !== "cost:usd",
+      (k) => k !== "cost:usd_micros",
     );
     expect([...PRICEABLE_DIMENSION_UNITS].sort()).toEqual([...expected].sort());
   });
@@ -117,7 +130,7 @@ describe("buildModelRows (no overrides)", () => {
     expect(rows.every((r) => Object.keys(r.override).length === 0)).toBe(true);
   });
 
-  it("exposes token pricing in $/MTok (haiku $1 in / $5 out)", () => {
+  it("exposes token pricing as micros/token, identical to $/MTok (haiku $1 in / $5 out)", () => {
     const haiku = find(rows, HAIKU);
     expect(haiku.effective.pricing).toEqual({ [TOK_IN]: 1, [TOK_OUT]: 5 });
     expect(haiku.effective.vision).toBe(true);
@@ -125,8 +138,8 @@ describe("buildModelRows (no overrides)", () => {
   });
 
   it("exposes the NON-token rates the editor used to hide entirely", () => {
-    expect(find(rows, CANVAS).effective.pricing).toEqual({ [REQ_IMAGE]: 0.04 });
-    expect(find(rows, REEL).effective.pricing).toEqual({ [DURATION]: 0.08 });
+    expect(find(rows, CANVAS).effective.pricing).toEqual({ [REQ_IMAGE]: 40_000 });
+    expect(find(rows, REEL).effective.pricing).toEqual({ [DURATION]: 80 });
   });
 
   it("carries each model's output modality (it decides the delivery channel)", () => {
@@ -143,7 +156,7 @@ describe("buildModelRows (no overrides)", () => {
 describe("buildModelRows (with overrides)", () => {
   it("merges a token-pricing override into effective, keeps source=platform", () => {
     const rows = buildModelRows([
-      row({ model_id: HAIKU, pricing_json: JSON.stringify({ [TOK_IN]: 2 / 1e6, [TOK_OUT]: 8 / 1e6 }) }),
+      row({ model_id: HAIKU, pricing_json: JSON.stringify({ [TOK_IN]: 2, [TOK_OUT]: 8 }) }),
     ]);
     const haiku = find(rows, HAIKU);
     expect(haiku.effective.pricing).toEqual({ [TOK_IN]: 2, [TOK_OUT]: 8 });
@@ -193,7 +206,7 @@ describe("buildModelRows (with overrides)", () => {
       row({
         model_id: "acme.custom-1",
         provider: "openai",
-        pricing_json: JSON.stringify({ [TOK_IN]: 0.5 / 1e6, [TOK_OUT]: 1.5 / 1e6 }),
+        pricing_json: JSON.stringify({ [TOK_IN]: 0.5, [TOK_OUT]: 1.5 }),
       }),
     ]);
     const custom = find(rows, "acme.custom-1");
@@ -265,24 +278,26 @@ describe("rowToOverride", () => {
 describe("overrideInputToColumns", () => {
   it("stores token rates divided down to USD per single token", () => {
     const cols = overrideInputToColumns({ pricing: { [TOK_IN]: 3, [TOK_OUT]: 15 } });
-    expect(JSON.parse(cols.pricing_json!)).toEqual({ [TOK_IN]: 3 / 1e6, [TOK_OUT]: 15 / 1e6 });
+    expect(JSON.parse(cols.pricing_json!)).toEqual({ [TOK_IN]: 3, [TOK_OUT]: 15 });
   });
 
   it("stores a per-image / per-second rate UNSCALED", () => {
-    const cols = overrideInputToColumns({ pricing: { [REQ_IMAGE]: 0.04, [DURATION]: 0.08 } });
-    expect(JSON.parse(cols.pricing_json!)).toEqual({ [REQ_IMAGE]: 0.04, [DURATION]: 0.08 });
+    const cols = overrideInputToColumns({ pricing: { [REQ_IMAGE]: 40_000, [DURATION]: 80 } });
+    expect(JSON.parse(cols.pricing_json!)).toEqual({ [REQ_IMAGE]: 40_000, [DURATION]: 80 });
   });
 
   it("PRESERVES non-token rates alongside token rates in one save", () => {
     // The old editor could only send a token pair, so this combination was
     // unreachable and any save dropped the non-token key.
+    // Canonical rates in, the same canonical rates out — there is no longer any
+    // conversion at this layer to drop or mangle a key.
     const cols = overrideInputToColumns({
-      pricing: { [TOK_IN]: 1, [TOK_OUT]: 2, [REQ_IMAGE]: 0.04 },
+      pricing: { [TOK_IN]: 1, [TOK_OUT]: 2, [REQ_IMAGE]: 40_000 },
     });
     expect(JSON.parse(cols.pricing_json!)).toEqual({
-      [TOK_IN]: 1e-6,
-      [TOK_OUT]: 2e-6,
-      [REQ_IMAGE]: 0.04,
+      [TOK_IN]: 1,
+      [TOK_OUT]: 2,
+      [REQ_IMAGE]: 40_000,
     });
   });
 
@@ -299,9 +314,9 @@ describe("overrideInputToColumns", () => {
 
   it("drops a non-finite rate rather than persisting NaN/Infinity as a price", () => {
     const cols = overrideInputToColumns({
-      pricing: { [TOK_IN]: Number.NaN, [REQ_IMAGE]: 0.04 } as Record<string, number>,
+      pricing: { [TOK_IN]: Number.NaN, [REQ_IMAGE]: 40_000 } as Record<string, number>,
     });
-    expect(JSON.parse(cols.pricing_json!)).toEqual({ [REQ_IMAGE]: 0.04 });
+    expect(JSON.parse(cols.pricing_json!)).toEqual({ [REQ_IMAGE]: 40_000 });
   });
 
   it("maps a null inferenceProfileId to cleared, a string to set, absent to inherit", () => {
@@ -385,7 +400,7 @@ describe("validatePricing", () => {
   });
 
   it("rejects a key that is not a metered (dimension, unit) pair", () => {
-    // A price on an unknown key would never be applied by deriveCostUsd — the
+    // A price on an unknown key would never be applied by deriveCostMicros — the
     // model would read as "priced" while contributing nothing to the cost gate.
     for (const key of ["input:widgets", "gpu:seconds", "tokens", "", "input:"]) {
       expect(validatePricing({ [key]: 1 }), key).toMatch(/not a metered/);
@@ -395,7 +410,7 @@ describe("validatePricing", () => {
   it("rejects cost:usd as a rate (it is the derived total, not a price)", () => {
     // cost:usd IS a metered pair, so this is caught by the priceable list, not
     // by isKnownDimensionUnit — assert the editor can't offer it.
-    expect(PRICEABLE_DIMENSION_UNITS).not.toContain("cost:usd");
+    expect(PRICEABLE_DIMENSION_UNITS).not.toContain("cost:usd_micros");
   });
 
   it("rejects a non-numeric, negative, or non-finite rate", () => {
@@ -460,7 +475,7 @@ describe("malformed stored JSON", () => {
 
   it("surfaces the half of a partially-priced row that is a number", () => {
     const rows = buildModelRows([
-      row({ model_id: HAIKU, pricing_json: JSON.stringify({ [TOK_IN]: 2 / 1e6 }) }),
+      row({ model_id: HAIKU, pricing_json: JSON.stringify({ [TOK_IN]: 2 }) }),
     ]);
     const haiku = find(rows, HAIKU);
     expect(haiku.override.pricing).toEqual({ [TOK_IN]: 2 });

@@ -58,7 +58,10 @@ export type InvokeCapabilityResult =
       model: string;
       text: string;
       usage: CapabilityUsage;
-      estCostUsd: number;
+      /** Reconciled cost of this invocation, in canonical micros — millionths
+       * of a dollar (see money.ts). Format for display; never do currency
+       * arithmetic in dollars. */
+      estCostMicros: number;
       invocationId: string;
     }
   | {
@@ -145,7 +148,7 @@ export async function invokeCapability(
       model: String(parsed.model ?? request.model),
       text: String(parsed.text ?? ""),
       usage: (parsed.usage as CapabilityUsage) ?? { inputTokens: 0, outputTokens: 0 },
-      estCostUsd: Number(parsed.estCostUsd ?? 0),
+      estCostMicros: Number(parsed.estCostMicros ?? 0),
       invocationId: String(parsed.invocationId ?? ""),
     };
   }
@@ -196,7 +199,10 @@ export type InvokeCapabilityImageResult =
       ok: true;
       model: string;
       output: CapabilityImageOutput;
-      estCostUsd: number;
+      /** Reconciled cost of this invocation, in canonical micros — millionths
+       * of a dollar (see money.ts). Format for display; never do currency
+       * arithmetic in dollars. */
+      estCostMicros: number;
       invocationId: string;
     };
 
@@ -238,7 +244,7 @@ export async function invokeCapabilityImage(
         keys: out.keys ?? [],
         totalBytes: Number(out.totalBytes ?? 0),
       },
-      estCostUsd: Number(parsed.estCostUsd ?? 0),
+      estCostMicros: Number(parsed.estCostMicros ?? 0),
       invocationId: String(parsed.invocationId ?? ""),
     };
   }
@@ -286,7 +292,10 @@ export type CapabilityStreamEvent =
       type: "done";
       model: string;
       usage: CapabilityUsage;
-      estCostUsd: number;
+      /** Reconciled cost of this invocation, in canonical micros — millionths
+       * of a dollar (see money.ts). Format for display; never do currency
+       * arithmetic in dollars. */
+      estCostMicros: number;
       invocationId: string;
     }
   | { type: "error"; status: number; error: string; message?: string };

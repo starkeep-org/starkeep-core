@@ -17,9 +17,18 @@
  *
  * Pricing drives the derived `cost` gate and the ledger; Bedrock never returns a
  * dollar figure (§3.5), so cost is always estimated from usage × these rates.
+ * Rates are canonical {@link MicrosPerUnit} — see money.ts, which owns every
+ * currency unit conversion; this module only ever holds already-canonical rates.
  */
 
 import { dimensionUnitKey } from "./dimensions.js";
+import {
+  usdPerMTokToMicrosPerToken,
+  usdPerUnitToMicrosPerUnit,
+  usdPerSecondToMicrosPerMs,
+  assertRate,
+  type MicrosPerUnit,
+} from "./money.js";
 
 export type ModelProvider = "anthropic" | "openai" | "qwen" | "kimi" | "glm" | "amazon";
 
@@ -36,9 +45,18 @@ export type ModelProvider = "anthropic" | "openai" | "qwen" | "kimi" | "glm" | "
  */
 export type OutputModality = "text" | "image" | "audio" | "video";
 
-/** Per-`(dimension:unit)` price, in USD per single unit. Token rates are stored
- * here already divided down from the conventional $/MTok (see {@link perMTok}). */
-export type PricingTable = Readonly<Record<string, number>>;
+/**
+ * Per-`(dimension:unit)` price, in {@link MicrosPerUnit} — micros of currency per
+ * ONE canonical quantity unit (per token, per pixel, per millisecond, …). This is
+ * the only price representation that exists anywhere; see money.ts.
+ *
+ * A token rate needs NO conversion to author, because `$x/MTok` and
+ * `x micros/token` are the same number (see
+ * {@link usdPerMTokToMicrosPerToken}) — so `{"input:tokens": 3}` is both "$3 per
+ * MTok" and the stored canonical rate, and there is no display encoding to
+ * round-trip.
+ */
+export type PricingTable = Readonly<Record<string, MicrosPerUnit>>;
 
 export interface ModelEstimates {
   /** Tokens to charge per input image before Bedrock returns the exact count —
@@ -82,21 +100,28 @@ export interface OperatorModelOverride {
    * always wins; this field is ignored when a platform row exists (see
    * {@link effectiveModel}). */
   outputModality?: OutputModality;
-  /** Per-`(dimension:unit)` USD/unit overrides, merged over the platform table. */
-  pricing?: Readonly<Record<string, number>>;
+  /** Per-`(dimension:unit)` rate overrides in canonical {@link MicrosPerUnit},
+   * merged over the platform table. Validated where the row is parsed. */
+  pricing?: PricingTable;
   estimates?: ModelEstimates;
-}
-
-/** Convert a conventional $/million-token rate to USD per single token. */
-export function perMTok(usdPerMillion: number): number {
-  return usdPerMillion / 1_000_000;
 }
 
 const TOK_IN = dimensionUnitKey("input", "tokens");
 const TOK_OUT = dimensionUnitKey("output", "tokens");
 
+/**
+ * Seed a token price table from the provider's published `$/MTok` figures.
+ *
+ * The arguments are the numbers Bedrock prints, and they pass through unchanged
+ * — `$3/MTok` IS 3 micros/token. The named ingest is still used rather than a
+ * bare object literal so that the one place foreign units enter the registry is
+ * explicit and validated.
+ */
 function tokenPricing(inPerMTok: number, outPerMTok: number): PricingTable {
-  return { [TOK_IN]: perMTok(inPerMTok), [TOK_OUT]: perMTok(outPerMTok) };
+  return {
+    [TOK_IN]: usdPerMTokToMicrosPerToken(inPerMTok),
+    [TOK_OUT]: usdPerMTokToMicrosPerToken(outPerMTok),
+  };
 }
 
 /**
@@ -180,7 +205,7 @@ export const PLATFORM_MODEL_REGISTRY: readonly PlatformModelEntry[] = [
     // output is written asynchronously to S3 by StartAsyncInvoke (plan §3.8) —
     // the async start/poll flow, NOT the synchronous Converse path. Billed per
     // second of generated video, which the CDS controls via the request's
-    // requested duration — so cost is CDS-derived (priced on output:duration_s)
+    // requested duration — so cost is CDS-derived (priced on output:duration_ms)
     // and the load-bearing cost gate holds without any app self-report. Exact
     // per-second rate is confirm-at-implementation (open question 12); seeded so
     // the async path is exercised and overridable by the operator. `amazon.nova-
@@ -191,7 +216,9 @@ export const PLATFORM_MODEL_REGISTRY: readonly PlatformModelEntry[] = [
     vision: false,
     outputModality: "video",
     defaults: {
-      pricing: { [dimensionUnitKey("output", "duration_s")]: 0.08 },
+      // Bedrock quotes ~$0.08 per second of generated video; the canonical time
+      // unit is `duration_ms`, so the rate is 80 micros/ms.
+      pricing: { [dimensionUnitKey("output", "duration_ms")]: usdPerSecondToMicrosPerMs(0.08) },
       estimates: {},
     },
   },
@@ -214,7 +241,8 @@ export const PLATFORM_MODEL_REGISTRY: readonly PlatformModelEntry[] = [
     vision: false,
     outputModality: "image",
     defaults: {
-      pricing: { [dimensionUnitKey("requests", "image")]: 0.04 },
+      // ~$0.04 per standard 1024x1024 image → 40_000 micros per request.
+      pricing: { [dimensionUnitKey("requests", "image")]: usdPerUnitToMicrosPerUnit(0.04) },
       estimates: {},
     },
   },
@@ -266,9 +294,11 @@ export function effectiveModel(
     return undefined;
   }
 
-  const pricing: Record<string, number> = { ...(platform?.defaults.pricing ?? {}) };
+  const pricing: Record<string, MicrosPerUnit> = { ...(platform?.defaults.pricing ?? {}) };
   if (override?.pricing) {
-    for (const [k, v] of Object.entries(override.pricing)) pricing[k] = v;
+    // An override arrives from the operator overrides table; re-assert so a
+    // malformed stored rate fails here rather than inside cost derivation.
+    for (const [k, v] of Object.entries(override.pricing)) pricing[k] = assertRate(v, `rate for ${k}`);
   }
 
   const estimates: ModelEstimates = {

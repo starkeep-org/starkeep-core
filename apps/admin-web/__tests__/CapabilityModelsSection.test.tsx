@@ -57,7 +57,7 @@ function canvasRow(over: Partial<ModelRow> = {}): ModelRow {
     inferenceProfileId: null,
     vision: false,
     outputModality: "image" as const,
-    pricing: { "requests:image": 0.04 },
+    pricing: { "requests:image": 40_000 }, // $0.04/image
     imageTokens: null,
   };
   return {
@@ -239,7 +239,7 @@ describe("the sparse-override contract", () => {
     fireEvent.click(toggleFor(/^Pricing$/));
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(writeCalls()).toHaveLength(1));
-    expect(writeCalls()[0]!.body.override).toEqual({ pricing: { "requests:image": 0.04 } });
+    expect(writeCalls()[0]!.body.override).toEqual({ pricing: { "requests:image": 40_000 } });
   });
 
   it("can add a NON-token rate alongside the token pair", async () => {
@@ -254,7 +254,7 @@ describe("the sparse-override contract", () => {
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(writeCalls()).toHaveLength(1));
     expect(writeCalls()[0]!.body.override).toEqual({
-      pricing: { "input:tokens": 1, "output:tokens": 5, "requests:image": 0.04 },
+      pricing: { "input:tokens": 1, "output:tokens": 5, "requests:image": 40_000 },
     });
   });
 
@@ -365,16 +365,16 @@ describe("adding an operator-defined model", () => {
     fireEvent.change(screen.getByLabelText("Output modality"), { target: { value: "video" } });
     fireEvent.click(toggleFor(/^Pricing$/));
     const selects = screen.getAllByLabelText("Price dimension") as HTMLSelectElement[];
-    fireEvent.change(selects[0]!, { target: { value: "output:duration_s" } });
+    fireEvent.change(selects[0]!, { target: { value: "output:duration_ms" } });
     fireEvent.click(screen.getByLabelText("Remove output:tokens"));
-    fireEvent.change(screen.getByLabelText("Rate for output:duration_s"), {
+    fireEvent.change(screen.getByLabelText("Rate for output:duration_ms"), {
       target: { value: "0.08" },
     });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(writeCalls()).toHaveLength(1));
     expect(writeCalls()[0]!.body.override).toMatchObject({
       outputModality: "video",
-      pricing: { "output:duration_s": 0.08 },
+      pricing: { "output:duration_ms": 80_000 }, // typed $0.08 per unit
     });
   });
 });
