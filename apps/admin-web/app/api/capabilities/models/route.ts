@@ -42,6 +42,7 @@ export async function POST(req: NextRequest) {
         "inference_profile_id",
         "inference_profile_cleared",
         "vision",
+        "output_modality",
         "pricing_json",
         "estimates_json",
       ])

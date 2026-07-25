@@ -104,6 +104,13 @@ beforeEach(() => {
 // GET-equivalent: the registry read
 // ---------------------------------------------------------------------------
 
+interface RegistryBody {
+  models: Array<{
+    modelId: string;
+    effective: { pricing: Record<string, number>; outputModality: string };
+  }>;
+}
+
 describe("POST /api/capabilities/models", () => {
   it("returns the effective registry built from the override rows", async () => {
     pgState.rows = [
@@ -113,25 +120,38 @@ describe("POST /api/capabilities/models", () => {
         inference_profile_id: null,
         inference_profile_cleared: null,
         vision: null,
+        output_modality: null,
         pricing_json: JSON.stringify({ "input:tokens": 2 / 1e6, "output:tokens": 8 / 1e6 }),
         estimates_json: null,
       },
     ];
     const res = await modelsPOST(jsonReq(CREDS));
     expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      models: Array<{ modelId: string; effective: { inputPerMTok?: number } }>;
-    };
+    const body = (await res.json()) as RegistryBody;
     const haiku = body.models.find((m) => m.modelId === "anthropic.claude-haiku-4-5")!;
-    expect(haiku.effective.inputPerMTok).toBe(2);
+    expect(haiku.effective.pricing["input:tokens"]).toBe(2);
     // Every platform model is present, not just the overridden one.
     expect(body.models.length).toBeGreaterThan(1);
+  });
+
+  it("ships the non-token rates and modality of the generation models", async () => {
+    const res = await modelsPOST(jsonReq(CREDS));
+    const body = (await res.json()) as RegistryBody;
+    const canvas = body.models.find((m) => m.modelId === "amazon.nova-canvas-v1:0")!;
+    expect(canvas.effective.pricing).toEqual({ "requests:image": 0.04 });
+    expect(canvas.effective.outputModality).toBe("image");
+    const reel = body.models.find((m) => m.modelId === "amazon.nova-reel-v1:1")!;
+    expect(reel.effective.pricing).toEqual({ "output:duration_s": 0.08 });
+    expect(reel.effective.outputModality).toBe("video");
   });
 
   it("selects the override columns and closes the pool", async () => {
     await modelsPOST(jsonReq(CREDS));
     expect(pgState.queries[0]!.sql).toContain('"shared"."capability_model_overrides"');
     expect(pgState.queries[0]!.sql).toContain('"inference_profile_cleared"');
+    // output_modality must be selected or an operator model's delivery channel
+    // silently reads as "text".
+    expect(pgState.queries[0]!.sql).toContain('"output_modality"');
     expect(pgState.ended).toBe(1);
   });
 
@@ -177,22 +197,73 @@ describe("POST /api/capabilities/models/override — validation", () => {
     // Platform ids are in the registry by definition; the regex is only a guard
     // for operator-typed ids.
     const res = await overridePOST(
-      jsonReq({ ...CREDS, modelId: "amazon.nova-reel-v1:1", override: { inputPerMTok: 1, outputPerMTok: 2 } }),
+      jsonReq({
+        ...CREDS,
+        modelId: "amazon.nova-reel-v1:1",
+        override: { pricing: { "output:duration_s": 0.1 } },
+      }),
     );
     expect(res.status).toBe(200);
   });
 
-  it("400s a half-set pricing pair (either direction)", async () => {
+  it("400s a half-set TOKEN pair (either direction)", async () => {
     const onlyIn = await overridePOST(
-      jsonReq({ ...CREDS, modelId: "anthropic.claude-haiku-4-5", override: { inputPerMTok: 2 } }),
+      jsonReq({
+        ...CREDS,
+        modelId: "anthropic.claude-haiku-4-5",
+        override: { pricing: { "input:tokens": 2 } },
+      }),
     );
     expect(onlyIn.status).toBe(400);
     expect((await onlyIn.json()).error).toBe("input and output $/MTok must be set together");
 
     const onlyOut = await overridePOST(
-      jsonReq({ ...CREDS, modelId: "anthropic.claude-haiku-4-5", override: { outputPerMTok: 8 } }),
+      jsonReq({
+        ...CREDS,
+        modelId: "anthropic.claude-haiku-4-5",
+        override: { pricing: { "output:tokens": 8 } },
+      }),
     );
     expect(onlyOut.status).toBe(400);
+    expect(pgState.queries).toHaveLength(0);
+  });
+
+  it("accepts a lone NON-token rate (per-image / per-second models have no pair)", async () => {
+    const res = await overridePOST(
+      jsonReq({
+        ...CREDS,
+        modelId: "amazon.nova-canvas-v1:0",
+        override: { pricing: { "requests:image": 0.06 } },
+      }),
+    );
+    expect(res.status).toBe(200);
+    // …and it is stored unscaled, unlike a token rate.
+    expect(
+      String(pgState.queries[0]!.params.find((p) => typeof p === "string" && p.includes("requests"))),
+    ).toBe(JSON.stringify({ "requests:image": 0.06 }));
+  });
+
+  it("400s a price on a key the platform does not meter", async () => {
+    const res = await overridePOST(
+      jsonReq({
+        ...CREDS,
+        modelId: "anthropic.claude-haiku-4-5",
+        override: { pricing: { "gpu:seconds": 1 } },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/not a metered/);
+    expect(pgState.queries).toHaveLength(0);
+  });
+
+  it("400s a negative or non-numeric rate", async () => {
+    for (const pricing of [{ "requests:image": -1 }, { "requests:image": "free" }]) {
+      const res = await overridePOST(
+        jsonReq({ ...CREDS, modelId: "amazon.nova-canvas-v1:0", override: { pricing } }),
+      );
+      expect(res.status, JSON.stringify(pricing)).toBe(400);
+      expect((await res.json()).error).toMatch(/non-negative/);
+    }
     expect(pgState.queries).toHaveLength(0);
   });
 
@@ -201,7 +272,7 @@ describe("POST /api/capabilities/models/override — validation", () => {
       jsonReq({
         ...CREDS,
         modelId: "anthropic.claude-haiku-4-5",
-        override: { inputPerMTok: 0, outputPerMTok: 0 },
+        override: { pricing: { "input:tokens": 0, "output:tokens": 0 } },
       }),
     );
     expect(res.status).toBe(200);
@@ -209,7 +280,11 @@ describe("POST /api/capabilities/models/override — validation", () => {
 
   it("400s an operator-DEFINED model with no provider (it can't be gated/metered)", async () => {
     const res = await overridePOST(
-      jsonReq({ ...CREDS, modelId: "acme.custom-1", override: { inputPerMTok: 1, outputPerMTok: 2 } }),
+      jsonReq({
+        ...CREDS,
+        modelId: "acme.custom-1",
+        override: { pricing: { "input:tokens": 1, "output:tokens": 2 } },
+      }),
     );
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/requires a provider/);
@@ -221,10 +296,68 @@ describe("POST /api/capabilities/models/override — validation", () => {
       jsonReq({
         ...CREDS,
         modelId: "anthropic.claude-haiku-4-5",
-        override: { inputPerMTok: 2, outputPerMTok: 8 },
+        override: { pricing: { "input:tokens": 2, "output:tokens": 8 } },
       }),
     );
     expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /api/capabilities/models/override — output modality", () => {
+  it("stores the modality of an operator-DEFINED model", async () => {
+    const res = await overridePOST(
+      jsonReq({
+        ...CREDS,
+        modelId: "acme.video-1",
+        override: {
+          provider: "amazon",
+          outputModality: "video",
+          pricing: { "output:duration_s": 0.05 },
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(pgState.queries[0]!.sql).toContain('"output_modality"');
+    expect(pgState.queries[0]!.params).toContain("video");
+  });
+
+  it("carries output_modality through the upsert's DO UPDATE set", async () => {
+    // Without this, re-saving an operator model would leave a stale modality —
+    // and the modality decides the delivery channel (inline vs sync-S3 vs async).
+    await overridePOST(
+      jsonReq({ ...CREDS, modelId: "acme.video-1", override: { provider: "amazon", outputModality: "audio" } }),
+    );
+    const sql = pgState.queries[0]!.sql;
+    const doUpdate = sql.slice(sql.indexOf("do update"));
+    expect(doUpdate).toContain('"output_modality" = "excluded"."output_modality"');
+  });
+
+  it("400s an unknown modality", async () => {
+    const res = await overridePOST(
+      jsonReq({
+        ...CREDS,
+        modelId: "acme.video-1",
+        override: { provider: "amazon", outputModality: "hologram" },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/outputModality must be one of/);
+    expect(pgState.queries).toHaveLength(0);
+  });
+
+  it("400s an attempt to re-point a PLATFORM model's modality", async () => {
+    // effectiveModel() ignores a stored modality for a platform id, so accepting
+    // it would persist a value that never takes effect.
+    const res = await overridePOST(
+      jsonReq({
+        ...CREDS,
+        modelId: "anthropic.claude-haiku-4-5",
+        override: { outputModality: "video" },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/intrinsic and cannot be overridden/);
+    expect(pgState.queries).toHaveLength(0);
   });
 });
 
@@ -238,7 +371,7 @@ describe("POST /api/capabilities/models/override — writes", () => {
       jsonReq({
         ...CREDS,
         modelId: "anthropic.claude-haiku-4-5",
-        override: { inputPerMTok: 2, outputPerMTok: 8, vision: false },
+        override: { pricing: { "input:tokens": 2, "output:tokens": 8 }, vision: false },
       }),
     );
     expect(res.status).toBe(200);

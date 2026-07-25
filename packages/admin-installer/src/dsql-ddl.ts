@@ -123,8 +123,13 @@ async function loadModelOverrides(
  *      model FAILS the install with a clear error until the operator defines it;
  *   2. write the `capability_grants` row (approved models + declared reports);
  *   3. if a monthly budget was consented, write it as one per-app `cost`/`usd`
- *      calendar-month gate (origin `app-consent`), which the operator can later
- *      tighten or supplement.
+ *      calendar-month gate (origin `app-consent`).
+ *
+ * The consent gate is OWNED BY THIS PATH — the upsert below rewrites its limit on
+ * every reinstall — so the operator does not edit it. They tighten or supplement
+ * it by adding their own `operator:`-prefixed gates in admin-web (Settings →
+ * Capability Limits); gates are independent and any breach denies, so the
+ * strictest matching gate wins without touching the app's row.
  * Also grants the app's PG role INSERT/UPDATE on the ledger so the broker can
  * write reservations under the per-app connection.
  *

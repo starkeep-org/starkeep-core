@@ -5,6 +5,8 @@ import {
   isKnownDimensionUnit,
   isCdsMeasured,
   isNonGenericDimensionUnit,
+  lookupDimensionUnit,
+  DIMENSION_UNIT_SPECS,
   REPORTABLE_DIMENSION_UNITS,
   // registry
   CAPABILITY_BEDROCK_INVOKE,
@@ -69,6 +71,56 @@ describe("dimension model", () => {
     expect(isKnownDimensionUnit("input", "tokens")).toBe(true);
     expect(isKnownDimensionUnit("input", "furlongs")).toBe(false);
     expect(isKnownDimensionUnit("bogus", "all")).toBe(false);
+  });
+
+  it("looks a pair's whole spec up, and undefined for an unknown one", () => {
+    // The operator gate editor renders its "app-reported" / "best-effort"
+    // caveats straight off this spec, so an absent or wrong one silently
+    // presents a soft limit as a hard cap.
+    expect(lookupDimensionUnit("cost", "usd")).toEqual({
+      dimension: "cost",
+      unit: "usd",
+      source: "cds",
+      timing: "post",
+      generic: true,
+    });
+    expect(lookupDimensionUnit("input", "furlongs")).toBeUndefined();
+    expect(lookupDimensionUnit("bogus", "usd")).toBeUndefined();
+  });
+
+  it("classifies WHEN each quantity is knowable (the timing axis)", () => {
+    const timing = (d: string, u: string) => lookupDimensionUnit(d, u)?.timing;
+    // Exact before the call.
+    expect(timing("requests", "all")).toBe("pre");
+    expect(timing("input", "bytes")).toBe("pre");
+    // App-supplied input quantities are knowable pre-call too (the app hands
+    // them over with the request), which is why they can pre-deny.
+    expect(timing("input", "megapixels")).toBe("pre");
+    // Estimated to reserve, exact from Bedrock's usage afterwards.
+    expect(timing("input", "tokens")).toBe("estimated");
+    // Only known after / during generation.
+    expect(timing("output", "tokens")).toBe("post");
+    expect(timing("output", "bytes")).toBe("post");
+    expect(timing("output", "megapixels")).toBe("post");
+    expect(timing("credits", "count")).toBe("post");
+  });
+
+  it("makes every OUTPUT unit post-call, whatever its input twin is", () => {
+    // input/output share a unit set but not a timing: nothing about the output
+    // is knowable before the call, so no output gate can ever pre-deny exactly.
+    for (const spec of DIMENSION_UNIT_SPECS.filter((s) => s.dimension === "output")) {
+      expect(spec.timing, spec.unit).toBe("post");
+    }
+  });
+
+  it("keeps the two axes independent — every spec is a valid (source, timing) pair", () => {
+    for (const spec of DIMENSION_UNIT_SPECS) {
+      const key = dimensionUnitKey(spec.dimension, spec.unit);
+      expect(["cds", "app"], key).toContain(spec.source);
+      expect(["pre", "estimated", "post"], key).toContain(spec.timing);
+      // generic is derived from the source, never set independently.
+      expect(spec.generic, key).toBe(spec.source === "cds");
+    }
   });
 });
 

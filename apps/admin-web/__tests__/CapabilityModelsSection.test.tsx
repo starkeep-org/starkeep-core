@@ -30,26 +30,41 @@ vi.mock("@/lib/cognito-auth", () => ({
 
 const { CapabilityModelsSection } = await import("@/components/CapabilityModelsSection");
 
+const HAIKU_VALUES = {
+  provider: "anthropic",
+  inferenceProfileId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  vision: true,
+  outputModality: "text" as const,
+  pricing: { "input:tokens": 1, "output:tokens": 5 },
+  imageTokens: 1600,
+};
+
 function modelRow(over: Partial<ModelRow> = {}): ModelRow {
   return {
     modelId: "anthropic.claude-haiku-4-5",
     source: "platform",
-    effective: {
-      provider: "anthropic",
-      inferenceProfileId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-      vision: true,
-      inputPerMTok: 1,
-      outputPerMTok: 5,
-      imageTokens: 1600,
-    },
-    platform: {
-      provider: "anthropic",
-      inferenceProfileId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-      vision: true,
-      inputPerMTok: 1,
-      outputPerMTok: 5,
-      imageTokens: 1600,
-    },
+    effective: { ...HAIKU_VALUES, pricing: { ...HAIKU_VALUES.pricing } },
+    platform: { ...HAIKU_VALUES, pricing: { ...HAIKU_VALUES.pricing } },
+    override: {},
+    ...over,
+  } as ModelRow;
+}
+
+/** A generation model: priced per image, not per token. */
+function canvasRow(over: Partial<ModelRow> = {}): ModelRow {
+  const values = {
+    provider: "amazon",
+    inferenceProfileId: null,
+    vision: false,
+    outputModality: "image" as const,
+    pricing: { "requests:image": 0.04 },
+    imageTokens: null,
+  };
+  return {
+    modelId: "amazon.nova-canvas-v1:0",
+    source: "platform",
+    effective: { ...values, pricing: { ...values.pricing } },
+    platform: { ...values, pricing: { ...values.pricing } },
     override: {},
     ...over,
   } as ModelRow;
@@ -99,15 +114,27 @@ describe("registry table", () => {
     await renderReady([modelRow()]);
     const row = screen.getByText("anthropic.claude-haiku-4-5").closest("tr")!;
     expect(within(row).getByText("anthropic")).toBeTruthy();
-    expect(within(row).getByText("$1")).toBeTruthy();
-    expect(within(row).getByText("$5")).toBeTruthy();
+    expect(within(row).getByText("input:tokens $1")).toBeTruthy();
+    expect(within(row).getByText("output:tokens $5")).toBeTruthy();
     expect(within(row).getByText("1600")).toBeTruthy();
+  });
+
+  it("shows the NON-token rate and modality of a generation model", async () => {
+    // The token-only table rendered these models as unpriced "—" even though
+    // they carry the rate the cost gate is derived from.
+    await renderReady([canvasRow()]);
+    const row = screen.getByText("amazon.nova-canvas-v1:0").closest("tr")!;
+    expect(within(row).getByText("requests:image $0.04")).toBeTruthy();
+    expect(within(row).getByText("image")).toBeTruthy();
   });
 
   it("badges a platform model, an overridden platform model, and an operator model distinctly", async () => {
     await renderReady([
       modelRow(),
-      modelRow({ modelId: "anthropic.claude-sonnet-5", override: { inputPerMTok: 2 } }),
+      modelRow({
+        modelId: "anthropic.claude-sonnet-5",
+        override: { pricing: { "input:tokens": 2, "output:tokens": 8 } },
+      }),
       modelRow({ modelId: "acme.custom-1", source: "user", platform: null }),
     ]);
     expect(screen.getByText("platform")).toBeTruthy();
@@ -118,19 +145,19 @@ describe("registry table", () => {
   it("renders an em dash for absent pricing / profile rather than 'null'", async () => {
     await renderReady([
       modelRow({
-        modelId: "amazon.nova-reel-v1:1",
+        modelId: "acme.unpriced",
         effective: {
           provider: "amazon",
           inferenceProfileId: null,
           vision: false,
-          inputPerMTok: null,
-          outputPerMTok: null,
+          outputModality: "text",
+          pricing: {},
           imageTokens: null,
         },
         platform: null,
       } as Partial<ModelRow>),
     ]);
-    const row = screen.getByText("amazon.nova-reel-v1:1").closest("tr")!;
+    const row = screen.getByText("acme.unpriced").closest("tr")!;
     expect(within(row).getAllByText("—").length).toBeGreaterThanOrEqual(4);
     expect(within(row).queryByText("null")).toBeNull();
   });
@@ -158,18 +185,25 @@ describe("registry table", () => {
   });
 });
 
+/** Open the edit dialog for the first model. */
+async function openEdit() {
+  fireEvent.click(screen.getAllByText("Edit")[0]!);
+  await waitFor(() => expect(screen.getByText(/^Edit /)).toBeTruthy());
+}
+
+/** The "override this field" checkbox of a labelled OverrideField. Scoped to
+ * the dialog — some labels ("Pricing") also name a table column behind it. */
+function toggleFor(label: RegExp | string): HTMLInputElement {
+  const field = within(screen.getByRole("dialog")).getByText(label).closest("div")!;
+  return within(field).getByRole("checkbox") as HTMLInputElement;
+}
+
+/** The rate input for one "dimension:unit" row of the price editor. */
+function rateInput(key: string): HTMLInputElement {
+  return screen.getByLabelText(`Rate for ${key}`) as HTMLInputElement;
+}
+
 describe("the sparse-override contract", () => {
-  /** Open the edit dialog for the first model. */
-  async function openEdit() {
-    fireEvent.click(screen.getAllByText("Edit")[0]!);
-    await waitFor(() => expect(screen.getByText(/^Edit /)).toBeTruthy());
-  }
-
-  function toggleFor(label: RegExp | string): HTMLInputElement {
-    const field = screen.getByText(label).closest("div")!;
-    return within(field).getByRole("checkbox") as HTMLInputElement;
-  }
-
   it("sends an EMPTY override when no field is toggled on (the reset-to-default path)", async () => {
     await renderReady([modelRow()]);
     await openEdit();
@@ -185,38 +219,86 @@ describe("the sparse-override contract", () => {
   it("sends ONLY the fields whose override toggle is on", async () => {
     await renderReady([modelRow()]);
     await openEdit();
-    fireEvent.click(toggleFor(/Token pricing/));
-    const inputs = screen.getAllByPlaceholderText(/^(in|out)$/) as HTMLInputElement[];
-    fireEvent.change(inputs[0]!, { target: { value: "2" } });
-    fireEvent.change(inputs[1]!, { target: { value: "8" } });
+    fireEvent.click(toggleFor(/^Pricing$/));
+    fireEvent.change(rateInput("input:tokens"), { target: { value: "2" } });
+    fireEvent.change(rateInput("output:tokens"), { target: { value: "8" } });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(writeCalls()).toHaveLength(1));
     // Vision / profile / image tokens stay inherited — they are absent, not null.
-    expect(writeCalls()[0]!.body.override).toEqual({ inputPerMTok: 2, outputPerMTok: 8 });
+    expect(writeCalls()[0]!.body.override).toEqual({
+      pricing: { "input:tokens": 2, "output:tokens": 8 },
+    });
   });
 
-  it("sends pricing as a PAIR, so the server's half-set rejection can't be hit from the UI", async () => {
-    await renderReady([modelRow()]);
+  it("seeds the price editor from the effective table, so a save KEEPS every rate", async () => {
+    // The regression this guards: the editor could only express token rates, so
+    // saving any override on a per-image model wiped `requests:image` — the rate
+    // the cost gate is derived from.
+    await renderReady([canvasRow()]);
     await openEdit();
-    fireEvent.click(toggleFor(/Token pricing/));
+    fireEvent.click(toggleFor(/^Pricing$/));
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(writeCalls()).toHaveLength(1));
-    const override = writeCalls()[0]!.body.override as Record<string, unknown>;
-    expect("inputPerMTok" in override).toBe(true);
-    expect("outputPerMTok" in override).toBe(true);
+    expect(writeCalls()[0]!.body.override).toEqual({ pricing: { "requests:image": 0.04 } });
+  });
+
+  it("can add a NON-token rate alongside the token pair", async () => {
+    await renderReady([modelRow()]);
+    await openEdit();
+    fireEvent.click(toggleFor(/^Pricing$/));
+    fireEvent.click(screen.getByText("Add rate"));
+    // The new row defaults to the first unused key; point it at requests:image.
+    const selects = screen.getAllByLabelText("Price dimension") as HTMLSelectElement[];
+    fireEvent.change(selects[selects.length - 1]!, { target: { value: "requests:image" } });
+    fireEvent.change(rateInput("requests:image"), { target: { value: "0.04" } });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(writeCalls()).toHaveLength(1));
+    expect(writeCalls()[0]!.body.override).toEqual({
+      pricing: { "input:tokens": 1, "output:tokens": 5, "requests:image": 0.04 },
+    });
+  });
+
+  it("can drop a rate entirely", async () => {
+    await renderReady([modelRow()]);
+    await openEdit();
+    fireEvent.click(toggleFor(/^Pricing$/));
+    fireEvent.click(screen.getByLabelText("Remove output:tokens"));
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() =>
+      expect(screen.getByText(/must be set together/)).toBeTruthy(),
+    );
+    // The token pair is enforced client-side too, so the server's 400 is
+    // unreachable from the UI.
+    expect(writeCalls()).toHaveLength(0);
   });
 
   it("rejects a negative price locally, without calling the API", async () => {
     await renderReady([modelRow()]);
     await openEdit();
-    fireEvent.click(toggleFor(/Token pricing/));
-    const inputs = screen.getAllByPlaceholderText(/^(in|out)$/) as HTMLInputElement[];
-    fireEvent.change(inputs[0]!, { target: { value: "-1" } });
+    fireEvent.click(toggleFor(/^Pricing$/));
+    fireEvent.change(rateInput("input:tokens"), { target: { value: "-1" } });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() =>
-      expect(screen.getByText(/must be non-negative numbers/)).toBeTruthy(),
+      expect(screen.getByText(/must be a non-negative number/)).toBeTruthy(),
     );
     expect(writeCalls()).toHaveLength(0);
+  });
+
+  it("rejects a blank rate rather than posting a 0 the operator didn't mean", async () => {
+    await renderReady([canvasRow()]);
+    await openEdit();
+    fireEvent.click(toggleFor(/^Pricing$/));
+    fireEvent.change(rateInput("requests:image"), { target: { value: "" } });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(screen.getByText(/must be a non-negative number/)).toBeTruthy());
+    expect(writeCalls()).toHaveLength(0);
+  });
+
+  it("does not offer an output-modality control for a PLATFORM model", async () => {
+    // Modality is intrinsic there; the API rejects it, so the UI must not ask.
+    await renderReady([modelRow()]);
+    await openEdit();
+    expect(screen.queryByLabelText("Output modality")).toBeNull();
   });
 
   it("surfaces a server rejection in the dialog and keeps it open", async () => {
@@ -261,5 +343,38 @@ describe("adding an operator-defined model", () => {
     const body = writeCalls()[0]!.body;
     expect(body.modelId).toBe("acme.custom-1");
     expect((body.override as Record<string, unknown>).provider).toBeTruthy();
+  });
+
+  it("declares an output modality, defaulting to text", async () => {
+    // Every operator-defined model used to land as `text`, so a custom image or
+    // video model was routed down the inline delivery channel.
+    await renderReady([modelRow()]);
+    fireEvent.click(screen.getByText("Add model"));
+    const idInput = await screen.findByPlaceholderText(/provider\.model-id/);
+    fireEvent.change(idInput, { target: { value: "acme.custom-1" } });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(writeCalls()).toHaveLength(1));
+    expect((writeCalls()[0]!.body.override as Record<string, unknown>).outputModality).toBe("text");
+  });
+
+  it("sends the chosen modality for a generation model", async () => {
+    await renderReady([modelRow()]);
+    fireEvent.click(screen.getByText("Add model"));
+    const idInput = await screen.findByPlaceholderText(/provider\.model-id/);
+    fireEvent.change(idInput, { target: { value: "acme.video-1" } });
+    fireEvent.change(screen.getByLabelText("Output modality"), { target: { value: "video" } });
+    fireEvent.click(toggleFor(/^Pricing$/));
+    const selects = screen.getAllByLabelText("Price dimension") as HTMLSelectElement[];
+    fireEvent.change(selects[0]!, { target: { value: "output:duration_s" } });
+    fireEvent.click(screen.getByLabelText("Remove output:tokens"));
+    fireEvent.change(screen.getByLabelText("Rate for output:duration_s"), {
+      target: { value: "0.08" },
+    });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(writeCalls()).toHaveLength(1));
+    expect(writeCalls()[0]!.body.override).toMatchObject({
+      outputModality: "video",
+      pricing: { "output:duration_s": 0.08 },
+    });
   });
 });

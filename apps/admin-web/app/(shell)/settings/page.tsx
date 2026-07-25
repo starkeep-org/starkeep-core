@@ -2,6 +2,7 @@
 
 import { CloudSetupWizard } from "../../../src/components/CloudSetupWizard";
 import { CapabilityModelsSection } from "../../../src/components/CapabilityModelsSection";
+import { CapabilityGatesSection } from "../../../src/components/CapabilityGatesSection";
 
 export default function SettingsPage() {
   return (
@@ -10,6 +11,10 @@ export default function SettingsPage() {
       <div className="rounded-lg border p-6">
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">Cloud Setup</h2>
         <CloudSetupWizard />
+      </div>
+      <div className="rounded-lg border p-6">
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">Capability Limits</h2>
+        <CapabilityGatesSection />
       </div>
       <div className="rounded-lg border p-6">
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">Capability Models</h2>

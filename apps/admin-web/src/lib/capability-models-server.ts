@@ -1,27 +1,31 @@
 /**
  * Server-only projection between the `shared.capability_model_overrides` DSQL
  * row shape, the platform registry in `@starkeep/protocol-primitives`, and the
- * wire types the editor consumes. Token prices are stored per-token in the DB
- * and shipped as $/MTok. See plan §3.6.
+ * wire types the editor consumes. See plan §3.6.
+ *
+ * Pricing is carried as a WHOLE per-`"dimension:unit"` table rather than a pair
+ * of token rates: the platform registry prices Nova Canvas on `requests:image`
+ * and Nova Reel on `output:duration_s`, and an editor that could only express
+ * token rates both hid those prices and silently dropped them on save (it
+ * rewrote `pricing_json` wholesale). The DB stores USD per single unit; the
+ * wire uses display units (token keys per MTok — see `toDisplayPrice`).
  */
 
 import {
   PLATFORM_MODEL_REGISTRY,
-  perMTok,
-  dimensionUnitKey,
+  isKnownDimensionUnit,
   type OperatorModelOverride,
   type ModelProvider,
+  type OutputModality,
   type PlatformModelEntry,
 } from "@starkeep/protocol-primitives";
-import type {
-  ModelRow,
-  ModelRowValues,
-  ModelOverrideInput,
+import {
+  toDisplayPricing,
+  toStoredPricing,
+  type ModelRow,
+  type ModelRowValues,
+  type ModelOverrideInput,
 } from "./capability-models";
-
-const TOK_IN = dimensionUnitKey("input", "tokens");
-const TOK_OUT = dimensionUnitKey("output", "tokens");
-const PER_MTOK = 1_000_000;
 
 /** Raw override row as selected from DSQL. */
 export interface OverrideRow {
@@ -30,6 +34,9 @@ export interface OverrideRow {
   inference_profile_id: string | null;
   inference_profile_cleared: boolean | null;
   vision: boolean | null;
+  /** Output modality of an operator-DEFINED model; NULL for override-only rows
+   * and for definitions that default to `text` (see `effectiveModel`). */
+  output_modality: string | null;
   pricing_json: string | null;
   estimates_json: string | null;
 }
@@ -38,21 +45,20 @@ function parseObj(json: string | null): Record<string, unknown> {
   if (!json) return {};
   try {
     const v = JSON.parse(json);
-    return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
   } catch {
     return {};
   }
 }
 
-/** $/MTok, rounded to kill float noise from the per-token ↔ $/MTok round-trip
- * (sub-1e-6 $/MTok precision is far finer than any real Bedrock rate). */
-function toPerMTok(perToken: number): number {
-  return Math.round(perToken * PER_MTOK * 1e6) / 1e6;
-}
-
-function pricePerMTok(pricing: Readonly<Record<string, number>>, key: string): number | null {
-  const v = pricing[key];
-  return typeof v === "number" ? toPerMTok(v) : null;
+/** The numeric entries of a stored pricing blob; non-numeric values (a
+ * hand-edited row) are dropped rather than poisoning the merge. */
+function parsePricing(json: string | null): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(parseObj(json))) {
+    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+  }
+  return out;
 }
 
 /** A DSQL override row → the sparse override the platform-merge logic consumes. */
@@ -62,10 +68,11 @@ export function rowToOverride(row: OverrideRow): OperatorModelOverride {
   if (row.inference_profile_cleared) o.inferenceProfileId = null;
   else if (row.inference_profile_id) o.inferenceProfileId = row.inference_profile_id;
   if (row.vision !== null && row.vision !== undefined) o.vision = row.vision;
-  const pricing = parseObj(row.pricing_json);
-  if (Object.keys(pricing).length > 0) o.pricing = pricing as Record<string, number>;
+  if (row.output_modality) o.outputModality = row.output_modality as OutputModality;
+  const pricing = parsePricing(row.pricing_json);
+  if (Object.keys(pricing).length > 0) o.pricing = pricing;
   const estimates = parseObj(row.estimates_json);
-  if (Object.keys(estimates).length > 0) o.estimates = estimates as { imageTokens?: number };
+  if (typeof estimates.imageTokens === "number") o.estimates = { imageTokens: estimates.imageTokens };
   return o;
 }
 
@@ -76,11 +83,9 @@ export function rowToOverrideInput(row: OverrideRow): ModelOverrideInput {
   if (row.inference_profile_cleared) out.inferenceProfileId = null;
   else if (row.inference_profile_id) out.inferenceProfileId = row.inference_profile_id;
   if (row.vision !== null && row.vision !== undefined) out.vision = row.vision;
-  const pricing = parseObj(row.pricing_json);
-  const inTok = pricing[TOK_IN];
-  const outTok = pricing[TOK_OUT];
-  if (typeof inTok === "number") out.inputPerMTok = toPerMTok(inTok);
-  if (typeof outTok === "number") out.outputPerMTok = toPerMTok(outTok);
+  if (row.output_modality) out.outputModality = row.output_modality as OutputModality;
+  const pricing = toDisplayPricing(parsePricing(row.pricing_json));
+  if (Object.keys(pricing).length > 0) out.pricing = pricing;
   const estimates = parseObj(row.estimates_json);
   if (typeof estimates.imageTokens === "number") out.imageTokens = estimates.imageTokens;
   return out;
@@ -91,8 +96,8 @@ function platformValues(p: PlatformModelEntry): ModelRowValues {
     provider: p.provider,
     inferenceProfileId: p.inferenceProfileId ?? null,
     vision: p.vision,
-    inputPerMTok: pricePerMTok(p.defaults.pricing, TOK_IN),
-    outputPerMTok: pricePerMTok(p.defaults.pricing, TOK_OUT),
+    outputModality: p.outputModality ?? "text",
+    pricing: toDisplayPricing(p.defaults.pricing),
     imageTokens: p.defaults.estimates.imageTokens ?? null,
   };
 }
@@ -109,7 +114,7 @@ export function buildModelRows(rows: OverrideRow[]): ModelRow[] {
 
   const effectiveOf = (modelId: string, platform: PlatformModelEntry | null): ModelRowValues => {
     // Re-derive the merged view field-by-field so pricing/estimates merge the
-    // same way the broker's effectiveModel() does, but expressed in $/MTok.
+    // same way the broker's effectiveModel() does, but in display units.
     const ov = overrides.find((o) => o.modelId === modelId);
     const pricing: Record<string, number> = { ...(platform?.defaults.pricing ?? {}) };
     if (ov?.pricing) for (const [k, v] of Object.entries(ov.pricing)) pricing[k] = v;
@@ -120,8 +125,12 @@ export function buildModelRows(rows: OverrideRow[]): ModelRow[] {
       provider: ov?.provider ?? platform?.provider ?? "",
       inferenceProfileId,
       vision: ov?.vision ?? platform?.vision ?? false,
-      inputPerMTok: pricePerMTok(pricing, TOK_IN),
-      outputPerMTok: pricePerMTok(pricing, TOK_OUT),
+      // Mirrors effectiveModel(): a platform model's modality is intrinsic and
+      // always wins; an override's modality only defines an operator model.
+      outputModality: platform
+        ? (platform.outputModality ?? "text")
+        : (ov?.outputModality ?? "text"),
+      pricing: toDisplayPricing(pricing),
       imageTokens: (ov?.estimates?.imageTokens ?? platform?.defaults.estimates.imageTokens) ?? null,
     };
   };
@@ -148,24 +157,27 @@ export function buildModelRows(rows: OverrideRow[]): ModelRow[] {
 }
 
 /** The columns to persist for a save. A field absent from `input` is stored as
- * NULL (inherit). Pricing is written as a per-token table under the token keys. */
+ * NULL (inherit). Pricing is written as a per-unit table keyed
+ * `"dimension:unit"`. */
 export interface OverrideColumns {
   provider: string | null;
   inference_profile_id: string | null;
   inference_profile_cleared: boolean;
   vision: boolean | null;
+  output_modality: string | null;
   pricing_json: string | null;
   estimates_json: string | null;
 }
 
 export function overrideInputToColumns(input: ModelOverrideInput): OverrideColumns {
-  let pricing_json: string | null = null;
-  if (typeof input.inputPerMTok === "number" && typeof input.outputPerMTok === "number") {
-    pricing_json = JSON.stringify({
-      [TOK_IN]: perMTok(input.inputPerMTok),
-      [TOK_OUT]: perMTok(input.outputPerMTok),
-    });
+  const displayPricing = input.pricing ?? {};
+  const numericPricing: Record<string, number> = {};
+  for (const [k, v] of Object.entries(displayPricing)) {
+    if (typeof v === "number" && Number.isFinite(v)) numericPricing[k] = v;
   }
+  const pricing_json =
+    Object.keys(numericPricing).length > 0 ? JSON.stringify(toStoredPricing(numericPricing)) : null;
+
   const estimates_json =
     typeof input.imageTokens === "number"
       ? JSON.stringify({ imageTokens: input.imageTokens })
@@ -183,7 +195,51 @@ export function overrideInputToColumns(input: ModelOverrideInput): OverrideColum
     inference_profile_id: profileId,
     inference_profile_cleared: cleared,
     vision: typeof input.vision === "boolean" ? input.vision : null,
+    output_modality: input.outputModality ?? null,
     pricing_json,
     estimates_json,
   };
+}
+
+/** True when the override carries nothing at all — equivalent to no override,
+ * so a platform model takes the DELETE branch rather than persisting an
+ * all-NULL row. */
+export function isEmptyOverride(cols: OverrideColumns): boolean {
+  return (
+    cols.provider === null &&
+    cols.inference_profile_id === null &&
+    cols.inference_profile_cleared === false &&
+    cols.vision === null &&
+    cols.output_modality === null &&
+    cols.pricing_json === null &&
+    cols.estimates_json === null
+  );
+}
+
+/**
+ * Validate a posted pricing table. Every key must be a `(dimension, unit)` the
+ * platform meters — a price on an unknown key would never be applied by
+ * `deriveCostUsd`, so it would silently read as "priced" while contributing
+ * nothing to the cost gate. The two token rates must be set together for the
+ * same reason the pair was always enforced: a model priced on input tokens but
+ * not output under-counts every call.
+ */
+export function validatePricing(pricing: Record<string, unknown> | undefined): string | null {
+  if (pricing === undefined) return null;
+  if (typeof pricing !== "object" || pricing === null || Array.isArray(pricing)) {
+    return "pricing must be an object keyed by \"dimension:unit\"";
+  }
+  for (const [key, value] of Object.entries(pricing)) {
+    const [dimension, unit] = key.split(":");
+    if (!dimension || !unit || !isKnownDimensionUnit(dimension, unit)) {
+      return `pricing key "${key}" is not a metered (dimension, unit) pair`;
+    }
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      return `pricing for "${key}" must be a non-negative number`;
+    }
+  }
+  const hasIn = "input:tokens" in pricing;
+  const hasOut = "output:tokens" in pricing;
+  if (hasIn !== hasOut) return "input and output $/MTok must be set together";
+  return null;
 }

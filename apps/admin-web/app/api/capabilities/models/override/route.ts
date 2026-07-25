@@ -14,8 +14,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { PLATFORM_MODEL_REGISTRY } from "@starkeep/protocol-primitives";
 import { connectInstallerDsql, dsqlCompiler, DsqlAdminError } from "../../../../../src/lib/dsql-admin";
-import { overrideInputToColumns } from "../../../../../src/lib/capability-models-server";
-import type { ModelOverrideInput } from "../../../../../src/lib/capability-models";
+import {
+  overrideInputToColumns,
+  isEmptyOverride,
+  validatePricing,
+} from "../../../../../src/lib/capability-models-server";
+import {
+  MODEL_OUTPUT_MODALITIES,
+  type ModelOverrideInput,
+} from "../../../../../src/lib/capability-models";
 
 // Same shape the manifest validator requires (provider-prefixed id).
 const MODEL_ID_RE = /^[a-z0-9]+\.[a-z0-9][a-z0-9._-]*$/;
@@ -45,14 +52,32 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  // Pricing is edited as a pair — reject a half-set that can't be metered.
-  const hasIn = typeof override.inputPerMTok === "number";
-  const hasOut = typeof override.outputPerMTok === "number";
-  if (hasIn !== hasOut) {
-    return NextResponse.json(
-      { error: "input and output $/MTok must be set together" },
-      { status: 400 },
-    );
+  // Every priced key must be a metered (dimension, unit) pair, and the token
+  // rates come as a pair — a half-set under-counts every call.
+  const pricingError = validatePricing(override.pricing as Record<string, unknown> | undefined);
+  if (pricingError) {
+    return NextResponse.json({ error: pricingError }, { status: 400 });
+  }
+
+  // Output modality DEFINES an operator model; it is not an override. The
+  // broker ignores it for a platform id (modality is intrinsic there), so
+  // accepting it would silently store a value that never takes effect.
+  if (override.outputModality !== undefined) {
+    if (!MODEL_OUTPUT_MODALITIES.includes(override.outputModality)) {
+      return NextResponse.json(
+        { error: `outputModality must be one of ${MODEL_OUTPUT_MODALITIES.join(", ")}` },
+        { status: 400 },
+      );
+    }
+    if (isPlatform) {
+      return NextResponse.json(
+        {
+          error:
+            "A platform model's output modality is intrinsic and cannot be overridden.",
+        },
+        { status: 400 },
+      );
+    }
   }
 
   const cols = overrideInputToColumns(override);
@@ -79,15 +104,7 @@ export async function POST(req: NextRequest) {
   try {
     // An entirely-empty override on a platform model is equivalent to no
     // override — delete rather than persist an all-NULL row.
-    const empty =
-      cols.provider === null &&
-      cols.inference_profile_id === null &&
-      cols.inference_profile_cleared === false &&
-      cols.vision === null &&
-      cols.pricing_json === null &&
-      cols.estimates_json === null;
-
-    if (isPlatform && empty) {
+    if (isPlatform && isEmptyOverride(cols)) {
       const del = dsqlCompiler
         .deleteFrom(TABLE)
         .where("model_id", "=", modelId)
@@ -105,6 +122,7 @@ export async function POST(req: NextRequest) {
           inference_profile_id: eb.ref("excluded.inference_profile_id"),
           inference_profile_cleared: eb.ref("excluded.inference_profile_cleared"),
           vision: eb.ref("excluded.vision"),
+          output_modality: eb.ref("excluded.output_modality"),
           pricing_json: eb.ref("excluded.pricing_json"),
           estimates_json: eb.ref("excluded.estimates_json"),
         })),
