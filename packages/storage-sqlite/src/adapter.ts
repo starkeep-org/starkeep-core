@@ -25,12 +25,15 @@ import {
   TransactionError,
   encodeLabelCursor,
   decodeLabelCursor,
+  encodeLabelScanCursor,
+  decodeLabelScanCursor,
 } from "@starkeep/storage-adapter";
 import { sql as kSql } from "kysely";
 import {
   recordToRow,
   rowToRecord,
   rowToLabel,
+  labelToRow,
   type SqliteRow,
   type SqliteLabelRow,
 } from "./serialization.js";
@@ -405,6 +408,113 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
           ? encodeLabelCursor({ value: last.value, recordId: last.recordId })
           : null,
     };
+  }
+
+  // ---- Label sync ---------------------------------------------------------
+
+  async putLabel(label: RecordLabel): Promise<void> {
+    // Snapshot write: every column comes from the incoming row, tombstone
+    // included. Using upsertLabels here instead would mint a fresh HLC and
+    // clear deleted_at, resurrecting a retraction that arrived from a peer.
+    const row = labelToRow(label);
+    const updateColumns = Object.keys(row).filter(
+      (c) => c !== "record_id" && c !== "app_id" && c !== "key",
+    );
+    const query = qb
+      .insertInto("shared_record_labels")
+      .values({ ...row })
+      .onConflict((oc) =>
+        oc.columns(["record_id", "app_id", "key"]).doUpdateSet((eb) =>
+          Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
+        ),
+      )
+      .compile();
+    this.runStmt(query.sql, ...query.parameters);
+  }
+
+  async getLabel(
+    recordId: StarkeepId,
+    appId: string,
+    key: string,
+  ): Promise<RecordLabel | null> {
+    // Tombstones included on purpose: a tombstone is exactly what a later
+    // arrival has to be LWW-compared against.
+    const query = qb
+      .selectFrom("shared_record_labels")
+      .selectAll()
+      .where("record_id", "=", recordId)
+      .where("app_id", "=", appId)
+      .where("key", "=", key)
+      .compile();
+    const row = this.getRow<SqliteLabelRow>(query.sql, ...query.parameters);
+    return row ? rowToLabel(row) : null;
+  }
+
+  async queryLabels(query: { limit?: number; cursor?: string }): Promise<{
+    labels: RecordLabel[];
+    nextCursor: string | null;
+    hasMore: boolean;
+  }> {
+    const limit = query.limit ?? 500;
+    let q = qb.selectFrom("shared_record_labels").selectAll();
+
+    const cursor = query.cursor ? decodeLabelScanCursor(query.cursor) : null;
+    if (cursor) {
+      // Row-value comparison over the primary key. Safe here — unlike the
+      // reverse-index cursor — because all three columns are NOT NULL.
+      q = q.where((eb) =>
+        eb.or([
+          eb("record_id", ">", cursor.recordId),
+          eb.and([
+            eb("record_id", "=", cursor.recordId),
+            eb("app_id", ">", cursor.appId),
+          ]),
+          eb.and([
+            eb("record_id", "=", cursor.recordId),
+            eb("app_id", "=", cursor.appId),
+            eb("key", ">", cursor.key),
+          ]),
+        ]),
+      );
+    }
+
+    const compiled = q
+      .orderBy("record_id", "asc")
+      .orderBy("app_id", "asc")
+      .orderBy("key", "asc")
+      .limit(limit + 1)
+      .compile();
+    const rows = this.allRows<SqliteLabelRow>(compiled.sql, ...compiled.parameters);
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+    return {
+      labels: page.map(rowToLabel),
+      hasMore,
+      nextCursor:
+        hasMore && last
+          ? encodeLabelScanCursor({
+              recordId: last.record_id as StarkeepId,
+              appId: last.app_id,
+              key: last.key,
+            })
+          : null,
+    };
+  }
+
+  async getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
+    // Same trick as getNodeWatermarks on records: within one node_id group,
+    // updated_at is fixed-width hex up to the nodeId suffix, so lexicographic
+    // MAX equals HLC MAX. Backed by (node_id, updated_at).
+    const query = qb
+      .selectFrom("shared_record_labels")
+      .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
+      .groupBy("node_id")
+      .compile();
+    const rows = this.allRows<{ node_id: string; max_updated_at: string }>(query.sql);
+    const out: Record<string, HLCTimestamp> = {};
+    for (const row of rows) out[row.node_id] = deserializeHLC(row.max_updated_at);
+    return out;
   }
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {

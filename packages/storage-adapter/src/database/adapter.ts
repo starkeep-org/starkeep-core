@@ -120,4 +120,45 @@ export interface DatabaseAdapter {
    * because the record is going away.
    */
   tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void>;
+
+  // ---- Label sync ---------------------------------------------------------
+  //
+  // Labels ride the Drive channel alongside records. These four mirror the
+  // record-side `put` / `get` / `query` / `getNodeWatermarks` used by the sync
+  // engine, and exist for the same reasons.
+
+  /**
+   * Write a label **snapshot** verbatim — including `createdAt` and any
+   * `deletedAt` tombstone. The sync apply path's equivalent of `put(record)`.
+   *
+   * Distinct from `upsertLabels`, which mints a fresh HLC and clears
+   * `deletedAt`: that is the *local write* path, and using it here would
+   * resurrect a retraction that arrived from a peer.
+   */
+  putLabel(label: RecordLabel): Promise<void>;
+
+  /**
+   * Read one label by primary key, tombstones included — the LWW comparison
+   * the apply path makes before overwriting. Returns tombstoned rows, unlike
+   * `getLabelsByRecordIds`, because a tombstone is exactly what a later
+   * arrival must be compared against.
+   */
+  getLabel(recordId: StarkeepId, appId: string, key: string): Promise<RecordLabel | null>;
+
+  /**
+   * Paginated scan over every label row, tombstones included, for the sync
+   * outbound scan. Ordered by primary key with an opaque cursor.
+   */
+  queryLabels(query: { limit?: number; cursor?: string }): Promise<{
+    labels: RecordLabel[];
+    nextCursor: string | null;
+    hasMore: boolean;
+  }>;
+
+  /**
+   * Per-nodeId MAX(updated_at) over every label row, tombstones included —
+   * the label half of the responder's coverage watermark, which is a union
+   * over both tables on the Drive channel.
+   */
+  getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>>;
 }

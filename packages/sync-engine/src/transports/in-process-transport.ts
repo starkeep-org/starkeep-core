@@ -4,6 +4,7 @@ import {
   ZERO_HLC,
   type AnyRecord,
   type HLCClock,
+  type RecordLabel,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type {
@@ -127,6 +128,30 @@ export function createInProcessSyncTransport(
         );
       }
 
+      // 2b. Apply incoming labels — same HLC LWW, same halted-node rule, on
+      //     the label row's own timestamp. Labels are shared data, so a
+      //     per-app channel drops them exactly as it drops records.
+      if (syncSharedRecords) {
+        for (const incoming of request.labels ?? []) {
+          if (haltedNodes.has(incoming.updatedAt.nodeId)) continue;
+          const current = await databaseAdapter.getLabel(
+            incoming.recordId,
+            incoming.appId,
+            incoming.key,
+          );
+          if (current && compareHLC(current.updatedAt, incoming.updatedAt) >= 0) {
+            continue;
+          }
+          clock.receive(incoming.updatedAt);
+          // Snapshot write: an inbound retraction must stay retracted.
+          await databaseAdapter.putLabel(incoming);
+        }
+      } else if ((request.labels?.length ?? 0) > 0) {
+        console.warn(
+          `[sync] in-process transport dropped ${request.labels?.length ?? 0} record label(s) on a per-app channel (syncSharedRecords=false)`,
+        );
+      }
+
       // 3. Scan local records the caller hasn't seen yet, paginated by
       //    cursor so records past any fixed scan window are still reachable.
       //    Collect up to `limit + 1` matches so we can set `hasMore`
@@ -163,11 +188,42 @@ export function createInProcessSyncTransport(
       }
       const records = collected;
 
+      // 3b. Labels the caller hasn't seen — same per-nodeId watermark filter
+      //     and the same cursor pagination as the record scan above. Shares
+      //     the round's `limit` budget with records so one stream can't
+      //     starve the other.
+      const labels: RecordLabel[] = [];
+      let labelOverflowed = false;
+      if (syncSharedRecords) {
+        let labelCursor: string | undefined = undefined;
+        let labelHasMore = true;
+        while (!labelOverflowed && labelHasMore) {
+          const page = await databaseAdapter.queryLabels({
+            limit: SCAN_PAGE,
+            ...(labelCursor !== undefined ? { cursor: labelCursor } : {}),
+          });
+          if (page.labels.length === 0) break;
+          for (const l of page.labels) {
+            const peerHlc = request.watermarks[l.updatedAt.nodeId];
+            if (!peerHlc || compareHLC(l.updatedAt, peerHlc) > 0) {
+              if (records.length + labels.length >= limit) {
+                labelOverflowed = true;
+                break;
+              }
+              labels.push(l);
+            }
+          }
+          if (labelOverflowed) break;
+          labelHasMore = page.hasMore;
+          labelCursor = page.nextCursor ?? undefined;
+        }
+      }
+
       // 4. App-syncable rows: same per-nodeId filtering across known tables,
       //    cursor-paginated for the same reason as the SR scan above —
       //    records past any fixed scan window stay reachable.
       const appSyncableRows: AppSyncableRowEntry[] = [];
-      if (appSyncableSource && records.length < limit) {
+      if (appSyncableSource && records.length + labels.length < limit) {
         const scanCapable = appSyncableSource.applier as ScanCapableApplier;
         if (typeof scanCapable.scanSince === "function") {
           const zeroStr = serializeHLC(ZERO_HLC);
@@ -176,7 +232,7 @@ export function createInProcessSyncTransport(
               let appCursor: string | undefined = undefined;
               let appHasMore = true;
               while (
-                records.length + appSyncableRows.length < limit &&
+                records.length + labels.length + appSyncableRows.length < limit &&
                 appHasMore
               ) {
                 let page: { rows: AppSyncableRowEntry[]; nextCursor: string | null; hasMore: boolean };
@@ -201,13 +257,13 @@ export function createInProcessSyncTransport(
                   const peerHlc = request.watermarks[r.timestamp.nodeId];
                   if (!peerHlc || compareHLC(r.timestamp, peerHlc) > 0) {
                     appSyncableRows.push(r);
-                    if (records.length + appSyncableRows.length >= limit) break;
+                    if (records.length + labels.length + appSyncableRows.length >= limit) break;
                   }
                 }
                 appHasMore = page.hasMore;
                 appCursor = page.nextCursor ?? undefined;
               }
-              if (records.length + appSyncableRows.length >= limit) break outer;
+              if (records.length + labels.length + appSyncableRows.length >= limit) break outer;
             }
           }
         }
@@ -220,7 +276,8 @@ export function createInProcessSyncTransport(
       // out early — i.e. records.length + appSyncableRows.length >= limit.
       const hasMore =
         overflowed ||
-        records.length + appSyncableRows.length >= limit;
+        labelOverflowed ||
+        records.length + labels.length + appSyncableRows.length >= limit;
 
       // 5. Coverage watermarks over this channel's full post-apply state
       //    (see SyncExchangeResponse.responderWatermarks). Scoped to the
@@ -231,7 +288,13 @@ export function createInProcessSyncTransport(
       //    failing the exchange.
       const responderWatermarks: Watermarks = {};
       if (syncSharedRecords) {
+        // A union over BOTH tables on this channel. Missing the label half
+        // would let the watermark overstate coverage — the requester would
+        // stop re-shipping labels the responder never received.
         for (const hlc of Object.values(await databaseAdapter.getNodeWatermarks())) {
+          advanceWatermark(responderWatermarks, hlc);
+        }
+        for (const hlc of Object.values(await databaseAdapter.getLabelNodeWatermarks())) {
           advanceWatermark(responderWatermarks, hlc);
         }
       }
@@ -258,7 +321,7 @@ export function createInProcessSyncTransport(
         }
       }
 
-      return { records, appSyncableRows, responderWatermarks, hasMore };
+      return { records, labels, appSyncableRows, responderWatermarks, hasMore };
     },
   };
 }

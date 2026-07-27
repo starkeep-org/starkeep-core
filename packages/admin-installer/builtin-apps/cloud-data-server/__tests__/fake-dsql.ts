@@ -48,15 +48,28 @@ export class FakeDsql implements DatabaseClientFactory {
 }
 
 /**
- * A fake pre-scripted with the two queries every authenticated request makes:
- * the caller's access_grants rows and the cloud-clock seed scan.
+ * A fake pre-scripted with the queries every authenticated request makes: the
+ * caller's access_grants rows and the cloud-clock seed scan.
+ *
+ * The two label routes are here rather than per-test because the **sync
+ * exchange** scans `record_labels` on every Drive-channel round — labels ride
+ * that channel alongside records — so any test that touches /sync/exchange
+ * needs them whether or not it is about labels.
+ *
+ * Both are scoped to the *sync* shapes specifically (the full-table scan
+ * ordered by primary key, and the watermark fold). Routes match in
+ * registration order, first match wins, so a broader pattern here would
+ * shadow the `.on(...)` a label test registers for hydration or the reverse
+ * query — which is exactly what it did on the first attempt.
  */
 export function fakeDsqlWithGrants(
   grantRows: Array<{ type_id: string; access: string }> = [],
 ): FakeDsql {
   return new FakeDsql()
     .on(/from "shared"\."access_grants"/, grantRows)
-    .on(/from "shared"\."records" where "updated_at" like/, []);
+    .on(/from "shared"\."records" where "updated_at" like/, [])
+    .on(/from "shared"\."record_labels" order by "record_id"/, [])
+    .on(/from "shared"\."record_labels" group by "node_id"/, []);
 }
 
 const TEST_HLC = serializeHLC({ wallTime: Date.UTC(2026, 0, 1), counter: 0, nodeId: "test" });

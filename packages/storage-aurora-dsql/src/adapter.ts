@@ -22,6 +22,8 @@ import {
   TransactionError,
   encodeLabelCursor,
   decodeLabelCursor,
+  encodeLabelScanCursor,
+  decodeLabelScanCursor,
 } from "@starkeep/storage-adapter";
 import type {
   AuroraDsqlDatabaseAdapterOptions,
@@ -32,6 +34,7 @@ import {
   recordToRow,
   rowToRecord,
   rowToLabel,
+  labelToRow,
   columnsToMetadataRow,
   type PostgresRow,
   type PostgresLabelRow,
@@ -474,6 +477,127 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
             ? encodeLabelCursor({ value: last.value, recordId: last.recordId })
             : null,
       };
+    });
+  }
+
+  // ---- Label sync ---------------------------------------------------------
+
+  async putLabel(label: RecordLabel): Promise<void> {
+    await withOccRetry("putLabel", async () => {
+      // Snapshot write: every column comes from the incoming row, tombstone
+      // included. upsertLabels would mint a fresh HLC and clear deleted_at,
+      // resurrecting a retraction that arrived from a peer.
+      const row = labelToRow(label);
+      const updateColumns = Object.keys(row).filter(
+        (c) => c !== "record_id" && c !== "app_id" && c !== "key",
+      );
+      await this.run(
+        compiler
+          .insertInto("shared.record_labels")
+          .values({ ...row })
+          .onConflict((oc) =>
+            oc.columns(["record_id", "app_id", "key"]).doUpdateSet((eb) =>
+              Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
+            ),
+          )
+          .compile(),
+      );
+    });
+  }
+
+  async getLabel(
+    recordId: StarkeepId,
+    appId: string,
+    key: string,
+  ): Promise<RecordLabel | null> {
+    return withOccRetry("getLabel", async () => {
+      // Tombstones included: a tombstone is what a later arrival is LWW-
+      // compared against.
+      const result = await this.run(
+        compiler
+          .selectFrom("shared.record_labels")
+          .selectAll()
+          .where("record_id", "=", recordId)
+          .where("app_id", "=", appId)
+          .where("key", "=", key)
+          .compile(),
+      );
+      const row = result.rows[0] as unknown as PostgresLabelRow | undefined;
+      return row ? rowToLabel(row) : null;
+    });
+  }
+
+  async queryLabels(query: { limit?: number; cursor?: string }): Promise<{
+    labels: RecordLabel[];
+    nextCursor: string | null;
+    hasMore: boolean;
+  }> {
+    return withOccRetry("queryLabels", async () => {
+      const limit = query.limit ?? 500;
+      let q = compiler.selectFrom("shared.record_labels").selectAll();
+
+      const cursor = query.cursor ? decodeLabelScanCursor(query.cursor) : null;
+      if (cursor) {
+        // Row-value comparison over the primary key — safe here, unlike the
+        // reverse-index cursor, because all three columns are NOT NULL.
+        q = q.where((eb) =>
+          eb.or([
+            eb("record_id", ">", cursor.recordId),
+            eb.and([
+              eb("record_id", "=", cursor.recordId),
+              eb("app_id", ">", cursor.appId),
+            ]),
+            eb.and([
+              eb("record_id", "=", cursor.recordId),
+              eb("app_id", "=", cursor.appId),
+              eb("key", ">", cursor.key),
+            ]),
+          ]),
+        );
+      }
+
+      const result = await this.run(
+        q
+          .orderBy("record_id", "asc")
+          .orderBy("app_id", "asc")
+          .orderBy("key", "asc")
+          .limit(limit + 1)
+          .compile(),
+      );
+      const rows = result.rows as unknown as PostgresLabelRow[];
+      const hasMore = rows.length > limit;
+      const page = hasMore ? rows.slice(0, limit) : rows;
+      const last = page[page.length - 1];
+      return {
+        labels: page.map(rowToLabel),
+        hasMore,
+        nextCursor:
+          hasMore && last
+            ? encodeLabelScanCursor({
+                recordId: last.record_id as StarkeepId,
+                appId: last.app_id,
+                key: last.key,
+              })
+            : null,
+      };
+    });
+  }
+
+  async getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
+    return withOccRetry("getLabelNodeWatermarks", async () => {
+      const result = await this.run(
+        compiler
+          .selectFrom("shared.record_labels")
+          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
+          .groupBy("node_id")
+          .compile(),
+      );
+      const out: Record<string, HLCTimestamp> = {};
+      for (const raw of result.rows) {
+        const row = raw as Record<string, unknown>;
+        out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
+      }
+      return out;
     });
   }
 
