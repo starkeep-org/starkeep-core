@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createHLCClock } from "../src/hlc/clock.js";
 import { createDataRecord } from "../src/records/builders.js";
-import { labelHasValidPrefix } from "../src/records/label.js";
 
 describe("createDataRecord", () => {
   const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
@@ -53,21 +52,7 @@ describe("createDataRecord", () => {
   });
 });
 
-describe("labelHasValidPrefix", () => {
-  it("accepts a well-formed label owned by the app", () => {
-    expect(labelHasValidPrefix("photos/thumbnail", "photos")).toBe(true);
-    // Purpose segment may itself contain slashes.
-    expect(labelHasValidPrefix("photos/derived/thumbnail", "photos")).toBe(true);
-  });
-
-  it("rejects a label whose prefix is another app (namespace squatting)", () => {
-    expect(labelHasValidPrefix("photos/thumbnail", "notes")).toBe(false);
-  });
-
-  it("rejects malformed labels (no slash, empty prefix, empty purpose)", () => {
-    expect(labelHasValidPrefix("thumbnail", "photos")).toBe(false);
-    expect(labelHasValidPrefix("/thumbnail", "photos")).toBe(false);
-    expect(labelHasValidPrefix("photos/", "photos")).toBe(false);
-    expect(labelHasValidPrefix("", "photos")).toBe(false);
-  });
-});
+// Note there is no successor to the old `labelHasValidPrefix` squatting test.
+// `appId` is a server-set column rather than a string prefix, so there is no
+// request that can express another app's namespace — the attack it guarded
+// against is unrepresentable rather than rejected.

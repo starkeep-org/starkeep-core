@@ -49,7 +49,7 @@ import {
 } from "../../packages/protocol-primitives/src/access/grants.js";
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
-import { createStarkeepId, labelHasValidPrefix } from "@starkeep/protocol-primitives";
+import { createStarkeepId } from "@starkeep/protocol-primitives";
 import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
@@ -1217,19 +1217,6 @@ async function main() {
           json(res, {
             error: "AccessDenied",
             detail: `app "${appId}" has no readwrite grant on type "${type}"`,
-          });
-          return;
-        }
-
-        // Advisory label is optional; when present it must be a well-formed
-        // `<appId>/<purpose>` marker owned by this app. Rejecting a mismatched
-        // prefix prevents one app from squatting another's label namespace
-        // (the label stays advisory for readers, enforced only at write time).
-        if (label != null && !labelHasValidPrefix(label, appId!)) {
-          res.writeHead(400);
-          json(res, {
-            error: "InvalidLabel",
-            detail: `label must be of the form "${appId}/<purpose>"`,
           });
           return;
         }

@@ -58,10 +58,14 @@ export interface DataRecord extends BaseRecord {
    * image-declaring apps' views). Advisory-only on the read side: readers
    * choose whether to honor it; nothing enforces filtering. `null` = general
    * interest (no filtering hint). Set at creation by the origin app and never
-   * changed afterward. The write path validates that a present label's prefix
-   * matches the writing app's id (see `labelHasValidPrefix`) to prevent
-   * namespace squatting. Distinct from `parentId`, which is the structural
-   * thumbnail→original link, not an interest filter.
+   * changed afterward.
+   *
+   * **Superseded and on its way out.** `shared.record_labels` replaces this
+   * with a general mechanism — many keys, many authoring apps, retractable,
+   * indexed in both directions, and namespaced by a server-set `app_id`
+   * *column* rather than a validated string prefix. This field is kept only
+   * until Photos moves `photos/thumbnail` onto that surface; nothing reads it.
+   * See `records/labels.ts`.
    */
   label: string | null;
 }
