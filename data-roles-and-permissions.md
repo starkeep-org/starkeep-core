@@ -29,6 +29,10 @@ Two consequences are worth stating up front, because the principles below lean o
 
 - **For shared data, the enforced property is *confinement to granted types*, not sole-identity ownership.** Because many apps legitimately operate on the same items, "one owner per byte" is not the guarantee. What the system guarantees is that an app can only read or write the types its manifest declares — checked before a sync write ever leaves the device (the local-data-server's `appCanWrite` check) and bounded again in the cloud by IAM (a per-app role's category-scoped grants on the runtime path; Drive's `shared/*` ceiling on the sync path). App-specific data, by contrast, *is* sole-identity owned: it lives in the app's own schema and prefix, reachable by no other role.
 
+- **A `read` grant is no longer write-inert.** An app holding only `read` on a type may write **cross-app labels** on records of that type, into its own server-set namespace in `shared.record_labels`. The confinement claim above is unchanged — the app is still confined to the types its manifest declares, and it still cannot touch the record row, its bytes, or another app's label namespace. But "read means you cause no shared-plane write" was true before and is not now, and that is worth stating plainly rather than leaving a reader to infer it.
+
+  The trade was deliberate: requiring `readwrite` to label would force an OCR service or a classifier to hold **destructive power over records it only ever reads**, which is a strictly worse security posture than letting it append a namespaced, quota-bounded, advisory row. A third grant level between `read` and `readwrite` would express this more literally; it was considered and rejected as more machinery than the distinction earns. What bounds the new power is elsewhere: the namespace is server-set so it cannot be forged, the keys must be declared in the manifest and are capped per app, and values are capped at 128 bytes.
+
 ---
 
 ## Stance
@@ -123,6 +127,10 @@ Two consequences are worth calling out:
 
 - **Cloud-data-server is a broker, not a data owner.** Its own credentials never read or write shared data. On the **runtime per-request data path** (reads/writes on `/data/*`), every shared byte is attributable to the per-app role that the broker assumed for that specific request. (The **sync path** is different — see below.)
 - **Application-layer enforcement is required for per-type filtering.** All shared records live in a single table (DSQL has no row-level security), so the protocol-core layer reads the caller's grants and applies type-level filters on reads and writes before any query is issued. This is the type-granular cut that the coarser layers leave open: PG GRANTs and the per-app S3 ceiling are category-granular; the application layer handles per-type-in-`shared.records` access.
+
+  **`shared.record_labels` is on the same footing, and its PG GRANTs are correspondingly coarse.** Every per-app PG role holds `SELECT, INSERT, UPDATE, DELETE` on it, exactly as for `shared.records` — the per-app cut is application-layer in both data servers, not in the database. This is not a new weakening; it is the same "DSQL has no RLS, so the app layer is the granular cut" trade, applied to a second table. What the app layer enforces there is a `read` grant on the *record's* type plus a manifest-declared key, and — the part the database genuinely cannot express — an `app_id` taken from the authenticated subject rather than from the request, which is what makes namespace squatting unrepresentable.
+
+  **`shared.app_label_keys` is world-readable by design** (`GRANT SELECT … TO PUBLIC`, mirroring `shared.access_grants`), writable only by the installer. Which label keys an app publishes is public schema, not user data, and cross-app discoverability is the entire reason keys are declared in a manifest rather than counted at runtime.
 
 The same single-hop assume serves **app-specific** runtime operations, but those target the app's *own* schema (`app_<appId>.*`) and filespace (`apps/<appId>/syncable/*`) rather than `shared.*`. No cross-app visibility arises, and no application-layer type filter is needed — the per-app PG role and permissions boundary already make the app's own namespace the only thing it can reach.
 
