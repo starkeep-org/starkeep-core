@@ -8,4 +8,16 @@ export {
   createDataRecord,
   type CreateDataRecordInput,
 } from "./builders.js";
-export { labelHasValidPrefix } from "./label.js";
+export {
+  type RecordLabel,
+  type LabelRef,
+  LABEL_KEY_MAX_LENGTH,
+  LABEL_KEYS_PER_APP_MAX,
+  LABEL_VALUE_MAX_BYTES,
+  isValidLabelKey,
+  isValidLabelValue,
+  labelValueByteLength,
+  validateLabelWrite,
+  formatLabelRef,
+  parseLabelRef,
+} from "./labels.js";

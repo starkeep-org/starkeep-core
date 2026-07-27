@@ -298,29 +298,12 @@ describe("record registration", () => {
     expect(db.calls(RECORDS_INSERT)[0]!.values).toContain("photos/thumbnail");
   });
 
-  it("400s a label whose prefix is not the writing app, before touching S3", async () => {
-    setDbFactory(fakeDsqlWithGrants(grants));
-    s3Mock.on(HeadObjectCommand).resolves({});
-    const res = await handler(
-      signedEvent({
-        appId: "notes",
-        method: "POST",
-        subPath: "/data/records",
-        // Squatting attempt: "notes" cannot mint a "photos/…" label.
-        body: {
-          type: "image/jpeg",
-          contentType: "image/jpeg",
-          contentHash: VALID_HASH,
-          sizeBytes: 3,
-          label: "photos/thumbnail",
-        },
-      }),
-      context,
-    );
-    expect(res.statusCode).toBe(400);
-    // Rejected before the blob existence check.
-    expect(s3Mock.commandCalls(HeadObjectCommand)).toHaveLength(0);
-  });
+  // The label-squatting test that used to sit here is deleted, not ported. It
+  // asserted that "notes" gets a 400 for minting a "photos/…" label — a check
+  // that only existed because the namespace was a string prefix the client
+  // supplied. In `shared.record_labels` the namespace is an `app_id` column
+  // the server sets from the authenticated subject, so there is no request
+  // that can express the attack. Nothing to test.
 
   it("dedups a byte-identical derived child of the same parent", async () => {
     const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
