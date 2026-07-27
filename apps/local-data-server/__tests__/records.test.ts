@@ -188,6 +188,36 @@ describe("list", () => {
     expect(records.some((r) => r.id === after.record.id)).toBe(true);
   });
 
+  it("pages to exhaustion with cursor, visiting every record exactly once", async () => {
+    for (let i = 0; i < 5; i++) {
+      await createRecordWithBytes(app, { fileName: `paged-${i}.jpg` });
+    }
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const res = await app.fetch(
+        `/data/records?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      );
+      const body = (await res.json()) as {
+        records: Array<{ id: string }>;
+        hasMore: boolean;
+        nextCursor: string | null;
+      };
+      seen.push(...body.records.map((r) => r.id));
+      cursor = body.nextCursor;
+      // Guard against a cursor that fails to advance rather than hanging.
+      expect(++pages).toBeLessThan(50);
+    } while (cursor !== null);
+
+    // Every id distinct: a cursor that skipped or repeated would show up here.
+    expect(new Set(seen).size).toBe(seen.length);
+    // And it found everything an unpaginated list finds.
+    const all = await listRecords(app, "?limit=1000");
+    expect(new Set(seen)).toEqual(new Set(all.map((r) => r.id)));
+  });
+
   it("reports types with counts in /data/types", async () => {
     await createRecordWithBytes(app, { fileName: "typecount.jpg" });
     const res = await app.fetch("/data/types");
