@@ -273,8 +273,19 @@ describe("record registration", () => {
     expect(inserts[0]!.values).toContain(VALID_HASH);
   });
 
-  it("persists and echoes a valid advisory label owned by the app", async () => {
-    const db = fakeDsqlWithGrants(grants).on(RECORDS_INSERT, []);
+  it("writes labels supplied on create, without a second request", async () => {
+    // Successor to the old `label` column round-trip. The record and its
+    // labels share a request but not a transaction — see §4a of the plan for
+    // why a transaction would buy nothing durable here.
+    const db = fakeDsqlWithGrants(grants)
+      .on(RECORDS_INSERT, [])
+      .on(/from "shared"\."app_label_keys"/, [{ app_id: "photos", key: "thumbnail", description: "d" }])
+      // The record-type lookup every label write makes — the read the
+      // single-statement upsert hides, and the dominant cost of a bulk job.
+      .on(/from "shared"\."records" where "id" in/, (q) => [
+        recordRow({ id: String(q.values[0]), type: "image/jpeg" }),
+      ])
+      .on(/insert into "shared"\."record_labels"/, []);
     setDbFactory(db);
     s3Mock.on(HeadObjectCommand).resolves({});
     const res = await handler(
@@ -287,15 +298,17 @@ describe("record registration", () => {
           contentType: "image/jpeg",
           contentHash: VALID_HASH,
           sizeBytes: 3,
-          label: "photos/thumbnail",
+          labels: [{ key: "thumbnail" }],
         },
       }),
       context,
     );
     expect(res.statusCode).toBe(201);
-    const { record } = bodyOf(res) as { record: Record<string, unknown> };
-    expect(record["label"]).toBe("photos/thumbnail");
-    expect(db.calls(RECORDS_INSERT)[0]!.values).toContain("photos/thumbnail");
+    const labelInsert = db.calls(/insert into "shared"\."record_labels"/)[0];
+    expect(labelInsert, "no label was written").toBeTruthy();
+    expect(labelInsert!.values).toContain("thumbnail");
+    // The namespace comes from the authenticated subject, not the body.
+    expect(labelInsert!.values).toContain("photos");
   });
 
   // The label-squatting test that used to sit here is deleted, not ported. It

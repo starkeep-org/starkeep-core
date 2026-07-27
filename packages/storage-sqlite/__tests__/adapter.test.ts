@@ -63,16 +63,6 @@ describe("SqliteDatabaseAdapter", () => {
       expect(retrieved!.sizeBytes).toBe(1024);
     });
 
-    it("round-trips the advisory label (and defaults it to null)", async () => {
-      const labeled = createDataRecord(baseInput({ label: "photos/thumbnail" }), clock);
-      const unlabeled = createDataRecord(baseInput(), clock);
-      await adapter.put(labeled);
-      await adapter.put(unlabeled);
-
-      expect((await adapter.get(labeled.id))!.label).toBe("photos/thumbnail");
-      expect((await adapter.get(unlabeled.id))!.label).toBeNull();
-    });
-
     it("should return null for non-existent ID", async () => {
       const id = createStarkeepId("01ARZ3NDEKTSV4RRFFQ69G5FAV");
       expect(await adapter.get(id)).toBeNull();
@@ -165,22 +155,11 @@ describe("SqliteDatabaseAdapter", () => {
       expect(result.records[0].originalFilename).toBe("b.jpg");
     });
 
-    it("supports filtering by label so consumers can exclude thumbnails", async () => {
-      await adapter.put(createDataRecord(baseInput({ label: "photos/thumbnail" }), clock));
-      await adapter.put(createDataRecord(baseInput({ label: null }), clock));
-
-      const thumbs = await adapter.query({
-        filters: [{ field: "label", operator: "eq", value: "photos/thumbnail" }],
-      });
-      expect(thumbs.records).toHaveLength(1);
-      expect(thumbs.records[0].label).toBe("photos/thumbnail");
-
-      const generalInterest = await adapter.query({
-        filters: [{ field: "label", operator: "isNull" }],
-      });
-      expect(generalInterest.records).toHaveLength(1);
-      expect(generalInterest.records[0].label).toBeNull();
-    });
+    // The label-filter test that used to sit here was the only thing in the
+    // tree that ever filtered on `records.label`. Its successor is the
+    // reverse-label query in labels.test.ts, which is a different shape (a
+    // seek on a separate table's index, not a column predicate) and is
+    // covered there.
 
     it("should support like filter", async () => {
       await adapter.put(createDataRecord(baseInput({ type: "@test/photo-jpeg" }), clock));

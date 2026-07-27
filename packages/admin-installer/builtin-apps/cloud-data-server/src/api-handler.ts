@@ -701,7 +701,6 @@ function recordToResponse(
     original_filename: record.originalFilename,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
-    label: record.label,
     ...(metadata !== undefined ? { metadata } : {}),
     // `[]` rather than null when a record has none: absence of labels is an
     // empty set, not an unknown — the opposite of the metadata case above,
@@ -1175,7 +1174,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     //
     // Body (key-ref form):
     //   { type, contentType, contentHash, sizeBytes, fileName?, parentId?,
-    //     label?, labels? }
+    //     labels? }
     //
     // The caller PUTs the bytes to S3 via a presigned URL first (see POST
     // /files/presign), then registers the record by content-addressed key.
@@ -1190,7 +1189,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         contentHash?: string;
         sizeBytes?: number;
         parentId?: string;
-        label?: string;
         labels?: Array<{ key: string; value?: string | null }>;
       };
       if (!body.type) return clientErr("type is required", 400);
@@ -1260,7 +1258,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           sizeBytes,
           originalFilename: body.fileName ?? null,
           parentId: (body.parentId as DataRecord["parentId"]) ?? null,
-          label: body.label ?? null,
         };
         await db.put(fresh);
         return { record: fresh, created: true };

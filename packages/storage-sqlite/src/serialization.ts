@@ -22,7 +22,6 @@ export interface SqliteRow {
   original_filename: string | null;
   origin_app_id: string;
   parent_id: string | null;
-  label: string | null;
 }
 
 export function recordToRow(record: DataRecord): SqliteRow {
@@ -41,7 +40,6 @@ export function recordToRow(record: DataRecord): SqliteRow {
     original_filename: record.originalFilename,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
-    label: record.label,
   };
 }
 
@@ -61,7 +59,6 @@ export function rowToRecord(row: SqliteRow): DataRecord {
     originalFilename: row.original_filename,
     originAppId: row.origin_app_id,
     parentId: row.parent_id ? createStarkeepId(row.parent_id) : null,
-    label: row.label,
   };
 }
 
