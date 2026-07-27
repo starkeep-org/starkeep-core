@@ -33,7 +33,8 @@
     "lint": "eslint src/"
   },
   "dependencies": {
-    "@starkeep/protocol-primitives": "workspace:*"
+    "@starkeep/protocol-primitives": "workspace:*",
+    "kysely": "^0.28.17"
   },
   "devDependencies": {
     "@types/node": "^25.4.0",
