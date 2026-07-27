@@ -31,10 +31,18 @@ export type DataPutInput = Omit<
   "contentHash" | "objectStorageKey" | "mimeType" | "sizeBytes"
 > & {
   /**
-   * Optional per-category metadata row to write atomically with the
-   * records-table row. Columns are defined by the record's category entry in
-   * `CATEGORIES` (category = `typeCategory(type)`); `other` records have no
-   * metadata table. The SDK supplies the `recordId` itself — callers omit it.
+   * Optional per-category metadata row written alongside the records-table
+   * row. Columns are defined by the record's category entry in `CATEGORIES`
+   * (category = `typeCategory(type)`); `other` records have no metadata table.
+   * The SDK supplies the `recordId` itself — callers omit it.
+   *
+   * **Not atomic with the record write.** The SDK issues `put` and
+   * `putMetadata` as two sequential adapter calls, each its own transaction
+   * (on DSQL, its own `withOccRetry`); over HTTP they are not even one
+   * request, since metadata has its own endpoint. A reader can therefore
+   * observe the record before its metadata row. Readers must tolerate that —
+   * a record arriving at a peer without its dimensions is already normal,
+   * since sync ships the two independently.
    */
   metadata?: Omit<MetadataRow, "recordId">;
 };
@@ -71,7 +79,8 @@ export interface DataOperations {
    * Update tracked record metadata (parentId, originalFilename, mimeType). All
    * data-bearing fields are derived from the underlying file; to change them,
    * upload a new file via `putWithFile`. The metadata row, if any, is updated
-   * by `putMetadata`.
+   * separately by `putMetadata` — this call does not touch it, and the two are
+   * not atomic with each other.
    */
   update(
     recordId: StarkeepId,
