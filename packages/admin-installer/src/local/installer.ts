@@ -10,10 +10,12 @@ import {
   createAppSyncableTables,
   createReservedFileRecordsTable,
   deleteAccessGrants,
+  deleteAppLabelKeys,
   deleteAppRegistry,
   dropAppSyncableTables,
   getCompletedSteps,
   insertAccessGrants,
+  insertAppLabelKeys,
   insertAppRegistry,
   recordStep,
   setAppStatus,
@@ -81,6 +83,10 @@ export function installLocal(db: DatabaseSync, rawManifest: unknown): InstallLoc
     insertAccessGrants(db, appId, manifest.infraRequirements.fileAccess);
   });
 
+  runStep(db, appId, "install", "register_label_keys", done, () => {
+    insertAppLabelKeys(db, appId, manifest.infraRequirements.labelKeys);
+  });
+
   const syncable = manifest.infraRequirements.appSpecificSyncable;
   runStep(db, appId, "install", "create_syncable_tables", done, () => {
     createAppSyncableTables(db, appId, syncable.tables);
@@ -144,6 +150,14 @@ export function uninstallLocal(
 
   runStep(db, appId, "uninstall", "revoke_access_grants", done, () => {
     deleteAccessGrants(db, appId);
+  });
+
+  // Only the *declarations* go. The label rows this app wrote survive, per the
+  // "shared data outlives uninstall" principle — reinstalling re-exposes them,
+  // and a reader shouldn't lose annotations because the producer was
+  // temporarily removed. See deleteAppLabelKeys.
+  runStep(db, appId, "uninstall", "revoke_label_keys", done, () => {
+    deleteAppLabelKeys(db, appId);
   });
 
   runStep(db, appId, "uninstall", "drop_syncable_tables", done, () => {

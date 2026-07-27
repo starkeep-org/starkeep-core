@@ -14,7 +14,9 @@ import { compiler as qb } from "../query-builder.js";
  *
  *   - shared_records           — all shared data, all types (file-backed only)
  *   - shared_record_<category>_metadata — per-category metadata rows (typed columns)
+ *   - shared_record_labels     — cross-app assertions about shared records
  *   - shared_access_grants     — per-app, per-type permissions
+ *   - shared_app_label_keys    — manifest-declared label keys, per app
  *   - shared_app_registry      — installed apps + HMAC secrets
  *   - shared_app_install_steps — idempotent install/uninstall ledger
  *
@@ -104,6 +106,70 @@ function applyLocalSchemaDdl(db: DatabaseSync): void {
       .ifNotExists()
       .on("shared_access_grants")
       .column("app_id")
+      .compile().sql,
+  );
+
+  // shared_record_labels — cross-app assertions about shared records; the
+  // local mirror of DSQL's shared.record_labels. See records/labels.ts in
+  // protocol-primitives for what a label is and why app_id is a column rather
+  // than a string prefix.
+  db.exec(
+    qb.schema
+      .createTable("shared_record_labels")
+      .ifNotExists()
+      .addColumn("record_id", "text", (c) => c.notNull())
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("key", "text", (c) => c.notNull())
+      .addColumn("value", "text")
+      // Denormalized from shared_records.type (immutable), so read gating
+      // never joins back — on the reverse path that join is unbounded.
+      .addColumn("record_type", "text", (c) => c.notNull())
+      .addColumn("created_at", "text", (c) => c.notNull())
+      .addColumn("updated_at", "text", (c) => c.notNull())
+      .addColumn("node_id", "text", (c) => c.notNull())
+      .addColumn("deleted_at", "text")
+      .addPrimaryKeyConstraint("pk_shared_record_labels", [
+        "record_id",
+        "app_id",
+        "key",
+      ] as never[])
+      .compile().sql,
+  );
+  const sharedRecordLabelsIndexes = [
+    // The reverse path. Column order mirrors DSQL's idx_record_labels_reverse
+    // exactly — see the long comment there for why each column is where it is.
+    // SQLite *does* support partial indexes, so `deleted_at` could have been a
+    // WHERE clause here; it is a key column instead so the two backends have
+    // one index shape between them and a query planned on one is planned the
+    // same on the other.
+    qb.schema
+      .createIndex("idx_shared_record_labels_reverse")
+      .ifNotExists()
+      .on("shared_record_labels")
+      .columns(["app_id", "key", "deleted_at", "value", "record_id"]),
+    qb.schema
+      .createIndex("idx_shared_record_labels_node_watermark")
+      .ifNotExists()
+      .on("shared_record_labels")
+      .columns(["node_id", "updated_at"]),
+  ];
+  for (const index of sharedRecordLabelsIndexes) {
+    db.exec(index.compile().sql);
+  }
+
+  // shared_app_label_keys — manifest-declared label keys, written by the
+  // installer and readable by every app. Cross-app readability is the point:
+  // discoverability is why keys are declared in a manifest rather than counted
+  // at runtime. Local mirror of DSQL's shared.app_label_keys.
+  db.exec(
+    qb.schema
+      .createTable("shared_app_label_keys")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("key", "text", (c) => c.notNull())
+      .addColumn("description", "text")
+      .addColumn("created_at", "text", (c) => c.notNull().defaultTo(sql`(datetime('now'))`))
+      .addPrimaryKeyConstraint("pk_shared_app_label_keys", ["app_id", "key"] as never[])
       .compile().sql,
   );
 

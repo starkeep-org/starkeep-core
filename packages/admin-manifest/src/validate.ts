@@ -93,6 +93,37 @@ export function validateManifest(raw: unknown): ValidationResult {
     );
   }
 
+  // Label keys are the app's published schema, so a duplicate is a manifest
+  // authoring mistake rather than something to silently dedup: the registry's
+  // primary key is (app_id, key), so a second row would be dropped and the
+  // second `description` — the one a reader of the cross-app registry sees —
+  // would depend on insert order.
+  const seenLabelKeys = new Set<string>();
+  for (const entry of manifest.infraRequirements.labelKeys) {
+    if (seenLabelKeys.has(entry.key)) {
+      errors.push(`infraRequirements.labelKeys: duplicate key "${entry.key}"`);
+    }
+    seenLabelKeys.add(entry.key);
+  }
+
+  // Writing a label needs only a `read` grant on the record's type (requiring
+  // readwrite would force an OCR service or a classifier to hold destructive
+  // power over photos it only ever reads). But an app with no type grants at
+  // all can never satisfy that check, so declared keys it could never write
+  // are a manifest mistake worth naming at install time rather than a 403 the
+  // author debugs later.
+  if (
+    manifest.infraRequirements.labelKeys.length > 0 &&
+    manifest.infraRequirements.fileAccess.length === 0 &&
+    !manifest.infraRequirements.fileAccessAll
+  ) {
+    errors.push(
+      "infraRequirements.labelKeys declares keys but the app has no fileAccess grants — " +
+        "labelling a record requires at least a read grant on its type, so none of " +
+        "these keys could ever be written",
+    );
+  }
+
   return {
     valid: errors.length === 0,
     manifest: errors.length === 0 ? manifest : null,

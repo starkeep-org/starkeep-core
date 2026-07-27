@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { sql, type CompiledQuery } from "kysely";
-import type { AppManifest, FileAccess, SyncableTable } from "@starkeep/admin-manifest";
+import type { AppManifest, FileAccess, LabelKey, SyncableTable } from "@starkeep/admin-manifest";
 import { appSyncableTableName, sqliteCompiler as k } from "@starkeep/storage-sqlite";
 import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
 
@@ -235,6 +235,62 @@ export function insertAccessGrants(
 
 export function deleteAccessGrants(db: DatabaseSync, appId: string): void {
   run(db, k.deleteFrom("shared_access_grants").where("app_id", "=", appId).compile());
+}
+
+/**
+ * Writes one `shared_app_label_keys` row per manifest-declared label key. The
+ * label write path rejects any key not in this table, so this is where an app's
+ * publishable schema is fixed.
+ *
+ * Deletes rows for keys the manifest no longer declares, so an upgrade that
+ * drops a key stops new writes to it. The *label rows* themselves survive that
+ * — see `deleteAppLabelKeys` for why an undeclared key with live rows is the
+ * intended steady state rather than corruption.
+ */
+export function insertAppLabelKeys(
+  db: DatabaseSync,
+  appId: string,
+  labelKeys: LabelKey[],
+): void {
+  for (const entry of labelKeys) {
+    run(
+      db,
+      k
+        .insertInto("shared_app_label_keys")
+        .values({ app_id: appId, key: entry.key, description: entry.description })
+        .onConflict((oc) =>
+          oc.columns(["app_id", "key"]).doUpdateSet((eb) => ({
+            description: eb.ref("excluded.description"),
+          })),
+        )
+        .compile(),
+    );
+  }
+
+  // An upgrade that removes a key must revoke it, not just fail to re-add it.
+  const declared = labelKeys.map((e) => e.key);
+  let stale = k.deleteFrom("shared_app_label_keys").where("app_id", "=", appId);
+  if (declared.length > 0) {
+    stale = stale.where("key", "not in", declared);
+  }
+  run(db, stale.compile());
+}
+
+/**
+ * Drops an app's declared keys on uninstall. **The label rows it wrote survive**,
+ * matching the existing "shared data outlives uninstall" principle — a reader
+ * shouldn't lose annotations because the producer was temporarily removed, and
+ * reinstalling re-exposes them.
+ *
+ * So live label rows can reference an undeclared key, and that is the intended
+ * steady state: reads and reverse queries return them normally, new writes to
+ * the key are rejected, and **retraction stays legal** (it is scoped by primary
+ * key, which contains `app_id`). Refusing retraction here would strand rows the
+ * app can no longer clean up — which is what the obvious implementation, one
+ * that validates the key on every write path including retraction, would do.
+ */
+export function deleteAppLabelKeys(db: DatabaseSync, appId: string): void {
+  run(db, k.deleteFrom("shared_app_label_keys").where("app_id", "=", appId).compile());
 }
 
 const SQLITE_COLUMN_TYPES: Record<SyncableTable["columns"][number]["type"], "text" | "integer" | "real" | "blob"> = {

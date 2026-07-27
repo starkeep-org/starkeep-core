@@ -288,3 +288,70 @@ describe("targets and localRun", () => {
     expect(result.errors.some((e) => e.startsWith("tier:"))).toBe(true);
   });
 });
+
+describe("labelKeys", () => {
+  // A manifest that can hold labels needs at least one type grant — labelling
+  // a record requires a read grant on its type.
+  function withGrant(labelKeys: unknown): Record<string, unknown> {
+    return minimal({
+      infraRequirements: {
+        fileAccess: [{ types: ["image/jpeg"], access: "read", rationale: "test" }],
+        labelKeys,
+      },
+    });
+  }
+
+  it("defaults to an empty list", () => {
+    expect(validateManifest(minimal()).manifest?.infraRequirements.labelKeys).toEqual([]);
+  });
+
+  it("accepts identifier-shaped keys with descriptions", () => {
+    const result = validateManifest(
+      withGrant([{ key: "ocr-available", description: "This app holds OCR text" }]),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.manifest?.infraRequirements.labelKeys).toEqual([
+      { key: "ocr-available", description: "This app holds OCR text" },
+    ]);
+  });
+
+  it("rejects a key that is content rather than an identifier", () => {
+    expect(validateManifest(withGrant([{ key: "Needs Review", description: "x" }])).valid).toBe(
+      false,
+    );
+  });
+
+  it("requires a description, so the cross-app registry is self-explaining", () => {
+    expect(validateManifest(withGrant([{ key: "ocr", description: "" }])).valid).toBe(false);
+  });
+
+  it("caps distinct keys per app at 64 — the cap that makes keys schema", () => {
+    const keys = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ key: `k${i}`, description: "d" }));
+    expect(validateManifest(withGrant(keys(64))).valid).toBe(true);
+    expect(validateManifest(withGrant(keys(65))).valid).toBe(false);
+  });
+
+  it("rejects a duplicate key rather than silently dropping the second", () => {
+    // The registry PK is (app_id, key), so a dup means one description wins by
+    // insert order — which is what a reader of the cross-app registry sees.
+    const result = validateManifest(
+      withGrant([
+        { key: "dup", description: "first" },
+        { key: "dup", description: "second" },
+      ]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("duplicate key"))).toBe(true);
+  });
+
+  it("rejects keys declared by an app with no type grants at all", () => {
+    // Every one of them would be unwritable: labelling needs a read grant on
+    // the record's type. Better named at install than debugged as a 403.
+    const result = validateManifest(
+      minimal({ infraRequirements: { labelKeys: [{ key: "k", description: "d" }] } }),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("no fileAccess grants"))).toBe(true);
+  });
+});

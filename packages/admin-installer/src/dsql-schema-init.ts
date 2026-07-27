@@ -209,6 +209,75 @@ export async function initializeSharedSchema(
       .raw(`GRANT INSERT, UPDATE, DELETE ON shared.access_grants TO "${installer}"`)
       .execute(db);
 
+    // shared.record_labels — cross-app assertions about shared records.
+    //
+    // app_id is a column, never a client-supplied prefix: both data servers
+    // set it from the authenticated subject, so an app cannot express another
+    // app's namespace. It is also in the primary key, which is what keeps two
+    // different apps from ever contending on the same row — the OCC-abort
+    // problem that ruled out widening shared.records instead.
+    //
+    // record_type is denormalized from records.type so read gating never joins
+    // back to shared.records (on the reverse path that join is over an
+    // unbounded set). It cannot go stale: type is declared at creation and
+    // immutable. Same trade already made for node_id.
+    //
+    // No FK on record_id — DSQL has none — so record deletion must tombstone
+    // label rows in application code, and orphans are possible and tolerated.
+    await db.schema
+      .createTable("shared.record_labels")
+      .ifNotExists()
+      .addColumn("record_id", "text", (c) => c.notNull())
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("key", "text", (c) => c.notNull())
+      .addColumn("value", "text")
+      .addColumn("record_type", "text", (c) => c.notNull())
+      .addColumn("created_at", "text", (c) => c.notNull())
+      .addColumn("updated_at", "text", (c) => c.notNull())
+      .addColumn("node_id", "text", (c) => c.notNull())
+      .addColumn("deleted_at", "text")
+      .addPrimaryKeyConstraint("record_labels_pkey", [
+        "record_id",
+        "app_id",
+        "key",
+      ] as never[])
+      .execute();
+
+    // Per-app PG GRANTs stay category-coarse, exactly as they are for
+    // shared.records: DSQL has no row-level security, so the per-app cut is
+    // application-layer in both data servers. Not a new weakening — the same
+    // trade already documented in data-roles-and-permissions.md.
+    await sql
+      .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON shared.record_labels TO PUBLIC`)
+      .execute(db);
+
+    // shared.app_label_keys — the manifest-declared key registry.
+    //
+    // Capping *distinct keys per app* is the limit that actually enforces the
+    // intent: byte caps alone don't stop an app using keys as data
+    // (`ocr-<first-40-chars>` as a flag) with an unbounded key space that
+    // poisons the reverse index. Declaring them in the manifest forces keys to
+    // be schema.
+    //
+    // SELECT is granted to PUBLIC deliberately. Discoverability is the whole
+    // reason this is a manifest declaration rather than a cheaper runtime
+    // counter — app B's developer being able to enumerate what app A publishes
+    // is the thing being paid for, and a registry only its owner can read
+    // would buy nothing. Which keys an app declares is public schema, not user
+    // data. Mirrors shared.access_grants above.
+    await db.schema
+      .createTable("shared.app_label_keys")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("key", "text", (c) => c.notNull())
+      .addColumn("description", "text")
+      .addPrimaryKeyConstraint("app_label_keys_pkey", ["app_id", "key"] as never[])
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.app_label_keys TO PUBLIC`).execute(db);
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE ON shared.app_label_keys TO "${installer}"`)
+      .execute(db);
+
     // Per-category metadata tables, generated from @starkeep/protocol-primitives's
     // CATEGORIES (plain-string DDL, executed via sql.raw). `other` has no
     // metadata columns and gets no table. record_id is logically an FK to
@@ -309,6 +378,53 @@ export async function initializeSharedSchema(
       "idx_records_node_watermark",
       `CREATE INDEX ASYNC idx_records_node_watermark
          ON shared.records (node_id, updated_at)`,
+    );
+
+    // The reverse label path: "which records has `alpha` labelled
+    // `ocr-available`", and "…labelled `quality = high`". This is the query
+    // that makes labels worth having — it is what replaces "ask app A about
+    // every file". Every column earns its place, and the shape was verified
+    // against a live DSQL cluster before it was written down (see §3b of
+    // plan-cross-app-record-labels-2026-07-27.md):
+    //
+    //   deleted_at is the THIRD key column, before value, so live rows form a
+    //   contiguous range. Retraction is a tombstone (it has to be — the
+    //   retraction itself must sync) and DSQL has no partial indexes, so
+    //   `WHERE deleted_at IS NULL` cannot be baked into the definition. DSQL
+    //   plans it as a scan key: measured behind 20,000 tombstones, this scans
+    //   20 index entries where the same index without the column scans 20,040.
+    //   Moving or dropping it silently reintroduces that.
+    //
+    //   value is in the index so `labelValue=high` is a seek rather than a
+    //   filter over every record the app ever labelled. It also costs nothing
+    //   for flag-only keys, where it is constant within the range.
+    //
+    //   record_type is an INCLUDE payload, so the caller's readable-type set
+    //   is applied while scanning rather than after fetching records — the
+    //   plan comes back as an Index Only Scan with no heap access at all.
+    //   INCLUDE rather than a key column because it is never a seek boundary,
+    //   and promoting it would push it into the residual sort order that the
+    //   pagination cursor is derived from.
+    //
+    // The residual order with app_id/key/deleted_at pinned is
+    // (value, record_id) — which is exactly what the cursor encodes. Do not
+    // "tidy" the column order.
+    await ensureIndex(
+      db,
+      "shared",
+      "idx_record_labels_reverse",
+      `CREATE INDEX ASYNC idx_record_labels_reverse
+         ON shared.record_labels (app_id, key, deleted_at, value, record_id)
+         INCLUDE (record_type)`,
+    );
+
+    // Sync watermark, mirroring idx_records_node_watermark.
+    await ensureIndex(
+      db,
+      "shared",
+      "idx_record_labels_node_watermark",
+      `CREATE INDEX ASYNC idx_record_labels_node_watermark
+         ON shared.record_labels (node_id, updated_at)`,
     );
 
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The
