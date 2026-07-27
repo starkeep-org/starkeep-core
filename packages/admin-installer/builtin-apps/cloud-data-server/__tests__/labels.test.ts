@@ -10,7 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
-import { S3Client } from "@aws-sdk/client-s3";
+import { S3Client, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { signRequest } from "@starkeep/app-client";
 import { serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
@@ -450,6 +450,299 @@ describe("GET /data/records with labels", () => {
     expect(q.values).toContain("image/jpeg");
     // Tombstones are excluded by the index's own key column, not a filter.
     expect(q.text).toMatch(/"deleted_at" is null/);
+  });
+});
+
+describe("the reverse query end to end", () => {
+  /** A label row as DSQL hands it back. */
+  function labelRow(over: Record<string, unknown>): Record<string, unknown> {
+    return {
+      record_id: "rec1",
+      app_id: "annotator",
+      key: "faces-detected",
+      value: null,
+      record_type: "image/jpeg",
+      created_at: TEST_HLC,
+      updated_at: TEST_HLC,
+      node_id: "test",
+      deleted_at: null,
+      ...over,
+    };
+  }
+
+  it("returns the labelled records, in the reverse index's order", async () => {
+    // `query` comes back id-ascending, which is NOT the (value, record_id)
+    // order the cursor is keyed on — so the handler has to restore it, or a
+    // caller paging by that cursor would see rows out of order.
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(LABELS_SELECT, [
+        labelRow({ record_id: "rec3", value: "a" }),
+        labelRow({ record_id: "rec1", value: "b" }),
+      ])
+      .on(RECORDS_SELECT, [
+        recordRow({ id: "rec1", type: "image/jpeg" }),
+        recordRow({ id: "rec3", type: "image/jpeg" }),
+      ]);
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "reader",
+        method: "GET",
+        subPath: "/data/records",
+        query: { label: "annotator/faces-detected" },
+      }),
+      context,
+    );
+    const { records } = bodyOf(res) as { records: Array<{ id: string }> };
+    expect(records.map((r) => r.id)).toEqual(["rec3", "rec1"]);
+  });
+
+  it("passes labelValue through as an exact-match filter", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(LABELS_SELECT, [])
+      .on(RECORDS_SELECT, []);
+    setDbFactory(db);
+
+    await handler(
+      signedEvent({
+        appId: "reader",
+        method: "GET",
+        subPath: "/data/records",
+        query: { label: "annotator/face-count", labelValue: "3" },
+      }),
+      context,
+    );
+    const q = db.calls(LABELS_SELECT)[0]!;
+    expect(q.text).toMatch(/"value" = /);
+    expect(q.values).toContain("3");
+  });
+
+  it("hydrates metadata and labels on the reverse path too", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(LABELS_SELECT, [labelRow({ record_id: "rec1", key: "face-count", value: "3" })])
+      .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "image/jpeg" })])
+      .on(/from "shared"\."record_image_metadata"/, [{ record_id: "rec1", width: 4, height: 2 }]);
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "reader",
+        method: "GET",
+        subPath: "/data/records",
+        query: { label: "annotator/face-count", include: "metadata,labels" },
+      }),
+      context,
+    );
+    const { records } = bodyOf(res) as {
+      records: Array<{ labels?: unknown[]; metadata?: Record<string, unknown> | null }>;
+    };
+    expect(records[0].labels).toHaveLength(1);
+    expect(records[0].metadata).toMatchObject({ width: 4, height: 2 });
+  });
+
+  it("narrows hydration to the namespaces labelApps asks for", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "image/jpeg" })])
+      .on(LABELS_SELECT, [
+        labelRow({ record_id: "rec1", app_id: "annotator" }),
+        labelRow({ record_id: "rec1", app_id: "photos", key: "thumbnail-of" }),
+      ]);
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "reader",
+        method: "GET",
+        subPath: "/data/records",
+        query: { include: "labels", labelApps: "photos" },
+      }),
+      context,
+    );
+    const { records } = bodyOf(res) as {
+      records: Array<{ labels: Array<{ app_id: string }> }>;
+    };
+    expect(records[0].labels.map((l) => l.app_id)).toEqual(["photos"]);
+  });
+
+  it("hands back a nextCursor and accepts it on the next request", async () => {
+    // limit + 1 rows come back, so the page is full and there is more.
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(LABELS_SELECT, [labelRow({ record_id: "rec1" }), labelRow({ record_id: "rec2" })])
+      .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "image/jpeg" })]);
+    setDbFactory(db);
+
+    const first = await handler(
+      signedEvent({
+        appId: "reader",
+        method: "GET",
+        subPath: "/data/records",
+        query: { label: "annotator/faces-detected", limit: "1" },
+      }),
+      context,
+    );
+    const { nextCursor, hasMore } = bodyOf(first) as {
+      nextCursor: string | null;
+      hasMore: boolean;
+    };
+    expect(hasMore).toBe(true);
+    expect(nextCursor).toBeTruthy();
+
+    // The cursor is opaque and round-trips into the label query's predicate.
+    db.log.length = 0;
+    await handler(
+      signedEvent({
+        appId: "reader",
+        method: "GET",
+        subPath: "/data/records",
+        query: { label: "annotator/faces-detected", limit: "1", cursor: nextCursor! },
+      }),
+      context,
+    );
+    expect(db.calls(LABELS_SELECT)[0]!.text).toMatch(/"record_id" > /);
+  });
+
+  it("drops a label whose record is gone, without ending the page", async () => {
+    // The orphan case — a delete that raced sync. It shortens a page, which is
+    // why the contract is "page until nextCursor is null" rather than "stop on
+    // a short page".
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(LABELS_SELECT, [
+        labelRow({ record_id: "rec1" }),
+        labelRow({ record_id: "gone" }),
+        labelRow({ record_id: "rec2" }),
+      ])
+      .on(RECORDS_SELECT, [
+        recordRow({ id: "rec1", type: "image/jpeg" }),
+        recordRow({ id: "rec2", type: "image/jpeg" }),
+      ]);
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "reader",
+        method: "GET",
+        subPath: "/data/records",
+        query: { label: "annotator/faces-detected", limit: "2" },
+      }),
+      context,
+    );
+    const { records, hasMore, nextCursor } = bodyOf(res) as {
+      records: Array<{ id: string }>;
+      hasMore: boolean;
+      nextCursor: string | null;
+    };
+    // The page held two label rows — rec1 and the orphan — and comes back with
+    // ONE record. That short page is not the end of the results, and a caller
+    // that stopped here would silently miss rec2.
+    expect(records.map((r) => r.id)).toEqual(["rec1"]);
+    expect(hasMore).toBe(true);
+    expect(nextCursor).not.toBeNull();
+  });
+
+  it("lets an all-access caller see every type", async () => {
+    // Drive holds no per-type grants; `readableTypes: undefined` is what says
+    // "no constraint" rather than "constrain to the empty set".
+    const db = fakeDsqlWithGrants([])
+      .on(/from "shared"\."app_registry"/, [{ app_id: "starkeep-drive" }])
+      .on(LABELS_SELECT, [labelRow({ record_id: "rec1", record_type: "audio/mp3" })])
+      .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "audio/mp3" })]);
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "starkeep-drive",
+        method: "GET",
+        subPath: "/data/records",
+        query: { label: "annotator/faces-detected" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const q = db.calls(LABELS_SELECT)[0]!;
+    // No record_type constraint at all, rather than an empty IN-list.
+    expect(q.text).not.toMatch(/"record_type" in/);
+  });
+});
+
+describe("GET /data/label-keys?app=", () => {
+  it("filters the registry to one app", async () => {
+    const db = fakeDsqlWithGrants([]).on(LABEL_KEYS_SELECT, [
+      { app_id: "annotator", key: "faces-detected", description: "d" },
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "somebody",
+        method: "GET",
+        subPath: "/data/label-keys",
+        query: { app: "annotator" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const q = db.calls(LABEL_KEYS_SELECT)[0]!;
+    expect(q.text).toMatch(/"app_id" = /);
+    expect(q.values).toContain("annotator");
+  });
+});
+
+describe("labels supplied on record create", () => {
+  const VALID_HASH = "b".repeat(64);
+
+  function createDb(over?: { declaredKeys?: string[] }) {
+    return fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
+      .on(RECORDS_INSERT, [])
+      .on(
+        LABEL_KEYS_SELECT,
+        (over?.declaredKeys ?? ["thumbnail-of"]).map((key) => ({
+          app_id: "photos",
+          key,
+          description: "d",
+        })),
+      )
+      .on(/from "shared"\."records" where "id" in/, (q) => [
+        recordRow({ id: String(q.values[0]), type: "image/jpeg" }),
+      ])
+      .on(LABELS_INSERT, []);
+  }
+
+  function createEvent(labels: Array<{ key: string; value?: string | null }>) {
+    return signedEvent({
+      appId: "photos",
+      method: "POST",
+      subPath: "/data/records",
+      body: {
+        type: "image/jpeg",
+        contentType: "image/jpeg",
+        contentHash: VALID_HASH,
+        sizeBytes: 3,
+        labels,
+      },
+    });
+  }
+
+  it("keeps the record and reports the failure when a label is rejected", async () => {
+    // The record and its labels share a request but not a transaction, so the
+    // record cannot be un-written. Claiming the whole call failed would have
+    // the caller re-upload bytes that are already stored.
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const db = createDb({ declaredKeys: [] });
+    setDbFactory(db);
+
+    const res = await handler(createEvent([{ key: "thumbnail-of" }]), context);
+    expect(res.statusCode).toBe(400);
+    const body = bodyOf(res) as {
+      error: string;
+      recordCreated: boolean;
+      record: { id: string };
+    };
+    expect(body.error).toBe("InvalidLabelWrite");
+    expect(body.recordCreated).toBe(true);
+    expect(body.record.id).toBeTruthy();
+    // The record row was written; only the labels were not.
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(1);
+    expect(db.calls(LABELS_INSERT)).toHaveLength(0);
   });
 });
 
