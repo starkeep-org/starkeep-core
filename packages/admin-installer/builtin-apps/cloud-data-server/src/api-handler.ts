@@ -38,8 +38,17 @@ import {
   getCategory,
   isCategoryId,
   isKnownType,
+  planLabelWrites,
+  planLabelRetractions,
+  parseLabelRef,
 } from "@starkeep/protocol-primitives";
-import type { DataRecord, StarkeepId, HLCClock, MetadataRow } from "@starkeep/protocol-primitives";
+import type {
+  DataRecord,
+  StarkeepId,
+  HLCClock,
+  MetadataRow,
+  RecordLabel,
+} from "@starkeep/protocol-primitives";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import {
   DsqlAppSyncableNamespaceStore,
@@ -53,10 +62,11 @@ import type {
   DatabaseClient,
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
-import type { Filter } from "@starkeep/storage-adapter";
+import type { Filter, DatabaseAdapter } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
 import {
   loadAccessGrants,
+  loadDeclaredLabelKeys,
   canRead,
   canWrite,
   canReadCategory,
@@ -672,7 +682,11 @@ export async function signSharedCloudFrontUrl(
 // "enrichment requested, but this record has no metadata row" (or its bytes
 // were ingested by a path that doesn't extract metadata — e.g. the LDS folder
 // watcher — so it may be backfilled later).
-function recordToResponse(record: DataRecord, metadata?: MetadataRow | null) {
+function recordToResponse(
+  record: DataRecord,
+  metadata?: MetadataRow | null,
+  labels?: RecordLabel[],
+) {
   return {
     id: record.id,
     type: record.type,
@@ -689,7 +703,48 @@ function recordToResponse(record: DataRecord, metadata?: MetadataRow | null) {
     parent_id: record.parentId,
     label: record.label,
     ...(metadata !== undefined ? { metadata } : {}),
+    // `[]` rather than null when a record has none: absence of labels is an
+    // empty set, not an unknown — the opposite of the metadata case above,
+    // where a missing row means "not extracted yet".
+    ...(labels !== undefined
+      ? {
+          labels: labels.map((l) => ({
+            app_id: l.appId,
+            key: l.key,
+            value: l.value,
+            // Wire/UI rendering only — storage has no such string.
+            label: `${l.appId}/${l.key}`,
+          })),
+        }
+      : {}),
   };
+}
+
+/**
+ * Batch-load labels for a page of records — one primary-key-prefix seek with
+ * an IN-list, the same shape `loadMetadataForPage` uses.
+ *
+ * Unlike metadata, this does **not** filter by the caller's grants per label.
+ * Any app that can read the record's type sees every app's labels on it; the
+ * records reaching this function have already passed that gate. Hiding who
+ * asserted what would defeat the point of attributed assertions.
+ */
+async function loadLabelsForPage(
+  db: { getLabelsByRecordIds: (ids: StarkeepId[]) => Promise<Map<StarkeepId, RecordLabel[]>> },
+  records: DataRecord[],
+  labelApps?: string,
+): Promise<Map<StarkeepId, RecordLabel[]>> {
+  if (records.length === 0) return new Map();
+  const wanted = labelApps
+    ? new Set(labelApps.split(",").map((s) => s.trim()).filter(Boolean))
+    : null;
+  const byId = await db.getLabelsByRecordIds(records.map((r) => r.id));
+  if (!wanted) return byId;
+  const filtered = new Map<StarkeepId, RecordLabel[]>();
+  for (const [id, labels] of byId) {
+    filtered.set(id, labels.filter((l) => wanted.has(l.appId)));
+  }
+  return filtered;
 }
 
 /**
@@ -718,6 +773,39 @@ async function loadMetadataForPage(
     for (const [id, row] of await db.getMetadataByIds(category, ids)) byId.set(id, row);
   }
   return byId;
+}
+
+/**
+ * Resolve a batch of requested label writes into adapter rows, or an error.
+ *
+ * The `SELECT id, type` here is the part the single-statement upsert hides,
+ * and it is very likely the dominant cost of a bulk labelling job — the thing
+ * to measure first if one is slow. The batch size that binds it is the same
+ * 3,000 as the write: an IN-list that large is fine, but it is not free.
+ */
+async function planCloudLabelWrites(
+  db: DatabaseAdapter,
+  grantClient: DatabaseClient,
+  grants: AccessGrants,
+  appId: string,
+  entries: Array<{ recordId: StarkeepId; key: string; value?: string | null }>,
+) {
+  const ids = [...new Set(entries.map((e) => e.recordId))];
+  const found = await db.query({
+    filters: [
+      { field: "id", operator: "in", value: ids },
+      { field: "deletedAt", operator: "isNull" },
+    ],
+    limit: ids.length,
+  });
+  return planLabelWrites({
+    entries,
+    recordTypes: new Map(found.records.map((r) => [r.id as string, r.type])),
+    declaredKeys: await loadDeclaredLabelKeys(grantClient, appId),
+    // A read grant is enough — see planLabelWrites for why labelling does not
+    // require readwrite.
+    canReadType: (type) => canRead(grants, type),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -873,12 +961,18 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const limit = Math.min(parseInt(query["limit"] ?? "50", 10), 500);
       const cursor = query["cursor"];
       const updatedAfter = query["updated_after"];
-      // Opt-in enrichment: embed each record's per-category metadata (dimensions,
-      // EXIF, …) so clients don't have to fan out a metadata request per record.
-      const includeMetadata = (query["include"] ?? "")
-        .split(",")
-        .map((s) => s.trim())
-        .includes("metadata");
+      // Opt-in enrichment: `include` is a comma list, so `labels` joins
+      // `metadata` in it rather than introducing a per-feature boolean.
+      const include = (query["include"] ?? "").split(",").map((s) => s.trim());
+      const includeMetadata = include.includes("metadata");
+      const includeLabels = include.includes("labels");
+      const labelApps = query["labelApps"];
+      const labelFilter = query["label"];
+      const labelValue = query["labelValue"];
+
+      if (labelValue !== undefined && labelFilter === undefined) {
+        return clientErr("labelValue requires label", 400);
+      }
 
       // Per-type read enforcement. An explicit ?type= must be in the caller's
       // readable set; otherwise constrain the scan to readable types.
@@ -886,6 +980,67 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         if (!canRead(grants, type)) return clientErr("Forbidden", 403);
       } else if (!grants.allAccess && grants.readableTypes.size === 0) {
         return ok({ records: [], hasMore: false, nextCursor: null });
+      }
+
+      // The reverse-label query is its own access path with its own order and
+      // its own cursor; hydration and rendering below are shared.
+      if (labelFilter !== undefined) {
+        const ref = parseLabelRef(labelFilter);
+        if (!ref) {
+          return clientErr(
+            `label must be of the form "<appId>/<key>" (got "${labelFilter}")`,
+            400,
+          );
+        }
+        // The grant filter rides inside the reverse index, so unreadable rows
+        // are never materialized and the page comes back full.
+        const found = await db.findByLabel({
+          appId: ref.appId,
+          key: ref.key,
+          value: labelValue,
+          readableTypes: grants.allAccess ? undefined : grants.readableTypes,
+          limit,
+          cursor,
+        });
+
+        // Restore the index's order: `query` returns id-ascending, which is
+        // not the (value, record_id) order the cursor is keyed on.
+        const ids = found.labels.map((l) => l.recordId);
+        const byId = new Map<string, DataRecord>();
+        if (ids.length > 0) {
+          const fetched = await db.query({
+            filters: [
+              { field: "id", operator: "in", value: ids },
+              { field: "deletedAt", operator: "isNull" },
+            ],
+            limit: ids.length,
+          });
+          for (const r of fetched.records) byId.set(r.id, r);
+        }
+        // A label whose record is gone (a delete that raced sync) drops out
+        // here — the one thing that can still short a page, and the reason
+        // the contract is "page until nextCursor is null".
+        const labelled = ids
+          .map((id) => byId.get(id))
+          .filter((r): r is DataRecord => r !== undefined);
+
+        const metaById = includeMetadata
+          ? await loadMetadataForPage(db, grants, labelled)
+          : null;
+        const labelsById = includeLabels
+          ? await loadLabelsForPage(db, labelled, labelApps)
+          : null;
+        return ok({
+          records: labelled.map((r) =>
+            recordToResponse(
+              r,
+              metaById ? metaById.get(r.id) ?? null : undefined,
+              labelsById ? labelsById.get(r.id) ?? [] : undefined,
+            ),
+          ),
+          hasMore: found.hasMore,
+          nextCursor: found.nextCursor,
+        });
       }
 
       const filters: Filter[] = [{ field: "deletedAt", operator: "isNull" }];
@@ -907,19 +1062,120 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const hasMore = result.records.length > limit;
       const records = hasMore ? result.records.slice(0, limit) : result.records;
       const metadataById = includeMetadata ? await loadMetadataForPage(db, grants, records) : null;
+      const labelsById = includeLabels ? await loadLabelsForPage(db, records, labelApps) : null;
       return ok({
         records: records.map((r) =>
-          recordToResponse(r, metadataById ? metadataById.get(r.id) ?? null : undefined),
+          recordToResponse(
+            r,
+            metadataById ? metadataById.get(r.id) ?? null : undefined,
+            labelsById ? labelsById.get(r.id) ?? [] : undefined,
+          ),
         ),
         hasMore,
         nextCursor: hasMore ? records[records.length - 1].id : null,
       });
     }
 
+    // GET /apps/{appId}/data/label-keys[?app=<appId>]
+    //
+    // The manifest-declared label-key registry. Deliberately NOT filtered by
+    // the caller's grants: which keys an app declares is public schema, not
+    // user data. Cross-app discoverability is the reason keys are declared in
+    // a manifest at all rather than counted at runtime.
+    if (method === "GET" && subPath === "/data/label-keys") {
+      const filterApp = query["app"];
+      let q = postgresCompiler
+        .selectFrom("shared.app_label_keys")
+        .select(["app_id", "key", "description"])
+        .orderBy("app_id", "asc")
+        .orderBy("key", "asc");
+      if (filterApp) q = q.where("app_id", "=", filterApp);
+      const compiled = q.compile();
+      const result = await grantClient.query(compiled.sql, [...compiled.parameters]);
+      const rows = result.rows as Array<{
+        app_id: string;
+        key: string;
+        description: string | null;
+      }>;
+      return ok({
+        labelKeys: rows.map((r) => ({
+          app_id: r.app_id,
+          key: r.key,
+          label: `${r.app_id}/${r.key}`,
+          description: r.description,
+        })),
+      });
+    }
+
+    // POST /apps/{appId}/data/labels — set labels (insert-or-update).
+    // Body: { labels: [{ recordId, key, value? }, …] }
+    //
+    // `appId` is never in the body: it is the authenticated subject, which is
+    // what makes squatting another app's namespace unrepresentable rather
+    // than merely rejected.
+    if (method === "POST" && subPath === "/data/labels") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as {
+        labels?: Array<{ recordId?: string; key?: string; value?: string | null }>;
+      };
+      const entries = body.labels;
+      if (!Array.isArray(entries) || entries.length === 0) {
+        return clientErr("labels must be a non-empty array", 400);
+      }
+      if (entries.some((e) => !e.recordId || !e.key)) {
+        return clientErr("each label needs a recordId and a key", 400);
+      }
+
+      const plan = await planCloudLabelWrites(
+        db,
+        grantClient,
+        grants,
+        appId,
+        entries as Array<{ recordId: StarkeepId; key: string; value?: string | null }>,
+      );
+      if (!plan.ok) return clientErr(plan.error, plan.status);
+
+      const hlc = clock.now();
+      await db.upsertLabels(plan.writes.map((w) => ({ ...w, appId, hlc })));
+      return ok({ written: plan.writes.length });
+    }
+
+    // POST /apps/{appId}/data/labels/retract — tombstone labels.
+    // Body: { labels: [{ recordId, key }, …] }
+    if (method === "POST" && subPath === "/data/labels/retract") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as {
+        labels?: Array<{ recordId?: string; key?: string }>;
+      };
+      const entries = body.labels;
+      if (!Array.isArray(entries) || entries.length === 0) {
+        return clientErr("labels must be a non-empty array", 400);
+      }
+      if (entries.some((e) => !e.recordId || !e.key)) {
+        return clientErr("each retraction needs a recordId and a key", 400);
+      }
+
+      // Checks far less than the write path — no declared-key check, no
+      // record-existence check, no grant check. See planLabelRetractions.
+      const plan = planLabelRetractions(
+        entries as Array<{ recordId: StarkeepId; key: string }>,
+      );
+      if (!plan.ok) return clientErr(plan.error, plan.status);
+
+      const hlc = clock.now();
+      await db.retractLabels(plan.writes.map((r) => ({ ...r, appId, hlc })));
+      return ok({ retracted: plan.writes.length });
+    }
+
     // POST /apps/{appId}/data/records
     //
     // Body (key-ref form):
-    //   { type, contentType, contentHash, sizeBytes, fileName?, parentId?, label? }
+    //   { type, contentType, contentHash, sizeBytes, fileName?, parentId?,
+    //     label?, labels? }
     //
     // The caller PUTs the bytes to S3 via a presigned URL first (see POST
     // /files/presign), then registers the record by content-addressed key.
@@ -935,6 +1191,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         sizeBytes?: number;
         parentId?: string;
         label?: string;
+        labels?: Array<{ key: string; value?: string | null }>;
       };
       if (!body.type) return clientErr("type is required", 400);
       if (!isKnownType(body.type)) return clientErr(`Unknown type id: ${body.type}`, 400);
@@ -1008,6 +1265,38 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         await db.put(fresh);
         return { record: fresh, created: true };
       });
+
+      // Optional labels, written in the same request as the record but NOT the
+      // same transaction — see the local-data-server's equivalent for why a
+      // transaction would buy nothing durable here. Only on the created path:
+      // a dedup hit is somebody else's record and re-labelling it silently
+      // would be a surprise.
+      if (created && Array.isArray(body.labels) && body.labels.length > 0) {
+        const plan = await planCloudLabelWrites(
+          db,
+          grantClient,
+          grants,
+          appId,
+          body.labels.map((l) => ({ ...l, recordId: record.id })),
+        );
+        if (!plan.ok) {
+          // The record is already written. Report the label failure rather
+          // than pretending the whole call failed — the caller can retry just
+          // the labels against POST /data/labels.
+          return ok(
+            {
+              error: "InvalidLabelWrite",
+              detail: plan.error,
+              record: recordToResponse(record),
+              recordCreated: true,
+            },
+            plan.status,
+          );
+        }
+        const labelHlc = clock.now();
+        await db.upsertLabels(plan.writes.map((w) => ({ ...w, appId, hlc: labelHlc })));
+      }
+
       return ok({ record: recordToResponse(record) }, created ? 201 : 200);
     }
 
