@@ -3,8 +3,11 @@ import {
   createDataRecord,
   dataRecordObjectKey,
   typeCategory,
+  validateLabelWrite,
+  isValidLabelKey,
   type DataRecord,
   type MetadataRow,
+  type StarkeepId,
 } from "@starkeep/protocol-primitives";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -23,6 +26,14 @@ import type {
   StarkeepSdkOptions,
   DataPutInput,
 } from "./types.js";
+
+/**
+ * DSQL caps a write transaction at 3,000 modified rows, and secondary-index
+ * entries do *not* count against it (measured), so the two indexes on
+ * record_labels don't shrink this. Used for the record-type lookup too, where
+ * it bounds the IN-list rather than a transaction.
+ */
+const LABEL_WRITE_CHUNK = 3000;
 
 // Resolve a record's Starkeep type id (or a bare category id) to its metadata
 // category. `other` has no metadata table, so callers skip persistence for it.
@@ -91,6 +102,23 @@ export async function createStarkeepSdk(
     changeNotifier.emit({
       eventType: "local-change-recorded",
       recordIds: [record.id],
+      timestamp: clock.now(),
+    });
+  }
+
+  /**
+   * Labels are shared data, so this is emitted with no `originAppId` — the
+   * always-on Drive channel owns them, not the writing app's channel.
+   *
+   * Note it carries the *labelled* record ids. Nothing about the record row
+   * changed; this only nudges the engine to look, and a label write must
+   * never touch `records.updated_at` (that would re-ship the whole record).
+   */
+  function logLabelChange(recordIds: StarkeepId[]): void {
+    if (recordIds.length === 0) return;
+    changeNotifier.emit({
+      eventType: "local-change-recorded",
+      recordIds: [...new Set(recordIds)],
       timestamp: clock.now(),
     });
   }
@@ -255,6 +283,112 @@ export async function createStarkeepSdk(
       async getMetadataByIds(typeId, recordIds) {
         if (metadataCategory(typeId) === "other") return new Map();
         return databaseAdapter.getMetadataByIds(typeId, recordIds);
+      },
+
+      async setLabels(appId, entries) {
+        if (entries.length === 0) return;
+
+        // Shape first, across the whole batch, so a bad key fails before any
+        // chunk is written rather than partway through a bulk job.
+        for (const e of entries) {
+          const problem = validateLabelWrite({ key: e.key, value: e.value ?? null });
+          if (problem) throw new Error(problem);
+        }
+
+        // Every label needs its record's type, denormalized onto the row.
+        // This read — not the upsert — is very likely the dominant cost of a
+        // bulk labelling job, and it is what the "one statement per batch"
+        // framing hides.
+        const ids = [...new Set(entries.map((e) => e.recordId))];
+        const recordTypes = new Map<string, string>();
+        for (let i = 0; i < ids.length; i += LABEL_WRITE_CHUNK) {
+          const slice = ids.slice(i, i + LABEL_WRITE_CHUNK);
+          const found = await databaseAdapter.query({
+            filters: [
+              { field: "id", operator: "in", value: slice },
+              { field: "deletedAt", operator: "isNull" },
+            ],
+            limit: slice.length,
+          });
+          for (const r of found.records) recordTypes.set(r.id, r.type);
+        }
+
+        const rows = entries.map((e) => {
+          const recordType = recordTypes.get(e.recordId);
+          if (recordType === undefined) {
+            // No FK backs record_id, so without this the write would create
+            // an orphan silently.
+            throw new Error(`Cannot label record ${e.recordId}: it does not exist`);
+          }
+          return { recordId: e.recordId, key: e.key, value: e.value ?? null, recordType };
+        });
+
+        // DSQL caps a transaction at 3,000 modified rows. Chunks are not
+        // atomic with each other; the upsert being idempotent is what makes a
+        // partial failure safe to retry from the beginning.
+        const hlc = clock.now();
+        for (let i = 0; i < rows.length; i += LABEL_WRITE_CHUNK) {
+          await databaseAdapter.upsertLabels(
+            rows.slice(i, i + LABEL_WRITE_CHUNK).map((r) => ({ ...r, appId, hlc })),
+          );
+        }
+        logLabelChange(rows.map((r) => r.recordId));
+      },
+
+      async retractLabels(appId, entries) {
+        if (entries.length === 0) return;
+        for (const e of entries) {
+          if (!isValidLabelKey(e.key)) throw new Error(`invalid label key "${e.key}"`);
+        }
+        // Deliberately no record-existence check: retracting a label on a
+        // deleted record is a no-op, not an error.
+        const hlc = clock.now();
+        for (let i = 0; i < entries.length; i += LABEL_WRITE_CHUNK) {
+          await databaseAdapter.retractLabels(
+            entries.slice(i, i + LABEL_WRITE_CHUNK).map((e) => ({
+              recordId: e.recordId,
+              key: e.key,
+              appId,
+              hlc,
+            })),
+          );
+        }
+        logLabelChange(entries.map((e) => e.recordId));
+      },
+
+      async getLabelsByIds(recordIds) {
+        if (recordIds.length === 0) return new Map();
+        return databaseAdapter.getLabelsByRecordIds(recordIds);
+      },
+
+      async findByLabel(sel, page) {
+        const found = await databaseAdapter.findByLabel({
+          appId: sel.appId,
+          key: sel.key,
+          value: sel.value,
+          limit: page?.limit,
+          cursor: page?.cursor,
+        });
+        if (found.labels.length === 0) {
+          return { records: [], nextCursor: found.nextCursor };
+        }
+        const ids = found.labels.map((l) => l.recordId);
+        const fetched = await databaseAdapter.query({
+          filters: [
+            { field: "id", operator: "in", value: ids },
+            { field: "deletedAt", operator: "isNull" },
+          ],
+          limit: ids.length,
+        });
+        // Restore the reverse index's order: `query` returns id-ascending,
+        // which is not the (value, record_id) order the cursor is keyed on.
+        const byId = new Map(fetched.records.map((r) => [r.id as string, r]));
+        return {
+          records: ids
+            .map((id) => byId.get(id))
+            .filter((r): r is DataRecord => r !== undefined),
+          nextCursor: found.nextCursor,
+        };
       },
     },
 

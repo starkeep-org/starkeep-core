@@ -150,3 +150,154 @@ describe("createStarkeepSdk", () => {
     });
   });
 });
+
+describe("label operations", () => {
+  async function sdkWithRecords(count: number) {
+    const localDatabase = new MockDatabaseAdapter();
+    const localObjectStorage = new MockObjectStorageAdapter();
+    const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
+    const sdk = await createStarkeepSdk({
+      databaseAdapter: localDatabase,
+      objectStorageAdapter: localObjectStorage,
+      nodeId: "test-node",
+      clock,
+    });
+    const ids: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const r = await sdk.data.putWithFile(
+        { type: "image/jpeg", originAppId: "photos" },
+        Buffer.from(`bytes-${i}`),
+        "image/jpeg",
+      );
+      ids.push(r.id);
+    }
+    return { sdk, ids };
+  }
+
+  it("sets a flag and a valued label, denormalizing the record type", async () => {
+    const { sdk, ids } = await sdkWithRecords(1);
+    await sdk.data.setLabels("alpha", [
+      { recordId: ids[0] as never, key: "ocr-available" },
+      { recordId: ids[0] as never, key: "quality", value: "high" },
+    ]);
+
+    const labels = (await sdk.data.getLabelsByIds([ids[0] as never])).get(ids[0] as never)!;
+    expect(labels).toHaveLength(2);
+    expect(labels.every((l) => l.appId === "alpha")).toBe(true);
+    expect(labels.every((l) => l.recordType === "image/jpeg")).toBe(true);
+    expect(labels.find((l) => l.key === "ocr-available")!.value).toBeNull();
+  });
+
+  it("rejects a malformed key before writing anything", async () => {
+    // Whole-batch validation up front: a bad key in entry 900 must not leave
+    // entries 1-899 written.
+    const { sdk, ids } = await sdkWithRecords(1);
+    await expect(
+      sdk.data.setLabels("alpha", [
+        { recordId: ids[0] as never, key: "fine" },
+        { recordId: ids[0] as never, key: "Not Fine" },
+      ]),
+    ).rejects.toThrow(/Not Fine/);
+    expect((await sdk.data.getLabelsByIds([ids[0] as never])).size).toBe(0);
+  });
+
+  it("rejects a value over the byte cap", async () => {
+    const { sdk, ids } = await sdkWithRecords(1);
+    await expect(
+      sdk.data.setLabels("alpha", [
+        { recordId: ids[0] as never, key: "k", value: "x".repeat(200) },
+      ]),
+    ).rejects.toThrow(/128/);
+  });
+
+  it("refuses to label a record that does not exist", async () => {
+    // Nothing backs record_id with a foreign key, so this would otherwise
+    // create an orphan silently.
+    const { sdk } = await sdkWithRecords(0);
+    await expect(
+      sdk.data.setLabels("alpha", [{ recordId: "01JMISSING" as never, key: "k" }]),
+    ).rejects.toThrow(/does not exist/);
+  });
+
+  it("retracts, and a retracted label stops appearing on both read paths", async () => {
+    const { sdk, ids } = await sdkWithRecords(1);
+    await sdk.data.setLabels("alpha", [{ recordId: ids[0] as never, key: "k" }]);
+    await sdk.data.retractLabels("alpha", [{ recordId: ids[0] as never, key: "k" }]);
+
+    expect((await sdk.data.getLabelsByIds([ids[0] as never])).size).toBe(0);
+    const found = await sdk.data.findByLabel({ appId: "alpha", key: "k" });
+    expect(found.records).toHaveLength(0);
+  });
+
+  it("retracting a key that was never set is a no-op, not an error", async () => {
+    const { sdk, ids } = await sdkWithRecords(1);
+    await expect(
+      sdk.data.retractLabels("alpha", [{ recordId: ids[0] as never, key: "never-set" }]),
+    ).resolves.toBeUndefined();
+  });
+
+  it("finds records by label, and pages to exhaustion", async () => {
+    const { sdk, ids } = await sdkWithRecords(5);
+    await sdk.data.setLabels(
+      "alpha",
+      ids.map((id) => ({ recordId: id as never, key: "flag" })),
+    );
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let guard = 0;
+    do {
+      const page: { records: Array<{ id: string }>; nextCursor: string | null } =
+        await sdk.data.findByLabel({ appId: "alpha", key: "flag" }, { limit: 2, cursor: cursor ?? undefined });
+      seen.push(...page.records.map((r) => r.id));
+      cursor = page.nextCursor;
+      expect(++guard).toBeLessThan(50);
+    } while (cursor !== null);
+
+    expect(new Set(seen)).toEqual(new Set(ids));
+  });
+
+  it("distinguishes presence from exact-value matching", async () => {
+    const { sdk, ids } = await sdkWithRecords(2);
+    await sdk.data.setLabels("alpha", [
+      { recordId: ids[0] as never, key: "quality", value: "high" },
+      { recordId: ids[1] as never, key: "quality", value: "low" },
+    ]);
+
+    const all = await sdk.data.findByLabel({ appId: "alpha", key: "quality" });
+    expect(all.records).toHaveLength(2);
+
+    const high = await sdk.data.findByLabel({ appId: "alpha", key: "quality", value: "high" });
+    expect(high.records.map((r) => r.id)).toEqual([ids[0]]);
+  });
+
+  it("keeps two apps' opinions about one record separate", async () => {
+    const { sdk, ids } = await sdkWithRecords(1);
+    await sdk.data.setLabels("alpha", [{ recordId: ids[0] as never, key: "quality", value: "high" }]);
+    await sdk.data.setLabels("gamma", [{ recordId: ids[0] as never, key: "quality", value: "low" }]);
+
+    const labels = (await sdk.data.getLabelsByIds([ids[0] as never])).get(ids[0] as never)!;
+    expect(new Set(labels.map((l) => `${l.appId}=${l.value}`))).toEqual(
+      new Set(["alpha=high", "gamma=low"]),
+    );
+    // And a reverse query stays inside the namespace it asked for.
+    const fromAlpha = await sdk.data.findByLabel({ appId: "alpha", key: "quality", value: "low" });
+    expect(fromAlpha.records).toHaveLength(0);
+  });
+
+  it("emits a change event so the Drive channel gets nudged", async () => {
+    const { sdk, ids } = await sdkWithRecords(1);
+    const seen: string[][] = [];
+    sdk.changeNotifier.subscribe((e) => {
+      if (e.eventType === "local-change-recorded") seen.push([...e.recordIds]);
+    });
+    await sdk.data.setLabels("alpha", [{ recordId: ids[0] as never, key: "k" }]);
+    expect(seen).toContainEqual([ids[0]]);
+  });
+
+  it("no-ops on an empty batch without touching the store", async () => {
+    const { sdk } = await sdkWithRecords(0);
+    await expect(sdk.data.setLabels("alpha", [])).resolves.toBeUndefined();
+    await expect(sdk.data.retractLabels("alpha", [])).resolves.toBeUndefined();
+  });
+});
