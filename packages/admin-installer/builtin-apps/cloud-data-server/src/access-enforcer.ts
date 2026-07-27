@@ -51,3 +51,29 @@ export async function loadAccessGrants(
   }));
   return buildAccessGrants(rows, { allAccess: false });
 }
+
+/**
+ * Load the label keys the caller's manifest declared, from
+ * `shared.app_label_keys`. The label write path rejects anything absent from
+ * this set, which is what makes the per-app key-cardinality cap enforceable.
+ *
+ * A small per-request lookup on a table of tens of rows — the same shape and
+ * cost as `loadAccessGrants` above, and loaded alongside it.
+ *
+ * Note there is no all-access shortcut here, unlike grants. Drive reads
+ * everything but writes only its own namespace, and "all access" says nothing
+ * about which keys an app declared; an app with no declared keys can write no
+ * labels, Drive included.
+ */
+export async function loadDeclaredLabelKeys(
+  client: DatabaseClient,
+  appId: string,
+): Promise<Set<string>> {
+  const query = postgresCompiler
+    .selectFrom("shared.app_label_keys")
+    .select("key")
+    .where("app_id", "=", appId)
+    .compile();
+  const result = await client.query(query.sql, [...query.parameters]);
+  return new Set((result.rows as Array<{ key: string }>).map((r) => r.key));
+}
