@@ -4,6 +4,7 @@ import type {
   HLCClock,
   CreateDataRecordInput,
   MetadataRow,
+  RecordLabel,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { IndexQuery, IndexResult } from "@starkeep/query-orchestrator";
@@ -98,6 +99,93 @@ export interface DataOperations {
     typeId: string,
     recordIds: StarkeepId[],
   ): Promise<Map<StarkeepId, MetadataRow>>;
+
+  // ---- Cross-app record labels -------------------------------------------
+  //
+  // ## Why `appId` is a parameter here
+  //
+  // This SDK is a **per-node** facility, not a per-app one: it has no app
+  // identity of its own, and every write that needs one already takes it
+  // explicitly (`CreateDataRecordInput.originAppId`). So the labelling app id
+  // is a parameter, exactly as `originAppId` is.
+  //
+  // That means the "an app cannot name another namespace" guarantee is *not*
+  // enforced by these types — it is enforced at the two data servers, which
+  // set `app_id` from the authenticated subject and ignore anything the
+  // request body says. This layer sits below that boundary, in the same way
+  // `query()` here does no grant filtering while the servers do. Callers
+  // reaching these methods directly are already inside the trust boundary.
+  //
+  // Likewise, the manifest declared-key check lives at the servers, which can
+  // read `shared.app_label_keys`; these methods validate key and value
+  // *shape* only.
+
+  /**
+   * Set (insert-or-update) labels in `appId`'s namespace. Idempotent per
+   * `(recordId, appId, key)`.
+   *
+   * **Owns the chunking at every size**, so there is no bulk/non-bulk split
+   * and no cliff where a caller's hand-rolled loop quietly stops being the
+   * right shape — the one-record case is a batch of one. DSQL caps a
+   * transaction at 3,000 modified rows; this splits accordingly, and the
+   * splits are **not** atomic with each other, so a failure partway leaves
+   * earlier chunks written. That is safe to retry: the upsert is idempotent.
+   *
+   * `value: null` (or omitted) sets a bare flag.
+   */
+  setLabels(appId: string, entries: LabelSetEntry[]): Promise<void>;
+
+  /**
+   * Retract labels in `appId`'s namespace, as tombstones so the retraction
+   * itself syncs. Takes the same entry shape as `setLabels` minus the value,
+   * so retraction mirrors the write rather than being a third argument
+   * convention to remember.
+   */
+  retractLabels(appId: string, entries: LabelRetractEntry[]): Promise<void>;
+
+  /**
+   * All live labels on each of `recordIds`, from **every** app — one batched
+   * query, the shape `?include=labels` uses. Ids with no labels are absent
+   * from the map.
+   */
+  getLabelsByIds(recordIds: StarkeepId[]): Promise<Map<StarkeepId, RecordLabel[]>>;
+
+  /**
+   * Records carrying a given app's label. The query labels exist for: it is
+   * what replaces "ask app A about every file".
+   *
+   * `sel.value` omitted means **presence** (any value, flags included);
+   * supplied means exact match.
+   *
+   * > **Page until `nextCursor` is null.** A short page does not mean the end
+   * > of the results — a label whose record was concurrently deleted drops out
+   * > of its page. Only a null `nextCursor` means there is no more. Stopping
+   * > on the first short page silently misses matches, and does so only under
+   * > load, which is worse than an obvious bug.
+   *
+   * Results come back in the reverse index's own order and no other; sorting
+   * by `created_at` would need a different index and is deliberately not
+   * offered. The cursor is opaque — do not parse it.
+   *
+   * Note this does **not** filter by any caller's read grants (see the note
+   * above about where the trust boundary is). The data servers apply that.
+   */
+  findByLabel(
+    sel: { appId: string; key: string; value?: string },
+    page?: { limit?: number; cursor?: string },
+  ): Promise<{ records: DataRecord[]; nextCursor: string | null }>;
+}
+
+export interface LabelSetEntry {
+  recordId: StarkeepId;
+  key: string;
+  /** Omitted or `null` sets a bare flag. */
+  value?: string | null;
+}
+
+export interface LabelRetractEntry {
+  recordId: StarkeepId;
+  key: string;
 }
 
 export interface IndexOperations {

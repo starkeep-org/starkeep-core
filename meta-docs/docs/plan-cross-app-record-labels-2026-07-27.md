@@ -652,6 +652,23 @@ argument convention to remember.
 sets a bare flag. On the read side `sel.value` omitted means *presence* (any value, flags
 included) and `sel.value` supplied means exact match, mirroring `?label=` / `&labelValue=`.
 
+> **Correction found during implementation.** Point 1 below is **wrong about this
+> codebase**: `packages/sdk` has *no* app identity. `StarkeepSdkOptions` carries no
+> `appId`, and every write that needs one already takes it explicitly — that is what
+> `CreateDataRecordInput.originAppId` is. The SDK is a **per-node** facility used by the
+> local-data-server; apps reach the data plane over HTTP via `app-client`'s `signedFetch`,
+> never by importing the SDK. So the shipped signatures are
+> `setLabels(appId, entries)` / `retractLabels(appId, entries)`, mirroring `originAppId`.
+>
+> The guarantee itself is not lost, it just lands where it was always actually enforced:
+> **both data servers set `app_id` from the authenticated subject and ignore the request
+> body**, which is what the cloud test "binds app_id from the authenticated subject" pins.
+> The SDK sits *below* that trust boundary, exactly as `query()` does no grant filtering
+> there either. Point 3 (manifest-key validation at the call site) moves for the same
+> reason — the SDK cannot read `shared.app_label_keys`; it validates key and value *shape*
+> only, and the servers reject undeclared keys. Points 2 and 4 hold as written, and 4 —
+> `setLabels` owning the chunking — was always the valuable one.
+
 Four things this buys that the HTTP surface alone cannot:
 
 1. **`app_id` never appears in a write signature.** The SDK is bound to one app identity, so
