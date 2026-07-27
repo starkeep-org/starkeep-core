@@ -253,6 +253,12 @@ export async function createStarkeepSdk(
         const ts = clock.now();
         await databaseAdapter.delete(recordId, ts);
         await databaseAdapter.deleteMetadata(existing.type, recordId);
+        // Cascade to labels by hand — no FK backs record_id on either
+        // backend. Crosses app namespaces deliberately: the record is going
+        // away, so every app's assertions about it go with it. Tombstones
+        // rather than hard-deletes, so the cascade itself syncs; a record
+        // with 8 labels is 9 rows, nowhere near any transaction limit.
+        await databaseAdapter.tombstoneLabelsForRecord(recordId, ts);
         const tombstone: DataRecord = {
           ...existing,
           updatedAt: ts,

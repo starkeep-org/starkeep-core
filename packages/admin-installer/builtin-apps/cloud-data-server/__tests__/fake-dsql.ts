@@ -69,7 +69,12 @@ export function fakeDsqlWithGrants(
     .on(/from "shared"\."access_grants"/, grantRows)
     .on(/from "shared"\."records" where "updated_at" like/, [])
     .on(/from "shared"\."record_labels" order by "record_id"/, [])
-    .on(/from "shared"\."record_labels" group by "node_id"/, []);
+    .on(/from "shared"\."record_labels" group by "node_id"/, [])
+    // DELETE /data/records/:id cascades to labels on every record delete,
+    // since DSQL has no foreign keys to do it. Returns no rows; tests that
+    // assert on the cascade read `db.calls(...)`, which logs every statement
+    // regardless of which route answered it.
+    .on(/update "shared"\."record_labels" set "deleted_at"/, []);
 }
 
 const TEST_HLC = serializeHLC({ wallTime: Date.UTC(2026, 0, 1), counter: 0, nodeId: "test" });

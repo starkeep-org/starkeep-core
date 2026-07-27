@@ -1577,7 +1577,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           const existing = await db.get(id);
           if (!existing || existing.deletedAt) return clientErr("Record not found", 404);
           if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
-          await db.delete(id, clock.now());
+          const hlc = clock.now();
+          await db.delete(id, hlc);
+          // Cascade to labels by hand: DSQL has no foreign keys, so nothing
+          // does this for us. Crosses app namespaces on purpose — the record
+          // is going away, so every app's assertions about it go with it.
+          // This is a platform operation riding on the record delete, not an
+          // app write, which is why it isn't gated on the caller owning those
+          // labels.
+          await db.tombstoneLabelsForRecord(id, hlc);
           return ok({ deleted: true });
         });
       }
