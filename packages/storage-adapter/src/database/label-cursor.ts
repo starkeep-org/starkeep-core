@@ -62,6 +62,39 @@ export function decodeLabelCursor(token: string): LabelCursor | null {
 }
 
 /**
+ * Cursor for the sync-side scan over *all* label rows, which is ordered by the
+ * primary key rather than by the reverse index. Separate from
+ * {@link LabelCursor} because it keys on a different order and includes
+ * tombstones; conflating them would produce a token that means one thing to
+ * `findByLabel` and another to `queryLabels`.
+ */
+export interface LabelScanCursor {
+  recordId: StarkeepId;
+  appId: string;
+  key: string;
+}
+
+export function encodeLabelScanCursor(c: LabelScanCursor): string {
+  return Buffer.from(JSON.stringify([c.recordId, c.appId, c.key]), "utf8").toString(
+    "base64url",
+  );
+}
+
+export function decodeLabelScanCursor(token: string): LabelScanCursor | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8")) as unknown;
+    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+    const [recordId, appId, key] = parsed as [unknown, unknown, unknown];
+    if (typeof recordId !== "string" || typeof appId !== "string" || typeof key !== "string") {
+      return null;
+    }
+    return { recordId: recordId as StarkeepId, appId, key };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The predicate itself is built with each adapter's Kysely expression builder
  * rather than shared as a SQL string, so parameter binding stays the compiler's
  * job. Both spell the same two cases:

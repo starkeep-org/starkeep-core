@@ -4,6 +4,7 @@ import {
   ZERO_HLC,
   type AnyRecord,
   type HLCTimestamp,
+  type RecordLabel,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
@@ -120,6 +121,31 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
+      // Label scan. Same channel, same cursor pattern, same per-nodeId
+      // watermark filter as the records scan above — labels are shared data,
+      // so only the Drive channel carries them.
+      const labelCandidates: RecordLabel[] = [];
+      if (syncSharedRecords) {
+        let labelCursor: string | undefined = undefined;
+        let labelHasMore = true;
+        while (labelCandidates.length < pageLimit && labelHasMore) {
+          const page = await localDatabaseAdapter.queryLabels({
+            limit: scanPageSize,
+            ...(labelCursor !== undefined ? { cursor: labelCursor } : {}),
+          });
+          if (page.labels.length === 0) break;
+          for (const l of page.labels) {
+            const peerHlc = peerWatermarks[l.updatedAt.nodeId];
+            if (!peerHlc || compareHLC(l.updatedAt, peerHlc) > 0) {
+              labelCandidates.push(l);
+              if (labelCandidates.length >= pageLimit) break;
+            }
+          }
+          labelHasMore = page.hasMore;
+          labelCursor = page.nextCursor ?? undefined;
+        }
+      }
+
       // AR/AW scan: same cursor pattern as the SR loop above. scanSince
       // paginates by `updated_at` (serialized HLC), so each page advances
       // the cursor across both filtered and selected rows. Combined cap of
@@ -184,19 +210,30 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // Items deferred here ship next round because the peer's watermarks
       // won't have advanced past them.
       const cappedRecords: AnyRecord[] = [];
+      const cappedLabels: RecordLabel[] = [];
       const cappedAppRows: AppSyncableRowEntry[] = [];
       if (
-        recordCandidates.length + appRowCandidates.length <= pageLimit
+        recordCandidates.length + labelCandidates.length + appRowCandidates.length <=
+        pageLimit
       ) {
         cappedRecords.push(...recordCandidates);
+        cappedLabels.push(...labelCandidates);
         cappedAppRows.push(...appRowCandidates);
       } else {
+        // Take the globally-earliest-HLC pageLimit items across all three
+        // streams. Labels must be in this sort, not appended after it:
+        // deferring a label whose HLC precedes a shipped record would break
+        // the contiguous-prefix rule the coverage watermark depends on.
         type Tagged =
           | { kind: "r"; rec: AnyRecord; hlc: HLCTimestamp }
+          | { kind: "l"; label: RecordLabel; hlc: HLCTimestamp }
           | { kind: "a"; row: AppSyncableRowEntry; hlc: HLCTimestamp };
         const tagged: Tagged[] = [
           ...recordCandidates.map(
             (r): Tagged => ({ kind: "r", rec: r, hlc: r.updatedAt }),
+          ),
+          ...labelCandidates.map(
+            (l): Tagged => ({ kind: "l", label: l, hlc: l.updatedAt }),
           ),
           ...appRowCandidates.map(
             (e): Tagged => ({ kind: "a", row: e, hlc: e.timestamp }),
@@ -205,16 +242,19 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         tagged.sort((a, b) => compareHLC(a.hlc, b.hlc));
         for (const t of tagged.slice(0, pageLimit)) {
           if (t.kind === "r") cappedRecords.push(t.rec);
+          else if (t.kind === "l") cappedLabels.push(t.label);
           else cappedAppRows.push(t.row);
         }
       }
 
       const outboundByNode = groupOutboundByNodeId(
         cappedRecords,
+        cappedLabels,
         cappedAppRows,
       );
 
       const outboundRecords: AnyRecord[] = [];
+      const outboundLabels: RecordLabel[] = [];
       const outboundAppRows: AppSyncableRowEntry[] = [];
 
       for (const items of outboundByNode.values()) {
@@ -233,6 +273,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           }
           if (item.kind === "record") {
             outboundRecords.push(item.record);
+          } else if (item.kind === "label") {
+            outboundLabels.push(item.label);
           } else {
             outboundAppRows.push(item.entry);
           }
@@ -242,6 +284,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       const response = await transport.exchange({
         watermarks: ownWatermarks,
         records: outboundRecords.length > 0 ? outboundRecords : undefined,
+        labels: outboundLabels.length > 0 ? outboundLabels : undefined,
         appSyncableRows: outboundAppRows.length > 0 ? outboundAppRows : undefined,
         limit: pageLimit,
       });
@@ -262,8 +305,18 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           `[sync] dropped ${response.records?.length ?? 0} shared record(s) received on a per-app channel (syncSharedRecords=false)`,
         );
       }
+      // Labels are shared data too, so the same guard applies. Without this
+      // the channel split would hold for records and silently not for
+      // labels — the kind of gap that gets left out because the responder
+      // "shouldn't" ship them.
+      if (!syncSharedRecords && (response.labels?.length ?? 0) > 0) {
+        console.warn(
+          `[sync] dropped ${response.labels?.length ?? 0} record label(s) received on a per-app channel (syncSharedRecords=false)`,
+        );
+      }
       const inboundByNode = groupInboundByNodeId(
         syncSharedRecords ? response.records : [],
+        syncSharedRecords ? (response.labels ?? []) : [],
         response.appSyncableRows,
       );
       const appliedIds: StarkeepId[] = [];
@@ -312,6 +365,33 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             // user-visible "data change."
             if (!metadataAlreadyApplied) appliedIds.push(snapshot.id);
             if (contiguous) ownSafeAdvance.set(nodeId, snapshot.updatedAt);
+          } else if (item.kind === "label") {
+            const incoming = item.label;
+            // HLC LWW on the label's own row, which is the whole reason
+            // labels are a separate table: a record's whole-row LWW would
+            // otherwise let a concurrent metadata update eat a label.
+            const current = await localDatabaseAdapter.getLabel(
+              incoming.recordId,
+              incoming.appId,
+              incoming.key,
+            );
+            if (
+              current === null ||
+              compareHLC(current.updatedAt, incoming.updatedAt) < 0
+            ) {
+              clock.receive(incoming.updatedAt);
+              // putLabel, not upsertLabels: this writes the snapshot verbatim
+              // including its tombstone, so an inbound retraction stays
+              // retracted instead of being revived.
+              await localDatabaseAdapter.putLabel(incoming);
+              // Surface the labelled record as changed. Nothing on the record
+              // row moved — a label write must never touch records.updated_at
+              // — but subscribers key on record ids.
+              appliedIds.push(incoming.recordId);
+            }
+            // No blob to pull, so a label can never fail the way a record
+            // with a missing blob can; the prefix stays contiguous.
+            if (contiguous) ownSafeAdvance.set(nodeId, incoming.updatedAt);
           } else {
             const entry = item.entry;
             if (!appSyncableSource) {
@@ -387,24 +467,32 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
 type OutboundItem =
   | { kind: "record"; record: AnyRecord }
+  | { kind: "label"; label: RecordLabel }
   | { kind: "appRow"; entry: AppSyncableRowEntry };
 
 type InboundItem =
   | { kind: "record"; record: AnyRecord }
+  | { kind: "label"; label: RecordLabel }
   | { kind: "appRow"; entry: AppSyncableRowEntry };
 
 function outboundItemHlc(item: OutboundItem): HLCTimestamp {
-  return item.kind === "record" ? item.record.updatedAt : item.entry.timestamp;
+  if (item.kind === "record") return item.record.updatedAt;
+  if (item.kind === "label") return item.label.updatedAt;
+  return item.entry.timestamp;
 }
 
 function inboundItemHlc(item: InboundItem): HLCTimestamp {
-  return item.kind === "record" ? item.record.updatedAt : item.entry.timestamp;
+  if (item.kind === "record") return item.record.updatedAt;
+  if (item.kind === "label") return item.label.updatedAt;
+  return item.entry.timestamp;
 }
 
 function outboundItemId(item: OutboundItem): string {
-  return item.kind === "record"
-    ? item.record.id
-    : `${item.entry.appId}.${item.entry.table}`;
+  if (item.kind === "record") return item.record.id;
+  if (item.kind === "label") {
+    return `${item.label.recordId}.${item.label.appId}.${item.label.key}`;
+  }
+  return `${item.entry.appId}.${item.entry.table}`;
 }
 
 /**
@@ -414,11 +502,15 @@ function outboundItemId(item: OutboundItem): string {
  */
 function groupOutboundByNodeId(
   records: AnyRecord[],
+  labels: RecordLabel[],
   appRows: AppSyncableRowEntry[],
 ): Map<string, OutboundItem[]> {
   const out = new Map<string, OutboundItem[]>();
   for (const r of records) {
     pushToBucket(out, r.updatedAt.nodeId, { kind: "record", record: r });
+  }
+  for (const l of labels) {
+    pushToBucket(out, l.updatedAt.nodeId, { kind: "label", label: l });
   }
   for (const e of appRows) {
     pushToBucket(out, e.timestamp.nodeId, { kind: "appRow", entry: e });
@@ -431,11 +523,15 @@ function groupOutboundByNodeId(
 
 function groupInboundByNodeId(
   records: readonly AnyRecord[],
+  labels: readonly RecordLabel[],
   appRows: readonly AppSyncableRowEntry[],
 ): Map<string, InboundItem[]> {
   const out = new Map<string, InboundItem[]>();
   for (const r of records) {
     pushToBucket(out, r.updatedAt.nodeId, { kind: "record", record: r });
+  }
+  for (const l of labels) {
+    pushToBucket(out, l.updatedAt.nodeId, { kind: "label", label: l });
   }
   for (const e of appRows) {
     pushToBucket(out, e.timestamp.nodeId, { kind: "appRow", entry: e });
@@ -453,9 +549,10 @@ function pushToBucket<T>(map: Map<string, T[]>, key: string, value: T): void {
 }
 
 function outboundManifest(item: OutboundItem): FileSyncManifest | null {
-  return item.kind === "record"
-    ? manifestForRecord(item.record)
-    : manifestForAppRow(item.entry);
+  if (item.kind === "record") return manifestForRecord(item.record);
+  // A label is a row, never a blob — it has nothing to transfer.
+  if (item.kind === "label") return null;
+  return manifestForAppRow(item.entry);
 }
 
 function manifestForRecord(record: AnyRecord): FileSyncManifest | null {

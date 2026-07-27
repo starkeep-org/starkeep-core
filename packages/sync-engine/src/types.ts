@@ -1,4 +1,9 @@
-import type { StarkeepId, HLCTimestamp, AnyRecord } from "@starkeep/protocol-primitives";
+import type {
+  StarkeepId,
+  HLCTimestamp,
+  AnyRecord,
+  RecordLabel,
+} from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 
 // ---------------------------------------------------------------------------
@@ -128,6 +133,19 @@ export interface SyncExchangeRequest {
   readonly watermarks: Watermarks;
   /** Records the caller believes the peer hasn't seen yet. */
   readonly records?: AnyRecord[];
+  /**
+   * Cross-app record labels the caller believes the peer hasn't seen. Shared
+   * data, so they ride the **Drive channel** with records under
+   * `app-starkeep-drive-role` — no new channel, and a per-app channel
+   * (`syncSharedRecords=false`) must drop them inbound exactly as it drops
+   * shared records.
+   *
+   * Labels are a second stream on the same channel, applied in merged per-node
+   * HLC order with records. That merge is what keeps the coverage watermark
+   * honest: it is only valid because holdings stay a contiguous per-node
+   * prefix, and with two streams that has to hold *across both*.
+   */
+  readonly labels?: RecordLabel[];
   /** App-syncable row deltas the caller believes the peer hasn't seen. */
   readonly appSyncableRows?: AppSyncableRowEntry[];
   /** Max records the responder should ship in this round. */
@@ -137,6 +155,8 @@ export interface SyncExchangeRequest {
 export interface SyncExchangeResponse {
   /** Records the caller hasn't seen (`updated_at > callerWatermarks[nodeId]`). */
   readonly records: AnyRecord[];
+  /** Labels the caller hasn't seen, by the same per-nodeId delta rule. */
+  readonly labels: RecordLabel[];
   /** Same delta logic per app schema. */
   readonly appSyncableRows: AppSyncableRowEntry[];
   /**
@@ -156,6 +176,14 @@ export interface SyncExchangeResponse {
    * genuinely holds less (wipe, redeploy, failed apply), forcing a re-ship.
    * Valid as a summary only because holdings stay a contiguous per-node
    * prefix — both sides apply per node in HLC order and stop on failure.
+   *
+   * On the Drive channel this is a **union over both tables**: records and
+   * labels. The contiguous-prefix claim therefore has to hold across two
+   * streams, which is why they are merged into one per-node HLC order and a
+   * failure halts the whole node rather than just its own stream. Getting
+   * that wrong doesn't corrupt data — LWW is idempotent and a re-ship is
+   * harmless — but it can make a watermark overstate coverage and silently
+   * drop a label.
    */
   readonly responderWatermarks: Watermarks;
   readonly hasMore: boolean;

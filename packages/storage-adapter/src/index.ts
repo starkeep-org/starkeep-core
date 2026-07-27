@@ -16,7 +16,10 @@ export type {
 export {
   encodeLabelCursor,
   decodeLabelCursor,
+  encodeLabelScanCursor,
+  decodeLabelScanCursor,
   type LabelCursor,
+  type LabelScanCursor,
 } from "./database/label-cursor.js";
 
 export type { ObjectStorageAdapter } from "./object-storage/adapter.js";
