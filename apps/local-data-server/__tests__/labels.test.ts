@@ -6,6 +6,8 @@
  * origin app labels its own records would exercise none of what is new.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { join } from "node:path";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import {
   installApp,
@@ -288,6 +290,119 @@ describe("reverse query", () => {
   });
 });
 
+describe("reverse query across a partially-readable library", () => {
+  it("returns only readable records, keeps pages full, and finds every match", async () => {
+    // The case the reverse index's INCLUDE (record_type) column exists for.
+    // annotator can read image/jpeg but not image/png, and owner labels both.
+    // Two things have to hold at once: a page of N comes back with N matches
+    // rather than however many survived a post-fetch filter, AND paging to
+    // exhaustion still finds every readable match.
+    const jpegIds: string[] = [];
+    const pngIds: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const jpeg = await createRecordWithBytes(owner, { fileName: `mixed-${i}.jpg` });
+      const png = await createRecordWithBytes(owner, {
+        type: "image/png",
+        contentType: "image/png",
+        fileName: `mixed-${i}.png`,
+      });
+      jpegIds.push(jpeg.record.id);
+      pngIds.push(png.record.id);
+    }
+    await setLabels(
+      owner,
+      [...jpegIds, ...pngIds].map((id) => ({ recordId: id, key: "thumbnail" })),
+    );
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let shortPages = 0;
+    let guard = 0;
+    do {
+      const res = await annotator.fetch(
+        `/data/records?label=owner/thumbnail&limit=2${
+          cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+        }`,
+      );
+      const body = (await res.json()) as {
+        records: Array<{ id: string; type: string }>;
+        nextCursor: string | null;
+      };
+      // Nothing unreadable leaks, whatever the paging does.
+      expect(body.records.every((r) => r.type === "image/jpeg")).toBe(true);
+      if (body.nextCursor !== null && body.records.length < 2) shortPages++;
+      seen.push(...body.records.map((r) => r.id));
+      cursor = body.nextCursor;
+      expect(++guard).toBeLessThan(50);
+    } while (cursor !== null);
+
+    // Every readable match, each exactly once — and none of the png ones.
+    // (Other tests in this file label jpegs with the same key, so this is a
+    // superset check rather than an equality one.)
+    for (const id of jpegIds) expect(seen).toContain(id);
+    for (const id of pngIds) expect(seen).not.toContain(id);
+    expect(new Set(seen).size).toBe(seen.length);
+    // The grant filter runs inside the scan, so no page short-changed the
+    // caller on account of unreadable rows.
+    expect(shortPages).toBe(0);
+  });
+
+  it("drops an orphaned label from a page without ending the results", async () => {
+    // A label whose record was deleted in a way that raced sync: the label row
+    // is still live while the record is gone. That is the one thing that can
+    // still short a page, and the whole reason the contract is "page until
+    // nextCursor is null" rather than "stop on a short page". Simulated by
+    // tombstoning the record row directly, which is what an inbound delete
+    // does without going through the label cascade.
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const { record } = await createRecordWithBytes(owner, { fileName: `orphan-${i}.jpg` });
+      ids.push(record.id);
+    }
+    await setLabels(
+      annotator,
+      ids.map((id) => ({ recordId: id, key: "faces-detected" })),
+    );
+
+    const db = new DatabaseSync(join(server.starkeepDir, "data.db"));
+    try {
+      db.prepare(
+        `UPDATE shared_records SET deleted_at = updated_at WHERE id = ?`,
+      ).run(ids[1]);
+    } finally {
+      db.close();
+    }
+
+    const pages: Array<{ size: number; last: boolean }> = [];
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let guard = 0;
+    do {
+      const res = await owner.fetch(
+        `/data/records?label=annotator/faces-detected&limit=2${
+          cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+        }`,
+      );
+      const body = (await res.json()) as {
+        records: Array<{ id: string }>;
+        nextCursor: string | null;
+      };
+      const matching = body.records.filter((r) => ids.includes(r.id));
+      pages.push({ size: matching.length, last: body.nextCursor === null });
+      seen.push(...matching.map((r) => r.id));
+      cursor = body.nextCursor;
+      expect(++guard).toBeLessThan(50);
+    } while (cursor !== null);
+
+    // The orphan is gone from the results...
+    expect(seen).not.toContain(ids[1]);
+    // ...but every other record is there, which only holds if the caller kept
+    // paging past the short page the orphan produced.
+    for (const id of [ids[0], ids[2], ids[3]]) expect(seen).toContain(id);
+    expect(pages.some((p) => p.size < 2 && !p.last)).toBe(true);
+  });
+});
+
 describe("retraction", () => {
   it("hides a retracted label from both read paths", async () => {
     const { record } = await createRecordWithBytes(owner, { fileName: "retract.jpg" });
@@ -348,7 +463,104 @@ describe("labels on create", () => {
     const { record } = (await res.json()) as { record: { id: string } };
     expect((await labelsFor(owner, record.id)).map((l) => l.label)).toEqual(["owner/thumbnail"]);
   });
+
+  it("keeps the record when the labels are rejected, and says so", async () => {
+    // The record and its labels share a request but NOT a transaction, so a
+    // bad label cannot un-write the record. Reporting the failure while
+    // admitting the record exists is the only honest answer — pretending the
+    // whole call failed would have the caller retry the upload.
+    const upload = await owner.fetch("/data/files?type=image/jpeg", {
+      method: "POST",
+      headers: { "Content-Type": "image/jpeg" },
+      body: Buffer.from("create-with-bad-label"),
+    });
+    const { contentHash, sizeBytes } = (await upload.json()) as {
+      contentHash: string;
+      sizeBytes: number;
+    };
+    const res = await owner.fetch("/data/records", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "image/jpeg",
+        contentType: "image/jpeg",
+        contentHash,
+        sizeBytes,
+        fileName: "created-with-bad-label.jpg",
+        labels: [{ key: "not-declared" }],
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: string;
+      detail: string;
+      record: { id: string };
+      recordCreated: boolean;
+    };
+    expect(body.error).toBe("InvalidLabelWrite");
+    expect(body.detail).toContain("not declared");
+    expect(body.recordCreated).toBe(true);
+
+    // The record really is there, and carries no labels — so the caller can
+    // retry just the labels against POST /data/labels.
+    const rows = await listWith(owner, "?include=labels&limit=1000");
+    const created = rows.find((r) => r.id === body.record.id);
+    expect(created, "the record was rolled back after all").toBeTruthy();
+    expect(created!.labels).toEqual([]);
+  });
+
+  it("does not label a record a dedup hit returned — it is someone else's", async () => {
+    // A byte-identical derived child of the same parent dedups to the existing
+    // record. Re-labelling it from the second request would silently mutate a
+    // record this call did not create.
+    const { record: parent } = await createRecordWithBytes(owner, { fileName: "dedup-parent.jpg" });
+    const bytes = Buffer.from("dedup-child-bytes");
+    const upload = await owner.fetch("/data/files?type=image/jpeg", {
+      method: "POST",
+      headers: { "Content-Type": "image/jpeg" },
+      body: bytes,
+    });
+    const { contentHash, sizeBytes } = (await upload.json()) as {
+      contentHash: string;
+      sizeBytes: number;
+    };
+    const create = (labels: Array<{ key: string }>) =>
+      owner.fetch("/data/records", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash,
+          sizeBytes,
+          fileName: "dedup-child.jpg",
+          parentId: parent.id,
+          labels,
+        }),
+      });
+
+    const first = (await (await create([{ key: "thumbnail" }])).json()) as {
+      record: { id: string };
+    };
+    const second = (await (await create([])).json()) as {
+      record: { id: string };
+      deduped?: boolean;
+    };
+
+    expect(second.deduped).toBe(true);
+    expect(second.record.id).toBe(first.record.id);
+    // The first request's label survives the second request untouched.
+    expect((await labelsFor(owner, first.record.id)).map((l) => l.label)).toEqual([
+      "owner/thumbnail",
+    ]);
+  });
 });
+
+// The record-delete cascade has no test here on purpose: the local-data-server
+// exposes no DELETE /data/records/:id. Deletion reaches labels through
+// `sdk.data.delete` (covered in packages/sdk) and through the cloud handler's
+// delete route (covered in its own tests).
 
 describe("GET /data/label-keys", () => {
   it("enumerates every app's declared keys, not just the caller's", async () => {

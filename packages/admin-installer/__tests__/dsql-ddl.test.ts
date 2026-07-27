@@ -227,6 +227,72 @@ describe("read-only app install DDL", () => {
   });
 });
 
+describe("the label-key registry", () => {
+  /** Install with an explicit key set — the photos fixture declares none. */
+  async function installWithKeys(keys: Array<{ key: string; description: string }>) {
+    const ir = photosManifest.infraRequirements;
+    await runAppInstallDdl(
+      opts,
+      "photos",
+      ir.fileAccess,
+      ir.fileAccessAll,
+      ir.appSpecificSyncable.tables,
+      ir.appSpecificSyncable.files,
+      keys,
+    );
+  }
+
+  it("upserts one row per declared key, carrying its description", async () => {
+    await installWithKeys([
+      { key: "thumbnail-of", description: "A derived thumbnail" },
+      { key: "crop-of", description: "A user-made crop" },
+    ]);
+    const s = stmts();
+    const inserts = s.filter((t) => t.includes('insert into "shared"."app_label_keys"'));
+    expect(inserts).toHaveLength(2);
+    // Upsert, not plain insert: a reinstall must not fail on the existing row,
+    // and an edited description has to land.
+    expect(
+      inserts.every((t) =>
+        t.includes('on conflict ("app_id", "key") do update set "description"'),
+      ),
+    ).toBe(true);
+  });
+
+  it("revokes keys the manifest no longer declares", async () => {
+    // An upgrade that drops a key has to actively delete it, not merely stop
+    // re-adding it — the write path reads this table to reject undeclared keys.
+    await installWithKeys([{ key: "thumbnail-of", description: "kept" }]);
+    const stale = stmts().find(
+      (t) => t.includes('delete from "shared"."app_label_keys"') && t.includes('"key" not in'),
+    );
+    expect(stale, "no stale-key cleanup was issued").toBeTruthy();
+    expect(stale).toContain('"app_id" =');
+  });
+
+  it("revokes every key when a manifest declares none", async () => {
+    await installWithKeys([]);
+    const s = stmts();
+    const del = s.find((t) => t.includes('delete from "shared"."app_label_keys"'));
+    expect(del, "an app that declares no keys must still clear old ones").toBeTruthy();
+    // Unqualified by key — there is no surviving key to exclude.
+    expect(del).not.toContain('"key" not in');
+    expect(s.some((t) => t.includes('insert into "shared"."app_label_keys"'))).toBe(false);
+  });
+
+  it("scopes the stale-key cleanup to one app", async () => {
+    // The delete is the dangerous statement here: unscoped, an install would
+    // wipe every other app's declarations. (Values are bound, so what is
+    // checkable in the statement text is that the predicate is there at all.)
+    await installWithKeys([{ key: "thumbnail-of", description: "d" }]);
+    const deletes = stmts().filter((t) =>
+      t.includes('delete from "shared"."app_label_keys"'),
+    );
+    expect(deletes.length).toBeGreaterThan(0);
+    expect(deletes.every((t) => t.includes('where "app_id" ='))).toBe(true);
+  });
+});
+
 describe("uninstall DDL", () => {
   it("revokes grants, deletes registry rows, drops schema and role — shared tables survive", async () => {
     state.pgRoleExists = true;
@@ -254,5 +320,20 @@ describe("uninstall DDL", () => {
     const s = stmts();
     expect(s.some((t) => t.startsWith("AWS IAM REVOKE"))).toBe(false);
     expect(s.some((t) => t.startsWith("DROP ROLE"))).toBe(false);
+  });
+
+  it("deletes the app's label DECLARATIONS but never its label rows", async () => {
+    // Shared data outlives the app that wrote it: reinstalling re-exposes the
+    // annotations, and a reader doesn't lose them because the producer was
+    // temporarily removed. Purging a departed app's claims is an explicit
+    // admin action, not a side effect of uninstall.
+    state.pgRoleExists = true;
+    const ir = photosManifest.infraRequirements;
+    await runAppUninstallDdl(opts, "photos", ir.fileAccess, ir.fileAccessAll);
+    const s = stmts();
+    expect(
+      s.some((t) => t.includes('delete from "shared"."app_label_keys" where "app_id" =')),
+    ).toBe(true);
+    expect(s.some((t) => t.includes('"shared"."record_labels"'))).toBe(false);
   });
 });

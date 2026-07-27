@@ -377,6 +377,100 @@ function runTeardownScript(script: string): void {
       expect(Buffer.from(await blob.arrayBuffer()).equals(photoBytes)).toBe(true);
     });
 
+    it("cross-app labels round-trip against real DSQL: write, hydrate, reverse query, retract", async () => {
+      // The only place the shipped label code meets a real DSQL cluster. The
+      // POC that settled the index shape ran hand-written SQL; everything else
+      // in CI runs against SQLite or a scripted fake, so three things are
+      // untested until here: that DSQL accepts the reverse index at all, that
+      // `value asc nulls first` is valid where SQLite needs no spelling, and
+      // that a multi-row ON CONFLICT DO UPDATE commits.
+      const cloudPhotos = cloudApp(photos);
+
+      // Two labels in one batch — one flag, one valued — on the record that
+      // synced up above. `crop-of` carries a value here only to exercise the
+      // valued seek; nothing reads it.
+      const write = await cloudPhotos.fetch("/data/labels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          labels: [
+            { recordId: syncedRecordId, key: "thumbnail-of" },
+            { recordId: syncedRecordId, key: "crop-of", value: "e2e" },
+          ],
+        }),
+      });
+      expect(write.status).toBe(200);
+      expect((await write.json()) as { written: number }).toEqual({ written: 2 });
+
+      // The registry is readable cross-app — the reason keys are declared in a
+      // manifest rather than counted at runtime.
+      const keysRes = await cloudApp(drive).fetch("/data/label-keys?app=photos");
+      expect(keysRes.status).toBe(200);
+      const { labelKeys } = (await keysRes.json()) as { labelKeys: Array<{ label: string }> };
+      expect(labelKeys.map((k) => k.label)).toEqual(
+        expect.arrayContaining(["photos/thumbnail-of", "photos/crop-of"]),
+      );
+
+      // Hydration: Drive holds no per-type grants but sees every app's labels
+      // on a record it can read.
+      const hydrated = await cloudApp(drive).fetch("/data/records?include=labels&limit=1000");
+      const { records } = (await hydrated.json()) as {
+        records: Array<{ id: string; labels?: Array<{ label: string; value: string | null }> }>;
+      };
+      const labelled = records.find((r) => r.id === syncedRecordId);
+      expect(labelled?.labels?.map((l) => l.label).sort()).toEqual([
+        "photos/crop-of",
+        "photos/thumbnail-of",
+      ]);
+
+      // The reverse query — the thing labels exist for, and the query the
+      // measured index shape was chosen for. Presence first.
+      const presence = await cloudApp(drive).fetch(
+        "/data/records?label=photos/thumbnail-of&limit=1000",
+      );
+      expect(presence.status).toBe(200);
+      const presenceBody = (await presence.json()) as {
+        records: Array<{ id: string }>;
+        nextCursor: string | null;
+      };
+      expect(presenceBody.records.map((r) => r.id)).toContain(syncedRecordId);
+
+      // Then the exact-value seek, which is why `value` is in the index key.
+      const byValue = await cloudApp(drive).fetch(
+        "/data/records?label=photos/crop-of&labelValue=e2e&limit=1000",
+      );
+      const matched = (await byValue.json()) as { records: Array<{ id: string }> };
+      expect(matched.records.map((r) => r.id)).toContain(syncedRecordId);
+
+      const byWrongValue = await cloudApp(drive).fetch(
+        "/data/records?label=photos/crop-of&labelValue=nope&limit=1000",
+      );
+      const unmatched = (await byWrongValue.json()) as { records: Array<{ id: string }> };
+      expect(unmatched.records.map((r) => r.id)).not.toContain(syncedRecordId);
+
+      // Retraction is a tombstone, and `deleted_at` being a key column of the
+      // reverse index is what keeps tombstones out of the scanned range.
+      const retract = await cloudPhotos.fetch("/data/labels/retract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ labels: [{ recordId: syncedRecordId, key: "crop-of" }] }),
+      });
+      expect(retract.status).toBe(200);
+
+      const afterRetract = await cloudApp(drive).fetch(
+        "/data/records?label=photos/crop-of&limit=1000",
+      );
+      const remaining = (await afterRetract.json()) as { records: Array<{ id: string }> };
+      expect(remaining.records.map((r) => r.id)).not.toContain(syncedRecordId);
+
+      // ...and the flag on the same record is untouched by it.
+      const stillFlagged = await cloudApp(drive).fetch(
+        "/data/records?label=photos/thumbnail-of&limit=1000",
+      );
+      const flagged = (await stillFlagged.json()) as { records: Array<{ id: string }> };
+      expect(flagged.records.map((r) => r.id)).toContain(syncedRecordId);
+    });
+
     it("reinstall after local creds drift: cloud install re-mirrors the registry secret, sync still validates", async () => {
       // Reproduce the todo-39 drift directly: leave a local creds file holding a
       // *different* secret than Drive's local registry (the value the supervisor

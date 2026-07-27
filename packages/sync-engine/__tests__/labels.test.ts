@@ -67,6 +67,30 @@ describe("label sync", () => {
     return id;
   }
 
+  /**
+   * A record with a real blob key whose bytes are *missing* locally, so
+   * `transferFile` fails and the engine halts that node for the round. The
+   * seedRecord above has an empty key, which the engine treats as blobless.
+   */
+  async function seedRecordWithMissingBlob(side: Side): Promise<StarkeepId> {
+    const id = generateId() as StarkeepId;
+    await side.db.put({
+      ...createDataRecord(
+        {
+          type: "image/jpeg",
+          originAppId: "photos",
+          contentHash: "sha256:missing",
+          objectStorageKey: `shared/image/jpeg/missing/${id}`,
+          mimeType: "image/jpeg",
+          sizeBytes: 10,
+        },
+        side.clock,
+      ),
+      id,
+    });
+    return id;
+  }
+
   async function seedLabel(
     side: Side,
     recordId: StarkeepId,
@@ -79,7 +103,11 @@ describe("label sync", () => {
     ]);
   }
 
-  function driveEngine(local: Side, cloud: Side) {
+  function driveEngine(
+    local: Side,
+    cloud: Side,
+    opts: { syncState?: SyncStateStore; pageLimit?: number; scanPageSize?: number } = {},
+  ) {
     const transport = createInProcessSyncTransport({
       databaseAdapter: cloud.db,
       clock: cloud.clock,
@@ -92,8 +120,10 @@ describe("label sync", () => {
       remoteObjectStorage: cloud.storage,
       transport,
       clock: local.clock,
-      syncState: makeSyncState(),
+      syncState: opts.syncState ?? makeSyncState(),
       syncSharedRecords: true,
+      ...(opts.pageLimit !== undefined ? { pageLimit: opts.pageLimit } : {}),
+      ...(opts.scanPageSize !== undefined ? { scanPageSize: opts.scanPageSize } : {}),
     });
   }
 
@@ -347,6 +377,171 @@ describe("label sync", () => {
 
     expect(await cloud.db.getNodeWatermarks()).toEqual(recordWatermarksBefore);
     expect((await cloud.db.getLabelsByRecordIds([recordId])).get(recordId)).toHaveLength(1);
+  });
+
+  it("blocks a later same-node LABEL when an earlier record's blob transfer fails", async () => {
+    // The contiguous-prefix rule has to hold ACROSS the two streams, not
+    // within each. HLC order on node L:
+    //   t1 — record, blob present  → ships
+    //   t2 — record, blob MISSING  → blocked
+    //   t3 — label on the t1 record → must NOT ship
+    // If the label shipped, the peer watermark would leapfrog the blocked
+    // record and it would never be re-sent. Nothing here corrupts data — LWW
+    // is idempotent — which is exactly why it needs an explicit test.
+    const { local, cloud } = await twoSides();
+
+    const early = await seedRecord(local);
+    const blocked = await seedRecordWithMissingBlob(local);
+    await seedLabel(local, early, "alpha", "faces-detected");
+
+    const syncState = makeSyncState();
+    await driveEngine(local, cloud, { syncState }).exchange();
+
+    expect(await cloud.db.get(early)).not.toBeNull();
+    expect(await cloud.db.get(blocked)).toBeNull();
+    // The label sorts after the blocked record on the same node, so it waits.
+    expect(await cloud.db.getLabel(early, "alpha", "faces-detected")).toBeNull();
+
+    const peer = await syncState.getPeerWatermarks();
+    expect(peer["L"]).toEqual((await local.db.get(early))!.updatedAt);
+
+    // Repair the blob and re-run: the record ships, and the label follows.
+    await local.storage.put(
+      (await local.db.get(blocked))!.objectStorageKey,
+      new Uint8Array([1]),
+      { contentType: "image/jpeg" },
+    );
+    await driveEngine(local, cloud, { syncState }).exchange();
+
+    expect(await cloud.db.get(blocked)).not.toBeNull();
+    expect(await cloud.db.getLabel(early, "alpha", "faces-detected")).not.toBeNull();
+  });
+
+  it("ships a label that precedes the failure, and holds only what follows it", async () => {
+    // The mirror of the case above: a label earlier in the same node's HLC
+    // order than the failure is part of the contiguous prefix and must ship,
+    // or a single bad blob would stall label delivery indefinitely.
+    const { local, cloud } = await twoSides();
+
+    const early = await seedRecord(local);
+    await seedLabel(local, early, "alpha", "before");
+    await seedRecordWithMissingBlob(local);
+    await seedLabel(local, early, "alpha", "after");
+
+    await driveEngine(local, cloud).exchange();
+
+    expect(await cloud.db.getLabel(early, "alpha", "before")).not.toBeNull();
+    expect(await cloud.db.getLabel(early, "alpha", "after")).toBeNull();
+  });
+
+  it("the responder skips inbound labels from a node halted by a failed app row", async () => {
+    // Same rule on the apply side of the transport: an app row that fails to
+    // apply halts its node for the round, and the labels behind it must not
+    // be applied over the gap.
+    const { local, cloud } = await twoSides();
+    const recordId = await seedRecord(local);
+    const label = {
+      recordId,
+      appId: "alpha",
+      key: "k",
+      value: null,
+      recordType: "image/jpeg",
+      createdAt: local.clock.now(),
+      updatedAt: local.clock.now(),
+      nodeId: "L",
+      deletedAt: null,
+    };
+
+    const transport = createInProcessSyncTransport({
+      databaseAdapter: cloud.db,
+      clock: cloud.clock,
+      objectStorage: cloud.storage,
+      appSyncableSource: { namespaces: cloud.namespaces, applier: cloud.applier },
+      syncSharedRecords: true,
+    });
+
+    await transport.exchange({
+      watermarks: {},
+      labels: [label],
+      // An app row for an app the responder doesn't know — the documented way
+      // a node gets halted for the round.
+      appSyncableRows: [
+        {
+          timestamp: { ...label.updatedAt, wallTime: label.updatedAt.wallTime - 1 },
+          appId: "not-installed",
+          table: "test_rows",
+          op: "insert" as const,
+          row: { id: "x" },
+        },
+      ],
+    });
+
+    expect(await cloud.db.getLabel(recordId, "alpha", "k")).toBeNull();
+
+    // The same label with nothing halting its node does land — so the
+    // assertion above is about the halt, not about labels never applying.
+    await transport.exchange({ watermarks: {}, labels: [label] });
+    expect(await cloud.db.getLabel(recordId, "alpha", "k")).not.toBeNull();
+  });
+
+  it("carries a label backlog larger than one scan page across rounds", async () => {
+    // The outbound scan pages through queryLabels with its own cursor. Every
+    // other test here has two labels, so nothing exercises the loop — or the
+    // cursor advancing correctly between pages, which is where a scan strands
+    // rows forever rather than failing.
+    const { local, cloud } = await twoSides();
+    const recordId = await seedRecord(local);
+    for (let i = 0; i < 12; i++) {
+      await seedLabel(local, recordId, "alpha", `k${String(i).padStart(2, "0")}`);
+    }
+
+    const syncState = makeSyncState();
+    // Both below the backlog: pageLimit caps the round, scanPageSize the scan.
+    const engine = () =>
+      driveEngine(local, cloud, { syncState, pageLimit: 5, scanPageSize: 2 });
+
+    let rounds = 0;
+    let landed = 0;
+    do {
+      await engine().exchange();
+      landed = (await cloud.db.getLabelsByRecordIds([recordId])).get(recordId)?.length ?? 0;
+      expect(++rounds).toBeLessThan(20);
+    } while (landed < 12);
+
+    // Every label arrived exactly once, and it genuinely took several rounds
+    // rather than one oversized response.
+    expect(landed).toBe(12);
+    expect(rounds).toBeGreaterThan(1);
+  });
+
+  it("shares the round's budget between records and labels", async () => {
+    // Records and labels compete for one `limit`, so neither stream can
+    // starve the other. With pageLimit=2 and both streams non-empty, a round
+    // must carry two items total — not two of each.
+    const { local, cloud } = await twoSides();
+    const first = await seedRecord(local);
+    await seedLabel(local, first, "alpha", "k1");
+    const second = await seedRecord(local);
+    await seedLabel(local, second, "alpha", "k2");
+
+    const syncState = makeSyncState();
+    await driveEngine(local, cloud, { syncState, pageLimit: 2 }).exchange();
+
+    const records = [await cloud.db.get(first), await cloud.db.get(second)].filter(Boolean);
+    const labels =
+      ((await cloud.db.getLabelsByRecordIds([first])).get(first)?.length ?? 0) +
+      ((await cloud.db.getLabelsByRecordIds([second])).get(second)?.length ?? 0);
+    expect(records.length + labels).toBe(2);
+    // And in merged HLC order, which puts the first record and its label first.
+    expect(await cloud.db.get(first)).not.toBeNull();
+    expect(await cloud.db.getLabel(first, "alpha", "k1")).not.toBeNull();
+
+    // Converges over further rounds without losing anything.
+    for (let i = 0; i < 5; i++) {
+      await driveEngine(local, cloud, { syncState, pageLimit: 2 }).exchange();
+    }
+    expect(await cloud.db.get(second)).not.toBeNull();
+    expect(await cloud.db.getLabel(second, "alpha", "k2")).not.toBeNull();
   });
 
   it("tolerates a label arriving before its record", async () => {
