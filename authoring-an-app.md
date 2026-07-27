@@ -77,6 +77,10 @@ example and `@starkeep/admin-manifest`'s `appManifestSchema` for the full schema
   write into the shared metadata table for those types), and a `rationale` shown
   to the user at install. Photos enumerates the raster image types and sets
   `metadataWrite: true` because it writes EXIF/dimensions.
+- `infraRequirements.labelKeys[]` — the **cross-app labels** this app publishes.
+  Each entry is a `key` (lowercase identifier, ≤64 chars) and a `description`
+  shown to anyone browsing what your app declares. Max 64 keys per app. Any key
+  not declared here is rejected at write time. See §9.
 - `localRun` — how admin-web spawns the app's dev/serve process (`command`,
   `args`, optional `portFlag`). Without it, the app can't be started from the
   admin UI. With `portFlag`, admin-web allocates a free port and appends it.
@@ -252,6 +256,71 @@ When paired with a remote data server, requests need a Cognito token. Wrap the
 app in an auth gate that checks for a refresh token and shows a sign-in form
 otherwise — see `src/lib/AuthGate.tsx` and `SignInForm.tsx`. For local builds the
 gate is a no-op (`not-required`).
+
+### 9. Cross-app labels
+
+A label is an **assertion your app makes about a shared record** — including
+records another app created. It's how you publish something other apps can act
+on without them having to call you about every file: "I have OCR text for this
+image", "this one needs review", "I counted 3 faces here".
+
+**Writing a label needs only a `read` grant** on the record's type. An OCR
+service shouldn't need destructive power over photos it only reads.
+
+Declare your keys in the manifest (§2), then:
+
+```ts
+// Set. `value` is optional — omit it for a bare flag.
+await fetch("/api/local-data/data/labels", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    labels: [
+      { recordId, key: "faces-detected" },
+      { recordId, key: "face-count", value: "3" },
+    ],
+  }),
+});
+
+// Retract (a tombstone, so it syncs).
+await fetch("/api/local-data/data/labels/retract", { /* same shape, no value */ });
+
+// Read them back with a record listing.
+GET /data/records?include=metadata,labels
+GET /data/records?include=labels&labelApps=alpha,gamma   // only these namespaces
+
+// Find records another app labelled — the query labels exist for.
+GET /data/records?label=alpha/faces-detected
+GET /data/records?label=alpha/face-count&labelValue=3
+
+// See what every installed app publishes.
+GET /data/label-keys
+```
+
+Things worth knowing before you design around them:
+
+- **Your `app_id` is never something you send.** The server takes it from your
+  authenticated identity. You cannot write into another app's namespace, and a
+  body claiming otherwise changes nothing.
+- **Everyone who can read the type sees every app's labels on it.** Labels are
+  for talking to other apps. If it's your app talking to itself, it belongs in
+  app-specific data (§6), not here.
+- **Values are small and dumb by design** — 128 bytes, matched by equality
+  only. An enum, an id pointing back at your own API, a count, a timestamp.
+  Never a sentence, and never a pointer into the shared data model.
+- **Page until `nextCursor` is null.** A short page does *not* mean the end of
+  the results; only a null cursor does. Stopping early silently misses matches,
+  and only under load — which is worse than an obvious bug.
+- **Disagreement is fine.** `alpha/quality=high` and `gamma/quality=low` coexist
+  as two rows. You decide whom to believe.
+
+> **Positive filters are unsafe by default — and that's still the right choice.**
+> Filtering *for* a label (`?label=photos/original`) only works if the labelling
+> app labels everything, and images written by a *different* app won't carry it.
+> The failure mode is silently hidden records. Filtering *against* one is safe by
+> default (unlabelled ⇒ included) but pays a scan proportional to how much you're
+> excluding, forever. Prefer the positive filter and treat coverage as an
+> obligation on the labelling app — but know which way it fails.
 
 ---
 
