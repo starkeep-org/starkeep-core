@@ -17,7 +17,7 @@
 import { Kysely, PostgresDialect, sql } from "kysely";
 import pg from "pg";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import type { FileAccess, SyncableTable } from "@starkeep/admin-manifest";
+import type { FileAccess, LabelKey, SyncableTable } from "@starkeep/admin-manifest";
 import {
   APP_GRANTABLE_CATEGORIES,
   typeCategory,
@@ -167,6 +167,7 @@ export async function runAppInstallDdl(
   fileAccessAll: boolean,
   appSyncableTables: SyncableTable[] = [],
   appSyncableFilesEnabled: boolean = false,
+  labelKeys: LabelKey[] = [],
 ): Promise<void> {
   const pgRole = appIdToPgRole(opts.stackPrefix, appId);
   // Every statement below is idempotent (IF [NOT] EXISTS, probe-then-act,
@@ -274,6 +275,37 @@ export async function runAppInstallDdl(
             })),
           )
           .execute();
+      }
+
+      // app_label_keys rows — the app's declared label schema. The label write
+      // path rejects any key absent from this table, which is what makes the
+      // per-app key-cardinality cap enforceable. The table is world-readable
+      // (GRANT SELECT ... TO PUBLIC in dsql-schema-init.ts) because
+      // discoverability is the reason keys are declared here at all.
+      for (const entry of labelKeys) {
+        await db
+          .insertInto("shared.app_label_keys")
+          .values({ app_id: appId, key: entry.key, description: entry.description })
+          .onConflict((oc) =>
+            oc.columns(["app_id", "key"]).doUpdateSet((eb) => ({
+              description: eb.ref("excluded.description"),
+            })),
+          )
+          .execute();
+      }
+      // An upgrade that drops a key must revoke it, not merely stop re-adding
+      // it. The label *rows* survive — see the uninstall path for why an
+      // undeclared key with live rows is the intended steady state.
+      {
+        let stale = db.deleteFrom("shared.app_label_keys").where("app_id", "=", appId);
+        if (labelKeys.length > 0) {
+          stale = stale.where(
+            "key",
+            "not in",
+            labelKeys.map((e) => e.key),
+          );
+        }
+        await stale.execute();
       }
 
       // App-specific syncable tables under the app's private schema.
@@ -428,6 +460,16 @@ export async function runAppUninstallDdl(
       await sql`REVOKE USAGE ON SCHEMA shared FROM ${sql.raw(pgRole)}`.execute(db);
 
       await db.deleteFrom("shared.access_grants").where("app_id", "=", appId).execute();
+      // Declarations only. The app's rows in shared.record_labels are shared
+      // data and outlive the uninstall, so reinstalling re-exposes them and a
+      // reader doesn't lose annotations because the producer was temporarily
+      // removed. That leaves live label rows on an undeclared key, which is the
+      // intended steady state: reads still return them, new writes are
+      // rejected, and retraction stays legal (it is scoped by a primary key
+      // containing app_id, so refusing it would strand rows the app can no
+      // longer clean up). Permanently purging a removed app's claims is an
+      // explicit admin action, not a side effect of uninstall.
+      await db.deleteFrom("shared.app_label_keys").where("app_id", "=", appId).execute();
       await db.deleteFrom("shared.app_syncable_namespaces").where("app_id", "=", appId).execute();
       await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
 

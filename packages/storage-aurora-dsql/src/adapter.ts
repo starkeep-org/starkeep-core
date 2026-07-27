@@ -1,4 +1,10 @@
-import type { DataRecord, HLCTimestamp, MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
+import type {
+  DataRecord,
+  HLCTimestamp,
+  MetadataRow,
+  RecordLabel,
+  StarkeepId,
+} from "@starkeep/protocol-primitives";
 import { pgMetadataTableName, serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type {
   DatabaseAdapter,
@@ -6,8 +12,17 @@ import type {
   QueryResult,
   BatchOperation,
   Transaction,
+  LabelUpsert,
+  LabelRetraction,
+  FindByLabelQuery,
+  FindByLabelResult,
 } from "@starkeep/storage-adapter";
-import { StorageError, TransactionError } from "@starkeep/storage-adapter";
+import {
+  StorageError,
+  TransactionError,
+  encodeLabelCursor,
+  decodeLabelCursor,
+} from "@starkeep/storage-adapter";
 import type {
   AuroraDsqlDatabaseAdapterOptions,
   DatabaseClient,
@@ -16,8 +31,10 @@ import type {
 import {
   recordToRow,
   rowToRecord,
+  rowToLabel,
   columnsToMetadataRow,
   type PostgresRow,
+  type PostgresLabelRow,
 } from "./serialization.js";
 import { buildPostgresQuery, compiler } from "./query-builder.js";
 import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
@@ -285,6 +302,197 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       const table = pgMetadataTableName(typeId);
       await this.run(
         compiler.deleteFrom(table).where("record_id", "=", recordId).compile(),
+      );
+    });
+  }
+
+  // ---- Cross-app record labels -------------------------------------------
+
+  /**
+   * One multi-row `INSERT … ON CONFLICT DO UPDATE`, so a whole batch is a
+   * single statement with no read-modify-write round trip. Replay-safe under
+   * `withOccRetry` because the statement is value-independent: every column is
+   * built from the caller's input, so a retry converges rather than compounding.
+   *
+   * The caller chunks to DSQL's 3,000-modified-rows-per-transaction limit;
+   * secondary-index entries do *not* count against that limit (measured), so
+   * the two indexes on this table don't shrink the usable batch.
+   */
+  async upsertLabels(labels: LabelUpsert[]): Promise<void> {
+    if (labels.length === 0) return;
+    await withOccRetry("upsertLabels", async () => {
+      await this.run(
+        compiler
+          .insertInto("shared.record_labels")
+          .values(
+            labels.map((l) => ({
+              record_id: l.recordId,
+              app_id: l.appId,
+              key: l.key,
+              value: l.value,
+              record_type: l.recordType,
+              created_at: serializeHLC(l.hlc),
+              updated_at: serializeHLC(l.hlc),
+              node_id: l.hlc.nodeId,
+              deleted_at: null,
+            })),
+          )
+          .onConflict((oc) =>
+            oc.columns(["record_id", "app_id", "key"]).doUpdateSet((eb) => ({
+              value: eb.ref("excluded.value"),
+              record_type: eb.ref("excluded.record_type"),
+              updated_at: eb.ref("excluded.updated_at"),
+              node_id: eb.ref("excluded.node_id"),
+              // Re-setting a retracted label revives it; otherwise a
+              // set → retract → set cycle writes a row that stays invisible.
+              deleted_at: null,
+            })),
+          )
+          .compile(),
+      );
+    });
+  }
+
+  async retractLabels(retractions: LabelRetraction[]): Promise<void> {
+    if (retractions.length === 0) return;
+    await withOccRetry("retractLabels", async () => {
+      for (const r of retractions) {
+        // Tombstone, not DELETE: the retraction itself has to sync. Scoped by
+        // primary key, which contains app_id — so "an app can only retract its
+        // own labels" needs no separate check.
+        await this.run(
+          compiler
+            .updateTable("shared.record_labels")
+            .set({
+              deleted_at: serializeHLC(r.hlc),
+              updated_at: serializeHLC(r.hlc),
+              node_id: r.hlc.nodeId,
+            })
+            .where("record_id", "=", r.recordId)
+            .where("app_id", "=", r.appId)
+            .where("key", "=", r.key)
+            .compile(),
+        );
+      }
+    });
+  }
+
+  async getLabelsByRecordIds(
+    recordIds: StarkeepId[],
+  ): Promise<Map<StarkeepId, RecordLabel[]>> {
+    if (recordIds.length === 0) return new Map();
+    return withOccRetry("getLabelsByRecordIds", async () => {
+      const result = new Map<StarkeepId, RecordLabel[]>();
+      const dbResult = await this.run(
+        compiler
+          .selectFrom("shared.record_labels")
+          .selectAll()
+          .where("record_id", "in", recordIds)
+          .where("deleted_at", "is", null)
+          .compile(),
+      );
+      for (const raw of dbResult.rows) {
+        const label = rowToLabel(raw as unknown as PostgresLabelRow);
+        let list = result.get(label.recordId);
+        if (!list) result.set(label.recordId, (list = []));
+        list.push(label);
+      }
+      return result;
+    });
+  }
+
+  async findByLabel(query: FindByLabelQuery): Promise<FindByLabelResult> {
+    return withOccRetry("findByLabel", async () => {
+      const limit = query.limit ?? 50;
+
+      let q = compiler
+        .selectFrom("shared.record_labels")
+        .selectAll()
+        .where("app_id", "=", query.appId)
+        .where("key", "=", query.key)
+        // Pinned by every reverse query, and pinning it is what keeps the
+        // tombstone pile out of the scanned range — `deleted_at` is the third
+        // key column of idx_record_labels_reverse precisely for this, and DSQL
+        // plans it as a scan key (measured: 20 index entries scanned behind
+        // 20,000 tombstones, vs 20,040 without).
+        .where("deleted_at", "is", null);
+
+      if (query.value !== undefined) {
+        q = q.where("value", "=", query.value);
+      }
+
+      // The caller's read grants. `record_type` is an INCLUDE payload on the
+      // reverse index, so this is evaluated during the index scan rather than
+      // after fetching records — which is what lets a page come back full.
+      if (query.readableTypes !== undefined) {
+        const types = [...query.readableTypes];
+        if (types.length === 0) return { labels: [], nextCursor: null, hasMore: false };
+        q = q.where("record_type", "in", types);
+      }
+
+      // "Strictly after the cursor", nulls-first. Not a row-value comparison:
+      // with a null on either side that evaluates to NULL rather than false,
+      // which would silently return an empty page. See label-cursor.ts.
+      const cursor = query.cursor ? decodeLabelCursor(query.cursor) : null;
+      if (cursor) {
+        const { value, recordId } = cursor;
+        q =
+          value === null
+            ? q.where((eb) =>
+                eb.or([
+                  eb("value", "is not", null),
+                  eb.and([eb("value", "is", null), eb("record_id", ">", recordId)]),
+                ]),
+              )
+            : q.where((eb) =>
+                eb.or([
+                  eb("value", ">", value),
+                  eb.and([eb("value", "=", value), eb("record_id", ">", recordId)]),
+                ]),
+              );
+      }
+
+      // Postgres sorts nulls LAST by default where SQLite sorts them first.
+      // Spelled out here so a cursor means the same thing on both backends.
+      const compiled = q
+        .orderBy(sql`value asc nulls first`)
+        .orderBy("record_id", "asc")
+        .limit(limit + 1)
+        .compile();
+
+      const dbResult = await this.run(compiled);
+      const rows = dbResult.rows as unknown as PostgresLabelRow[];
+      const hasMore = rows.length > limit;
+      const labels = (hasMore ? rows.slice(0, limit) : rows).map(rowToLabel);
+      const last = labels[labels.length - 1];
+
+      return {
+        labels,
+        hasMore,
+        nextCursor:
+          hasMore && last
+            ? encodeLabelCursor({ value: last.value, recordId: last.recordId })
+            : null,
+      };
+    });
+  }
+
+  async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
+    await withOccRetry("tombstoneLabelsForRecord", async () => {
+      // Crosses app namespaces deliberately — the record is going away, so
+      // every app's assertions about it go with it. A platform operation, not
+      // reachable as an app write.
+      await this.run(
+        compiler
+          .updateTable("shared.record_labels")
+          .set({
+            deleted_at: serializeHLC(hlc),
+            updated_at: serializeHLC(hlc),
+            node_id: hlc.nodeId,
+          })
+          .where("record_id", "=", recordId)
+          .where("deleted_at", "is", null)
+          .compile(),
       );
     });
   }

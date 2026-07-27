@@ -105,6 +105,7 @@ describe("install", () => {
       [
         "create_app_registry_row",
         "create_access_grants",
+        "register_label_keys",
         "create_syncable_tables",
         "register_syncable_namespace",
         "mark_active",

@@ -7,7 +7,17 @@ export type {
   SortDirection,
   BatchOperation,
   Transaction,
+  LabelUpsert,
+  LabelRetraction,
+  FindByLabelQuery,
+  FindByLabelResult,
 } from "./database/types.js";
+
+export {
+  encodeLabelCursor,
+  decodeLabelCursor,
+  type LabelCursor,
+} from "./database/label-cursor.js";
 
 export type { ObjectStorageAdapter } from "./object-storage/adapter.js";
 export type {

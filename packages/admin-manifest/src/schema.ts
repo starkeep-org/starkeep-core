@@ -20,6 +20,28 @@ export const fileAccessSchema = z.object({
   rationale: z.string(),
 });
 
+/**
+ * One label key this app publishes into the shared plane, e.g.
+ * `{ key: "ocr-available", description: "This app holds OCR text for the record" }`.
+ *
+ * Keys are declared rather than counted at runtime because **discoverability is
+ * the reason to pay for a manifest declaration**: app B's developer can see
+ * what app A publishes without reading app A's source. The registry is
+ * therefore readable cross-app (`GET /data/label-keys`), which is what makes
+ * the declaration worth more than a runtime counter would be.
+ *
+ * The write path rejects any key not declared here, so the cap on *distinct
+ * keys* is what stops an app using keys as data — a bounded key space is the
+ * thing that makes a key schema rather than content.
+ *
+ * `description` is carried into the registry so the cross-app enumeration is
+ * self-explaining rather than a list of bare strings.
+ */
+export const labelKeySchema = z.object({
+  key: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
+  description: z.string().min(1),
+});
+
 export const sharedResourceRequirementSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("cloudfront"),
@@ -95,6 +117,14 @@ export const infraRequirementsSchema = z.object({
   brokerPower: z.boolean().default(false),
   appSpecificSyncable: appSpecificSyncableSchema.default({}),
   sharedResources: z.array(sharedResourceRequirementSchema).default([]),
+  /**
+   * Label keys this app may write into `shared.record_labels`. Capped at 64 —
+   * the cardinality cap is the one that actually enforces the intent, since
+   * byte caps alone leave an unbounded key space to smuggle content through.
+   * The uniqueness check lives in validate.ts alongside the other cross-field
+   * rules.
+   */
+  labelKeys: z.array(labelKeySchema).max(64).default([]),
 });
 
 export const permissionEntrySchema = z.object({
@@ -139,6 +169,7 @@ export const appManifestSchema = z.object({
 export type AppTier = z.infer<typeof appTierSchema>;
 export type AppTarget = z.infer<typeof appTargetSchema>;
 export type FileAccess = z.infer<typeof fileAccessSchema>;
+export type LabelKey = z.infer<typeof labelKeySchema>;
 export type SharedResourceRequirement = z.infer<typeof sharedResourceRequirementSchema>;
 export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;
 export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;
