@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createHLCClock } from "@starkeep/protocol-primitives";
+import { createDataRecord, createHLCClock } from "@starkeep/protocol-primitives";
 import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,
@@ -299,6 +299,190 @@ describe("label operations", () => {
     const { sdk } = await sdkWithRecords(0);
     await expect(sdk.data.setLabels("alpha", [])).resolves.toBeUndefined();
     await expect(sdk.data.retractLabels("alpha", [])).resolves.toBeUndefined();
+  });
+});
+
+describe("setLabels owns the chunking", () => {
+  /**
+   * The 3,000-rows-per-transaction rule is the SDK's headline feature —
+   * "there is no bulk/non-bulk split, the one-record case is a batch of one" —
+   * and it only shows up above 3,000 rows, which no other test reaches.
+   *
+   * Records go in through the adapter directly rather than `putWithFile`:
+   * 3,001 blob writes and hashes would make this a slow test about the wrong
+   * thing.
+   */
+  const CHUNK = 3000;
+
+  class CountingAdapter extends MockDatabaseAdapter {
+    upsertCallSizes: number[] = [];
+    retractCallSizes: number[] = [];
+    queryIdListSizes: number[] = [];
+
+    override async upsertLabels(labels: Parameters<MockDatabaseAdapter["upsertLabels"]>[0]) {
+      this.upsertCallSizes.push(labels.length);
+      return super.upsertLabels(labels);
+    }
+
+    override async retractLabels(rs: Parameters<MockDatabaseAdapter["retractLabels"]>[0]) {
+      this.retractCallSizes.push(rs.length);
+      return super.retractLabels(rs);
+    }
+
+    override async query(q: Parameters<MockDatabaseAdapter["query"]>[0]) {
+      const inFilter = q.filters?.find((f) => f.operator === "in");
+      if (inFilter) this.queryIdListSizes.push((inFilter.value as unknown[]).length);
+      return super.query(q);
+    }
+  }
+
+  async function sdkWithBareRecords(count: number) {
+    const localDatabase = new CountingAdapter();
+    const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
+    const sdk = await createStarkeepSdk({
+      databaseAdapter: localDatabase,
+      objectStorageAdapter: new MockObjectStorageAdapter(),
+      nodeId: "test-node",
+      clock,
+    });
+    const ids: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const record = createDataRecord(
+        {
+          type: "image/jpeg",
+          originAppId: "photos",
+          contentHash: `sha256:${i}`,
+          objectStorageKey: `k/${i}`,
+          mimeType: "image/jpeg",
+          sizeBytes: 1,
+        },
+        clock,
+      );
+      await localDatabase.put(record);
+      ids.push(record.id);
+    }
+    // The record writes are not what is being counted.
+    localDatabase.queryIdListSizes.length = 0;
+    return { sdk, localDatabase, ids };
+  }
+
+  it("splits a batch over the 3,000-row transaction limit into whole chunks", async () => {
+    const { sdk, localDatabase, ids } = await sdkWithBareRecords(CHUNK + 1);
+    await sdk.data.setLabels(
+      "alpha",
+      ids.map((id) => ({ recordId: id as never, key: "faces-detected" })),
+    );
+
+    // DSQL rejects the whole transaction at 3,001 modified rows, so the
+    // split has to happen below the adapter, not inside it.
+    expect(localDatabase.upsertCallSizes).toEqual([CHUNK, 1]);
+  });
+
+  it("chunks the record-type lookup too — it is an IN-list of the same size", async () => {
+    // The read the single-statement framing hides, and probably the dominant
+    // cost of a bulk labelling job.
+    const { sdk, localDatabase, ids } = await sdkWithBareRecords(CHUNK + 1);
+    await sdk.data.setLabels(
+      "alpha",
+      ids.map((id) => ({ recordId: id as never, key: "faces-detected" })),
+    );
+    expect(localDatabase.queryIdListSizes).toEqual([CHUNK, 1]);
+  });
+
+  it("writes one chunk for a batch at exactly the limit", async () => {
+    const { sdk, localDatabase, ids } = await sdkWithBareRecords(CHUNK);
+    await sdk.data.setLabels(
+      "alpha",
+      ids.map((id) => ({ recordId: id as never, key: "k" })),
+    );
+    expect(localDatabase.upsertCallSizes).toEqual([CHUNK]);
+  });
+
+  it("gives every chunk the same HLC, so a bulk pass is one logical write", async () => {
+    const { sdk, ids } = await sdkWithBareRecords(CHUNK + 1);
+    await sdk.data.setLabels(
+      "alpha",
+      ids.map((id) => ({ recordId: id as never, key: "k" })),
+    );
+    const first = await sdk.data.getLabelsByIds([ids[0] as never]);
+    const last = await sdk.data.getLabelsByIds([ids[CHUNK] as never]);
+    expect(first.get(ids[0] as never)![0].updatedAt).toEqual(
+      last.get(ids[CHUNK] as never)![0].updatedAt,
+    );
+  });
+
+  it("chunks retractions on the same boundary", async () => {
+    const { sdk, localDatabase, ids } = await sdkWithBareRecords(CHUNK + 1);
+    await sdk.data.retractLabels(
+      "alpha",
+      ids.map((id) => ({ recordId: id as never, key: "k" })),
+    );
+    expect(localDatabase.retractCallSizes).toEqual([CHUNK, 1]);
+  });
+
+  it("collapses a repeated (record, key) before chunking, last write winning", async () => {
+    // Postgres rejects a multi-row upsert that touches one row twice, so a
+    // caller's duplicate would be a cloud-only 500 without this.
+    const { sdk, localDatabase, ids } = await sdkWithBareRecords(1);
+    await sdk.data.setLabels("alpha", [
+      { recordId: ids[0] as never, key: "quality", value: "high" },
+      { recordId: ids[0] as never, key: "quality", value: "low" },
+    ]);
+
+    expect(localDatabase.upsertCallSizes).toEqual([1]);
+    const labels = (await sdk.data.getLabelsByIds([ids[0] as never])).get(ids[0] as never)!;
+    expect(labels).toHaveLength(1);
+    expect(labels[0].value).toBe("low");
+  });
+
+  it("emits one change event for the whole batch, with each record once", async () => {
+    const { sdk, ids } = await sdkWithBareRecords(3);
+    const seen: string[][] = [];
+    sdk.changeNotifier.subscribe((e) => {
+      if (e.eventType === "local-change-recorded") seen.push([...e.recordIds]);
+    });
+    await sdk.data.setLabels("alpha", [
+      { recordId: ids[0] as never, key: "a" },
+      { recordId: ids[0] as never, key: "b" },
+      { recordId: ids[1] as never, key: "a" },
+    ]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].sort()).toEqual([ids[0], ids[1]].sort());
+  });
+});
+
+describe("the SDK sits below the trust boundary", () => {
+  it("findByLabel does no grant filtering — that is the data servers' job", async () => {
+    // The SDK is a per-node facility used by the local-data-server; apps reach
+    // the data plane over HTTP. `query()` does no grant filtering here either,
+    // and pretending otherwise would invite a caller to rely on a check this
+    // layer has no identity to make.
+    const localDatabase = new MockDatabaseAdapter();
+    const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
+    const sdk = await createStarkeepSdk({
+      databaseAdapter: localDatabase,
+      objectStorageAdapter: new MockObjectStorageAdapter(),
+      nodeId: "test-node",
+      clock,
+    });
+
+    const jpeg = await sdk.data.putWithFile(
+      { type: "image/jpeg", originAppId: "photos" },
+      Buffer.from("a"),
+      "image/jpeg",
+    );
+    const png = await sdk.data.putWithFile(
+      { type: "image/png", originAppId: "photos" },
+      Buffer.from("b"),
+      "image/png",
+    );
+    await sdk.data.setLabels("alpha", [
+      { recordId: jpeg.id, key: "k" },
+      { recordId: png.id, key: "k" },
+    ]);
+
+    const found = await sdk.data.findByLabel({ appId: "alpha", key: "k" });
+    expect(found.records.map((r) => r.type).sort()).toEqual(["image/jpeg", "image/png"]);
   });
 });
 

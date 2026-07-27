@@ -4,6 +4,7 @@ import {
   dataRecordObjectKey,
   typeCategory,
   validateLabelWrite,
+  dedupeLabelWrites,
   isValidLabelKey,
   type DataRecord,
   type MetadataRow,
@@ -319,7 +320,11 @@ export async function createStarkeepSdk(
           for (const r of found.records) recordTypes.set(r.id, r.type);
         }
 
-        const rows = entries.map((e) => {
+        // Deduped by (recordId, key), last wins. A chunk is one multi-row
+        // upsert, and Postgres/DSQL rejects one that touches the same row
+        // twice while SQLite quietly keeps the last — so an undeduped repeat
+        // is a batch that works locally and 500s in the cloud.
+        const rows = dedupeLabelWrites(entries).map((e) => {
           const recordType = recordTypes.get(e.recordId);
           if (recordType === undefined) {
             // No FK backs record_id, so without this the write would create

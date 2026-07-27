@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  dedupeLabelWrites,
   planLabelWrites,
   planLabelRetractions,
   LABEL_VALUE_MAX_BYTES,
@@ -167,6 +168,73 @@ describe("planLabelWrites", () => {
       entries: [
         { recordId: "rec1" as never, key: "quality", value: "high" },
         { recordId: "rec1" as never, key: "Bad Key" },
+      ],
+    });
+    expect(plan.ok).toBe(false);
+  });
+});
+
+describe("dedupeLabelWrites", () => {
+  // Not a tidiness measure. A multi-row INSERT … ON CONFLICT DO UPDATE that
+  // touches one row twice is an ERROR on Postgres/DSQL (21000) and silently
+  // last-wins on SQLite, so an undeduped batch is one that passes every
+  // offline test and 500s against the cloud.
+  it("keeps the last write for a repeated (recordId, key)", () => {
+    const deduped = dedupeLabelWrites([
+      { recordId: "rec1" as never, key: "quality", value: "high" },
+      { recordId: "rec1" as never, key: "quality", value: "low" },
+    ]);
+    expect(deduped).toEqual([{ recordId: "rec1", key: "quality", value: "low" }]);
+  });
+
+  it("does not collapse the same key on different records, or different keys", () => {
+    const entries = [
+      { recordId: "rec1" as never, key: "quality" },
+      { recordId: "rec2" as never, key: "quality" },
+      { recordId: "rec1" as never, key: "other" },
+    ];
+    expect(dedupeLabelWrites(entries)).toHaveLength(3);
+  });
+
+  it("preserves first-appearance order so a batch stays predictable", () => {
+    const deduped = dedupeLabelWrites([
+      { recordId: "a" as never, key: "k", value: "1" },
+      { recordId: "b" as never, key: "k", value: "2" },
+      { recordId: "a" as never, key: "k", value: "3" },
+    ]);
+    expect(deduped.map((e) => e.recordId)).toEqual(["a", "b"]);
+    expect(deduped[0].value).toBe("3");
+  });
+});
+
+describe("planLabelWrites deduping", () => {
+  const base = {
+    recordTypes: new Map([["rec1", "image/jpeg"]]),
+    declaredKeys: new Set(["quality", "bad"]),
+    canReadType: () => true,
+  };
+
+  it("emits one write per (record, key), last value winning", () => {
+    const plan = planLabelWrites({
+      ...base,
+      entries: [
+        { recordId: "rec1" as never, key: "quality", value: "high" },
+        { recordId: "rec1" as never, key: "quality", value: "low" },
+      ],
+    });
+    expect(plan.ok && plan.writes).toEqual([
+      { recordId: "rec1", key: "quality", value: "low", recordType: "image/jpeg" },
+    ]);
+  });
+
+  it("still validates every entry before deduping", () => {
+    // The repeat must not be a way to smuggle a bad entry past validation by
+    // having it collapsed away.
+    const plan = planLabelWrites({
+      ...base,
+      entries: [
+        { recordId: "rec1" as never, key: "quality", value: "high" },
+        { recordId: "rec1" as never, key: "quality", value: "x".repeat(200) },
       ],
     });
     expect(plan.ok).toBe(false);
