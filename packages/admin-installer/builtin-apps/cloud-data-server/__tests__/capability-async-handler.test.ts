@@ -317,6 +317,30 @@ describe("async capability start (plan §3.8)", () => {
     expect(db.jobs).toHaveLength(0);
     expect(db.ledger.every((r) => r.status === "released")).toBe(true);
   });
+
+  it("maps an AccessDenied StartAsyncInvoke to 503 capability_frozen", async () => {
+    // A frozen capability role denies StartAsyncInvoke exactly as it denies the
+    // buffered and streaming calls — three entry points, one mapping, and this
+    // is the one that is easy to forget (budget-guardrail plan §4.8).
+    const db = new InMemoryDb({ models: ["amazon.nova-reel-v1:1"], reports: [] });
+    const res = await handleCapabilityInvokeAsyncStart(
+      startDeps(db, {
+        asyncInvoker: makeAsyncInvoker({
+          async startAsync() {
+            throw Object.assign(new Error("not authorized to perform: bedrock:StartAsyncInvoke"), {
+              name: "AccessDeniedException",
+            });
+          },
+        }),
+      }),
+    );
+    expect(res.statusCode).toBe(503);
+    expect((res.body as { error: string }).error).toBe("capability_frozen");
+    expect((res.body as { message: string }).message).toMatch(/spend guardrail/i);
+    // No job was started, so nothing can ever reconcile the reservation.
+    expect(db.jobs).toHaveLength(0);
+    expect(db.ledger.every((r) => r.status === "released")).toBe(true);
+  });
 });
 
 const s3ImageContent = async (): Promise<ContentReadResult> => ({

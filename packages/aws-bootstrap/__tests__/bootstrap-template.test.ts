@@ -45,10 +45,13 @@ describe("bootstrap template structure", () => {
     });
   });
 
-  it("creates exactly the six permissions boundaries", () => {
+  it("creates exactly the six permissions boundaries plus the Bedrock freeze policy", () => {
     expect(resourcesOfType("AWS::IAM::ManagedPolicy").sort()).toEqual([
       "AppFoundationalPermissionsBoundary",
       "AppPermissionsBoundary",
+      // Not a boundary — the Deny document an action-enabled budget attaches to
+      // the capability-broker role on breach.
+      "BedrockFreezePolicy",
       "CapabilityBrokerPermissionsBoundary",
       "InstallDdlPermissionsBoundary",
       "InstallInfraPermissionsBoundary",
@@ -56,9 +59,10 @@ describe("bootstrap template structure", () => {
     ]);
   });
 
-  it("creates exactly the four install-time roles", () => {
+  it("creates exactly the four install-time roles plus the budget-action role", () => {
     expect(resourcesOfType("AWS::IAM::Role").sort()).toEqual([
       "AdminAppRole",
+      "BedrockBudgetActionRole",
       "InstallDdlRole",
       "InstallInfraRole",
       "ManagerRole",
@@ -136,6 +140,51 @@ describe("trust policies (who can assume which role)", () => {
     },
   );
 
+  it("BedrockBudgetActionRole is assumable only by Budgets, with both confused-deputy conditions", () => {
+    const [stmt] = trustStatements("BedrockBudgetActionRole");
+    expect(trustStatements("BedrockBudgetActionRole")).toHaveLength(1);
+    expect(stmt).toMatchObject({
+      Effect: "Allow",
+      Principal: { Service: "budgets.amazonaws.com" },
+      Action: "sts:AssumeRole",
+    });
+    // Both conditions, not just the principal: a service principal alone lets
+    // ANY account's budget assume this role.
+    expect(stmt.Condition).toEqual({
+      StringEquals: { "aws:SourceAccount": { Ref: "AWS::AccountId" } },
+      ArnLike: {
+        "aws:SourceArn": {
+          "Fn::Sub": "arn:aws:budgets::${AWS::AccountId}:budget/${StackPrefix}-*",
+        },
+      },
+    });
+  });
+
+  it("BedrockBudgetActionRole's attach power is scoped to the broker role and the freeze policy", () => {
+    const props = resources.BedrockBudgetActionRole.Properties as unknown as {
+      PermissionsBoundary?: unknown;
+      Policies: Array<{ PolicyDocument: { Statement: Array<Record<string, unknown>> } }>;
+    };
+    // Bootstrap-created, like Manager and admin-app — no boundary.
+    expect(props.PermissionsBoundary).toBeUndefined();
+    const statements = props.Policies[0].PolicyDocument.Statement;
+    expect(statements).toHaveLength(1);
+    const [stmt] = statements;
+    expect(stmt.Action).toEqual(["iam:AttachRolePolicy", "iam:DetachRolePolicy"]);
+    // Enumerated role ARNs, never a `-app-*-role` wildcard.
+    expect(stmt.Resource).toEqual([
+      {
+        "Fn::Sub":
+          "arn:aws:iam::${AWS::AccountId}:role/${StackPrefix}-app-capability-broker-role",
+      },
+    ]);
+    // The condition IS the security argument: without it this is "attach any
+    // policy to the broker role", which is an escalation, not a guardrail.
+    expect(stmt.Condition).toEqual({
+      ArnEquals: { "iam:PolicyARN": { Ref: "BedrockFreezePolicy" } },
+    });
+  });
+
   it("the federated identity pool maps authenticated users to AdminAppRole", () => {
     const props = resources.IdentityPoolRoleAttachment.Properties as unknown as {
       Roles: Record<string, unknown>;
@@ -157,6 +206,8 @@ describe("stack outputs", () => {
         "AppFoundationalPermissionsBoundaryArn",
         "UserDataOwnerPermissionsBoundaryArn",
         "CapabilityBrokerPermissionsBoundaryArn",
+        "BedrockFreezePolicyArn",
+        "BedrockBudgetActionRoleArn",
         "InstallDdlRoleArn",
         "InstallInfraRoleArn",
         "PulumiStateBucketName",

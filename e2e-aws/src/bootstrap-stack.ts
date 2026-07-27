@@ -31,6 +31,9 @@ export interface BootstrapOutputs {
   installInfraRoleArn: string;
   pulumiStateBucketName: string;
   artifactsBucketName: string;
+  /** Bedrock spend guardrail (budget-guardrail plan §4.1). */
+  bedrockFreezePolicyArn: string;
+  bedrockBudgetActionRoleArn: string;
 }
 
 const REQUIRED_OUTPUT_KEYS: Record<keyof BootstrapOutputs, string> = {
@@ -47,6 +50,8 @@ const REQUIRED_OUTPUT_KEYS: Record<keyof BootstrapOutputs, string> = {
   installInfraRoleArn: "InstallInfraRoleArn",
   pulumiStateBucketName: "PulumiStateBucketName",
   artifactsBucketName: "ArtifactsBucketName",
+  bedrockFreezePolicyArn: "BedrockFreezePolicyArn",
+  bedrockBudgetActionRoleArn: "BedrockBudgetActionRoleArn",
 };
 
 function outputsFromStack(stack: Stack, stackName: string): BootstrapOutputs {

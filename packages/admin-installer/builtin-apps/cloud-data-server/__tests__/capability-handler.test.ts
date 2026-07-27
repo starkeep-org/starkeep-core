@@ -935,3 +935,102 @@ describe("buildImageModelInput (Nova Canvas body)", () => {
     ).toThrow(/not supported/);
   });
 });
+
+/**
+ * The Bedrock spend guardrail freezes the capability-broker role by attaching a
+ * Deny policy, which reaches the broker as a plain `AccessDeniedException`.
+ * Mapped generically that reads as an opaque 502 fault; it is actually an
+ * intended, operator-visible state with a screen to go fix it (budget-guardrail
+ * plan §4.8).
+ */
+describe("frozen capability (spend guardrail)", () => {
+  function accessDenied(): Error {
+    // Shaped like the SDK's exception: the `name` is what the mapping keys on.
+    return Object.assign(new Error("User is not authorized to perform: bedrock:InvokeModel"), {
+      name: "AccessDeniedException",
+    });
+  }
+
+  const throwingInvoker = (err: Error): BedrockInvoker => ({
+    async converse() {
+      throw err;
+    },
+    // eslint-disable-next-line require-yield
+    async *converseStream() {
+      throw err;
+    },
+  });
+
+  it("maps AccessDenied on the buffered invoke to 503 capability_frozen", async () => {
+    const db = makeDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
+    const res = await handleCapabilityInvoke(
+      baseDeps(db, { invoker: throwingInvoker(accessDenied()) }),
+    );
+    expect(res.statusCode).toBe(503);
+    const body = res.body as { error: string; message: string };
+    expect(body.error).toBe("capability_frozen");
+    // The message must name the guardrail and where to resolve it — an opaque
+    // fault is exactly what this mapping exists to stop being.
+    expect(body.message).toMatch(/spend guardrail/i);
+    expect(body.message).toMatch(/Settings/);
+  });
+
+  it("releases the ledger reservation on the frozen path", async () => {
+    // Asserted rather than assumed: without it, every denied invoke while frozen
+    // would leave its worst-case projection reserved and silently consume the
+    // app's monthly budget for calls that never happened.
+    const db = makeDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
+    await handleCapabilityInvoke(baseDeps(db, { invoker: throwingInvoker(accessDenied()) }));
+    expect(db.ledger.length).toBeGreaterThan(0);
+    expect(db.ledger.every((r) => r.status === "released")).toBe(true);
+  });
+
+  it("maps AccessDenied on the STREAMING path the same way", async () => {
+    const db = makeDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
+    const prep = await handleCapabilityInvokeStream(
+      baseDeps(db, { invoker: throwingInvoker(accessDenied()) }),
+    );
+    expect(prep.ok).toBe(true);
+    if (!prep.ok) throw new Error("expected an open stream");
+    const events = [];
+    for await (const evt of prep.stream) events.push(evt);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "error", status: 503, error: "capability_frozen" }),
+    );
+    expect(db.ledger.every((r) => r.status === "released")).toBe(true);
+  });
+
+  it("maps AccessDenied on the sync-image path the same way", async () => {
+    const db = makeDb({ models: [IMAGE_MODEL], reports: [] }, []);
+    const res = await handleCapabilityInvoke(
+      baseDeps(db, {
+        body: { model: IMAGE_MODEL, prompt: "a cat", maxTokens: 100 },
+        readContent: async () => ({ ok: true, content: { sizeBytes: 0 } }),
+        imageInvoker: {
+          async generateImage() {
+            throw accessDenied();
+          },
+        },
+        writeSyncOutput: async (): Promise<SyncImageOutput> => ({
+          bucket: "b",
+          keyPrefix: "p",
+          keys: [],
+          totalBytes: 0,
+        }),
+      }),
+    );
+    expect(res.statusCode).toBe(503);
+    expect((res.body as { error: string }).error).toBe("capability_frozen");
+  });
+
+  it("still maps a NON-AccessDenied Bedrock failure to 502 invoke_failed", async () => {
+    // No over-broad rewrite: a genuine Bedrock fault must not be reported to the
+    // operator as a spend freeze they then go looking for and can't find.
+    const db = makeDb({ models: ["anthropic.claude-haiku-4-5"], reports: [] }, []);
+    const res = await handleCapabilityInvoke(
+      baseDeps(db, { invoker: throwingInvoker(new Error("bedrock exploded")) }),
+    );
+    expect(res.statusCode).toBe(502);
+    expect((res.body as { error: string }).error).toBe("invoke_failed");
+  });
+});

@@ -9,6 +9,14 @@ import {
   capabilityBrokerPermissionsBoundaryStatements,
 } from "../src/bootstrap/index.js";
 import { userDataOwnerPermissionsBoundaryStatements } from "../src/bootstrap/user-data-owner-permissions-boundary.js";
+import {
+  bedrockFreezePolicyStatements,
+  BEDROCK_FREEZE_EXEMPT_ACTIONS,
+} from "../src/bootstrap/bedrock-freeze-policy.js";
+import {
+  bedrockFreezePolicyName,
+  bedrockBudgetActionRoleName,
+} from "../src/bedrock-budget-spec.js";
 import { MAX_STACK_PREFIX_LENGTH } from "../src/bootstrap/index.js";
 import type { IamStatement, CfnValue } from "../src/iam-utils.js";
 
@@ -77,6 +85,19 @@ describe("manager policy (the install/uninstall allow-list)", () => {
         // so gated providers can be invoked (plan §3.6). Account config, not a
         // data-plane verb — the negatives below still hold.
         "bedrock:*UseCaseForModelAccess",
+        // Bedrock spend guardrail (§4.2): cost governance, not data plane.
+        "budgets:ViewBudget",
+        "budgets:ModifyBudget",
+        "budgets:CreateBudgetAction",
+        "budgets:UpdateBudgetAction",
+        "budgets:DeleteBudgetAction",
+        "budgets:DescribeBudgetAction",
+        "budgets:DescribeBudgetActionsForBudget",
+        "budgets:DescribeBudgetActionHistories",
+        "budgets:ExecuteBudgetAction",
+        "iam:PassRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
       ].sort(),
     );
     // The load-bearing negatives: Manager can never read user data or app secrets.
@@ -103,18 +124,66 @@ describe("manager policy (the install/uninstall allow-list)", () => {
     ]);
   });
 
-  it("scopes role management to ${prefix}-app-* and the two install roles only", () => {
+  it("scopes role management to ${prefix}-app-*, the two install roles, and the budget-action role", () => {
     const roleResources = statements
       .filter((s) => {
         const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
         return actions.some((a) => a.startsWith("iam:")) && s.Effect === "Allow";
       })
-      .map((s) => cfnString(s.Resource as CfnValue));
+      .flatMap((s) => (Array.isArray(s.Resource) ? s.Resource : [s.Resource]))
+      .map(cfnString);
     for (const r of roleResources) {
       expect(r).toMatch(
-        new RegExp(`^arn:aws:iam::\\*:role/${PREFIX}-(app-\\*|install-ddl-role|install-infra-role)$`),
+        new RegExp(
+          `^arn:aws:iam::\\*:role/${PREFIX}-(app-\\*|app-capability-broker-role|install-ddl-role|install-infra-role|bedrock-budget-action-role)$`,
+        ),
       );
     }
+  });
+
+  // The Bedrock spend guardrail's Manager grants (§4.2). Each one is an
+  // escalation verb whose safety rests entirely on its condition, so the
+  // conditions are asserted positively AND the absence of an unconditioned
+  // second statement is asserted — a presence-only test would pass on a
+  // dangerously wide policy.
+  it("scopes the budgets verbs to this deployment's own budgets", () => {
+    const budgets = byId(statements, "ManagerManageBedrockBudget");
+    expect(cfnString(budgets.Resource as CfnValue)).toBe(
+      `arn:aws:budgets::*:budget/${PREFIX}-*`,
+    );
+    const actions = Array.isArray(budgets.Action) ? budgets.Action : [budgets.Action];
+    expect(actions.every((a) => a.startsWith("budgets:"))).toBe(true);
+  });
+
+  it("PassRole carries iam:PassedToService and exists nowhere unconditioned", () => {
+    const passRoleStatements = statements.filter((s) =>
+      (Array.isArray(s.Action) ? s.Action : [s.Action]).includes("iam:PassRole"),
+    );
+    expect(passRoleStatements).toHaveLength(1);
+    const [pass] = passRoleStatements;
+    expect(cfnString(pass.Resource as CfnValue)).toBe(
+      `arn:aws:iam::*:role/${PREFIX}-bedrock-budget-action-role`,
+    );
+    expect(pass.Condition).toEqual({
+      StringEquals: { "iam:PassedToService": "budgets.amazonaws.com" },
+    });
+  });
+
+  it("attach/detach carries iam:PolicyARN and exists nowhere unconditioned", () => {
+    const attachStatements = statements.filter((s) =>
+      (Array.isArray(s.Action) ? s.Action : [s.Action]).some(
+        (a) => a === "iam:AttachRolePolicy" || a === "iam:DetachRolePolicy",
+      ),
+    );
+    expect(attachStatements).toHaveLength(1);
+    const [attach] = attachStatements;
+    expect(attach.Action).toEqual(["iam:AttachRolePolicy", "iam:DetachRolePolicy"]);
+    expect((attach.Resource as CfnValue[]).map(cfnString)).toEqual([
+      `arn:aws:iam::*:role/${PREFIX}-app-capability-broker-role`,
+    ]);
+    expect(
+      cfnString(attach.Condition!.ArnEquals["iam:PolicyARN"] as CfnValue),
+    ).toBe(`arn:aws:iam::*:policy/${PREFIX}-bedrock-freeze-policy`);
   });
 
   it("manages app-creds SSM parameters but can never read them back", () => {
@@ -288,6 +357,87 @@ describe("admin-app policy", () => {
   });
 });
 
+describe("Bedrock freeze policy (the structural spend backstop)", () => {
+  const statements = bedrockFreezePolicyStatements();
+
+  /**
+   * Does an IAM action pattern (`bedrock:Invoke*`) match a concrete action name?
+   * The whole point of the wildcard patterns is what they do and don't catch, so
+   * the invariants below are asserted by MATCHING rather than by eyeballing the
+   * pattern list — a pattern rewrite is exactly the edit that would silently
+   * break them.
+   */
+  function matches(pattern: string, action: string): boolean {
+    const rx = new RegExp(
+      `^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`,
+      "i",
+    );
+    return rx.test(action);
+  }
+  const patterns = statements.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+  const denies = (action: string) => patterns.some((p) => matches(p, action));
+
+  it("is a single Deny on all resources", () => {
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Effect).toBe("Deny");
+    expect(statements[0].Resource).toBe("*");
+    expect(patterns).toEqual([
+      "bedrock:Invoke*",
+      "bedrock:Converse*",
+      "bedrock:StartAsync*",
+      "bedrock:Retrieve*",
+      "bedrock:Rerank*",
+    ]);
+  });
+
+  it("denies every Bedrock spend verb the broker uses today", () => {
+    for (const action of [
+      "bedrock:InvokeModel",
+      "bedrock:InvokeModelWithResponseStream",
+      "bedrock:Converse",
+      "bedrock:ConverseStream",
+      "bedrock:StartAsyncInvoke",
+    ]) {
+      expect(denies(action), `${action} must be denied`).toBe(true);
+    }
+  });
+
+  it("denies plausible FUTURE spend verbs without a policy edit", () => {
+    // The automation claim of §9 Q5, tested rather than asserted in prose.
+    for (const action of [
+      "bedrock:InvokeAgent",
+      "bedrock:InvokeFlow",
+      "bedrock:ConverseStream",
+      "bedrock:RetrieveAndGenerate",
+      "bedrock:Rerank",
+    ]) {
+      expect(denies(action), `${action} should be caught by the wildcards`).toBe(true);
+    }
+  });
+
+  it("NEVER denies the async-invoke poll", () => {
+    // §4.1's accounting invariant: a submitted video job bills whether or not we
+    // freeze, so denying the poll would strand the ledger with an unreconciled
+    // reservation and the app with a job it can never collect. `StartAsync*` is
+    // chosen over `*Async*` precisely to keep these two allowed.
+    for (const action of BEDROCK_FREEZE_EXEMPT_ACTIONS) {
+      expect(denies(action), `${action} must stay allowed through a freeze`).toBe(false);
+    }
+  });
+});
+
+describe("resource name lengths (IAM's 64-char ceiling)", () => {
+  const MAX_PREFIX = "x".repeat(MAX_STACK_PREFIX_LENGTH);
+  const IAM_NAME_LIMIT = 64;
+
+  it.each([
+    ["bedrock-freeze-policy", bedrockFreezePolicyName],
+    ["bedrock-budget-action-role", bedrockBudgetActionRoleName],
+  ])("%s fits at the longest allowed prefix", (_label, build) => {
+    expect(build(MAX_PREFIX).length).toBeLessThanOrEqual(IAM_NAME_LIMIT);
+  });
+});
+
 describe("managed-policy size (AWS 6144-char ceiling)", () => {
   // Each permissions boundary is deployed as an AWS::IAM::ManagedPolicy, whose
   // document may not exceed 6144 characters — whitespace excluded — or
@@ -320,8 +470,10 @@ describe("managed-policy size (AWS 6144-char ceiling)", () => {
     return JSON.stringify(doc).replace(/\s/g, "").length;
   }
 
-  // Every managed policy in the bootstrap template = the six boundaries.
+  // Every managed policy in the bootstrap template = the six boundaries plus
+  // the Bedrock freeze policy.
   const managedPolicies: Record<string, (p: string) => IamStatement[]> = {
+    "bedrock-freeze-policy": () => bedrockFreezePolicyStatements(),
     "app-permissions-boundary": appPermissionsBoundaryStatements,
     "foundational-permissions-boundary": foundationalPermissionsBoundaryStatements,
     "user-data-owner-permissions-boundary": userDataOwnerPermissionsBoundaryStatements,

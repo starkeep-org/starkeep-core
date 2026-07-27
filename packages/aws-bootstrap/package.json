@@ -11,6 +11,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./bedrock-budget-ops": {
+      "types": "./dist/bedrock-budget-ops.d.ts",
+      "import": "./dist/bedrock-budget-ops.js",
+      "require": "./dist/bedrock-budget-ops.cjs"
     }
   },
   "scripts": {
@@ -28,5 +33,10 @@
     "typescript": "^5.7.0",
     "vitest": "^3.2.7",
     "yaml": "^2.9.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-budgets": "^3.1095.0",
+    "@aws-sdk/client-iam": "^3.1095.0",
+    "@starkeep/protocol-primitives": "workspace:*"
   }
 }

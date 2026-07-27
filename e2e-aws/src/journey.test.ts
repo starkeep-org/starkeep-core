@@ -52,6 +52,7 @@ import {
   upsertGate,
   deleteGate,
 } from "./dsql-operator.js";
+import { drillFreeze, drillResume, drillStatus } from "./bedrock-freeze.js";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
@@ -1054,6 +1055,99 @@ function runTeardownScript(script: string): void {
         );
         expect(head.ContentLength).toBe(body.output.totalBytes);
       },
+    );
+
+    // ── Bedrock spend-guardrail freeze drill (budget-guardrail plan §8.2) ────
+    //
+    // Exercises the EFFECT of a spend freeze without breaching a real budget,
+    // which is only possible because Manager holds the same condition-scoped
+    // attach/detach the budget action does. So this tests OUR policy, not AWS's
+    // budget evaluation — whether Budgets fires at 100% of actual is AWS's
+    // function, would cost real money to trigger, and would take a day to
+    // produce a verdict we could not act on if it failed.
+    //
+    // Costs one small form-free-model invoke and runs in seconds.
+    (process.env.STARKEEP_AWS_BEDROCK === "1" ? it : it.skip)(
+      "freezing the capability role denies the broker, and resuming restores it",
+      async () => {
+        const target = {
+          stackPrefix: STACK_PREFIX,
+          accountId: config.accountId!,
+          region: REGION,
+          managerRoleArn: outputs.managerRoleArn,
+          adminCredentials: {
+            accessKeyId: session.awsCredentials.accessKeyId,
+            secretAccessKey: session.awsCredentials.secretAccessKey,
+            sessionToken: session.awsCredentials.sessionToken,
+          },
+        };
+
+        const invoke = () =>
+          cloudApp(photos).fetch("/capabilities/bedrock.invoke/invoke", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "amazon.nova-lite",
+              prompt: "Reply with the single word: ok.",
+              maxTokens: 8,
+            }),
+          });
+
+        // THE PROPERTY THIS WHOLE DESIGN EXISTS FOR: a broker STS session minted
+        // BEFORE the freeze must also be denied. Identity policies are evaluated
+        // at request time, so an in-flight session gains no immunity — and this
+        // is the one thing no mocked test can establish. The invoke below warms
+        // the broker (and its cached session) before the policy lands.
+        const warm = await invoke();
+        expect(warm.status, await warm.text()).toBe(200);
+
+        await drillFreeze(target);
+        try {
+          const status = await drillStatus(target);
+          expect(status.frozenRoleNames).toContain(`${STACK_PREFIX}-app-capability-broker-role`);
+
+          // IAM is eventually consistent about a fresh attach; poll rather than
+          // sleep a fixed guess, and fail on the last observed body.
+          let frozenRes: Response | undefined;
+          let frozenBody = "";
+          for (let attempt = 0; attempt < 15; attempt++) {
+            frozenRes = await invoke();
+            frozenBody = await frozenRes.text();
+            if (frozenRes.status === 503) break;
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+          expect(frozenRes!.status, frozenBody).toBe(503);
+          expect(JSON.parse(frozenBody).error).toBe("capability_frozen");
+
+          // No dangling reservation. A denied invoke reserves its worst-case
+          // projection before the Bedrock call and must release it on failure —
+          // otherwise a freeze would silently burn the app's monthly budget on
+          // calls that never reached Bedrock. Asserted against the REAL ledger:
+          // nothing may be left in `reserved` once the request has returned.
+          const pool = await operatorDsql();
+          const { rows } = await pool.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM shared.capability_ledger
+              WHERE app_id = $1 AND status = 'reserved'`,
+            ["photos"],
+          );
+          expect(rows[0].n, "denied invokes must leave no reserved rows").toBe("0");
+        } finally {
+          // Always detach — a leaked freeze would fail every later step and,
+          // worse, survive a kept-up stack.
+          await drillResume(target);
+        }
+
+        let resumed: Response | undefined;
+        let resumedBody = "";
+        for (let attempt = 0; attempt < 15; attempt++) {
+          resumed = await invoke();
+          resumedBody = await resumed.text();
+          if (resumed.status === 200) break;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        expect(resumed!.status, resumedBody).toBe(200);
+      },
+      300_000,
     );
 
     // EXPENSIVE video generation (Amazon Nova Reel async). Gated behind its OWN

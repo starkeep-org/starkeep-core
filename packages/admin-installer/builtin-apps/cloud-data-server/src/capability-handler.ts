@@ -203,6 +203,41 @@ type PrepareResult =
   | { ok: true; prepared: PreparedInvoke };
 
 /**
+ * The error body for a Bedrock call that failed — `503 capability_frozen` when
+ * Bedrock refused on authorization, `502 invoke_failed` otherwise.
+ *
+ * WHY THIS EXISTS (budget-guardrail plan §4.8). The Bedrock spend guardrail
+ * freezes the capability-broker role by attaching a Deny policy, and from the
+ * broker's side that surfaces as a plain `AccessDeniedException`. Mapped
+ * generically it reads as an opaque 502 fault, when it is in fact an INTENDED,
+ * operator-visible state with a place to go and fix it.
+ *
+ * The message hedges on purpose. The broker cannot cheaply PROVE the cause is
+ * the freeze — checking the role's attached policies on every request is not
+ * affordable, and an IAM misconfiguration produces the identical exception — so
+ * it says "likely" and points at the one screen where the answer is definitive.
+ * 503 rather than 502 because the condition is temporary by construction: a
+ * freeze self-clears at the month boundary.
+ */
+function bedrockFailureBody(err: unknown): { statusCode: number; body: Record<string, unknown> } {
+  const message = err instanceof Error ? err.message : String(err);
+  if ((err as { name?: string })?.name === "AccessDeniedException") {
+    return {
+      statusCode: 503,
+      body: {
+        error: "capability_frozen",
+        message:
+          "Capability unavailable — Bedrock denied the broker's request. This is most likely " +
+          "the Bedrock spend guardrail having frozen the capability role after a budget " +
+          "breach; check Settings in the admin app to confirm and resume.",
+        cause: message,
+      },
+    };
+  }
+  return { statusCode: 502, body: { error: "invoke_failed", message } };
+}
+
+/**
  * Shared pre-flight for the buffered and streaming invoke paths — plan §3.4
  * steps 1–4, i.e. everything up to (but not including) the Bedrock call:
  * validate capability + model, read the referenced content under the app's own
@@ -405,12 +440,12 @@ export async function handleCapabilityInvoke(
       credentials: creds,
     });
   } catch (err) {
-    // Failed/aborted call must not hold a reservation.
+    // Failed/aborted call must not hold a reservation. This release is also what
+    // keeps a FROZEN capability from silently eating the app's monthly budget:
+    // every denied invoke would otherwise leave its worst-case projection
+    // reserved on the ledger.
     await release(capClient, invocationId);
-    return {
-      statusCode: 502,
-      body: { error: "invoke_failed", message: err instanceof Error ? err.message : String(err) },
-    };
+    return bedrockFailureBody(err);
   }
 
   // (6) Reconcile to actuals + return.
@@ -481,10 +516,7 @@ async function handleSyncImageInvoke(
     output = await writeSyncOutput(invocationId, generated.images, `image/${generated.format}`);
   } catch (err) {
     await release(capClient, invocationId);
-    return {
-      statusCode: 502,
-      body: { error: "invoke_failed", message: err instanceof Error ? err.message : String(err) },
-    };
+    return bedrockFailureBody(err);
   }
 
   // Reconcile: image generation has no tokens (0/0); cost falls out of the
@@ -588,11 +620,12 @@ export async function handleCapabilityInvokeStream(
     } catch (err) {
       // Failed/aborted stream must not hold a reservation.
       await release(capClient, invocationId);
+      const failure = bedrockFailureBody(err);
       yield {
         type: "error",
-        status: 502,
-        error: "invoke_failed",
-        message: err instanceof Error ? err.message : String(err),
+        status: failure.statusCode,
+        error: String(failure.body.error),
+        message: String(failure.body.message),
       };
       return;
     }
@@ -908,9 +941,13 @@ export async function handleCapabilityInvokeAsyncStart(
   } catch (err) {
     // Failed to start → the reservation must not linger.
     await release(capClient, invocationId);
-    return reject(502, {
-      error: "async_start_failed",
-      message: err instanceof Error ? err.message : String(err),
+    // A frozen role denies StartAsyncInvoke exactly as it denies the buffered
+    // and streaming calls — three entry points, one mapping, and this is the one
+    // that is easy to forget.
+    const failure = bedrockFailureBody(err);
+    return reject(failure.statusCode, {
+      ...failure.body,
+      ...(failure.body.error === "invoke_failed" ? { error: "async_start_failed" } : {}),
     });
   }
 

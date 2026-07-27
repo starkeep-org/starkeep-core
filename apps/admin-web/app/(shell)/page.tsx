@@ -35,6 +35,7 @@ import { CommandOutputModal } from "../../src/components/CommandOutputModal";
 import { CloudDataServerStatus } from "../../src/components/CloudDataServerStatus";
 import { StatusBadge } from "../../src/components/StatusBadge";
 import { AppDiscovery } from "../../src/components/AppDiscovery";
+import { BedrockFrozenBanner } from "../../src/components/BedrockFrozenBanner";
 import { LocalDriveSection } from "../../src/components/LocalDriveSection";
 import { LocalAppsSection } from "../../src/components/LocalAppsSection";
 import { CloudAppsSection } from "../../src/components/CloudAppsSection";
@@ -419,6 +420,9 @@ export default function DashboardPage() {
       </div>
 
       <div className="mb-6 flex flex-col gap-3">
+        {/* Renders nothing unless a freeze is live. Apps losing a capability with
+            no visible reason is the outcome this prevents. */}
+        <BedrockFrozenBanner />
         <AppDiscovery onSaved={refreshApps} />
         {appsError && (
           <Alert variant="destructive">

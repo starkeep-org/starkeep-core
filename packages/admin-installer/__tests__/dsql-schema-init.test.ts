@@ -15,6 +15,9 @@ const state = {
   indexExists: false,
   iamMappingExists: false,
   statements: [] as string[],
+  // Parameterized statements keep their bound values out of the SQL text, so
+  // anything asserted on a VALUE (the seeded gate's limit) needs these.
+  queries: [] as { sql: string; params: unknown[] }[],
 };
 
 vi.mock("@aws-sdk/dsql-signer", () => ({
@@ -27,12 +30,12 @@ vi.mock("@aws-sdk/dsql-signer", () => ({
 
 vi.mock("pg", () => {
   class FakePool {
-    async query(text: string) {
-      return handleQuery(text);
+    async query(text: string, params?: unknown[]) {
+      return handleQuery(text, params);
     }
     async connect() {
       return {
-        query: async (text: string) => handleQuery(text),
+        query: async (text: string, params?: unknown[]) => handleQuery(text, params),
         release() {},
       };
     }
@@ -41,8 +44,10 @@ vi.mock("pg", () => {
       return this;
     }
   }
-  function handleQuery(text: string) {
-    state.statements.push(text.replace(/\s+/g, " ").trim());
+  function handleQuery(text: string, params?: unknown[]) {
+    const sql = text.replace(/\s+/g, " ").trim();
+    state.statements.push(sql);
+    state.queries.push({ sql, params: params ?? [] });
     if (text.includes("FROM pg_roles")) {
       return { rows: [{ exists: state.roleExists }], rowCount: 1 };
     }
@@ -58,6 +63,7 @@ vi.mock("pg", () => {
 });
 
 import { initializeSharedSchema, installerPgUser } from "../src/dsql-schema-init";
+import { evaluateGates, gateMatches, type Gate } from "@starkeep/protocol-primitives";
 
 const opts = {
   hostname: "fake.dsql.us-east-1.on.aws",
@@ -72,6 +78,7 @@ beforeEach(() => {
   state.indexExists = false;
   state.iamMappingExists = false;
   state.statements = [];
+  state.queries = [];
 });
 
 /** The single CREATE TABLE statement for `table`. */
@@ -326,5 +333,114 @@ describe("the rest of the shared schema is untouched by the capability work", ()
   it("never drops anything", async () => {
     await initializeSharedSchema(opts);
     expect(state.statements.some((s) => /^drop /i.test(s))).toBe(false);
+  });
+});
+
+describe("seeded global Bedrock cost gate (budget-guardrail plan §4.6)", () => {
+  /** The one INSERT into shared.capability_gates, with its bound values. */
+  function seedInsert() {
+    const hits = state.queries.filter(
+      (q) => /^insert into/i.test(q.sql) && q.sql.includes('"shared"."capability_gates"'),
+    );
+    expect(hits).toHaveLength(1);
+    return hits[0]!;
+  }
+
+  /** The seed's bound values, keyed by the column order in the INSERT. */
+  function seedValues(): Record<string, unknown> {
+    const { sql, params } = seedInsert();
+    const cols = sql
+      .slice(sql.indexOf("(") + 1, sql.indexOf(")"))
+      .split(",")
+      .map((c) => c.trim().replace(/"/g, ""));
+    return Object.fromEntries(cols.map((c, i) => [c, params[i]]));
+  }
+
+  it("seeds one global monthly cost gate", async () => {
+    await initializeSharedSchema({ ...opts, defaultBedrockCostGateUsd: 20 });
+    const values = seedValues();
+    expect(values).toMatchObject({
+      id: "operator:bedrock-monthly-cost",
+      capability_name: "bedrock.invoke",
+      dimension: "cost",
+      unit: "usd_micros",
+      window_kind: "calendar",
+      window_period: "month",
+      on_exceed: "deny",
+      // `operator`, not `app-consent`: this must render in the gate editor as a
+      // normal, fully editable row.
+      origin: "operator",
+    });
+    // All scope columns NULL — global across every app, provider and model.
+    expect(values.scope_provider).toBeNull();
+    expect(values.scope_model).toBeNull();
+    expect(values.scope_app_id).toBeNull();
+    expect(values.window_seconds).toBeNull();
+  });
+
+  it("stores the limit in micros, exactly", async () => {
+    // $20 under a $25 budget. An off-by-1e6 here is a 1000×-wrong ceiling that
+    // no other assertion in this file would catch.
+    await initializeSharedSchema({ ...opts, defaultBedrockCostGateUsd: 20 });
+    expect(seedValues().limit_value).toBe(20_000_000);
+  });
+
+  it("stores a non-integer-dollar limit exactly", async () => {
+    await initializeSharedSchema({ ...opts, defaultBedrockCostGateUsd: 0.8 * 25 });
+    expect(seedValues().limit_value).toBe(20_000_000);
+  });
+
+  it("is insert-if-absent, NOT an upsert", async () => {
+    // A DO UPDATE would silently revert an operator's edited limit on every
+    // reinstall — a spend cap loosened by a routine redeploy.
+    await initializeSharedSchema({ ...opts, defaultBedrockCostGateUsd: 20 });
+    const { sql } = seedInsert();
+    expect(sql.toLowerCase()).toContain("on conflict");
+    expect(sql.toLowerCase()).toContain("do nothing");
+    expect(sql.toLowerCase()).not.toContain("do update");
+  });
+
+  it("emits no insert at all when no default is supplied", async () => {
+    await initializeSharedSchema(opts);
+    expect(
+      state.statements.some(
+        (s) => /^insert into/i.test(s) && s.includes('"shared"."capability_gates"'),
+      ),
+    ).toBe(false);
+  });
+
+  it("uses an id the admin-web gate editor treats as editable", async () => {
+    // The editor's write routes refuse any id without this prefix, so a seed
+    // that missed it would render as an uneditable, undeletable mystery row.
+    await initializeSharedSchema({ ...opts, defaultBedrockCostGateUsd: 20 });
+    expect(String(seedValues().id).startsWith("operator:")).toBe(true);
+  });
+
+  it("seeds a gate that the pure gate logic actually ENFORCES", async () => {
+    // Storing a row is not the same as bounding spend. Map the seeded row the
+    // way the broker does and check it matches an arbitrary request and denies
+    // at the limit.
+    await initializeSharedSchema({ ...opts, defaultBedrockCostGateUsd: 20 });
+    const values = seedValues();
+    const gate: Gate = {
+      id: String(values.id),
+      dimension: String(values.dimension),
+      unit: String(values.unit),
+      scope: {},
+      window: { kind: "calendar", period: "month" },
+      limit: Number(values.limit_value),
+      onExceed: "deny",
+    };
+    const ctx = { appId: "any-app", provider: "anthropic" as const, model: "any-model" };
+    expect(gateMatches(gate, ctx)).toBe(true);
+
+    const decision = await evaluateGates({
+      gates: [gate],
+      ctx,
+      appReports: [],
+      projected: [{ dimension: "cost", unit: "usd_micros", quantity: 1 }],
+      getSum: async () => 20_000_000,
+    });
+    expect(decision.allowed).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import type { IamStatement, CfnValue } from "../iam-utils.js";
+import { bedrockFreezeTargetRoleNames } from "../bedrock-budget-spec.js";
 
 const SUB = (s: string): CfnValue => ({ Sub: s });
 
@@ -154,6 +155,63 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
       Effect: "Allow",
       Action: "bedrock:*UseCaseForModelAccess",
       Resource: "*",
+    },
+    // -----------------------------------------------------------------------
+    // Bedrock spend guardrail (budget-guardrail plan §4.2).
+    //
+    // Budget management goes through Manager, not the admin-app role. Manager is
+    // already the deployment's hub for account-global foundational setup (it
+    // submits the Bedrock use-case form) and holds no data-plane power; budgets
+    // verbs are cost governance, not data plane, so this does not widen admin.
+    // -----------------------------------------------------------------------
+    {
+      // Action ARNs are children of the budget ARN, so one resource pattern
+      // covers both. Scoped to this deployment's own budgets.
+      Sid: "ManagerManageBedrockBudget",
+      Effect: "Allow",
+      Action: [
+        "budgets:ViewBudget",
+        "budgets:ModifyBudget",
+        "budgets:CreateBudgetAction",
+        "budgets:UpdateBudgetAction",
+        "budgets:DeleteBudgetAction",
+        "budgets:DescribeBudgetAction",
+        "budgets:DescribeBudgetActionsForBudget",
+        "budgets:DescribeBudgetActionHistories",
+        "budgets:ExecuteBudgetAction",
+      ],
+      Resource: SUB(`arn:aws:budgets::*:budget/${stackPrefix}-*`),
+    },
+    {
+      // Handing the budget-action role to Budgets is the whole point of the
+      // action; PassedToService bounds it to exactly that. Manager holds no
+      // other PassRole today, so this is the narrowest possible addition.
+      Sid: "ManagerPassBedrockBudgetActionRole",
+      Effect: "Allow",
+      Action: "iam:PassRole",
+      Resource: SUB(`arn:aws:iam::*:role/${stackPrefix}-bedrock-budget-action-role`),
+      Condition: {
+        StringEquals: { "iam:PassedToService": "budgets.amazonaws.com" },
+      },
+    },
+    {
+      // Powers the manual Freeze now / Resume controls — and, importantly, makes
+      // the whole freeze path deterministically testable without waiting on a
+      // real budget breach. Identical scope and condition to the budget-action
+      // role's own grant: only the freeze policy, only on the roles that can
+      // spend on Bedrock. `iam:PolicyARN` is what keeps this from being a
+      // general "attach any policy" escalation.
+      Sid: "ManagerAttachDetachBedrockFreezePolicy",
+      Effect: "Allow",
+      Action: ["iam:AttachRolePolicy", "iam:DetachRolePolicy"],
+      Resource: bedrockFreezeTargetRoleNames(stackPrefix).map((roleName) =>
+        SUB(`arn:aws:iam::*:role/${roleName}`),
+      ),
+      Condition: {
+        ArnEquals: {
+          "iam:PolicyARN": SUB(`arn:aws:iam::*:policy/${stackPrefix}-bedrock-freeze-policy`),
+        },
+      },
     },
   ];
 }

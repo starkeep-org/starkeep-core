@@ -14,3 +14,7 @@ export { userDataOwnerPermissionsBoundaryStatements } from "./user-data-owner-pe
 export { capabilityBrokerPermissionsBoundaryStatements } from "./capability-broker-permissions-boundary.js";
 export { installDdlBoundaryStatements } from "./install-ddl-boundary.js";
 export { installInfraBoundaryStatements } from "./install-infra-boundary.js";
+export {
+  bedrockFreezePolicyStatements,
+  BEDROCK_FREEZE_EXEMPT_ACTIONS,
+} from "./bedrock-freeze-policy.js";

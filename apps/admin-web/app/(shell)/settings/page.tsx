@@ -3,6 +3,7 @@
 import { CloudSetupWizard } from "../../../src/components/CloudSetupWizard";
 import { CapabilityModelsSection } from "../../../src/components/CapabilityModelsSection";
 import { CapabilityGatesSection } from "../../../src/components/CapabilityGatesSection";
+import { BedrockBudgetSection } from "../../../src/components/BedrockBudgetSection";
 
 export default function SettingsPage() {
   return (
@@ -11,6 +12,12 @@ export default function SettingsPage() {
       <div className="rounded-lg border p-6">
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">Cloud Setup</h2>
         <CloudSetupWizard />
+      </div>
+      {/* Above Capability Limits on purpose: the hard, structural ceiling should
+          read before the soft ones it backstops. */}
+      <div className="rounded-lg border p-6">
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">Bedrock Spend Guardrail</h2>
+        <BedrockBudgetSection />
       </div>
       <div className="rounded-lg border p-6">
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">Capability Limits</h2>

@@ -33,6 +33,7 @@
     "@pulumi/pulumi": "^3.0.0",
     "@pulumi/tls": "^5.0.0",
     "@starkeep/app-client": "workspace:*",
+    "@starkeep/aws-bootstrap": "workspace:*",
     "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
@@ -41,7 +42,6 @@
     "pg": "^8.0.0"
   },
   "devDependencies": {
-    "@starkeep/aws-bootstrap": "workspace:*",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.0.0",
     "aws-sdk-client-mock": "^4.1.0",

@@ -70,6 +70,13 @@ interface StarkeepConfig {
   capabilityStreamFunction?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
+  /** The operator's Cognito email. Persisted so the Bedrock spend guardrail's
+   * budget action has a notification subscriber (Budgets rejects an action
+   * without one) on later non-interactive runs. */
+  operatorEmail?: string;
+  /** Operator preference for the Bedrock spend guardrail. Absent means enabled
+   * at the $25 default — see resolveBedrockBudgetPreference. */
+  bedrockBudget?: { enabled?: boolean; limitUsd?: number; notifyEmail?: string };
 }
 
 const STARKEEP_DIR = starkeepDir();
@@ -99,6 +106,12 @@ const config = loadConfig();
 const region = regionFromUserPoolId(config.userPoolId);
 const stackPrefix = config.stackPrefix;
 
+// The address the Bedrock spend guardrail's budget action notifies. Learned from
+// the interactive sign-in below when we don't already have it on file; a
+// non-interactive run (the admin-web spawn, the e2e harness) relies on whatever
+// a previous run or admin-web persisted.
+let operatorEmail = config.operatorEmail;
+
 if (nonInteractive) {
   const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
   if (!AWS_ACCESS_KEY_ID || !AWS_SECRET_ACCESS_KEY || !AWS_SESSION_TOKEN) {
@@ -109,6 +122,7 @@ if (nonInteractive) {
   }
 } else {
   const email = await prompt("Email: ");
+  operatorEmail = email;
   const password = await prompt("Password: ", true);
 
   console.log("\nAuthenticating with Cognito…");
@@ -207,6 +221,8 @@ const outputs = await installCloudDataServer({
   pulumiStateBucket,
   userPoolId: config.userPoolId,
   userPoolClientId: config.userPoolClientId,
+  bedrockBudget: config.bedrockBudget,
+  operatorEmail,
   // The cloud e2e harness passes --ephemeral to provision disposable infra and
   // skip the production data-protection hardening (versioning/SSE/PAB/deletion-
   // protect). A CLI flag — not an env var — so it can't leak in via the
@@ -224,6 +240,7 @@ const outputs = await installCloudDataServer({
 const updated: StarkeepConfig = {
   ...config,
   accountId,
+  ...(operatorEmail ? { operatorEmail } : {}),
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
   userDataOwnerPermissionsBoundaryArn,

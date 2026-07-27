@@ -7,6 +7,8 @@ import { userDataOwnerPermissionsBoundaryStatements } from "./user-data-owner-pe
 import { capabilityBrokerPermissionsBoundaryStatements } from "./capability-broker-permissions-boundary.js";
 import { installDdlBoundaryStatements } from "./install-ddl-boundary.js";
 import { installInfraBoundaryStatements } from "./install-infra-boundary.js";
+import { bedrockFreezePolicyStatements } from "./bedrock-freeze-policy.js";
+import { bedrockFreezeTargetRoleNames } from "../bedrock-budget-spec.js";
 
 export interface GenerateBootstrapTemplateInput {
   stackPrefix?: string;
@@ -74,6 +76,19 @@ export function generateBootstrapTemplate(
     installInfraBoundaryStatements(stackPrefix),
     10,
   );
+  const bedrockFreezePolicyYaml = renderStatementsYaml(
+    bedrockFreezePolicyStatements(),
+    10,
+  );
+  // The freeze applies to an ENUMERATED list of role ARNs, never a
+  // `-app-*-role` wildcard: a wildcard would let a compromise of the budget
+  // action role attach the freeze policy to any app role. Harmless in effect,
+  // but wider than the job needs, and the narrow version costs nothing. The list
+  // itself lives in bedrock-budget-spec.ts, which is also what the budget
+  // action's Roles[] and Manager's attach/detach scope are built from.
+  const bedrockFreezeTargetRoleArnsYaml = bedrockFreezeTargetRoleNames("${StackPrefix}")
+    .map((roleName) => `                  - !Sub 'arn:aws:iam::\${AWS::AccountId}:role/${roleName}'`)
+    .join("\n");
   return `AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Starkeep Bootstrap — creates Cognito auth, IAM roles (admin-app, manager),
@@ -230,6 +245,86 @@ ${userDataOwnerBoundaryPolicyYaml}
         Version: '2012-10-17'
         Statement:
 ${capabilityBrokerBoundaryPolicyYaml}
+
+  # ---------------------------------------------------------------------------
+  # Bedrock Freeze Policy — the STRUCTURAL spend backstop.
+  #
+  # Attached to the capability-broker role by an action-enabled AWS Budget when
+  # monthly Bedrock spend breaches its limit (and detachable by the operator's
+  # Resume). After the attach the role cannot invoke Bedrock no matter what the
+  # broker code does — including for STS sessions minted before the freeze, since
+  # identity policies are evaluated at request time. It is the only ceiling in
+  # the deployment that does not depend on our own code being correct.
+  #
+  # Created here, not at runtime, because creating IAM privilege belongs in the
+  # auditable bootstrap stack. The Budget + BudgetAction that reference it are
+  # created via the Budgets API so the operator can toggle and re-price them
+  # without a stack update.
+  # ---------------------------------------------------------------------------
+  BedrockFreezePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '\${StackPrefix}-bedrock-freeze-policy'
+      Description: >-
+        Denies every Bedrock spend verb. Attached to the capability-broker role
+        by the Bedrock spend budget's action on breach; detached at the start of
+        the next budget period or by the operator. Leaves the async-invoke poll
+        allowed so in-flight jobs can still be reconciled.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+${bedrockFreezePolicyYaml}
+
+  # ---------------------------------------------------------------------------
+  # Bedrock Budget Action Role — the identity AWS Budgets assumes to apply the
+  # freeze policy on breach.
+  #
+  # This holds a genuine escalation verb (iam:AttachRolePolicy). AWS's own
+  # example policy for a budget action role uses Resource "*"; this one does not.
+  # It is scoped to the enumerated capability-broker role AND conditioned on
+  # iam:PolicyARN equalling the one freeze policy, so the worst a compromise of
+  # this role achieves is freezing (or unfreezing) Bedrock. The trust policy
+  # carries both documented confused-deputy conditions.
+  # ---------------------------------------------------------------------------
+  BedrockBudgetActionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '\${StackPrefix}-bedrock-budget-action-role'
+      Description: >-
+        Assumed by AWS Budgets to attach/detach the Bedrock freeze policy on the
+        capability-broker role when the Bedrock spend budget is breached.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:budgets::\${AWS::AccountId}:budget/\${StackPrefix}-*'
+      Policies:
+        - PolicyName: StarkeepBedrockFreezePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AttachDetachBedrockFreezePolicy
+                Effect: Allow
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                Resource:
+${bedrockFreezeTargetRoleArnsYaml}
+                Condition:
+                  ArnEquals:
+                    'iam:PolicyARN': !Ref BedrockFreezePolicy
+      Tags:
+        - Key: starkeep:managed
+          Value: 'true'
+        - Key: StackPrefix
+          Value: !Ref StackPrefix
 
   # ---------------------------------------------------------------------------
   # Admin App Role — federated entry point + admin-app runtime identity
@@ -473,6 +568,14 @@ Outputs:
   CapabilityBrokerPermissionsBoundaryArn:
     Description: ARN of the permissions boundary for the capability-broker role (Bedrock invoke only)
     Value: !Ref CapabilityBrokerPermissionsBoundary
+
+  BedrockFreezePolicyArn:
+    Description: ARN of the managed policy the Bedrock spend budget attaches to freeze Bedrock
+    Value: !Ref BedrockFreezePolicy
+
+  BedrockBudgetActionRoleArn:
+    Description: ARN of the role AWS Budgets assumes to apply the Bedrock freeze policy
+    Value: !GetAtt BedrockBudgetActionRole.Arn
 
   InstallDdlRoleArn:
     Description: ARN of the install-DDL role (the only identity that can connect to DSQL as PG admin)

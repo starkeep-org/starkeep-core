@@ -1402,6 +1402,11 @@ export function CloudSetupWizard({ onComplete }: Props) {
               setCredentials(creds);
               await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: userEmail ?? undefined });
               await writeCloudCredentials(creds);
+              // Persist the address SERVER-side too. The session lives in this
+              // browser's localStorage, but the deploy in the next step runs as a
+              // spawned CLI reading config.json — and the Bedrock spend
+              // guardrail's budget action cannot be created without a subscriber.
+              if (userEmail) await patchCloudConfig({ operatorEmail: userEmail });
               markDone(4);
             }}
             onBack={() => handleNavigate(3)}

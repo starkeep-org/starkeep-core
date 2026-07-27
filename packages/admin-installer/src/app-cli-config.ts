@@ -9,6 +9,10 @@ import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { configPath } from "@starkeep/app-client";
+import {
+  bedrockFreezePolicyArn,
+  bedrockBudgetActionRoleArn,
+} from "@starkeep/aws-bootstrap";
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 // packages/admin-installer/src -> admin-installer -> packages -> starkeep-core -> workspace root
@@ -48,6 +52,19 @@ export interface StarkeepCliConfig {
   s3Bucket?: string;
   auroraEndpoint?: string;
   appParentDirs?: string[];
+  /** The operator's Cognito email — the Bedrock spend guardrail's budget action
+   * needs a notification subscriber, and a headless install has no way to ask.
+   * Written by the interactive CLI sign-in and by admin-web's wizard. */
+  operatorEmail?: string;
+  /** Operator preference for the Bedrock spend guardrail (§4.5). ABSENT means
+   * enabled at the $25 default, so a config predating the guardrail gains one on
+   * its next install; only an explicit `enabled: false` opts out. AWS is the
+   * live state — this records only what a future install should do. */
+  bedrockBudget?: {
+    enabled?: boolean;
+    limitUsd?: number;
+    notifyEmail?: string;
+  };
 }
 
 export const starkeepConfigPath = configPath;
@@ -131,6 +148,12 @@ export interface DerivedInstallerArns {
   foundationalPermissionsBoundaryArn: string;
   userDataOwnerPermissionsBoundaryArn: string;
   capabilityBrokerPermissionsBoundaryArn: string;
+  /** Bedrock spend guardrail (§4.1). Both are name-derivable, so no wizard
+   * plumbing is needed — but a bootstrap stack predating the guardrail won't
+   * HAVE the resources, and the install must not fail over that. Callers attempt
+   * and tolerate `NoSuchEntity`. */
+  bedrockFreezePolicyArn: string;
+  bedrockBudgetActionRoleArn: string;
   pulumiStateBucket: string;
   artifactsBucket: string;
 }
@@ -167,6 +190,8 @@ export function deriveInstallerArns(
     capabilityBrokerPermissionsBoundaryArn:
       config.capabilityBrokerPermissionsBoundaryArn ??
       `arn:aws:iam::${accountId}:policy/${stackPrefix}-capability-broker-permissions-boundary`,
+    bedrockFreezePolicyArn: bedrockFreezePolicyArn(stackPrefix, accountId),
+    bedrockBudgetActionRoleArn: bedrockBudgetActionRoleArn(stackPrefix, accountId),
     pulumiStateBucket:
       config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`,
     // Suffixed with account+region to keep the bucket globally unique (the

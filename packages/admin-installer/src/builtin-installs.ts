@@ -47,6 +47,13 @@ import {
 } from "./iam";
 import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
 import { ensureBedrockUseCaseForm } from "./bedrock-usecase";
+import {
+  ensureBedrockBudgetStep,
+  deleteBedrockBudgetStep,
+  resolveBedrockBudgetPreference,
+  defaultBedrockCostGateUsd,
+  type BedrockBudgetPreference,
+} from "./bedrock-budget";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import { putCloudFrontSigningParameter } from "./app-creds";
@@ -111,6 +118,13 @@ export interface CloudDataServerInstallConfig {
   /** Cognito user-pool resources from the bootstrap CFN stack. */
   userPoolId: string;
   userPoolClientId: string;
+  /** Operator preference for the Bedrock spend guardrail (§4.5). Absent means
+   * enabled at the $25 default — the guardrail turns itself on for deployments
+   * that predate it. Only an explicit `enabled: false` suppresses it. */
+  bedrockBudget?: BedrockBudgetPreference;
+  /** The operator's Cognito email, used as the budget action's notification
+   * subscriber (Budgets rejects an action without one). */
+  operatorEmail?: string;
   /**
    * When true, provision disposable infrastructure and skip the production
    * data-protection hardening (files-bucket versioning/SSE/public-access-block
@@ -348,6 +362,48 @@ export async function installCloudDataServer(
     );
   }
 
+  // Step 1d: Create (or reconcile) the action-enabled AWS Budget that freezes
+  // Bedrock on a spend breach — the STRUCTURAL backstop under the broker's
+  // software gates (budget-guardrail plan §4.4).
+  //
+  // Ordering matters and is why this is 1d rather than earlier: the budget
+  // action's Roles[] names the capability-broker role, which step 1b just
+  // minted. Best-effort with a loud warning, matching 1c — a bootstrap stack
+  // predating this plan has no freeze policy for the action to reference, and
+  // no guardrail must never mean no install.
+  console.log("Ensuring the Bedrock spend guardrail…");
+  const budgetOutcome = await ensureBedrockBudgetStep({
+    stackPrefix: config.stackPrefix,
+    accountId: config.accountId,
+    managerCreds,
+    preference: config.bedrockBudget,
+    operatorEmail: config.operatorEmail,
+  });
+  switch (budgetOutcome.status) {
+    case "disabled":
+      console.log("Bedrock spend guardrail is disabled in config.json — skipping.");
+      break;
+    case "skipped":
+      console.warn(`Bedrock spend guardrail not created: ${budgetOutcome.reason}.`);
+      break;
+    case "ensured":
+      console.log(
+        budgetOutcome.createdBudget || budgetOutcome.createdAction
+          ? "Bedrock spend guardrail created."
+          : budgetOutcome.updatedLimit || budgetOutcome.updatedAction
+            ? "Bedrock spend guardrail reconciled."
+            : "Bedrock spend guardrail already in place.",
+      );
+      break;
+    case "failed":
+      console.warn(
+        "Could not create the Bedrock spend guardrail (Bedrock spend is bounded only by " +
+          "the in-database capability gates until this succeeds; update the bootstrap stack " +
+          `if the freeze policy is missing): ${budgetOutcome.reason}`,
+      );
+      break;
+  }
+
   // Step 2: Attach the wider temp-install-cloud-data-server policy.
   // Returns true when PutRolePolicy was actually called (policy is new or changed).
   // Skips the IAM call — and the propagation delay — when the policy is already
@@ -465,6 +521,14 @@ export async function installCloudDataServer(
         secretAccessKey: appCreds.secretAccessKey,
         sessionToken: appCreds.sessionToken,
       },
+      // Seed the SOFT ceiling that pairs with the budget above (§4.6). The two
+      // layers only cohere if the in-database gate — which denies within
+      // milliseconds — trips before the day-late structural freeze, so it is
+      // seeded at 80% of the budget's limit. Insert-if-absent: the operator's
+      // own edits survive every reinstall.
+      defaultBedrockCostGateUsd: defaultBedrockCostGateUsd(
+        resolveBedrockBudgetPreference(config.bedrockBudget, config.operatorEmail).limitUsd,
+      ),
     });
     console.log("Shared schema initialized.");
 
@@ -568,6 +632,22 @@ export async function uninstallCloudDataServer(
 
   // Delete the capability-broker role (plan §3.3) — minted alongside the CDS,
   // torn down with it. Idempotent; a stack that never had one is a no-op.
+  // The budget + action are created via the Budgets API, not CloudFormation, so
+  // nothing else will clean them up. Deleted before the broker role so the
+  // action's target still exists while AWS validates the delete.
+  console.log("Deleting the Bedrock spend guardrail…");
+  const budgetTeardown = await deleteBedrockBudgetStep({
+    stackPrefix: config.stackPrefix,
+    accountId: config.accountId,
+    managerCreds,
+  });
+  if (budgetTeardown.status === "failed") {
+    console.warn(
+      `Could not delete the Bedrock spend budget (delete it by hand from the Budgets ` +
+        `console if it lingers): ${budgetTeardown.reason}`,
+    );
+  }
+
   console.log("Deleting capability-broker role…");
   await deleteCapabilityBrokerRole({ stackPrefix: config.stackPrefix, managerCreds });
 

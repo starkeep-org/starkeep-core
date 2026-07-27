@@ -38,6 +38,13 @@ export interface StarkeepConfig {
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
+  /**
+   * The operator's Cognito email, persisted at sign-in. The Bedrock spend
+   * guardrail's budget action needs a notification subscriber — AWS rejects a
+   * budget action without one — and the install runs headless (a spawned CLI, or
+   * a non-interactive e2e run) with no way to ask. This is where it learns it.
+   */
+  operatorEmail?: string;
 }
 
 /**

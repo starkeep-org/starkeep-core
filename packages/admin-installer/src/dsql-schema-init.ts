@@ -46,7 +46,14 @@
 import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import { CATEGORIES, pgMetadataDdl } from "@starkeep/protocol-primitives";
+import {
+  CATEGORIES,
+  pgMetadataDdl,
+  CAPABILITY_BEDROCK_INVOKE,
+  COST_DIMENSION,
+  COST_UNIT,
+  usdDecimalToMicros,
+} from "@starkeep/protocol-primitives";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -58,7 +65,27 @@ export interface SchemaInitOptions {
     secretAccessKey: string;
     sessionToken?: string;
   };
+  /**
+   * Seed one global monthly `cost` gate at this many dollars (budget-guardrail
+   * plan §4.6). Undefined ⇒ no gate is seeded at all.
+   *
+   * This is the SOFT ceiling paired with the AWS Budget the same install
+   * creates: the in-database gate denies within milliseconds of the spend
+   * happening, the budget freezes Bedrock structurally about a day later. It is
+   * seeded at 80% of the budget's limit so the fast layer is normally the one
+   * that acts, and the structural one is what's left when the fast layer is the
+   * thing that's broken.
+   */
+  defaultBedrockCostGateUsd?: number;
 }
+
+/**
+ * Id of the seeded global gate. `operator:`-prefixed on purpose — that prefix is
+ * what admin-web's gate editor requires before it will let a row be edited or
+ * deleted, so the seed lands as a NORMAL operator gate rather than as something
+ * the operator can see but not touch.
+ */
+export const SEEDED_BEDROCK_COST_GATE_ID = "operator:bedrock-monthly-cost";
 
 /**
  * PG identifier for the privileged installer user. Matches the convention
@@ -123,6 +150,58 @@ async function ensureIndex(
   `.execute(db);
   if (existing.rows[0]?.exists) return;
   await sql.raw(createSql).execute(db);
+}
+
+/**
+ * Seed the global monthly `cost` gate that pairs with the AWS Budget (§4.6).
+ *
+ * Three deliberate choices, each of which the obvious alternative gets wrong:
+ *
+ *   - **ON CONFLICT DO NOTHING, never an upsert.** An operator who edits this
+ *     limit must have that edit survive every reinstall. A `DO UPDATE` would
+ *     silently revert it, which is the failure mode where a spend cap is loosened
+ *     by a routine redeploy.
+ *   - **`operator:` id, `origin: operator`.** So it renders in the existing gate
+ *     editor as fully editable and deletable rather than as a mystery row the UI
+ *     marks read-only.
+ *   - **No live coupling to the budget's limit.** Editing the budget to $100 does
+ *     not move this gate, and editing this gate does not move the budget. It is
+ *     the DEFAULTS that cohere, not the values — which is what keeps this a seed
+ *     instead of a reconciliation engine. The UI displays both numbers together
+ *     so a divergence is visible rather than inferred.
+ *
+ * The accepted wart: a DELETED gate is re-seeded by the next install. Same
+ * fail-safe direction as the budget preference — the ceiling comes back; it
+ * never silently vanishes — and the UI says so.
+ */
+async function seedGlobalBedrockCostGate(
+  db: Kysely<Record<string, never>>,
+  limitUsd: number | undefined,
+): Promise<void> {
+  if (limitUsd === undefined) return;
+
+  await (db as unknown as Kysely<Record<string, Record<string, unknown>>>)
+    .insertInto("shared.capability_gates")
+    .values({
+      id: SEEDED_BEDROCK_COST_GATE_ID,
+      capability_name: CAPABILITY_BEDROCK_INVOKE,
+      dimension: COST_DIMENSION,
+      unit: COST_UNIT,
+      // All scope columns NULL = global: every app, every provider, every model.
+      scope_provider: null,
+      scope_model: null,
+      scope_app_id: null,
+      window_kind: "calendar",
+      window_period: "month",
+      window_seconds: null,
+      // Dollars leave the code HERE, via the same converter the consent path
+      // uses. An off-by-1e6 in this one expression is a 1000×-wrong ceiling.
+      limit_value: usdDecimalToMicros(limitUsd),
+      on_exceed: "deny",
+      origin: "operator",
+    })
+    .onConflict((oc) => oc.column("id").doNothing())
+    .execute();
 }
 
 /**
@@ -348,6 +427,8 @@ export async function initializeSharedSchema(
     await sql
       .raw(`GRANT INSERT, UPDATE, DELETE ON shared.capability_gates TO "${installer}"`)
       .execute(db);
+
+    await seedGlobalBedrockCostGate(db, opts.defaultBedrockCostGateUsd);
 
     // capability_ledger — append-only, one row per (invocation, dimension, unit)
     // measurement. status ∈ {reserved, committed, released}; the gate SUM

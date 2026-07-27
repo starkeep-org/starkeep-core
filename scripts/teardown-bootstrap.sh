@@ -134,6 +134,10 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="${STACK_PREFIX}-pulumi-state-${ACCOUNT_ID}-${REGION}"
 ARTIFACTS_BUCKET="${STACK_PREFIX}-artifacts-${ACCOUNT_ID}-${REGION}"
 SSM_PARAM="/${STACK_PREFIX}/pulumi/passphrase"
+# The Bedrock spend guardrail's budget + action are created via the Budgets API,
+# not CloudFormation, so stack deletion leaves them behind. Budgets is global:
+# every call below goes to us-east-1 regardless of $REGION.
+BEDROCK_BUDGET="${STACK_PREFIX}-bedrock-spend"
 
 # ── Confirmation ────────────────────────────────────────────────────────────
 echo ""
@@ -146,6 +150,7 @@ echo "    CloudFormation stack : $STACK_NAME  (region: $REGION)"
 echo "    S3 bucket            : $BUCKET"
 echo "    S3 bucket            : $ARTIFACTS_BUCKET"
 echo "    SSM parameter        : $SSM_PARAM"
+echo "    AWS Budget           : $BEDROCK_BUDGET  (+ its freeze action)"
 echo "    IAM role             : ${STACK_PREFIX}-app-admin-role"
 echo "    IAM role             : ${STACK_PREFIX}-manager-role"
 echo "    IAM role             : ${STACK_PREFIX}-install-ddl-role"
@@ -154,6 +159,8 @@ echo "    IAM policy           : ${STACK_PREFIX}-app-permissions-boundary"
 echo "    IAM policy           : ${STACK_PREFIX}-foundational-permissions-boundary"
 echo "    IAM policy           : ${STACK_PREFIX}-install-ddl-permissions-boundary"
 echo "    IAM policy           : ${STACK_PREFIX}-install-infra-permissions-boundary"
+echo "    IAM policy           : ${STACK_PREFIX}-bedrock-freeze-policy"
+echo "    IAM role             : ${STACK_PREFIX}-bedrock-budget-action-role"
 [[ -n "$USER_POOL_ID" ]]      && echo "    Cognito User Pool    : $USER_POOL_ID"
 [[ -n "$IDENTITY_POOL_ID" ]]  && echo "    Cognito Identity Pool: $IDENTITY_POOL_ID"
 echo ""
@@ -384,6 +391,39 @@ else
   skip
 fi
 
+# ── Step 2b: Delete the Bedrock spend budget and its freeze action ───────────
+# Created via the Budgets API by the cloud-data-server install (step 1d), so
+# CloudFormation does not own them and delete-stack will not remove them. The
+# normal uninstall handles this per-deployment; the sweep here catches whatever
+# an interrupted run left behind. The ACTION goes first — AWS refuses to delete a
+# budget that still has one. Budgets is a global service: us-east-1 always.
+step "Deleting AWS Budget: $BEDROCK_BUDGET (and its freeze action)"
+BUDGET_ACTION_IDS=$(aws budgets describe-budget-actions-for-budget \
+  --account-id "$ACCOUNT_ID" \
+  --budget-name "$BEDROCK_BUDGET" \
+  --region us-east-1 \
+  --query 'Actions[].ActionId' \
+  --output text 2>/dev/null || true)
+if [ -n "$BUDGET_ACTION_IDS" ] && [ "$BUDGET_ACTION_IDS" != "None" ]; then
+  for action_id in $BUDGET_ACTION_IDS; do
+    aws budgets delete-budget-action \
+      --account-id "$ACCOUNT_ID" \
+      --budget-name "$BEDROCK_BUDGET" \
+      --action-id "$action_id" \
+      --region us-east-1 >/dev/null 2>&1 \
+      && echo "  Deleted budget action $action_id" \
+      || echo "  Could not delete budget action $action_id (continuing)"
+  done
+fi
+if aws budgets describe-budget --account-id "$ACCOUNT_ID" --budget-name "$BEDROCK_BUDGET" \
+     --region us-east-1 >/dev/null 2>&1; then
+  aws budgets delete-budget --account-id "$ACCOUNT_ID" --budget-name "$BEDROCK_BUDGET" \
+    --region us-east-1
+  echo "  Deleted."
+else
+  skip
+fi
+
 # ── Step 3: Delete IAM roles and policies manually ───────────────────────────
 # Done before CF deletion so CF never races against us or gets stuck on
 # dependency errors (e.g. can't delete a policy while a role holds it as a
@@ -400,6 +440,12 @@ delete_managed_policy "${STACK_PREFIX}-install-infra-permissions-boundary"
 # ${STACK_PREFIX}-app-capability-broker-role (normally already deleted by the
 # cloud-data-server uninstall in phase 2) so CFN can drop the managed policy.
 delete_managed_policy "${STACK_PREFIX}-capability-broker-permissions-boundary"
+# Bedrock spend guardrail. The freeze policy may still be ATTACHED to the
+# capability-broker role if the deployment was torn down while frozen, so it is
+# dropped after that role is gone (phase 2 / above) and via the same detach-then-
+# delete helper the boundaries use.
+delete_role "${STACK_PREFIX}-bedrock-budget-action-role"
+delete_managed_policy "${STACK_PREFIX}-bedrock-freeze-policy"
 
 # ── Step 4: Delete CloudFormation stack ──────────────────────────────────────
 # All resources that CF would trip over are already gone; this is fast and

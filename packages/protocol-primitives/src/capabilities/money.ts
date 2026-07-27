@@ -373,6 +373,34 @@ export function deriveCostMicros(
 }
 
 // ---------------------------------------------------------------------------
+// Machine egress
+// ---------------------------------------------------------------------------
+
+/**
+ * Render micros as a BARE decimal currency amount — the exact inverse of
+ * {@link usdDecimalToMicros}, and the form an AWS API wants when it asks for an
+ * `Amount` as a string (e.g. a Budgets `BudgetLimit`).
+ *
+ * This is egress to a MACHINE, not exception-2 display: no currency symbol, no
+ * thousands separators, no locale. Kept here anyway because it is a unit
+ * conversion on money, and this module is the only place those may live.
+ *
+ * Done by integer arithmetic on the micros so the digits emitted are exactly the
+ * digits stored — `25` renders `"25"`, `25_500_000` renders `"25.5"`. Trailing
+ * fractional zeros are trimmed because a limit of `"25.000000"` and `"25"` are
+ * the same limit and the shorter form is what a human reads back out of the
+ * console.
+ */
+export function microsToUsdDecimalString(micros: Micros): string {
+  assertMicros(micros);
+  const whole = Math.floor(micros / MICROS_PER_USD);
+  const frac = micros - whole * MICROS_PER_USD;
+  if (frac === 0) return String(whole);
+  const digits = String(frac).padStart(6, "0").replace(/0+$/, "");
+  return `${whole}.${digits}`;
+}
+
+// ---------------------------------------------------------------------------
 // Display formatting (canonical-units exception 2)
 // ---------------------------------------------------------------------------
 
