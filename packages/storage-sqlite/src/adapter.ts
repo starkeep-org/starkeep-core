@@ -23,26 +23,41 @@ import type {
 import {
   StorageError,
   TransactionError,
-  encodeLabelCursor,
-  decodeLabelCursor,
-  encodeLabelScanCursor,
-  decodeLabelScanCursor,
+  buildFindByLabel,
+  buildGetLabel,
+  buildLabelNodeWatermarks,
+  buildLabelRetraction,
+  buildLabelSnapshotUpsert,
+  buildLabelUpsert,
+  buildLabelsByRecordIds,
+  buildQueryLabels,
+  buildTombstoneLabelsForRecord,
+  groupLabelsByRecordId,
+  paginateFindByLabel,
+  paginateLabelScan,
+  rowToLabel,
+  type LabelDialect,
+  type LabelRow,
 } from "@starkeep/storage-adapter";
 import { sql as kSql } from "kysely";
-import {
-  recordToRow,
-  rowToRecord,
-  rowToLabel,
-  labelToRow,
-  type SqliteRow,
-  type SqliteLabelRow,
-} from "./serialization.js";
+import { recordToRow, rowToRecord, type SqliteRow } from "./serialization.js";
 import { buildSelectQuery, compiler as qb } from "./query-builder.js";
 import { initializeLocalSchema } from "./schema/bootstrap.js";
 
 export interface SqliteDatabaseAdapterOptions {
   path: string | ":memory:";
 }
+
+/**
+ * How labels are spelled on this backend. The table is flat-named (SQLite has
+ * no schemas), and ASC is already nulls-first, so nothing has to be spelled
+ * out — the normalized order label-cursor.ts defines is SQLite's natural one.
+ * Everything else about label SQL lives in `@starkeep/storage-adapter`.
+ */
+const LABELS: LabelDialect = {
+  table: "shared_record_labels",
+  spellOutNullsFirst: false,
+};
 
 export class SqliteDatabaseAdapter implements DatabaseAdapter {
   private database: DatabaseSync | null = null;
@@ -263,57 +278,21 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   // ---- Cross-app record labels -------------------------------------------
+  //
+  // The SQL for all of these is built in `@starkeep/storage-adapter`, shared
+  // with the DSQL adapter: same columns, same ON CONFLICT set, same cursor
+  // predicate, same paging. Only the table name and the null-ordering spelling
+  // are this backend's business, and both live in LABELS above.
 
   async upsertLabels(labels: LabelUpsert[]): Promise<void> {
     if (labels.length === 0) return;
-    // One multi-row statement, not a loop: this mirrors the DSQL adapter,
-    // where the difference is a transaction-per-row versus a single one.
-    const query = qb
-      .insertInto("shared_record_labels")
-      .values(
-        labels.map((l) => ({
-          record_id: l.recordId,
-          app_id: l.appId,
-          key: l.key,
-          value: l.value,
-          record_type: l.recordType,
-          created_at: serializeHLC(l.hlc),
-          updated_at: serializeHLC(l.hlc),
-          node_id: l.hlc.nodeId,
-          deleted_at: null,
-        })),
-      )
-      .onConflict((oc) =>
-        oc.columns(["record_id", "app_id", "key"]).doUpdateSet((eb) => ({
-          value: eb.ref("excluded.value"),
-          record_type: eb.ref("excluded.record_type"),
-          updated_at: eb.ref("excluded.updated_at"),
-          node_id: eb.ref("excluded.node_id"),
-          // Re-setting a retracted label revives it. Without this, a
-          // set → retract → set cycle would write a row that stays invisible.
-          deleted_at: null,
-        })),
-      )
-      .compile();
+    const query = buildLabelUpsert(qb, LABELS, labels);
     this.runStmt(query.sql, ...query.parameters);
   }
 
   async retractLabels(retractions: LabelRetraction[]): Promise<void> {
     for (const r of retractions) {
-      // Tombstone, not DELETE: the retraction itself has to sync.
-      const query = qb
-        .updateTable("shared_record_labels")
-        .set({
-          deleted_at: serializeHLC(r.hlc),
-          updated_at: serializeHLC(r.hlc),
-          node_id: r.hlc.nodeId,
-        })
-        .where("record_id", "=", r.recordId)
-        // app_id is part of the primary key and is server-set, so this is
-        // also the whole of "an app can only retract its own labels".
-        .where("app_id", "=", r.appId)
-        .where("key", "=", r.key)
-        .compile();
+      const query = buildLabelRetraction(qb, LABELS, r);
       this.runStmt(query.sql, ...query.parameters);
     }
   }
@@ -321,114 +300,26 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   async getLabelsByRecordIds(
     recordIds: StarkeepId[],
   ): Promise<Map<StarkeepId, RecordLabel[]>> {
-    const result = new Map<StarkeepId, RecordLabel[]>();
-    if (recordIds.length === 0) return result;
-    const query = qb
-      .selectFrom("shared_record_labels")
-      .selectAll()
-      .where("record_id", "in", recordIds)
-      .where("deleted_at", "is", null)
-      .compile();
-    for (const row of this.allRows<SqliteLabelRow>(query.sql, ...query.parameters)) {
-      const label = rowToLabel(row);
-      let list = result.get(label.recordId);
-      if (!list) result.set(label.recordId, (list = []));
-      list.push(label);
-    }
-    return result;
+    if (recordIds.length === 0) return new Map();
+    const query = buildLabelsByRecordIds(qb, LABELS, recordIds);
+    return groupLabelsByRecordId(
+      this.allRows<LabelRow>(query.sql, ...query.parameters),
+    );
   }
 
   async findByLabel(query: FindByLabelQuery): Promise<FindByLabelResult> {
-    const limit = query.limit ?? 50;
-
-    let q = qb
-      .selectFrom("shared_record_labels")
-      .selectAll()
-      .where("app_id", "=", query.appId)
-      .where("key", "=", query.key)
-      // Pinned by every reverse query — nobody asks for retracted labels — and
-      // pinning it is what keeps the tombstone pile out of the scanned range.
-      .where("deleted_at", "is", null);
-
-    // Omitted value = presence filter (any value, flags included); supplied =
-    // exact match. See FindByLabelQuery.value for why exact-only.
-    if (query.value !== undefined) {
-      q = q.where("value", "=", query.value);
-    }
-
-    // The caller's read grants, applied here rather than after fetching the
-    // records, so a page comes back full.
-    if (query.readableTypes !== undefined) {
-      const types = [...query.readableTypes];
-      if (types.length === 0) return { labels: [], nextCursor: null, hasMore: false };
-      q = q.where("record_type", "in", types);
-    }
-
-    // "Strictly after the cursor", in nulls-first order. A row-value
-    // comparison would be shorter but evaluates to NULL — not false — when
-    // either side is null, silently returning an empty page. See
-    // label-cursor.ts for why nulls-first, and why the cursor is a composite.
-    const cursor = query.cursor ? decodeLabelCursor(query.cursor) : null;
-    if (cursor) {
-      const { value, recordId } = cursor;
-      q =
-        value === null
-          ? // Nulls sort first, so every non-null value is past the cursor.
-            q.where((eb) =>
-              eb.or([
-                eb("value", "is not", null),
-                eb.and([eb("value", "is", null), eb("record_id", ">", recordId)]),
-              ]),
-            )
-          : // Past the nulls entirely — a null can never follow a non-null.
-            q.where((eb) =>
-              eb.or([
-                eb("value", ">", value),
-                eb.and([eb("value", "=", value), eb("record_id", ">", recordId)]),
-              ]),
-            );
-    }
-
-    // SQLite's ASC is already nulls-first, which is the normalized order both
-    // adapters present; the DSQL adapter has to spell out NULLS FIRST.
-    q = q.orderBy("value", "asc").orderBy("record_id", "asc").limit(limit + 1);
-
-    const compiled = q.compile();
-    const rows = this.allRows<SqliteLabelRow>(compiled.sql, ...compiled.parameters);
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
-    const labels = page.map(rowToLabel);
-    const last = labels[labels.length - 1];
-
-    return {
-      labels,
-      hasMore,
-      nextCursor:
-        hasMore && last
-          ? encodeLabelCursor({ value: last.value, recordId: last.recordId })
-          : null,
-    };
+    // `null` means the query cannot match anything — a caller with no readable
+    // types — so there is nothing to ask the database.
+    const compiled = buildFindByLabel(qb, LABELS, query);
+    if (!compiled) return { labels: [], nextCursor: null, hasMore: false };
+    const rows = this.allRows<LabelRow>(compiled.sql, ...compiled.parameters);
+    return paginateFindByLabel(rows, query.limit);
   }
 
   // ---- Label sync ---------------------------------------------------------
 
   async putLabel(label: RecordLabel): Promise<void> {
-    // Snapshot write: every column comes from the incoming row, tombstone
-    // included. Using upsertLabels here instead would mint a fresh HLC and
-    // clear deleted_at, resurrecting a retraction that arrived from a peer.
-    const row = labelToRow(label);
-    const updateColumns = Object.keys(row).filter(
-      (c) => c !== "record_id" && c !== "app_id" && c !== "key",
-    );
-    const query = qb
-      .insertInto("shared_record_labels")
-      .values({ ...row })
-      .onConflict((oc) =>
-        oc.columns(["record_id", "app_id", "key"]).doUpdateSet((eb) =>
-          Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
-        ),
-      )
-      .compile();
+    const query = buildLabelSnapshotUpsert(qb, LABELS, label);
     this.runStmt(query.sql, ...query.parameters);
   }
 
@@ -437,16 +328,8 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     appId: string,
     key: string,
   ): Promise<RecordLabel | null> {
-    // Tombstones included on purpose: a tombstone is exactly what a later
-    // arrival has to be LWW-compared against.
-    const query = qb
-      .selectFrom("shared_record_labels")
-      .selectAll()
-      .where("record_id", "=", recordId)
-      .where("app_id", "=", appId)
-      .where("key", "=", key)
-      .compile();
-    const row = this.getRow<SqliteLabelRow>(query.sql, ...query.parameters);
+    const query = buildGetLabel(qb, LABELS, recordId, appId, key);
+    const row = this.getRow<LabelRow>(query.sql, ...query.parameters);
     return row ? rowToLabel(row) : null;
   }
 
@@ -455,62 +338,13 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     nextCursor: string | null;
     hasMore: boolean;
   }> {
-    const limit = query.limit ?? 500;
-    let q = qb.selectFrom("shared_record_labels").selectAll();
-
-    const cursor = query.cursor ? decodeLabelScanCursor(query.cursor) : null;
-    if (cursor) {
-      // Row-value comparison over the primary key. Safe here — unlike the
-      // reverse-index cursor — because all three columns are NOT NULL.
-      q = q.where((eb) =>
-        eb.or([
-          eb("record_id", ">", cursor.recordId),
-          eb.and([
-            eb("record_id", "=", cursor.recordId),
-            eb("app_id", ">", cursor.appId),
-          ]),
-          eb.and([
-            eb("record_id", "=", cursor.recordId),
-            eb("app_id", "=", cursor.appId),
-            eb("key", ">", cursor.key),
-          ]),
-        ]),
-      );
-    }
-
-    const compiled = q
-      .orderBy("record_id", "asc")
-      .orderBy("app_id", "asc")
-      .orderBy("key", "asc")
-      .limit(limit + 1)
-      .compile();
-    const rows = this.allRows<SqliteLabelRow>(compiled.sql, ...compiled.parameters);
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
-    const last = page[page.length - 1];
-    return {
-      labels: page.map(rowToLabel),
-      hasMore,
-      nextCursor:
-        hasMore && last
-          ? encodeLabelScanCursor({
-              recordId: last.record_id as StarkeepId,
-              appId: last.app_id,
-              key: last.key,
-            })
-          : null,
-    };
+    const compiled = buildQueryLabels(qb, LABELS, query);
+    const rows = this.allRows<LabelRow>(compiled.sql, ...compiled.parameters);
+    return paginateLabelScan(rows, query.limit);
   }
 
   async getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
-    // Same trick as getNodeWatermarks on records: within one node_id group,
-    // updated_at is fixed-width hex up to the nodeId suffix, so lexicographic
-    // MAX equals HLC MAX. Backed by (node_id, updated_at).
-    const query = qb
-      .selectFrom("shared_record_labels")
-      .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
-      .groupBy("node_id")
-      .compile();
+    const query = buildLabelNodeWatermarks(qb, LABELS);
     const rows = this.allRows<{ node_id: string; max_updated_at: string }>(query.sql);
     const out: Record<string, HLCTimestamp> = {};
     for (const row of rows) out[row.node_id] = deserializeHLC(row.max_updated_at);
@@ -518,18 +352,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
-    // Crosses app namespaces deliberately — the record is going away, so every
-    // app's assertions about it go with it. Not reachable as an app write.
-    const query = qb
-      .updateTable("shared_record_labels")
-      .set({
-        deleted_at: serializeHLC(hlc),
-        updated_at: serializeHLC(hlc),
-        node_id: hlc.nodeId,
-      })
-      .where("record_id", "=", recordId)
-      .where("deleted_at", "is", null)
-      .compile();
+    const query = buildTombstoneLabelsForRecord(qb, LABELS, recordId, hlc);
     this.runStmt(query.sql, ...query.parameters);
   }
 }
