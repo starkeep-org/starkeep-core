@@ -184,7 +184,6 @@ export async function initializeSharedSchema(
       .addColumn("original_filename", "text")
       .addColumn("origin_app_id", "text", (c) => c.notNull())
       .addColumn("parent_id", "text")
-      .addColumn("label", "text")
       .execute();
 
     await sql

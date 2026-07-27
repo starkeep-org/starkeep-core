@@ -1294,7 +1294,6 @@ async function main() {
             size_bytes: r.sizeBytes,
             original_filename: r.originalFilename,
             parent_id: r.parentId,
-            label: r.label,
             path: r.objectStorageKey
               ? await localAdapter.resolvePath(r.objectStorageKey)
               : null,
@@ -1324,11 +1323,11 @@ async function main() {
 
       // POST /data/records — create a record from a file.
       // Two body shapes (in preference order):
-      //   key-ref:  { type, contentType, contentHash, sizeBytes, fileName?, parentId?, label? }
+      //   key-ref:  { type, contentType, contentHash, sizeBytes, fileName?, parentId?, labels? }
       //             Bytes already PUT via the presigned upload URL. Server
       //             verifies the blob is at shared/<type>/<shard>/<hash>.
       //             The path that scales to large files.
-      //   filePath: { type, contentType, filePath, fileName?, parentId?, label? }
+      //   filePath: { type, contentType, filePath, fileName?, parentId?, labels? }
       //             Bytes live on local disk; SDK ingests by path. Same-machine
       //             only — legit optimization over the network round trip.
       if (path === "/data/records" && req.method === "POST") {
@@ -1341,7 +1340,6 @@ async function main() {
           contentHash,
           sizeBytes,
           parentId,
-          label,
           labels,
         } = JSON.parse(body) as {
           type?: string;
@@ -1351,7 +1349,6 @@ async function main() {
           contentHash?: string;
           sizeBytes?: number;
           parentId?: StarkeepId;
-          label?: string;
           labels?: Array<{ key: string; value?: string | null }>;
         };
         if (!type) {
@@ -1399,7 +1396,6 @@ async function main() {
           objectStorageKey: string | null;
           originalFilename: string | null;
           parentId: string | null;
-          label: string | null;
         }) => ({
           id: r.id,
           type: r.type,
@@ -1410,7 +1406,6 @@ async function main() {
           object_storage_key: r.objectStorageKey,
           original_filename: r.originalFilename,
           parent_id: r.parentId,
-          label: r.label,
           path: r.objectStorageKey ? await localAdapter.resolvePath(r.objectStorageKey) : null,
         });
 
@@ -1437,7 +1432,7 @@ async function main() {
         }
 
         let record;
-        const baseInput = { type, originAppId: appId!, parentId: parentId ?? null, label: label ?? null };
+        const baseInput = { type, originAppId: appId!, parentId: parentId ?? null };
         if (contentHash) {
           if (!/^[a-f0-9]{64}$/.test(contentHash)) {
             res.writeHead(400);

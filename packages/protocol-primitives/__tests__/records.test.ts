@@ -33,13 +33,6 @@ describe("createDataRecord", () => {
     expect(record.parentId).toBeNull();
   });
 
-  it("defaults label to null and passes a supplied label through", () => {
-    expect(createDataRecord(baseInput, clock).label).toBeNull();
-    expect(
-      createDataRecord({ ...baseInput, label: "photos/thumbnail" }, clock).label,
-    ).toBe("photos/thumbnail");
-  });
-
   it("matches createdAt and updatedAt on initial create", () => {
     const record = createDataRecord(baseInput, clock);
     expect(record.createdAt).toEqual(record.updatedAt);
