@@ -33,6 +33,7 @@ import { createAppSpecificFactory } from "../../packages/shared-space-api/src/ap
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
+import type { Filter } from "../../packages/storage-adapter/src/database/types.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
@@ -1050,10 +1051,17 @@ async function main() {
         return;
       }
 
-      // GET /data/records?type=xxx&limit=100&updated_after=<iso>&include=metadata
+      // GET /data/records?type=xxx&limit=100&cursor=<id>&updated_after=<iso>&include=metadata
+      //
+      // Results come back in `id asc` order — the order the adapter's cursor
+      // predicate (`id > cursor`) is keyed on. An `updatedAt desc` sort here
+      // would make the cursor skip and repeat rows, so paging and sorting
+      // cannot both be had from this endpoint; callers wanting recency sort
+      // client-side, as Photos already does.
       if (path === "/data/records" && req.method === "GET") {
         const recordType = url.searchParams.get("type");
         const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+        const cursor = url.searchParams.get("cursor") ?? undefined;
         const updatedAfter = url.searchParams.get("updated_after");
         // Opt-in enrichment: embed each record's per-category metadata
         // (dimensions, EXIF, …) so clients skip a per-record metadata fan-out.
@@ -1062,9 +1070,33 @@ async function main() {
           .map(s => s.trim())
           .includes("metadata");
 
-        const filters: { field: string; operator: "eq" | "gt"; value: string }[] = recordType
-          ? [{ field: "type", operator: "eq", value: recordType }]
-          : [];
+        const grants = appGrants(localDb, appId!);
+
+        // Per-type read enforcement, pushed into the query rather than applied
+        // after it: a post-filter would let a page come back short of `limit`
+        // for reasons the caller can't see, and would make the cursor derived
+        // from it skip rows.
+        if (recordType !== null) {
+          if (!canRead(grants, recordType)) {
+            res.writeHead(403);
+            json(res, {
+              error: "AccessDenied",
+              detail: `app "${appId}" has no read grant on type "${recordType}"`,
+            });
+            return;
+          }
+        } else if (!grants.allAccess && grants.readableTypes.size === 0) {
+          json(res, { records: [], hasMore: false, nextCursor: null });
+          return;
+        }
+
+        // Soft-deletes are excluded in the query rather than after it, so the
+        // adapter's own `hasMore`/`nextCursor` describe the page the caller
+        // actually gets.
+        const filters: Filter[] = [{ field: "deletedAt", operator: "isNull" }];
+        if (recordType) {
+          filters.push({ field: "type", operator: "eq", value: recordType });
+        }
 
         if (updatedAfter) {
           const ms = new Date(updatedAfter).getTime();
@@ -1076,16 +1108,12 @@ async function main() {
             });
           }
         }
+        if (!recordType && !grants.allAccess) {
+          filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
+        }
 
-        const result = await databaseAdapter.query({
-          filters,
-          limit,
-          sort: [{ field: "updatedAt", direction: "desc" as const }],
-        });
-
-        const readable = result.records.filter(
-          r => !r.deletedAt && appCanRead(localDb, appId!, r.type),
-        );
+        const result = await databaseAdapter.query({ filters, limit, cursor });
+        const readable = result.records;
 
         // When enrichment is requested, batch-read per-category metadata for the
         // page (one call per represented category) and index it by record id.
@@ -1135,7 +1163,7 @@ async function main() {
           })),
         );
 
-        json(res, { records });
+        json(res, { records, hasMore: result.hasMore, nextCursor: result.nextCursor });
         return;
       }
 
