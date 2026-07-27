@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
+  planLabelWrites,
+  planLabelRetractions,
   LABEL_VALUE_MAX_BYTES,
   formatLabelRef,
   isValidLabelKey,
@@ -93,5 +95,100 @@ describe("label ref wire form", () => {
     // appId "alpha", key "a" with a stray suffix.
     expect(parseLabelRef("alpha/a/b")).toBeNull();
     expect(parseLabelRef("alpha/Needs Review")).toBeNull();
+  });
+});
+
+describe("planLabelWrites", () => {
+  const base = {
+    recordTypes: new Map([["rec1", "image/jpeg"], ["rec2", "image/png"]]),
+    declaredKeys: new Set(["ocr-available", "quality"]),
+    canReadType: (t: string) => t === "image/jpeg",
+  };
+
+  it("plans a flag and a valued write, filling in the denormalized record type", () => {
+    const plan = planLabelWrites({
+      ...base,
+      entries: [
+        { recordId: "rec1" as never, key: "ocr-available" },
+        { recordId: "rec1" as never, key: "quality", value: "high" },
+      ],
+    });
+    expect(plan.ok).toBe(true);
+    expect(plan.ok && plan.writes).toEqual([
+      { recordId: "rec1", key: "ocr-available", value: null, recordType: "image/jpeg" },
+      { recordId: "rec1", key: "quality", value: "high", recordType: "image/jpeg" },
+    ]);
+  });
+
+  it("rejects a key the manifest does not declare", () => {
+    const plan = planLabelWrites({
+      ...base,
+      entries: [{ recordId: "rec1" as never, key: "undeclared" }],
+    });
+    expect(plan.ok).toBe(false);
+    expect(!plan.ok && plan.status).toBe(400);
+    expect(!plan.ok && plan.error).toContain("not declared");
+  });
+
+  it("rejects a write against a record that does not exist", () => {
+    // Nothing backs record_id with a foreign key, so without this the write
+    // would silently create an orphan.
+    const plan = planLabelWrites({
+      ...base,
+      entries: [{ recordId: "nope" as never, key: "quality", value: "high" }],
+    });
+    expect(plan.ok).toBe(false);
+    expect(!plan.ok && plan.error).toContain("does not exist");
+  });
+
+  it("allows a write with only a READ grant on the type", () => {
+    // The central authorization decision: requiring readwrite would force an
+    // OCR service to hold destructive power over photos it only reads.
+    const plan = planLabelWrites({
+      ...base,
+      canReadType: (t) => t === "image/jpeg", // read-only; no write notion here at all
+      entries: [{ recordId: "rec1" as never, key: "ocr-available" }],
+    });
+    expect(plan.ok).toBe(true);
+  });
+
+  it("403s a write against a type the caller cannot read", () => {
+    const plan = planLabelWrites({
+      ...base,
+      entries: [{ recordId: "rec2" as never, key: "quality", value: "high" }],
+    });
+    expect(plan.ok).toBe(false);
+    expect(!plan.ok && plan.status).toBe(403);
+  });
+
+  it("rejects the whole batch on one bad entry rather than partially applying", () => {
+    const plan = planLabelWrites({
+      ...base,
+      entries: [
+        { recordId: "rec1" as never, key: "quality", value: "high" },
+        { recordId: "rec1" as never, key: "Bad Key" },
+      ],
+    });
+    expect(plan.ok).toBe(false);
+  });
+});
+
+describe("planLabelRetractions", () => {
+  it("accepts a retraction whose key is no longer declared", () => {
+    // An uninstall or a key-dropping upgrade revokes the declaration while the
+    // rows survive. Validating the key here would strand an app's own rows
+    // permanently out of its reach — the bug the obvious implementation has.
+    const plan = planLabelRetractions([{ recordId: "rec1" as never, key: "long-gone" }]);
+    expect(plan.ok).toBe(true);
+  });
+
+  it("accepts a retraction against a record that no longer exists", () => {
+    const plan = planLabelRetractions([{ recordId: "deleted" as never, key: "k" }]);
+    expect(plan.ok).toBe(true);
+  });
+
+  it("still rejects a structurally invalid key", () => {
+    const plan = planLabelRetractions([{ recordId: "rec1" as never, key: "Bad Key" }]);
+    expect(plan.ok).toBe(false);
   });
 });

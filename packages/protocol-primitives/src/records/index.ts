@@ -11,6 +11,12 @@ export {
 export {
   type RecordLabel,
   type LabelRef,
+  type LabelWriteRequest,
+  type LabelRetractRequest,
+  type PlannedLabelWrite,
+  type LabelPlan,
+  planLabelWrites,
+  planLabelRetractions,
   LABEL_KEY_MAX_LENGTH,
   LABEL_KEYS_PER_APP_MAX,
   LABEL_VALUE_MAX_BYTES,

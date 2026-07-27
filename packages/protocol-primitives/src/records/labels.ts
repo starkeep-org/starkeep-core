@@ -133,6 +133,134 @@ export function validateLabelWrite(input: {
   return null;
 }
 
+/** One label a caller asked to set. `appId` is absent by construction — it is
+ *  the authenticated subject, not something the request can name. */
+export interface LabelWriteRequest {
+  recordId: StarkeepId;
+  key: string;
+  /** Omitted or `null` sets a bare flag. */
+  value?: string | null;
+}
+
+/** One label a caller asked to retract. */
+export interface LabelRetractRequest {
+  recordId: StarkeepId;
+  key: string;
+}
+
+export interface PlannedLabelWrite {
+  recordId: StarkeepId;
+  key: string;
+  value: string | null;
+  recordType: string;
+}
+
+export type LabelPlan<T> =
+  | { ok: true; writes: T[] }
+  | { ok: false; error: string; status: 400 | 403 };
+
+/**
+ * Decide whether a batch of label writes is allowed, and shape it for the
+ * adapter. Pure, so both data servers share one gate rather than two that
+ * drift — the failure mode being one backend enforcing a rule the other
+ * doesn't.
+ *
+ * `recordTypes` maps record id → `records.type` for the records that exist.
+ * The caller loads it in one `SELECT id, type WHERE id IN (…)` over the batch,
+ * which is very likely the dominant cost of a bulk labelling job — the
+ * single-statement upsert hides that this read has to happen first.
+ *
+ * Four things are checked, in the order that fails cheapest first:
+ *
+ *  1. **Key and value shape** — see {@link validateLabelWrite}.
+ *  2. **The key is declared** in the app's manifest. This is what makes the
+ *     per-app key-cardinality cap enforceable, and it is the reason keys are
+ *     schema rather than content.
+ *  3. **The record exists.** No FK backs `record_id`, so a write against a
+ *     missing record would create an orphan silently. (Orphans arriving over
+ *     *sync* are fine and expected — that path must not check this.)
+ *  4. **The caller can read the record's type.** A `read` grant, not
+ *     `readwrite`: requiring write access would force every labelling app —
+ *     an OCR service, a classifier — to hold destructive power over photos it
+ *     only ever reads. Labelling is additive, namespaced, quota-bounded and
+ *     advisory, so reading is the right price.
+ */
+export function planLabelWrites(input: {
+  entries: LabelWriteRequest[];
+  recordTypes: ReadonlyMap<string, string>;
+  declaredKeys: ReadonlySet<string>;
+  canReadType: (type: string) => boolean;
+}): LabelPlan<PlannedLabelWrite> {
+  const writes: PlannedLabelWrite[] = [];
+  for (const entry of input.entries) {
+    const value = entry.value ?? null;
+
+    const shapeError = validateLabelWrite({ key: entry.key, value });
+    if (shapeError) return { ok: false, error: shapeError, status: 400 };
+
+    if (!input.declaredKeys.has(entry.key)) {
+      return {
+        ok: false,
+        error:
+          `label key "${entry.key}" is not declared in this app's manifest ` +
+          `(infraRequirements.labelKeys)`,
+        status: 400,
+      };
+    }
+
+    const recordType = input.recordTypes.get(entry.recordId);
+    if (recordType === undefined) {
+      return {
+        ok: false,
+        error: `record "${entry.recordId}" does not exist`,
+        status: 400,
+      };
+    }
+
+    if (!input.canReadType(recordType)) {
+      return {
+        ok: false,
+        error: `no read grant on type "${recordType}" (record "${entry.recordId}")`,
+        status: 403,
+      };
+    }
+
+    writes.push({ recordId: entry.recordId, key: entry.key, value, recordType });
+  }
+  return { ok: true, writes };
+}
+
+/**
+ * Validate a batch of retractions.
+ *
+ * Deliberately checks **less** than {@link planLabelWrites}:
+ *
+ *  - **The key need not still be declared.** An uninstall, or an upgrade that
+ *    drops a key, revokes the declaration while the label rows survive as
+ *    shared data. Validating the key here would strand those rows permanently
+ *    out of their own author's reach — which is exactly what the obvious
+ *    implementation, one that runs every write through the same gate, does.
+ *  - **The record need not exist.** Retracting a label on a deleted record is
+ *    a no-op, not an error.
+ *  - **No grant check.** Retraction is scoped by the primary key, which
+ *    contains the server-set `app_id`, so an app can only ever reach its own
+ *    rows. There is nothing further to authorize.
+ */
+export function planLabelRetractions(
+  entries: LabelRetractRequest[],
+): LabelPlan<LabelRetractRequest> {
+  for (const entry of entries) {
+    if (!isValidLabelKey(entry.key)) {
+      return {
+        ok: false,
+        error: `invalid label key "${entry.key}"`,
+        status: 400,
+      };
+    }
+  }
+  return { ok: true, writes: entries };
+}
+
 /**
  * Render the wire/UI form of a label reference: `alpha/ocr-available`.
  * Storage never sees this — see the module docstring.
