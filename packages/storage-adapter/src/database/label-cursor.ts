@@ -95,9 +95,9 @@ export function decodeLabelScanCursor(token: string): LabelScanCursor | null {
 }
 
 /**
- * The predicate itself is built with each adapter's Kysely expression builder
- * rather than shared as a SQL string, so parameter binding stays the compiler's
- * job. Both spell the same two cases:
+ * The SQL form of the predicate is built once, in label-queries.ts, with the
+ * calling adapter's Kysely expression builder — so parameter binding stays the
+ * compiler's job. It spells the same two cases the comparators below do:
  *
  *   cursor value IS NULL → `value IS NOT NULL OR (value IS NULL AND id > ?)`
  *   otherwise            → `value > ? OR (value = ? AND id > ?)`
@@ -105,3 +105,50 @@ export function decodeLabelScanCursor(token: string): LabelScanCursor | null {
  * The second case needs no null branch: nulls sort first, so none can follow a
  * non-null cursor.
  */
+
+/** The part of a label the reverse-index order is defined over. */
+interface OrderedLabel {
+  value: string | null;
+  recordId: StarkeepId;
+}
+
+/**
+ * The reverse index's order as a comparator: nulls first, then value ascending,
+ * then record id.
+ *
+ * Exists so an in-memory adapter can present the same order the SQL ones do
+ * without restating the rule. A memory adapter that sorted nulls *last* — the
+ * Postgres default, and an easy thing to write by accident — would page
+ * correctly in its own tests and disagree with both real backends.
+ */
+export function compareLabelOrder(a: OrderedLabel, b: OrderedLabel): number {
+  if (a.value === null && b.value !== null) return -1;
+  if (a.value !== null && b.value === null) return 1;
+  if (a.value !== null && b.value !== null && a.value !== b.value) {
+    return a.value < b.value ? -1 : 1;
+  }
+  return a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0;
+}
+
+/** Is this label strictly after the cursor, in {@link compareLabelOrder}? */
+export function isAfterLabelCursor(label: OrderedLabel, cursor: LabelCursor): boolean {
+  return compareLabelOrder(label, cursor) > 0;
+}
+
+/** The same, for the primary-key order the sync scan uses. */
+export function isAfterLabelScanCursor(
+  label: LabelScanCursor,
+  cursor: LabelScanCursor,
+): boolean {
+  if (label.recordId !== cursor.recordId) return label.recordId > cursor.recordId;
+  if (label.appId !== cursor.appId) return label.appId > cursor.appId;
+  return label.key > cursor.key;
+}
+
+/** Primary-key order, for an in-memory scan. */
+export function compareLabelScanOrder(a: LabelScanCursor, b: LabelScanCursor): number {
+  if (a.recordId !== b.recordId) return a.recordId < b.recordId ? -1 : 1;
+  if (a.appId !== b.appId) return a.appId < b.appId ? -1 : 1;
+  if (a.key !== b.key) return a.key < b.key ? -1 : 1;
+  return 0;
+}

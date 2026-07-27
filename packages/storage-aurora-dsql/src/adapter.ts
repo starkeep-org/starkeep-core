@@ -20,10 +20,21 @@ import type {
 import {
   StorageError,
   TransactionError,
-  encodeLabelCursor,
-  decodeLabelCursor,
-  encodeLabelScanCursor,
-  decodeLabelScanCursor,
+  buildFindByLabel,
+  buildGetLabel,
+  buildLabelNodeWatermarks,
+  buildLabelRetraction,
+  buildLabelSnapshotUpsert,
+  buildLabelUpsert,
+  buildLabelsByRecordIds,
+  buildQueryLabels,
+  buildTombstoneLabelsForRecord,
+  groupLabelsByRecordId,
+  paginateFindByLabel,
+  paginateLabelScan,
+  rowToLabel,
+  type LabelDialect,
+  type LabelRow,
 } from "@starkeep/storage-adapter";
 import type {
   AuroraDsqlDatabaseAdapterOptions,
@@ -33,15 +44,24 @@ import type {
 import {
   recordToRow,
   rowToRecord,
-  rowToLabel,
-  labelToRow,
   columnsToMetadataRow,
   type PostgresRow,
-  type PostgresLabelRow,
 } from "./serialization.js";
 import { buildPostgresQuery, compiler } from "./query-builder.js";
 import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
 import { sql, type CompiledQuery } from "kysely";
+
+/**
+ * How labels are spelled on this backend. The table lives in the `shared`
+ * schema, and Postgres sorts nulls *last* by default — so the reverse query's
+ * nulls-first order, which the pagination cursor is defined against, has to be
+ * written out. Everything else about label SQL is shared with the SQLite
+ * adapter in `@starkeep/storage-adapter`.
+ */
+const LABELS: LabelDialect = {
+  table: "shared.record_labels",
+  spellOutNullsFirst: true,
+};
 
 
 export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
@@ -310,49 +330,21 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   // ---- Cross-app record labels -------------------------------------------
+  //
+  // The SQL for all of these is built in `@starkeep/storage-adapter`, shared
+  // with the SQLite adapter. What is this backend's own business is the OCC
+  // retry wrapping every statement below: DSQL aborts transactions that race
+  // on a row, and these are all replay-safe — the upsert is value-independent
+  // and keyed by primary key, so a retry converges rather than compounding.
 
-  /**
-   * One multi-row `INSERT … ON CONFLICT DO UPDATE`, so a whole batch is a
-   * single statement with no read-modify-write round trip. Replay-safe under
-   * `withOccRetry` because the statement is value-independent: every column is
-   * built from the caller's input, so a retry converges rather than compounding.
-   *
-   * The caller chunks to DSQL's 3,000-modified-rows-per-transaction limit;
-   * secondary-index entries do *not* count against that limit (measured), so
-   * the two indexes on this table don't shrink the usable batch.
-   */
   async upsertLabels(labels: LabelUpsert[]): Promise<void> {
     if (labels.length === 0) return;
+    // One multi-row statement, so a whole batch is a single round trip with no
+    // read-modify-write. The caller chunks to DSQL's 3,000-modified-rows limit;
+    // secondary-index entries do not count against it (measured), so the two
+    // indexes on this table don't shrink the usable batch.
     await withOccRetry("upsertLabels", async () => {
-      await this.run(
-        compiler
-          .insertInto("shared.record_labels")
-          .values(
-            labels.map((l) => ({
-              record_id: l.recordId,
-              app_id: l.appId,
-              key: l.key,
-              value: l.value,
-              record_type: l.recordType,
-              created_at: serializeHLC(l.hlc),
-              updated_at: serializeHLC(l.hlc),
-              node_id: l.hlc.nodeId,
-              deleted_at: null,
-            })),
-          )
-          .onConflict((oc) =>
-            oc.columns(["record_id", "app_id", "key"]).doUpdateSet((eb) => ({
-              value: eb.ref("excluded.value"),
-              record_type: eb.ref("excluded.record_type"),
-              updated_at: eb.ref("excluded.updated_at"),
-              node_id: eb.ref("excluded.node_id"),
-              // Re-setting a retracted label revives it; otherwise a
-              // set → retract → set cycle writes a row that stays invisible.
-              deleted_at: null,
-            })),
-          )
-          .compile(),
-      );
+      await this.run(buildLabelUpsert(compiler, LABELS, labels));
     });
   }
 
@@ -360,22 +352,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     if (retractions.length === 0) return;
     await withOccRetry("retractLabels", async () => {
       for (const r of retractions) {
-        // Tombstone, not DELETE: the retraction itself has to sync. Scoped by
-        // primary key, which contains app_id — so "an app can only retract its
-        // own labels" needs no separate check.
-        await this.run(
-          compiler
-            .updateTable("shared.record_labels")
-            .set({
-              deleted_at: serializeHLC(r.hlc),
-              updated_at: serializeHLC(r.hlc),
-              node_id: r.hlc.nodeId,
-            })
-            .where("record_id", "=", r.recordId)
-            .where("app_id", "=", r.appId)
-            .where("key", "=", r.key)
-            .compile(),
-        );
+        await this.run(buildLabelRetraction(compiler, LABELS, r));
       }
     });
   }
@@ -385,98 +362,19 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   ): Promise<Map<StarkeepId, RecordLabel[]>> {
     if (recordIds.length === 0) return new Map();
     return withOccRetry("getLabelsByRecordIds", async () => {
-      const result = new Map<StarkeepId, RecordLabel[]>();
-      const dbResult = await this.run(
-        compiler
-          .selectFrom("shared.record_labels")
-          .selectAll()
-          .where("record_id", "in", recordIds)
-          .where("deleted_at", "is", null)
-          .compile(),
-      );
-      for (const raw of dbResult.rows) {
-        const label = rowToLabel(raw as unknown as PostgresLabelRow);
-        let list = result.get(label.recordId);
-        if (!list) result.set(label.recordId, (list = []));
-        list.push(label);
-      }
-      return result;
+      const result = await this.run(buildLabelsByRecordIds(compiler, LABELS, recordIds));
+      return groupLabelsByRecordId(result.rows as unknown as LabelRow[]);
     });
   }
 
   async findByLabel(query: FindByLabelQuery): Promise<FindByLabelResult> {
+    // `null` means the query cannot match anything — a caller with no readable
+    // types — so there is nothing to ask DSQL.
+    const compiled = buildFindByLabel(compiler, LABELS, query);
+    if (!compiled) return { labels: [], nextCursor: null, hasMore: false };
     return withOccRetry("findByLabel", async () => {
-      const limit = query.limit ?? 50;
-
-      let q = compiler
-        .selectFrom("shared.record_labels")
-        .selectAll()
-        .where("app_id", "=", query.appId)
-        .where("key", "=", query.key)
-        // Pinned by every reverse query, and pinning it is what keeps the
-        // tombstone pile out of the scanned range — `deleted_at` is the third
-        // key column of idx_record_labels_reverse precisely for this, and DSQL
-        // plans it as a scan key (measured: 20 index entries scanned behind
-        // 20,000 tombstones, vs 20,040 without).
-        .where("deleted_at", "is", null);
-
-      if (query.value !== undefined) {
-        q = q.where("value", "=", query.value);
-      }
-
-      // The caller's read grants. `record_type` is an INCLUDE payload on the
-      // reverse index, so this is evaluated during the index scan rather than
-      // after fetching records — which is what lets a page come back full.
-      if (query.readableTypes !== undefined) {
-        const types = [...query.readableTypes];
-        if (types.length === 0) return { labels: [], nextCursor: null, hasMore: false };
-        q = q.where("record_type", "in", types);
-      }
-
-      // "Strictly after the cursor", nulls-first. Not a row-value comparison:
-      // with a null on either side that evaluates to NULL rather than false,
-      // which would silently return an empty page. See label-cursor.ts.
-      const cursor = query.cursor ? decodeLabelCursor(query.cursor) : null;
-      if (cursor) {
-        const { value, recordId } = cursor;
-        q =
-          value === null
-            ? q.where((eb) =>
-                eb.or([
-                  eb("value", "is not", null),
-                  eb.and([eb("value", "is", null), eb("record_id", ">", recordId)]),
-                ]),
-              )
-            : q.where((eb) =>
-                eb.or([
-                  eb("value", ">", value),
-                  eb.and([eb("value", "=", value), eb("record_id", ">", recordId)]),
-                ]),
-              );
-      }
-
-      // Postgres sorts nulls LAST by default where SQLite sorts them first.
-      // Spelled out here so a cursor means the same thing on both backends.
-      const compiled = q
-        .orderBy(sql`value asc nulls first`)
-        .orderBy("record_id", "asc")
-        .limit(limit + 1)
-        .compile();
-
-      const dbResult = await this.run(compiled);
-      const rows = dbResult.rows as unknown as PostgresLabelRow[];
-      const hasMore = rows.length > limit;
-      const labels = (hasMore ? rows.slice(0, limit) : rows).map(rowToLabel);
-      const last = labels[labels.length - 1];
-
-      return {
-        labels,
-        hasMore,
-        nextCursor:
-          hasMore && last
-            ? encodeLabelCursor({ value: last.value, recordId: last.recordId })
-            : null,
-      };
+      const result = await this.run(compiled);
+      return paginateFindByLabel(result.rows as unknown as LabelRow[], query.limit);
     });
   }
 
@@ -484,24 +382,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   async putLabel(label: RecordLabel): Promise<void> {
     await withOccRetry("putLabel", async () => {
-      // Snapshot write: every column comes from the incoming row, tombstone
-      // included. upsertLabels would mint a fresh HLC and clear deleted_at,
-      // resurrecting a retraction that arrived from a peer.
-      const row = labelToRow(label);
-      const updateColumns = Object.keys(row).filter(
-        (c) => c !== "record_id" && c !== "app_id" && c !== "key",
-      );
-      await this.run(
-        compiler
-          .insertInto("shared.record_labels")
-          .values({ ...row })
-          .onConflict((oc) =>
-            oc.columns(["record_id", "app_id", "key"]).doUpdateSet((eb) =>
-              Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
-            ),
-          )
-          .compile(),
-      );
+      await this.run(buildLabelSnapshotUpsert(compiler, LABELS, label));
     });
   }
 
@@ -511,18 +392,8 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     key: string,
   ): Promise<RecordLabel | null> {
     return withOccRetry("getLabel", async () => {
-      // Tombstones included: a tombstone is what a later arrival is LWW-
-      // compared against.
-      const result = await this.run(
-        compiler
-          .selectFrom("shared.record_labels")
-          .selectAll()
-          .where("record_id", "=", recordId)
-          .where("app_id", "=", appId)
-          .where("key", "=", key)
-          .compile(),
-      );
-      const row = result.rows[0] as unknown as PostgresLabelRow | undefined;
+      const result = await this.run(buildGetLabel(compiler, LABELS, recordId, appId, key));
+      const row = result.rows[0] as unknown as LabelRow | undefined;
       return row ? rowToLabel(row) : null;
     });
   }
@@ -533,65 +404,14 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     hasMore: boolean;
   }> {
     return withOccRetry("queryLabels", async () => {
-      const limit = query.limit ?? 500;
-      let q = compiler.selectFrom("shared.record_labels").selectAll();
-
-      const cursor = query.cursor ? decodeLabelScanCursor(query.cursor) : null;
-      if (cursor) {
-        // Row-value comparison over the primary key — safe here, unlike the
-        // reverse-index cursor, because all three columns are NOT NULL.
-        q = q.where((eb) =>
-          eb.or([
-            eb("record_id", ">", cursor.recordId),
-            eb.and([
-              eb("record_id", "=", cursor.recordId),
-              eb("app_id", ">", cursor.appId),
-            ]),
-            eb.and([
-              eb("record_id", "=", cursor.recordId),
-              eb("app_id", "=", cursor.appId),
-              eb("key", ">", cursor.key),
-            ]),
-          ]),
-        );
-      }
-
-      const result = await this.run(
-        q
-          .orderBy("record_id", "asc")
-          .orderBy("app_id", "asc")
-          .orderBy("key", "asc")
-          .limit(limit + 1)
-          .compile(),
-      );
-      const rows = result.rows as unknown as PostgresLabelRow[];
-      const hasMore = rows.length > limit;
-      const page = hasMore ? rows.slice(0, limit) : rows;
-      const last = page[page.length - 1];
-      return {
-        labels: page.map(rowToLabel),
-        hasMore,
-        nextCursor:
-          hasMore && last
-            ? encodeLabelScanCursor({
-                recordId: last.record_id as StarkeepId,
-                appId: last.app_id,
-                key: last.key,
-              })
-            : null,
-      };
+      const result = await this.run(buildQueryLabels(compiler, LABELS, query));
+      return paginateLabelScan(result.rows as unknown as LabelRow[], query.limit);
     });
   }
 
   async getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
     return withOccRetry("getLabelNodeWatermarks", async () => {
-      const result = await this.run(
-        compiler
-          .selectFrom("shared.record_labels")
-          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
-          .groupBy("node_id")
-          .compile(),
-      );
+      const result = await this.run(buildLabelNodeWatermarks(compiler, LABELS));
       const out: Record<string, HLCTimestamp> = {};
       for (const raw of result.rows) {
         const row = raw as Record<string, unknown>;
@@ -603,21 +423,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     await withOccRetry("tombstoneLabelsForRecord", async () => {
-      // Crosses app namespaces deliberately — the record is going away, so
-      // every app's assertions about it go with it. A platform operation, not
-      // reachable as an app write.
-      await this.run(
-        compiler
-          .updateTable("shared.record_labels")
-          .set({
-            deleted_at: serializeHLC(hlc),
-            updated_at: serializeHLC(hlc),
-            node_id: hlc.nodeId,
-          })
-          .where("record_id", "=", recordId)
-          .where("deleted_at", "is", null)
-          .compile(),
-      );
+      await this.run(buildTombstoneLabelsForRecord(compiler, LABELS, recordId, hlc));
     });
   }
 }

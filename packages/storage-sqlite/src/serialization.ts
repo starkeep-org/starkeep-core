@@ -1,7 +1,6 @@
 import type {
   DataRecord,
   MetadataRow,
-  RecordLabel,
   StarkeepId,
 } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC, createStarkeepId } from "@starkeep/protocol-primitives";
@@ -62,45 +61,12 @@ export function rowToRecord(row: SqliteRow): DataRecord {
   };
 }
 
-export interface SqliteLabelRow {
-  record_id: string;
-  app_id: string;
-  key: string;
-  value: string | null;
-  record_type: string;
-  created_at: string;
-  updated_at: string;
-  node_id: string;
-  deleted_at: string | null;
-}
-
-export function rowToLabel(row: SqliteLabelRow): RecordLabel {
-  return {
-    recordId: createStarkeepId(row.record_id),
-    appId: row.app_id,
-    key: row.key,
-    value: row.value,
-    recordType: row.record_type,
-    createdAt: deserializeHLC(row.created_at),
-    updatedAt: deserializeHLC(row.updated_at),
-    nodeId: row.node_id,
-    deletedAt: row.deleted_at ? deserializeHLC(row.deleted_at) : null,
-  };
-}
-
-export function labelToRow(label: RecordLabel): SqliteLabelRow {
-  return {
-    record_id: label.recordId,
-    app_id: label.appId,
-    key: label.key,
-    value: label.value,
-    record_type: label.recordType,
-    created_at: serializeHLC(label.createdAt),
-    updated_at: serializeHLC(label.updatedAt),
-    node_id: label.updatedAt.nodeId,
-    deleted_at: label.deletedAt ? serializeHLC(label.deletedAt) : null,
-  };
-}
+/**
+ * Label rows are identical on both backends, so their row type and both
+ * conversions live in `@starkeep/storage-adapter` — re-exported here for the
+ * adapter that used to own them.
+ */
+export { rowToLabel, labelToRow, type LabelRow as SqliteLabelRow } from "@starkeep/storage-adapter";
 
 /**
  * Convert SQLite column-keyed row data into a MetadataRow keyed by recordId
