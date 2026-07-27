@@ -301,3 +301,43 @@ describe("label operations", () => {
     await expect(sdk.data.retractLabels("alpha", [])).resolves.toBeUndefined();
   });
 });
+
+describe("delete cascades to labels", () => {
+  it("tombstones every app's labels when the record is deleted", async () => {
+    // No FK backs record_id on either backend, so nothing does this for us.
+    // The cascade crosses app namespaces on purpose: the record is going
+    // away, so every app's assertions about it go with it.
+    const localDatabase = new MockDatabaseAdapter();
+    const localObjectStorage = new MockObjectStorageAdapter();
+    const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
+    const sdk = await createStarkeepSdk({
+      databaseAdapter: localDatabase,
+      objectStorageAdapter: localObjectStorage,
+      nodeId: "test-node",
+      clock,
+    });
+
+    const doomed = await sdk.data.putWithFile(
+      { type: "image/jpeg", originAppId: "photos" },
+      Buffer.from("doomed"),
+      "image/jpeg",
+    );
+    const survivor = await sdk.data.putWithFile(
+      { type: "image/jpeg", originAppId: "photos" },
+      Buffer.from("survivor"),
+      "image/jpeg",
+    );
+    await sdk.data.setLabels("alpha", [{ recordId: doomed.id, key: "k" }]);
+    await sdk.data.setLabels("gamma", [{ recordId: doomed.id, key: "k" }]);
+    await sdk.data.setLabels("alpha", [{ recordId: survivor.id, key: "k" }]);
+
+    await sdk.data.delete(doomed.id);
+
+    expect((await sdk.data.getLabelsByIds([doomed.id])).size).toBe(0);
+    // Another record's labels are untouched.
+    expect((await sdk.data.getLabelsByIds([survivor.id])).get(survivor.id)).toHaveLength(1);
+    // And the reverse query no longer surfaces the deleted record.
+    const found = await sdk.data.findByLabel({ appId: "alpha", key: "k" });
+    expect(found.records.map((r) => r.id)).toEqual([survivor.id]);
+  });
+});

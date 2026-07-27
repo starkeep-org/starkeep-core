@@ -452,3 +452,29 @@ describe("GET /data/records with labels", () => {
     expect(q.text).toMatch(/"deleted_at" is null/);
   });
 });
+
+describe("DELETE /data/records/:id cascades to labels", () => {
+  it("tombstones the record's labels in the same request", async () => {
+    // DSQL has no foreign keys, so nothing cascades for us — the delete path
+    // has to do it by hand or the labels outlive their record as orphans.
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
+      .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "image/jpeg" })])
+      .on(RECORDS_UPDATE, [])
+      .on(LABELS_UPDATE, []);
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({ appId: "owner", method: "DELETE", subPath: "/data/records/rec1" }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+
+    const labelUpdate = db.calls(LABELS_UPDATE)[0];
+    expect(labelUpdate, "no label cascade was issued").toBeTruthy();
+    expect(labelUpdate!.text).toMatch(/set "deleted_at"/);
+    expect(labelUpdate!.values).toContain("rec1");
+    // Crosses app namespaces on purpose — no app_id predicate, because every
+    // app's assertions about the record go with the record.
+    expect(labelUpdate!.text).not.toMatch(/"app_id" = /);
+  });
+});
