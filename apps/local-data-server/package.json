@@ -30,7 +30,7 @@
     "@starkeep/sync-engine": "workspace:*",
     "kysely": "^0.28.17",
     "pg": "^8.13.0",
-    "valibot": "^1.2.0"
+    "valibot": "^1.4.2"
   },
   "devDependencies": {
     "@starkeep/app-client": "workspace:*",
