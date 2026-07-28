@@ -84,10 +84,10 @@ fi
 # (e.g. the test suite deploys to us-east-2 while the AWS CLI default is
 # us-east-1), which would skip the real resources and falsely report success.
 # It must be passed via --region, or entered at an interactive prompt.
+CONFIG_REGION="${CONFIG_USER_POOL_ID%%_*}"
 REGION="$FLAG_REGION"
 if [[ -z "$REGION" ]]; then
   if [[ "$YES" != "true" && -t 0 ]]; then
-    CONFIG_REGION="${CONFIG_USER_POOL_ID%%_*}"
     if [[ -n "$CONFIG_REGION" ]]; then
       echo "No --region given. (For reference, $CONFIG_FILE describes region '$CONFIG_REGION'.)" >&2
     fi
@@ -98,6 +98,23 @@ if [[ -z "$REGION" ]]; then
     echo "Usage: $0 [--yes] --prefix <stack-prefix> --region <region>" >&2
     exit 1
   fi
+fi
+
+# Does $CONFIG_FILE actually describe the deployment being torn down? Step 9
+# strips the cloud-data-server keys from it, and that is only correct when the
+# config belongs to *this* deployment. The teardown target comes from
+# --prefix/--region while the config is whatever STARKEEP_DIR (default
+# $HOME/.starkeep) happens to point at — usually the operator's real
+# deployment. Tearing down a test stack must not blank the real deployment's
+# config, so we require both scoping keys to match before touching it.
+#
+# The config carries no region key; userPoolId is region-prefixed
+# (us-east-1_xxxx), so it stands in for one. A config missing either key can't
+# be shown to match, so it's left alone.
+CONFIG_MATCHES_TEARDOWN=false
+if [[ -n "$CONFIG_STACK_PREFIX" && "$CONFIG_STACK_PREFIX" == "$STACK_PREFIX" \
+      && -n "$CONFIG_REGION" && "$CONFIG_REGION" == "$REGION" ]]; then
+  CONFIG_MATCHES_TEARDOWN=true
 fi
 
 # Pin every aws subcommand below to the resolved region. The CLI's default
@@ -266,7 +283,12 @@ echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
 echo "  CUR report   : $CUR_REPORT"
 echo "  IAM role     : $CDS_ROLE"
 echo "  Pulumi locks : s3://${PULUMI_STATE_BUCKET}/.pulumi/locks/ (cleared, bucket kept)"
-echo "  Config keys  : stale cloud-data-server keys stripped from $CONFIG_FILE"
+if [[ "$CONFIG_MATCHES_TEARDOWN" == "true" ]]; then
+  echo "  Config keys  : stale cloud-data-server keys stripped from $CONFIG_FILE"
+else
+  echo "  Config keys  : NOT touched — $CONFIG_FILE describes"
+  echo "                 prefix '${CONFIG_STACK_PREFIX:-<none>}' / region '${CONFIG_REGION:-<none>}', not this teardown"
+fi
 echo ""
 
 if [[ "$YES" != "true" ]]; then
@@ -600,9 +622,17 @@ delete_role "$CDS_ROLE"
 # (Cognito pool ids, account, permissions boundaries, managerRoleArn,
 # pulumiStateBucket, nodeId, stackPrefix) survive cloud-data-server teardown
 # and are left untouched. Skipped silently if config.json is absent.
+#
+# Only when the config describes this same prefix+region do we know its keys
+# point at the resources we just destroyed (see CONFIG_MATCHES_TEARDOWN above).
+# Otherwise it belongs to a different deployment — typically the operator's real
+# one under the default $HOME/.starkeep — whose gateway, bucket and DSQL cluster
+# are all still live, and blanking its keys would strand a working install.
 
-step "Clearing stale cloud-data-server keys from $CONFIG_FILE"
-if [[ -f "$CONFIG_FILE" ]]; then
+if [[ "$CONFIG_MATCHES_TEARDOWN" != "true" ]]; then
+  step "Leaving $CONFIG_FILE untouched (describes prefix '${CONFIG_STACK_PREFIX:-<none>}' / region '${CONFIG_REGION:-<none>}', not ${STACK_PREFIX}/${REGION})"
+elif [[ -f "$CONFIG_FILE" ]]; then
+  step "Clearing stale cloud-data-server keys from $CONFIG_FILE"
   python3 - "$CONFIG_FILE" << 'PYEOF'
 import json, sys
 
@@ -635,6 +665,7 @@ else:
     print("  No stale keys present.")
 PYEOF
 else
+  step "Clearing stale cloud-data-server keys from $CONFIG_FILE"
   skip
 fi
 

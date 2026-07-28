@@ -25,11 +25,12 @@
 # (--yes or no TTY) missing either errors out.
 #
 # Local config (STARKEEP_DIR/config.json): the cloud config is cleared only when
-# STARKEEP_DIR is set explicitly (so we know the config belongs to the
-# deployment being torn down — the test suite always passes its own run-state
-# dir). With STARKEEP_DIR unset, the default $HOME/.starkeep config is left
-# untouched and flagged as possibly stale. Either way, clearing removes only
-# cloud state; the local 'appParentDirs' setting is always preserved.
+# it actually describes the deployment being torn down — i.e. its stackPrefix and
+# region match --prefix/--region. Any other config belongs to some other
+# deployment (typically the operator's real one under the default
+# $HOME/.starkeep, whose resources are all still live) and is left untouched.
+# Clearing removes only cloud state; the local 'appParentDirs' setting is always
+# preserved.
 
 set -euo pipefail
 
@@ -39,15 +40,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # a STARKEEP_DIR provided via .env.local correctly counts as "explicit" (and thus
 # this deployment's config gets cleared).
 source "$SCRIPT_DIR/load-env.sh"
-
-# Whether STARKEEP_DIR was set by the caller. A teardown only clears the local
-# config when it knows *which* config belongs to the deployment it's tearing
-# down — i.e. when STARKEEP_DIR is explicit (as the test suite always passes it,
-# pointing at its own run-state dir). A bare manual run inherits the default
-# $HOME/.starkeep, which typically describes the *real* deployment, so we must
-# not reset it just because some other prefix/region was torn down.
-STARKEEP_DIR_EXPLICIT=false
-[[ -n "${STARKEEP_DIR:-}" ]] && STARKEEP_DIR_EXPLICIT=true
 
 STARKEEP_DIR="${STARKEEP_DIR:-$HOME/.starkeep}"
 CONFIG_FILE="$STARKEEP_DIR/config.json"
@@ -108,10 +100,10 @@ STACK_NAME="${STACK_PREFIX}-bootstrap"
 # (e.g. the test suite deploys to us-east-2 while the AWS CLI default is
 # us-east-1), which would skip the real resources and falsely report success.
 # It must be passed via --region, or entered at an interactive prompt.
+CONFIG_REGION="${USER_POOL_ID%%_*}"
 REGION="$FLAG_REGION"
 if [[ -z "$REGION" ]]; then
   if [[ "$YES" != "true" && -t 0 ]]; then
-    CONFIG_REGION="${USER_POOL_ID%%_*}"
     if [[ -n "$CONFIG_REGION" ]]; then
       echo "No --region given. (For reference, $CONFIG_FILE describes region '$CONFIG_REGION'.)" >&2
     fi
@@ -122,6 +114,21 @@ if [[ -z "$REGION" ]]; then
     echo "Usage: $0 [--yes] --prefix <stack-prefix> --region <region>" >&2
     exit 1
   fi
+fi
+
+# Does $CONFIG_FILE describe the deployment being torn down? Step 6 clears its
+# cloud state, which is only correct for *this* deployment's config. The target
+# comes from --prefix/--region while the config is whatever STARKEEP_DIR
+# (default $HOME/.starkeep) points at — so tearing down a test stack must not
+# blank the real deployment's config. Both scoping keys must match first; the
+# config carries no region key, but userPoolId is region-prefixed
+# (us-east-1_xxxx) and stands in for one. A config missing either key can't be
+# shown to match, so it's left alone. Mirrors the same check in
+# teardown-cloud-data-server.sh, which clears the cloud-data-server subset.
+CONFIG_MATCHES_TEARDOWN=false
+if [[ -n "$CONFIG_STACK_PREFIX" && "$CONFIG_STACK_PREFIX" == "$STACK_PREFIX" \
+      && -n "$CONFIG_REGION" && "$CONFIG_REGION" == "$REGION" ]]; then
+  CONFIG_MATCHES_TEARDOWN=true
 fi
 
 # Pin every aws subcommand below to the resolved region. The CLI's default
@@ -157,13 +164,12 @@ echo "    IAM policy           : ${STACK_PREFIX}-install-infra-permissions-bound
 [[ -n "$USER_POOL_ID" ]]      && echo "    Cognito User Pool    : $USER_POOL_ID"
 [[ -n "$IDENTITY_POOL_ID" ]]  && echo "    Cognito Identity Pool: $IDENTITY_POOL_ID"
 echo ""
-if [[ "$STARKEEP_DIR_EXPLICIT" == "true" ]]; then
+if [[ "$CONFIG_MATCHES_TEARDOWN" == "true" ]]; then
   echo "After all resources are deleted, the cloud config in $CONFIG_FILE will be"
   echo "cleared (the local 'appParentDirs' setting is preserved)."
 else
-  echo "STARKEEP_DIR is not set, so $CONFIG_FILE will be left UNTOUCHED — it may"
-  echo "describe a different deployment than the one being torn down. Set"
-  echo "STARKEEP_DIR to this deployment's config dir if you want it cleared."
+  echo "$CONFIG_FILE will be left UNTOUCHED — it describes prefix"
+  echo "'${CONFIG_STACK_PREFIX:-<none>}' / region '${CONFIG_REGION:-<none>}', not the deployment being torn down."
 fi
 echo ""
 
@@ -457,15 +463,16 @@ if [[ -n "$USER_POOL_ID" ]]; then
 fi
 
 # ── Step 6: Clear cloud config ────────────────────────────────────────────────
-# Only when STARKEEP_DIR was explicit do we know this config belongs to the
-# deployment we just tore down. Otherwise we leave it alone: the default
-# $HOME/.starkeep config usually describes the real deployment, and clearing it
-# after tearing down some other prefix/region would wrongly orphan it.
+# Only a config whose prefix+region match the teardown target describes the
+# deployment we just destroyed (see CONFIG_MATCHES_TEARDOWN above). Any other
+# one we leave alone: the default $HOME/.starkeep config usually describes the
+# real deployment, and blanking it after tearing down some other prefix/region
+# would strand a working install.
 #
 # Even when we do clear it, this removes only the *cloud* state. 'appParentDirs'
 # is a purely local concern (where apps live on disk) and survives a cloud
 # teardown.
-if [[ "$STARKEEP_DIR_EXPLICIT" == "true" ]]; then
+if [[ "$CONFIG_MATCHES_TEARDOWN" == "true" ]]; then
   step "Clearing cloud config in $CONFIG_FILE (preserving local appParentDirs)"
   python3 -c "
 import json, os
@@ -483,10 +490,10 @@ with open(path, 'w') as f:
 "
   echo "  Cloud config cleared; local appParentDirs preserved."
 else
-  step "Leaving $CONFIG_FILE untouched (STARKEEP_DIR not set)"
-  echo "  WARNING: this config was not cleared and may now be stale — it could"
-  echo "  describe a deployment that no longer exists. Re-bootstrap or edit it"
-  echo "  by hand as needed."
+  step "Leaving $CONFIG_FILE untouched (describes prefix '${CONFIG_STACK_PREFIX:-<none>}' / region '${CONFIG_REGION:-<none>}', not ${STACK_PREFIX}/${REGION})"
+  echo "  It belongs to a different deployment, so its cloud state was not"
+  echo "  cleared. Point STARKEEP_DIR at this deployment's config dir if you"
+  echo "  expected it to be."
 fi
 
 echo ""
