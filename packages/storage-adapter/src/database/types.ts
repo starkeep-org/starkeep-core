@@ -51,7 +51,8 @@ export interface LabelUpsert {
   /** Server-set from the authenticated subject; never client-supplied. */
   appId: string;
   key: string;
-  value: string | null;
+  /** In the primary key. `""` is a bare flag; never null. */
+  value: string;
   /** Denormalized from `records.type`; the caller reads it as part of the
    *  same batch that checks the record exists. */
   recordType: string;
@@ -63,6 +64,27 @@ export interface LabelRetraction {
   recordId: StarkeepId;
   appId: string;
   key: string;
+  /**
+   * Which value to tombstone. **Omitted tombstones every value of this key on
+   * this record** — the reading that keeps a `{record, key}` retraction meaning
+   * "take this assertion back" now that a key is set-valued.
+   */
+  value?: string;
+  hlc: HLCTimestamp;
+}
+
+/**
+ * Replace the entire value set for one `(record, app, key)` — see
+ * {@link DatabaseAdapter.replaceLabelValues}.
+ */
+export interface LabelValueReplacement {
+  recordId: StarkeepId;
+  appId: string;
+  key: string;
+  /** The complete desired set. Empty retracts every value of the key. */
+  values: string[];
+  /** Denormalized from `records.type`, as for {@link LabelUpsert}. */
+  recordType: string;
   hlc: HLCTimestamp;
 }
 
@@ -71,11 +93,16 @@ export interface FindByLabelQuery {
   appId: string;
   key: string;
   /**
-   * Omitted = **presence** filter: any value, including the null of a bare
-   * flag. Supplied = exact match. Deliberately exact-only — no ranges, no
-   * prefixes, no IN-list. A value is an enum, an opaque id, a count or a
-   * timestamp, and equality is the only operator that fits that contract;
-   * anything richer signals an app using values as data.
+   * Omitted = **presence** filter: any value, bare flags included. Supplied =
+   * exact match, and `""` specifically matches bare flags. Deliberately
+   * exact-only — no ranges, no prefixes, no IN-list. A value is an enum, an
+   * opaque id, a count or a timestamp, and equality is the only operator that
+   * fits that contract; anything richer signals an app using values as data.
+   *
+   * Callers parsing this off a query string must distinguish an **absent**
+   * parameter from an **empty** one (`.has()` vs `.get()`): `?labelValue=` is a
+   * request for bare flags, and reading it as "no filter" silently returns a
+   * superset — which looks like it works.
    */
   value?: string;
   /**

@@ -17,6 +17,7 @@ import type {
   Transaction,
   LabelUpsert,
   LabelRetraction,
+  LabelValueReplacement,
   FindByLabelQuery,
   FindByLabelResult,
 } from "@starkeep/storage-adapter";
@@ -27,6 +28,7 @@ import {
   buildGetLabel,
   buildLabelNodeWatermarks,
   buildLabelRetraction,
+  buildLabelValueReplacementTombstone,
   buildLabelSnapshotUpsert,
   buildLabelUpsert,
   buildLabelsByRecordIds,
@@ -49,14 +51,13 @@ export interface SqliteDatabaseAdapterOptions {
 }
 
 /**
- * How labels are spelled on this backend. The table is flat-named (SQLite has
- * no schemas), and ASC is already nulls-first, so nothing has to be spelled
- * out — the normalized order label-cursor.ts defines is SQLite's natural one.
- * Everything else about label SQL lives in `@starkeep/storage-adapter`.
+ * How labels are spelled on this backend: the table is flat-named, SQLite
+ * having no schemas. That is now the only difference — null ordering used to be
+ * a second one, and stopped being with `value` NOT NULL. Everything else about
+ * label SQL lives in `@starkeep/storage-adapter`.
  */
 const LABELS: LabelDialect = {
   table: "shared_record_labels",
-  spellOutNullsFirst: false,
 };
 
 export class SqliteDatabaseAdapter implements DatabaseAdapter {
@@ -281,8 +282,8 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   //
   // The SQL for all of these is built in `@starkeep/storage-adapter`, shared
   // with the DSQL adapter: same columns, same ON CONFLICT set, same cursor
-  // predicate, same paging. Only the table name and the null-ordering spelling
-  // are this backend's business, and both live in LABELS above.
+  // predicate, same paging. Only the table name is this backend's business,
+  // and it lives in LABELS above.
 
   async upsertLabels(labels: LabelUpsert[]): Promise<void> {
     if (labels.length === 0) return;
@@ -294,6 +295,39 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     for (const r of retractions) {
       const query = buildLabelRetraction(qb, LABELS, r);
       this.runStmt(query.sql, ...query.parameters);
+    }
+  }
+
+  async replaceLabelValues(replacements: LabelValueReplacement[]): Promise<void> {
+    if (replacements.length === 0) return;
+    // Tombstone-then-upsert per key, all in one transaction: a reader must never
+    // see the moment where the old values are gone and the new ones are not yet
+    // there, which for a single-valued key is the key appearing to be unset.
+    this.getDatabase().exec("BEGIN");
+    try {
+      for (const r of replacements) {
+        const tombstone = buildLabelValueReplacementTombstone(qb, LABELS, r);
+        this.runStmt(tombstone.sql, ...tombstone.parameters);
+        if (r.values.length > 0) {
+          const upsert = buildLabelUpsert(
+            qb,
+            LABELS,
+            r.values.map((value) => ({
+              recordId: r.recordId,
+              appId: r.appId,
+              key: r.key,
+              value,
+              recordType: r.recordType,
+              hlc: r.hlc,
+            })),
+          );
+          this.runStmt(upsert.sql, ...upsert.parameters);
+        }
+      }
+      this.getDatabase().exec("COMMIT");
+    } catch (error) {
+      this.getDatabase().exec("ROLLBACK");
+      throw error;
     }
   }
 
@@ -327,8 +361,9 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     recordId: StarkeepId,
     appId: string,
     key: string,
+    value: string,
   ): Promise<RecordLabel | null> {
-    const query = buildGetLabel(qb, LABELS, recordId, appId, key);
+    const query = buildGetLabel(qb, LABELS, recordId, appId, key, value);
     const row = this.getRow<LabelRow>(query.sql, ...query.parameters);
     return row ? rowToLabel(row) : null;
   }

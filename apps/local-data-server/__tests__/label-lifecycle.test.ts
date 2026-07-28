@@ -44,6 +44,14 @@ async function setLabel(app: InstalledApp, key: string, value?: string) {
   });
 }
 
+async function replaceValues(app: InstalledApp, key: string, values: string[]) {
+  return app.fetch("/data/labels/values", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ labels: [{ recordId, key, values }] }),
+  });
+}
+
 async function retractLabel(app: InstalledApp, key: string) {
   return app.fetch("/data/labels/retract", {
     method: "POST",
@@ -58,6 +66,18 @@ async function labelsOnRecord(app: InstalledApp): Promise<string[]> {
     records: Array<{ id: string; labels?: Array<{ label: string }> }>;
   };
   return (records.find((r) => r.id === recordId)?.labels ?? []).map((l) => l.label);
+}
+
+/** Every value this record carries for one `<app>/<key>`, sorted. */
+async function valuesOf(app: InstalledApp, label: string): Promise<string[]> {
+  const res = await app.fetch("/data/records?include=labels&limit=1000");
+  const { records } = (await res.json()) as {
+    records: Array<{ id: string; labels?: Array<{ label: string; value: string }> }>;
+  };
+  return (records.find((r) => r.id === recordId)?.labels ?? [])
+    .filter((l) => l.label === label)
+    .map((l) => l.value)
+    .sort();
 }
 
 async function declaredKeys(app: InstalledApp): Promise<string[]> {
@@ -147,17 +167,31 @@ describe("reinstalling with fewer keys leaves live rows on an undeclared key", (
     expect(await labelsOnRecord(owner)).not.toContain("annotator/drop-me");
   });
 
-  it("updates the surviving row in place rather than writing a second one", async () => {
+  it("adds to the surviving row's key rather than overwriting it", async () => {
+    // `keep-me` was set as a bare flag in setup; this adds a value beside it.
+    // A key is set-valued, so a plain write accumulates — the behaviour every
+    // writer has to know, and the one that used to be an overwrite.
     expect((await setLabel(annotator, "keep-me", "back")).status).toBe(200);
+    expect(await valuesOf(owner, "annotator/keep-me")).toEqual(["", "back"]);
+  });
 
-    const res = await owner.fetch("/data/records?include=labels&limit=1000");
-    const { records } = (await res.json()) as {
-      records: Array<{ id: string; labels?: Array<{ label: string; value: string | null }> }>;
-    };
-    const labels = (records.find((r) => r.id === recordId)?.labels ?? []).filter(
-      (l) => l.label === "annotator/keep-me",
-    );
-    expect(labels).toHaveLength(1);
-    expect(labels[0].value).toBe("back");
+  it("replaces the whole value set with the set-valued write", async () => {
+    // What "update this key" means now: the bare flag goes, `back` stays,
+    // `also` arrives, in one atomic step.
+    expect((await replaceValues(annotator, "keep-me", ["back", "also"])).status).toBe(200);
+    expect(await valuesOf(owner, "annotator/keep-me")).toEqual(["also", "back"]);
+
+    // And an undeclared key cannot be written this way either — the set-valued
+    // path is gated exactly like a plain add.
+    const res = await replaceValues(annotator, "drop-me", ["v3"]);
+    expect(res.status).toBe(400);
+    expect((await res.json()).detail).toContain("not declared");
+  });
+
+  it("clears the key when the set-valued write is given nothing", async () => {
+    // The retraction shape of the same call, and it needs no declared key —
+    // it only tombstones, so gating it as a write would strand the rows.
+    expect((await replaceValues(annotator, "keep-me", [])).status).toBe(200);
+    expect(await valuesOf(owner, "annotator/keep-me")).toEqual([]);
   });
 });

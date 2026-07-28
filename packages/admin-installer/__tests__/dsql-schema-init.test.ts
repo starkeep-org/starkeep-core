@@ -85,22 +85,27 @@ function find(statements: string[], needle: string): string | undefined {
 }
 
 describe("shared.record_labels", () => {
-  it("creates the table with the (record_id, app_id, key) primary key", async () => {
+  it("creates the table with the (record_id, app_id, key, value) primary key", async () => {
     const create = find(await init(), 'create table if not exists "shared"."record_labels"');
     expect(create).toBeTruthy();
     // app_id in the primary key is what keeps two different apps from ever
     // contending on the same row — the OCC problem that ruled out widening
-    // shared.records instead.
-    expect(create).toMatch(/primary key \("record_id", "app_id", "key"\)/);
+    // shared.records instead. `value` is what makes a key set-valued: without
+    // it, faces=Alice and faces=Bob cannot both exist and the value stops being
+    // searchable at all.
+    expect(create).toMatch(/primary key \("record_id", "app_id", "key", "value"\)/);
     // No FK on record_id: DSQL has none, and orphans are tolerated.
     expect(create).not.toMatch(/references/i);
   });
 
-  it("makes value and deleted_at nullable, and everything else NOT NULL", async () => {
+  it("makes deleted_at the only nullable column", async () => {
     const create = find(await init(), 'create table if not exists "shared"."record_labels"')!;
-    // A null value is a bare flag, and a null deleted_at is a live row — both
-    // are load-bearing states, not missing data.
-    expect(create).toMatch(/"value" text[,)]/);
+    // `value` is NOT NULL because a PK column cannot be nullable — a bare flag
+    // is the empty string, and row-present vs row-absent is what carried the
+    // meaning all along. `deleted_at` stays nullable: tombstoned-or-not is
+    // genuinely two-state, and it is pinned by equality in the reverse index
+    // rather than participating in the cursor order.
+    expect(create).toMatch(/"value" text not null/);
     expect(create).toMatch(/"deleted_at" text[,)]/);
     expect(create).toMatch(/"record_type" text not null/);
     expect(create).toMatch(/"node_id" text not null/);

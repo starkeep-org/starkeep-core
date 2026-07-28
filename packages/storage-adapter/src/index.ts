@@ -9,6 +9,7 @@ export type {
   Transaction,
   LabelUpsert,
   LabelRetraction,
+  LabelValueReplacement,
   FindByLabelQuery,
   FindByLabelResult,
 } from "./database/types.js";
@@ -32,6 +33,7 @@ export {
   buildLabelUpsert,
   buildLabelSnapshotUpsert,
   buildLabelRetraction,
+  buildLabelValueReplacementTombstone,
   buildTombstoneLabelsForRecord,
   buildLabelsByRecordIds,
   buildGetLabel,

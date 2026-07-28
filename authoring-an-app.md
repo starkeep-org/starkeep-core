@@ -270,20 +270,37 @@ service shouldn't need destructive power over photos it only reads.
 Declare your keys in the manifest (§2), then:
 
 ```ts
-// Set. `value` is optional — omit it for a bare flag.
+// Add. `value` is optional — omit it for a bare flag (stored as "").
 await fetch("/api/local-data/data/labels", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
     labels: [
       { recordId, key: "faces-detected" },
-      { recordId, key: "face-count", value: "3" },
+      { recordId, key: "face", value: "Alice" },
+      { recordId, key: "face", value: "Bob" },   // same key, second row
     ],
   }),
 });
 
-// Retract (a tombstone, so it syncs).
-await fetch("/api/local-data/data/labels/retract", { /* same shape, no value */ });
+// Make a key hold exactly these values: adds what's missing, retracts what's
+// present and absent from the list, atomically. This — not the add above — is
+// how you *update* a key. An empty `values` clears it.
+await fetch("/api/local-data/data/labels/values", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    labels: [{ recordId, key: "face-count", values: ["4"] }],
+  }),
+});
+
+// Retract (a tombstone, so it syncs). Omitting `value` retracts every value of
+// that key on that record; `value: ""` retracts the bare flag alone.
+await fetch("/api/local-data/data/labels/retract", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ labels: [{ recordId, key: "face" }] }),
+});
 
 // Read them back with a record listing.
 GET /data/records?include=metadata,labels
@@ -291,7 +308,8 @@ GET /data/records?include=labels&labelApps=alpha,gamma   // only these namespace
 
 // Find records another app labelled — the query labels exist for.
 GET /data/records?label=alpha/faces-detected
-GET /data/records?label=alpha/face-count&labelValue=3
+GET /data/records?label=alpha/face&labelValue=Alice
+GET /data/records?label=alpha/faces-detected&labelValue=   // bare flags only
 
 // See what every installed app publishes.
 GET /data/label-keys
@@ -299,6 +317,13 @@ GET /data/label-keys
 
 Things worth knowing before you design around them:
 
+- **A key holds a set, and a plain write adds to it.** `key: "face"` twice with
+  different values is two rows, which is what makes `?labelValue=Alice` an
+  indexed lookup instead of a substring scan over a packed `"Alice,Bob"`. The
+  corollary is the one that bites: writing `face-count=4` over an existing
+  `face-count=3` leaves *both*, and the key then reads back as two answers with
+  nothing to say which is current. Use `/data/labels/values` whenever you mean
+  "this is my current answer" — including for keys you think of as single-valued.
 - **Your `app_id` is never something you send.** The server takes it from your
   authenticated identity. You cannot write into another app's namespace, and a
   body claiming otherwise changes nothing.
@@ -306,8 +331,10 @@ Things worth knowing before you design around them:
   for talking to other apps. If it's your app talking to itself, it belongs in
   app-specific data (§6), not here.
 - **Values are small and dumb by design** — 128 bytes, matched by equality
-  only. An enum, an id pointing back at your own API, a count, a timestamp.
-  Never a sentence, and never a pointer into the shared data model.
+  only, at most 32 per key per record. An enum, an id pointing back at your own
+  API, a count, a timestamp, a name. Never a sentence, and never a pointer into
+  the shared data model. There is no null: a bare flag is the empty string, and
+  the thing that carries meaning is the row existing at all.
 - **Page until `nextCursor` is null.** A short page does *not* mean the end of
   the results; only a null cursor does. Stopping early silently misses matches,
   and only under load — which is worse than an obvious bug.

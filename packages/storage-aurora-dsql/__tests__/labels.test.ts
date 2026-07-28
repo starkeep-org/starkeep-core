@@ -252,8 +252,16 @@ describe("the sync-facing surface", () => {
     const page = await adapter.queryLabels({ limit: 1 });
     expect(page.labels.map((l) => l.recordId)).toEqual(["rec1"]);
     expect(page.hasMore).toBe(true);
+    // All four primary-key columns, `value` included. Without it the cursor is
+    // not unique, and a page boundary landing inside one key's values skips
+    // every sibling after the first — sync losing rows with nothing to notice.
     expect(page.nextCursor).toBe(
-      encodeLabelScanCursor({ recordId: rid("rec1"), appId: "alpha", key: "quality" }),
+      encodeLabelScanCursor({
+        recordId: rid("rec1"),
+        appId: "alpha",
+        key: "quality",
+        value: "high",
+      }),
     );
   });
 

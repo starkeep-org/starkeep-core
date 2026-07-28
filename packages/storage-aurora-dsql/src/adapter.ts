@@ -14,6 +14,7 @@ import type {
   Transaction,
   LabelUpsert,
   LabelRetraction,
+  LabelValueReplacement,
   FindByLabelQuery,
   FindByLabelResult,
 } from "@starkeep/storage-adapter";
@@ -24,6 +25,7 @@ import {
   buildGetLabel,
   buildLabelNodeWatermarks,
   buildLabelRetraction,
+  buildLabelValueReplacementTombstone,
   buildLabelSnapshotUpsert,
   buildLabelUpsert,
   buildLabelsByRecordIds,
@@ -52,15 +54,15 @@ import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
 import { sql, type CompiledQuery } from "kysely";
 
 /**
- * How labels are spelled on this backend. The table lives in the `shared`
- * schema, and Postgres sorts nulls *last* by default — so the reverse query's
- * nulls-first order, which the pagination cursor is defined against, has to be
- * written out. Everything else about label SQL is shared with the SQLite
- * adapter in `@starkeep/storage-adapter`.
+ * How labels are spelled on this backend: the table lives in the `shared`
+ * schema. That is now the only difference — the reverse query also used to have
+ * to spell out `NULLS FIRST`, because Postgres sorts nulls last and SQLite sorts
+ * them first, and the pagination cursor is defined against one order. With
+ * `value` NOT NULL there are no nulls to order. Everything else about label SQL
+ * is shared with the SQLite adapter in `@starkeep/storage-adapter`.
  */
 const LABELS: LabelDialect = {
   table: "shared.record_labels",
-  spellOutNullsFirst: true,
 };
 
 
@@ -357,6 +359,46 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     });
   }
 
+  async replaceLabelValues(replacements: LabelValueReplacement[]): Promise<void> {
+    if (replacements.length === 0) return;
+    // BEGIN…COMMIT, and the whole thing is the retry unit for the same reason
+    // `batch` is: DSQL raises an OCC conflict at COMMIT, so retrying a narrower
+    // span is wrong. Both halves are replay-safe — the tombstone is keyed and
+    // skips already-tombstoned rows, the upsert is keyed and value-independent.
+    //
+    // Atomic because the intermediate state is wrong in a way a reader would
+    // believe: between the tombstone and the upsert a single-valued key looks
+    // unset rather than mid-update.
+    await withOccRetry("replaceLabelValues", async () => {
+      await this.getClient().query("BEGIN");
+      try {
+        for (const r of replacements) {
+          await this.run(buildLabelValueReplacementTombstone(compiler, LABELS, r));
+          if (r.values.length > 0) {
+            await this.run(
+              buildLabelUpsert(
+                compiler,
+                LABELS,
+                r.values.map((value) => ({
+                  recordId: r.recordId,
+                  appId: r.appId,
+                  key: r.key,
+                  value,
+                  recordType: r.recordType,
+                  hlc: r.hlc,
+                })),
+              ),
+            );
+          }
+        }
+        await this.getClient().query("COMMIT");
+      } catch (error) {
+        await this.getClient().query("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
   async getLabelsByRecordIds(
     recordIds: StarkeepId[],
   ): Promise<Map<StarkeepId, RecordLabel[]>> {
@@ -390,9 +432,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     recordId: StarkeepId,
     appId: string,
     key: string,
+    value: string,
   ): Promise<RecordLabel | null> {
     return withOccRetry("getLabel", async () => {
-      const result = await this.run(buildGetLabel(compiler, LABELS, recordId, appId, key));
+      const result = await this.run(
+        buildGetLabel(compiler, LABELS, recordId, appId, key, value),
+      );
       const row = result.rows[0] as unknown as LabelRow | undefined;
       return row ? rowToLabel(row) : null;
     });

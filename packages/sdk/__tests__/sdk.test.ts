@@ -185,7 +185,8 @@ describe("label operations", () => {
     expect(labels).toHaveLength(2);
     expect(labels.every((l) => l.appId === "alpha")).toBe(true);
     expect(labels.every((l) => l.recordType === "image/jpeg")).toBe(true);
-    expect(labels.find((l) => l.key === "ocr-available")!.value).toBeNull();
+    // A bare flag is the empty string — there is no null in the label model.
+    expect(labels.find((l) => l.key === "ocr-available")!.value).toBe("");
   });
 
   it("rejects a malformed key before writing anything", async () => {
@@ -420,19 +421,71 @@ describe("setLabels owns the chunking", () => {
     expect(localDatabase.retractCallSizes).toEqual([CHUNK, 1]);
   });
 
-  it("collapses a repeated (record, key) before chunking, last write winning", async () => {
+  it("collapses a repeated (record, key, value) before chunking, last write winning", async () => {
     // Postgres rejects a multi-row upsert that touches one row twice, so a
     // caller's duplicate would be a cloud-only 500 without this.
     const { sdk, localDatabase, ids } = await sdkWithBareRecords(1);
     await sdk.data.setLabels("alpha", [
       { recordId: ids[0] as never, key: "quality", value: "high" },
-      { recordId: ids[0] as never, key: "quality", value: "low" },
+      { recordId: ids[0] as never, key: "quality", value: "high" },
     ]);
 
     expect(localDatabase.upsertCallSizes).toEqual([1]);
     const labels = (await sdk.data.getLabelsByIds([ids[0] as never])).get(ids[0] as never)!;
     expect(labels).toHaveLength(1);
-    expect(labels[0].value).toBe("low");
+  });
+
+  it("keeps two values of one key as two rows through the whole path", async () => {
+    // The dedupe tuple includes `value`; on the old three-column key this
+    // collapses to one row and turns a set-valued write into a single-valued
+    // one, with no error and perfectly plausible output.
+    const { sdk, localDatabase, ids } = await sdkWithBareRecords(1);
+    await sdk.data.setLabels("alpha", [
+      { recordId: ids[0] as never, key: "face", value: "Alice" },
+      { recordId: ids[0] as never, key: "face", value: "Bob" },
+    ]);
+
+    expect(localDatabase.upsertCallSizes).toEqual([2]);
+    const labels = (await sdk.data.getLabelsByIds([ids[0] as never])).get(ids[0] as never)!;
+    expect(labels.map((l) => l.value).sort()).toEqual(["Alice", "Bob"]);
+  });
+
+  it("replaceLabelValues makes a key hold exactly the values given", async () => {
+    // How a key is *updated* now that a plain write adds: Alice kept, Bob
+    // tombstoned, Carol added, atomically per record.
+    const { sdk, ids } = await sdkWithBareRecords(1);
+    await sdk.data.setLabels("alpha", [
+      { recordId: ids[0] as never, key: "face", value: "Alice" },
+      { recordId: ids[0] as never, key: "face", value: "Bob" },
+    ]);
+    await sdk.data.replaceLabelValues("alpha", [
+      { recordId: ids[0] as never, key: "face", values: ["Alice", "Carol"] },
+    ]);
+
+    const labels = (await sdk.data.getLabelsByIds([ids[0] as never])).get(ids[0] as never)!;
+    expect(labels.map((l) => l.value).sort()).toEqual(["Alice", "Carol"]);
+  });
+
+  it("replaceLabelValues with no values clears the key", async () => {
+    const { sdk, ids } = await sdkWithBareRecords(1);
+    await sdk.data.setLabels("alpha", [{ recordId: ids[0] as never, key: "face", value: "Alice" }]);
+    await sdk.data.replaceLabelValues("alpha", [
+      { recordId: ids[0] as never, key: "face", values: [] },
+    ]);
+    expect((await sdk.data.getLabelsByIds([ids[0] as never])).get(ids[0] as never)).toBeUndefined();
+  });
+
+  it("retracting without a value takes back every value of the key", async () => {
+    const { sdk, ids } = await sdkWithBareRecords(1);
+    await sdk.data.setLabels("alpha", [
+      { recordId: ids[0] as never, key: "face", value: "Alice" },
+      { recordId: ids[0] as never, key: "face", value: "Bob" },
+      { recordId: ids[0] as never, key: "quality", value: "high" },
+    ]);
+    await sdk.data.retractLabels("alpha", [{ recordId: ids[0] as never, key: "face" }]);
+
+    const labels = (await sdk.data.getLabelsByIds([ids[0] as never])).get(ids[0] as never)!;
+    expect(labels.map((l) => l.key)).toEqual(["quality"]);
   });
 
   it("emits one change event for the whole batch, with each record once", async () => {

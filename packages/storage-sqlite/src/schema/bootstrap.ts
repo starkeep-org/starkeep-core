@@ -119,7 +119,10 @@ function applyLocalSchemaDdl(db: DatabaseSync): void {
       .addColumn("record_id", "text", (c) => c.notNull())
       .addColumn("app_id", "text", (c) => c.notNull())
       .addColumn("key", "text", (c) => c.notNull())
-      .addColumn("value", "text")
+      // In the primary key, so a key is set-valued (faces=Alice and faces=Bob
+      // are two rows), and therefore NOT NULL — a bare flag is "". See the
+      // matching comment in dsql-schema-init.ts.
+      .addColumn("value", "text", (c) => c.notNull())
       // Denormalized from shared_records.type (immutable), so read gating
       // never joins back — on the reverse path that join is unbounded.
       .addColumn("record_type", "text", (c) => c.notNull())
@@ -131,6 +134,7 @@ function applyLocalSchemaDdl(db: DatabaseSync): void {
         "record_id",
         "app_id",
         "key",
+        "value",
       ] as never[])
       .compile().sql,
   );

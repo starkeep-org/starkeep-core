@@ -110,7 +110,7 @@ describe("shared_app_label_keys registry", () => {
     db.prepare(
       `INSERT INTO shared_record_labels
          (record_id, app_id, key, value, record_type, created_at, updated_at, node_id, deleted_at)
-       VALUES ('rec1', 'alpha', 'ocr-available', NULL, 'image/jpeg', 't0', 't0', 'nodeA', NULL)`,
+       VALUES ('rec1', 'alpha', 'ocr-available', '', 'image/jpeg', 't0', 't0', 'nodeA', NULL)`,
     ).run();
 
     deleteAppLabelKeys(db, "alpha");

@@ -6,6 +6,7 @@ import {
   validateLabelWrite,
   dedupeLabelWrites,
   isValidLabelKey,
+  LABEL_VALUES_PER_KEY_MAX,
   type DataRecord,
   type MetadataRow,
   type StarkeepId,
@@ -122,6 +123,32 @@ export async function createStarkeepSdk(
       recordIds: [...new Set(recordIds)],
       timestamp: clock.now(),
     });
+  }
+
+  /**
+   * `record id → records.type` for the live records among `recordIds`, which
+   * every label row needs denormalized onto it. Missing ids are missing records.
+   *
+   * This read — not the upsert — is very likely the dominant cost of a bulk
+   * labelling job, and it is what the "one statement per batch" framing hides.
+   */
+  async function loadRecordTypes(
+    recordIds: StarkeepId[],
+  ): Promise<Map<string, string>> {
+    const ids = [...new Set(recordIds)];
+    const types = new Map<string, string>();
+    for (let i = 0; i < ids.length; i += LABEL_WRITE_CHUNK) {
+      const slice = ids.slice(i, i + LABEL_WRITE_CHUNK);
+      const found = await databaseAdapter.query({
+        filters: [
+          { field: "id", operator: "in", value: slice },
+          { field: "deletedAt", operator: "isNull" },
+        ],
+        limit: slice.length,
+      });
+      for (const r of found.records) types.set(r.id, r.type);
+    }
+    return types;
   }
 
   const sharedSpaceApi = createSharedSpaceApi({
@@ -298,32 +325,18 @@ export async function createStarkeepSdk(
         // Shape first, across the whole batch, so a bad key fails before any
         // chunk is written rather than partway through a bulk job.
         for (const e of entries) {
-          const problem = validateLabelWrite({ key: e.key, value: e.value ?? null });
+          const problem = validateLabelWrite({ key: e.key, value: e.value ?? "" });
           if (problem) throw new Error(problem);
         }
 
         // Every label needs its record's type, denormalized onto the row.
-        // This read — not the upsert — is very likely the dominant cost of a
-        // bulk labelling job, and it is what the "one statement per batch"
-        // framing hides.
-        const ids = [...new Set(entries.map((e) => e.recordId))];
-        const recordTypes = new Map<string, string>();
-        for (let i = 0; i < ids.length; i += LABEL_WRITE_CHUNK) {
-          const slice = ids.slice(i, i + LABEL_WRITE_CHUNK);
-          const found = await databaseAdapter.query({
-            filters: [
-              { field: "id", operator: "in", value: slice },
-              { field: "deletedAt", operator: "isNull" },
-            ],
-            limit: slice.length,
-          });
-          for (const r of found.records) recordTypes.set(r.id, r.type);
-        }
+        const recordTypes = await loadRecordTypes(entries.map((e) => e.recordId));
 
-        // Deduped by (recordId, key), last wins. A chunk is one multi-row
-        // upsert, and Postgres/DSQL rejects one that touches the same row
-        // twice while SQLite quietly keeps the last — so an undeduped repeat
-        // is a batch that works locally and 500s in the cloud.
+        // Deduped by (recordId, key, value) — `value` included, because it is
+        // in the primary key and two values of one key are two rows. A chunk is
+        // one multi-row upsert, and Postgres/DSQL rejects one that touches the
+        // same row twice while SQLite quietly keeps the last — so an undeduped
+        // repeat is a batch that works locally and 500s in the cloud.
         const rows = dedupeLabelWrites(entries).map((e) => {
           const recordType = recordTypes.get(e.recordId);
           if (recordType === undefined) {
@@ -331,12 +344,14 @@ export async function createStarkeepSdk(
             // an orphan silently.
             throw new Error(`Cannot label record ${e.recordId}: it does not exist`);
           }
-          return { recordId: e.recordId, key: e.key, value: e.value ?? null, recordType };
+          return { recordId: e.recordId, key: e.key, value: e.value ?? "", recordType };
         });
 
-        // DSQL caps a transaction at 3,000 modified rows. Chunks are not
-        // atomic with each other; the upsert being idempotent is what makes a
-        // partial failure safe to retry from the beginning.
+        // DSQL caps a transaction at 3,000 modified rows, so the chunk is a
+        // count of *rows* — one record can now contribute many, and chunking on
+        // records would blow the cap on a batch that looked small. Chunks are
+        // not atomic with each other; the upsert being idempotent is what makes
+        // a partial failure safe to retry from the beginning.
         const hlc = clock.now();
         for (let i = 0; i < rows.length; i += LABEL_WRITE_CHUNK) {
           await databaseAdapter.upsertLabels(
@@ -346,6 +361,52 @@ export async function createStarkeepSdk(
         logLabelChange(rows.map((r) => r.recordId));
       },
 
+      async replaceLabelValues(appId, entries) {
+        if (entries.length === 0) return;
+
+        for (const e of entries) {
+          // An empty `values` is legal — it is how a key is cleared — so the
+          // key still has to be validated on its own when there is nothing to
+          // validate it alongside.
+          if (!isValidLabelKey(e.key)) throw new Error(`invalid label key "${e.key}"`);
+          for (const value of e.values) {
+            const problem = validateLabelWrite({ key: e.key, value });
+            if (problem) throw new Error(problem);
+          }
+          const distinct = new Set(e.values).size;
+          if (distinct > LABEL_VALUES_PER_KEY_MAX) {
+            throw new Error(
+              `${distinct} values for key "${e.key}" on record "${e.recordId}", ` +
+                `over the ${LABEL_VALUES_PER_KEY_MAX}-value limit`,
+            );
+          }
+        }
+
+        const recordTypes = await loadRecordTypes(entries.map((e) => e.recordId));
+
+        // One replacement per (record, key) — each is atomic in the adapter,
+        // and they are not atomic with each other, same as a chunked setLabels.
+        // Deduped on distinct values: a repeat is the same row, and the upsert
+        // half cannot touch one row twice on DSQL.
+        const hlc = clock.now();
+        const replacements = entries.map((e) => {
+          const recordType = recordTypes.get(e.recordId);
+          if (recordType === undefined) {
+            throw new Error(`Cannot label record ${e.recordId}: it does not exist`);
+          }
+          return {
+            recordId: e.recordId,
+            appId,
+            key: e.key,
+            values: [...new Set(e.values)],
+            recordType,
+            hlc,
+          };
+        });
+        await databaseAdapter.replaceLabelValues(replacements);
+        logLabelChange(replacements.map((r) => r.recordId));
+      },
+
       async retractLabels(appId, entries) {
         if (entries.length === 0) return;
         for (const e of entries) {
@@ -353,12 +414,17 @@ export async function createStarkeepSdk(
         }
         // Deliberately no record-existence check: retracting a label on a
         // deleted record is a no-op, not an error.
+        //
+        // `value` is passed through as-is, undefined included — that is the
+        // "retract every value of this key" form, and defaulting it to `""`
+        // here would silently narrow it to the bare flag alone.
         const hlc = clock.now();
         for (let i = 0; i < entries.length; i += LABEL_WRITE_CHUNK) {
           await databaseAdapter.retractLabels(
             entries.slice(i, i + LABEL_WRITE_CHUNK).map((e) => ({
               recordId: e.recordId,
               key: e.key,
+              value: e.value,
               appId,
               hlc,
             })),

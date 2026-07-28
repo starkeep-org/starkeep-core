@@ -285,6 +285,10 @@ describe("record registration", () => {
       .on(/from "shared"\."records" where "id" in/, (q) => [
         recordRow({ id: String(q.values[0]), type: "image/jpeg" }),
       ])
+      // The second read the write path makes: this app's stored values for the
+      // batch's records, so the per-key value cap counts rows already there
+      // rather than only the ones in the batch. A brand-new record has none.
+      .on(/from "shared"\."record_labels" where "record_id" in/, [])
       .on(/insert into "shared"\."record_labels"/, []);
     setDbFactory(db);
     s3Mock.on(HeadObjectCommand).resolves({});
