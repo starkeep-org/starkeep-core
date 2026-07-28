@@ -98,12 +98,19 @@ const RECORDS_UPDATE = /update "shared"\."records"/;
 const LABELS_INSERT = /insert into "shared"\."record_labels"/;
 const LABELS_UPDATE = /update "shared"\."record_labels"/;
 const LABELS_SELECT = /select \* from "shared"\."record_labels"/;
+/**
+ * The forward hydration shape — `?include=labels`, and now also the
+ * value-cardinality cap's read of what the app already has stored. Narrow
+ * enough not to shadow the reverse query, which orders by value.
+ */
+const LABELS_BY_IDS = /from "shared"\."record_labels" where "record_id" in/;
 const LABEL_KEYS_SELECT = /from "shared"\."app_label_keys"/;
 
 /** Read-only grant on image/jpeg, with two declared label keys. */
 function annotatorDb(over?: {
   records?: Record<string, unknown>[];
   declaredKeys?: string[];
+  storedLabels?: Record<string, unknown>[];
 }): FakeDsql {
   return fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
     .on(LABEL_KEYS_SELECT, (over?.declaredKeys ?? ["faces-detected", "face-count"]).map((key) => ({
@@ -112,6 +119,10 @@ function annotatorDb(over?: {
       description: `desc for ${key}`,
     })))
     .on(RECORDS_SELECT, over?.records ?? [recordRow({ id: "rec1", type: "image/jpeg" })])
+    // The write path reads this app's stored values for the batch's records, so
+    // the value cap counts rows already there and not just the ones in front of
+    // it. Empty = nothing stored yet, which is what every test here assumes.
+    .on(LABELS_BY_IDS, over?.storedLabels ?? [])
     .on(LABELS_INSERT, [])
     .on(LABELS_UPDATE, []);
 }
@@ -375,7 +386,7 @@ describe("GET /data/records with labels", () => {
       context,
     );
     const { records } = bodyOf(withLabels) as {
-      records: Array<{ labels?: Array<{ label: string; value: string | null }> }>;
+      records: Array<{ labels?: Array<{ label: string; value: string }> }>;
     };
     expect(records[0].labels).toEqual([
       { app_id: "annotator", key: "face-count", value: "3", label: "annotator/face-count" },
@@ -460,7 +471,11 @@ describe("the reverse query end to end", () => {
       record_id: "rec1",
       app_id: "annotator",
       key: "faces-detected",
-      value: null,
+      // "" — a bare flag. `value` is NOT NULL now, and a fixture that still
+      // carried a null would make the reverse cursor undecodable, which
+      // degrades the next page into an unfiltered first page rather than
+      // erroring.
+      value: "",
       record_type: "image/jpeg",
       created_at: TEST_HLC,
       updated_at: TEST_HLC,
@@ -704,10 +719,14 @@ describe("labels supplied on record create", () => {
       .on(/from "shared"\."records" where "id" in/, (q) => [
         recordRow({ id: String(q.values[0]), type: "image/jpeg" }),
       ])
+      // The write path reads this app's stored values for the batch's records
+      // so the value cap counts what is already there. A brand-new record has
+      // none.
+      .on(LABELS_BY_IDS, [])
       .on(LABELS_INSERT, []);
   }
 
-  function createEvent(labels: Array<{ key: string; value?: string | null }>) {
+  function createEvent(labels: Array<{ key: string; value?: string }>) {
     return signedEvent({
       appId: "photos",
       method: "POST",

@@ -138,6 +138,7 @@ export function createInProcessSyncTransport(
             incoming.recordId,
             incoming.appId,
             incoming.key,
+            incoming.value,
           );
           if (current && compareHLC(current.updatedAt, incoming.updatedAt) >= 0) {
             continue;

@@ -70,9 +70,20 @@ afterAll(async () => {
 
 async function setLabels(
   app: InstalledApp,
-  labels: Array<{ recordId: string; key: string; value?: string | null }>,
+  labels: Array<{ recordId: string; key: string; value?: string }>,
 ): Promise<Response> {
   return app.fetch("/data/labels", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ labels }),
+  });
+}
+
+async function replaceValues(
+  app: InstalledApp,
+  labels: Array<{ recordId: string; key: string; values: string[] }>,
+): Promise<Response> {
+  return app.fetch("/data/labels/values", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ labels }),
@@ -130,15 +141,86 @@ describe("writing labels", () => {
     expect(res.status).toBe(400);
   });
 
-  it("updates a label in place rather than duplicating it", async () => {
+  it("adds a second value to a key rather than overwriting", async () => {
+    // A key is set-valued, so this is two rows and not an update. It is the
+    // single behaviour change every writer has to know about, and it produces
+    // no error — the key simply reads back as two answers at once.
     const { record } = await createRecordWithBytes(owner, { fileName: "upsert.jpg" });
     await setLabels(annotator, [{ recordId: record.id, key: "face-count", value: "1" }]);
     await setLabels(annotator, [{ recordId: record.id, key: "face-count", value: "9" }]);
 
-    const labels = await labelsFor(owner, record.id);
-    const counts = labels.filter((l) => l.key === "face-count");
-    expect(counts).toHaveLength(1);
-    expect(counts[0].value).toBe("9");
+    const counts = (await labelsFor(owner, record.id)).filter((l) => l.key === "face-count");
+    expect(counts.map((l) => l.value).sort()).toEqual(["1", "9"]);
+  });
+
+  it("writes two values of one key in a single batch", async () => {
+    // Deduped on three columns this batch collapses to one row, silently
+    // turning a set-valued write into a single-valued one.
+    const { record } = await createRecordWithBytes(owner, { fileName: "multi.jpg" });
+    const res = await setLabels(annotator, [
+      { recordId: record.id, key: "face-count", value: "1" },
+      { recordId: record.id, key: "face-count", value: "2" },
+    ]);
+    expect(res.status).toBe(200);
+    expect((await res.json()).written).toBe(2);
+
+    const counts = (await labelsFor(owner, record.id)).filter((l) => l.key === "face-count");
+    expect(counts.map((l) => l.value).sort()).toEqual(["1", "2"]);
+  });
+
+  it("updates a single-valued key in place with the set-valued write", async () => {
+    // The endpoint that replaces: `9` arrives and `1` is tombstoned, in one
+    // atomic step. This is what a plain write used to do, and what an app
+    // treating a key as single-valued now has to ask for explicitly.
+    const { record } = await createRecordWithBytes(owner, { fileName: "replace.jpg" });
+    await setLabels(annotator, [{ recordId: record.id, key: "face-count", value: "1" }]);
+    expect(
+      (await replaceValues(annotator, [{ recordId: record.id, key: "face-count", values: ["9"] }]))
+        .status,
+    ).toBe(200);
+
+    const counts = (await labelsFor(owner, record.id)).filter((l) => l.key === "face-count");
+    expect(counts.map((l) => l.value)).toEqual(["9"]);
+  });
+
+  it("caps the values one key may hold on one record, counting stored rows", async () => {
+    // The value-side counterpart of the per-app key cap. Counted over the batch
+    // alone it is cleared by sending 32 values repeatedly — exactly the
+    // smuggling channel it exists to close.
+    const { record } = await createRecordWithBytes(owner, { fileName: "cap.jpg" });
+    const values = (from: number, count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        recordId: record.id,
+        key: "face-count",
+        value: String(from + i),
+      }));
+
+    expect((await setLabels(annotator, values(0, 30))).status).toBe(200);
+    // 30 stored + 5 new = 35, over the 32 cap, though the batch itself is tiny.
+    const over = await setLabels(annotator, values(30, 5));
+    expect(over.status).toBe(400);
+    expect((await over.json()).detail).toContain("32 values");
+    // Re-writing values it already holds costs no slots.
+    expect((await setLabels(annotator, values(0, 30))).status).toBe(200);
+  });
+
+  it("retracts every value of a key when no value is given", async () => {
+    const { record } = await createRecordWithBytes(owner, { fileName: "retract-all.jpg" });
+    await setLabels(annotator, [
+      { recordId: record.id, key: "face-count", value: "1" },
+      { recordId: record.id, key: "face-count", value: "2" },
+      { recordId: record.id, key: "faces-detected" },
+    ]);
+
+    const res = await annotator.fetch("/data/labels/retract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ labels: [{ recordId: record.id, key: "face-count" }] }),
+    });
+    expect(res.status).toBe(200);
+
+    // Only face-count went; the other key is untouched.
+    expect((await labelsFor(owner, record.id)).map((l) => l.key)).toEqual(["faces-detected"]);
   });
 
   it("has no way to express another app's namespace", async () => {
@@ -201,7 +283,7 @@ describe("reading labels", () => {
 
     const rows = await listWith(owner, "?include=labels&labelApps=owner&limit=1000");
     expect(rows.find((r) => r.id === record.id)!.labels).toEqual([
-      { app_id: "owner", key: "thumbnail", value: null, label: "owner/thumbnail" },
+      { app_id: "owner", key: "thumbnail", value: "", label: "owner/thumbnail" },
     ]);
   });
 
@@ -590,7 +672,8 @@ describe("GET /data/label-keys", () => {
 interface WireLabel {
   app_id: string;
   key: string;
-  value: string | null;
+  /** Never null: a bare flag is the empty string. */
+  value: string;
   label: string;
 }
 

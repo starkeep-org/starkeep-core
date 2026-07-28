@@ -370,10 +370,16 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             // HLC LWW on the label's own row, which is the whole reason
             // labels are a separate table: a record's whole-row LWW would
             // otherwise let a concurrent metadata update eat a label.
+            //
+            // `value` is part of the row's identity, so each value of a
+            // set-valued key gets its own LWW domain. Looking up without it
+            // would compare an incoming `faces=Bob` against whichever row
+            // happened to be found — and drop it as stale.
             const current = await localDatabaseAdapter.getLabel(
               incoming.recordId,
               incoming.appId,
               incoming.key,
+              incoming.value,
             );
             if (
               current === null ||

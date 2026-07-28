@@ -17,7 +17,8 @@ export interface LabelRow {
   record_id: string;
   app_id: string;
   key: string;
-  value: string | null;
+  /** NOT NULL and part of the primary key; `""` is a bare flag. */
+  value: string;
   record_type: string;
   created_at: string;
   updated_at: string;

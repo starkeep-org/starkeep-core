@@ -4,6 +4,8 @@ import {
   planLabelWrites,
   planLabelRetractions,
   LABEL_VALUE_MAX_BYTES,
+  LABEL_VALUES_PER_KEY_MAX,
+  labelValueSetKey,
   formatLabelRef,
   isValidLabelKey,
   isValidLabelValue,
@@ -40,8 +42,10 @@ describe("isValidLabelKey", () => {
 });
 
 describe("isValidLabelValue", () => {
-  it("accepts null — a bare flag is a first-class label", () => {
-    expect(isValidLabelValue(null)).toBe(true);
+  it("accepts the empty string — a bare flag is a first-class label", () => {
+    // There is no null in the label model: 0 bytes is trivially within the
+    // limit, and row-present vs row-absent is what carries the meaning.
+    expect(isValidLabelValue("")).toBe(true);
   });
 
   it("accepts values up to 128 bytes", () => {
@@ -61,12 +65,12 @@ describe("isValidLabelValue", () => {
 
 describe("validateLabelWrite", () => {
   it("returns null for a well-formed flag and a well-formed valued label", () => {
-    expect(validateLabelWrite({ key: "needs-review", value: null })).toBeNull();
+    expect(validateLabelWrite({ key: "needs-review", value: "" })).toBeNull();
     expect(validateLabelWrite({ key: "quality", value: "high" })).toBeNull();
   });
 
   it("names the offending key when the key is malformed", () => {
-    const err = validateLabelWrite({ key: "Needs Review", value: null });
+    const err = validateLabelWrite({ key: "Needs Review", value: "" });
     expect(err).toContain("Needs Review");
   });
 
@@ -116,7 +120,7 @@ describe("planLabelWrites", () => {
     });
     expect(plan.ok).toBe(true);
     expect(plan.ok && plan.writes).toEqual([
-      { recordId: "rec1", key: "ocr-available", value: null, recordType: "image/jpeg" },
+      { recordId: "rec1", key: "ocr-available", value: "", recordType: "image/jpeg" },
       { recordId: "rec1", key: "quality", value: "high", recordType: "image/jpeg" },
     ]);
   });
@@ -179,12 +183,42 @@ describe("dedupeLabelWrites", () => {
   // touches one row twice is an ERROR on Postgres/DSQL (21000) and silently
   // last-wins on SQLite, so an undeduped batch is one that passes every
   // offline test and 500s against the cloud.
-  it("keeps the last write for a repeated (recordId, key)", () => {
+  it("keeps the last write for a repeated (recordId, key, value)", () => {
     const deduped = dedupeLabelWrites([
       { recordId: "rec1" as never, key: "quality", value: "high" },
-      { recordId: "rec1" as never, key: "quality", value: "low" },
+      { recordId: "rec1" as never, key: "quality", value: "high" },
     ]);
-    expect(deduped).toEqual([{ recordId: "rec1", key: "quality", value: "low" }]);
+    expect(deduped).toEqual([{ recordId: "rec1", key: "quality", value: "high" }]);
+  });
+
+  // The whole point of the set-valued primary key: two values of one key are two
+  // rows. Deduping these together would silently turn every multi-valued write
+  // into a single-valued one, with no error and plausible-looking output.
+  it("does NOT collapse two values of the same key on one record", () => {
+    const deduped = dedupeLabelWrites([
+      { recordId: "rec1" as never, key: "faces", value: "Alice" },
+      { recordId: "rec1" as never, key: "faces", value: "Bob" },
+    ]);
+    expect(deduped).toHaveLength(2);
+  });
+
+  // A single-character separator would let ("a b","c") and ("a","b c") collide.
+  it("does not collide on values containing the separator", () => {
+    const deduped = dedupeLabelWrites([
+      { recordId: "rec1" as never, key: "k", value: "a b" },
+      { recordId: "rec1" as never, key: "k", value: "a" },
+    ]);
+    expect(deduped).toHaveLength(2);
+  });
+
+  // Omitted value is the bare flag, i.e. "" — and must not merge with a real
+  // value that happens to be adjacent in the tuple encoding.
+  it("treats an omitted value as distinct from a valued write", () => {
+    const deduped = dedupeLabelWrites([
+      { recordId: "rec1" as never, key: "k" },
+      { recordId: "rec1" as never, key: "k", value: "v" },
+    ]);
+    expect(deduped).toHaveLength(2);
   });
 
   it("does not collapse the same key on different records, or different keys", () => {
@@ -200,10 +234,9 @@ describe("dedupeLabelWrites", () => {
     const deduped = dedupeLabelWrites([
       { recordId: "a" as never, key: "k", value: "1" },
       { recordId: "b" as never, key: "k", value: "2" },
-      { recordId: "a" as never, key: "k", value: "3" },
+      { recordId: "a" as never, key: "k", value: "1" },
     ]);
     expect(deduped.map((e) => e.recordId)).toEqual(["a", "b"]);
-    expect(deduped[0].value).toBe("3");
   });
 });
 
@@ -214,7 +247,10 @@ describe("planLabelWrites deduping", () => {
     canReadType: () => true,
   };
 
-  it("emits one write per (record, key), last value winning", () => {
+  // Two values of one key are two rows, not a last-wins overwrite. An app that
+  // means "replace" says so explicitly — see the replace-mode write path — because
+  // nothing here can tell a single-valued key from a set-valued one.
+  it("emits one write per (record, key, value)", () => {
     const plan = planLabelWrites({
       ...base,
       entries: [
@@ -223,8 +259,91 @@ describe("planLabelWrites deduping", () => {
       ],
     });
     expect(plan.ok && plan.writes).toEqual([
+      { recordId: "rec1", key: "quality", value: "high", recordType: "image/jpeg" },
       { recordId: "rec1", key: "quality", value: "low", recordType: "image/jpeg" },
     ]);
+  });
+
+  it("rejects more than LABEL_VALUES_PER_KEY_MAX values for one key on one record", () => {
+    const plan = planLabelWrites({
+      ...base,
+      entries: Array.from({ length: LABEL_VALUES_PER_KEY_MAX + 1 }, (_, i) => ({
+        recordId: "rec1" as never,
+        key: "quality",
+        value: `v${i}`,
+      })),
+    });
+    expect(plan.ok).toBe(false);
+  });
+
+  it("does not charge a repeated row twice against the value cap", () => {
+    const plan = planLabelWrites({
+      ...base,
+      entries: Array.from({ length: LABEL_VALUES_PER_KEY_MAX + 5 }, () => ({
+        recordId: "rec1" as never,
+        key: "quality",
+        value: "same",
+      })),
+    });
+    expect(plan.ok).toBe(true);
+  });
+
+  it("counts stored values against the cap, not just the batch's", () => {
+    // A cap that only saw the batch would be cleared by sending 32 values
+    // thirty times — which is exactly the smuggling channel it exists to close,
+    // and it would pass every test that only ever writes one batch.
+    const existingValues = new Map([
+      [
+        labelValueSetKey("rec1" as never, "quality"),
+        new Set(Array.from({ length: LABEL_VALUES_PER_KEY_MAX - 1 }, (_, i) => `stored${i}`)),
+      ],
+    ]);
+    const oneMore = (values: string[]) =>
+      planLabelWrites({
+        ...base,
+        existingValues,
+        entries: values.map((value) => ({
+          recordId: "rec1" as never,
+          key: "quality",
+          value,
+        })),
+      });
+
+    // 31 stored + 1 new = 32, exactly at the cap.
+    expect(oneMore(["new"]).ok).toBe(true);
+    // 31 stored + 2 new = 33, over it.
+    expect(oneMore(["new", "newer"]).ok).toBe(false);
+    // Re-writing a value already stored takes no new slot: a slot is a value,
+    // not a write, so an idempotent re-run of a full batch must not fail.
+    expect(oneMore(["stored0", "stored1"]).ok).toBe(true);
+  });
+
+  it("counts each key separately, and each record separately", () => {
+    const plan = planLabelWrites({
+      ...base,
+      recordTypes: new Map([
+        ["rec1", "image/jpeg"],
+        ["rec2", "image/jpeg"],
+      ]),
+      entries: [
+        ...Array.from({ length: LABEL_VALUES_PER_KEY_MAX }, (_, i) => ({
+          recordId: "rec1" as never,
+          key: "quality",
+          value: `v${i}`,
+        })),
+        ...Array.from({ length: LABEL_VALUES_PER_KEY_MAX }, (_, i) => ({
+          recordId: "rec1" as never,
+          key: "bad",
+          value: `v${i}`,
+        })),
+        ...Array.from({ length: LABEL_VALUES_PER_KEY_MAX }, (_, i) => ({
+          recordId: "rec2" as never,
+          key: "quality",
+          value: `v${i}`,
+        })),
+      ],
+    });
+    expect(plan.ok).toBe(true);
   });
 
   it("still validates every entry before deduping", () => {

@@ -56,8 +56,8 @@ const postgres = new Kysely<LabelDb>({
   },
 });
 
-const SQLITE: LabelDialect = { table: "shared_record_labels", spellOutNullsFirst: false };
-const DSQL: LabelDialect = { table: "shared.record_labels", spellOutNullsFirst: true };
+const SQLITE: LabelDialect = { table: "shared_record_labels" };
+const DSQL: LabelDialect = { table: "shared.record_labels" };
 
 const clock = createHLCClock({ nodeId: "nodeA", wallClockFunction: () => 1000 });
 const rid = (s: string) => s as StarkeepId;
@@ -71,7 +71,7 @@ const upsertRow = {
   recordId: rid("rec1"),
   appId: "alpha",
   key: "quality",
-  value: "high" as string | null,
+  value: "high",
   recordType: "image/jpeg",
   hlc: clock.now(),
 };
@@ -104,7 +104,12 @@ describe("buildLabelUpsert", () => {
     );
     for (const q of [s, d]) {
       const updateSet = q.sql.slice(q.sql.indexOf("do update set"));
-      expect(q.sql).toMatch(/on conflict \("record_id", "app_id", "key"\) do update set/);
+      expect(q.sql).toMatch(
+        /on conflict \("record_id", "app_id", "key", "value"\) do update set/,
+      );
+      // `value` is a conflict *target*, not something to overwrite: a differing
+      // value is a different row, so there is nothing left for it to update.
+      expect(updateSet).not.toMatch(/"value" =/);
       // Bound as a parameter rather than a literal `null`, so this checks the
       // column is in the update set and that the value bound for it is null.
       expect(updateSet).toMatch(/"deleted_at" = /);
@@ -121,17 +126,31 @@ describe("buildLabelUpsert", () => {
     // a cloud-only failure.
     const { dsql } = both((k, dialect) =>
       buildLabelUpsert(k, dialect, [
-        upsertRow, // rec1 = "high"
-        { ...upsertRow, value: "low" }, // rec1 again, later
-        { ...upsertRow, recordId: rid("rec2"), value: "other" },
+        upsertRow, // rec1/quality = "high"
+        { ...upsertRow, recordType: "image/png" }, // the same row again, later
+        { ...upsertRow, recordId: rid("rec2"), value: "other", recordType: "image/gif" },
       ]),
     );
-    // The superseded value never reaches the statement, and rec1 appears once.
-    expect(dsql.parameters.filter((p) => p === "high")).toHaveLength(0);
-    expect(dsql.parameters.filter((p) => p === "low")).toHaveLength(1);
+    // The superseded row never reaches the statement, and rec1 appears once.
+    expect(dsql.parameters.filter((p) => p === "image/jpeg")).toHaveLength(0);
+    expect(dsql.parameters.filter((p) => p === "image/png")).toHaveLength(1);
     expect(dsql.parameters.filter((p) => p === "rec1")).toHaveLength(1);
     // The distinct row is untouched by the dedupe.
     expect(dsql.parameters.filter((p) => p === "other")).toHaveLength(1);
+  });
+
+  it("keeps two values of one key as two rows — the set-valued case", () => {
+    // The dedupe key includes `value`; on the three-column tuple this batch
+    // would collapse to one row and turn a set-valued write into a
+    // single-valued one, with no error and perfectly plausible output.
+    const { dsql } = both((k, dialect) =>
+      buildLabelUpsert(k, dialect, [
+        { ...upsertRow, key: "face", value: "Alice" },
+        { ...upsertRow, key: "face", value: "Bob" },
+      ]),
+    );
+    expect(dsql.parameters.filter((p) => p === "Alice")).toHaveLength(1);
+    expect(dsql.parameters.filter((p) => p === "Bob")).toHaveLength(1);
   });
 
   it("addresses the right table on each backend", () => {
@@ -148,7 +167,7 @@ describe("buildLabelSnapshotUpsert", () => {
     recordId: rid("rec1"),
     appId: "alpha",
     key: "k",
-    value: null,
+    value: "",
     recordType: "image/jpeg",
     createdAt: clock.now(),
     updatedAt: clock.now(),
@@ -171,12 +190,13 @@ describe("buildLabelSnapshotUpsert", () => {
 });
 
 describe("buildLabelRetraction and the delete cascade", () => {
-  it("tombstones by full primary key — never a DELETE", () => {
+  it("tombstones by primary key — never a DELETE", () => {
     const { sqlite: s, dsql: d } = both((k, dialect) =>
       buildLabelRetraction(k, dialect, {
         recordId: rid("rec1"),
         appId: "alpha",
         key: "k",
+        value: "v",
         hlc: clock.now(),
       }),
     );
@@ -188,7 +208,23 @@ describe("buildLabelRetraction and the delete cascade", () => {
       // own labels".
       expect(q.sql).toMatch(/"app_id" = /);
       expect(q.sql).toMatch(/"key" = /);
+      expect(q.sql).toMatch(/"value" = /);
     }
+  });
+
+  it("omitting the value retracts every value of the key", () => {
+    // The one shape that quietly does nothing if it pins `value` anyway: an app
+    // with three names on a photo asking to take the key back.
+    const { dsql } = both((k, dialect) =>
+      buildLabelRetraction(k, dialect, {
+        recordId: rid("rec1"),
+        appId: "alpha",
+        key: "face",
+        hlc: clock.now(),
+      }),
+    );
+    expect(dsql.sql).toMatch(/"key" = /);
+    expect(dsql.sql).not.toMatch(/"value" = /);
   });
 
   it("the record cascade crosses namespaces and skips existing tombstones", () => {
@@ -213,17 +249,17 @@ describe("buildFindByLabel", () => {
     for (const q of [s, d]) expect(q.sql).toMatch(/"deleted_at" is null/);
   });
 
-  it("spells NULLS FIRST on Postgres and leaves SQLite's natural order alone", () => {
+  it("orders identically on both backends, with no NULLS spelling anywhere", () => {
     // SQLite sorts nulls first in an ASC scan and Postgres sorts them last, so
-    // without this the same cursor would mean different things on a local and
-    // a cloud data server, and a page crossing the null boundary would skip
-    // rows on one of them.
+    // while `value` was nullable one side had to spell `NULLS FIRST` out or the
+    // same cursor meant different things against a local and a cloud data
+    // server. NOT NULL removes the divergence rather than normalizing it.
     const { sqlite: s, dsql: d } = both((k, dialect) =>
       buildFindByLabel(k, dialect, { appId: "alpha", key: "k" })!,
     );
-    expect(d.sql).toMatch(/order by value asc nulls first, "record_id" asc/);
+    expect(d.sql).toMatch(/order by "value" asc, "record_id" asc/);
     expect(s.sql).toMatch(/order by "value" asc, "record_id" asc/);
-    expect(s.sql).not.toMatch(/nulls/i);
+    for (const q of [s, d]) expect(q.sql).not.toMatch(/nulls/i);
   });
 
   it("fetches limit + 1 so a full page is distinguishable from the last one", () => {
@@ -244,6 +280,19 @@ describe("buildFindByLabel", () => {
     })!;
     expect(exact.sql).toMatch(/"value" = /);
     expect(exact.parameters).toContain("high");
+  });
+
+  it('value: "" is a real filter — bare flags — and not "no filter"', () => {
+    // The parser-level version of this bug degrades a flag query into an
+    // unfiltered presence query, which returns a superset and so looks like it
+    // works. Pinned here because the builder is where the two must stay apart.
+    const flags = buildFindByLabel(postgres, DSQL, {
+      appId: "alpha",
+      key: "k",
+      value: "",
+    })!;
+    expect(flags.sql).toMatch(/"value" = /);
+    expect(flags.parameters).toContain("");
   });
 
   it("returns null — no query at all — for a caller with no readable types", () => {
@@ -268,28 +317,20 @@ describe("buildFindByLabel", () => {
     expect(q.parameters).toContain("image/jpeg");
   });
 
-  it("expands the cursor rather than using a row-value comparison", () => {
-    // `(value, record_id) > (?, ?)` evaluates to NULL — not false — when
-    // either side is null, which silently returns an empty page.
-    const nullCursor = buildFindByLabel(postgres, DSQL, {
-      appId: "alpha",
-      key: "k",
-      cursor: encodeLabelCursor({ value: null, recordId: rid("rec5") }),
-    })!;
-    // Past a null cursor: every non-null value qualifies, plus later nulls.
-    expect(nullCursor.sql).toMatch(/"value" is not null/);
-    expect(nullCursor.sql).toMatch(/"value" is null and "record_id" > /);
-
-    const valuedCursor = buildFindByLabel(postgres, DSQL, {
-      appId: "alpha",
-      key: "k",
-      cursor: encodeLabelCursor({ value: "m", recordId: rid("rec5") }),
-    })!;
-    // Past a non-null cursor: no null branch is needed, because nulls sort
-    // first and none can follow.
-    expect(valuedCursor.sql).toMatch(/"value" > /);
-    expect(valuedCursor.sql).toMatch(/"value" = .* and "record_id" > /);
-    expect(valuedCursor.sql).not.toMatch(/"value" is null/);
+  it("compares the cursor in one case, with no null branch left", () => {
+    // Two branches used to be needed because `(value, record_id) > (?, ?)`
+    // evaluates to NULL — not false — with a null on either side, silently
+    // returning an empty page. NOT NULL collapses it to the single comparison.
+    for (const value of ["", "m"]) {
+      const q = buildFindByLabel(postgres, DSQL, {
+        appId: "alpha",
+        key: "k",
+        cursor: encodeLabelCursor({ value, recordId: rid("rec5") }),
+      })!;
+      expect(q.sql, value).toMatch(/"value" > /);
+      expect(q.sql, value).toMatch(/"value" = .* and "record_id" > /);
+      expect(q.sql, value).not.toMatch(/"value" is( not)? null/);
+    }
   });
 
   it("ignores a malformed cursor instead of failing the query", () => {
@@ -308,26 +349,40 @@ describe("the sync-facing queries", () => {
     // that feeds sync must see it.
     const { sqlite: s, dsql: d } = both((k, dialect) => buildQueryLabels(k, dialect, {}));
     for (const q of [s, d]) {
-      expect(q.sql).toMatch(/order by "record_id" asc, "app_id" asc, "key" asc/);
+      expect(q.sql).toMatch(
+        /order by "record_id" asc, "app_id" asc, "key" asc, "value" asc/,
+      );
       expect(q.sql).not.toMatch(/"deleted_at" is null/);
     }
   });
 
-  it("queryLabels expands its cursor over the three-column primary key", () => {
+  it("queryLabels expands its cursor over all four primary-key columns", () => {
     const q = buildQueryLabels(postgres, DSQL, {
-      cursor: encodeLabelScanCursor({ recordId: rid("rec1"), appId: "alpha", key: "k" }),
+      cursor: encodeLabelScanCursor({
+        recordId: rid("rec1"),
+        appId: "alpha",
+        key: "k",
+        value: "v",
+      }),
     });
     expect(q.sql).toMatch(/"record_id" > /);
     expect(q.sql).toMatch(/"record_id" = .* and "app_id" > /);
     expect(q.sql).toMatch(/"app_id" = .* and "key" > /);
+    // The value leg. Without it the cursor is not unique, so every sibling
+    // value of a key after the first is skipped — sync loses label rows with
+    // nothing to notice, a short page not being an error.
+    expect(q.sql).toMatch(/"key" = .* and "value" > /);
   });
 
   it("getLabel reads by primary key including tombstones — the LWW compare", () => {
     const { dsql } = both((k, dialect) =>
-      buildGetLabel(k, dialect, rid("rec1"), "alpha", "k"),
+      buildGetLabel(k, dialect, rid("rec1"), "alpha", "k", "v"),
     );
     expect(dsql.sql).not.toMatch(/"deleted_at" is null/);
-    expect(dsql.parameters).toEqual(["rec1", "alpha", "k"]);
+    // `value` included: each value of a set-valued key has its own LWW domain,
+    // and looking up without it compares an incoming row against whichever
+    // sibling was found first.
+    expect(dsql.parameters).toEqual(["rec1", "alpha", "k", "v"]);
   });
 
   it("the watermark query folds max(updated_at) per node over every row", () => {

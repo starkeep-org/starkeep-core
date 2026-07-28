@@ -121,8 +121,13 @@ export interface DataOperations {
   // *shape* only.
 
   /**
-   * Set (insert-or-update) labels in `appId`'s namespace. Idempotent per
-   * `(recordId, appId, key)`.
+   * Add labels in `appId`'s namespace. Idempotent per
+   * `(recordId, appId, key, value)` — which is to say **it adds, it does not
+   * replace**: a key is set-valued, so setting `faces=Bob` on a photo that
+   * already carries `faces=Alice` leaves both. To make one key hold exactly a
+   * given set of values — including the single-valued case, "set the count to
+   * 4" — use {@link replaceLabelValues}, which is the only call that removes
+   * what it did not write.
    *
    * **Owns the chunking at every size**, so there is no bulk/non-bulk split
    * and no cliff where a caller's hand-rolled loop quietly stops being the
@@ -131,15 +136,35 @@ export interface DataOperations {
    * splits are **not** atomic with each other, so a failure partway leaves
    * earlier chunks written. That is safe to retry: the upsert is idempotent.
    *
-   * `value: null` (or omitted) sets a bare flag.
+   * Chunking is on **rows**, not records: a record contributes as many rows as
+   * the caller gave it values, so rows-per-record is no longer fixed.
+   *
+   * An omitted `value` sets a bare flag, which is stored as the empty string.
    */
   setLabels(appId: string, entries: LabelSetEntry[]): Promise<void>;
 
   /**
+   * Make `key` hold exactly `values` on each record: add the ones missing,
+   * retract the ones present and absent from the list, atomically per record.
+   *
+   * This is the call an app wants whenever it thinks of a key as *its current
+   * answer* rather than as an accumulating set — a single-valued key like
+   * `quality=high`, or a re-run of a face detector that dropped a name. Written
+   * as {@link setLabels} instead, the stale values stay, and the key reads back
+   * as both answers at once with nothing to signal which is current.
+   *
+   * An empty `values` retracts the key entirely.
+   */
+  replaceLabelValues(appId: string, entries: LabelValuesEntry[]): Promise<void>;
+
+  /**
    * Retract labels in `appId`'s namespace, as tombstones so the retraction
-   * itself syncs. Takes the same entry shape as `setLabels` minus the value,
-   * so retraction mirrors the write rather than being a third argument
-   * convention to remember.
+   * itself syncs. Takes the same entry shape as `setLabels`, so retraction
+   * mirrors the write rather than being a convention to remember.
+   *
+   * An **omitted `value` retracts every value of that key** on that record —
+   * the reading that keeps `{recordId, key}` meaning "take this assertion
+   * back". Pass `value: ""` to retract a bare flag specifically.
    */
   retractLabels(appId: string, entries: LabelRetractEntry[]): Promise<void>;
 
@@ -155,7 +180,9 @@ export interface DataOperations {
    * what replaces "ask app A about every file".
    *
    * `sel.value` omitted means **presence** (any value, flags included);
-   * supplied means exact match.
+   * supplied means exact match, and `""` specifically matches bare flags.
+   * Callers reading this off a query string must tell an absent parameter from
+   * an empty one — see `FindByLabelQuery.value`.
    *
    * > **Page until `nextCursor` is null.** A short page does not mean the end
    * > of the results — a label whose record was concurrently deleted drops out
@@ -179,13 +206,22 @@ export interface DataOperations {
 export interface LabelSetEntry {
   recordId: StarkeepId;
   key: string;
-  /** Omitted or `null` sets a bare flag. */
-  value?: string | null;
+  /** Omitted sets a bare flag, stored as `""`. Never null. */
+  value?: string;
+}
+
+export interface LabelValuesEntry {
+  recordId: StarkeepId;
+  key: string;
+  /** The complete set this key should hold. Empty retracts the key. */
+  values: string[];
 }
 
 export interface LabelRetractEntry {
   recordId: StarkeepId;
   key: string;
+  /** Omitted retracts **every** value of this key on this record. */
+  value?: string;
 }
 
 export interface IndexOperations {

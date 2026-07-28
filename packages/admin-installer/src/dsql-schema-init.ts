@@ -223,13 +223,25 @@ export async function initializeSharedSchema(
     //
     // No FK on record_id — DSQL has none — so record deletion must tombstone
     // label rows in application code, and orphans are possible and tolerated.
+    //
+    // value is in the primary key, which is what makes a key set-valued:
+    // photos/faces=Alice and photos/faces=Bob are two rows on one photo, and
+    // each is found by the equality match the reverse index already serves.
+    // Packed into one row they would need a substring scan instead — unindexable
+    // and wrong ("Alice" matches "Alicent").
+    //
+    // Which forces value NOT NULL, since a PK column cannot be nullable. A bare
+    // flag is the empty string: the state that carries meaning is row-present vs
+    // row-absent, and NULL only duplicated what absence already said. It also
+    // removes a genuine backend divergence — SQLite sorts NULLs first in an ASC
+    // scan, Postgres sorts them last, which the reverse cursor had to normalize.
     await db.schema
       .createTable("shared.record_labels")
       .ifNotExists()
       .addColumn("record_id", "text", (c) => c.notNull())
       .addColumn("app_id", "text", (c) => c.notNull())
       .addColumn("key", "text", (c) => c.notNull())
-      .addColumn("value", "text")
+      .addColumn("value", "text", (c) => c.notNull())
       .addColumn("record_type", "text", (c) => c.notNull())
       .addColumn("created_at", "text", (c) => c.notNull())
       .addColumn("updated_at", "text", (c) => c.notNull())
@@ -239,6 +251,7 @@ export async function initializeSharedSchema(
         "record_id",
         "app_id",
         "key",
+        "value",
       ] as never[])
       .execute();
 

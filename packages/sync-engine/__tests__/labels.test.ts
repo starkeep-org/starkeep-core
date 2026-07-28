@@ -96,7 +96,7 @@ describe("label sync", () => {
     recordId: StarkeepId,
     appId: string,
     key: string,
-    value: string | null = null,
+    value = "",
   ): Promise<void> {
     await side.db.upsertLabels([
       { recordId, appId, key, value, recordType: "image/jpeg", hlc: side.clock.now() },
@@ -149,7 +149,7 @@ describe("label sync", () => {
     expect(landed![0]).toMatchObject({
       appId: "alpha",
       key: "faces-detected",
-      value: null,
+      value: "",
       recordType: "image/jpeg",
     });
   });
@@ -184,7 +184,7 @@ describe("label sync", () => {
     expect((await cloud.db.getLabelsByRecordIds([recordId])).get(recordId)).toBeUndefined();
     // The tombstone row itself is present — that is what makes the retraction
     // syncable at all.
-    const tombstone = await cloud.db.getLabel(recordId, "alpha", "faces-detected");
+    const tombstone = await cloud.db.getLabel(recordId, "alpha", "faces-detected", "");
     expect(tombstone).not.toBeNull();
     expect(tombstone!.deletedAt).not.toBeNull();
   });
@@ -206,7 +206,7 @@ describe("label sync", () => {
     await driveEngine(local, cloud).exchange();
 
     expect((await local.db.getLabelsByRecordIds([recordId])).get(recordId)).toBeUndefined();
-    const tombstone = await local.db.getLabel(recordId, "alpha", "faces-detected");
+    const tombstone = await local.db.getLabel(recordId, "alpha", "faces-detected", "");
     expect(tombstone).not.toBeNull();
     expect(tombstone!.deletedAt).not.toBeNull();
   });
@@ -216,14 +216,81 @@ describe("label sync", () => {
     const recordId = await seedRecord(local);
     await driveEngine(local, cloud).exchange();
 
-    // Both sides set the same key; cloud's HLC is later.
-    await seedLabel(local, recordId, "alpha", "quality", "from-local");
-    await seedLabel(cloud, recordId, "alpha", "quality", "from-cloud");
+    // Both sides write the SAME row — same value, differing only in the
+    // denormalized record type — so this is a genuine conflict. Cloud's HLC is
+    // later.
+    await local.db.upsertLabels([
+      {
+        recordId,
+        appId: "alpha",
+        key: "quality",
+        value: "high",
+        recordType: "image/jpeg",
+        hlc: local.clock.now(),
+      },
+    ]);
+    await cloud.db.upsertLabels([
+      {
+        recordId,
+        appId: "alpha",
+        key: "quality",
+        value: "high",
+        recordType: "image/png",
+        hlc: cloud.clock.now(),
+      },
+    ]);
 
     await driveEngine(local, cloud).exchange();
 
     const onLocal = (await local.db.getLabelsByRecordIds([recordId])).get(recordId)!;
-    expect(onLocal.find((l) => l.key === "quality")!.value).toBe("from-cloud");
+    expect(onLocal.filter((l) => l.key === "quality")).toHaveLength(1);
+    expect(onLocal.find((l) => l.key === "quality")!.recordType).toBe("image/png");
+  });
+
+  it("gives each value of a key its own LWW domain — they do not conflict", async () => {
+    // `value` is in the primary key, so two values of one key written on two
+    // devices are two rows and both survive. Treating this as a conflict would
+    // silently drop half of a set-valued key on every sync, which is the shape
+    // the old three-column LWW had.
+    const { local, cloud } = await twoSides();
+    const recordId = await seedRecord(local);
+    await driveEngine(local, cloud).exchange();
+
+    await seedLabel(local, recordId, "alpha", "face", "Alice");
+    await seedLabel(cloud, recordId, "alpha", "face", "Bob");
+
+    await driveEngine(local, cloud).exchange();
+
+    for (const side of [local, cloud]) {
+      const labels = (await side.db.getLabelsByRecordIds([recordId])).get(recordId)!;
+      expect(labels.filter((l) => l.key === "face").map((l) => l.value).sort()).toEqual([
+        "Alice",
+        "Bob",
+      ]);
+    }
+  });
+
+  it("ships a rename as a retraction plus a set, and both land", async () => {
+    // With no person identity in the shared plane, a rename is exactly this:
+    // two rows, both carrying HLCs, both tombstone-aware, both shipped.
+    const { local, cloud } = await twoSides();
+    const recordId = await seedRecord(local);
+    await seedLabel(local, recordId, "alpha", "face", "Alice");
+    await driveEngine(local, cloud).exchange();
+
+    await local.db.retractLabels([
+      { recordId, appId: "alpha", key: "face", value: "Alice", hlc: local.clock.now() },
+    ]);
+    await seedLabel(local, recordId, "alpha", "face", "Alicia");
+
+    await driveEngine(local, cloud).exchange();
+
+    const onCloud = (await cloud.db.getLabelsByRecordIds([recordId])).get(recordId)!;
+    expect(onCloud.map((l) => l.value)).toEqual(["Alicia"]);
+    // The retraction shipped as a tombstone rather than as an absence, so the
+    // old name cannot be resurrected by a later round.
+    expect((await cloud.db.getLabel(recordId, "alpha", "face", "Alice"))!.deletedAt)
+      .not.toBeNull();
   });
 
   it("keeps a label's LWW domain separate from its record's", async () => {
@@ -400,7 +467,7 @@ describe("label sync", () => {
     expect(await cloud.db.get(early)).not.toBeNull();
     expect(await cloud.db.get(blocked)).toBeNull();
     // The label sorts after the blocked record on the same node, so it waits.
-    expect(await cloud.db.getLabel(early, "alpha", "faces-detected")).toBeNull();
+    expect(await cloud.db.getLabel(early, "alpha", "faces-detected", "")).toBeNull();
 
     const peer = await syncState.getPeerWatermarks();
     expect(peer["L"]).toEqual((await local.db.get(early))!.updatedAt);
@@ -414,7 +481,7 @@ describe("label sync", () => {
     await driveEngine(local, cloud, { syncState }).exchange();
 
     expect(await cloud.db.get(blocked)).not.toBeNull();
-    expect(await cloud.db.getLabel(early, "alpha", "faces-detected")).not.toBeNull();
+    expect(await cloud.db.getLabel(early, "alpha", "faces-detected", "")).not.toBeNull();
   });
 
   it("ships a label that precedes the failure, and holds only what follows it", async () => {
@@ -430,8 +497,8 @@ describe("label sync", () => {
 
     await driveEngine(local, cloud).exchange();
 
-    expect(await cloud.db.getLabel(early, "alpha", "before")).not.toBeNull();
-    expect(await cloud.db.getLabel(early, "alpha", "after")).toBeNull();
+    expect(await cloud.db.getLabel(early, "alpha", "before", "")).not.toBeNull();
+    expect(await cloud.db.getLabel(early, "alpha", "after", "")).toBeNull();
   });
 
   it("the responder skips inbound labels from a node halted by a failed app row", async () => {
@@ -444,7 +511,7 @@ describe("label sync", () => {
       recordId,
       appId: "alpha",
       key: "k",
-      value: null,
+      value: "",
       recordType: "image/jpeg",
       createdAt: local.clock.now(),
       updatedAt: local.clock.now(),
@@ -476,12 +543,12 @@ describe("label sync", () => {
       ],
     });
 
-    expect(await cloud.db.getLabel(recordId, "alpha", "k")).toBeNull();
+    expect(await cloud.db.getLabel(recordId, "alpha", "k", "")).toBeNull();
 
     // The same label with nothing halting its node does land — so the
     // assertion above is about the halt, not about labels never applying.
     await transport.exchange({ watermarks: {}, labels: [label] });
-    expect(await cloud.db.getLabel(recordId, "alpha", "k")).not.toBeNull();
+    expect(await cloud.db.getLabel(recordId, "alpha", "k", "")).not.toBeNull();
   });
 
   it("carries a label backlog larger than one scan page across rounds", async () => {
@@ -534,14 +601,14 @@ describe("label sync", () => {
     expect(records.length + labels).toBe(2);
     // And in merged HLC order, which puts the first record and its label first.
     expect(await cloud.db.get(first)).not.toBeNull();
-    expect(await cloud.db.getLabel(first, "alpha", "k1")).not.toBeNull();
+    expect(await cloud.db.getLabel(first, "alpha", "k1", "")).not.toBeNull();
 
     // Converges over further rounds without losing anything.
     for (let i = 0; i < 5; i++) {
       await driveEngine(local, cloud, { syncState, pageLimit: 2 }).exchange();
     }
     expect(await cloud.db.get(second)).not.toBeNull();
-    expect(await cloud.db.getLabel(second, "alpha", "k2")).not.toBeNull();
+    expect(await cloud.db.getLabel(second, "alpha", "k2", "")).not.toBeNull();
   });
 
   it("tolerates a label arriving before its record", async () => {
@@ -555,7 +622,7 @@ describe("label sync", () => {
         recordId: orphanId,
         appId: "alpha",
         key: "k",
-        value: null,
+        value: "",
         recordType: "image/jpeg",
         hlc: cloud.clock.now(),
       },
@@ -564,7 +631,7 @@ describe("label sync", () => {
     await driveEngine(local, cloud).exchange();
 
     // Landed without error, and is invisible until the record shows up.
-    expect(await local.db.getLabel(orphanId, "alpha", "k")).not.toBeNull();
+    expect(await local.db.getLabel(orphanId, "alpha", "k", "")).not.toBeNull();
     expect(await local.db.get(orphanId)).toBeNull();
   });
 });

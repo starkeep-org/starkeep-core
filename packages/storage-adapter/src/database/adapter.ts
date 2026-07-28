@@ -12,6 +12,7 @@ import type {
   Transaction,
   LabelUpsert,
   LabelRetraction,
+  LabelValueReplacement,
   FindByLabelQuery,
   FindByLabelResult,
 } from "./types.js";
@@ -89,8 +90,25 @@ export interface DatabaseAdapter {
    * Retract labels by stamping `deleted_at`. A tombstone, not a hard delete,
    * so the retraction itself syncs. Scoped by primary key — which contains
    * `app_id` — so an app can only ever retract its own rows.
+   *
+   * A retraction with no `value` tombstones **every** value of that key on that
+   * record; one with a `value` tombstones just that row. See
+   * {@link LabelRetraction.value}.
    */
   retractLabels(retractions: LabelRetraction[]): Promise<void>;
+
+  /**
+   * Replace the whole value set for `(record, app, key)`: upsert `values`, and
+   * tombstone every other value of that key on that record, in one round trip.
+   *
+   * This is how an app that treats a key as **single-valued** updates it. Since
+   * `value` joined the primary key, a plain re-`upsertLabels` no longer
+   * overwrites — it adds a second row — so "set the count to 4" written as an
+   * upsert silently leaves `count=3` beside it. Nothing in the platform can tell
+   * a single-valued key from a set-valued one, so the intent has to travel with
+   * the write rather than with the key.
+   */
+  replaceLabelValues(replacements: LabelValueReplacement[]): Promise<void>;
 
   /**
    * Forward path: every live label on each of `recordIds`, keyed by record id.
@@ -143,7 +161,12 @@ export interface DatabaseAdapter {
    * `getLabelsByRecordIds`, because a tombstone is exactly what a later
    * arrival must be compared against.
    */
-  getLabel(recordId: StarkeepId, appId: string, key: string): Promise<RecordLabel | null>;
+  getLabel(
+    recordId: StarkeepId,
+    appId: string,
+    key: string,
+    value: string,
+  ): Promise<RecordLabel | null>;
 
   /**
    * Paginated scan over every label row, tombstones included, for the sync

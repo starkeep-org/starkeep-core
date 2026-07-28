@@ -3,17 +3,17 @@
  *
  * SQLite and DSQL store labels in the same nine columns and answer the same
  * five questions about them; before this module each adapter built those
- * queries itself, and the copies drifted only in the three ways that are
- * genuinely dialect-specific:
+ * queries itself, and the copies drifted only in the ways that are genuinely
+ * dialect-specific:
  *
  *   1. **Table name** — `shared_record_labels` vs `shared.record_labels`.
- *   2. **Null ordering** — SQLite sorts nulls first in an ASC scan, Postgres
- *      sorts them last, so the reverse query has to spell `NULLS FIRST` out on
- *      one side. See label-cursor.ts for why the normalized order is
- *      nulls-first and why the cursor would otherwise mean two different
- *      things.
- *   3. **Transaction wrapping** — DSQL wraps everything in `withOccRetry`,
+ *   2. **Transaction wrapping** — DSQL wraps everything in `withOccRetry`,
  *      which is the adapter's business, not the query's.
+ *
+ * Null ordering used to be a third: SQLite sorts nulls first in an ASC scan and
+ * Postgres sorts them last, so the reverse query had to spell out `NULLS FIRST`
+ * on one side or the same cursor meant two different things. `value` is NOT NULL
+ * now, so that divergence is gone rather than normalized.
  *
  * Everything else — the column list, the `ON CONFLICT` update set, the cursor
  * predicate, the page-plus-one paging — is one behaviour that must not differ,
@@ -25,7 +25,12 @@
 import { sql, type CompiledQuery, type Kysely } from "kysely";
 import type { HLCTimestamp, RecordLabel, StarkeepId } from "@starkeep/protocol-primitives";
 import { serializeHLC } from "@starkeep/protocol-primitives";
-import type { FindByLabelQuery, LabelRetraction, LabelUpsert } from "./types.js";
+import type {
+  FindByLabelQuery,
+  LabelRetraction,
+  LabelUpsert,
+  LabelValueReplacement,
+} from "./types.js";
 import {
   decodeLabelCursor,
   decodeLabelScanCursor,
@@ -41,24 +46,22 @@ export type LabelDb = Record<string, Record<string, unknown>>;
 export interface LabelDialect {
   /** `"shared_record_labels"` (SQLite) or `"shared.record_labels"` (DSQL). */
   table: string;
-  /**
-   * True when the dialect sorts nulls *last* by default and the reverse
-   * query's `NULLS FIRST` therefore has to be written out — Postgres/DSQL.
-   * SQLite's ASC is already nulls-first.
-   */
-  spellOutNullsFirst: boolean;
 }
 
 export const DEFAULT_FIND_LIMIT = 50;
 export const DEFAULT_SCAN_LIMIT = 500;
 
-const PK_COLUMNS = ["record_id", "app_id", "key"] as const;
+const PK_COLUMNS = ["record_id", "app_id", "key", "value"] as const;
 
 /** Last write wins for a repeated primary key — see {@link buildLabelUpsert}. */
 function dedupeUpserts(labels: LabelUpsert[]): LabelUpsert[] {
   if (labels.length < 2) return labels;
   const byPk = new Map<string, LabelUpsert>();
-  for (const l of labels) byPk.set(`${l.recordId} ${l.appId} ${l.key}`, l);
+  // Keyed on the full four-column PK, `value` included: two values of one key
+  // are two rows, and collapsing them here would turn a set-valued write into a
+  // single-valued one. JSON rather than a joined string because a value is
+  // arbitrary caller text, so any separator character can collide.
+  for (const l of labels) byPk.set(JSON.stringify([l.recordId, l.appId, l.key, l.value]), l);
   return byPk.size === labels.length ? labels : [...byPk.values()];
 }
 
@@ -101,8 +104,9 @@ export function buildLabelUpsert(
       })),
     )
     .onConflict((oc) =>
+      // `value` is a conflict *target* now, not something to update — a differing
+      // value is a different row, so there is nothing left for it to overwrite.
       oc.columns([...PK_COLUMNS]).doUpdateSet((eb) => ({
-        value: eb.ref("excluded.value"),
         record_type: eb.ref("excluded.record_type"),
         updated_at: eb.ref("excluded.updated_at"),
         node_id: eb.ref("excluded.node_id"),
@@ -110,6 +114,44 @@ export function buildLabelUpsert(
       })),
     )
     .compile();
+}
+
+/**
+ * The tombstone half of {@link DatabaseAdapter.replaceLabelValues}: retract every
+ * value of one `(record, app, key)` **except** the ones being kept.
+ *
+ * Paired with a {@link buildLabelUpsert} over the kept values, this is how an app
+ * that treats a key as single-valued updates it. Without it, re-setting a key
+ * leaves the old value beside the new one — the sharpest edge of a set-valued
+ * primary key, and one that produces no error.
+ *
+ * An empty `keep` retracts the key entirely, which is what an app publishing "no
+ * names on this photo any more" needs; the `not in ()` that would otherwise
+ * compile is avoided by dropping the predicate.
+ */
+export function buildLabelValueReplacementTombstone(
+  k: Kysely<LabelDb>,
+  dialect: LabelDialect,
+  r: LabelValueReplacement,
+): CompiledQuery {
+  let q = k
+    .updateTable(dialect.table)
+    .set({
+      deleted_at: serializeHLC(r.hlc),
+      updated_at: serializeHLC(r.hlc),
+      node_id: r.hlc.nodeId,
+    })
+    .where("record_id", "=", r.recordId)
+    .where("app_id", "=", r.appId)
+    .where("key", "=", r.key)
+    // Already-tombstoned rows are skipped so a re-run doesn't restamp them with
+    // a later HLC — same reason as the record-delete cascade.
+    .where("deleted_at", "is", null);
+
+  if (r.values.length > 0) {
+    q = q.where("value", "not in", r.values);
+  }
+  return q.compile();
 }
 
 /**
@@ -139,17 +181,22 @@ export function buildLabelSnapshotUpsert(
 }
 
 /**
- * Tombstone one label. Not a DELETE — the retraction itself has to sync.
+ * Tombstone a label. Not a DELETE — the retraction itself has to sync.
  *
- * Scoped by the full primary key, which contains the server-set `app_id`, so
- * "an app can only retract its own labels" needs no separate check.
+ * Scoped by the primary key, which contains the server-set `app_id`, so "an app
+ * can only retract its own labels" needs no separate check.
+ *
+ * `value` is optional and its absence is meaningful: **omitted tombstones every
+ * value of the key on that record.** A retraction that pinned only the first
+ * three PK columns while `value` was in the key would otherwise be the one shape
+ * that quietly does nothing when the app has more than one value stored.
  */
 export function buildLabelRetraction(
   k: Kysely<LabelDb>,
   dialect: LabelDialect,
   r: LabelRetraction,
 ): CompiledQuery {
-  return k
+  let q = k
     .updateTable(dialect.table)
     .set({
       deleted_at: serializeHLC(r.hlc),
@@ -158,8 +205,10 @@ export function buildLabelRetraction(
     })
     .where("record_id", "=", r.recordId)
     .where("app_id", "=", r.appId)
-    .where("key", "=", r.key)
-    .compile();
+    .where("key", "=", r.key);
+
+  if (r.value !== undefined) q = q.where("value", "=", r.value);
+  return q.compile();
 }
 
 /**
@@ -209,6 +258,7 @@ export function buildGetLabel(
   recordId: StarkeepId,
   appId: string,
   key: string,
+  value: string,
 ): CompiledQuery {
   return k
     .selectFrom(dialect.table)
@@ -216,6 +266,7 @@ export function buildGetLabel(
     .where("record_id", "=", recordId)
     .where("app_id", "=", appId)
     .where("key", "=", key)
+    .where("value", "=", value)
     .compile();
 }
 
@@ -264,35 +315,27 @@ export function buildFindByLabel(
     q = q.where("record_type", "in", types);
   }
 
-  // "Strictly after the cursor", in nulls-first order. Not a row-value
-  // comparison: with a NULL on either side that evaluates to NULL rather than
-  // false, which silently returns an empty page instead of erroring.
+  // "Strictly after the cursor" in `(value, record_id)` order. A single case
+  // now that `value` is NOT NULL — the two-branch version this replaces existed
+  // only because a NULL on either side of the comparison evaluates to NULL.
   const cursor = query.cursor ? decodeLabelCursor(query.cursor) : null;
   if (cursor) {
     const { value, recordId } = cursor;
-    q =
-      value === null
-        ? // Nulls sort first, so every non-null value is past the cursor.
-          q.where((eb) =>
-            eb.or([
-              eb("value", "is not", null),
-              eb.and([eb("value", "is", null), eb("record_id", ">", recordId)]),
-            ]),
-          )
-        : // Past the nulls entirely — a null can never follow a non-null.
-          q.where((eb) =>
-            eb.or([
-              eb("value", ">", value),
-              eb.and([eb("value", "=", value), eb("record_id", ">", recordId)]),
-            ]),
-          );
+    q = q.where((eb) =>
+      eb.or([
+        eb("value", ">", value),
+        eb.and([eb("value", "=", value), eb("record_id", ">", recordId)]),
+      ]),
+    );
   }
 
-  q = dialect.spellOutNullsFirst
-    ? q.orderBy(sql`value asc nulls first`)
-    : q.orderBy("value", "asc");
-
-  return q.orderBy("record_id", "asc").limit(limit + 1).compile();
+  // No `NULLS FIRST`: with no nulls in the column the two dialects order this
+  // identically on their own.
+  return q
+    .orderBy("value", "asc")
+    .orderBy("record_id", "asc")
+    .limit(limit + 1)
+    .compile();
 }
 
 /**
@@ -311,8 +354,10 @@ export function buildQueryLabels(
 
   const cursor = query.cursor ? decodeLabelScanCursor(query.cursor) : null;
   if (cursor) {
-    // Row-value comparison over the primary key. Safe here — unlike the
-    // reverse-index cursor — because all three columns are NOT NULL.
+    // Row-value comparison over all four primary-key columns. `value` must be
+    // here: without it the cursor is not unique, and every sibling value of a
+    // key after the first would be skipped — losing label rows from the sync
+    // stream with nothing to notice, since a short page is not an error.
     q = q.where((eb) =>
       eb.or([
         eb("record_id", ">", cursor.recordId),
@@ -322,6 +367,12 @@ export function buildQueryLabels(
           eb("app_id", "=", cursor.appId),
           eb("key", ">", cursor.key),
         ]),
+        eb.and([
+          eb("record_id", "=", cursor.recordId),
+          eb("app_id", "=", cursor.appId),
+          eb("key", "=", cursor.key),
+          eb("value", ">", cursor.value),
+        ]),
       ]),
     );
   }
@@ -330,6 +381,7 @@ export function buildQueryLabels(
     .orderBy("record_id", "asc")
     .orderBy("app_id", "asc")
     .orderBy("key", "asc")
+    .orderBy("value", "asc")
     .limit(limit + 1)
     .compile();
 }
@@ -396,6 +448,7 @@ export function paginateLabelScan(
             recordId: last.recordId,
             appId: last.appId,
             key: last.key,
+            value: last.value,
           })
         : null,
   };

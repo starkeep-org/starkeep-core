@@ -54,6 +54,7 @@ import {
   planLabelWrites,
   planLabelRetractions,
   parseLabelRef,
+  labelValueSetKey,
 } from "@starkeep/protocol-primitives";
 import type { RecordLabel, DataRecord } from "@starkeep/protocol-primitives";
 import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
@@ -1072,6 +1073,36 @@ async function main() {
       }
 
       /**
+       * This app's live values per `(record, key)`, for the value-cardinality
+       * cap. A second batched read on the write path, and the reason the cap is
+       * a cap rather than a suggestion: counted over the batch alone it is
+       * cleared by sending 32 values repeatedly.
+       *
+       * Tombstoned rows are excluded — a retracted value is a freed slot, and
+       * counting it would make a key that has been edited enough times
+       * permanently unwritable.
+       */
+      const appLabelValueSets = async (
+        writerAppId: string,
+        recordIds: StarkeepId[],
+      ): Promise<Map<string, Set<string>>> => {
+        const out = new Map<string, Set<string>>();
+        if (recordIds.length === 0) return out;
+        for (const labels of (
+          await databaseAdapter.getLabelsByRecordIds(recordIds)
+        ).values()) {
+          for (const l of labels) {
+            if (l.appId !== writerAppId || l.deletedAt) continue;
+            const k = labelValueSetKey(l.recordId, l.key);
+            let set = out.get(k);
+            if (!set) out.set(k, (set = new Set()));
+            set.add(l.value);
+          }
+        }
+        return out;
+      };
+
+      /**
        * Resolve a batch of requested label writes into adapter rows, or an
        * error. The `SELECT id, type` here is the part the single-statement
        * upsert hides, and it is very likely the dominant cost of a bulk
@@ -1079,7 +1110,7 @@ async function main() {
        */
       const planLabelWriteBatch = async (
         writerAppId: string,
-        entries: Array<{ recordId: StarkeepId; key: string; value?: string | null }>,
+        entries: Array<{ recordId: StarkeepId; key: string; value?: string }>,
       ) => {
         const ids = [...new Set(entries.map((e) => e.recordId))];
         const found = await databaseAdapter.query({
@@ -1098,6 +1129,7 @@ async function main() {
           // A read grant is enough — see planLabelWrites for why labelling
           // does not require readwrite.
           canReadType: (type) => canRead(grants, type),
+          existingValues: await appLabelValueSets(writerAppId, ids),
         });
       };
 
@@ -1198,7 +1230,10 @@ async function main() {
           const found = await databaseAdapter.findByLabel({
             appId: ref.appId,
             key: ref.key,
-            // Absent = presence filter (any value, flags included).
+            // Absent = presence filter (any value, flags included). `??`, never
+            // `||`: `?labelValue=` is `""` here and asks for bare flags
+            // specifically, which `||` would widen back into a presence query —
+            // a superset, so it looks like it works.
             value: labelValue ?? undefined,
             readableTypes: grants.allAccess ? undefined : grants.readableTypes,
             limit,
@@ -1349,7 +1384,7 @@ async function main() {
           contentHash?: string;
           sizeBytes?: number;
           parentId?: StarkeepId;
-          labels?: Array<{ key: string; value?: string | null }>;
+          labels?: Array<{ key: string; value?: string }>;
         };
         if (!type) {
           res.writeHead(400);
@@ -2022,15 +2057,19 @@ async function main() {
         return;
       }
 
-      // POST /data/labels — set labels (insert-or-update).
+      // POST /data/labels — add labels (insert-or-update).
       // Body: { labels: [{ recordId, key, value? }, …] }
+      //
+      // Adds; does not replace. A key is set-valued, so writing `faces=Bob`
+      // where `faces=Alice` already sits leaves both — POST /data/labels/values
+      // is the endpoint that makes a key hold exactly a given set.
       //
       // `appId` is never in the body: it is the authenticated subject, which
       // is what makes squatting another app's namespace unrepresentable rather
       // than merely rejected.
       if (path === "/data/labels" && req.method === "POST") {
         const body = JSON.parse(await readBody(req)) as {
-          labels?: Array<{ recordId?: string; key?: string; value?: string | null }>;
+          labels?: Array<{ recordId?: string; key?: string; value?: string }>;
         };
         const entries = body.labels;
         if (!Array.isArray(entries) || entries.length === 0) {
@@ -2046,7 +2085,7 @@ async function main() {
 
         const plan = await planLabelWriteBatch(
           appId!,
-          entries as Array<{ recordId: StarkeepId; key: string; value?: string | null }>,
+          entries as Array<{ recordId: StarkeepId; key: string; value?: string }>,
         );
         if (!plan.ok) {
           res.writeHead(plan.status);
@@ -2072,11 +2111,120 @@ async function main() {
         return;
       }
 
+      // POST /data/labels/values — make each key hold exactly `values`.
+      // Body: { labels: [{ recordId, key, values: [...] }, …] }
+      //
+      // The set-valued write. Upserts the listed values and tombstones the rest
+      // of that key's values on that record, atomically per entry — the diff an
+      // app would otherwise have to compute itself, non-atomically, from a read
+      // it would have to do first. An empty `values` clears the key.
+      //
+      // This is what a **single-valued** key uses to update: since `value`
+      // joined the primary key, POST /data/labels no longer overwrites, so
+      // "set the count to 4" written as a plain add leaves `count=3` beside it.
+      if (path === "/data/labels/values" && req.method === "POST") {
+        const body = JSON.parse(await readBody(req)) as {
+          labels?: Array<{ recordId?: string; key?: string; values?: unknown }>;
+        };
+        const entries = body.labels;
+        if (!Array.isArray(entries) || entries.length === 0) {
+          res.writeHead(400);
+          json(res, { error: "labels must be a non-empty array" });
+          return;
+        }
+        if (
+          entries.some(
+            (e) =>
+              !e.recordId ||
+              !e.key ||
+              !Array.isArray(e.values) ||
+              e.values.some((v) => typeof v !== "string"),
+          )
+        ) {
+          res.writeHead(400);
+          json(res, {
+            error: "each entry needs a recordId, a key, and a values array of strings",
+          });
+          return;
+        }
+        const normalized = entries.map((e) => ({
+          recordId: e.recordId as StarkeepId,
+          key: e.key as string,
+          // Deduped here: the upsert half is one multi-row statement and cannot
+          // touch a row twice on DSQL, and a repeat is the same row anyway.
+          values: [...new Set(e.values as string[])],
+        }));
+
+        // An entry with no values writes nothing — it only tombstones — so it
+        // is a retraction of the whole key and is gated as one: no declared-key
+        // check (an uninstalled key's rows must stay reachable by their author)
+        // and no record-existence check (clearing a key on a deleted record is
+        // a no-op). Sending it through the write gate would be the bug
+        // planLabelRetractions exists to avoid.
+        const clears = normalized.filter((e) => e.values.length === 0);
+        const sets = normalized.filter((e) => e.values.length > 0);
+
+        const clearPlan = planLabelRetractions(clears);
+        if (!clearPlan.ok) {
+          res.writeHead(clearPlan.status);
+          json(res, { error: "InvalidLabelRetraction", detail: clearPlan.error });
+          return;
+        }
+
+        // The rest is gated exactly like an add — same key shape, same
+        // declared-key check, same record-existence check, same read grant, same
+        // value-cardinality cap.
+        const plan = await planLabelWriteBatch(
+          appId!,
+          sets.flatMap((e) =>
+            e.values.map((value) => ({ recordId: e.recordId, key: e.key, value })),
+          ),
+        );
+        if (!plan.ok) {
+          res.writeHead(plan.status);
+          json(res, { error: "InvalidLabelWrite", detail: plan.error });
+          return;
+        }
+
+        const typeByRecord = new Map(plan.writes.map((w) => [w.recordId, w.recordType]));
+        const hlc = clock.now();
+        await databaseAdapter.replaceLabelValues(
+          sets.map((e) => ({
+            recordId: e.recordId,
+            appId: appId!,
+            key: e.key,
+            values: e.values,
+            recordType: typeByRecord.get(e.recordId)!,
+            hlc,
+          })),
+        );
+        // Omitted `value` — retract every value of the key, which is what an
+        // empty `values` asked for.
+        await databaseAdapter.retractLabels(
+          clearPlan.writes.map((e) => ({
+            recordId: e.recordId,
+            key: e.key,
+            appId: appId!,
+            hlc,
+          })),
+        );
+        changeNotifier.emit({
+          eventType: "local-change-recorded",
+          recordIds: normalized.map((e) => e.recordId),
+          timestamp: hlc,
+        });
+        json(res, { replaced: normalized.length });
+        return;
+      }
+
       // POST /data/labels/retract — tombstone labels.
-      // Body: { labels: [{ recordId, key }, …] }
+      // Body: { labels: [{ recordId, key, value? }, …] }
+      //
+      // An omitted `value` retracts **every** value of that key on that record;
+      // `value: ""` retracts the bare flag alone.
       if (path === "/data/labels/retract" && req.method === "POST") {
         const body = JSON.parse(await readBody(req)) as {
-          labels?: Array<{ recordId?: string; key?: string }>;
+          labels?: Array<{ recordId?: string; key?: string; value?: string }>;
         };
         const entries = body.labels;
         if (!Array.isArray(entries) || entries.length === 0) {
@@ -2093,7 +2241,7 @@ async function main() {
         // Checks far less than the write path — no declared-key check, no
         // record-existence check, no grant check. See planLabelRetractions.
         const plan = planLabelRetractions(
-          entries as Array<{ recordId: StarkeepId; key: string }>,
+          entries as Array<{ recordId: StarkeepId; key: string; value?: string }>,
         );
         if (!plan.ok) {
           res.writeHead(plan.status);
