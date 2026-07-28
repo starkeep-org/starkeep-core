@@ -114,8 +114,14 @@ PULUMI_STATE_BUCKET="${STACK_PREFIX}-pulumi-state-${ACCOUNT_ID}-${REGION}"
 FILES_BUCKET="${STACK_PREFIX}-files-${ACCOUNT_ID}-${REGION}"
 BILLING_BUCKET="${STACK_PREFIX}-billing-${ACCOUNT_ID}-${REGION}"
 CUR_REPORT="${STACK_PREFIX}-billing"
-CDS_LAMBDA="${STACK_PREFIX}-app-cloud-data-server-api"
-CDS_LOG_GROUP="/aws/lambda/${CDS_LAMBDA}"
+# Every Lambda under this prefix, not one hard-coded name. teardown-cloud-apps.sh
+# excludes `-app-cloud-data-server-*` from its orphan scan on the understanding
+# that this script owns them, so anything here that the name below did not match
+# fell through both scripts and survived every teardown — which is how an
+# `-api-stream` function from an abandoned streaming design outlived the stack it
+# belonged to and wedged the next install (Pulumi planned a delete the install
+# role had no permission to perform).
+CDS_LAMBDA_PREFIX="${STACK_PREFIX}-app-cloud-data-server-"
 CDS_ROLE="${STACK_PREFIX}-app-cloud-data-server-role"
 GATEWAY_NAME="${STACK_PREFIX}-gateway"
 
@@ -252,7 +258,7 @@ echo "(and all installed apps via teardown-cloud-apps.sh):"
 echo ""
 echo "  Stack prefix : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
 echo "  API Gateway  : $GATEWAY_NAME"
-echo "  Lambda       : $CDS_LAMBDA"
+echo "  Lambdas      : ${CDS_LAMBDA_PREFIX}*"
 echo "  DSQL cluster : (tagged starkeep:appId=cloud-data-server)$([[ "$FORCE" == "true" ]] && echo "  [--force: will disable deletion protection]")"
 echo "  CloudFront   : distribution + OAC + cache policy + public key + key group (Part B)"
 echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
@@ -316,20 +322,29 @@ fi
 
 # ── Step 3: cloud-data-server Lambda + log group ──────────────────────────────
 
-step "Deleting Lambda: $CDS_LAMBDA"
-if aws lambda get-function --function-name "$CDS_LAMBDA" >/dev/null 2>&1; then
-  aws lambda delete-function --function-name "$CDS_LAMBDA"
-  echo "  Deleted."
+step "Deleting Lambdas under: ${CDS_LAMBDA_PREFIX}"
+CDS_LAMBDAS=$(aws lambda list-functions \
+  --query "Functions[?starts_with(FunctionName, '${CDS_LAMBDA_PREFIX}')].FunctionName" \
+  --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)
+if [[ -n "$CDS_LAMBDAS" ]]; then
+  while IFS= read -r fn; do
+    aws lambda delete-function --function-name "$fn"
+    echo "  Deleted $fn."
+  done <<< "$CDS_LAMBDAS"
 else
   skip
 fi
 
-step "Deleting log group: $CDS_LOG_GROUP"
-if aws logs describe-log-groups --log-group-name-prefix "$CDS_LOG_GROUP" \
-    --query "logGroups[?logGroupName=='$CDS_LOG_GROUP'] | length(@)" \
-    --output text 2>/dev/null | grep -q "^1$"; then
-  aws logs delete-log-group --log-group-name "$CDS_LOG_GROUP"
-  echo "  Deleted."
+step "Deleting log groups under: /aws/lambda/${CDS_LAMBDA_PREFIX}"
+CDS_LOG_GROUPS=$(aws logs describe-log-groups \
+  --log-group-name-prefix "/aws/lambda/${CDS_LAMBDA_PREFIX}" \
+  --query "logGroups[].logGroupName" \
+  --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)
+if [[ -n "$CDS_LOG_GROUPS" ]]; then
+  while IFS= read -r lg; do
+    aws logs delete-log-group --log-group-name "$lg"
+    echo "  Deleted $lg."
+  done <<< "$CDS_LOG_GROUPS"
 else
   skip
 fi
