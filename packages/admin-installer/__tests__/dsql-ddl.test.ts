@@ -244,8 +244,8 @@ describe("the label-key registry", () => {
 
   it("upserts one row per declared key, carrying its description", async () => {
     await installWithKeys([
-      { key: "thumbnail-of", description: "A derived thumbnail" },
-      { key: "crop-of", description: "A user-made crop" },
+      { key: "thumbnail", description: "A derived thumbnail" },
+      { key: "crop", description: "A user-made crop" },
     ]);
     const s = stmts();
     const inserts = s.filter((t) => t.includes('insert into "shared"."app_label_keys"'));
@@ -262,7 +262,7 @@ describe("the label-key registry", () => {
   it("revokes keys the manifest no longer declares", async () => {
     // An upgrade that drops a key has to actively delete it, not merely stop
     // re-adding it — the write path reads this table to reject undeclared keys.
-    await installWithKeys([{ key: "thumbnail-of", description: "kept" }]);
+    await installWithKeys([{ key: "thumbnail", description: "kept" }]);
     const stale = stmts().find(
       (t) => t.includes('delete from "shared"."app_label_keys"') && t.includes('"key" not in'),
     );
@@ -284,7 +284,7 @@ describe("the label-key registry", () => {
     // The delete is the dangerous statement here: unscoped, an install would
     // wipe every other app's declarations. (Values are bound, so what is
     // checkable in the statement text is that the predicate is there at all.)
-    await installWithKeys([{ key: "thumbnail-of", description: "d" }]);
+    await installWithKeys([{ key: "thumbnail", description: "d" }]);
     const deletes = stmts().filter((t) =>
       t.includes('delete from "shared"."app_label_keys"'),
     );
