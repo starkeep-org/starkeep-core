@@ -902,15 +902,17 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // grants once per request and gate both the records and sync paths below.
     // Also seed the cloud HLC clock from the highest cloud-stamped timestamp
     // visible on this request — same connection, one extra query.
+    //
+    // The client is request-scoped, not scoped to these two loads: the label
+    // paths below (`/data/label-keys`, and `loadDeclaredLabelKeys` on the
+    // write path) query it too. Closing it here instead left every one of
+    // those querying a closed client — "Client was closed and is not
+    // queryable", a 500 on the whole cloud label plane, invisible to suites
+    // whose fake client keeps answering after `end()`.
     const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
-    let grants: AccessGrants;
-    let clock: HLCClock;
-    try {
-      grants = await loadAccessGrants(grantClient, appId);
-      clock = await makeCloudClock(grantClient);
-    } finally {
-      await grantClient.end();
-    }
+    toClose.push(() => grantClient.end());
+    const grants: AccessGrants = await loadAccessGrants(grantClient, appId);
+    const clock: HLCClock = await makeCloudClock(grantClient);
 
     const query = event.queryStringParameters ?? {};
 
