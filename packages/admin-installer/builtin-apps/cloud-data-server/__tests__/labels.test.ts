@@ -561,7 +561,7 @@ describe("the reverse query end to end", () => {
       .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "image/jpeg" })])
       .on(LABELS_SELECT, [
         labelRow({ record_id: "rec1", app_id: "annotator" }),
-        labelRow({ record_id: "rec1", app_id: "photos", key: "thumbnail-of" }),
+        labelRow({ record_id: "rec1", app_id: "photos", key: "thumbnail" }),
       ]);
     setDbFactory(db);
 
@@ -710,7 +710,7 @@ describe("labels supplied on record create", () => {
       .on(RECORDS_INSERT, [])
       .on(
         LABEL_KEYS_SELECT,
-        (over?.declaredKeys ?? ["thumbnail-of"]).map((key) => ({
+        (over?.declaredKeys ?? ["thumbnail"]).map((key) => ({
           app_id: "photos",
           key,
           description: "d",
@@ -749,7 +749,7 @@ describe("labels supplied on record create", () => {
     const db = createDb({ declaredKeys: [] });
     setDbFactory(db);
 
-    const res = await handler(createEvent([{ key: "thumbnail-of" }]), context);
+    const res = await handler(createEvent([{ key: "thumbnail" }]), context);
     expect(res.statusCode).toBe(400);
     const body = bodyOf(res) as {
       error: string;
