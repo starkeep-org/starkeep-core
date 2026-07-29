@@ -1,4 +1,4 @@
-export { starkeepDir, configPath, dataDbPath, appCredsPath } from "./paths";
+export { starkeepDir, starkeepAssetsDir, configPath, dataDbPath, appCredsPath } from "./paths";
 export {
   type AppCredentials,
   appCredentialsPath,

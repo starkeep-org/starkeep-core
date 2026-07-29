@@ -8,5 +8,7 @@ Conversely, anything that does get implemented must be fully hooked up to the re
 
 When working with shared or app specific data, refer to the "How data is classified" section of system-design.md.
 
+Always write plans, designs, and other long-form output to a file. Never leave substantial detail only in chat — summarize in chat and link the file.
+
 Use the Typescript LSP proactively as needed.
 Use Kysely when writing new SQL or modifying existing SQL.

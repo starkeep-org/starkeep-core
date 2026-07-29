@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { starkeepDir } from "../src/paths.js";
+import { starkeepAssetsDir, starkeepDir } from "../src/paths.js";
 
 let saved: string | undefined;
 let savedGuard: string | undefined;
@@ -56,5 +56,28 @@ describe("starkeepDir real-state guard", () => {
     const decoy = `${join(homedir(), ".starkeep")}-decoy`;
     process.env.STARKEEP_DIR = decoy;
     expect(starkeepDir()).toBe(decoy);
+  });
+});
+
+describe("starkeepAssetsDir", () => {
+  it("resolves the real ~/.starkeep under test, where starkeepDir() throws", () => {
+    delete process.env.STARKEEP_DIR;
+    expect(() => starkeepDir()).toThrow();
+    expect(starkeepAssetsDir()).toBe(join(homedir(), ".starkeep", "app-assets"));
+  });
+
+  it("follows STARKEEP_DIR like every other path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "paths-test-"));
+    try {
+      process.env.STARKEEP_DIR = dir;
+      expect(starkeepAssetsDir()).toBe(join(dir, "app-assets"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("cannot escape the app-assets segment (the segment is not the caller's to pick)", () => {
+    process.env.STARKEEP_DIR = join(homedir(), ".starkeep");
+    expect(starkeepAssetsDir().endsWith(join(".starkeep", "app-assets"))).toBe(true);
   });
 });

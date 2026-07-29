@@ -11,9 +11,38 @@ import { join, resolve, sep } from "node:path";
  * and data.db can never drift apart.
  */
 export function starkeepDir(): string {
-  const dir = process.env.STARKEEP_DIR ?? join(homedir(), ".starkeep");
+  const dir = starkeepRoot();
   assertNotRealStateUnderTest(dir);
   return dir;
+}
+
+/**
+ * `$STARKEEP_DIR/app-assets/` — the one place the real-state guard does not
+ * apply, and the reason it can safely not apply: nothing under here is state.
+ *
+ * Apps put *downloaded, re-fetchable, immutable* artifacts here — model weights
+ * being the first case. They are content the app fetches and verifies from a
+ * remote, never something the user authored, and deleting the tree costs a
+ * re-download and nothing else. So a test that reads them out of the operator's
+ * real `~/.starkeep` reads exactly what a fresh download would have given it,
+ * which is what makes gating a test on "are the 278 MB of weights installed?"
+ * meaningful instead of permanently false.
+ *
+ * The `app-assets` segment is joined here rather than by the caller on purpose:
+ * this function is an unguarded root, and owning the segment is what keeps it
+ * from being usable as a way around the guard for anything else.
+ *
+ * Contrast `app-local/<appId>/...` (see `starkeepDir()` and core's
+ * system-design.md): also non-syncable and also app-owned, but it holds derived
+ * *user* data — Photos' face sidecars, clusters, scan progress — so it is state,
+ * it resolves through the guarded root, and tests must never touch the real one.
+ */
+export function starkeepAssetsDir(): string {
+  return join(starkeepRoot(), "app-assets");
+}
+
+function starkeepRoot(): string {
+  return process.env.STARKEEP_DIR ?? join(homedir(), ".starkeep");
 }
 
 /**
@@ -27,6 +56,10 @@ export function starkeepDir(): string {
  * dir" convention into an enforced invariant: a harness that forgets to set the
  * env var (or a regression in this default) now fails loudly instead of
  * silently reading/writing/deleting the developer's live local state.
+ *
+ * The one exemption is `starkeepAssetsDir()`, which resolves the same root
+ * without this check — see there for why that subtree holds nothing worth
+ * guarding.
  */
 function assertNotRealStateUnderTest(dir: string): void {
   const underTest = process.env.VITEST || process.env.STARKEEP_TEST_GUARD === "1";
