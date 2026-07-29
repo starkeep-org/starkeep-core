@@ -1051,3 +1051,12 @@ presence queries, and exact-value queries. Photos then reads it back via
 
 It is throwaway: when real face detection lands it replaces the mock behind the same labels,
 and nothing else moves.
+
+> **Removed before merge (2026-07-29).** `face-index` shipped as described above, did its
+> job, and was then deleted from `starkeep-apps` along with its tests. It was a mock sitting
+> in the apps workspace where the installer's app scan treats it as a real app, and the real
+> consumers arrived fast enough that carrying it past the merge bought nothing: Photos' own
+> `thumbnail`/`crop` labels land in this branch and exercise the origin-app path, and face
+> detection is in flight on its own branch for the cross-app path. What step 10 proved still
+> holds — it just no longer has a checked-in prover. The label surface stays covered in
+> `starkeep-core`, which tests it against apps defined inside the tests themselves.

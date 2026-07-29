@@ -86,7 +86,6 @@ been left with.
 | Installer DDL | `admin-installer/__tests__/dsql-ddl.test.ts` | Registry upsert, stale-key revocation (both branches), uninstall dropping declarations but never label rows. |
 | Schema DDL | `admin-installer/__tests__/dsql-schema-init.test.ts` | **New file.** Guards the measured reverse-index column order and `INCLUDE`, the PUBLIC grants, and the DSQL constraints (one DDL statement per query, no PL/pgSQL). Nothing in CI covered this before; `initializeSharedSchema` only runs against a real endpoint. |
 | Photos | `photos/__tests__/photos-labels.test.ts`, `photo-record-to-app-image.test.ts` | The rules both resize paths ask, and `derivedKind` including another app's identically-named key. |
-| face-index | `face-index/__tests__/index-pass.test.ts` | Paging and flush sizes are now injectable, so the multi-page loop and the chunked flush are exercised instead of being dead paths at the fixture size. |
 | Real DSQL | `e2e-aws/src/journey.test.ts` | Write (flag + valued in one batch), registry read, hydration, presence and exact-value reverse queries, retraction. The only place the shipped label code meets a real cluster — the §3a/§3b POC ran hand-written SQL. |
 
 ---
@@ -110,6 +109,5 @@ been left with.
 ## 4. Verification
 
 - `npm run build`, `npm run typecheck`, `npm test` at the `starkeep-core` root: all green.
-- `starkeep-apps`: photos (96 tests) and face-index (14 tests) green; `tsc --noEmit`
-  clean for both, plus the photos e2e tsconfig; the photos Lambda bundle builds with
-  the shared helper.
+- `starkeep-apps`: photos (96 tests) green; `tsc --noEmit` clean, plus the photos e2e
+  tsconfig; the photos Lambda bundle builds with the shared helper.
