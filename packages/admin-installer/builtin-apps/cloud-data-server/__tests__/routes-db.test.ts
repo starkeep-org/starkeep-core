@@ -1181,6 +1181,86 @@ describe("GET /data/records filters", () => {
   });
 });
 
+// ---- Variant resolution by target long edge (media plan item 3b) ----
+//
+// The resolution rules are tested in protocol-primitives and the gathering in
+// storage-sqlite. What is tested here is the *contract at the edge*: a request
+// that is malformed must be refused rather than answered as though it were
+// valid, because a caller that asked in pixels precisely so it would not have
+// to reason about size classes has no way to notice a silently-empty answer.
+describe("GET /data/records variant resolution", () => {
+  const grants = [{ type_id: "image/jpeg", access: "readwrite" }];
+
+  async function request(query: Record<string, string>) {
+    setDbFactory(fakeDsqlWithGrants(grants).on(RECORDS_SELECT, []));
+    return handler(
+      signedEvent({ appId: "app1", method: "GET", subPath: "/data/records", query }),
+      context,
+    );
+  }
+
+  it("accepts a variant label and a list of pixel sizes", async () => {
+    const res = await request({ variant: "photos/rendition", variantLongEdge: "400,1280" });
+    expect(res.statusCode).toBe(200);
+  });
+
+  // Either parameter alone is meaningless. Answering it as though it were
+  // valid returns no variants, which reads as "this record has none" rather
+  // than "you asked wrongly".
+  it("rejects variant without variantLongEdge", async () => {
+    const res = await request({ variant: "photos/rendition" });
+    expect(res.statusCode).toBe(400);
+    expect(String(bodyOf(res)["error"])).toMatch(/must be given together/);
+  });
+
+  it("rejects variantLongEdge without variant", async () => {
+    const res = await request({ variantLongEdge: "400" });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("rejects a malformed variant label", async () => {
+    const res = await request({ variant: "no-slash", variantLongEdge: "400" });
+    expect(res.statusCode).toBe(400);
+    expect(String(bodyOf(res)["error"])).toMatch(/variant must be of the form/);
+  });
+
+  // "400px" is what you get from string-concatenating a CSS value, and
+  // parseInt would happily accept it.
+  it("rejects sizes that are not whole pixel counts", async () => {
+    for (const bad of ["400px", "12abc", "400.5", "-400", "0"]) {
+      const res = await request({ variant: "photos/rendition", variantLongEdge: bad });
+      expect(res.statusCode, bad).toBe(400);
+    }
+  });
+
+  it("caps how many sizes one request may ask for", async () => {
+    const res = await request({
+      variant: "photos/rendition",
+      variantLongEdge: "100,200,300,400,500",
+    });
+    expect(res.statusCode).toBe(400);
+    expect(String(bodyOf(res)["error"])).toMatch(/at most/);
+  });
+
+  // Omitting the parameters entirely must not start resolving variants — the
+  // extra child query is not free, and every existing caller passes neither.
+  it("does no variant work when neither parameter is present", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
+      recordRow({ id: "rec-1", type: "image/jpeg" }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "app1", method: "GET", subPath: "/data/records" }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res) as { records: Array<Record<string, unknown>> };
+    expect(body.records[0]!["variants"]).toBeUndefined();
+    // One records query, not two: no child lookup happened.
+    expect(db.calls(RECORDS_SELECT)).toHaveLength(1);
+  });
+});
+
 // ---- Verified uploads: the checksum pinned into the presigned PUT ----
 //
 // The property under test is that the broker decides what may be written at a

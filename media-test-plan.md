@@ -373,7 +373,93 @@ performance fix that is also a correctness fix.
 - **`precheckThumbnail` itself is untested.** It is two `fetch` calls and a boolean; the rules
   it composes are tested, the composition is not. A fake `fetchPath` would cover it cheaply.
 
-*(Sections for items 3b, 4, 5, 5b and onward are appended as each lands.)*
+### Item 3b — variant resolution by target long edge
+
+Split in three, because the three parts fail differently: a pure resolver
+(`protocol-primitives/records/variants.ts`), a gatherer over the adapter interface
+(`storage-adapter/database/variant-queries.ts`, shared by both servers so it cannot be fixed in
+only one), and the parameter contract at each server's edge.
+
+#### The rules (`protocol-primitives/__tests__/variants.test.ts`, 30 tests)
+
+| Rule | Tests |
+|---|---|
+| 1 — smallest at or above target | rounds **up** not down (500 px must not be served 400 and upscaled); picks the *smallest* qualifying rung, not merely a qualifying one (2560 for a 401 px request is ~40× the pixels — and under I-T a read promotes the object back to Frequent Access for 30 days) |
+| 2 — clamp to the largest that exists | lets a client request its full viewport without knowing whether this record has a rung that large |
+| 3 — **never the original** | asserted as an *absence*: no candidate set contains a parent, and `never returns something larger than its largest variant` sweeps a range of targets. Exceeding the ladder must be an explicit restore, the same guarantee the storage layer enforces by refusing to thaw on read |
+
+Also: long edge of a **portrait** variant is its height, not its width; unmeasured variants are
+excluded rather than guessed at (and an all-unmeasured record resolves to `null`); zero and
+negative dimensions are not measurements.
+
+**Determinism is tested, not assumed.** Two variants can legitimately share a long edge (a
+class that clamped to its source, or a re-derivation mid-supersession). An unstable choice hands
+a different URL to each request, defeating client and edge caching for exactly the records with
+the most variants — so ties break on id, and the test resolves the same set in two orders.
+
+**Test candidates are named by their dimensions, never by a class.** A test calling something
+`imageMedium` would encode the very assumption this module exists to prevent: that a class name
+tells you a size. It does not — classes are per-record maxima.
+
+#### The gathering (`storage-sqlite/__tests__/variant-queries.test.ts`, 12 tests)
+
+Every case here is one where a naive version silently resolves to the *wrong child*:
+
+| Test | Would otherwise serve |
+|---|---|
+| `ignores children that are not labelled as variants` | someone's **crop** when they asked for a 400 px tile — the bug reading `parent_id` alone always had |
+| `ignores a variant whose label has been retracted` | bytes the app has disowned |
+| `ignores a soft-deleted variant` | a deleted object |
+| `is scoped to the naming app` | another app's `rendition` key |
+| `keeps each record's variants to itself` | a different record's image |
+| `never resolves to the parent record itself` | the original — rule 3 at the gathering layer |
+
+Plus: a record whose variants have no dimensions is omitted; a partially-measured record
+resolves from the measured ones; a whole page resolves in one pass.
+
+#### The edge (`cloud-data-server/__tests__/routes-db.test.ts`, 7 tests)
+
+The contract is **refuse, don't half-answer**. A caller that asked in pixels precisely so it
+would not have to reason about classes has no way to notice a silently-empty answer.
+
+- `variant` without `variantLongEdge` (or vice versa) → 400. Either alone is meaningless, and
+  answering it returns no variants, which reads as "this record has none".
+- Malformed label ref → 400.
+- `400px`, `12abc`, `400.5`, `-400`, `0` → 400. `parseInt` would accept the first two, and
+  `"400px"` is exactly what string-concatenating a CSS value produces.
+- More than `MAX_VARIANT_TARGETS` sizes → 400.
+- **Neither parameter present does no variant work at all** — asserted by counting queries, so
+  the extra child lookup cannot creep into every existing caller's request.
+
+#### Design notes
+
+- **URLs ride the record list.** Resolution lives on the list endpoint precisely so it costs no
+  extra round trip; a grid that presigned every tile separately would have given back the hop
+  this design removes. One signature per distinct variant, not per (record, target) pair, since
+  progressive presentation frequently resolves several sizes to the same child.
+- **A variant the caller may not read arrives without a URL** rather than being omitted — being
+  omitted would read as "no variant that size".
+- Long URL TTL (6 h) is safe because keys are content-addressed and the cache policy already
+  excludes the signature from the cache key.
+
+**Gaps**
+
+- **No test resolves variants end-to-end through a running server.** The three layers are
+  covered separately and their seams are typed, but nothing asserts that a real
+  `GET /data/records?variant=…&variantLongEdge=…` returns a populated `variants` map with
+  working URLs. That needs a fixture with parent+child records and metadata in the
+  local-data-server harness.
+- **`MAX_CHILDREN_PER_PAGE` truncation is untested.** A record with more children than the cap
+  degrades to a truncated candidate set, which could resolve to a smaller variant than exists.
+  Far above any real case, but the behaviour is unasserted.
+- **Video variants are untested.** The resolver reads `width`/`height`, which the video metadata
+  table also has, but no test exercises a video parent — and video classes are not purely a
+  long-edge ladder (bitrate is a second axis). Revisit with item 27.
+- **Nothing yet consumes this.** Item 9 is the first consumer; until then the grep-level check
+  that no size-class literal appears outside the ladder definition (see cross-cutting
+  principles) has nothing to check.
+
+*(Sections for items 4, 5, 5b and onward are appended as each lands.)*
 
 ---
 
