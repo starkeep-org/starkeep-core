@@ -327,8 +327,69 @@ describe("record registration", () => {
   // the server sets from the authenticated subject, so there is no request
   // that can express the attack. Nothing to test.
 
+  // Item 20. The reaper is blocked without this: keys are content-addressed,
+  // so two registrations of the same bytes name the same object — and if both
+  // create records, deleting either has to decide whether the bytes may go.
+  // That is a refcount the reaper cannot compute cheaply and must never get
+  // wrong. One key, one record makes "delete the record, delete the object"
+  // sound.
+  it("dedups a byte-identical top-level record, not just a derived child", async () => {
+    const db = fakeDsqlWithGrants(grants, [], [
+      recordRow({ id: "already-here", type: "image/jpeg", content_hash: VALID_HASH }),
+    ]);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const res = await handler(
+      signedEvent({
+        appId: "reg9",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+        },
+      }),
+      context,
+    );
+    // Idempotent, not an error: the second arrival is a retry or a re-import,
+    // neither of which is a mistake the caller can act on.
+    expect(res.statusCode).toBe(200);
+    expect((bodyOf(res)["record"] as { id: string }).id).toBe("already-here");
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
+  });
+
+  // The parent edge is part of what a record *is*: the same bytes may
+  // legitimately be both a standalone photo and a rendition of something else.
+  // Those are different records that happen to share storage, and collapsing
+  // them would make one disappear.
+  it("does not collapse a top-level record into a child with the same bytes", async () => {
+    const db = fakeDsqlWithGrants(grants, [], []);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).resolves({});
+    await handler(
+      signedEvent({
+        appId: "reg10",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+        },
+      }),
+      context,
+    );
+    // The dedup lookup is scoped by parent — a top-level registration asks for
+    // parent_id IS NULL rather than matching any record with these bytes.
+    const dedupCall = db.calls(/from "shared"\."records" where "content_hash" =/)[0]!;
+    expect(dedupCall.text).toContain('"parent_id" is null');
+  });
+
   it("dedups a byte-identical derived child of the same parent", async () => {
-    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
+    const db = fakeDsqlWithGrants(grants, [], [
       recordRow({ id: "existing-thumb", type: "image/jpeg", content_hash: VALID_HASH, parent_id: "parent-1" }),
     ]);
     setDbFactory(db);
