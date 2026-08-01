@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ObjectStorageAdapter } from "../object-storage/adapter.js";
 import { collectStream, streamFromBytes, verifyingStream } from "../object-storage/stream-verify.js";
 import type {
+  ByteRange,
   PutOptions,
   PutStreamOptions,
   GetResult,
@@ -78,10 +79,17 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
     };
   }
 
-  async getStream(key: string): Promise<ReadableStream<Uint8Array> | null> {
+  async getStream(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
     const entry = this.store.get(key);
     if (!entry) return null;
-    return streamFromBytes(entry.data);
+    if (!range) return streamFromBytes(entry.data);
+    // `end` is inclusive, so +1 for subarray's exclusive bound. Getting this
+    // wrong in the mock is worse than getting it wrong in a real adapter: every
+    // ranged test would agree with the bug and the truncation would only show
+    // up against live S3.
+    return streamFromBytes(
+      entry.data.subarray(range.start, range.end === undefined ? undefined : range.end + 1),
+    );
   }
 
   async putStream(

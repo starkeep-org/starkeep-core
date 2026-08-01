@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { verifyingStream } from "@starkeep/storage-adapter";
-import type { PutOptions, PutStreamOptions, GetResult, ListOptions, ListResult, ObjectFacts } from "@starkeep/storage-adapter";
+import type { ByteRange, PutOptions, PutStreamOptions, GetResult, ListOptions, ListResult, ObjectFacts } from "@starkeep/storage-adapter";
 
 export interface FsObjectStorageAdapterOptions {
   basePath: string;
@@ -66,7 +66,7 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     }
   }
 
-  async getStream(key: string): Promise<ReadableStream<Uint8Array> | null> {
+  async getStream(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
     const filePath = this.keyToPath(key);
     try {
       await access(filePath);
@@ -74,7 +74,11 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
       return null;
     }
     // Node's own conversion — the file is read in chunks, never held whole.
-    return Readable.toWeb(createReadStream(filePath)) as ReadableStream<Uint8Array>;
+    // `start`/`end` are both inclusive in createReadStream, which is why
+    // ByteRange is inclusive too: no translation, so no off-by-one to get wrong.
+    return Readable.toWeb(
+      createReadStream(filePath, range ? { start: range.start, end: range.end } : undefined),
+    ) as ReadableStream<Uint8Array>;
   }
 
   async putStream(

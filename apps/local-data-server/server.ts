@@ -67,6 +67,9 @@ import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { parseRangeHeader } from "./range.js";
+import { pipeline } from "node:stream/promises";
 import { openSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createFileWatchManager } from "./watcher.js";
@@ -2230,18 +2233,54 @@ async function main() {
           json(res, { error: "Invalid or expired file token" });
           return;
         }
-        const fileResult = await localAdapter.get(parsed.key);
-        if (!fileResult) {
+        // stat() rather than get(): the old code read the entire object into
+        // memory to serve it, which is unremarkable for a 3 MB still and an
+        // outright OOM for a 4 GB clip — one allocation of the whole file per
+        // concurrent request.
+        const facts = await localAdapter.stat(parsed.key);
+        if (!facts) {
           res.writeHead(404);
           json(res, { error: "File not found" });
           return;
         }
-        res.writeHead(200, {
+
+        const parsedRange = parseRangeHeader(req.headers["range"], facts.sizeBytes);
+        if (parsedRange === "unsatisfiable") {
+          // 416 must carry the real length, which is how a client that guessed
+          // past the end learns what to ask for instead.
+          res.writeHead(416, {
+            "Content-Range": `bytes */${facts.sizeBytes}`,
+            "Accept-Ranges": "bytes",
+          });
+          res.end();
+          return;
+        }
+
+        const stream = await localAdapter.getStream(parsed.key, parsedRange ?? undefined);
+        if (!stream) {
+          res.writeHead(404);
+          json(res, { error: "File not found" });
+          return;
+        }
+
+        // `Accept-Ranges` is advertised on every response, not just ranged
+        // ones: a <video> element reads it from the first response to decide
+        // whether seeking is possible at all, and without it the browser
+        // disables the scrub bar even though ranges would have worked.
+        const headers: Record<string, string | number> = {
           "Content-Type": parsed.mimeType,
-          "Content-Length": fileResult.size,
+          "Accept-Ranges": "bytes",
           "Cache-Control": "private, no-store",
-        });
-        res.end(Buffer.from(fileResult.data));
+        };
+        if (parsedRange) {
+          const end = parsedRange.end ?? facts.sizeBytes - 1;
+          headers["Content-Range"] = `bytes ${parsedRange.start}-${end}/${facts.sizeBytes}`;
+          headers["Content-Length"] = end - parsedRange.start + 1;
+        } else {
+          headers["Content-Length"] = facts.sizeBytes;
+        }
+        res.writeHead(parsedRange ? 206 : 200, headers);
+        await pipeline(Readable.fromWeb(stream as never), res);
         return;
       }
 

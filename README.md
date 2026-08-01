@@ -20,6 +20,12 @@ However, there are some significant known limitations, making Starkeep probably 
 - Starkeep does not yet support non-default Lambda concurrency limits (i.e. beyond the new account default limit of 10). This is because increasing that limit requires making a request to Amazon and could complicate the setup, which we wanted to keep as simple as possible. We'll sort this out soon.
 - The apps - essentially Drive (built-in) and Photos (installable) - are mostly bare bones proof-of-concept level and lack the features you'd likely need to use these apps as real replacements for, say, your current Photos app. We'll get there!
 
+## Changelog
+
+### 2026-07-29
+
+- **Cross-app labels.** Apps can now make attributed, set-valued assertions about shared records they only hold a read grant on — `alpha/ocr-available` or `photos/faces=Alice` — stored in their own table and queryable by any app that can read the record's type. Labels carry the asserting app's identity, so two apps disagreeing about the same photo is representable rather than a conflict, and they sync between local and cloud over Drive's channel alongside the records themselves. See the labels discussion in [`system-design.md`](system-design.md).
+
 ## Overview
 
 The Starkeep Core repo includes four built-in system apps:

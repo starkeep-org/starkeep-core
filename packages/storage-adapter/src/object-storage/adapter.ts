@@ -1,4 +1,4 @@
-import type { PutOptions, PutStreamOptions, GetResult, ListOptions, ListResult, ObjectFacts, SignedUrlOptions, SignedPutUrlOptions } from "./types.js";
+import type { ByteRange, PutOptions, PutStreamOptions, GetResult, ListOptions, ListResult, ObjectFacts, SignedUrlOptions, SignedPutUrlOptions } from "./types.js";
 
 export interface ObjectStorageAdapter {
   init(): Promise<void>;
@@ -19,8 +19,18 @@ export interface ObjectStorageAdapter {
    * adapter interface has to be implementable on React Native and in a browser,
    * where Node streams do not exist. Node-side adapters convert at their own
    * edge, which costs one wrapper and keeps the contract portable.
+   *
+   * `range` reads a byte range instead of the whole object. This exists for
+   * video: a `<video>` element seeks by issuing `Range` requests, and an
+   * implementation that read from zero and discarded the prefix would turn a
+   * scrub to the ten-minute mark into a ten-minute download. Every backend here
+   * supports ranged reads natively, so honouring it costs one parameter.
+   *
+   * A range beyond the end of the object is the caller's error to handle; the
+   * adapter reports what the backend reports rather than clamping, because a
+   * silently-clamped range is indistinguishable from a correct short read.
    */
-  getStream(key: string): Promise<ReadableStream<Uint8Array> | null>;
+  getStream(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null>;
   /**
    * Write an object from a stream, without buffering it.
    *

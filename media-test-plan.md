@@ -57,6 +57,8 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Blocking** | Multipart uploads are unverified above the part threshold in the buffered `put()` path; the streamed path verifies, the convenience method does not. | 1b-i / 2 | An `e2e-aws` test plus routing all large writes through `putStream` |
 | **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily. | 7 | A node-local (non-syncable) table |
 | **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
+| **Deferred** | Nothing produces a video yet, so the ranged byte layer is exercised only with synthetic bytes. | 28 | Items 26/27 |
+| **Deferred** | No test proves video is routed to the `shared/*` (S3) behaviour rather than the gateway. Serving it through the chunked gateway origin makes CloudFront return whole objects and silently kills seeking. | 28 | An `e2e-aws` 206-through-CloudFront assertion |
 | ~~Deferred~~ | ~~No lifecycle rule exists.~~ **Closed (item 18)** — one tag-filtered rule requiring both tags, above a ~1 MB floor. | 4/5 | — |
 | ~~Deferred~~ | ~~Nothing declares `archive` intent.~~ **Closed (item 17)** — Photos declares it for originals; renditions stay `instant`. | 4/5 | — |
 | ~~Deferred~~ | ~~`absent` is never written for objects that never existed.~~ **Closed** — the reconcile reports stored keys the inventory does not list. | 5b | — |
@@ -1060,6 +1062,80 @@ is that its equivalent is a HeadObject per record — O(library) in network requ
 - **Inventory reports are never reaped.** They accumulate daily under `_starkeep/inventory/`. Small
   (a few MB) and outside `shared/`, so nothing breaks, but a lifecycle rule expiring them after a
   week is the obvious follow-up.
+
+## Phase 5
+
+### Item 28 (byte layer) — ranged reads and range serving
+
+A `<video>` element does not download a file and play it; it **seeks**, by issuing `Range`
+requests. The byte layer had no notion of a range at all, which made this the half of item 28 worth
+doing before any transcode exists to play.
+
+**What the plan asked to verify rather than assume: the CloudFront cache policy.** Verified against
+live AWS docs, and the answer inverts the naive expectation — `Range` must **not** be added to the
+cache key. CloudFront handles ranges natively, caching the whole object and slicing from it; adding
+`Range` to `headersConfig` would fragment the cache into one entry per distinct byte range, and
+since browsers pick arbitrary ranges the hit rate would collapse. The existing
+`headerBehavior: "none"` is already correct. **This is recorded because it looks like a bug and is
+not** — a future reader "fixing" it would destroy the video cache hit rate.
+
+Two real constraints fell out of the same docs:
+
+- **`Transfer-Encoding: chunked` from the origin makes CloudFront return the entire object instead
+  of the range.** So video bytes must be served from the `shared/*` behaviour (S3 origin, real
+  `Content-Length`) and never through the gateway origin, which streams chunked. Seeking would
+  silently degrade to full downloads — a performance cliff with no error anywhere.
+- Range on a compressed object is expressed in *compressed* offsets. Not a live problem (CloudFront
+  does not compress video MIME types) but it is why `compress: true` and ranges coexisting is worth
+  knowing about rather than assuming.
+
+**Two genuine defects found in the local path**, both in `GET /data/files/:token`:
+
+1. **No `Range` handling whatsoever** — every response was 200 with the whole body. Seeking was
+   impossible, and Safari frequently refuses to play at all without a 206.
+2. **`localAdapter.get()` read the entire object into memory to serve it.** Unremarkable for a 3 MB
+   still; an outright OOM for a 4 GB clip, once per concurrent request. Now `stat()` + `getStream()`
+   piped to the response.
+
+`getStream(key, range?)` gained an optional inclusive `ByteRange` across all four adapters. Inclusive
+at both ends deliberately: HTTP and S3 are both inclusive, so no layer translates and there is no
+boundary to get wrong — and the failure mode of an exclusive type here is silently dropping the last
+byte of every file rather than failing loudly.
+
+**Tests.** Nine parser cases and eight end-to-end cases through a running server. The parser cases
+are the ones that fail *quietly*:
+
+- **A suffix range (`bytes=-500`) means the LAST 500 bytes, not the first.** Read as a prefix it
+  returns real bytes from the wrong end of the file under a status code asserting they are right.
+- An oversized suffix is *satisfiable* per RFC 7233 and means the whole file — rejecting it would
+  break "give me the last 10 MB" of a 2 MB file.
+- Ends that overrun are clamped (browsers routinely ask for a fixed chunk past EOF); starts past the
+  end are 416 **with the real length**, not clamped, since clamping would serve the last byte to a
+  client that asked for something nonexistent.
+- Malformed and multi-range requests fall back to the whole object, which is always a *correct*
+  response — it is what a server without range support does.
+
+The e2e cases assert **bytes, not just status**: a 206 carrying the wrong slice is worse than a 200,
+because the client trusts it and assembles a corrupt file. The parser passing proves nothing about
+the route — a header parsed perfectly and then never consulted passes every parser test.
+
+The fs adapter's ranged reads were **verified by sabotage**: ignoring the `range` argument fails
+exactly the three new tests and nothing else, so they prove the range reaches the filesystem rather
+than being applied after a full read.
+
+The HTTP adapter treats a **200 response to a ranged request as an error**. A server that ignores
+`Range` answers with a success status carrying the wrong bytes; unchecked, the caller writes a whole
+object into a slot sized for a chunk and the corruption only surfaces later in the assembled file.
+
+#### Gaps
+
+- **Nothing yet produces a video to serve.** The byte layer is complete and exercised with synthetic
+  bytes; probe and transcode (items 26/27) are what make it reachable from the app.
+- **`Accept-Ranges` is advertised by the local server only.** CloudFront and S3 emit it themselves,
+  so the cloud path is covered, but that is inherited behaviour rather than something asserted here.
+- **No test proves video is served from the `shared/*` behaviour rather than the gateway.** The
+  chunked-encoding constraint above is documented and honoured by the current routing, but a routing
+  change could violate it silently. An `e2e-aws` assertion on a 206 through CloudFront would close it.
 
 ## Phase 4
 

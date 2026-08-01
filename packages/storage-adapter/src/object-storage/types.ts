@@ -18,6 +18,27 @@ export interface GetResult {
   size: number;
 }
 
+/**
+ * A half-open-at-neither-end byte range: both bounds are inclusive.
+ *
+ * Inclusive because every wire format this crosses is inclusive — HTTP's
+ * `Range: bytes=0-99` and S3's `Range` header both mean "100 bytes" — and a
+ * type that flipped to exclusive here would put an off-by-one at every
+ * boundary, in the direction that silently truncates the last byte of a file
+ * rather than failing loudly.
+ */
+export interface ByteRange {
+  /** First byte to read, inclusive. */
+  readonly start: number;
+  /**
+   * Last byte to read, inclusive. Omit to read to the end.
+   *
+   * A `<video>` element's opening request is `bytes=0-` — open-ended is the
+   * common case, not an edge case.
+   */
+  readonly end?: number;
+}
+
 export interface PutStreamOptions {
   contentType?: string;
   metadata?: Record<string, string>;
