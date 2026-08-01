@@ -1052,6 +1052,36 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         return clientErr("labelValue requires label", 400);
       }
 
+      // `parentId=<id>` restricts to that record's children; `parentId=none`
+      // restricts to records that have no parent at all. Two questions the
+      // resize path used to answer by listing the whole library and filtering
+      // client-side — which was also silently capped at whatever `limit` the
+      // caller passed, so on a large library it answered them wrongly.
+      const parentIdParam = query["parentId"];
+      const parentFilter: Filter | null =
+        parentIdParam === undefined
+          ? null
+          : parentIdParam === "none"
+            ? { field: "parentId", operator: "isNull" }
+            : { field: "parentId", operator: "eq", value: parentIdParam };
+
+      // `notLabel=<appId>/<key>` excludes records carrying that label at any
+      // value. This is what lets the grid page originals server-side: with a
+      // rendition label on every derived child, a 60k-item library is 300k+
+      // records, and a page that mixes them is a page the client cannot use.
+      const notLabelParam = query["notLabel"];
+      let excludeLabel: { appId: string; key: string } | undefined;
+      if (notLabelParam !== undefined) {
+        const ref = parseLabelRef(notLabelParam);
+        if (!ref) {
+          return clientErr(
+            `notLabel must be of the form "<appId>/<key>" (got "${notLabelParam}")`,
+            400,
+          );
+        }
+        excludeLabel = { appId: ref.appId, key: ref.key };
+      }
+
       // Per-type read enforcement. An explicit ?type= must be in the caller's
       // readable set; otherwise constrain the scan to readable types.
       if (type !== undefined) {
@@ -1095,14 +1125,21 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             filters: [
               { field: "id", operator: "in", value: ids },
               { field: "deletedAt", operator: "isNull" },
+              // Combinable with the label filter, per the plan: "which
+              // rendition of *this* record" is one query, not a label scan
+              // followed by a client-side parent check.
+              ...(parentFilter ? [parentFilter] : []),
             ],
             limit: ids.length,
+            ...(excludeLabel ? { excludeLabel } : {}),
           });
           for (const r of fetched.records) byId.set(r.id, r);
         }
         // A label whose record is gone (a delete that raced sync) drops out
         // here — the one thing that can still short a page, and the reason
-        // the contract is "page until nextCursor is null".
+        // the contract is "page until nextCursor is null". `parentId` and
+        // `notLabel` short a page the same way when combined with `label`,
+        // for the same reason and with the same remedy.
         const labelled = ids
           .map((id) => byId.get(id))
           .filter((r): r is DataRecord => r !== undefined);
@@ -1140,8 +1177,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (type === undefined && !grants.allAccess) {
         filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
       }
+      if (parentFilter) filters.push(parentFilter);
 
-      const result = await db.query({ type, filters, limit: limit + 1, cursor });
+      const result = await db.query({
+        type,
+        filters,
+        limit: limit + 1,
+        cursor,
+        ...(excludeLabel ? { excludeLabel } : {}),
+      });
       const hasMore = result.records.length > limit;
       const records = hasMore ? result.records.slice(0, limit) : result.records;
       const metadataById = includeMetadata ? await loadMetadataForPage(db, grants, records) : null;
@@ -1759,7 +1803,24 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const record = await db.get(id);
         if (!record || record.deletedAt) return clientErr("Record not found", 404);
         if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
-        return ok({ record: recordToResponse(record) });
+        // Same `include` vocabulary as the list route. Asking about one record
+        // is the cheapest possible form of "is this record a rendition", and
+        // without it the only way to answer that was to list the library and
+        // look — which is O(library) to learn one bit.
+        const detailInclude = (query["include"] ?? "").split(",").map((s) => s.trim());
+        const detailLabels = detailInclude.includes("labels")
+          ? await loadLabelsForPage(db, [record], query["labelApps"])
+          : null;
+        const detailMeta = detailInclude.includes("metadata")
+          ? await loadMetadataForPage(db, grants, [record])
+          : null;
+        return ok({
+          record: recordToResponse(
+            record,
+            detailMeta ? detailMeta.get(record.id) ?? null : undefined,
+            detailLabels ? detailLabels.get(record.id) ?? [] : undefined,
+          ),
+        });
       }
 
       if (method === "PUT") {

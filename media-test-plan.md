@@ -323,7 +323,57 @@ checksums are CRC-only). Both halves of the fix are now in:
   and will fail against real S3 rather than silently uploading something truncated. Untested
   against real S3 — same `e2e-aws` gap as above.
 
-*(Sections for items 3, 3b, 4, 5, 5b and onward are appended as each lands.)*
+### Item 3 — `parentId` and negated-label filters; deleting the O(library) scan
+
+The scan this replaces was not merely slow. `/data/records?limit=1000&include=labels` listed
+every readable record to learn two bits ("is this a thumbnail", "does it already have one"),
+and above the page limit it answered the second one **wrongly**: a record outside the first
+1000 read as "no thumbnail yet", so the same thumbnail was derived again on every attempt. A
+performance fix that is also a correctness fix.
+
+**Automated**
+
+| Test | Where | Asserts |
+|---|---|---|
+| `returns records that carry no such label` | `storage-sqlite/__tests__/exclude-label.test.ts` | the basic exclusion |
+| `excludes regardless of the label's value` | same | negation is over the key, not a value — see below |
+| `returns a record exactly once when it holds many other labels` | same | a `LEFT JOIN … IS NULL` would multiply the row before the null test, so a record with three face labels would come back three times |
+| `does not exclude on a tombstoned label` | same | a retracted rendition label means the record is no longer a rendition; treating the dead row as live would hide it from the grid **permanently**, with nothing to un-hide it |
+| `is scoped to the naming app` | same | namespaces exist so two apps can use one key name; excluding on the key alone would let one app's vocabulary hide another's records |
+| `combines with ordinary column filters` | same | "children of X that are not renditions" |
+| `emits a correlated NOT EXISTS` / `ignores tombstoned label rows` / `does not join` | `storage-aurora-dsql/__tests__/query-builder.test.ts` | the same three properties at the SQL level for the cloud dialect — an *uncorrelated* subquery would exclude every record as soon as any record carried the label |
+| `pushes parentId into the query rather than filtering after it` | `cloud-data-server/__tests__/routes-db.test.ts` | the constraint reaches SQL, so pages come back full and the cursor is honest |
+| `treats parentId=none as a null-parent filter` | same | sentinel rather than an empty value, which would be indistinguishable from a caller that built the query string from an undefined variable |
+| `rejects a malformed notLabel rather than ignoring it` | same | silently ignoring it returns renditions mixed into the grid, which **looks like the filter working** on a small library |
+| `combines parentId with a label filter` | same | "a thumbnail *of this record*" is one lookup, not a label scan plus a client-side parent check |
+| `parentId filtering` group | `storage-sqlite/__tests__/exclude-label.test.ts` | `eq` selects one record's children; `isNull` selects top-level records |
+
+**Design notes worth keeping**
+
+- **`excludeLabel` has no value component, deliberately.** `?label=` distinguishes presence
+  from a specific value because a positive query has a reason to. A negated one asking "not
+  carrying key K with value V" would silently *include* records carrying K with some other
+  value — the opposite of what it reads as.
+- **`include=labels` was added to the single-record GET** on both servers. Asking about one
+  record is the cheapest possible form of "is this record a rendition"; without it the only way
+  to answer was to list the library and look.
+- The two resize paths (Next route and cloud Lambda) now share `precheckThumbnail` in
+  `photos-lib`, continuing the existing rule that a rule kept in both would eventually be fixed
+  in only one.
+
+**Gaps**
+
+- **No test proves the query is actually indexed.** The tests assert the right SQL is emitted
+  and the right rows come back; nothing measures that `NOT EXISTS` over `record_labels` uses
+  the primary key rather than scanning. On a 300k-row label table that difference is the whole
+  point of the item. Needs an `EXPLAIN` assertion or a seeded-volume benchmark.
+- **The local data server's filters have no route-level test.** The SQL layer is covered by
+  `storage-sqlite`, and the cloud route by `routes-db`, but the local server's own parameter
+  parsing (`parentId=none`, malformed `notLabel`) is only covered transitively.
+- **`precheckThumbnail` itself is untested.** It is two `fetch` calls and a boolean; the rules
+  it composes are tested, the composition is not. A fake `fetchPath` would cover it cheaply.
+
+*(Sections for items 3b, 4, 5, 5b and onward are appended as each lands.)*
 
 ---
 

@@ -92,4 +92,37 @@ describe("buildPostgresQuery (compile-only, no database)", () => {
     expect(text).toContain("limit $1");
     expect(values).toEqual([51]);
   });
+
+  describe("excludeLabel", () => {
+    it("emits a correlated NOT EXISTS against the labels table", () => {
+      const { text, values } = buildPostgresQuery({
+        excludeLabel: { appId: "photos", key: "rendition" },
+      });
+      expect(text).toContain("not exists");
+      expect(text).toContain('"shared"."record_labels"');
+      // Correlated on the record id — an uncorrelated subquery would exclude
+      // every record as soon as *any* record carried the label.
+      expect(text).toMatch(/"record_id" = "shared"\."records"\."id"/);
+      expect(values).toEqual(["photos", "rendition"]);
+    });
+
+    // A retracted rendition label means the record is no longer a rendition.
+    // Without this clause the dead row would keep it hidden from the grid
+    // permanently, and nothing would ever un-hide it.
+    it("ignores tombstoned label rows", () => {
+      const { text } = buildPostgresQuery({
+        excludeLabel: { appId: "photos", key: "rendition" },
+      });
+      expect(text).toContain('"deleted_at" is null');
+    });
+
+    // NOT EXISTS rather than a LEFT JOIN: a record can hold several values of
+    // one key, and a join would multiply its row before the null test.
+    it("does not join, so a record with many labels cannot be duplicated", () => {
+      const { text } = buildPostgresQuery({
+        excludeLabel: { appId: "photos", key: "rendition" },
+      });
+      expect(text).not.toContain("left join");
+    });
+  });
 });

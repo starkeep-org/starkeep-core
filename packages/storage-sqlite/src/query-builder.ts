@@ -63,6 +63,29 @@ export function buildSelectQuery(query: Query): BuiltQuery {
     }
   }
 
+  if (query.excludeLabel) {
+    // NOT EXISTS rather than a LEFT JOIN … IS NULL: a record can carry several
+    // values of one key, and a join would multiply its row before the null
+    // test, so the record would come back once per *other* label it holds.
+    // The tombstone check is not optional — a retracted rendition label means
+    // the record is no longer a rendition, and treating the dead row as live
+    // would permanently hide it from the grid.
+    const { appId, key } = query.excludeLabel;
+    qb = qb.where((eb: ExpressionBuilder<DB, "shared_records">) =>
+      eb.not(
+        eb.exists(
+          eb
+            .selectFrom("shared_record_labels")
+            .select("record_id")
+            .whereRef("shared_record_labels.record_id", "=", "shared_records.id")
+            .where("app_id", "=", appId)
+            .where("key", "=", key)
+            .where("deleted_at", "is", null),
+        ),
+      ),
+    ) as Qb;
+  }
+
   if (query.cursor) {
     qb = qb.where("id", ">", query.cursor);
   }
