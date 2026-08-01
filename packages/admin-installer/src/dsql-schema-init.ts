@@ -263,6 +263,29 @@ export async function initializeSharedSchema(
       .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON shared.record_labels TO PUBLIC`)
       .execute(db);
 
+    // shared.object_availability — whether the cloud can serve an object's
+    // bytes right now.
+    //
+    // Keyed by object key rather than record id: keys are content-addressed, so
+    // two records legitimately share one object, and readability is a property
+    // of the object. Per-record rows could disagree about one blob.
+    //
+    // Rows exist only for objects something has told us about; absence means
+    // the default (instant). That is what "maintained, not computed" buys — a
+    // listing costs one batched read instead of a HeadObject per record, which
+    // would be O(library) on every grid scroll.
+    await db.schema
+      .createTable("shared.object_availability")
+      .ifNotExists()
+      .addColumn("object_storage_key", "text", (c) => c.primaryKey())
+      .addColumn("state", "text", (c) => c.notNull())
+      .addColumn("tier", "text")
+      .addColumn("expected_latency_hours", "integer")
+      .addColumn("ready_at_ms", "bigint")
+      .addColumn("restored_until_ms", "bigint")
+      .addColumn("observed_at_ms", "bigint", (c) => c.notNull())
+      .execute();
+
     // shared.app_label_keys — the manifest-declared key registry.
     //
     // Capping *distinct keys per app* is the limit that actually enforces the

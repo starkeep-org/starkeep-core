@@ -16,6 +16,7 @@ import type {
   LabelValueReplacement,
   FindByLabelQuery,
   FindByLabelResult,
+  StoredAvailability,
 } from "../database/types.js";
 import {
   encodeLabelCursor,
@@ -398,5 +399,38 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     this.store.clear();
     this.metadata.clear();
     this.labels.clear();
+  }
+
+  // ---- Object availability ------------------------------------------------
+
+  private availability = new Map<string, StoredAvailability>();
+
+  async getAvailability(objectStorageKeys: string[]): Promise<Map<string, StoredAvailability>> {
+    const out = new Map<string, StoredAvailability>();
+    for (const key of objectStorageKeys) {
+      const row = this.availability.get(key);
+      if (row) out.set(key, row);
+    }
+    return out;
+  }
+
+  async putAvailability(row: StoredAvailability): Promise<void> {
+    this.availability.set(row.objectStorageKey, row);
+  }
+
+  async countRestoringObjects(): Promise<{ objectCount: number; bytes: number }> {
+    let objectCount = 0;
+    let bytes = 0;
+    for (const row of this.availability.values()) {
+      if (row.state !== "restoring") continue;
+      objectCount += 1;
+      for (const record of this.store.values()) {
+        if (record.objectStorageKey === row.objectStorageKey) {
+          bytes += record.sizeBytes;
+          break;
+        }
+      }
+    }
+    return { objectCount, bytes };
   }
 }

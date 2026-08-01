@@ -1181,6 +1181,227 @@ describe("GET /data/records filters", () => {
   });
 });
 
+// ---- Availability and restore (media plan item 5b) ----
+//
+// The guarantee under test: **a read never restores implicitly**. Without it, a
+// future slideshow feature would thaw an entire archive one image at a time,
+// each thaw costing money and twelve hours, with nothing in the call path
+// looking wrong. Every case below is either "the caller is told before trying"
+// or "the caller is refused rather than silently committed".
+describe("availability and restore", () => {
+  const grants = [{ type_id: "image/jpeg", access: "readwrite" }];
+  const archivedKey = `shared/image/aa/${"a".repeat(64)}`;
+
+  function archivedRow(over: Record<string, unknown> = {}) {
+    return {
+      object_storage_key: archivedKey,
+      state: "archived",
+      tier: "DEEP_ARCHIVE",
+      expected_latency_hours: 12,
+      ready_at_ms: null,
+      restored_until_ms: null,
+      observed_at_ms: 1,
+      ...over,
+    };
+  }
+
+  it("reports instant for an object nothing has moved", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
+      recordRow({ id: "rec-1", type: "image/jpeg" }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "app1", method: "GET", subPath: "/data/records" }),
+      context,
+    );
+    const body = bodyOf(res) as { records: Array<Record<string, unknown>> };
+    // Defaulting to instant is what makes staleness fail safe: a wrong answer
+    // costs a recoverable 409 from the read path, where defaulting to archived
+    // would make every record look unreadable until proven otherwise.
+    expect(body.records[0]!["availability"]).toEqual({ state: "instant" });
+  });
+
+  it("reports archived, with the tier and the wait, on the listing itself", async () => {
+    const db = fakeDsqlWithGrants(grants, [archivedRow()]).on(RECORDS_SELECT, [
+      recordRow({ id: "rec-1", type: "image/jpeg", object_storage_key: archivedKey }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "app1", method: "GET", subPath: "/data/records" }),
+      context,
+    );
+    const body = bodyOf(res) as { records: Array<Record<string, unknown>> };
+    // On the listing the client already fetched — so unreadability is known
+    // before anything is attempted, rather than discovered as a stalled image.
+    expect(body.records[0]!["availability"]).toEqual({
+      state: "archived",
+      tier: "DEEP_ARCHIVE",
+      expectedLatencyHours: 12,
+    });
+  });
+
+  it("refuses a file-url for archived bytes with 409, and does not restore", async () => {
+    const db = fakeDsqlWithGrants(grants, [archivedRow()]).on(RECORDS_SELECT, [
+      recordRow({ id: "rec-1", type: "image/jpeg", object_storage_key: archivedKey }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "app1", method: "GET", subPath: "/data/records/rec-1/file-url" }),
+      context,
+    );
+    expect(res.statusCode).toBe(409);
+    const body = bodyOf(res);
+    expect(body["error"]).toBe("ObjectArchived");
+    expect(body["availability"]).toMatchObject({ tier: "DEEP_ARCHIVE" });
+    // Nothing was written: a read must not have side effects, least of all
+    // billable ones.
+    expect(db.calls(/insert into "shared"\."object_availability"/)).toHaveLength(0);
+  });
+
+  it("409s a read of bytes already being restored rather than queueing another", async () => {
+    const db = fakeDsqlWithGrants(grants, [
+      archivedRow({ state: "restoring", ready_at_ms: 1_700_000_000_000 }),
+    ]).on(RECORDS_SELECT, [
+      recordRow({ id: "rec-1", type: "image/jpeg", object_storage_key: archivedKey }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "app1", method: "GET", subPath: "/data/records/rec-1/file-url" }),
+      context,
+    );
+    expect(res.statusCode).toBe(409);
+    expect(bodyOf(res)["error"]).toBe("ObjectRestoring");
+  });
+
+  describe("POST /data/records/:id/restore", () => {
+    function archivedDb() {
+      return fakeDsqlWithGrants(grants, [archivedRow()]).on(RECORDS_SELECT, [
+        recordRow({
+          id: "rec-1",
+          type: "image/jpeg",
+          object_storage_key: archivedKey,
+          size_bytes: 5 * 1024 ** 3,
+        }),
+      ]);
+    }
+
+    // The cost and the wait are invisible at the moment someone clicks.
+    // Returning them as a distinct step is what makes them a decision rather
+    // than a discovery.
+    it("returns an estimate and does nothing without confirmation", async () => {
+      const db = archivedDb();
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({ appId: "app1", method: "POST", subPath: "/data/records/rec-1/restore", body: {} }),
+        context,
+      );
+      expect(res.statusCode).toBe(200);
+      const body = bodyOf(res);
+      expect(body["confirmRequired"]).toBe(true);
+      const estimate = body["estimate"] as Record<string, unknown>;
+      expect(estimate["tier"]).toBe("Standard");
+      expect(estimate["estimatedHours"]).toBe(12);
+      expect(Number(estimate["estimatedCostUsd"])).toBeGreaterThan(0);
+      expect(db.calls(/insert into "shared"\."object_availability"/)).toHaveLength(0);
+    });
+
+    it("issues the restore only on explicit confirmation", async () => {
+      const db = archivedDb();
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/data/records/rec-1/restore",
+          body: { confirm: true },
+        }),
+        context,
+      );
+      expect(res.statusCode).toBe(200);
+      expect(bodyOf(res)["restoring"]).toBe(true);
+      expect(db.calls(/insert into "shared"\."object_availability"/)).toHaveLength(1);
+    });
+
+    // Standard rather than Bulk by default: the difference is hundredths of a
+    // cent and thirty-six hours.
+    it("defaults to the fast tier and lets a caller opt into the cheap one", async () => {
+      setDbFactory(archivedDb());
+      const bulk = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/data/records/rec-1/restore",
+          body: { tier: "Bulk" },
+        }),
+        context,
+      );
+      const estimate = bodyOf(bulk)["estimate"] as Record<string, unknown>;
+      expect(estimate["tier"]).toBe("Bulk");
+      expect(estimate["estimatedHours"]).toBe(48);
+    });
+
+    // Two clients racing on one archived record is ordinary, not an error.
+    it("reports an already-readable record without restoring it", async () => {
+      const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
+        recordRow({ id: "rec-1", type: "image/jpeg", object_storage_key: archivedKey }),
+      ]);
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/data/records/rec-1/restore",
+          body: { confirm: true },
+        }),
+        context,
+      );
+      expect(res.statusCode).toBe(200);
+      expect(bodyOf(res)["alreadyReadable"]).toBe(true);
+      expect(db.calls(/insert into "shared"\."object_availability"/)).toHaveLength(0);
+    });
+
+    it("does not queue a second restore for bytes already thawing", async () => {
+      const db = fakeDsqlWithGrants(grants, [archivedRow({ state: "restoring" })]).on(
+        RECORDS_SELECT,
+        [recordRow({ id: "rec-1", type: "image/jpeg", object_storage_key: archivedKey })],
+      );
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/data/records/rec-1/restore",
+          body: { confirm: true },
+        }),
+        context,
+      );
+      expect(bodyOf(res)["alreadyRestoring"]).toBe(true);
+      expect(db.calls(/insert into "shared"\."object_availability"/)).toHaveLength(0);
+    });
+
+    // A read grant is enough to *ask*. Requiring write access would leave a
+    // read-only app able to see that a record is archived and unable to act.
+    it("403s a caller with no read grant on the type", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants([{ type_id: "audio/mp3", access: "read" }], [archivedRow()]).on(
+          RECORDS_SELECT,
+          [recordRow({ id: "rec-1", type: "image/jpeg", object_storage_key: archivedKey })],
+        ),
+      );
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/data/records/rec-1/restore",
+          body: { confirm: true },
+        }),
+        context,
+      );
+      expect(res.statusCode).toBe(403);
+    });
+  });
+});
+
 // ---- Sync blob downloads go through CloudFront (media plan item 4) ----
 //
 // The signing chokepoint itself is covered in cloudfront-signing.test.ts. What

@@ -39,6 +39,8 @@ import {
   resolveVariants,
   isRetrievalIntent,
   tagsForIntent,
+  estimateRestore,
+  DEFAULT_AVAILABILITY,
   DEFAULT_RETRIEVAL_INTENT,
   RETRIEVAL_INTENTS,
   typeCategory,
@@ -56,6 +58,7 @@ import type {
   HLCClock,
   MetadataRow,
   RecordLabel,
+  RecordAvailability,
   ResolvedVariant,
   RetrievalIntent,
   VariantCandidate,
@@ -75,6 +78,7 @@ import type {
 } from "@starkeep/storage-aurora-dsql";
 import type { Filter, DatabaseAdapter } from "@starkeep/storage-adapter";
 import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
+import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
 import {
   loadAccessGrants,
@@ -699,6 +703,7 @@ function recordToResponse(
   metadata?: MetadataRow | null,
   labels?: RecordLabel[],
   variants?: Record<string, ResolvedVariant & { url?: string }>,
+  availability?: RecordAvailability,
 ) {
   return {
     id: record.id,
@@ -729,6 +734,11 @@ function recordToResponse(
           })),
         }
       : {}),
+    // Whether *this node* can serve the bytes right now. Always present, so a
+    // client never has to discover unreadability by trying and failing —
+    // which is what makes archiving safe by construction rather than by every
+    // call site remembering not to touch an original.
+    ...(availability !== undefined ? { availability } : {}),
     // Keyed by the requested pixel size, carrying the *actual* dimensions of
     // what was chosen. A client that wants to reason about what it got can —
     // it just never has to ask in those terms.
@@ -778,6 +788,148 @@ async function loadLabelsForPage(
     filtered.set(id, labels.filter((l) => wanted.has(l.appId)));
   }
   return filtered;
+}
+
+/**
+ * How long a thawed copy stays readable before lapsing back.
+ *
+ * A week, so a print session or an export does not re-thaw the same object
+ * repeatedly — the retrieval charge is per restore, and the second one buys
+ * nothing the first did not.
+ */
+const RESTORED_COPY_RETENTION_DAYS = 7;
+
+/**
+ * Per-app restore budget, enforced before anything is issued.
+ *
+ * Restore is the one endpoint here where a loop costs real money rather than
+ * CPU — and the app most likely to loop is one retrying against a failure it
+ * does not understand. Both a count and a byte volume are capped, because
+ * either alone is trivially evaded: a thousand small objects and one enormous
+ * one are different shapes of the same mistake.
+ *
+ * Counted over live `restoring` rows rather than a separate ledger, so a
+ * restart cannot forget what is already in flight and the window closes on its
+ * own as restores complete. The trade-off, accepted: an app that restores
+ * steadily and lets each complete is never throttled, which is the intended
+ * behaviour — the limit is on *concurrent* commitment, not on lifetime use.
+ */
+const RESTORE_MAX_CONCURRENT_OBJECTS = 100;
+const RESTORE_MAX_CONCURRENT_BYTES = 50 * 1024 ** 3;
+
+async function checkRestoreRateLimit(
+  db: DatabaseAdapter,
+  appId: string,
+  incomingBytes: number,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const inFlight = await db.countRestoringObjects();
+  if (inFlight.objectCount + 1 > RESTORE_MAX_CONCURRENT_OBJECTS) {
+    return {
+      ok: false,
+      message:
+        `Too many restores already in flight (${inFlight.objectCount}). ` +
+        `Wait for some to complete before requesting more.`,
+    };
+  }
+  if (inFlight.bytes + incomingBytes > RESTORE_MAX_CONCURRENT_BYTES) {
+    return {
+      ok: false,
+      message:
+        `Restore volume already in flight (${inFlight.bytes} bytes) would be exceeded ` +
+        `by this request. Wait for some to complete before requesting more.`,
+    };
+  }
+  void appId;
+  return { ok: true };
+}
+
+/**
+ * The availability of a page of records, as this node sees it.
+ *
+ * One batched read rather than a HeadObject per record: that would be
+ * O(library) on every grid scroll, which is why availability is a maintained
+ * fact rather than a computed one. Keys with no stored row take the default.
+ */
+async function loadAvailabilityForPage(
+  db: DatabaseAdapter,
+  records: DataRecord[],
+): Promise<Map<string, RecordAvailability>> {
+  const out = new Map<string, RecordAvailability>();
+  if (records.length === 0) return out;
+  const keys = [...new Set(records.map((r) => r.objectStorageKey).filter(Boolean))];
+  const stored = await db.getAvailability(keys);
+  for (const record of records) {
+    out.set(record.id, toRecordAvailability(stored.get(record.objectStorageKey)));
+  }
+  return out;
+}
+
+/** Map a stored row (or its absence) onto the API's availability union. */
+function toRecordAvailability(row: StoredAvailability | undefined): RecordAvailability {
+  if (!row) return DEFAULT_AVAILABILITY;
+  switch (row.state) {
+    case "archived":
+      return {
+        state: "archived",
+        tier: row.tier ?? "DEEP_ARCHIVE",
+        expectedLatencyHours: row.expectedLatencyHours ?? 12,
+      };
+    case "restoring":
+      return {
+        state: "restoring",
+        readyAt: row.readyAtMs === null ? null : new Date(row.readyAtMs).toISOString(),
+      };
+    case "absent":
+      return { state: "absent" };
+    default:
+      return { state: "instant" };
+  }
+}
+
+/**
+ * Refuse a read of bytes that are not readable right now.
+ *
+ * **Never restores implicitly.** A read that quietly triggered a twelve-hour
+ * thaw would turn one careless call into a bill and a long wait, and the caller
+ * would have no idea it had happened — which is exactly how a future slideshow
+ * feature would thaw an entire archive. The 409 carries what a caller needs to
+ * decide whether to ask for a restore; asking is a separate, explicit act.
+ */
+function archivedReadRefusal(availability: RecordAvailability) {
+  if (availability.state === "archived") {
+    return {
+      status: 409,
+      body: {
+        error: "ObjectArchived",
+        availability,
+        detail:
+          `These bytes are in ${availability.tier} and cannot be read for about ` +
+          `${availability.expectedLatencyHours}h. Request a restore explicitly; ` +
+          `reads never trigger one.`,
+      },
+    };
+  }
+  if (availability.state === "restoring") {
+    return {
+      status: 409,
+      body: {
+        error: "ObjectRestoring",
+        availability,
+        detail: "A restore is already in flight for these bytes.",
+      },
+    };
+  }
+  if (availability.state === "absent") {
+    return {
+      status: 409,
+      body: {
+        error: "ObjectAbsent",
+        availability,
+        detail: "This node does not hold these bytes.",
+      },
+    };
+  }
+  return null;
 }
 
 /**
@@ -1301,6 +1453,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               await loadVariantsForPage(db, labelled, variantLabel, variantTargets),
             )
           : null;
+        const availabilityById = await loadAvailabilityForPage(db, labelled);
         return ok({
           records: labelled.map((r) =>
             recordToResponse(
@@ -1308,6 +1461,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               metaById ? metaById.get(r.id) ?? null : undefined,
               labelsById ? labelsById.get(r.id) ?? [] : undefined,
               variantsById ? variantsById.get(r.id) ?? {} : undefined,
+              availabilityById.get(r.id) ?? DEFAULT_AVAILABILITY,
             ),
           ),
           hasMore: found.hasMore,
@@ -1349,6 +1503,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             await loadVariantsForPage(db, records, variantLabel, variantTargets),
           )
         : null;
+      const availabilityById = await loadAvailabilityForPage(db, records);
       return ok({
         records: records.map((r) =>
           recordToResponse(
@@ -1356,6 +1511,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             metadataById ? metadataById.get(r.id) ?? null : undefined,
             labelsById ? labelsById.get(r.id) ?? [] : undefined,
             variantsById ? variantsById.get(r.id) ?? {} : undefined,
+            availabilityById.get(r.id) ?? DEFAULT_AVAILABILITY,
           ),
         ),
         hasMore,
@@ -1963,6 +2119,87 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     // GET /apps/{appId}/data/records/:id/file-url
+    // POST /apps/{appId}/data/records/:id/restore
+    //
+    // Restoring is a real feature, not an error path — and it is the *only* way
+    // archived bytes become readable. Reads never trigger one, so this endpoint
+    // is where the cost and the wait become someone's decision rather than
+    // their discovery.
+    //
+    // Two-step by design. Without `confirm`, it returns an estimate and does
+    // nothing; with it, the restore is issued. A single-step endpoint would
+    // make the numbers something a caller learns *after* committing to them.
+    const restoreMatch = subPath.match(/^\/data\/records\/([^/]+)\/restore$/);
+    if (restoreMatch && method === "POST") {
+      const id = decodeURIComponent(restoreMatch[1]!) as StarkeepId;
+      const record = await db.get(id);
+      if (!record || record.deletedAt) return clientErr("Record not found", 404);
+      // A read grant is enough to *ask*: restoring does not change the bytes,
+      // and requiring write access would mean a read-only app could see that a
+      // record is archived and have no way to act on it.
+      if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
+      if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
+
+      const body = event.body
+        ? (JSON.parse(
+            event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body,
+          ) as { confirm?: boolean; tier?: string })
+        : {};
+
+      const current = toRecordAvailability(
+        (await db.getAvailability([record.objectStorageKey])).get(record.objectStorageKey),
+      );
+      if (current.state === "instant") {
+        // Not an error: the caller asked for something that has already
+        // happened, which is the ordinary outcome of two clients racing on one
+        // archived record.
+        return ok({ alreadyReadable: true, availability: current });
+      }
+      if (current.state === "restoring") {
+        return ok({ alreadyRestoring: true, availability: current });
+      }
+      if (current.state === "absent") {
+        return clientErr("This node does not hold these bytes; there is nothing to restore", 409);
+      }
+
+      const tier = body.tier === "Bulk" ? "Bulk" : "Standard";
+      const estimate = estimateRestore(
+        record.sizeBytes,
+        1,
+        tier,
+        RESTORED_COPY_RETENTION_DAYS,
+      );
+      if (body.confirm !== true) {
+        return ok({ estimate, availability: current, confirmRequired: true });
+      }
+
+      // Rate limit *before* issuing, and per app. A restore is the one endpoint
+      // here where a loop costs real money rather than CPU, and the app most
+      // likely to loop is one retrying on a failure it doesn't understand.
+      const limited = await checkRestoreRateLimit(db, appId, record.sizeBytes);
+      if (!limited.ok) return clientErr(limited.message, 429);
+
+      const readyAtMs = Date.now() + estimate.estimatedHours * 60 * 60 * 1000;
+      await db.putAvailability({
+        objectStorageKey: record.objectStorageKey,
+        state: "restoring",
+        tier: current.tier,
+        expectedLatencyHours: estimate.estimatedHours,
+        readyAtMs,
+        restoredUntilMs: null,
+        observedAtMs: Date.now(),
+      });
+
+      return ok({
+        restoring: true,
+        estimate,
+        availability: {
+          state: "restoring",
+          readyAt: new Date(readyAtMs).toISOString(),
+        } satisfies RecordAvailability,
+      });
+    }
+
     const fileUrlMatch = subPath.match(/^\/data\/records\/([^/]+)\/file-url$/);
     if (fileUrlMatch && method === "GET") {
       const id = decodeURIComponent(fileUrlMatch[1]!) as StarkeepId;
@@ -1970,6 +2207,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!record || record.deletedAt) return clientErr("Record not found", 404);
       if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
       if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
+      // Refuse rather than hand out a URL that will fail — or worse, one whose
+      // use would trigger a thaw. A read never restores implicitly.
+      const readAvailability = toRecordAvailability(
+        (await db.getAvailability([record.objectStorageKey])).get(record.objectStorageKey),
+      );
+      const refusal = archivedReadRefusal(readAvailability);
+      if (refusal) return { statusCode: refusal.status, body: JSON.stringify(refusal.body) };
       const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
       const key = record.objectStorageKey;
       // Shared bytes → CloudFront signed URL (through the chokepoint); any
@@ -2003,11 +2247,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const detailMeta = detailInclude.includes("metadata")
           ? await loadMetadataForPage(db, grants, [record])
           : null;
+        const detailAvailability = await loadAvailabilityForPage(db, [record]);
         return ok({
           record: recordToResponse(
             record,
             detailMeta ? detailMeta.get(record.id) ?? null : undefined,
             detailLabels ? detailLabels.get(record.id) ?? [] : undefined,
+            undefined,
+            detailAvailability.get(record.id) ?? DEFAULT_AVAILABILITY,
           ),
         });
       }

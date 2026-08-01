@@ -160,3 +160,32 @@ export interface Transaction {
   query(query: Query): Promise<QueryResult>;
 }
 
+
+/**
+ * One stored availability observation for an object.
+ *
+ * Flattened rather than shaped like {@link RecordAvailability} because it is a
+ * database row: a discriminated union with per-variant fields would need either
+ * a JSON blob (unqueryable — the reconcile wants "every archived key") or a
+ * table per variant. The mapping back to the union happens at the API edge.
+ */
+export interface StoredAvailability {
+  readonly objectStorageKey: string;
+  readonly state: "instant" | "restoring" | "archived" | "absent";
+  /** Storage tier, when archived or restoring from one. */
+  readonly tier: string | null;
+  readonly expectedLatencyHours: number | null;
+  /** Epoch ms a restore in flight is expected to complete. */
+  readonly readyAtMs: number | null;
+  /** Epoch ms a thawed copy lapses back to archived. */
+  readonly restoredUntilMs: number | null;
+  /**
+   * Epoch ms this observation was made.
+   *
+   * Stored because observations arrive out of order — a transition event and
+   * the daily inventory can disagree about a key that moved in between — and
+   * without it there is no way to tell which of two disagreeing answers is
+   * newer, only which arrived last.
+   */
+  readonly observedAtMs: number;
+}
