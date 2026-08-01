@@ -78,6 +78,24 @@ export interface SignedPutUrlOptions {
    * Starkeep; S3 wants base64 of the raw digest. Use `sha256HexToBase64`.
    */
   checksumSha256?: string;
+  /**
+   * Backend storage class the object must land in, bound into the signature.
+   *
+   * Set at write time rather than moved afterwards: a transition costs a
+   * request per object and, for a large library, more than the storage it
+   * saves. It is signed for the same reason the checksum is — otherwise the
+   * uploader chooses, and "this app's blobs are all in the cheap tier" would be
+   * a hope rather than a property.
+   */
+  storageClass?: string;
+  /**
+   * Object tags to write, bound into the signature.
+   *
+   * Tags are how a bucket-wide lifecycle rule selects objects without the rule
+   * needing to know anything about records. Signing them means an uploader
+   * cannot tag its way into (or out of) a rule it was not granted.
+   */
+  tagging?: Record<string, string>;
 }
 
 /**

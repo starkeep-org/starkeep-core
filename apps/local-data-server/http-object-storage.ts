@@ -10,6 +10,51 @@ import type {
 } from "@starkeep/storage-adapter";
 import { verifyingStream } from "@starkeep/storage-adapter";
 
+/**
+ * What the server hands back when it signs an upload.
+ *
+ * Every field except the URL is something the *server* decided and bound into
+ * the signature: which bytes may be written there, which storage class they
+ * land in, and which tags they carry. The client's job is to echo them exactly,
+ * not to have opinions about them — which is why they arrive as values rather
+ * than as parameters the client passes in.
+ */
+interface PresignResponse {
+  readonly url: string;
+  readonly checksumSha256?: string;
+  readonly storageClass?: string;
+  readonly tagging?: Record<string, string>;
+}
+
+/**
+ * Turn a presign response into the headers the PUT must carry.
+ *
+ * These are mandatory when present, not optional extras: each one is inside the
+ * signature, so omitting it fails the request rather than uploading something
+ * unverified, untiered or untagged. That is the property being relied on —
+ * the client cannot quietly drop one.
+ */
+function presignHeaders(response: {
+  checksumSha256?: string;
+  storageClass?: string;
+  tagging?: Record<string, string>;
+}): Record<string, string> {
+  return {
+    ...(response.checksumSha256 ? { "x-amz-checksum-sha256": response.checksumSha256 } : {}),
+    ...(response.storageClass ? { "x-amz-storage-class": response.storageClass } : {}),
+    ...(response.tagging && Object.keys(response.tagging).length > 0
+      ? {
+          // Same encoding the signer used. Tag keys contain a colon
+          // (`starkeep:intent`), which survives naive concatenation and then
+          // fails signature validation reporting only "SignatureDoesNotMatch".
+          "x-amz-tagging": Object.entries(response.tagging)
+            .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+            .join("&"),
+        }
+      : {}),
+  };
+}
+
 export interface HttpObjectStorageAdapterOptions {
   readonly baseUrl: string;
   readonly fetch?: typeof globalThis.fetch;
@@ -107,10 +152,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!presignRes.ok) {
       throw new Error(`presign PUT ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
     }
-    const { url, checksumSha256 } = await presignRes.json() as {
-      url: string;
-      checksumSha256?: string;
-    };
+    const { url, checksumSha256, storageClass, tagging } = await presignRes.json() as PresignResponse;
 
     // Upload directly to S3 — presigned URL carries credentials, no auth header needed.
     //
@@ -124,7 +166,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       method: "PUT",
       headers: {
         ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
-        ...(checksumSha256 ? { "x-amz-checksum-sha256": checksumSha256 } : {}),
+        ...presignHeaders({ checksumSha256, storageClass, tagging }),
       },
       body: Buffer.from(data),
     });
@@ -225,10 +267,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!presignRes.ok) {
       throw new Error(`presign PUT ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
     }
-    const { url, checksumSha256 } = await presignRes.json() as {
-      url: string;
-      checksumSha256?: string;
-    };
+    const { url, checksumSha256, storageClass, tagging } = await presignRes.json() as PresignResponse;
 
     // Hash on the way past and fail the stream on a mismatch, which aborts the
     // request rather than completing it. The server's pinned `checksumSha256`
@@ -244,7 +283,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
         method: "PUT",
         headers: {
           ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
-          ...(checksumSha256 ? { "x-amz-checksum-sha256": checksumSha256 } : {}),
+          ...presignHeaders({ checksumSha256, storageClass, tagging }),
           // S3 rejects a presigned PUT with chunked transfer encoding, so a
           // streamed body needs an explicit length. Records always carry
           // sizeBytes, so this is present in practice; when it isn't, the

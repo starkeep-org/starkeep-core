@@ -1181,6 +1181,78 @@ describe("GET /data/records filters", () => {
   });
 });
 
+// ---- Sync blob downloads go through CloudFront (media plan item 4) ----
+//
+// The signing chokepoint itself is covered in cloudfront-signing.test.ts. What
+// is covered here is that the route the *sync engine* uses actually reaches it:
+// HttpObjectStorageAdapter.getStream asks GET /files/{key}/presign, and if that
+// handed back an S3 presigned URL the sync path would quietly keep paying
+// origin egress with no edge caching, and nothing would look wrong.
+describe("GET /files/{key}/presign — the sync download path", () => {
+  const sharedImageKey = `shared/image/aa/${"a".repeat(64)}`;
+
+  it("signs shared bytes through CloudFront, not S3", async () => {
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]));
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: `/files/${sharedImageKey}/presign`,
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const url = String(bodyOf(res)["url"]);
+    expect(url).toContain(CF_DOMAIN);
+    expect(url).toContain("Signature=");
+    // Not an S3 presigned URL — those carry SigV4 query parameters.
+    expect(url).not.toContain("X-Amz-Signature");
+  });
+
+  // CloudFront never serves apps/*, so app-syncable bytes must stay on S3
+  // presign. Routing them through the distribution would need a second origin
+  // and a second grant model for no benefit — they are not shared data.
+  it("leaves app-syncable bytes on S3 presign", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants().on(/from "shared"\."app_syncable_namespaces"/, [
+        {
+          app_id: "app1",
+          tables_json: JSON.stringify([{ name: "_starkeep_sync_records", pkColumns: ["id"] }]),
+          files_enabled: true,
+        },
+      ]),
+    );
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: "/files/apps/app1/syncable/cover/presign",
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const url = String(bodyOf(res)["url"]);
+    expect(url).toContain("X-Amz-Signature");
+    expect(url).not.toContain(CF_DOMAIN);
+  });
+
+  it("404s a key with no object behind it", async () => {
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]));
+    s3Mock.on(HeadObjectCommand).rejects({ name: "NotFound", $metadata: { httpStatusCode: 404 } });
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: `/files/${sharedImageKey}/presign`,
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(404);
+  });
+});
+
 // ---- Variant resolution by target long edge (media plan item 3b) ----
 //
 // The resolution rules are tested in protocol-primitives and the gathering in
@@ -1337,6 +1409,113 @@ describe("POST /files/presign pins the expected checksum", () => {
     );
     expect(res.statusCode).toBe(403);
     expect(String(bodyOf(res)["error"])).toMatch(/no-cloud/);
+  });
+
+  // ---- Declared retrieval intent (media plan items 5 / 5b) ----
+  //
+  // The app declares latency it can tolerate; the broker decides the storage
+  // class and tags, and binds both into the signature. Every assertion below
+  // is about the broker deciding rather than the uploader.
+  describe("declared retrieval intent", () => {
+    it("defaults to instant when the caller says nothing", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+      );
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/files/presign",
+          body: { key: sharedKey },
+        }),
+        context,
+      );
+      // A write that forgot to think about retrieval must not produce something
+      // that takes twelve hours to read.
+      expect(bodyOf(res)["intent"]).toBe("instant");
+      expect(bodyOf(res)["tagging"]).toBeUndefined();
+    });
+
+    it("tags an archive-intent write so a lifecycle rule can find it later", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+      );
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/files/presign",
+          body: { key: sharedKey, intent: "archive" },
+        }),
+        context,
+      );
+      expect(bodyOf(res)["intent"]).toBe("archive");
+      expect(bodyOf(res)["tagging"]).toEqual({ "starkeep:intent": "archive" });
+    });
+
+    // Both tiers land in Intelligent-Tiering. `archive` is *not* written
+    // straight to Deep Archive, because the transition is gated on the record's
+    // ladder being complete and on a hold period — neither known at write time.
+    // Freezing on write would freeze originals whose ladder does not exist yet,
+    // which is exactly when the original is the only readable copy.
+    it("writes both intents to Intelligent-Tiering, gating the freeze elsewhere", async () => {
+      for (const intent of ["instant", "archive"]) {
+        setDbFactory(
+          fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+        );
+        const res = await handler(
+          signedEvent({
+            appId: "app1",
+            method: "POST",
+            subPath: "/files/presign",
+            body: { key: sharedKey, intent },
+          }),
+          context,
+        );
+        expect(bodyOf(res)["storageClass"], intent).toBe("INTELLIGENT_TIERING");
+      }
+    });
+
+    it("binds the storage class and tags into the signature", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+      );
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/files/presign",
+          body: { key: sharedKey, intent: "archive" },
+        }),
+        context,
+      );
+      const url = String(bodyOf(res)["url"]);
+      // Signed, not merely advertised: an unsigned header is one the uploader
+      // can drop, which would let it choose its own tier and tag its way into
+      // (or out of) a lifecycle rule it was never granted.
+      expect(url).toContain("x-amz-storage-class");
+      expect(url).toContain("x-amz-tagging");
+    });
+
+    // Defaulting a typo would be silently wrong in both directions: "instant"
+    // costs money quietly, "archive" puts bytes behind a 48-hour thaw nobody
+    // asked for. Neither announces itself.
+    it("refuses an unrecognized intent rather than defaulting", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+      );
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/files/presign",
+          body: { key: sharedKey, intent: "archve" },
+        }),
+        context,
+      );
+      expect(res.statusCode).toBe(400);
+      expect(String(bodyOf(res)["error"])).toMatch(/intent must be one of/);
+    });
   });
 
   it("ignores a caller-supplied checksum in favour of the key's", async () => {
