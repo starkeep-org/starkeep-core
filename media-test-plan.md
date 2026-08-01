@@ -670,7 +670,78 @@ only the grant was missing.
 - **Video ladder helpers are unused.** `applicableVideoClasses` and friends are tested and
   exported but nothing calls them until item 27.
 
-*(Sections for items 7, 9, 9b, 8 and onward are appended as each lands.)*
+### Item 7 — derivation at ingest (partial; see the correction below)
+
+**The rule obeyed:** derive where the bytes already are, and never transfer an original in order
+to derive from it. `deriveStillLadder` takes bytes rather than a record id, so it can only be
+called by something that already holds them and there is no code path that could fetch anything.
+
+One decode produces every rung. Decoding a 48 MP ProRAW is the expensive part, and doing it per
+rung would multiply it for output that is collectively smaller than the source. `image-medium` is
+emitted **first**, because ingest runs AI off it and every routine model input is ≤640 px.
+
+**Automated** — `photos/__tests__/derivation.test.ts` (18 tests). The encoding itself is not
+tested: that is sharp, and asserting sharp resizes is asserting sharp. What is tested is
+everything deciding *whether work happens*, where failures are silent.
+
+| Test | Guards against |
+|---|---|
+| `is not complete while any applicable rung is absent` (swept over each rung) | an original archived with nothing readable in its place — the ladder-complete gate's predicate |
+| `does not demand rungs that do not apply to a small original` | every small photo permanently ineligible for archiving *and* permanently re-attempted |
+| `ignores classes it did not ask for` | a superseded rung awaiting the reaper reading as "incomplete" |
+| `cannot decode HEIC or raw` | the fallback silently appearing to cover a phone library, which is mostly HEIC |
+| `never retries a format this node cannot decode` | **the sweeper re-downloading and re-failing on every HEIC in the library, daily, forever** |
+| `does not back off a record whose bytes simply are not here` | backoff applied where the fix is a transfer, not another attempt |
+| `backs off further with each consecutive failure, up to a cap` | an unbounded backoff, which eventually means "never" |
+| `resets the count on any non-transient outcome` | a record that failed twice, succeeded, then failed again starting from an hour |
+| `retries a previously-complete record` | a stale `complete` blocking re-derivation after a respec or a reaped child |
+| `does not take over before the window elapses` | the cloud racing the originating node rather than backstopping it |
+
+Both resize paths (Next route and cloud Lambda) now derive the whole ladder through the shared
+`publishRendition`, and the **"already has a thumbnail, stop" early return was removed** — with a
+ladder, one existing rung says nothing about the others, and that check would have frozen every
+record at whatever it happened to have. Skipping is now per rung, so a retry after partial failure
+finishes the job rather than duplicating it.
+
+Dimensions are written per rendition and **not** best-effort: variant resolution orders by long
+edge, so a rendition without them is excluded from resolution entirely — storage nobody ever reads.
+
+#### Correction to the plan: sync ordering is not a scheduling change
+
+The plan says renditions-before-originals "is a scheduling change in the sync supervisor, not a
+protocol change." **That does not survive contact with the engine.**
+
+Blob pushes are gated on the metadata contiguous-prefix rule: within a node's stream, items ship in
+HLC order and a blob failure halts the rest. Renditions are *children*, so the original's record
+must exist first and therefore has the earlier HLC — its 40 MB blob is pushed before any 20 KB
+rendition. Reordering within a node bucket would break the prefix rule that the coverage watermark
+depends on, which is not a scheduling knob but the correctness argument for the whole exchange.
+
+Achieving it properly needs blob transfer decoupled from the metadata prefix rule — a protocol
+change. **Not attempted here**, and deliberately not faked with a partial version. The consequence
+is that on a slow uplink the library is browsable only after originals upload, not within seconds.
+The plan's own mitigation still holds: the archive gate makes the original wait, so nothing is
+*incorrect*, only slower than intended.
+
+**Gaps**
+
+- **No cloud sweeper runs.** The decision logic (`fallbackIsDue`, `shouldAttemptDerivation`) and
+  the outcome vocabulary exist and are tested; nothing schedules them. That needs a scheduled
+  Lambda and is infra work.
+- **The attempt ledger has no storage.** The types and transitions are complete and tested, but
+  nothing persists a `DerivationAttempt` yet — so today the "never retry HEIC" guarantee is
+  available and unused. It needs a node-local table, deliberately not syncable: an attempt is a
+  fact about *one node's* capabilities, and syncing it would let a phone's failure tell the laptop
+  not to bother.
+- **ThumbHash and perceptual hash are not computed.** The columns exist (items 4/21); derivation
+  does not populate them.
+- **No test derives real image bytes.** Everything above is the decision layer. A fixture-based
+  test that runs a real JPEG through `deriveStillLadder` and asserts the rungs' dimensions obey
+  Rule 1 would be cheap and is worth adding.
+- **Video derivation is not wired.** `applicableVideoClasses` is tested; no transcode path exists
+  (item 27).
+
+*(Sections for items 9, 9b, 8 and onward are appended as each lands.)*
 
 ---
 
