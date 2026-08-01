@@ -64,6 +64,10 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Deferred** | Nothing reads Apple's content identifier, so Live Photo pairing only ever reaches `filename` confidence in practice. | 31 | A QuickTime/maker-note reader |
 | **Deferred** | CR3 is ISO-BMFF, not TIFF, so preview extraction finds nothing in it and reports it undecodable. | 30 | A CR3 container parser |
 | **Accepted** | HEIC decode is macOS-only; a Linux container leaves such records ladder-incomplete and therefore unarchived. | 32 | — (measure via item 15) |
+| **Blocking** | No UI is wired to the retention projection, and per-record overrides as rules over labels are unbuilt. Item 34 is half-done. | 34 | The matrix UI |
+| **Blocking** | Nothing produces a `SizeClassCensus`, so the projection has no real input. Same query the residency inspector needs. | 34/15 | A grouped local query |
+| **Deferred** | `BackfillStore` has only an in-memory test double; the durable version should be the node-local SQLite ledger import already uses. | 8 | Reuse `import-store` |
+| **Deferred** | Backfill is **built but never run** — correctly gated on item 9b. | 8 | Item 9b |
 | ~~Blocking~~ | ~~Nothing calls `deriveVideoLadder`.~~ **Closed** — `deriveAndPublishVideo` wires probe → facts → derive → publish → gate; the import loop now discovers video and no longer buffers whole files. | 26/27 | — |
 | **Deferred** | Skim parameters (8x / 20s / 2fps) are an untested hypothesis; may be better as animated AVIF. | 27 | Measurement against real clips |
 | **Deferred** | VP9/WebM transcoding is written but never exercised by a test. | 27 | A fixture asserting the webm path |
@@ -1513,6 +1517,89 @@ would be two round trips for nothing.
 *(Sections for items 9b, 8 and onward are appended as each lands.)*
 
 ---
+
+## Phase 7
+
+### Item 10 — narrowing the raw database
+
+`getRawDatabase()` returned `node:sqlite`'s `DatabaseSync`, and that one concrete type is why a
+second driver could not exist: the sync engine, resident set, state store, app-syncable applier and
+installer all took it, so every one was nailed to a module React Native does not have.
+
+The interface is **what the callers were measured to use** — `exec`, `prepare`, and on a statement
+`run`/`get`/`all`. Nothing else appears anywhere in the codebase. A wider interface would be work a
+second driver must implement that no caller needs, and each extra method is one more thing that has
+to behave identically across drivers or produce a bug that appears only on a phone.
+
+Synchronous is the one real constraint, and it is deliberate: the change-log write happens inside the
+same logical operation as the record write it describes. Making it async opens a window where a
+record exists and its change-log entry does not — precisely the state the contiguous-prefix watermark
+cannot represent.
+
+**The connection constructor stays concrete.** Opening a database is the one place that cannot be
+driver-agnostic, and a blanket rename got this wrong first (it produced `new RawDatabase(path)`,
+which the build caught).
+
+The test uses a driver backed by **plain arrays, not SQLite**: something wrapping a real connection
+could satisfy the interface by accident through a member the interface does not name, whereas this
+can only satisfy it on purpose. If a consumer reaches for `close()` or `open()`, it stops compiling.
+
+### Item 8 — the backfill job (built, not run)
+
+**The item 9b gate is code, not a note.** The ladder's maxima are provisional until the visual test
+replaces them, and backfill applies them to the whole library at once — then the archive gate fires
+on each complete ladder and starts freezing originals behind a 48-hour thaw on the strength of sizes
+that are about to change. Undoing that means paying to thaw everything it froze. `assertLadderMeasured`
+refuses, names item 9b, and says what must happen first; a test asserts it reads **zero** originals
+while refusing.
+
+Other decisions the tests pin:
+
+- **Never transfer an original to derive from it.** A non-resident original is `unavailable` —
+  terminal, not a failure to retry, because the answer cannot change without a thaw somebody pays for
+  deliberately.
+- **Oldest first.** Archiving begins only on a complete ladder, and the oldest material is both least
+  likely to be viewed and the largest share of the library.
+- **Attempts are bounded.** A record that failed five times will not succeed on the sixth in the same
+  run, and continuing costs the throughput of everything behind it.
+- **Complete means "nothing left worth attempting"**, not "everything succeeded" — a library always
+  holds undecodable records and unreachable originals, and counting them as unfinished leaves an
+  operator watching a progress bar that never fills.
+
+### Item 34 — projecting the retention matrix
+
+The matrix is edited *before* it takes effect, so the projection answers "what happens if I do this"
+while the operator is deciding. A UI reporting current usage would answer a different question.
+
+Numbers come from a **census**, not from an average size times a record count: rendition sizes are
+per-record maxima, so a library of screenshots and one of ProRAW have wildly different totals for
+identical counts.
+
+**Every rounding decision leans toward over-estimating**, because an operator told a row costs more
+buys a bigger disk, while one told it costs less runs out of space and evicts what they asked to
+keep. An unmeasured cutoff rounds *up* to the next measured point rather than interpolating
+(interpolation is a guess presented as a measurement); the opened-recently working set is *added* to
+the recency window rather than unioned, since the census cannot say how much they overlap.
+
+**`on-demand-only` was the case worth getting right, and the compiler caught that it was missing.**
+Projecting it as zero is badly wrong: on-demand caching converges on the working set and fills the
+budget over time, so an operator shown "0 B" would size a disk for a row that grows to 50 GB. It is
+estimated from what has actually been opened and flagged `demandDriven`, so the UI presents a floor
+rather than a settled figure.
+
+Pins are reported separately, because pins win over budgets — a row can exceed its own cap
+legitimately, and an operator needs to know that is pins and not a bug. Classes the policy does not
+mention fall to the fallback and **still appear in the table**; quietly omitting them would
+under-report exactly the disk use nobody planned for.
+
+#### Gaps
+
+- **No UI is wired to the projection.** The logic is complete and tested; the matrix itself, and the
+  per-record overrides as rules over labels, are unbuilt. Item 34 is half-done and this is the half.
+- **Nothing produces a `SizeClassCensus`.** It needs a grouped query over records and blob sizes on
+  the local node — the same shape the residency inspector (item 15) needs, and worth building once.
+- **Backfill has no store implementation.** `BackfillStore` is an interface with an in-memory test
+  double; the durable version should be the node-local SQLite ledger the import already uses.
 
 ## Flakes found along the way
 
