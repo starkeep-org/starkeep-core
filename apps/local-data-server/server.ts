@@ -1258,6 +1258,38 @@ async function main() {
           return;
         }
 
+        // `parentId=<id>` restricts to that record's children; `parentId=none`
+        // restricts to records with no parent at all. Two questions the resize
+        // path used to answer by listing the whole library and filtering
+        // client-side — which was also silently capped at whatever `limit` the
+        // caller passed, so on a large library it answered them wrongly.
+        const parentIdParam = url.searchParams.get("parentId");
+        const parentFilter: Filter | null =
+          parentIdParam === null
+            ? null
+            : parentIdParam === "none"
+              ? { field: "parentId", operator: "isNull" }
+              : { field: "parentId", operator: "eq", value: parentIdParam };
+
+        // `notLabel=<appId>/<key>` excludes records carrying that label at any
+        // value. This is what lets the grid page originals server-side: with a
+        // rendition label on every derived child, a 60k-item library is 300k+
+        // records, and a page that mixes them is a page the client cannot use.
+        const notLabelParam = url.searchParams.get("notLabel");
+        let excludeLabel: { appId: string; key: string } | undefined;
+        if (notLabelParam !== null) {
+          const ref = parseLabelRef(notLabelParam);
+          if (!ref) {
+            res.writeHead(400);
+            json(res, {
+              error: "InvalidLabel",
+              detail: `notLabel must be of the form "<appId>/<key>" (got "${notLabelParam}")`,
+            });
+            return;
+          }
+          excludeLabel = { appId: ref.appId, key: ref.key };
+        }
+
         // Per-type read enforcement, pushed into the query rather than applied
         // after it: a post-filter would let a page come back short of `limit`
         // for reasons the caller can't see, and would make the cursor derived
@@ -1297,6 +1329,7 @@ async function main() {
         if (!recordType && !grants.allAccess) {
           filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
         }
+        if (parentFilter) filters.push(parentFilter);
 
         // Two ways to select a page. The reverse-label query is its own
         // access path with its own order and its own cursor; everything after
@@ -1341,20 +1374,32 @@ async function main() {
               filters: [
                 { field: "id", operator: "in", value: ids },
                 { field: "deletedAt", operator: "isNull" },
+                // Combinable with the label filter, per the plan: "which
+                // rendition of *this* record" is one query, not a label scan
+                // followed by a client-side parent check.
+                ...(parentFilter ? [parentFilter] : []),
               ],
               limit: ids.length,
+              ...(excludeLabel ? { excludeLabel } : {}),
             });
             for (const r of fetched.records) byId.set(r.id, r);
           }
           // A label whose record is gone (a delete that raced sync) drops out
           // here. That is the one thing that can still short a page, and it is
           // why the contract is "page until nextCursor is null" rather than
-          // "a short page means the end".
+          // "a short page means the end". `parentId` and `notLabel` short a
+          // page the same way when combined with `label`, for the same reason
+          // and with the same remedy.
           readable = ids.map((id) => byId.get(id)).filter((r): r is DataRecord => !!r);
           pageHasMore = found.hasMore;
           pageCursor = found.nextCursor;
         } else {
-          const result = await databaseAdapter.query({ filters, limit, cursor });
+          const result = await databaseAdapter.query({
+            filters,
+            limit,
+            cursor,
+            ...(excludeLabel ? { excludeLabel } : {}),
+          });
           readable = result.records;
           pageHasMore = result.hasMore;
           pageCursor = result.nextCursor;
@@ -2456,6 +2501,19 @@ async function main() {
             path: record.kind === "data" && record.objectStorageKey
               ? await localAdapter.resolvePath(record.objectStorageKey)
               : null,
+            // Same `include` vocabulary as the list route. Asking about one
+            // record is the cheapest possible form of "is this record a
+            // rendition"; without it the only way to answer that was to list
+            // the library and look, which is O(library) to learn one bit.
+            ...(url.searchParams.get("include")?.split(",").map((v) => v.trim()).includes("labels")
+              ? {
+                  labels: (
+                    (await databaseAdapter.getLabelsByRecordIds([record.id])).get(record.id) ?? []
+                  )
+                    .filter((l) => !l.deletedAt)
+                    .map((l) => ({ app_id: l.appId, key: l.key, value: l.value })),
+                }
+              : {}),
           },
         });
         return;

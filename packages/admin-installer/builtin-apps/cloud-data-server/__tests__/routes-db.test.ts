@@ -1060,6 +1060,127 @@ describe("/app-data routes", () => {
   });
 });
 
+// ---- parentId / notLabel filters (media plan item 3) ----
+//
+// These exist to delete an O(library) scan: the resize path used to list every
+// readable record and filter client-side, which was not only slow but *wrong*
+// above the page limit — a record outside the first page read as "no thumbnail
+// exists yet" and got one derived again.
+describe("GET /data/records filters", () => {
+  const grants = [{ type_id: "image/jpeg", access: "readwrite" }];
+
+  it("pushes parentId into the query rather than filtering after it", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
+      recordRow({ id: "child-1", type: "image/jpeg", parent_id: "parent-1" }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { parentId: "parent-1" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const sql = db.calls(RECORDS_SELECT)[0]!;
+    expect(sql.text).toContain('"parent_id" =');
+    expect(sql.values).toContain("parent-1");
+  });
+
+  // "Originals only" for a grid. Expressed as a sentinel rather than an empty
+  // value because `?parentId=` would be indistinguishable from a caller that
+  // built the query string from an undefined variable.
+  it("treats parentId=none as a null-parent filter", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, []);
+    setDbFactory(db);
+    await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { parentId: "none" },
+      }),
+      context,
+    );
+    expect(db.calls(RECORDS_SELECT)[0]!.text).toContain('"parent_id" is null');
+  });
+
+  it("pushes notLabel into the query as a negated label filter", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { notLabel: "photos/rendition" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const sql = db.calls(RECORDS_SELECT)[0]!;
+    expect(sql.text).toContain("not exists");
+    expect(sql.values).toContain("photos");
+    expect(sql.values).toContain("rendition");
+  });
+
+  it("rejects a malformed notLabel rather than ignoring it", async () => {
+    setDbFactory(fakeDsqlWithGrants(grants));
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { notLabel: "no-slash-here" },
+      }),
+      context,
+    );
+    // Silently ignoring it would return renditions mixed into the grid, which
+    // looks like the filter working on a small library.
+    expect(res.statusCode).toBe(400);
+    expect(String(bodyOf(res)["error"])).toMatch(/notLabel/);
+  });
+
+  it("combines parentId with a label filter", async () => {
+    const db = fakeDsqlWithGrants(grants)
+      .on(/from "shared"\."record_labels" where "app_id" =/, [
+        {
+          record_id: "child-1",
+          app_id: "photos",
+          key: "thumbnail",
+          value: "",
+          record_type: "image/jpeg",
+          created_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
+          updated_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
+          node_id: "n",
+          deleted_at: null,
+        },
+      ])
+      .on(RECORDS_SELECT, [
+        recordRow({ id: "child-1", type: "image/jpeg", parent_id: "parent-1" }),
+      ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { label: "photos/thumbnail", parentId: "parent-1" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    // The hydration query carries the parent constraint, so "a thumbnail *of
+    // this record*" is one lookup rather than a label scan plus a client-side
+    // parent check.
+    const hydrate = db.calls(RECORDS_SELECT).at(-1)!;
+    expect(hydrate.text).toContain('"parent_id" =');
+    expect(hydrate.values).toContain("parent-1");
+  });
+});
+
 // ---- Verified uploads: the checksum pinned into the presigned PUT ----
 //
 // The property under test is that the broker decides what may be written at a

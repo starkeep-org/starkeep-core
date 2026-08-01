@@ -37,6 +37,25 @@ export interface Query {
   sort?: SortField[];
   limit?: number;
   cursor?: string;
+  /**
+   * Exclude records carrying a live label with this `(appId, key)`, at any
+   * value. A **negated** filter, which is why it can't be expressed as a
+   * {@link Filter}: those constrain columns on the records row, and this is an
+   * anti-join against the labels table.
+   *
+   * It exists so a grid can page originals server-side. With a rendition label
+   * on every derived child, "everything except renditions" is one indexed
+   * query; without it a 60k-item library is 300k+ rows and paging is
+   * meaningless — a page of 100 might contain no originals at all, so the
+   * client cannot even tell how far to keep reading.
+   *
+   * Deliberately no value component. `?label=` distinguishes presence from a
+   * specific value because a positive query has a reason to; a negated one
+   * asking "not carrying key K with value V" would silently *include* records
+   * carrying K with some other value, which reads as the opposite of what it
+   * says.
+   */
+  excludeLabel?: { appId: string; key: string };
 }
 
 export interface QueryResult {
