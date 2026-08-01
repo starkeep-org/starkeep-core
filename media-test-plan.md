@@ -37,6 +37,52 @@ failure it prevents is "a client hard-codes `image-screen`" and that is invisibl
 
 ---
 
+## Open gaps register
+
+**This table is an index, not the record.** Each per-item **Gaps** section below is authoritative
+for detail and reasoning; this exists so nobody has to read the whole document to find out what is
+open. When a gap closes, strike it here *and* in its section.
+
+Severity is about the consequence of shipping with it, not the effort to close it:
+
+- **Blocking** — something reads as working and is not, or data can be lost. Must close before the
+  relevant item is trusted in production.
+- **Deferred** — knowingly incomplete, with a named item that closes it. Safe meanwhile.
+- **Accepted** — will not be closed here; the reason is recorded.
+
+| Severity | Gap | Item | What closes it |
+|---|---|---|---|
+| **Blocking** | `RestoreObject` is never actually called — the endpoint records state, returns an estimate, and thaws nothing. It **looks complete and is not**. | 5b | Item 19 |
+| **Blocking** | Nothing maintains `availability`. Every record reads `instant` in a real deployment regardless of what happened to it. | 5b | Item 19b |
+| **Blocking** | Multipart uploads are unverified above the part threshold in the buffered `put()` path; the streamed path verifies, the convenience method does not. | 1b-i / 2 | An `e2e-aws` test plus routing all large writes through `putStream` |
+| **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily. | 7 | A node-local (non-syncable) table |
+| **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
+| **Deferred** | No lifecycle rule exists, so `archive`-tagged objects are tagged and nothing acts on them. | 4/5 | Item 18 |
+| **Deferred** | Nothing declares `archive` intent yet; every write is `instant`. | 4/5 | Item 17 |
+| **Deferred** | `absent` is never written on the cloud, so a `no-cloud` record reads `instant` there. | 5b | Item 19b |
+| **Deferred** | The local data server does not report `availability` at all. Harmless today (local bytes are readable or elided) and therefore invisible. | 5b | Wiring the local `/data/records` response |
+| **Deferred** | No eviction pass is scheduled; `runEviction` is reachable and uncalled. | 1b | Item 15/34 (residency inspector) |
+| **Deferred** | `protectedLocally` is never set, so the durability predicate is the only thing between eviction and a last copy. | 1b | Item 7's derivation-input tracking |
+| **Deferred** | `recencyAtMs` is always null from the sync engine, so `recent-only` behaves as `all`. | 1b | Host decider supplying capture time |
+| **Deferred** | Only one rung is produced by the resize path in practice until every ingest route uses `deriveStillLadder`. | 6/7 | Item 7 completion |
+| **Deferred** | ThumbHash and perceptual hash are not computed despite their columns existing. | 4/21 | Derivation populating them |
+| **Deferred** | Video derivation is not wired; the ladder helpers are tested and uncalled. | 6 | Item 27 |
+| **Deferred** | Renditions do not sync before originals. **The plan's claim that this is a scheduling change is wrong** — it needs blob transfer decoupled from the metadata prefix rule. | 7 | A protocol change, not yet scoped |
+| **Deferred** | No test asserts consumers never name a size class. | 6 | Item 9, when there is a consumer that could violate it |
+| **Accepted** | Every number in the ladder is unverified. The largest open item in the plan; gates backfill. | 6 | Item 9b — human judgement, cannot be automated |
+| **Accepted** | Buckets created before item 0 can never get Object Lock. | 0 | Nothing — AWS design |
+| **Accepted** | A permanently corrupt source retries forever with a warning rather than escalating. | 2 | Surfacing it in the residency inspector |
+| **Accepted** | Restore estimates are unvalidated against a real bill. | 5b | Item 35 (CUR) |
+
+Test-coverage gaps that are not behavioural risks — no end-to-end variant resolution through a
+running server, no route-level test of the local server's filters, `MAX_CHILDREN_PER_PAGE`
+truncation, video variants, `precheckThumbnail`'s composition, the S3 `availability` mapping, real
+image bytes through `deriveStillLadder`, and whether the `NOT EXISTS` is actually indexed — are
+listed in their own sections rather than here, because each is "we did not write this test" rather
+than "this does not work".
+
+---
+
 ## Phase 0a
 
 ### Item 0 — `objectLockEnabled` on the files bucket
@@ -619,6 +665,11 @@ reproduces these exactly. `thumb_hash` is on video too, so a grid mixing stills 
 hole where a placeholder should be. A test asserts `content_hash` stays on the record row:
 perceptual hash matches re-encodes and resizes, which is what makes it useful for import dedup and
 what makes it **unsafe as an identity** — a candidate-finder, never a decision.
+
+**Gaps** — the columns exist and nothing writes them yet: derivation computes neither hash (see
+item 7). The raw *types* are registered, but nothing can decode a raw file — deriving from the
+embedded preview is item 30. Recorded explicitly rather than left as an empty section, because a
+missing **Gaps** block is ambiguous between "none" and "nobody wrote them".
 
 ### Item 6 — the rendition ladder and `photos/rendition`
 
