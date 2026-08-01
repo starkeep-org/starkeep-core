@@ -50,6 +50,7 @@ import {
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
+import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import type { NodeRetentionPolicy } from "../../packages/sync-engine/src/index.js";
 import { createResidencyManager, residencyHooks } from "./residency.js";
 import {
@@ -1417,6 +1418,55 @@ async function main() {
           }
         }
 
+        // Availability, as *this node* sees it. The same record is instant
+        // here and archived in the cloud, and both answers are correct —
+        // which is why it is reported by whichever server was asked rather
+        // than stored on the record.
+        //
+        // Locally the answer is nearly always instant: bytes on a disk are
+        // readable or they are not here. The one interesting case is `absent`,
+        // which is what an elided record looks like — metadata present, blob
+        // deliberately declined — and a client that cannot tell that apart
+        // from "readable" will render a broken image instead of an explanation.
+        const availabilityByRecord = new Map<string, RecordAvailability>();
+        if (readable.length > 0) {
+          const storedAvailability = await databaseAdapter.getAvailability(
+            readable.map((r) => r.objectStorageKey).filter(Boolean),
+          );
+          for (const r of readable) {
+            const stored = storedAvailability.get(r.objectStorageKey);
+            if (stored && stored.state !== "instant") {
+              availabilityByRecord.set(
+                r.id,
+                stored.state === "archived"
+                  ? {
+                      state: "archived",
+                      tier: stored.tier ?? "DEEP_ARCHIVE",
+                      expectedLatencyHours: stored.expectedLatencyHours ?? 12,
+                    }
+                  : stored.state === "restoring"
+                    ? {
+                        state: "restoring",
+                        readyAt:
+                          stored.readyAtMs === null
+                            ? null
+                            : new Date(stored.readyAtMs).toISOString(),
+                      }
+                    : { state: "absent" },
+              );
+              continue;
+            }
+            // No stored row: fall back to whether the bytes are actually here.
+            // One filesystem stat per record on a page is microseconds — the
+            // reason the cloud cannot do this is that its equivalent is a
+            // HeadObject per record, which is O(library) in network requests.
+            const here = r.objectStorageKey
+              ? await localAdapter.has(r.objectStorageKey)
+              : false;
+            availabilityByRecord.set(r.id, here ? { state: "instant" } : { state: "absent" });
+          }
+        }
+
         // Variant resolution, when asked for. Generic over child records, a
         // label key and the width/height columns, so this server never learns
         // what any particular size class is — the same resolver the cloud
@@ -1466,6 +1516,7 @@ async function main() {
             size_bytes: r.sizeBytes,
             original_filename: r.originalFilename,
             parent_id: r.parentId,
+            availability: availabilityByRecord.get(r.id) ?? { state: "instant" },
             path: r.objectStorageKey
               ? await localAdapter.resolvePath(r.objectStorageKey)
               : null,

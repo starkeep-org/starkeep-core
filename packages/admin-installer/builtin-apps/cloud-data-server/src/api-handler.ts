@@ -41,6 +41,8 @@ import {
   tagsForIntent,
   observationFor,
   shouldReplace,
+  reconcileAvailability,
+  vanishedObservation,
   INTENT_TAG_KEY,
   LADDER_TAG_KEY,
   LADDER_TAG_COMPLETE,
@@ -64,6 +66,7 @@ import type {
   MetadataRow,
   RecordLabel,
   AvailabilityEventKind,
+  InventoryRow,
   RecordAvailability,
   ResolvedVariant,
   RetrievalIntent,
@@ -82,7 +85,7 @@ import type {
   DatabaseClient,
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
-import type { Filter, DatabaseAdapter } from "@starkeep/storage-adapter";
+import type { Filter, DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
 import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
@@ -1238,9 +1241,11 @@ function isS3Event(event: unknown): event is S3EventEnvelope {
 export async function handleS3Availability(
   event: S3EventEnvelope,
   db: DatabaseAdapter,
+  storage?: ObjectStorageAdapter,
 ): Promise<{ applied: number; skipped: number }> {
   let applied = 0;
   let skipped = 0;
+  const inventoryManifests: string[] = [];
 
   for (const record of event.Records ?? []) {
     try {
@@ -1252,6 +1257,18 @@ export async function handleS3Availability(
       // S3 URL-encodes keys in notifications, and ours contain slashes.
       const objectStorageKey = decodeURIComponent(rawKey.replace(/\+/g, " "));
       const observedAtMs = record.eventTime ? Date.parse(record.eventTime) : Date.now();
+
+      // An inventory report landing is an ObjectCreated under the reserved
+      // prefix, not an availability event about that object. Keyed on the
+      // checksum file specifically: S3 writes data files first and the checksum
+      // last, so anything else would read a partial report.
+      if (
+        objectStorageKey.startsWith(INVENTORY_PREFIX) &&
+        objectStorageKey.endsWith("manifest.checksum")
+      ) {
+        inventoryManifests.push(objectStorageKey);
+        continue;
+      }
 
       const kind = eventKindOf(record.eventName ?? "");
       if (!kind) {
@@ -1298,6 +1315,180 @@ export async function handleS3Availability(
   return { applied, skipped };
 }
 
+/**
+ * Where inventory reports land. Must match the installer's `INVENTORY_PREFIX`.
+ *
+ * A drift here is silent in the worst way: reports accumulate, nothing ingests
+ * them, and availability quietly has no backstop while appearing to have one.
+ */
+const INVENTORY_PREFIX = "_starkeep/inventory/";
+
+/**
+ * Ingest a daily S3 Inventory report and correct availability from it.
+ *
+ * The backstop for events that were never delivered. Event delivery is
+ * at-least-once and a poison record is deliberately swallowed rather than
+ * making S3 redeliver a batch forever — both right, and both meaning something
+ * can be lost. Without this a record stays wrong indefinitely, and the
+ * wrongness is invisible until somebody tries to read it.
+ *
+ * Only the manifest's *checksum file* triggers this. S3 writes the data files
+ * first and `manifest.checksum` last, so keying on it is what guarantees the
+ * data files are complete — reacting to a data file directly would read a
+ * partial report.
+ */
+async function ingestInventoryReport(
+  manifestKey: string,
+  db: DatabaseAdapter,
+  storage: ObjectStorageAdapter,
+): Promise<{ applied: number; vanished: number; probes: number; unexpected: number }> {
+  // manifest.checksum sits beside manifest.json in the same "run" directory.
+  const manifestJsonKey = manifestKey.replace(/manifest\.checksum$/, "manifest.json");
+  const manifestBytes = await storage.get(manifestJsonKey);
+  if (!manifestBytes) {
+    console.warn(`[availability] inventory manifest missing at ${manifestJsonKey}`);
+    return { applied: 0, vanished: 0, probes: 0, unexpected: 0 };
+  }
+
+  const manifest = JSON.parse(Buffer.from(manifestBytes.data).toString("utf8")) as {
+    creationTimestamp?: string;
+    fileSchema?: string;
+    files?: Array<{ key: string }>;
+  };
+  // The snapshot's own time, not now. A report generated hours ago must not
+  // overwrite an event that happened since, and the newer-wins rule can only
+  // apply that if the snapshot time travels with the observations.
+  const snapshotAtMs = manifest.creationTimestamp
+    ? Number(manifest.creationTimestamp)
+    : Date.now();
+
+  // The column order is declared per-report rather than fixed, so it is read
+  // from the manifest instead of assumed. Assuming it is how a schema change
+  // silently reinterprets StorageClass as a size.
+  const columns = (manifest.fileSchema ?? "").split(",").map((c) => c.trim());
+  const keyIndex = columns.indexOf("Key");
+  const classIndex = columns.indexOf("StorageClass");
+  const tierIndex = columns.indexOf("IntelligentTieringAccessTier");
+  if (keyIndex < 0 || classIndex < 0) {
+    console.warn(`[availability] inventory schema lacks Key/StorageClass: ${manifest.fileSchema}`);
+    return { applied: 0, vanished: 0, probes: 0, unexpected: 0 };
+  }
+
+  const rows: InventoryRow[] = [];
+  for (const file of manifest.files ?? []) {
+    const data = await storage.get(file.key);
+    if (!data) continue;
+    const text = await gunzipToString(Buffer.from(data.data));
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      const cells = parseCsvLine(line);
+      const rawKey = cells[keyIndex];
+      if (!rawKey) continue;
+      rows.push({
+        // Inventory URL-encodes keys, and ours contain slashes.
+        objectStorageKey: decodeURIComponent(rawKey),
+        storageClass: cells[classIndex] ?? "STANDARD",
+        ...(tierIndex >= 0 && cells[tierIndex] ? { intelligentTieringAccessTier: cells[tierIndex]! } : {}),
+      });
+    }
+  }
+
+  const storedRows = await db.getAvailability(rows.map((r) => r.objectStorageKey));
+  const result = reconcileAvailability({
+    rows,
+    stored: new Map(
+      [...storedRows.entries()].map(([k, v]) => [
+        k,
+        {
+          objectStorageKey: k,
+          state: v.state,
+          readyAtMs: v.readyAtMs,
+          restoredUntilMs: v.restoredUntilMs,
+          observedAtMs: v.observedAtMs,
+        },
+      ]),
+    ),
+    snapshotAtMs,
+    nowMs: Date.now(),
+  });
+
+  for (const observation of result.observations) await db.putAvailability(observation);
+  for (const key of result.vanished) {
+    await db.putAvailability(vanishedObservation(key, snapshotAtMs));
+  }
+
+  // A restore whose completion event was lost stays `restoring` forever unless
+  // something probes it. The set is bounded by outstanding restores, not by
+  // library size, which is what makes checking every day affordable.
+  for (const key of result.needsRestoreProbe) {
+    const facts = await storage.stat(key);
+    if (!facts) continue;
+    await db.putAvailability({
+      objectStorageKey: key,
+      state: facts.availability.state === "restoring" ? "restoring" : facts.availability.state,
+      tier: facts.storageClass,
+      expectedLatencyHours:
+        facts.availability.state === "archived" ? facts.availability.expectedLatencyHours : null,
+      readyAtMs: null,
+      restoredUntilMs: null,
+      observedAtMs: Date.now(),
+    });
+  }
+
+  if (result.unexpectedlyArchived.length > 0) {
+    // Reported, never silently corrected: nothing here can un-archive an
+    // object, and the interesting question is which rule put it there.
+    console.error(
+      `[availability] ${result.unexpectedlyArchived.length} object(s) archived that should be ` +
+        `instantly readable: ${result.unexpectedlyArchived.slice(0, 10).join(", ")}`,
+    );
+  }
+
+  return {
+    applied: result.observations.length,
+    vanished: result.vanished.length,
+    probes: result.needsRestoreProbe.length,
+    unexpected: result.unexpectedlyArchived.length,
+  };
+}
+
+async function gunzipToString(buf: Buffer): Promise<string> {
+  const { gunzip } = await import("node:zlib");
+  return new Promise((resolve, reject) => {
+    gunzip(buf, (err, out) => (err ? reject(err) : resolve(out.toString("utf8"))));
+  });
+}
+
+/**
+ * Minimal CSV line parser for inventory rows.
+ *
+ * S3 quotes every field and escapes embedded quotes by doubling them. A split
+ * on commas would break on any key containing one — which object keys may,
+ * and ours would if a filename did.
+ */
+function parseCsvLine(line: string): string[] {
+  const cells: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          current += '"';
+          i += 1;
+        } else inQuotes = false;
+      } else current += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ",") {
+      cells.push(current);
+      current = "";
+    } else current += ch;
+  }
+  cells.push(current);
+  return cells;
+}
+
 function eventKindOf(eventName: string): AvailabilityEventKind | null {
   if (eventName.startsWith("LifecycleTransition")) return "transition";
   if (eventName.startsWith("ObjectRestore:Completed")) return "restore-completed";
@@ -1323,9 +1514,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       DRIVE_APP_ID,
       getAccountId(context.invokedFunctionArn),
     );
-    const { db } = makeAdapters(DRIVE_APP_ID, creds);
+    const { db, storage } = makeAdapters(DRIVE_APP_ID, creds);
     try {
-      const result = await handleS3Availability(event as unknown as S3EventEnvelope, db);
+      const result = await handleS3Availability(
+        event as unknown as S3EventEnvelope,
+        db,
+        storage,
+      );
       // Returned in the HTTP shape even though nothing reads it: an
       // S3-triggered invocation's return value is discarded, and keeping one
       // return type keeps every caller and test from having to narrow a union

@@ -53,14 +53,14 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | Severity | Gap | Item | What closes it |
 |---|---|---|---|
 | ~~Blocking~~ | ~~`RestoreObject` is never called.~~ **Closed (item 19)** — the endpoint issues it, and a test asserts the SDK call rather than the recorded state. | 5b | — |
-| ~~Blocking~~ | ~~Nothing maintains `availability`.~~ **Closed (item 19b)** — S3 notifications for transition/restore/expiry are subscribed and applied. The daily Inventory reconcile is still absent; see below. | 5b | — |
+| ~~Blocking~~ | ~~Nothing maintains `availability`.~~ **Closed (item 19b)** — notifications *and* the daily Inventory reconcile. | 5b | — |
 | **Blocking** | Multipart uploads are unverified above the part threshold in the buffered `put()` path; the streamed path verifies, the convenience method does not. | 1b-i / 2 | An `e2e-aws` test plus routing all large writes through `putStream` |
 | **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily. | 7 | A node-local (non-syncable) table |
 | **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
 | ~~Deferred~~ | ~~No lifecycle rule exists.~~ **Closed (item 18)** — one tag-filtered rule requiring both tags, above a ~1 MB floor. | 4/5 | — |
 | ~~Deferred~~ | ~~Nothing declares `archive` intent.~~ **Closed (item 17)** — Photos declares it for originals; renditions stay `instant`. | 4/5 | — |
-| **Deferred** | `absent` is written on object removal, but a `no-cloud` record that was never uploaded still reads `instant` — there is no event for an object that never existed. | 5b | The Inventory reconcile |
-| **Deferred** | The local data server does not report `availability` at all. Harmless today (local bytes are readable or elided) and therefore invisible. | 5b | Wiring the local `/data/records` response |
+| ~~Deferred~~ | ~~`absent` is never written for objects that never existed.~~ **Closed** — the reconcile reports stored keys the inventory does not list. | 5b | — |
+| ~~Deferred~~ | ~~The local data server does not report `availability`.~~ **Closed** — reports `absent` for an elided record, which a client otherwise renders as a broken image. | 5b | — |
 | **Deferred** | No eviction pass is scheduled; `runEviction` is reachable and uncalled. | 1b | Item 15/34 (residency inspector) |
 | **Deferred** | `protectedLocally` is never set, so the durability predicate is the only thing between eviction and a last copy. | 1b | Item 7's derivation-input tracking |
 | **Deferred** | `recencyAtMs` is always null from the sync engine, so `recent-only` behaves as `all`. | 1b | Host decider supplying capture time |
@@ -991,16 +991,6 @@ events for a consumer that is already warm.
 
 **Gaps**
 
-- **No daily Inventory reconcile.** The plan specifies one as the *backstop* for events that were
-  never delivered, and it does not exist. Events are best-effort by design (a poison record is
-  swallowed so S3 does not redeliver a batch forever), which makes the absent backstop more
-  significant than it sounds: anything genuinely lost stays wrong until something else touches the
-  object. It is also what would populate `absent` for records whose bytes were never uploaded, and
-  what the plan wants for reporting objects whose actual class disagrees with their declared
-  intent.
-- **Nothing polls a restore to completion.** The endpoint records `restoring` with an *estimated*
-  ready time; the `ObjectRestore:Completed` event is what actually flips it. If that event is
-  missed, the record stays `restoring` indefinitely — precisely the case the reconcile would fix.
 - **No notification test against real S3.** Whether the event shape matches what
   `handleS3Availability` parses is only observable against a real bucket. The key decoding
   (`+` → space, then percent-decode) is exactly the sort of thing that is wrong in one direction
@@ -1008,6 +998,68 @@ events for a consumer that is already warm.
 - **The local data server still does not report availability.** Intended to close alongside this
   and deferred for size; harmless today because local bytes are readable or elided, and therefore
   still invisible.
+
+#### The daily Inventory reconcile — the backstop
+
+Event delivery is at-least-once, and a poison record is deliberately swallowed rather than making
+S3 redeliver a batch forever. Both are right, and both mean something can be lost — so without a
+backstop a record stays wrong indefinitely, and the wrongness is invisible until somebody reads it.
+
+Inventory rather than a HeadObject sweep: ~$0.0025 per million objects, against 300k requests to
+probe a 300k-object library daily. **That cost difference is why availability is a maintained fact
+at all**, so the backstop had to preserve it.
+
+**What an inventory can and cannot see** shapes the whole design. It reports storage class and
+Intelligent-Tiering access tier; it has **no restore-status field**. So the sweep splits:
+
+- Archived-vs-readable is settled from the report alone, at no per-object cost.
+- Restore state is settled by probing — but only for records claiming to be mid-restore whose
+  estimated ready time has passed. **That set is bounded by outstanding restores, not library
+  size**, which is what keeps a daily check affordable.
+
+| Test | Asserts |
+|---|---|
+| `marks an object archived when the inventory says so and the store does not` | the backstop's actual job |
+| `sees through Intelligent-Tiering to its asynchronous access tier` | storage class alone would call it readable |
+| `does not overwrite an event newer than the snapshot` | a 03:00 report read at 05:00 must not revert a 04:00 transition — the snapshot's own time travels with the observations |
+| `leaves a live restored copy alone despite an archived storage class` | an inventory cannot see thaws; otherwise every reconcile marks a freshly-restored object unreadable *while the user is looking at it* |
+| `flags a restore whose estimated ready time has passed` | the only thing that ever unsticks a lost `ObjectRestore:Completed` |
+| `never marks a restoring key as vanished` | inventory silence about a restoring key is not evidence of deletion |
+| `reports an archived object that was expected to stay readable` | **reported, never silently corrected** — nothing can un-archive it, and the interesting question is which rule put it there |
+| `writes nothing for an unknown key that is readable anyway` | instant is the default; writing it says nothing |
+
+**The ingestion is wired, not just written.** `aws.s3.Inventory` produces a daily CSV; a second
+notification subscription triggers on the manifest landing. Keyed on **`manifest.checksum`
+specifically**, because S3 writes data files first and the checksum last — anything else would
+ingest a partial report. Tests assert the subscription exists and its suffix.
+
+The column order is read from the manifest's `fileSchema` rather than assumed, since assuming it is
+how a schema change silently reinterprets `StorageClass` as a size. CSV is parsed with quote
+handling rather than `split(",")`, because object keys may contain commas.
+
+#### The local server now reports availability
+
+Locally the answer is nearly always `instant` — bytes on a disk are readable or absent. The case
+that matters is **`absent`**, which is what an elided record looks like: metadata present, blob
+deliberately declined. A client that cannot tell that from "readable" renders a broken image
+instead of an explanation.
+
+One filesystem `stat` per record on a page is microseconds. The reason the cloud cannot do the same
+is that its equivalent is a HeadObject per record — O(library) in network requests.
+
+**Gaps**
+
+- **No test ingests a real inventory report.** The reconcile logic has 18 tests; the CSV/gzip/
+  manifest path that feeds it has none. Whether the manifest's field names match what is parsed,
+  and whether key decoding is right for unusual characters, is only observable against a real
+  report. Together with the notification shape, this is now the main `e2e-aws` debt for item 19b.
+- **`unexpectedlyArchived` has no caller supplying `expectedInstant`.** The reconcile supports the
+  check and the ingestion does not pass a predicate, so the "a rendition must never be archived"
+  audit is available and unused — it needs a bounded query for rendition children among archived
+  keys.
+- **Inventory reports are never reaped.** They accumulate daily under `_starkeep/inventory/`. Small
+  (a few MB) and outside `shared/`, so nothing breaks, but a lifecycle rule expiring them after a
+  week is the obvious follow-up.
 
 *(Sections for items 9b, 8 and onward are appended as each lands.)*
 
