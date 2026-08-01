@@ -32,7 +32,7 @@
  * prefix, which is why this file needs no concept of media kind.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import {
   DummyDriver,
   Kysely,
@@ -138,7 +138,7 @@ interface Row {
 }
 
 export function createSqliteResidentSetIndex(options: {
-  readonly db: DatabaseSync;
+  readonly db: RawDatabase;
 }): ResidentSetIndex {
   const { db } = options;
 

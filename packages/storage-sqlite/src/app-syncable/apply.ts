@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql, type CompiledQuery } from "kysely";
 import type { HLCTimestamp } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
@@ -8,11 +8,11 @@ import { appSyncableTableName } from "./namespace.js";
 
 type SqlParam = null | number | bigint | string | Uint8Array;
 
-function runCompiled(db: DatabaseSync, compiled: CompiledQuery): void {
+function runCompiled(db: RawDatabase, compiled: CompiledQuery): void {
   db.prepare(compiled.sql).run(...(compiled.parameters as SqlParam[]));
 }
 
-function allCompiled<T>(db: DatabaseSync, compiled: CompiledQuery): T[] {
+function allCompiled<T>(db: RawDatabase, compiled: CompiledQuery): T[] {
   return db.prepare(compiled.sql).all(...(compiled.parameters as SqlParam[])) as T[];
 }
 
@@ -31,7 +31,7 @@ export class SqliteAppSyncableApplier
   implements AppSyncableApplier, ScanCapableApplier
 {
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly db: RawDatabase,
     private readonly namespace: AppSyncableNamespaceStore,
   ) {}
 

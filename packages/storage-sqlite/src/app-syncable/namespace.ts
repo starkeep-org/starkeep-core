@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import { compiler as qb } from "../query-builder.js";
 import type {
   AppSyncableNamespace,
@@ -34,7 +34,7 @@ function rowToNamespace(r: {
 }
 
 export function upsertAppSyncableNamespace(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   tables: AppSyncableTableInfo[],
   filesEnabled: boolean,
@@ -56,13 +56,13 @@ export function upsertAppSyncableNamespace(
   db.prepare(query.sql).run(...(query.parameters as (string | number)[]));
 }
 
-export function deleteAppSyncableNamespace(db: DatabaseSync, appId: string): void {
+export function deleteAppSyncableNamespace(db: RawDatabase, appId: string): void {
   const query = qb.deleteFrom("app_syncable_namespaces").where("app_id", "=", appId).compile();
   db.prepare(query.sql).run(...(query.parameters as string[]));
 }
 
 export function getAppSyncableNamespace(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
 ): AppSyncableNamespace | null {
   const query = qb
@@ -79,7 +79,7 @@ export function getAppSyncableNamespace(
   return rowToNamespace(row);
 }
 
-export function listAppSyncableNamespaces(db: DatabaseSync): AppSyncableNamespace[] {
+export function listAppSyncableNamespaces(db: RawDatabase): AppSyncableNamespace[] {
   const query = qb
     .selectFrom("app_syncable_namespaces")
     .select(["app_id", "tables_json", "files_enabled"])
@@ -96,7 +96,7 @@ export function listAppSyncableNamespaces(db: DatabaseSync): AppSyncableNamespac
  * and the sync applier.
  */
 export class SqliteAppSyncableNamespaceStore implements AppSyncableNamespaceStore {
-  constructor(private readonly db: DatabaseSync) {}
+  constructor(private readonly db: RawDatabase) {}
 
   get(appId: string): AppSyncableNamespace | null {
     return getAppSyncableNamespace(this.db, appId);

@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import {
   DummyDriver,
   Kysely,
@@ -26,7 +26,7 @@ const PEER_WATERMARKS = "peer_watermarks";
 const HLC_CLOCK = "hlc_clock";
 
 export interface SqliteSyncStateStoreOptions {
-  readonly db: DatabaseSync;
+  readonly db: RawDatabase;
 }
 
 export function createSqliteSyncStateStore(

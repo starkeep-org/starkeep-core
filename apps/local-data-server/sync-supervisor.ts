@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import {
   createHttpSyncTransport,
   createSyncEngine,
@@ -47,7 +47,7 @@ export interface SyncSupervisorOptions {
   readonly sdk: StarkeepSdk;
   readonly databaseAdapter: DatabaseAdapter;
   readonly localObjectStorage: ObjectStorageAdapter;
-  readonly localDb: DatabaseSync;
+  readonly localDb: RawDatabase;
   readonly cloudUrl: string;
   /**
    * Returns the current list of installed apps from the registry. The

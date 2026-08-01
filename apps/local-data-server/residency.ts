@@ -18,7 +18,7 @@
  *     cache policy. That is the expensive mistake available in this area.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import {
   DummyDriver,
   Kysely,
@@ -66,7 +66,7 @@ export function originalClassFor(type: string | null): string {
 }
 
 export interface ResidencyManagerOptions {
-  readonly localDb: DatabaseSync;
+  readonly localDb: RawDatabase;
   readonly databaseAdapter: DatabaseAdapter;
   readonly localObjectStorage: ObjectStorageAdapter;
   /**

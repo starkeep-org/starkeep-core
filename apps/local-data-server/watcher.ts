@@ -8,13 +8,13 @@
  * SQLite table managed here — it never touches the user data layer.
  */
 
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join, relative, extname, basename } from "node:path";
 import { pipeline } from "node:stream/promises";
-import type { DatabaseSync } from "node:sqlite";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
 import { createStarkeepId, defaultTypeForExtension } from "@starkeep/protocol-primitives";
@@ -129,7 +129,7 @@ const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
 export function createFileWatchManager(opts: {
   sdk: StarkeepSdk;
-  db: DatabaseSync;
+  db: RawDatabase;
   databaseAdapter: DatabaseAdapter;
   appId: string;
 }): FileWatchManager {

@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import { randomBytes } from "node:crypto";
 import {
   validateManifest,
@@ -55,7 +55,7 @@ export class ManifestValidationError extends LocalInstallError {
  * Returns the new (or existing) HMAC secret so the caller can hand it to the
  * app process for request signing.
  */
-export function installLocal(db: DatabaseSync, rawManifest: unknown): InstallLocalResult {
+export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLocalResult {
   const validation = validateManifest(rawManifest);
   if (!validation.valid || !validation.manifest) {
     throw new ManifestValidationError(validation.errors);
@@ -130,7 +130,7 @@ export interface UninstallLocalOptions {
 }
 
 export function uninstallLocal(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   options: UninstallLocalOptions = {},
 ): void {
@@ -196,7 +196,7 @@ export function uninstallLocal(
 }
 
 function runStep(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   operation: Operation,
   step: string,
