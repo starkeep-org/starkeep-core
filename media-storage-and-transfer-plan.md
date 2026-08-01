@@ -13,7 +13,7 @@ Established with the operator:
 
 - **Library:** 20k–100k items, tens of GB to a few hundred GB. §5.4 models three scales — 50 GB, 500 GB (the operator, ~63k items, growing ~100 GB/yr), and 2 TB.
 - **Capture:** iPhone (HEIC + Live Photos, Apple ProRAW/DNG, 4K/HDR, ProRes), Pixel (HEIC/JPEG, DNG, Motion Photos, HEVC MP4), plus 1080p short clips.
-- **Append-only.** Nothing is ever deleted. Glacier minimum-duration billing is therefore a non-issue, and monotonic growth makes per-GB storage price the dominant long-run term.
+- **Append-only, for everything the user made.** Originals and user-created records are never deleted. Glacier minimum-duration billing is therefore a non-issue, and monotonic growth makes per-GB storage price the dominant long-run term. **Renditions are the one exception**: they are reproducible cache, and §4.6 supersedes and reaps them when a size class is respecified. Nothing else in this plan depends on renditions being permanent — the Glacier argument above is about originals — and the distinction is what makes a ladder change possible at all after a library has been built.
 - **Nodes:** the laptop runs a local-data-server; the phone runs a **sync peer** — an app implementing the sync protocol without the LDS's server surface, modelled on how Google Photos works on iOS (§7.5). **Android ships first** and is built to the iOS background-execution constraint (§7.6).
 - **AI is local-first, on-device only.** The cloud never needs pixel access for tagging, faces, or similarity.
 - **Viewing:** phone almost always, laptop occasionally, 4K TV rarely, print rarely. Recency-biased — recent items are viewed far more.
@@ -209,12 +209,25 @@ the actual `width`/`height` come back on the record with the rest of its image m
 costs no extra request.
 
 **Video needs the same treatment on two axes, and §3.3's numbers are maxima too.** Resolution follows
-rules 1 and 2 directly — which closes the identical gap on the poster classes, where under the old
-margin rule a 1080p source (1,920 px) would have got no `video-poster-screen` at all and only 4K
-sources would. Bitrate is a second maximum: a transcode's bitrate is `min(source, class max)`. The
-extra clause video needs and stills do not: **if both resolution and bitrate would be unchanged, do
-not transcode — use the original**, since the output would be a same-size re-encode with nothing
+rules 1 and 2 directly. Bitrate is a second maximum: a transcode's bitrate is `min(source, class
+max)`. Video's two chains are independent:
+
+| Class | Maximum | Generated when source exceeds |
+|---|---|---|
+| `video-poster-thumb` | 400 px | *(always)* |
+| `video-poster-screen` | 1280 px | 400 px |
+| `video-skim` | 480 px, 2 fps, ≤20 s out | *(always — see below)* |
+| `video-720p` | 1280 px / ~1.5 Mbps | *(always, subject to the clause below)* |
+| `video-1080p` | 1920 px / ~4 Mbps | 1280 px |
+
+The extra clause video needs and stills do not: **if both resolution and bitrate would be unchanged,
+do not transcode — use the original**, since the output would be a same-size re-encode with nothing
 gained. A 480p 800 kbps clip is its own `video-720p`.
+
+**`video-skim` is exempt from that clause and is generated for every video.** It differs from its
+source in the *time* dimension — 4 fps at 8× speed — so it gains something at any resolution, and a
+480p clip that gets no separate `video-720p` still gets a skim. It is the video analogue of
+`image-thumb`: the asset that makes every record identifiable at a glance with no fallback path.
 
 ### 3.2 Progressive presentation — needs more work
 
@@ -249,18 +262,19 @@ The first and third are measurable on the Android app (§7.6) and should be sett
 | Size class | Max spec | Typical (30 s clip) | Storage class | Serves |
 |---|---|---|---|---|
 | `video-poster-thumb` | 400 px still from frame ~1 s | ~20 KB | I-T (stays at Standard rate) | grid tile |
-| `video-poster-screen` | 2560 px still | ~350 KB | Intelligent-Tiering | larger-thumbnail UIs, pre-roll / paused state |
-| `video-skim` | ~480 px, 4 fps, 8× speed, capped at ~10 s output | ~150 KB | Intelligent-Tiering | hover / long-press identification |
+| `video-poster-screen` | 1280 px still | ~110 KB | I-T (stays at Standard rate) | larger-thumbnail UIs, pre-roll / paused state |
+| `video-skim` | ~480 px, 2 fps, 8× speed, capped at ~20 s output | ~80 KB | I-T (stays at Standard rate) | hover / long-press identification — **generated for every video** |
 | `video-720p` | 720p H.264 ~1.5 Mbps, full framerate | ~5.6 MB | Intelligent-Tiering | actual inline playback |
 | `video-1080p` *(optional)* | 1080p H.264 ~4 Mbps | ~15 MB | Intelligent-Tiering | TV / large-screen playback |
 | `original` | as captured | 30 MB–6 GB | Deep Archive | export, editing |
 
 **`video-skim` and `video-720p` are two different things and both are wanted.** An earlier draft conflated them. `video-skim` answers *"which video is this?"* at a glance — the low-framerate, fast-playback strip that reads as a series of stills, the same idea as YouTube's hover preview. `video-720p` answers *"let me watch it"* at full framerate. Neither substitutes for the other.
 
-- **`video-skim` sizing rule:** speed factor = `max(8, duration_seconds / 10)`, so output never exceeds ~10 s regardless of source length. A 30 s clip → 3.75 s at 4 fps ≈ 15 frames; a 5-minute clip → 10 s at 4 fps = 40 frames, not 150. Without the cap, long videos produce absurd skims.
-- **`video-skim` is probably better as an animated image than a video.** At 15–40 frames, animated AVIF or WebP renders in a plain `<img>` — no player, autoplays, loops, trivially cacheable, no range requests. **Needs testing** (the operator's note): frame rate, speed factor, and container are all empirical, and 4 fps / 8× is a starting hypothesis rather than a known-good answer.
+- **`video-skim` is generated for every video, without exception**, and is the one motion class exempt from the "resolution and bitrate unchanged → use the original" rule below. That rule exists because a same-size re-encode gains nothing; a skim gains something regardless of resolution, because it differs from its source in the *time* dimension — 4 fps at 8× speed is not a thing any source already is. A 480p clip therefore gets a 480 px skim even though it gets no separate `video-720p`. It is the video analogue of `image-thumb`: the asset that guarantees every record is identifiable at a glance with no fallback path.
+- **`video-skim` sizing rule:** speed factor = `max(8, duration_seconds / 20)`, so output never exceeds ~20 s regardless of source length. A 30 s clip → 3.75 s at 2 fps ≈ 8 frames; a 5-minute clip → 20 s at 2 fps = 40 frames, not 600. Without the cap, long videos produce absurd skims. The frame *ceiling* is 40 either way; what 2 fps changes is the short-clip case, which is the common one — a typical clip's skim halves to ~80 KB, which takes the class below the 128 KB line and leaves it unmanaged at the Standard rate under Intelligent-Tiering (§5.3.2).
+- **`video-skim` is probably better as an animated image than a video.** At 8–40 frames, animated AVIF or WebP renders in a plain `<img>` — no player, autoplays, loops, trivially cacheable, no range requests. **Needs testing** (the operator's note): frame rate, speed factor, and container are all empirical, and 4 fps / 8× is a starting hypothesis rather than a known-good answer.
 - **`video-720p` is mandatory for every video.** Playback from an archive tier is impossible, so a video whose preview is missing is a video you cannot watch for 48 hours. The ladder-complete gate (§5.2) enforces this.
-- **§3.1.1's max-size semantics apply here on two axes**, and matter more than for stills because video transcodes are lossy in both directions. Resolution and bitrate are both maxima: a transcode is `min(source, class max)` on each. A 480p 800 kbps clip therefore yields no separate `video-720p` — both axes would be unchanged, so the output would be a same-size re-encode and the original *is* its `video-720p`, played directly. Old phone footage and screen recordings are the common cases, and there are usually a lot of them. Note this also gives a 1080p source a `video-poster-screen` at 1,920 px, where a fixed-2560 class would have produced none.
+- **§3.1.1's max-size semantics apply here on two axes**, and matter more than for stills because video transcodes are lossy in both directions. Resolution and bitrate are both maxima: a transcode is `min(source, class max)` on each. A 480p 800 kbps clip therefore yields no separate `video-720p` — both axes would be unchanged, so the output would be a same-size re-encode and the original *is* its `video-720p`, played directly. Old phone footage and screen recordings are the common cases, and there are usually a lot of them. **`video-poster-screen`'s maximum is 1280, matching `video-720p`.** A poster larger than the resolution the video actually plays at is wasted: the still would be sharper than the footage that replaces it, so the transition into playback visibly degrades. Sizing the poster to the playback rung keeps pre-roll and paused states consistent with what follows, and drops the class from ~350 KB to ~110 KB — below the 128 KB line at which Intelligent-Tiering stops managing an object, so it now sits at the Standard rate permanently (§5.3.2).
 
 **Codec: H.264 by default, WebM/VP9 as an option — but the choice is constrained by hardware encode, not by size.** Since derivation happens on-device (§4.1), the deciding fact is what the phone can encode in hardware: iOS VideoToolbox does H.264 and HEVC and has **no VP9 or AV1 encoder**; Android MediaCodec has universal H.264, but VP9 *encode* support is patchy across devices. **H.264 is the only codec both platforms can reliably hardware-encode**, which settles the default. VP9/WebM (~30–50% smaller) makes sense as an option for laptop- or cloud-derived content, where a software encoder is acceptable — worth having as a config knob, not as the default.
 
@@ -279,6 +293,9 @@ What the test has to establish, in order of how expensive it is to get wrong:
 2. **Whether the long edges are right**, viewed on the real devices at real distances: the phone in hand, the laptop windowed and fullscreen, and the 4K TV. Specifically whether `image-medium` upscaled is acceptable as a phone fullscreen (§3.2's second open question) and whether `image-large` at 4272 is enough for the zoom case or whether zoom genuinely means restoring the original. Note this question now only concerns originals *above* 4,272 px — below that §3.1.1 gives every record a native-resolution `image-large`, so zoom never needs the original at all.
 3. **AVIF vs JPEG/WebP at equal bytes**, at each size, including decode time on a mid-range Android — because §3.2's third open question and §11's AVIF-encode-cost risk are the same trade seen from two ends.
 4. **The video parameters** — `video-skim` frame rate and speed factor, `video-720p` bitrate — which are guesses to the same degree (§3.3).
+5. **Whether generation-2 renditions are acceptable** (§4.6). Compare a class derived from the original against the same class derived from `image-screen` or `image-large`, and find the downscale ratio below which the source's own artifacts stop being filtered away. If gen-2 output is not acceptable, §4.6's entire approach fails and every future respec means thawing the archive — which is much better to know before backfill than after.
+6. **The near-boundary case specifically** — rebuilding `image-medium` at 1280 from an `image-screen` at ~1300 (§3.1.1's accepted cost), which is the worst downscale ratio the system can produce.
+7. **Whether a mixed library is visible** — an old and a new `image-screen` side by side. This decides whether §4.6 can re-derive lazily or has to sweep eagerly.
 
 The sample must include the operator's own hard cases, not a stock test set: fine text (screenshots, documents, signs), foliage and other high-frequency detail, night and high-ISO shots where noise interacts badly with modern codecs, skin tones, smooth gradients (skies), and at least one Live Photo and one 4K clip. The output of the test is a table of final integers that replaces the provisional ones in §3.1 and §3.3.
 
@@ -386,6 +403,137 @@ So the test is: run a real Takeout export against a library that already contain
 
 Until that has been done, the safe default is to run tiers 2 and 3 in **report-only** mode — log what they would have skipped, import everything — so the first real import produces the calibration data instead of consuming it.
 
+### 4.6 Respecifying a size class after the library is built
+
+§3.4's visual test sets the maxima and quality levels once, before backfill. This section is about
+the *second* time they change — a class maximum moves, or a codec does — with 60,000 renditions
+already written and every original in Deep Archive.
+
+**The whole approach rests on one property §3.1.1 guarantees:** every record has an instantly
+readable copy at `min(original long edge, 4272)`. Re-derivation never has to touch the archive.
+
+#### The rule
+
+**Re-derive from the smallest applicable class whose long edge is at least ~1.5× the new target.**
+Not from the largest — to rebuild `image-medium` at 1440, `image-screen` (1.8×) is as good a source
+as `image-large` (3.0×), since both are one generation from the original and both downscale by
+enough to low-pass away the source's encode artifacts, and it reads a third of the bytes. Below
+about 1.5× the downscale stops filtering and generational loss becomes visible; that threshold is a
+§3.4 question rather than a known quantity.
+
+**When several classes change at once, derive all of them from the highest *unchanged* class in one
+pass.** Rebuilding `image-medium` from a freshly rebuilt `image-screen` would make it generation 3.
+
+**Two limits, both narrow and neither removable:**
+
+- **A record's top applicable class can only be rebuilt from the original.** Since a class maximum
+  only affects records whose original exceeds it, raising `image-large` from 4272 later would need a
+  thaw for exactly the >4,272 px population and nothing else.
+- **Near-boundary records are poor sources.** A 1,300 px original has `image-medium` at 1,280 and
+  `image-screen` at 1,300 (§3.1.1's accepted cost); rebuilding the former from the latter is a 1.02×
+  downscale, i.e. a re-encode with no artifact filtering. It affects only originals sitting just
+  above a maximum, which real device sizes mostly avoid.
+
+#### No version concept is needed — the spec is recoverable from metadata
+
+Staleness is a query over state that already exists, not a stored marker:
+
+| Spec component | Where it lives | Byte-derived? |
+|---|---|---|
+| long edge | `width` / `height` in `IMAGE_METADATA_COLUMNS`, `VIDEO_METADATA_COLUMNS` | yes |
+| codec | the record's own `type` — `image/avif` vs `image/webp` are distinct registry entries | yes |
+| video bitrate, frame rate | `bitrate`, `frame_rate` in `VIDEO_METADATA_COLUMNS` | yes |
+| **still quality level** | **nowhere** | **no** |
+
+For video this is complete: every component of `video-720p`'s spec is already a column. For stills,
+long edge and codec cover the two changes worth re-deriving a library for. The gap is the encoder
+quality parameter — AVIF and WebP do not record it, and bytes-per-pixel cannot be thresholded back
+into one, since it varies by an order of magnitude between a flat sky and foliage.
+
+**Accept that gap rather than adding state for it.** A quality-only respec is the least likely and
+least valuable of the three, and its escape hatch needs no query at all: re-derive every rendition of
+that class unconditionally. Paying permanent per-rendition state to optimise a sweep nobody is likely
+to run is the wrong trade — and it is the same instinct §4.2 rejected when it deleted
+`needs-derivation`. **Derivation state is a query, not a field.**
+
+The predicate, then, is a join rather than a lookup, since §3.1.1 makes every class's output size
+per-record:
+
+> a rendition is stale when its long edge ≠ `min(parent's long edge, class max)`, or its `type` ≠ the
+> class's current codec
+
+§4.4's `parentId` filter is what makes that one indexed query.
+
+#### Supersession, not coexistence
+
+Consumers must never see two `image-medium` children of one record. When the replacement is
+registered, the old child's `photos/rendition` label is **tombstoned in the same set-valued write**
+§4.4 already specifies (`POST /data/labels/values` upserts and tombstones the rest). The old record
+still exists and its bytes are still there, but it is no longer labelled a rendition — it is an
+orphaned image record awaiting the reaper. "The `image-medium` of record X" stays one indexed query
+on `parentId` + `labelValue`, and no consumer learns that a respec happened.
+
+#### Reaping — the one place this can lose data
+
+- **Refcount over records, not per record.** Keys are content-addressed, so two records can
+  legitimately share an object — identical screenshots produce byte-identical `image-thumb`
+  renditions and therefore one key. Deleting on behalf of one superseded record would silently break
+  the other. This is the gap §10 item 20 already records, and the reaper must not ship before it.
+- **Renditions must not carry Object Lock retention** (§5.1, §5.6), or none of this is possible.
+- **Wait at least 30 days.** Intelligent-Tiering has a 30-day minimum storage duration
+  (`EarlyDelete-INT`, prorated at the Frequent Access rate), so reaping sooner pays the remainder at
+  $0.023/GB-mo — and a delay is wanted for safety reasons anyway.
+- **Tombstones propagate before bytes are removed.** §7.1's `Tombstoned` state already exists.
+  Content-addressing makes the ordering benign: a node that deletes early simply re-fetches.
+- **Never reap a record's current top applicable class**, since it cannot be rebuilt without a thaw.
+
+#### Cost, and what actually justifies it
+
+Rebuilding one class across the library at Model B:
+
+| | Re-derive from renditions | Restore originals |
+|---|---|---|
+| Bytes read | 21 GB (`image-screen`) | 500 GB |
+| Direct charge | ~$0.40 (I-T promotion to Frequent Access for 30 days) | $1.25 bulk + ~$2.45 staging |
+| Wall clock | minutes to hours | **48 hours before the first byte** |
+| Decoder | AVIF — works in stock sharp today | HEIC/DNG — **blocked on §8.1's custom libvips** |
+
+At Model C the gap widens sharply, since re-derivation scales with rendition bytes (162 GB of
+`image-large`) and a thaw scales with original bytes (2 TB): roughly $2.60 against ~$15.
+
+**But the money is not the argument at Model B** — $0.40 against $3.70 is not what justifies this.
+Three other things do: there is no 48-hour wait and no restore window that can expire mid-job; the
+codec problem disappears, because renditions are AVIF and stock sharp handles them, so re-derivation
+works today on HEIC-captured photos without §8.1's build; and it never touches the archive, so it
+cannot interact with the 180-day Deep Archive minimum, with Object Lock, or with §5.1.1's restore
+rate limits.
+
+#### Who runs it
+
+Whether a pass runs locally, in the cloud, or both is a later decision that nothing here depends on.
+Two primitives do have to hold:
+
+- **A node may only derive from bytes it holds** (§4.1). The source rule is therefore "the smallest
+  applicable class ≥1.5× the target *that this node holds*", and a node with no local source skips
+  the record — the same shape as §7.1's `Elided`, so residency policy (§7.2) decides who can
+  participate without anything else needing to know.
+- **A respec pass has a single owner.** §4.2's reasoning applies unchanged: two nodes re-deriving one
+  record produce *two* replacements, because AVIF encoders are not bit-identical across platforms and
+  the outputs get different content-addressed keys. One actor, therefore no lease and no coordination
+  protocol.
+
+*Which* node is configuration. The cloud is the sensible default — it holds every rendition,
+instantly readable under I-T, with no residency gaps — and §4.2's singleton sweeper already exists to
+schedule this shape of work. A local-first install (§9) points it at the laptop instead, and the only
+difference is which records get skipped for want of a local source.
+
+**Triggering is lazy with a backstop:** re-derive on next access, plus a low-priority background
+sweep driven by the same staleness query. One mechanism, two triggers. A mixed library in the interim
+is acceptable for `image-thumb` and `image-medium` and should be checked by eye for `image-screen`
+(§3.4).
+
+---
+
 ## 5. Storage: cloud
 
 ### 5.1 Storage class: declared as intent, applied at PUT, reported per record
@@ -402,10 +550,12 @@ Content-addressed keys (`shared/<category>/<shard>/<hash>`) carry no size-class 
 
 **The app declares an intent at PUT time**, from a small platform-defined vocabulary that says nothing about AWS:
 
-| Intent | Meaning to the app | Maps to |
-|---|---|---|
-| `instant` *(default)* | must be readable now, at normal latency, whenever it is read | S3 Intelligent-Tiering, automatic tiers only |
-| `archive` | may be unavailable for up to 48 hours when read | S3 Glacier Deep Archive |
+| Intent | Meaning to the app | Storage class | Tag | Object Lock retention |
+|---|---|---|---|---|
+| `instant` *(default)* | must be readable now, at normal latency, whenever it is read | S3 Intelligent-Tiering, automatic tiers only | none | **none** |
+| `archive` | may be unavailable for up to 48 hours when read | S3 Glacier Deep Archive | `starkeep:intent=archive` | 1 year (§5.6) |
+
+**Retention is the third thing the intent decides**, and the reason it belongs here rather than as a bucket-wide setting is §4.6: compliance-mode retention cannot be reduced by anyone, so a rendition written under it could never be superseded. Renditions are reproducible and must stay deletable; originals are not and must not.
 
 Photos maps its size classes onto that: **every rendition class → `instant`**; `original` → `archive` (subject to the gate in §5.2 and the floors below). Another app storing images can express "this must be readable" or "this is a cold master" without knowing what Glacier is, and the platform can change the AWS mapping — or an installation can override it — without touching any app.
 
@@ -453,16 +603,32 @@ The operator's instinct is to archive originals immediately, and the economics a
 
 **Gate on durability, not on age.** When every *applicable* size class for a record (§3.1.1) is confirmed present in the cloud, tag the original `starkeep:ladder=complete`. A lifecycle rule transitions tagged originals to Deep Archive. Until it fires the original sits in Intelligent-Tiering like everything else, so a ladder-incomplete original is always instantly readable — which is what makes §4.2's cloud derivation fallback free of thaws.
 
-**And hold for a minimum of 7 days before transitioning, regardless.** This was worth checking rather than assuming, because it hinges on whether waiting costs anything:
+**And hold for a minimum period before transitioning, regardless — `archiveHoldDays`, default 7.** This was worth checking rather than assuming, because it hinges on whether waiting costs anything:
 
 **Does the transition itself cost money? Yes — but the cost is fixed and does not depend on how long you waited.** Two charges, both verified against the Price List API for us-east-1, both one-time and per-object:
 
 - **Lifecycle transition request to Deep Archive: $0.05 per 1,000 objects** (`Requests-Tier3` / `S3-GDATransition`). For comparison: $0.03/1,000 to Glacier Flexible, $0.02/1,000 to Glacier IR, $0.01/1,000 to Standard-IA.
 - **Deep Archive checksum-computation fee: $0.004/GB** on bytes transitioned (`Compute-Checksum-Processed-GDA-Bytes`).
 
-For the operator's 500 GB / ~63k originals that is $3.15 + $2.00 = **$5.15, once**. Waiting a week changes neither number. The only cost of delay is holding those bytes in Intelligent-Tiering meanwhile, and on an append-only library that is a *rolling window* rather than the whole library. Objects newer than 30 days sit in I-T's Frequent Access tier at the Standard rate, so the delay is priced at $0.023/GB-mo: at ~100 GB/yr, a 7-day window is ~1.9 GB, or about **$0.04/month**. A 30-day window is ~8.2 GB, about **$0.19/month**.
+For the operator's 500 GB / ~63k originals that is $3.15 + $2.00 = **$5.15, once**. Waiting a week changes neither number. The only cost of delay is holding those bytes in Intelligent-Tiering meanwhile, and on an append-only library that is a *rolling window* rather than the whole library.
 
-So the answer to "should we always hold for at least a week" is yes, unambiguously — it buys a week to catch a derivation bug before the input is behind a 48-hour thaw, and it costs four cents a month. **Default 7 days, configurable, and 30 is a defensible setting for anyone who wants more margin.** One thing the delay does *not* protect against is the 180-day minimum storage duration once an object has transitioned: an object archived and then re-transitioned or deleted inside 180 days is billed pro-rata for the remainder. Append-only makes that moot, which is another reason the hold is the right place to put the caution.
+**`archiveHoldDays` is a real user-facing setting, not just a safety margin.** It has two independent motivations that happen to want the same knob. The first is defensive: it buys time to catch a derivation bug before the input is behind a 48-hour thaw. The second is that **some users want to keep working with their originals** — editing, exporting, re-processing — for longer than a week, and a thaw in the middle of that is exactly the friction the ladder exists to avoid elsewhere. The second motivation is the one that will actually drive people to change it, so it belongs in §9 as a primary knob rather than buried under Advanced.
+
+**Intelligent-Tiering is what makes long hold periods affordable**, and this is worth showing because the answer is counter-intuitive. Priced at Model B's ~100 GB/yr growth:
+
+| `archiveHoldDays` | Un-archived window | Cost over archiving at day 7 |
+|---|---|---|
+| 7 *(default)* | 1.9 GB | — |
+| 30 | 8.2 GB | +$0.14/mo |
+| 90 | 24.7 GB | +$0.33/mo |
+| 180 | 49.3 GB | +$0.40/mo |
+| 365 | 100 GB | +$0.46/mo |
+
+**The curve flattens hard after 90 days**, because an original that has sat unread that long has itself drifted to I-T's Archive Instant Access at $0.004/GB-mo — only 4× Deep Archive, not 23×. So holding originals for a *year* costs about $0.13/mo more than holding them for 90 days, and the whole range from a week to a year spans less than fifty cents a month. Under the earlier scheme, where originals waited in S3 Standard, a one-year hold would have cost $2.30/mo; adopting I-T (§5.3.2) is what turned this from a knob with a real price into one users can set on preference alone.
+
+Two things the hold does not change: the transition charges above are the same whenever they are paid, and the 180-day Deep Archive minimum applies only after the transition, so delaying entry never interacts with it. It also widens, harmlessly, the window in which §4.2's cloud derivation fallback is guaranteed thaw-free.
+
+So the answer to "should we always hold for at least a week" is yes, unambiguously — it buys a week to catch a derivation bug before the input is behind a 48-hour thaw, and it costs four cents a month. **Default 7 days; 30 is a defensible setting for anyone who wants more margin, and 90 or more is reasonable for anyone who edits recent originals routinely.** One thing the delay does *not* protect against is the 180-day minimum storage duration once an object has transitioned: an object archived and then re-transitioned or deleted inside 180 days is billed pro-rata for the remainder. Append-only makes that moot, which is another reason the hold is the right place to put the caution.
 
 Gating on durability is strictly better than a fixed 30- or 90-day rule: with the floor it archives at the earliest safe moment and never before, rather than at an arbitrary one. And note the loop it closes with §4.2 — because incomplete-ladder originals stay in Standard, the cloud derivation fallback never needs a thaw.
 
@@ -564,18 +730,16 @@ That is the property that decides this. Every archive tier bills small objects p
 | `image-screen` | $0.461 | $0.119 | $0.239 |
 | `image-large` | $1.053 | $0.222 | $0.353 |
 | `video-poster-thumb` | $0.001 | $0.003 | $0.001 |
-| `video-poster-screen` | $0.023 | $0.006 | $0.012 |
-| `video-skim` | $0.010 | $0.004 | $0.009 |
+| `video-poster-screen` | $0.007 | $0.003 | $0.007 |
+| `video-skim` | $0.005 | $0.003 | $0.005 |
 | `video-720p` | $0.368 | $0.066 | $0.078 |
-| **Total** | **$2.09** | **$0.56** | **$0.86** |
+| **Total** | **$2.06** | **$0.55** | **$0.86** |
 
 GIR columns include the intent tag; I-T columns include the monitoring fee and assume ~95% of an append-only library is past the 90-day idle mark. **GIR is $0.31/mo cheaper at Model B — but only at zero reads.** Solving for the read volume at which I-T becomes cheaper, given GIR's $0.03/GB retrieval plus its request surcharge:
 
 | Class | I-T beats GIR above |
 |---|---|
 | `video-720p` | **33 plays/month** |
-| `video-poster-screen` | 283 reads/mo |
-| `video-skim` | 400 reads/mo |
 | `image-large` | ~3,400 reads/mo (~114/day) |
 | `image-screen` | ~5,700 reads/mo (~189/day) |
 
@@ -604,32 +768,32 @@ Modelled at three scales, since the right answer differs by size. **Prices are A
 | Stills | 7,000 | 60,000 | 170,000 |
 | Video clips | 1,000 (~30 s) | 3,000 (~30 s) | 15,000 (~45 s, 4K-heavy) |
 
-**Derived volume** (`image-thumb` 20 KB, `image-medium` 110 KB, `image-screen` 350 KB, `image-large` 950 KB, `video-poster-thumb` 20 KB, `video-poster-screen` 350 KB, `video-skim` 150 KB, `video-720p` 5.6 MB per 30 s):
+**Derived volume** (`image-thumb` 20 KB, `image-medium` 110 KB, `image-screen` 350 KB, `image-large` 950 KB, `video-poster-thumb` 20 KB, `video-poster-screen` 110 KB, `video-skim` 80 KB, `video-720p` 5.6 MB per 30 s):
 
 | Size class | I-T behaviour | A | B | C |
 |---|---|---|---|---|
 | `image-thumb` | under 128 KB — unmanaged, Standard rate | 0.14 GB | 1.2 GB | 3.4 GB |
 | `image-medium` | under 128 KB — unmanaged, Standard rate | 0.77 GB | 6.6 GB | 18.7 GB |
 | `video-poster-thumb` | under 128 KB — unmanaged, Standard rate | 0.02 GB | 0.06 GB | 0.29 GB |
+| `video-poster-screen` | under 128 KB — unmanaged, Standard rate | 0.11 GB | 0.32 GB | 1.57 GB |
+| `video-skim` | under 128 KB — unmanaged, Standard rate | 0.08 GB | 0.23 GB | 1.6 GB |
 | `image-screen` | monitored, drifts to AIA | 2.5 GB | 21 GB | 60 GB |
 | `image-large` | monitored, drifts to AIA | 6.7 GB | 57 GB | 162 GB |
-| `video-poster-screen` | monitored, drifts to AIA | 0.33 GB | 1.0 GB | 5.0 GB |
-| `video-skim` | monitored, drifts to AIA | 0.2 GB | 0.5 GB | 2.3 GB |
 | `video-720p` | monitored, drifts to AIA | 5.6 GB | 17 GB | 126 GB |
 
 **Monthly cost.** Monitored classes are priced at a blended **$0.0046/GB-mo** — the mix of Frequent Access (0–30 days), Infrequent Access (30–90) and Archive Instant Access (90+) that an append-only library growing ~100 GB/yr settles into, which is roughly 95% AIA. Unmanaged classes are priced at the Standard rate because that is literally what I-T charges them.
 
 | | A | B | C |
 |---|---|---|---|
-| Under-128 KB classes (Standard rate, unmanaged) | $0.02 | $0.18 | $0.51 |
-| Monitored classes (I-T, blended) | $0.07 | $0.44 | $1.63 |
-| I-T monitoring fee | $0.04 | $0.32 | $0.96 |
+| Under-128 KB classes (Standard rate, unmanaged) | $0.03 | $0.19 | $0.59 |
+| Monitored classes (I-T, blended) | $0.07 | $0.44 | $1.60 |
+| I-T monitoring fee | $0.04 | $0.31 | $0.89 |
 | Originals (Deep Archive) | $0.05 | $0.50 | $2.03 |
 | Object tags (originals only) | $0.01 | $0.04 | $0.12 |
 | Inventory (§5.1.1) | $0.00 | $0.02 | $0.06 |
-| **Proposed total** | **$0.19** | **$1.51** | **$5.32** |
+| **Proposed total** | **$0.19** | **$1.50** | **$5.29** |
 | **Today (all Standard)** | **$1.15** | **$11.50** | **$47.10** |
-| **Reduction** | **6.1×** | **7.6×** | **8.9×** |
+| **Reduction** | **6.1×** | **7.7×** | **8.9×** |
 
 *(For reference, the earlier all-Standard-plus-GIR-for-`image-large` policy came to $0.30 / $1.88 / $7.83. Adopting I-T saves a further ~$0.11 / $0.37 / $2.51 per month and deletes the `cool` intent. `image-large` is priced at 950 KB rather than 800 KB because §3.1.1 raised its maximum to 4272 and made it native-resolution for anything below that; the ~$0.04–0.12/mo this adds is the entire cost of closing the 12 MP master gap.)*
 
@@ -662,7 +826,9 @@ Five implementation facts, because this one has sharp edges and the first is a h
 - **Versioning is already on** for non-ephemeral installs (`cloud-data-server-program.ts:151`), and Object Lock requires it. That half is done.
 - **It must ride `!ctx.ephemeral`, exactly like versioning does.** Compliance mode means objects cannot be deleted by anyone, including the account root, until retention expires — so an e2e bucket with compliance lock is a bucket that can never be torn down, and `forceDestroy` would fail permanently. The existing ephemeral guard is the right place and the right shape.
 - **Compliance mode does not interfere with the lifecycle plan.** Object Lock blocks deletion and overwrite of a version; it does not block *transitions*, so originals still move to Deep Archive normally. It does block lifecycle *expiration*, which we do not use. Content-addressed keys also mean a re-PUT is semantically a no-op rather than an overwrite, so the append-only premise holds at the object layer too.
-- **The retention period is the one real cost, and it should be finite.** Compliance retention cannot be shortened or removed by anyone, so anything written by mistake — a 6 GB accidental screen recording, or a photo the user later wants gone for privacy reasons — is undeletable and billable until it expires. The threat model here (an errant lifecycle rule, a compromised credential) is detected in days to weeks, not years, so **1 year is the recommended default** rather than the decade the append-only framing might suggest. Retention can always be extended; it can never be reduced. Note the honest consequence: "nothing is ever deleted" stops being a policy and becomes a fact enforced against the user as well as against an attacker.
+- **Retention applies to `archive` intent only — never to renditions.** This is the third thing the declared intent decides, alongside storage class and tag (§5.1): `archive` PUTs carry a retain-until date, `instant` PUTs carry none, and **no bucket-level default retention is ever configured**. The asymmetry follows from the threat model rather than from convenience — losing an original to an errant lifecycle rule or a compromised credential is permanent, while losing every rendition is a thaw plus a re-derivation pass (§4.6). Lock what is irreplaceable; do not lock what is reproducible. Without this split, §4.6 cannot reap a superseded rendition at all and every respec would leave its obsolete output undeletable and billable for the full retention period.
+- **The bucket-level default is the irreversible part, and it is a sequencing constraint.** Retention can be extended but never reduced, so any object written under a bucket-wide default is permanently undeletable. Item 0 must therefore land `objectLockEnabled: true` **without** configuring a default retention, leaving retention to be set per-object in item 19c. Getting this order wrong cannot be fixed afterwards for objects already written.
+- **The retention period is the one real cost, and it should be finite.** Compliance retention cannot be shortened or removed by anyone, so an original written by mistake — a 6 GB accidental screen recording, or a photo the user later wants gone for privacy reasons — is undeletable and billable until it expires. The threat model here (an errant lifecycle rule, a compromised credential) is detected in days to weeks, not years, so **1 year is the recommended default** rather than the decade the append-only framing might suggest. Note the honest consequence, now scoped to originals: for them, "nothing is ever deleted" stops being a policy and becomes a fact enforced against the user as well as against an attacker.
 
 **`no-cloud` records invert this caveat rather than escaping it** — there the device is the only copy. See §7.2.2 for the replica-count minimum that has to accompany the control.
 
@@ -753,19 +919,38 @@ So the operator's laptop is "`original`: never; everything else: all". The phone
 
 **Budgets are granular, and that is the point.** A single device-wide byte cap is not a useful control here, because the size classes have wildly different value-per-byte and the user has clear opinions about the trade. **The budget is set per size class** — one row per class, defaulted, with a total shown. Because the class names carry their media type (§3.0), this is a flat list rather than the photo × class matrix an earlier draft used:
 
-| Size class | Default budget |
-|---|---|
-| `image-thumb` | 1 GB |
-| `image-medium` | 4 GB |
-| `image-screen` | 2 GB |
-| `image-large` | 0 |
-| `video-poster-thumb` | 0.2 GB |
-| `video-poster-screen` | 0.3 GB |
-| `video-skim` | 0.5 GB |
-| `video-720p` | 4 GB |
-| `video-1080p` | 0 |
-| `original` (photo) | 0 |
-| `original` (video) | 0 |
+| Size class | Default budget | Roughly |
+|---|---|---|
+| `image-thumb` | 1 GB | 50,000 tiles |
+| `image-medium` | 4 GB | 36,000 items |
+| `image-screen` | 2 GB | 6,000 items |
+| `image-large` | 1 GB | 1,100 items |
+| `video-poster-thumb` | 0.2 GB | 10,000 clips |
+| `video-poster-screen` | 0.3 GB | 2,700 clips |
+| `video-skim` | 0.5 GB | 6,500 clips |
+| `video-720p` | 4 GB | 700 clips of 30 s |
+| `video-1080p` | 1 GB | 65 clips of 30 s |
+| `original` (photo) | 2 GB | 600 HEIC, or 25 ProRAW |
+| `original` (video) | 3 GB | one or two 4K clips |
+| **Total** | **19 GB** | |
+
+**No row defaults to zero, deliberately.** A zero budget is "never" restated (§7.2.1), and it has two
+consequences that are wrong as a *default* even where they are right as a *setting*. It makes the
+class unreachable offline, so every access is a network fetch with no ability to degrade gracefully.
+And it silently disables the recency rule below — "anything opened in the last 30 days" cannot retain
+anything in a class with no room — which is the behaviour users actually notice, because re-opening
+the photo they looked at yesterday re-downloads it.
+
+The values above are sized as **working sets, not libraries**. `image-large` at 1 GB does not hold
+the zoomable copy of a 60k-item library and is not meant to; it holds the thousand items someone
+actually zoomed into or printed recently. Likewise the two `original` rows exist so that editing or
+exporting a handful of photos does not re-fetch them on every operation — not so that a device can
+be an archive. Anyone who wants a device to hold originals in bulk raises the row, which is the
+setting the row exists to make expressible; the §9 presets ("laptop", "phone", "archive box") are
+what move these en masse.
+
+Note that this is separate from, and does not weaken, the rule that **originals captured *here* are
+retained until confirmed durable elsewhere** regardless of budget — capture never blocks (§7.2.1).
 
 The photo/video split matters more than it looks: one 4K clip is worth hundreds of `image-medium` stills in bytes, and a user who wants offline video and a user who wants their whole still library at `image-medium` are asking for opposite allocations. Under a single pooled budget one silently starves the other, and which one loses depends on ingest order — which is not a behaviour anyone can predict or debug. Separate budgets make it a stated preference. The prefixed names give that for free everywhere except `original`, which is the one class that exists in both ladders and therefore still needs the split spelled out.
 
@@ -995,9 +1180,9 @@ Two dropdowns and a slider for the common case; everything else has a default, a
 
 **Library profile** (one per library, in Photos settings or admin-web):
 
-- **Cost-first** — originals to Deep Archive as soon as renditions are durable; `image-large` class off; video `video-720p` only.
-- **Balanced** *(default)* — originals to Deep Archive on the same gate; full ladder in Intelligent-Tiering; `video-1080p` for sources above 1080p.
-- **Everything instant** — originals stay in Intelligent-Tiering rather than transitioning to Deep Archive, so nothing in the library is ever more than milliseconds away. For people who edit originals routinely or are not comfortable with a thaw delay. Costs roughly $1.90/mo more than Balanced at Model B — 500 GB of originals at the blended I-T rate plus monitoring ($2.46) instead of Deep Archive plus tags ($0.54) — which is the honest price of never waiting.
+- **Cost-first** — originals to Deep Archive as soon as renditions are durable, `archiveHoldDays` at its 7-day floor; `image-large` class off; `video-720p` only.
+- **Balanced** *(default)* — originals to Deep Archive on the same gate, `archiveHoldDays` 7; full ladder in Intelligent-Tiering; `video-1080p` for sources above 1080p.
+- **Everything instant** — originals stay in Intelligent-Tiering rather than transitioning to Deep Archive at all (equivalently, `archiveHoldDays` unbounded), so nothing in the library is ever more than milliseconds away. For people who edit originals routinely or are not comfortable with a thaw delay. Costs roughly $1.90/mo more than Balanced at Model B — 500 GB of originals at the blended I-T rate plus monitoring ($2.46) instead of Deep Archive plus tags ($0.54) — which is the honest price of never waiting.
 - **Local-first** — the cloud holds renditions only; originals never leave the local nodes, i.e. `starkeep/no-cloud` (§7.2.2) applied by default to originals. A coherent privacy-motivated pattern that is otherwise only reachable by tagging every file by hand, so it deserves naming. It opts out of the cost model in §5.4 and requires a NAS or desktop retaining originals indefinitely; the replica-count minimum (§7.2.2) is what keeps it from being a data-loss feature.
 
 **Device retention** (one per node): the per-size-class table from §7.2 — for each size class, keep all / recent-only / on-demand / never, a recency window where that applies, and a byte budget, split photo vs video. Each row shows its projected disk use next to its budget, and the page shows the total. Presets ("laptop", "phone", "archive box") may front this once the UI is designed, but they write these settings rather than being stored.
@@ -1007,7 +1192,9 @@ Two dropdowns and a slider for the common case; everything else has a default, a
 - *Never sync to cloud* / *always sync to cloud* — travels with the record, binding on every node.
 - *Always keep on this device* / *keep if the budget allows* — node-local, counted against the budget, and pins win over it.
 
-**Advanced**, all defaulted: size-class long edges and quality levels (post-§3.4), rendition codec (AVIF / WebP / JPEG — the fallback matters for slow devices, since AVIF encode is 3–10× JPEG's CPU and that is battery on a phone), video preview bitrate and HLS duration threshold, archive tier, archive delay floor, restored-copy retention window, eviction high/low-water marks, minimum replica count before an original becomes evictable.
+**Original hold period** (one per library) — `archiveHoldDays`, default 7. How long an original stays instantly readable before transitioning to Deep Archive (§5.2). Raise it if you edit or export recent originals routinely and do not want a 48-hour thaw in the middle of that. It is presented here rather than under Advanced because it is the setting most likely to be changed for a reason that has nothing to do with cost — and because under Intelligent-Tiering the cost barely moves: the entire range from a week to a year spans under $0.50/month at the operator's scale, and flattens after 90 days.
+
+**Advanced**, all defaulted: size-class maximum long edges and quality levels (post-§3.4), rendition codec (AVIF / WebP / JPEG — the fallback matters for slow devices, since AVIF encode is 3–10× JPEG's CPU and that is battery on a phone), video transcode bitrate and HLS duration threshold, archive tier, restored-copy retention window, eviction high/low-water marks, minimum replica count before an original becomes evictable.
 
 The operator's own configuration under this scheme: **Balanced**; phone keeping `image-thumb` for everything, `image-medium` for 90 days, `image-screen` on demand, nothing else, at ~8 GB across the matrix; laptop keeping every rendition class and no originals; `video-1080p` off until the TV becomes a real pattern.
 
@@ -1017,7 +1204,7 @@ The operator's own configuration under this scheme: **Balanced**; phone keeping 
 
 **Phase 0a — the one thing that cannot be done later.**
 
-0. **`objectLockEnabled: true` on the files bucket** (`cloud-data-server-program.ts:127`), ephemeral installs excluded, with a 1-year default retention. Object Lock can only be set at bucket creation; every install that happens before this lands can never get it without an AWS Support request. Trivial code, hard deadline — see §5.6.
+0. **`objectLockEnabled: true` on the files bucket** (`cloud-data-server-program.ts:127`), ephemeral installs excluded, and **with no bucket-level default retention** — retention is set per-object on `archive` intent in item 19c (§5.1, §5.6). Object Lock can only be enabled at bucket creation, so every install before this lands can never get it without an AWS Support request; and any object written under a bucket default is permanently undeletable, which would make §4.6's reaping impossible. Trivial code, two irreversible properties — see §5.6.
 
 **Phase 0 — platform unblockers** (`starkeep-core`). Nothing else can land without these.
 
@@ -1051,11 +1238,12 @@ The operator's own configuration under this scheme: **Balanced**; phone keeping 
 
 **Phase 3 — storage classes.**
 
-17. Declared intent at PUT — `instant` writes `x-amz-storage-class: INTELLIGENT_TIERING`, `archive` writes the tag; ladder-complete gate over *applicable* classes only (§3.1.1); 7-day minimum hold before the Deep Archive transition.
+17. Declared intent at PUT — `instant` writes `x-amz-storage-class: INTELLIGENT_TIERING`, `archive` writes the tag; ladder-complete gate over *applicable* classes only (§3.1.1); **`archiveHoldDays` minimum hold** before the Deep Archive transition, default 7, surfaced as a primary setting (§9).
 18. **One** lifecycle rule: tag-filtered Deep Archive for `archive`-intent objects above the ~1 MB floor. Renditions need none — they are PUT directly into Intelligent-Tiering (§5.3.2). Assert in the installer that no `IntelligentTieringConfiguration` enabling the async archive tiers is ever created; that omission is what makes every rendition permanently `instant`.
 19. Restore flow — request, poll, notify, serve, retain.
 19b. **Availability maintenance** (§5.1.1) — S3 Event Notifications for transitions and restores, plus a daily S3 Inventory reconcile (~$0.02/mo) that also reports objects whose actual storage class disagrees with their declared intent.
-19c. Compliance-mode retention configuration and the confirmation UX around it (§5.6). The bucket flag itself is item 0.
+19c. Compliance-mode retention configuration and the confirmation UX around it (§5.6) — **applied per-object on `archive` intent only, never to renditions**. The bucket flag itself is item 0.
+19d. **Ladder respec machinery** (§4.6) — the staleness query over `width`/`height` and `type`, re-derivation from the smallest applicable class ≥1.5× the target, label supersession on registration, and a refcounted reaper gated behind item 20 and a 30-day minimum age. Deliberately *not* built until there is a real respec to run; what must land earlier is item 0's no-default-retention property, without which no rendition is ever deletable.
 
 **Phase 4 — dedup and local import** (§4.5). Depends on Phase 1. Deliberately scoped small — the Takeout specifics wait until a real export has been inspected.
 

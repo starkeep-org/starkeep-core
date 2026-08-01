@@ -1,8 +1,9 @@
 # Changing the ladder after the library is built
 
-**Status:** design note against `media-storage-and-transfer-plan.md`. Shaped to drop in as **§4.6**.
-Not yet folded into the plan — §1 and §5 below amend decisions that plan already settled (§0's
-append-only premise and §5.6's Object Lock retention), which is the operator's call.
+**Status: SUPERSEDED — folded into `media-storage-and-transfer-plan.md` as §4.6**, together with the
+two amendments it required: §0's append-only premise is now scoped to originals and user-created
+records, and §5.6's Object Lock retention now applies to `archive` intent only. This file is retained
+as the working derivation; the plan is authoritative.
 **Date:** 2026-08-01
 
 The question: after backfill, we decide `image-medium` should be 1440 px rather than 1280 (or
