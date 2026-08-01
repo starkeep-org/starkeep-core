@@ -25,11 +25,11 @@
  * check rather than a rubber stamp.
  */
 
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import {
   createHLCClock,
   appSyncableObjectKey,
@@ -84,7 +84,7 @@ export interface FakeCloud {
   /** Temp dir holding the cloud-side SQLite DB and blob store. */
   dir: string;
   /** Raw cloud-side DB handle for direct assertions. */
-  db: DatabaseSync;
+  db: RawDatabase;
   /**
    * "Cloud-install" an app: registers it and creates its syncable tables in
    * the cloud-side DB so its per-app channel applies incoming rows.

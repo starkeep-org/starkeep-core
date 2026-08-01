@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql } from "kysely";
 import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/protocol-primitives";
 import { compiler as qb } from "../query-builder.js";
@@ -24,7 +24,7 @@ import { compiler as qb } from "../query-builder.js";
  * ~/.starkeep/data.db (or the local-data-server's STARKEEP_DIR is fresh)
  * before this code runs.
  */
-function applyLocalSchemaDdl(db: DatabaseSync): void {
+function applyLocalSchemaDdl(db: RawDatabase): void {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
 
@@ -276,7 +276,7 @@ function applyLocalSchemaDdl(db: DatabaseSync): void {
   }
 }
 
-export function initializeLocalSchema(db: DatabaseSync): void {
+export function initializeLocalSchema(db: RawDatabase): void {
   try {
     applyLocalSchemaDdl(db);
   } catch (err) {

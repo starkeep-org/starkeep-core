@@ -1,3 +1,4 @@
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
@@ -127,11 +128,17 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   /**
-   * Returns the raw SQLite connection so sibling subsystems (e.g. the sync
-   * engine's change log + state store) can create side tables in the same
-   * database file. Callers must only use this after `init()`.
+   * The raw SQLite connection, so sibling subsystems (the sync engine's change
+   * log and state store, the resident set) can create side tables in the same
+   * database file. Only valid after `init()`.
+   *
+   * Typed as {@link RawDatabase} rather than `DatabaseSync`: returning the
+   * concrete Node type is what made a second driver impossible, since every
+   * consumer was then nailed to `node:sqlite`, which React Native does not
+   * have. `DatabaseSync` satisfies the narrower interface structurally, so
+   * nothing about this connection changes — only what callers may reach for.
    */
-  getRawDatabase(): DatabaseSync {
+  getRawDatabase(): RawDatabase {
     return this.getDatabase();
   }
 

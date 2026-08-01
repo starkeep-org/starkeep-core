@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql } from "kysely";
 import { sqliteCompiler as qb } from "@starkeep/storage-sqlite";
 import type { SyncStateStore, Watermarks } from "@starkeep/sync-engine";
@@ -11,7 +11,7 @@ import type { SyncStateStore, Watermarks } from "@starkeep/sync-engine";
  * (one wall clock per node) — those methods pass through unmodified.
  */
 export function createPerAppSyncStateStore(
-  db: DatabaseSync,
+  db: RawDatabase,
   underlying: SyncStateStore,
   appId: string,
 ): SyncStateStore {

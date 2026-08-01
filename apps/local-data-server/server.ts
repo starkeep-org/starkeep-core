@@ -6,10 +6,10 @@
 
 // First import: load repo-root .env / .env.local so STARKEEP_DIR (and any other
 // vars) are populated before anything below reads them.
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import "@starkeep/app-client/load-env";
 import { createServer } from "node:http";
 import { createHmac, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import {
   installLocal,
   uninstallLocal,
@@ -117,7 +117,7 @@ interface AppGrantRow {
   metadata_write: number;
 }
 
-function grantsForApp(db: DatabaseSync, appId: string): AppGrantRow[] {
+function grantsForApp(db: RawDatabase, appId: string): AppGrantRow[] {
   // access_grants are keyed by extension (type_id = extension); one row per
   // declared extension. Drive (the User-Data-Owner) writes no rows — it is
   // granted all-access by app id below — so this is a plain lookup.
@@ -143,7 +143,7 @@ const ALL_ACCESS_APP_IDS = new Set<string>([DRIVE_APP_ID, LOCAL_WATCHER_APP_ID])
 // cloud-data-server (see @starkeep/protocol-primitives `access/grants.ts`);
 // this server supplies only the SQLite grant source and the local all-access
 // policy (Drive + the watcher).
-function appGrants(db: DatabaseSync, appId: string): AccessGrants {
+function appGrants(db: RawDatabase, appId: string): AccessGrants {
   return buildAccessGrants(
     grantsForApp(db, appId).map((g) => ({
       typeId: g.type_id,
@@ -154,11 +154,11 @@ function appGrants(db: DatabaseSync, appId: string): AccessGrants {
   );
 }
 
-function appCanRead(db: DatabaseSync, appId: string, type: string): boolean {
+function appCanRead(db: RawDatabase, appId: string, type: string): boolean {
   return canRead(appGrants(db, appId), type);
 }
 
-function appCanWrite(db: DatabaseSync, appId: string, type: string): boolean {
+function appCanWrite(db: RawDatabase, appId: string, type: string): boolean {
   return canWrite(appGrants(db, appId), type);
 }
 
@@ -166,21 +166,21 @@ function appCanWrite(db: DatabaseSync, appId: string, type: string): boolean {
 // per-category metadata tables are category-namespaced (so is the IAM ceiling),
 // so they authorize against the categories the app's type grants map to —
 // a category is accessible when at least one granted type maps to it.
-function appCanReadCategory(db: DatabaseSync, appId: string, category: string): boolean {
+function appCanReadCategory(db: RawDatabase, appId: string, category: string): boolean {
   return canReadCategory(appGrants(db, appId), category);
 }
 
-function appCanWriteCategory(db: DatabaseSync, appId: string, category: string): boolean {
+function appCanWriteCategory(db: RawDatabase, appId: string, category: string): boolean {
   return canWriteCategory(appGrants(db, appId), category);
 }
 
-function appCanWriteMetadataCategory(db: DatabaseSync, appId: string, category: string): boolean {
+function appCanWriteMetadataCategory(db: RawDatabase, appId: string, category: string): boolean {
   return canWriteMetadataCategory(appGrants(db, appId), category);
 }
 
 /** The label keys an app's manifest declares. Read per label-write request,
  *  the same shape and cost as the grants load. */
-function appDeclaredLabelKeys(db: DatabaseSync, appId: string): Set<string> {
+function appDeclaredLabelKeys(db: RawDatabase, appId: string): Set<string> {
   const query = qb
     .selectFrom("shared_app_label_keys")
     .select("key")
@@ -192,7 +192,7 @@ function appDeclaredLabelKeys(db: DatabaseSync, appId: string): Set<string> {
   return new Set(rows.map((r) => r.key));
 }
 
-function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
+function getAppHmacSecret(db: RawDatabase, appId: string): string | null {
   const query = qb
     .selectFrom("shared_app_registry")
     .select("hmac_secret")
@@ -206,7 +206,7 @@ function getAppHmacSecret(db: DatabaseSync, appId: string): string | null {
 }
 
 function validateAppHmac(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   method: string,
   path: string,

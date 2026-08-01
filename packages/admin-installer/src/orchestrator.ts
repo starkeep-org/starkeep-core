@@ -18,8 +18,9 @@
  * express, and they bootstrap the shared step ledger rather than reading it.
  */
 
-import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { dataDbPath, appCredsPath } from "@starkeep/app-client";
@@ -525,6 +526,9 @@ function resolveLocalHmacSecret(appId: string): string {
   // pass `{ readOnly: true }` — this package pins @types/node 22.10, predating
   // that option — but existsSync above guarantees we won't create the file, and
   // the lookup never writes.)
+  // The concrete driver, deliberately. Opening a connection is the one place
+  // that cannot be driver-agnostic — RawDatabase describes what consumers may
+  // use, not how a connection comes into being.
   const db = new DatabaseSync(dbPath);
   let secret: string | null;
   try {

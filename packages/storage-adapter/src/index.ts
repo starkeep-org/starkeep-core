@@ -52,6 +52,7 @@ export {
   type LabelDialect,
 } from "./database/label-queries.js";
 
+export type { RawDatabase, RawStatement } from "./database/raw-database.js";
 export type { ObjectStorageAdapter } from "./object-storage/adapter.js";
 export type {
   ByteRange,

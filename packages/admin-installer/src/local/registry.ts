@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql, type CompiledQuery } from "kysely";
 import type { AppManifest, FileAccess, LabelKey, SyncableTable } from "@starkeep/admin-manifest";
 import { appSyncableTableName, sqliteCompiler as k } from "@starkeep/storage-sqlite";
@@ -9,16 +9,16 @@ export type StepStatus = "pending" | "done" | "failed";
 
 type SqlParam = null | number | bigint | string | Uint8Array;
 
-function run(db: DatabaseSync, compiled: CompiledQuery): void {
+function run(db: RawDatabase, compiled: CompiledQuery): void {
   db.prepare(compiled.sql).run(...(compiled.parameters as SqlParam[]));
 }
 
-function all<T>(db: DatabaseSync, compiled: CompiledQuery): T[] {
+function all<T>(db: RawDatabase, compiled: CompiledQuery): T[] {
   return db.prepare(compiled.sql).all(...(compiled.parameters as SqlParam[])) as T[];
 }
 
 export function recordStep(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   operation: Operation,
   step: string,
@@ -49,7 +49,7 @@ export function recordStep(
 }
 
 export function getCompletedSteps(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   operation: Operation,
 ): Set<string> {
@@ -66,7 +66,7 @@ export function getCompletedSteps(
   return new Set(rows.map((r) => r.step));
 }
 
-export function clearStepLedger(db: DatabaseSync, appId: string): void {
+export function clearStepLedger(db: RawDatabase, appId: string): void {
   run(db, k.deleteFrom("shared_app_install_steps").where("app_id", "=", appId).compile());
 }
 
@@ -78,7 +78,7 @@ export interface InstallStepRow {
   updatedAt: string;
 }
 
-export function listInstallSteps(db: DatabaseSync, appId: string): InstallStepRow[] {
+export function listInstallSteps(db: RawDatabase, appId: string): InstallStepRow[] {
   const rows = all<{
     operation: string;
     step: string;
@@ -117,7 +117,7 @@ const APP_REGISTRY_COLUMNS = [
   "updated_at",
 ] as const;
 
-export function appRegistryRow(db: DatabaseSync, appId: string): RegisteredApp | null {
+export function appRegistryRow(db: RawDatabase, appId: string): RegisteredApp | null {
   const [row] = all<RegisteredAppRow>(
     db,
     k
@@ -130,7 +130,7 @@ export function appRegistryRow(db: DatabaseSync, appId: string): RegisteredApp |
   return toRegisteredApp(row);
 }
 
-export function listAppRegistry(db: DatabaseSync): RegisteredApp[] {
+export function listAppRegistry(db: RawDatabase): RegisteredApp[] {
   const rows = all<RegisteredAppRow>(
     db,
     k
@@ -157,7 +157,7 @@ function toRegisteredApp(row: RegisteredAppRow): RegisteredApp {
 }
 
 export function insertAppRegistry(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   manifest: AppManifest,
   hmacSecret: string,
@@ -180,7 +180,7 @@ export function insertAppRegistry(
 }
 
 export function setAppStatus(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   status: RegisteredApp["status"],
 ): void {
@@ -194,7 +194,7 @@ export function setAppStatus(
   );
 }
 
-export function deleteAppRegistry(db: DatabaseSync, appId: string): void {
+export function deleteAppRegistry(db: RawDatabase, appId: string): void {
   run(db, k.deleteFrom("shared_app_registry").where("app_id", "=", appId).compile());
 }
 
@@ -205,7 +205,7 @@ export function deleteAppRegistry(db: DatabaseSync, appId: string): void {
  * enumerate `other/*` types). Mirrors the cloud `runAppInstallDdl` rule.
  */
 export function insertAccessGrants(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   fileAccess: FileAccess[],
 ): void {
@@ -233,7 +233,7 @@ export function insertAccessGrants(
   }
 }
 
-export function deleteAccessGrants(db: DatabaseSync, appId: string): void {
+export function deleteAccessGrants(db: RawDatabase, appId: string): void {
   run(db, k.deleteFrom("shared_access_grants").where("app_id", "=", appId).compile());
 }
 
@@ -248,7 +248,7 @@ export function deleteAccessGrants(db: DatabaseSync, appId: string): void {
  * intended steady state rather than corruption.
  */
 export function insertAppLabelKeys(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   labelKeys: LabelKey[],
 ): void {
@@ -289,7 +289,7 @@ export function insertAppLabelKeys(
  * app can no longer clean up — which is what the obvious implementation, one
  * that validates the key on every write path including retraction, would do.
  */
-export function deleteAppLabelKeys(db: DatabaseSync, appId: string): void {
+export function deleteAppLabelKeys(db: RawDatabase, appId: string): void {
   run(db, k.deleteFrom("shared_app_label_keys").where("app_id", "=", appId).compile());
 }
 
@@ -317,7 +317,7 @@ interface SyncableColumnDef {
  * backs the responder's per-node coverage watermark query.
  */
 function createSyncableTable(
-  db: DatabaseSync,
+  db: RawDatabase,
   fullName: string,
   columns: SyncableColumnDef[],
 ): void {
@@ -357,7 +357,7 @@ function createSyncableTable(
 }
 
 export function createAppSyncableTables(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   tables: SyncableTable[],
 ): void {
@@ -382,7 +382,7 @@ export function createAppSyncableTables(
  * the LWW applier can treat it uniformly.
  */
 export function createReservedFileRecordsTable(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
 ): void {
   createSyncableTable(
@@ -398,7 +398,7 @@ export function createReservedFileRecordsTable(
 }
 
 export function dropAppSyncableTables(
-  db: DatabaseSync,
+  db: RawDatabase,
   appId: string,
   tableNames: string[],
 ): void {
