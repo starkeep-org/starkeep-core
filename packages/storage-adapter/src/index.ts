@@ -52,6 +52,7 @@ export {
 export type { ObjectStorageAdapter } from "./object-storage/adapter.js";
 export type {
   PutOptions,
+  PutStreamOptions,
   GetResult,
   ListOptions,
   ListResult,
@@ -62,6 +63,13 @@ export type {
 } from "./object-storage/types.js";
 
 export { sha256HexToBase64, sha256Base64ToHex } from "./object-storage/checksum.js";
+
+export {
+  verifyingStream,
+  collectStream,
+  streamFromBytes,
+  ChecksumMismatchError,
+} from "./object-storage/stream-verify.js";
 
 export {
   StorageError,

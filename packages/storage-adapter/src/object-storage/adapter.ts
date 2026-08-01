@@ -1,4 +1,4 @@
-import type { PutOptions, GetResult, ListOptions, ListResult, ObjectFacts, SignedUrlOptions, SignedPutUrlOptions } from "./types.js";
+import type { PutOptions, PutStreamOptions, GetResult, ListOptions, ListResult, ObjectFacts, SignedUrlOptions, SignedPutUrlOptions } from "./types.js";
 
 export interface ObjectStorageAdapter {
   init(): Promise<void>;
@@ -7,6 +7,33 @@ export interface ObjectStorageAdapter {
 
   put(key: string, data: Uint8Array, options?: PutOptions): Promise<void>;
   get(key: string): Promise<GetResult | null>;
+  /**
+   * Read an object as a stream, or `null` if there is none.
+   *
+   * The buffered {@link get} is retained for callers that genuinely want the
+   * bytes in hand (a small JSON blob, a thumbnail). It is not usable for media:
+   * `get()` then `put()` holds the whole object in memory, so a 2 GB clip
+   * cannot sync at all.
+   *
+   * Web `ReadableStream` rather than a Node stream, deliberately — the same
+   * adapter interface has to be implementable on React Native and in a browser,
+   * where Node streams do not exist. Node-side adapters convert at their own
+   * edge, which costs one wrapper and keeps the contract portable.
+   */
+  getStream(key: string): Promise<ReadableStream<Uint8Array> | null>;
+  /**
+   * Write an object from a stream, without buffering it.
+   *
+   * Adapters that support multipart must use it above their own threshold and
+   * must send per-part checksums. See {@link PutStreamOptions.expectedSha256Hex}
+   * for why the whole-object verification has to happen here rather than being
+   * delegated to the store.
+   */
+  putStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    options?: PutStreamOptions,
+  ): Promise<void>;
   /**
    * Cheap existence check — must not download the object body.
    *

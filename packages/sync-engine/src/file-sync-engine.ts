@@ -1,6 +1,25 @@
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { FileSyncEngine, FileSyncManifest, FileEntry } from "./types.js";
 
+const HEX_SHA256 = /^[a-f0-9]{64}$/;
+
+/**
+ * The SHA-256 a transferred object must hash to, or null when there isn't one.
+ *
+ * `fileHash` is the record's `contentHash` when it has one and falls back to
+ * the object key otherwise, so it is only a hash some of the time — and a key
+ * is not a hash. Returning null rather than guessing means an object with no
+ * known hash transfers unverified instead of failing every time, which is the
+ * correct direction: this check exists to catch corruption, not to block
+ * records that predate content hashing.
+ */
+function expectedHashFor(manifest: FileSyncManifest): string | null {
+  if (HEX_SHA256.test(manifest.fileHash)) return manifest.fileHash;
+  // Content-addressed keys carry the hash in their last segment.
+  const last = manifest.objectStorageKey.split("/").pop() ?? "";
+  return HEX_SHA256.test(last) ? last : null;
+}
+
 export function createFileSyncEngine(): FileSyncEngine {
   // Object-storage keys currently being transferred in this process. Each
   // transferFile call acquires the key on entry and releases on exit. Used by
@@ -23,13 +42,33 @@ export function createFileSyncEngine(): FileSyncEngine {
       if (await destination.has(key)) {
         return true;
       }
-      const file = await source.get(key);
-      if (!file) {
+      // Streamed, never buffered. The old `source.get()` → `destination.put()`
+      // held the whole object in memory, so a 2 GB clip could not sync at all —
+      // it wasn't slow, it was impossible. Nothing here materializes the body.
+      const body = await source.getStream(key);
+      if (!body) {
         return false;
       }
-      await destination.put(key, file.data, {
-        contentType: manifest.mimeType,
-      });
+      const expectedSha256Hex = expectedHashFor(manifest);
+      try {
+        await destination.putStream(key, body, {
+          ...(manifest.mimeType ? { contentType: manifest.mimeType } : {}),
+          ...(manifest.sizeBytes ? { sizeBytes: manifest.sizeBytes } : {}),
+          // Verify the whole object as it passes. Above the multipart threshold
+          // the store cannot check a SHA-256 for us at all (it is composite-only
+          // for multipart), and this transfer is exactly where a large,
+          // least-replaceable object crosses a network.
+          ...(expectedSha256Hex ? { expectedSha256Hex } : {}),
+        });
+      } catch (err) {
+        // Cancel the source explicitly. A stream abandoned mid-transfer keeps
+        // the underlying HTTP response open, and since a failed transfer is
+        // retried every round, leaked responses accumulate until the connection
+        // pool starves — which surfaces much later, as unrelated requests
+        // hanging, rather than as this transfer failing.
+        await body.cancel().catch(() => {});
+        throw err;
+      }
       return true;
     } finally {
       inFlightKeys.delete(key);

@@ -9,7 +9,9 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl as awsGetSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
+import { Readable } from "node:stream";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import { verifyingStream } from "@starkeep/storage-adapter";
 import type {
   PutOptions,
   GetResult,
@@ -17,12 +19,21 @@ import type {
   ListResult,
   ObjectAvailability,
   ObjectFacts,
+  PutStreamOptions,
   SignedUrlOptions,
   SignedPutUrlOptions,
 } from "@starkeep/storage-adapter";
 import type { S3ObjectStorageAdapterOptions } from "./types.js";
 
 const MULTIPART_THRESHOLD_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Part size for streamed uploads. Above ~8 MB the media plan wants multipart;
+ * lib-storage switches to it automatically once a body exceeds one part, so
+ * this doubles as the threshold. A smaller part size would multiply request
+ * count on the multi-GB clips this path exists for.
+ */
+const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
 
 export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
   private readonly options: S3ObjectStorageAdapterOptions;
@@ -125,6 +136,71 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
             : {}),
         }),
       );
+    }
+  }
+
+  async getStream(key: string): Promise<ReadableStream<Uint8Array> | null> {
+    try {
+      const response = await this.getClient().send(
+        new GetObjectCommand({
+          Bucket: this.options.bucketName,
+          Key: this.resolveKey(key),
+        }),
+      );
+      if (!response.Body) return null;
+      // The SDK hands back a Node Readable in this runtime; the adapter
+      // contract is a web ReadableStream so the same interface is
+      // implementable on React Native and in a browser. `transformToWebStream`
+      // is the SDK's own conversion, so no bytes are buffered here.
+      return (response.Body as { transformToWebStream(): ReadableStream<Uint8Array> })
+        .transformToWebStream();
+    } catch (error: unknown) {
+      if (isMissingOrForbidden(error)) return null;
+      throw error;
+    }
+  }
+
+  async putStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    options?: PutStreamOptions,
+  ): Promise<void> {
+    const resolvedKey = this.resolveKey(key);
+
+    // Hash as the bytes go past and fail the stream at end-of-input on a
+    // mismatch, which aborts the upload instead of completing it. This is the
+    // only whole-object verification available above the multipart threshold —
+    // see PutStreamOptions.expectedSha256Hex.
+    const verified = options?.expectedSha256Hex
+      ? verifyingStream(body, { key, expectedSha256Hex: options.expectedSha256Hex })
+      : body;
+
+    const upload = new Upload({
+      client: this.getClient(),
+      params: {
+        Bucket: this.options.bucketName,
+        Key: resolvedKey,
+        // lib-storage accepts a Node Readable, not a web stream.
+        Body: Readable.fromWeb(verified as Parameters<typeof Readable.fromWeb>[0]),
+        ...(options?.contentType ? { ContentType: options.contentType } : {}),
+        ...(options?.metadata ? { Metadata: options.metadata } : {}),
+        // Per-part SHA-256: S3 validates each part on UploadPart and rejects a
+        // corrupted one, and the composite it stores attests the assembly.
+        // This is what "verify per part" means in practice — it is *not* a
+        // whole-object checksum and must never be compared against one.
+        ChecksumAlgorithm: "SHA256",
+      },
+      partSize: MULTIPART_PART_SIZE_BYTES,
+    });
+
+    try {
+      await upload.done();
+    } catch (err) {
+      // A mismatch surfaces as the stream erroring mid-upload. Abort so the
+      // multipart upload doesn't linger as billable orphaned parts — S3 charges
+      // for them until a lifecycle rule reaps them, and there is no such rule.
+      await upload.abort().catch(() => {});
+      throw err;
     }
   }
 

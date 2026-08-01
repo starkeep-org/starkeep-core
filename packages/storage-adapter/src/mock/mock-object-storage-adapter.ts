@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import type { ObjectStorageAdapter } from "../object-storage/adapter.js";
+import { collectStream, streamFromBytes, verifyingStream } from "../object-storage/stream-verify.js";
 import type {
   PutOptions,
+  PutStreamOptions,
   GetResult,
   ListOptions,
   ListResult,
@@ -73,6 +75,38 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
       metadata: entry.metadata,
       size: entry.data.length,
     };
+  }
+
+  async getStream(key: string): Promise<ReadableStream<Uint8Array> | null> {
+    const entry = this.store.get(key);
+    if (!entry) return null;
+    return streamFromBytes(entry.data);
+  }
+
+  async putStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    options?: PutStreamOptions,
+  ): Promise<void> {
+    // Verification happens *before* anything is stored, so a mismatched stream
+    // leaves no object behind — matching what the real adapters do by aborting
+    // the multipart upload / discarding the temp file. A mock that stored first
+    // and threw afterwards would let a test pass against an implementation that
+    // keeps corrupt bytes.
+    const verified = options?.expectedSha256Hex
+      ? verifyingStream(body, { key, expectedSha256Hex: options.expectedSha256Hex })
+      : body;
+    const data = await collectStream(verified);
+    this.store.set(key, {
+      data: new Uint8Array(data),
+      contentType: options?.contentType,
+      metadata: options?.metadata,
+      // The streamed path carries no store-verified checksum, exactly as S3's
+      // multipart path doesn't: what it has instead is the writer's own
+      // whole-object check, which is not a statement the *store* can make.
+      availability: { state: "instant" },
+      storageClass: null,
+    });
   }
 
   async has(key: string): Promise<boolean> {

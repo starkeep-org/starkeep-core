@@ -5,6 +5,7 @@ import type {
   ObjectFacts,
   ObjectStorageAdapter,
   PutOptions,
+  PutStreamOptions,
 } from "@starkeep/storage-adapter";
 
 /**
@@ -72,6 +73,35 @@ export class FailingObjectStorageAdapter implements ObjectStorageAdapter {
 
   get(key: string): Promise<GetResult | null> {
     return this.base.get(key);
+  }
+
+  getStream(key: string): Promise<ReadableStream<Uint8Array> | null> {
+    return this.base.getStream(key);
+  }
+
+  // Failure is injected on the *destination* write, so putStream has to honour
+  // the same rules as put — the transfer path uses streams now, and a rule that
+  // only fired on put() would silently stop injecting anything.
+  async putStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    options?: PutStreamOptions,
+  ): Promise<void> {
+    for (const rule of this.rules) {
+      if (!rule.matches(key)) continue;
+      const shouldFail = rule.recov === "persistent" || !rule.firedFor.has(key);
+      if (shouldFail) {
+        rule.firedFor.add(key);
+        // Cancel rather than leak: an abandoned stream keeps the source's
+        // connection open, and the retry on the next round would then contend
+        // with it.
+        await body.cancel().catch(() => {});
+        throw new Error(
+          `[harness] injected putStream failure (${rule.label}) for key: ${key}`,
+        );
+      }
+    }
+    await this.base.putStream(key, body, options);
   }
 
   has(key: string): Promise<boolean> {

@@ -18,6 +18,32 @@ export interface GetResult {
   size: number;
 }
 
+export interface PutStreamOptions {
+  contentType?: string;
+  metadata?: Record<string, string>;
+  /**
+   * Total size when known. Lets an adapter take the cheaper single-request
+   * path for a small object instead of always negotiating a multipart upload.
+   * Omitted is fine — adapters must not require it, because a stream from a
+   * peer may not know its length until it ends.
+   */
+  sizeBytes?: number;
+  /**
+   * Lowercase-hex SHA-256 the streamed bytes must hash to. The adapter hashes
+   * as it streams and **fails the write** on a mismatch rather than storing
+   * the object.
+   *
+   * This is how a large object gets verified at all. A whole-object
+   * `x-amz-checksum-sha256` is not available for multipart uploads — S3
+   * supports full-object checksums for multipart only with the CRC algorithms,
+   * because only those linearize from part checksums — so for anything above
+   * the multipart threshold the store cannot check a SHA-256 for us. Per-part
+   * checksums (which the adapter also sends) protect each part in transit;
+   * this protects the object as a whole.
+   */
+  expectedSha256Hex?: string;
+}
+
 export interface ListOptions {
   limit?: number;
   cursor?: string;

@@ -6,7 +6,9 @@ import type {
   ListResult,
   ObjectAvailability,
   ObjectFacts,
+  PutStreamOptions,
 } from "@starkeep/storage-adapter";
+import { verifyingStream } from "@starkeep/storage-adapter";
 
 export interface HttpObjectStorageAdapterOptions {
   readonly baseUrl: string;
@@ -130,10 +132,16 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}`);
     }
 
-    // Tell the server the blob has landed so it can eagerly flip matching
-    // PendingFileDownload records to Synced. Best-effort: the server's lazy
-    // reconcile on pull is the correctness-critical path, so a failed confirm
-    // is a warning, not an error — the blob is durably in S3 either way.
+    await this.confirm(key);
+  }
+
+  /**
+   * Tell the server the blob has landed so it can eagerly flip matching
+   * PendingFileDownload records to Synced. Best-effort: the server's lazy
+   * reconcile on pull is the correctness-critical path, so a failed confirm
+   * is a warning, not an error — the blob is durably in S3 either way.
+   */
+  private async confirm(key: string): Promise<void> {
     try {
       const confirmBody = JSON.stringify({ key });
       const confirmRes = await this.fetchImpl(`${this.apiBase()}/files/confirm`, {
@@ -178,6 +186,91 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       contentType,
       size: buffer.length,
     };
+  }
+
+  async getStream(key: string): Promise<ReadableStream<Uint8Array> | null> {
+    const presignRes = await this.fetchImpl(`${this.url(key)}/presign`, {
+      headers: this.headers("GET", `/files/${key}/presign`, ""),
+    });
+    if (presignRes.status === 404) return null;
+    if (!presignRes.ok) {
+      throw new Error(`presign GET ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
+    }
+    const { url } = await presignRes.json() as { url: string };
+
+    const res = await this.fetchImpl(url);
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      throw new Error(`GET ${key} failed: ${res.status} ${res.statusText}`);
+    }
+    // The response body, not `arrayBuffer()` — a multi-GB clip must not be
+    // materialized here, which is the entire point of this method existing
+    // alongside get().
+    return res.body as ReadableStream<Uint8Array> | null;
+  }
+
+  async putStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    options?: PutStreamOptions,
+  ): Promise<void> {
+    const presignBody = JSON.stringify({ key, contentType: options?.contentType });
+    const presignRes = await this.fetchImpl(`${this.apiBase()}/files/presign`, {
+      method: "POST",
+      headers: this.headers("POST", "/files/presign", presignBody, {
+        "Content-Type": "application/json",
+      }),
+      body: presignBody,
+    });
+    if (!presignRes.ok) {
+      throw new Error(`presign PUT ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
+    }
+    const { url, checksumSha256 } = await presignRes.json() as {
+      url: string;
+      checksumSha256?: string;
+    };
+
+    // Hash on the way past and fail the stream on a mismatch, which aborts the
+    // request rather than completing it. The server's pinned `checksumSha256`
+    // covers the single-part case; above the multipart threshold S3 cannot
+    // check a whole-object SHA-256 at all, so this is the only thing that does.
+    const verified = options?.expectedSha256Hex
+      ? verifyingStream(body, { key, expectedSha256Hex: options.expectedSha256Hex })
+      : body;
+
+    let s3Res: Response;
+    try {
+      s3Res = await this.fetchImpl(url, {
+        method: "PUT",
+        headers: {
+          ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
+          ...(checksumSha256 ? { "x-amz-checksum-sha256": checksumSha256 } : {}),
+          // S3 rejects a presigned PUT with chunked transfer encoding, so a
+          // streamed body needs an explicit length. Records always carry
+          // sizeBytes, so this is present in practice; when it isn't, the
+          // request goes out chunked and will fail against real S3 rather than
+          // silently uploading something truncated.
+          ...(options?.sizeBytes !== undefined
+            ? { "Content-Length": String(options.sizeBytes) }
+            : {}),
+        },
+        body: verified,
+        // Required by undici whenever the body is a stream: without it the
+        // request fails with "duplex option is required when sending a body".
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+    } catch (err) {
+      // fetch rejects when the body stream errors — which is exactly what a
+      // checksum mismatch does. Cancel so the source isn't left open.
+      await verified.cancel().catch(() => {});
+      throw err;
+    }
+    if (!s3Res.ok) {
+      await verified.cancel().catch(() => {});
+      throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}`);
+    }
+
+    await this.confirm(key);
   }
 
   async has(key: string): Promise<boolean> {
