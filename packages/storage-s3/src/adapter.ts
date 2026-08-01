@@ -6,6 +6,7 @@ import {
   ListObjectsV2Command,
   HeadBucketCommand,
   HeadObjectCommand,
+  PutObjectTaggingCommand,
 } from "@aws-sdk/client-s3";
 import type { PutObjectCommandInput } from "@aws-sdk/client-s3";
 import { getSignedUrl as awsGetSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -289,6 +290,18 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       ...(response.ContentType ? { contentType: response.ContentType } : {}),
       ...(response.Metadata ? { metadata: response.Metadata } : {}),
     };
+  }
+
+  async setTags(key: string, tags: Record<string, string>): Promise<void> {
+    await this.getClient().send(
+      new PutObjectTaggingCommand({
+        Bucket: this.options.bucketName,
+        Key: this.resolveKey(key),
+        Tagging: {
+          TagSet: Object.entries(tags).map(([Key, Value]) => ({ Key, Value })),
+        },
+      }),
+    );
   }
 
   async delete(key: string): Promise<void> {

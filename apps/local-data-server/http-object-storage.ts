@@ -338,6 +338,20 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     return facts;
   }
 
+  async setTags(key: string, tags: Record<string, string>): Promise<void> {
+    const body = JSON.stringify({ tags });
+    const res = await this.fetchImpl(`${this.url(key)}/tags`, {
+      method: "PUT",
+      headers: this.headers("PUT", `/files/${key}/tags`, body, {
+        "Content-Type": "application/json",
+      }),
+      body,
+    });
+    if (!res.ok) {
+      throw new Error(`setTags ${key} failed: ${res.status} ${res.statusText}`);
+    }
+  }
+
   async delete(key: string): Promise<void> {
     // DELETE signs over the empty body — matches the cloud verifier, which
     // treats GET/HEAD as empty and accepts an empty DELETE body the same way

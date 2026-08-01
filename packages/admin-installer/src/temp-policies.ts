@@ -452,6 +452,9 @@ export function buildTempInstallCloudDataServerPolicy(
           "s3:PutBucketObjectLockConfiguration",
           "s3:GetReplicationConfiguration",
           "s3:GetLifecycleConfiguration",
+          // Writing the single tag-filtered Deep Archive rule (media plan item 18).
+          // Paired with the Get above, which Pulumi reads on every refresh.
+          "s3:PutLifecycleConfiguration",
           "s3:GetBucketNotification",
           "s3:ListBucket",
         ],

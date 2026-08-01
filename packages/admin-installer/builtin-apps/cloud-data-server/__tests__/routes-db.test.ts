@@ -10,7 +10,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
-import { S3Client, HeadObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, HeadObjectCommand, PutObjectTaggingCommand } from "@aws-sdk/client-s3";
 import { signRequest } from "@starkeep/app-client";
 import { dataRecordObjectKey, serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
@@ -1178,6 +1178,125 @@ describe("GET /data/records filters", () => {
     const hydrate = db.calls(RECORDS_SELECT).at(-1)!;
     expect(hydrate.text).toContain('"parent_id" =');
     expect(hydrate.values).toContain("parent-1");
+  });
+});
+
+// ---- The archive gate (media plan item 17) ----
+//
+// The property under test is the *split*: the app asserts its ladder is
+// complete because only it knows what a complete ladder is, and the platform
+// independently applies its own floors. Neither side alone can freeze anything,
+// and each test below removes one side's contribution and checks nothing gets
+// tagged.
+describe("POST /data/records/:id/archive-gate", () => {
+  const grants = [{ type_id: "image/jpeg", access: "readwrite" }];
+  const bigKey = `shared/image/aa/${"a".repeat(64)}`;
+  const TAGGING = /PutObjectTagging/;
+
+  function dbWith(sizeBytes: number, labelRows: Array<Record<string, unknown>> = []) {
+    return fakeDsqlWithGrants(grants)
+      .on(RECORDS_SELECT, [
+        recordRow({
+          id: "rec-1",
+          type: "image/jpeg",
+          object_storage_key: bigKey,
+          size_bytes: sizeBytes,
+        }),
+      ])
+      .on(/from "shared"\."record_labels" where "record_id" in/, labelRows);
+  }
+
+  async function gate(body: Record<string, unknown>) {
+    return handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/data/records/rec-1/archive-gate",
+        body,
+      }),
+      context,
+    );
+  }
+
+  it("tags an object when the app asserts a complete ladder and the floors pass", async () => {
+    setDbFactory(dbWith(50 * 1024 * 1024));
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const res = await gate({ ladderComplete: true });
+
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)["tagged"]).toBe(true);
+    const call = s3Mock.commandCalls(PutObjectTaggingCommand)[0]!;
+    const tagSet = (call.args[0].input.Tagging as { TagSet: Array<{ Key: string; Value: string }> })
+      .TagSet;
+    const tags = Object.fromEntries(tagSet.map((t) => [t.Key, t.Value]));
+    // Both tags, because the lifecycle rule requires both. Either alone would
+    // either do nothing or freeze something it should not.
+    expect(tags["starkeep:intent"]).toBe("archive");
+    expect(tags["starkeep:ladder"]).toBe("complete");
+  });
+
+  // Tagged, not transitioned. The hold period is what buys a week to catch a
+  // derivation bug before the input is behind a 48-hour thaw.
+  it("does not itself transition anything", async () => {
+    setDbFactory(dbWith(50 * 1024 * 1024));
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const res = await gate({ ladderComplete: true });
+    expect(bodyOf(res)["archived"]).toBe(false);
+  });
+
+  // The app's half of the split removed.
+  it("refuses when the app does not assert a complete ladder", async () => {
+    setDbFactory(dbWith(50 * 1024 * 1024));
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const res = await gate({});
+    expect(bodyOf(res)["tagged"]).toBeUndefined();
+    expect(String((bodyOf(res)["refusals"] as string[])[0])).toMatch(/ladderComplete/);
+    expect(s3Mock.commandCalls(PutObjectTaggingCommand)).toHaveLength(0);
+  });
+
+  // The platform's half. An app that is wrong about its ladder still cannot
+  // archive a small file — which is the entire point of checking independently.
+  it("refuses a small object even when the app says the ladder is complete", async () => {
+    setDbFactory(dbWith(200 * 1024));
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const res = await gate({ ladderComplete: true });
+    expect(bodyOf(res)["tagged"]).toBeUndefined();
+    expect(String((bodyOf(res)["refusals"] as string[])[0])).toMatch(/floor/);
+    expect(s3Mock.commandCalls(PutObjectTaggingCommand)).toHaveLength(0);
+  });
+
+  it("refuses a record marked starkeep/no-cloud", async () => {
+    setDbFactory(
+      dbWith(50 * 1024 * 1024, [
+        {
+          record_id: "rec-1",
+          app_id: "starkeep",
+          key: "no-cloud",
+          value: "",
+          record_type: "image/jpeg",
+          created_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
+          updated_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
+          node_id: "n",
+          deleted_at: null,
+        },
+      ]),
+    );
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const res = await gate({ ladderComplete: true });
+    expect(String((bodyOf(res)["refusals"] as string[]).join(" "))).toMatch(/no-cloud/);
+    expect(s3Mock.commandCalls(PutObjectTaggingCommand)).toHaveLength(0);
+  });
+
+  // A read grant is not enough: this changes how the object is stored, and an
+  // app that may only read has no business making it slow for everyone else.
+  it("requires write access, not merely read", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(RECORDS_SELECT, [
+        recordRow({ id: "rec-1", type: "image/jpeg", object_storage_key: bigKey, size_bytes: 5e7 }),
+      ]),
+    );
+    const res = await gate({ ladderComplete: true });
+    expect(res.statusCode).toBe(403);
   });
 });
 

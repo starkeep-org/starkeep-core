@@ -22,6 +22,11 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import * as tls from "@pulumi/tls";
+import {
+  INTENT_TAG_KEY,
+  LADDER_TAG_KEY,
+  LADDER_TAG_COMPLETE,
+} from "@starkeep/protocol-primitives";
 
 // ---------------------------------------------------------------------------
 // Cost / DoS guardrails (todo-cloud-dos-cost-amplification-2026-06-30)
@@ -82,7 +87,30 @@ export interface CloudDataServerProgramContext {
    * we assert on top of those defaults.
    */
   ephemeral: boolean;
+  /**
+   * Days an `archive`-intent original waits, after its ladder is confirmed
+   * complete, before transitioning to Deep Archive.
+   *
+   * A primary setting, not a safety margin. Under Intelligent-Tiering the whole
+   * range from a week to a year spans well under a dollar a month at the
+   * operator's scale and flattens after 90 days, so the number is chosen for
+   * how long you want to be able to change your mind — about a derivation bug,
+   * or about an original you are still editing — rather than for cost.
+   */
+  archiveHoldDays?: number;
 }
+
+/**
+ * Below this, archiving costs more than not archiving.
+ *
+ * Deep Archive bills a 40 KB per-object overhead and a 180-day minimum
+ * duration, so a small object is both more expensive and slower to read once
+ * frozen. Strictly worse on both axes, which is why this is a floor rather than
+ * a tuning knob.
+ */
+const ARCHIVE_MIN_OBJECT_BYTES = 1024 * 1024;
+
+const DEFAULT_ARCHIVE_HOLD_DAYS = 7;
 
 export function buildCloudDataServerProgram(
   ctx: CloudDataServerProgramContext,
@@ -197,6 +225,59 @@ export function buildCloudDataServerProgram(
         blockPublicPolicy: true,
         ignorePublicAcls: true,
         restrictPublicBuckets: true,
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // Archive lifecycle — ONE rule, tag-filtered
+    // -----------------------------------------------------------------------
+    //
+    // The conjunction is the whole safety argument. An object transitions to
+    // Deep Archive only when it carries BOTH tags: `starkeep:intent=archive`
+    // (its writer declared it can tolerate a 48-hour read) AND
+    // `starkeep:ladder=complete` (something cheaper is confirmed readable in
+    // its place). Either alone is not enough — an original whose derived ladder
+    // is incomplete is still the only readable form of that record, and
+    // freezing it would put the sole copy behind a thaw.
+    //
+    // Renditions need no rule at all. They are never tagged, so they are
+    // structurally ineligible: an untagged object cannot match this filter,
+    // which is a stronger guarantee than a rule that reads a value correctly.
+    //
+    // The ~1 MB floor is not a tuning knob. Deep Archive bills a 40 KB
+    // per-object overhead plus a minimum 180-day duration, so below roughly a
+    // megabyte an archived object costs *more* than leaving it in
+    // Intelligent-Tiering — and it is slower to read. Archiving it would be
+    // strictly worse on both axes.
+    //
+    // `archiveHoldDays` is expressed here as the transition's `days`. It is a
+    // primary user-facing setting rather than a safety margin: it buys a week
+    // to catch a derivation bug before the input is behind a 48-hour thaw, and
+    // it is what someone who edits recent originals will ask to change.
+    if (!ctx.ephemeral) {
+      new aws.s3.BucketLifecycleConfigurationV2(`${ctx.stackPrefix}-files-lifecycle`, {
+        bucket: bucket.id,
+        rules: [
+          {
+            id: "starkeep-archive-complete-originals",
+            status: "Enabled",
+            filter: {
+              and: {
+                tags: {
+                  [INTENT_TAG_KEY]: "archive",
+                  [LADDER_TAG_KEY]: LADDER_TAG_COMPLETE,
+                },
+                objectSizeGreaterThan: ARCHIVE_MIN_OBJECT_BYTES,
+              },
+            },
+            transitions: [
+              {
+                days: ctx.archiveHoldDays ?? DEFAULT_ARCHIVE_HOLD_DAYS,
+                storageClass: "DEEP_ARCHIVE",
+              },
+            ],
+          },
+        ],
       });
     }
 

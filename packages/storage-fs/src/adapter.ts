@@ -184,6 +184,24 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     };
   }
 
+  async setTags(key: string, tags: Record<string, string>): Promise<void> {
+    // A local filesystem has no lifecycle rules, so tags here are inert — but
+    // they are stored rather than ignored so a local node can answer the same
+    // questions a cloud node can, and so a test can assert what was written
+    // without a cloud.
+    const filePath = this.keyToPath(key);
+    let existing: { contentType?: string; metadata?: Record<string, string> } = {};
+    try {
+      existing = JSON.parse(await readFile(`${filePath}.meta.json`, "utf8")) as typeof existing;
+    } catch {
+      // No sidecar yet.
+    }
+    await writeFile(
+      `${filePath}.meta.json`,
+      JSON.stringify({ ...existing, tags }),
+    );
+  }
+
   async delete(key: string): Promise<void> {
     const filePath = this.keyToPath(key);
     try {

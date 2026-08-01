@@ -92,6 +92,10 @@ const sse = (): CreatedResource[] =>
 const pab = (): CreatedResource[] => byTypeSuffix("bucketPublicAccessBlock:BucketPublicAccessBlock");
 const objectLockConfig = (): CreatedResource[] =>
   byTypeSuffix("bucketObjectLockConfigurationV2:BucketObjectLockConfigurationV2");
+const lifecycle = (): CreatedResource[] =>
+  byTypeSuffix("bucketLifecycleConfigurationV2:BucketLifecycleConfigurationV2");
+const intelligentTiering = (): CreatedResource[] =>
+  byTypeSuffix("bucketIntelligentTieringConfiguration:BucketIntelligentTieringConfiguration");
 
 beforeEach(() => {
   created.length = 0;
@@ -176,6 +180,55 @@ describe("real installs (ephemeral=false) are hardened", () => {
   });
 });
 
+describe("the archive lifecycle rule (media plan item 18)", () => {
+  it("creates exactly one lifecycle rule", async () => {
+    await run(false);
+    const configs = lifecycle();
+    expect(configs).toHaveLength(1);
+    expect((configs[0]!.inputs.rules as unknown[])).toHaveLength(1);
+  });
+
+  // The conjunction is the whole safety argument. `intent=archive` alone would
+  // freeze originals whose derived ladder does not exist yet — which is exactly
+  // when the original is the only readable form of the record — and
+  // `ladder=complete` alone would freeze things nobody asked to be slow.
+  it("requires BOTH the intent tag and the ladder-complete tag", async () => {
+    await run(false);
+    const rule = (lifecycle()[0]!.inputs.rules as Array<Record<string, never>>)[0]!;
+    const tags = (rule.filter as { and: { tags: Record<string, string> } }).and.tags;
+    expect(tags["starkeep:intent"]).toBe("archive");
+    expect(tags["starkeep:ladder"]).toBe("complete");
+  });
+
+  // Renditions are never tagged, so they cannot match this filter. Structural
+  // ineligibility beats a rule that has to read a value the right way round.
+  it("transitions only to Deep Archive, and only above the small-object floor", async () => {
+    await run(false);
+    const rule = (lifecycle()[0]!.inputs.rules as Array<Record<string, never>>)[0]!;
+    const filter = rule.filter as { and: { objectSizeGreaterThan: number } };
+    // Deep Archive bills a 40 KB per-object overhead and a 180-day minimum, so
+    // below ~1 MB an archived object is both dearer and slower. Strictly worse.
+    expect(filter.and.objectSizeGreaterThan).toBeGreaterThanOrEqual(1024 * 1024);
+    const transitions = rule.transitions as Array<{ storageClass: string; days: number }>;
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0]!.storageClass).toBe("DEEP_ARCHIVE");
+    expect(transitions[0]!.days).toBeGreaterThan(0);
+  });
+
+  // The guarantee every `instant` write depends on. Intelligent-Tiering's
+  // automatic tiers are all millisecond-latency; its ASYNCHRONOUS tiers
+  // (ARCHIVE_ACCESS / DEEP_ARCHIVE_ACCESS) are not, and an object in one exists
+  // and cannot be read. Enabling them would silently break `instant` for every
+  // rendition in the library, with no code change anywhere to notice.
+  //
+  // Asserted as an absence, because the failure mode is somebody *adding* this
+  // resource later to save money without realising what it costs.
+  it("never configures Intelligent-Tiering's asynchronous archive tiers", async () => {
+    await run(false);
+    expect(intelligentTiering()).toHaveLength(0);
+  });
+});
+
 describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
   it("leaves the DSQL cluster unprotected so teardown can drop it", async () => {
     await run(true);
@@ -200,5 +253,12 @@ describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
     await run(true);
     expect(filesBucket().inputs.objectLockEnabled).toBe(false);
     expect(objectLockConfig()).toHaveLength(0);
+  });
+
+  // A lifecycle rule on a disposable bucket would transition objects the
+  // teardown then has to thaw before it can delete them.
+  it("creates no lifecycle rule", async () => {
+    await run(true);
+    expect(lifecycle()).toHaveLength(0);
   });
 });
