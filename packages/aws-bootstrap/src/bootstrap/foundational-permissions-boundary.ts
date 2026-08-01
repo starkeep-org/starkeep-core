@@ -85,40 +85,42 @@ export function foundationalPermissionsBoundaryStatements(
         "s3:CreateBucket",
         "s3:DeleteBucket",
         "s3:ListBucket",
-        "s3:GetBucketLocation",
-        "s3:GetBucketAcl",
-        "s3:GetBucketCORS",
+        // Every bucket-level *read*, as one wildcard.
+        //
+        // Enumerating these individually pushed this policy past AWS's
+        // 6144-character managed-policy ceiling, and the enumeration was buying
+        // nothing: all seventeen were already granted, Pulumi's BucketV2 reads
+        // most of them on every refresh, and the list only ever grew.
+        //
+        // The safety property that makes the wildcard sound is the Resource
+        // below: **bucket ARNs only, never `bucket/*`**. Object actions like
+        // `s3:GetObject` require an object ARN, so they cannot match this
+        // statement however the wildcard expands — including for read actions
+        // AWS adds in future. What it admits is reading our own two buckets'
+        // configuration, which every enumerated entry already admitted.
+        //
+        // This is the *ceiling*, not a grant. The install-time temp policy
+        // still enumerates exactly what it needs, so widening here does not
+        // widen what any identity actually holds.
+        "s3:Get*",
+        // Writes stay enumerated. A `s3:Put*` here would admit
+        // PutBucketPolicy-class changes nobody has asked for, and the whole
+        // point of a boundary is that the dangerous half is explicit.
         "s3:PutBucketCORS",
-        "s3:GetBucketPolicy",
         "s3:PutBucketPolicy",
         "s3:DeleteBucketPolicy",
-        "s3:GetBucketTagging",
         "s3:PutBucketTagging",
-        "s3:GetBucketVersioning",
         "s3:PutBucketVersioning",
-        "s3:GetBucketPublicAccessBlock",
         "s3:PutBucketPublicAccessBlock",
-        "s3:GetBucketOwnershipControls",
         "s3:PutBucketOwnershipControls",
-        "s3:GetEncryptionConfiguration",
         "s3:PutEncryptionConfiguration",
-        "s3:GetBucketWebsite",
-        // Pulumi's aws.s3.BucketV2 reads these on every refresh; without them
-        // every CDS install eats AccessDenied warnings or hard refresh
-        // failures (G6a).
-        "s3:GetAccelerateConfiguration",
-        "s3:GetBucketLogging",
-        "s3:GetBucketRequestPayment",
-        "s3:GetBucketObjectLockConfiguration",
         // Creating the files bucket with `objectLockEnabled` requires this in
         // addition to CreateBucket and PutBucketVersioning — AWS treats the
-        // creation-time flag as writing the lock configuration. It is the
-        // ceiling only: we set the flag and never a bucket-level default
-        // retention (see the files bucket in cloud-data-server-program.ts).
+        // creation-time flag as writing the lock configuration. The flag only:
+        // a bucket-level default retention is never written.
         "s3:PutBucketObjectLockConfiguration",
-        "s3:GetReplicationConfiguration",
-        "s3:GetLifecycleConfiguration",
-        "s3:GetBucketNotification",
+        // The single tag-filtered Deep Archive rule (media plan item 18).
+        "s3:PutLifecycleConfiguration",
       ],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-files-*`,

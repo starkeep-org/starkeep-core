@@ -112,6 +112,10 @@ export class FailingObjectStorageAdapter implements ObjectStorageAdapter {
     return this.base.stat(key);
   }
 
+  setTags(key: string, tags: Record<string, string>): Promise<void> {
+    return this.base.setTags(key, tags);
+  }
+
   delete(key: string): Promise<void> {
     return this.base.delete(key);
   }

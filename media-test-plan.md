@@ -57,8 +57,8 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Blocking** | Multipart uploads are unverified above the part threshold in the buffered `put()` path; the streamed path verifies, the convenience method does not. | 1b-i / 2 | An `e2e-aws` test plus routing all large writes through `putStream` |
 | **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily. | 7 | A node-local (non-syncable) table |
 | **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
-| **Deferred** | No lifecycle rule exists, so `archive`-tagged objects are tagged and nothing acts on them. | 4/5 | Item 18 |
-| **Deferred** | Nothing declares `archive` intent yet; every write is `instant`. | 4/5 | Item 17 |
+| ~~Deferred~~ | ~~No lifecycle rule exists.~~ **Closed (item 18)** — one tag-filtered rule requiring both tags, above a ~1 MB floor. | 4/5 | — |
+| ~~Deferred~~ | ~~Nothing declares `archive` intent.~~ **Closed (item 17)** — Photos declares it for originals; renditions stay `instant`. | 4/5 | — |
 | **Deferred** | `absent` is never written on the cloud, so a `no-cloud` record reads `instant` there. | 5b | Item 19b |
 | **Deferred** | The local data server does not report `availability` at all. Harmless today (local bytes are readable or elided) and therefore invisible. | 5b | Wiring the local `/data/records` response |
 | **Deferred** | No eviction pass is scheduled; `runEviction` is reachable and uncalled. | 1b | Item 15/34 (residency inspector) |
@@ -864,6 +864,72 @@ lives on the record rather than in object storage.
   being obviously fine. Unmeasured.
 - **No test renders a real ThumbHash.** The decode path is exercised only through the "no
   placeholder" branch; nothing asserts a decoded data URL appears.
+
+### Items 17 + 18 — declared intent, the archive gate, and one lifecycle rule
+
+#### The gate is split, and that is the whole design
+
+The **app** asserts its derived ladder is complete, because only it knows what a complete ladder
+*is* — the platform must never learn what `image-medium` means, and a platform-side check would
+have to. The **platform** independently applies its own floors and refuses to tag if they fail.
+
+**Neither side alone can freeze anything**, and each test removes one side's contribution:
+
+| Test | Removes | Asserts |
+|---|---|---|
+| `refuses when the app does not assert a complete ladder` | the app's half | no tagging call is made at all |
+| `refuses a small object even when the app says the ladder is complete` | the platform's floor | an app that is *wrong* about its ladder still cannot archive a 200 KB file |
+| `refuses a record marked starkeep/no-cloud` | — | tagging a record with no cloud bytes would assert something about an object that should not exist |
+| `requires write access, not merely read` | — | this changes how an object is stored; a read-only app has no business making it slow for everyone else |
+| `does not itself transition anything` | — | tagged ≠ transitioned; the hold period is what buys a week to catch a derivation bug |
+
+#### One lifecycle rule, and the conjunction is the safety argument
+
+An object transitions only when it carries **both** `starkeep:intent=archive` **and**
+`starkeep:ladder=complete`. Either alone is wrong: intent-only would freeze originals whose
+renditions do not exist — exactly when the original is the only readable form — and ladder-only
+would freeze things nobody asked to be slow.
+
+Renditions are **never tagged**, so they are *structurally* ineligible. That is stronger than a
+rule that has to read a value the right way round.
+
+| Test | Asserts |
+|---|---|
+| `creates exactly one lifecycle rule` | one rule, one transition — the plan's "**one** lifecycle rule" |
+| `requires BOTH the intent tag and the ladder-complete tag` | the conjunction |
+| `transitions only to Deep Archive, above the small-object floor` | ≥1 MB, because Deep Archive's 40 KB per-object overhead and 180-day minimum make a small frozen object **dearer *and* slower** — strictly worse on both axes |
+| `never configures Intelligent-Tiering's asynchronous archive tiers` | **asserted as an absence.** I-T's automatic tiers are all millisecond-latency; its async tiers are not, and an object in one exists and cannot be read. Enabling them would silently break `instant` for every rendition, with no code change anywhere to notice. The failure mode is somebody *adding* this resource later to save money |
+| `creates no lifecycle rule` (ephemeral) | a rule on a disposable bucket would transition objects teardown then has to thaw |
+
+#### A guard fired that was worth having
+
+Adding `s3:PutLifecycleConfiguration` pushed the foundational permissions boundary **past AWS's
+6144-character managed-policy ceiling** (6161). An existing test caught it.
+
+The fix was a deliberate widening, not a formatting trim: the seventeen enumerated bucket-level
+`s3:Get*` reads collapsed into one wildcard. What makes it sound is the statement's Resource —
+**bucket ARNs only, never `bucket/*`** — so object actions like `s3:GetObject` cannot match
+however the wildcard expands, including for actions AWS adds later. Writes stay enumerated,
+because the dangerous half of a boundary should be explicit. And this is the *ceiling*: the
+install-time temp policy still enumerates exactly what it needs, so nothing any identity actually
+holds got wider.
+
+**Gaps**
+
+- **Nothing verifies the tag actually reaches S3.** The gate's tagging call is asserted against a
+  mock. Whether S3 accepts the tag set, and whether the lifecycle rule then matches it, is only
+  observable against a real bucket — and a mismatch between the rule's filter and the tags written
+  is silent in both directions. **This is the highest-value `e2e-aws` test in the plan so far**,
+  because the consequence of the rule being subtly wrong is either objects that never archive (a
+  bill nobody notices) or objects that archive too early (the only readable copy behind a thaw).
+- **`archiveHoldDays` is not configurable end to end.** The program accepts it and defaults to 7;
+  no config surface sets it, and the plan calls it a *primary* user-facing setting.
+- **The gate is called only from the resize paths.** A record whose ladder completes some other
+  way — a backfill, a re-derivation — is never gated. A sweeper should call it; none exists.
+- **The two floors are only half implemented.** Object size and cloud exclusion are enforced; the
+  "original is functionally the top of its own ladder" floor is defined in `ladder.ts`
+  (`isOwnTopOfLadder`) and **not consulted by the gate**, so a 300 px original that satisfies the
+  size floor could still be tagged despite archiving saving nothing.
 
 *(Sections for items 9b, 8 and onward are appended as each lands.)*
 

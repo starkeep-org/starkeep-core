@@ -22,6 +22,7 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
       checksumSha256?: string;
       availability: ObjectAvailability;
       storageClass: string | null;
+      tags?: Record<string, string>;
     }
   >();
   private initialized = false;
@@ -139,6 +140,19 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
     if (!entry) throw new Error(`setAvailability: no object at key ${key}`);
     entry.availability = availability;
     if (storageClass !== undefined) entry.storageClass = storageClass;
+  }
+
+  async setTags(key: string, tags: Record<string, string>): Promise<void> {
+    const entry = this.store.get(key);
+    if (!entry) throw new Error(`setTags: no object at key ${key}`);
+    // Replaces, as S3 does. A merging mock would let a test pass against an
+    // implementation that leaves a stale ladder=complete tag behind.
+    entry.tags = { ...tags };
+  }
+
+  /** Test accessor: what tags an object carries. */
+  tagsOf(key: string): Record<string, string> {
+    return { ...(this.store.get(key)?.tags ?? {}) };
   }
 
   async delete(key: string): Promise<void> {

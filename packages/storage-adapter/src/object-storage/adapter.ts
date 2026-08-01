@@ -53,6 +53,21 @@ export interface ObjectStorageAdapter {
    * returned.
    */
   stat(key: string): Promise<ObjectFacts | null>;
+  /**
+   * Replace an object's tags.
+   *
+   * Tags are how a bucket-wide lifecycle rule selects objects without knowing
+   * anything about records. Separate from `put` because the fact being recorded
+   * — "this record's derived ladder is confirmed complete" — becomes true long
+   * after the bytes were written, and re-uploading a 40 MB original to change a
+   * tag would be absurd.
+   *
+   * Replaces rather than merges, matching S3's own semantics: a partial update
+   * would need a read first, and two writers merging into the same tag set is
+   * how an object ends up carrying a stale `ladder=complete` from before a
+   * respec.
+   */
+  setTags(key: string, tags: Record<string, string>): Promise<void>;
   delete(key: string): Promise<void>;
   list(prefix: string, options?: ListOptions): Promise<ListResult>;
   getSignedUrl?(key: string, options?: SignedUrlOptions): Promise<string>;

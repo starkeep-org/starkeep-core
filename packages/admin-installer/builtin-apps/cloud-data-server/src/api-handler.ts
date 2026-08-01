@@ -39,6 +39,9 @@ import {
   resolveVariants,
   isRetrievalIntent,
   tagsForIntent,
+  INTENT_TAG_KEY,
+  LADDER_TAG_KEY,
+  LADDER_TAG_COMPLETE,
   estimateRestore,
   DEFAULT_AVAILABILITY,
   DEFAULT_RETRIEVAL_INTENT,
@@ -791,6 +794,42 @@ async function loadLabelsForPage(
 }
 
 /**
+ * Below this, archiving costs more than not archiving.
+ *
+ * Deep Archive bills a 40 KB per-object overhead and a 180-day minimum
+ * duration, so a small object frozen is both dearer and slower to read.
+ * Strictly worse on both axes — a floor, not a tuning knob. Mirrors the
+ * lifecycle rule's own `objectSizeGreaterThan`, and both are asserted, because
+ * a disagreement between them would tag objects the rule then ignores (a
+ * confusing no-op) or, if the rule's floor were the lower one, freeze things
+ * this gate meant to protect.
+ */
+const ARCHIVE_MIN_OBJECT_BYTES = 1024 * 1024;
+
+/**
+ * The archive gate: mark an original eligible for the Deep Archive transition.
+ *
+ * ## Why the decision is split
+ *
+ * The **app** asserts its derived ladder is complete, because only it knows
+ * what a complete ladder is — the platform must never learn what
+ * `image-medium` means, and a platform-side check would have to.
+ *
+ * The **platform** independently applies the floors and refuses to tag if they
+ * fail. So neither side alone can freeze anything: an app that is wrong about
+ * its ladder still cannot archive a 200 KB file, and a platform that wanted to
+ * be clever still cannot archive a record whose renditions do not exist.
+ *
+ * ## Why this is a gate rather than an age rule
+ *
+ * Archiving on age alone would eventually freeze an original whose derivation
+ * never succeeded — HEIC on a node with no decoder, say — and that original is
+ * the *only* readable form of the record. Gating on confirmed durability
+ * instead is also what makes the cloud derivation fallback guaranteed
+ * thaw-free: an incomplete original is, by construction, still instantly
+ * readable.
+ */
+/**
  * How long a thawed copy stays readable before lapsing back.
  *
  * A week, so a print session or an export does not re-thaw the same object
@@ -1053,31 +1092,28 @@ async function planCloudLabelWrites(
 // ---------------------------------------------------------------------------
 
 /**
- * The AWS storage class each declared intent lands in.
+ * The AWS storage class **every** write lands in, whatever its declared intent.
  *
- * This is the *only* place the platform vocabulary meets a provider concept,
- * which is the point of having a vocabulary at all — an app says "instant" and
- * has no opinion about tiers.
+ * A constant rather than a function, and the reason is now settled rather than
+ * pending. An earlier version was a function taking the intent, on the
+ * assumption that `archive` would eventually branch. It does not, and it should
+ * not: the transition to Deep Archive is gated on the record's ladder being
+ * confirmed complete *and* on a hold period, neither of which is known at write
+ * time. Freezing on write would freeze originals whose renditions do not exist
+ * yet — exactly when the original is the only readable form of the record.
  *
- * `instant` maps to Intelligent-Tiering rather than Standard because I-T's
- * automatic tiers are all millisecond-latency, so the promise still holds while
- * cold objects get cheaper on their own. That guarantee depends on the bucket
- * never enabling I-T's *asynchronous* archive tiers — an object in
- * DEEP_ARCHIVE_ACCESS exists and cannot be read, which would break `instant`
- * silently.
+ * So the split lives entirely in the object's tags, and the lifecycle rule
+ * (media plan item 18) is what acts on them. A function pretending to branch
+ * invited someone to add the branch here, which is the one place it must never
+ * be.
  *
- * `archive` lands in Intelligent-Tiering too, not straight into Deep Archive.
- * The transition is gated on the record's derived ladder being complete *and*
- * on a hold period, neither of which is known at write time — so the tag marks
- * the object eligible later and the lifecycle rule is what acts on it. Writing
- * straight to Deep Archive here would freeze originals whose ladder does not
- * exist yet, which is exactly the state where the original is the only readable
- * copy of the record.
+ * Intelligent-Tiering rather than Standard because its *automatic* tiers are
+ * all millisecond-latency, so cold objects get cheaper on their own without
+ * breaking the `instant` promise. That depends on the bucket never enabling
+ * I-T's asynchronous archive tiers — an object in DEEP_ARCHIVE_ACCESS exists
+ * and cannot be read — which the installer asserts.
  */
-function storageClassForIntent(intent: RetrievalIntent): string {
-  void intent;
-  return "INTELLIGENT_TIERING";
-}
+const WRITE_STORAGE_CLASS = "INTELLIGENT_TIERING";
 
 /** Label namespace for platform-level record constraints. */
 const STARKEEP_LABEL_APP_ID = "starkeep";
@@ -1928,7 +1964,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         ...(checksumSha256 ? { checksumSha256 } : {}),
         // Both are bound into the signature, so the uploader cannot choose a
         // different tier or tag its way into a lifecycle rule it wasn't given.
-        storageClass: storageClassForIntent(intent),
+        storageClass: WRITE_STORAGE_CLASS,
         ...(Object.keys(tagging).length > 0 ? { tagging } : {}),
       });
       // Returned so the uploader can send the mandatory headers without
@@ -1939,7 +1975,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         url,
         ...(checksumSha256 ? { checksumSha256 } : {}),
         intent,
-        storageClass: storageClassForIntent(intent),
+        storageClass: WRITE_STORAGE_CLASS,
         ...(Object.keys(tagging).length > 0 ? { tagging } : {}),
       });
     }
@@ -2119,6 +2155,63 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     // GET /apps/{appId}/data/records/:id/file-url
+    // POST /apps/{appId}/data/records/:id/archive-gate
+    //
+    // Body: { ladderComplete: boolean }. The caller asserts its derived ladder
+    // is complete; this applies the platform's own floors and tags the object
+    // only if both agree. Idempotent — re-tagging an already-tagged object is a
+    // no-op, which is what makes it safe to call after every derivation pass.
+    const archiveGateMatch = subPath.match(/^\/data\/records\/([^/]+)\/archive-gate$/);
+    if (archiveGateMatch && method === "POST") {
+      const id = decodeURIComponent(archiveGateMatch[1]!) as StarkeepId;
+      const record = await db.get(id);
+      if (!record || record.deletedAt) return clientErr("Record not found", 404);
+      // Write access, not read: this changes how the object is stored, and an
+      // app that may only read a record has no business deciding it can be
+      // slow to read for everyone else.
+      if (!canWrite(grants, record.type)) return clientErr("Forbidden", 403);
+      if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
+
+      const body = event.body
+        ? (JSON.parse(
+            event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body,
+          ) as { ladderComplete?: boolean })
+        : {};
+
+      const refusals: string[] = [];
+      if (body.ladderComplete !== true) {
+        refusals.push(
+          "the caller did not assert ladderComplete — an original whose derived " +
+            "ladder is incomplete is still the only readable form of the record",
+        );
+      }
+      if (record.sizeBytes <= ARCHIVE_MIN_OBJECT_BYTES) {
+        refusals.push(
+          `object is ${record.sizeBytes} bytes, at or below the ${ARCHIVE_MIN_OBJECT_BYTES}-byte ` +
+            "floor: Deep Archive's per-object overhead and minimum duration make archiving it " +
+            "both dearer and slower than leaving it",
+        );
+      }
+      // A record marked no-cloud has no cloud bytes to archive, and tagging one
+      // would be asserting something about an object that should not exist.
+      if (await keyIsCloudExcluded(db, record.objectStorageKey)) {
+        refusals.push("record is marked starkeep/no-cloud");
+      }
+
+      if (refusals.length > 0) {
+        return ok({ archived: false, refusals });
+      }
+
+      await storage.setTags(record.objectStorageKey, {
+        [INTENT_TAG_KEY]: "archive",
+        [LADDER_TAG_KEY]: LADDER_TAG_COMPLETE,
+      });
+      // Tagged, not transitioned. The lifecycle rule performs the transition
+      // after `archiveHoldDays`, which buys a week to catch a derivation bug
+      // before the input is behind a 48-hour thaw.
+      return ok({ archived: false, tagged: true, refusals: [] });
+    }
+
     // POST /apps/{appId}/data/records/:id/restore
     //
     // Restoring is a real feature, not an error path — and it is the *only* way
