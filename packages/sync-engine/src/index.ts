@@ -89,3 +89,13 @@ export {
   type HttpSyncServerOptions,
 } from "./transports/http-server.js";
 export { SyncError } from "./errors.js";
+
+export {
+  projectPolicy,
+  projectRow,
+  selectedBytesFor,
+  formatBytes,
+  type SizeClassCensus,
+  type RowProjection,
+  type PolicyProjection,
+} from "./retention-projection.js";
