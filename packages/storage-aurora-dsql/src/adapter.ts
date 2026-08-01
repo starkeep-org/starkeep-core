@@ -17,6 +17,7 @@ import type {
   LabelValueReplacement,
   FindByLabelQuery,
   FindByLabelResult,
+  StoredAvailability,
 } from "@starkeep/storage-adapter";
 import {
   StorageError,
@@ -61,6 +62,17 @@ import { sql, type CompiledQuery } from "kysely";
  * `value` NOT NULL there are no nulls to order. Everything else about label SQL
  * is shared with the SQLite adapter in `@starkeep/storage-adapter`.
  */
+const AVAILABILITY_TABLE = "shared.object_availability";
+
+/**
+ * Postgres hands back `bigint` as a string through node-postgres, so every
+ * numeric column from that table goes through this rather than a cast. A cast
+ * would typecheck and then silently compare "1754000000000" against a number.
+ */
+function numOrNull(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
+}
+
 const LABELS: LabelDialect = {
   table: "shared.record_labels",
 };
@@ -452,6 +464,88 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       const result = await this.run(buildQueryLabels(compiler, LABELS, query));
       return paginateLabelScan(result.rows as unknown as LabelRow[], query.limit);
     });
+  }
+
+  // ---- Object availability ------------------------------------------------
+
+  async getAvailability(objectStorageKeys: string[]): Promise<Map<string, StoredAvailability>> {
+    const out = new Map<string, StoredAvailability>();
+    if (objectStorageKeys.length === 0) return out;
+    const compiled = compiler
+      .selectFrom(AVAILABILITY_TABLE)
+      .selectAll()
+      .where("object_storage_key", "in", objectStorageKeys)
+      .compile();
+    const result = await this.run(compiled);
+    for (const raw of result.rows) {
+      const row = raw as Record<string, unknown>;
+      const key = row["object_storage_key"] as string;
+      out.set(key, {
+        objectStorageKey: key,
+        state: row["state"] as StoredAvailability["state"],
+        tier: (row["tier"] as string | null) ?? null,
+        // Postgres returns bigint as a string through node-postgres, so every
+        // numeric column here goes through Number() rather than a cast — a cast
+        // would typecheck and then compare "1754000000000" against a number.
+        expectedLatencyHours: numOrNull(row["expected_latency_hours"]),
+        readyAtMs: numOrNull(row["ready_at_ms"]),
+        restoredUntilMs: numOrNull(row["restored_until_ms"]),
+        observedAtMs: Number(row["observed_at_ms"]),
+      });
+    }
+    return out;
+  }
+
+  async putAvailability(row: StoredAvailability): Promise<void> {
+    await withOccRetry("putAvailability", async () => {
+      const compiled = compiler
+        .insertInto(AVAILABILITY_TABLE)
+        .values({
+          object_storage_key: row.objectStorageKey,
+          state: row.state,
+          tier: row.tier,
+          expected_latency_hours: row.expectedLatencyHours,
+          ready_at_ms: row.readyAtMs,
+          restored_until_ms: row.restoredUntilMs,
+          observed_at_ms: row.observedAtMs,
+        })
+        .onConflict((oc) =>
+          oc.column("object_storage_key").doUpdateSet((eb) => ({
+            state: eb.ref("excluded.state"),
+            tier: eb.ref("excluded.tier"),
+            expected_latency_hours: eb.ref("excluded.expected_latency_hours"),
+            ready_at_ms: eb.ref("excluded.ready_at_ms"),
+            restored_until_ms: eb.ref("excluded.restored_until_ms"),
+            observed_at_ms: eb.ref("excluded.observed_at_ms"),
+          })),
+        )
+        .compile();
+      await this.run(compiled);
+    });
+  }
+
+  async countRestoringObjects(): Promise<{ objectCount: number; bytes: number }> {
+    // Joined to records for the byte total: availability is keyed by object,
+    // and only the record row knows how big the object is.
+    const compiled = compiler
+      .selectFrom(AVAILABILITY_TABLE)
+      .innerJoin(
+        "shared.records",
+        "shared.records.object_storage_key",
+        `${AVAILABILITY_TABLE}.object_storage_key`,
+      )
+      .select(({ fn }) => [
+        fn.count<number>(`${AVAILABILITY_TABLE}.object_storage_key`).as("object_count"),
+        fn.sum<number>("shared.records.size_bytes").as("bytes"),
+      ])
+      .where(`${AVAILABILITY_TABLE}.state`, "=", "restoring")
+      .compile();
+    const result = await this.run(compiled);
+    const row = (result.rows[0] ?? {}) as Record<string, unknown>;
+    return {
+      objectCount: Number(row["object_count"] ?? 0),
+      bytes: Number(row["bytes"] ?? 0),
+    };
   }
 
   async getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {

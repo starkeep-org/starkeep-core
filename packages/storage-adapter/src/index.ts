@@ -12,6 +12,7 @@ export type {
   LabelValueReplacement,
   FindByLabelQuery,
   FindByLabelResult,
+  StoredAvailability,
 } from "./database/types.js";
 
 export {

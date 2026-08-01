@@ -64,9 +64,34 @@ export class FakeDsql implements DatabaseClientFactory {
  */
 export function fakeDsqlWithGrants(
   grantRows: Array<{ type_id: string; access: string }> = [],
+  /**
+   * Stored availability rows, if the test needs any.
+   *
+   * A parameter rather than a `.on(...)` a test adds afterwards, because routes
+   * match in **registration order** and this helper registers first — a default
+   * here would shadow any per-test override, which is the trap this file
+   * already warns about for the label routes. Passing them in is the only way
+   * to both default the common case (no rows: everything reads as instant) and
+   * let a test say otherwise.
+   */
+  availabilityRows: Rows = [],
 ): FakeDsql {
   return new FakeDsql()
     .on(/from "shared"\."access_grants"/, grantRows)
+    // Every record listing now reads availability in one batched query. Empty
+    // by default: no stored row means the default (instant), which is the
+    // ordinary state of an object nothing has moved.
+    //
+    // Scoped to the select-*-by-key shape specifically. A looser pattern would
+    // also swallow the restore rate limit's aggregate below and hand it a row
+    // list where it expects a count — which would "work" by accident, since the
+    // missing column reads as zero.
+    .on(/select \* from "shared"\."object_availability"/, availabilityRows)
+    // The restore rate limit's in-flight aggregate. No rows = nothing in
+    // flight, which is what every test that isn't about the limit wants.
+    .on(/count\(.*\) .*from "shared"\."object_availability"/, [])
+    // Issuing a restore records the new state.
+    .on(/insert into "shared"\."object_availability"/, [])
     .on(/from "shared"\."records" where "updated_at" like/, [])
     .on(/from "shared"\."record_labels" order by "record_id"/, [])
     .on(/from "shared"\."record_labels" group by "node_id"/, [])

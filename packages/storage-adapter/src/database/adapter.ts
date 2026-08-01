@@ -15,6 +15,7 @@ import type {
   LabelValueReplacement,
   FindByLabelQuery,
   FindByLabelResult,
+  StoredAvailability,
 } from "./types.js";
 
 export interface DatabaseAdapter {
@@ -184,4 +185,38 @@ export interface DatabaseAdapter {
    * over both tables on the Drive channel.
    */
   getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>>;
+
+  // ---- Object availability ------------------------------------------------
+  //
+  // Keyed by **object storage key**, not record id. Keys are content-addressed,
+  // so two records legitimately share one object — and its readability is a
+  // property of the object, not of either record. Storing it per record would
+  // let two rows disagree about one blob.
+  //
+  // Rows exist only for objects something has told us about. Absence means the
+  // default (`instant`), which is what "maintained, not computed" buys: a
+  // listing costs one batched read instead of a HeadObject per record.
+
+  /**
+   * Availability for a page of object keys. Keys with no stored row are simply
+   * missing from the map; callers apply `DEFAULT_AVAILABILITY`.
+   */
+  getAvailability(objectStorageKeys: string[]): Promise<Map<string, StoredAvailability>>;
+
+  /**
+   * Record what a transition, restore, or reconcile observed. Upsert by key —
+   * these arrive out of order (an event and the daily inventory can disagree
+   * about a key in flight), so `observedAtMs` is stored and a caller comparing
+   * two observations can tell which is newer.
+   */
+  putAvailability(row: StoredAvailability): Promise<void>;
+
+  /**
+   * How much is currently mid-restore: object count and total bytes.
+   *
+   * Backs the restore rate limit. Counted from live `restoring` rows rather
+   * than a separate ledger, so a restart cannot forget what is already in
+   * flight and the window closes on its own as restores complete.
+   */
+  countRestoringObjects(): Promise<{ objectCount: number; bytes: number }>;
 }

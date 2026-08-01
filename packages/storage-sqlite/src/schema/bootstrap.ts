@@ -160,6 +160,30 @@ function applyLocalSchemaDdl(db: DatabaseSync): void {
     db.exec(index.compile().sql);
   }
 
+  // shared_object_availability — whether this node can serve an object's bytes
+  // right now.
+  //
+  // Keyed by object key rather than record id: keys are content-addressed, so
+  // two records legitimately share one object, and readability is a property of
+  // the object. Per-record rows could disagree about one blob.
+  //
+  // Rows exist only for objects something has told us about; absence means the
+  // default (instant). That is what "maintained, not computed" buys — a listing
+  // costs one batched read instead of a HeadObject per record.
+  db.exec(
+    qb.schema
+      .createTable("shared_object_availability")
+      .ifNotExists()
+      .addColumn("object_storage_key", "text", (c) => c.primaryKey())
+      .addColumn("state", "text", (c) => c.notNull())
+      .addColumn("tier", "text")
+      .addColumn("expected_latency_hours", "integer")
+      .addColumn("ready_at_ms", "integer")
+      .addColumn("restored_until_ms", "integer")
+      .addColumn("observed_at_ms", "integer", (c) => c.notNull())
+      .compile().sql,
+  );
+
   // shared_app_label_keys — manifest-declared label keys, written by the
   // installer and readable by every app. Cross-app readability is the point:
   // discoverability is why keys are declared in a manifest rather than counted

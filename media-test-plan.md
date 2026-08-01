@@ -517,7 +517,88 @@ their ladder is complete (the only readable copy behind a 48-hour thaw).
   inspected for the header names, not exercised. Signature validation failures here report only
   "SignatureDoesNotMatch", so this belongs in the `e2e-aws` tier alongside the multipart gap.
 
-*(Sections for items 5b and onward are appended as each lands.)*
+### Item 5b — availability on every record; 409 on archived reads; explicit restore
+
+The guarantee: **a read never restores implicitly.** Without it a future slideshow feature
+would thaw an entire archive one image at a time — each thaw costing money and twelve hours,
+with nothing in the call path looking wrong. That is the property the plan means by "safe by
+construction rather than by convention", and every test below is either *the caller is told
+before trying* or *the caller is refused rather than silently committed*.
+
+#### Availability is maintained, not computed
+
+A `HeadObject` per record on listing is O(library) and would make every grid scroll a storm of
+storage requests. So it is a stored fact (`shared_object_availability` / `shared.object_availability`),
+read once per page, keyed by **object key rather than record id** — keys are content-addressed,
+so two records legitimately share one object and readability is a property of the object. Per-record
+rows could disagree about one blob.
+
+| Test | Asserts |
+|---|---|
+| `reports instant for an object nothing has moved` | absence of a row means the default |
+| `assumes instant for an object nothing has reported on` (unit) | the direction is deliberate: being wrong this way costs a recoverable 409 that self-corrects; defaulting to `archived` would be safe in the other direction and useless, since every record would look unreadable until proven otherwise |
+| `reports archived, with the tier and the wait, on the listing itself` | unreadability is known **before anything is attempted**, on the listing the client already fetched — not discovered as a stalled image |
+| `treats only instant as readable now` (unit) | `restoring`, `archived` and `absent` are all "not now", and `absent` is distinct from `archived` — collapsing them would send a client to a restore endpoint with nothing to restore |
+
+#### Reads refuse
+
+| Test | Asserts |
+|---|---|
+| `refuses a file-url for archived bytes with 409, and does not restore` | the 409 carries tier and expected latency, **and no availability row is written** — a read must not have side effects, least of all billable ones |
+| `409s a read of bytes already being restored rather than queueing another` | `ObjectRestoring` is its own answer |
+
+#### Restoring is a decision, not a discovery
+
+Two-step by design: without `confirm`, the endpoint returns an estimate and does nothing. A
+single-step endpoint would make the cost and the wait something a caller learns *after*
+committing to them.
+
+| Test | Asserts |
+|---|---|
+| `returns an estimate and does nothing without confirmation` | estimate present, **zero writes** |
+| `issues the restore only on explicit confirmation` | exactly one write |
+| `defaults to the fast tier and lets a caller opt into the cheap one` | Standard (12 h) by default — the difference to Bulk is hundredths of a cent and 36 hours, so Bulk earns its wait only in batch |
+| `reports an already-readable record without restoring it` | two clients racing on one archived record is ordinary, not an error |
+| `does not queue a second restore for bytes already thawing` | idempotent under retry |
+| `403s a caller with no read grant on the type` | a **read** grant is enough to ask — requiring write would leave a read-only app able to see a record is archived and unable to act |
+| `makes Bulk much cheaper and much slower` (unit) | the trade in one number: 4× the wait to save under $2 on 100 GB |
+
+Rate limiting counts **live `restoring` rows** rather than keeping a ledger, so a restart cannot
+forget what is in flight and the window closes on its own as restores complete. Both a count and
+a byte volume are capped, because either alone is trivially evaded — a thousand small objects and
+one enormous one are different shapes of the same mistake.
+
+#### A harness trap avoided
+
+`fakeDsqlWithGrants` takes availability rows as a **parameter** rather than letting tests
+register their own route afterwards. Routes match in registration order and the helper registers
+first, so a default there would shadow every per-test override — the exact trap that file already
+documents for the label routes. The default availability route is also scoped to the
+`select * …` shape specifically: a looser pattern swallowed the rate limit's aggregate and handed
+it a row list where it expected a count, which "worked" by accident because the missing column
+read as zero.
+
+**Gaps**
+
+- **Nothing maintains availability yet.** No S3 Event Notification handler, no Inventory
+  reconcile — that is item 19b. Today the only writer is the restore endpoint itself, so in a
+  real deployment every record reads `instant` until item 19b lands. The plumbing, the API shape
+  and the refusals are all real; the *input* is not.
+- **`RestoreObject` is never actually called.** The endpoint records `restoring` and returns the
+  estimate, but does not yet issue the S3 request — item 19 (request → poll → notify → serve).
+  So a confirmed restore currently marks state and thaws nothing. **This is the most misleading
+  gap in the plan so far**: the endpoint looks complete and is not.
+- **`absent` is never written on the cloud.** The local server could compute it cheaply from
+  local blob presence; the cloud cannot without an O(library) probe, so it needs the inventory
+  reconcile. A `no-cloud` record therefore reads `instant` in the cloud today.
+- **The local data server does not report availability at all.** The store exists on SQLite and
+  the adapter implements it, but the local `/data/records` response has not been wired. Records
+  are always readable locally unless elided, so the omission is currently harmless — and
+  currently invisible, which is why it is written down.
+- **Restore estimates are unvalidated against a real bill.** The per-GB figures come from the
+  plan's cost model, itself listed as an unverified input. Item 35's CUR work settles it.
+
+*(Sections for Phase 1 onward are appended as each lands.)*
 
 ---
 

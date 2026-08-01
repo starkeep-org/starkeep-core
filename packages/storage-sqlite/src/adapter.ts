@@ -20,6 +20,7 @@ import type {
   LabelValueReplacement,
   FindByLabelQuery,
   FindByLabelResult,
+  StoredAvailability,
 } from "@starkeep/storage-adapter";
 import {
   StorageError,
@@ -56,6 +57,31 @@ export interface SqliteDatabaseAdapterOptions {
  * a second one, and stopped being with `value` NOT NULL. Everything else about
  * label SQL lives in `@starkeep/storage-adapter`.
  */
+const AVAILABILITY = "shared_object_availability";
+
+/** The stored row shape, mapped back to the flat domain type at the boundary. */
+interface AvailabilityRow {
+  object_storage_key: string;
+  state: string;
+  tier: string | null;
+  expected_latency_hours: number | null;
+  ready_at_ms: number | null;
+  restored_until_ms: number | null;
+  observed_at_ms: number;
+}
+
+function rowToAvailability(row: AvailabilityRow): StoredAvailability {
+  return {
+    objectStorageKey: row.object_storage_key,
+    state: row.state as StoredAvailability["state"],
+    tier: row.tier,
+    expectedLatencyHours: row.expected_latency_hours,
+    readyAtMs: row.ready_at_ms,
+    restoredUntilMs: row.restored_until_ms,
+    observedAtMs: row.observed_at_ms,
+  };
+}
+
 const LABELS: LabelDialect = {
   table: "shared_record_labels",
 };
@@ -384,6 +410,66 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     const out: Record<string, HLCTimestamp> = {};
     for (const row of rows) out[row.node_id] = deserializeHLC(row.max_updated_at);
     return out;
+  }
+
+  // ---- Object availability ------------------------------------------------
+
+  async getAvailability(objectStorageKeys: string[]): Promise<Map<string, StoredAvailability>> {
+    const out = new Map<string, StoredAvailability>();
+    if (objectStorageKeys.length === 0) return out;
+    const compiled = qb
+      .selectFrom(AVAILABILITY)
+      .selectAll()
+      .where("object_storage_key", "in", objectStorageKeys)
+      .compile();
+    const rows = this.allRows<AvailabilityRow>(compiled.sql, ...compiled.parameters);
+    for (const row of rows) out.set(row.object_storage_key, rowToAvailability(row));
+    return out;
+  }
+
+  async putAvailability(row: StoredAvailability): Promise<void> {
+    const compiled = qb
+      .insertInto(AVAILABILITY)
+      .values({
+        object_storage_key: row.objectStorageKey,
+        state: row.state,
+        tier: row.tier,
+        expected_latency_hours: row.expectedLatencyHours,
+        ready_at_ms: row.readyAtMs,
+        restored_until_ms: row.restoredUntilMs,
+        observed_at_ms: row.observedAtMs,
+      })
+      .onConflict((oc) =>
+        oc.column("object_storage_key").doUpdateSet((eb) => ({
+          state: eb.ref("excluded.state"),
+          tier: eb.ref("excluded.tier"),
+          expected_latency_hours: eb.ref("excluded.expected_latency_hours"),
+          ready_at_ms: eb.ref("excluded.ready_at_ms"),
+          restored_until_ms: eb.ref("excluded.restored_until_ms"),
+          observed_at_ms: eb.ref("excluded.observed_at_ms"),
+        })),
+      )
+      .compile();
+    this.runStmt(compiled.sql, ...compiled.parameters);
+  }
+
+  async countRestoringObjects(): Promise<{ objectCount: number; bytes: number }> {
+    // Joined to records for the byte total: availability is keyed by object,
+    // and only the record row knows how big the object is.
+    const compiled = qb
+      .selectFrom(AVAILABILITY)
+      .innerJoin("shared_records", "shared_records.object_storage_key", `${AVAILABILITY}.object_storage_key`)
+      .select(({ fn }) => [
+        fn.count<number>(`${AVAILABILITY}.object_storage_key`).as("object_count"),
+        fn.sum<number>("shared_records.size_bytes").as("bytes"),
+      ])
+      .where(`${AVAILABILITY}.state`, "=", kSql.lit("restoring"))
+      .compile();
+    const row = this.getRow<{ object_count: number; bytes: number | null }>(
+      compiled.sql,
+      ...compiled.parameters,
+    );
+    return { objectCount: row?.object_count ?? 0, bytes: row?.bytes ?? 0 };
   }
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
