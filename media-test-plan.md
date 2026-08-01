@@ -58,6 +58,10 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily. | 7 | A node-local (non-syncable) table |
 | **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
 | **Deferred** | Nothing produces a video yet, so the ranged byte layer is exercised only with synthetic bytes. | 28 | Items 26/27 |
+| **Blocking** | Nothing calls `deriveVideoLadder`, and no video metadata is written to the `video` columns. Probe and derivation are complete, tested, and **unreachable from the app**. | 26/27 | An ingest/sweeper call site |
+| **Deferred** | Skim parameters (8x / 20s / 2fps) are an untested hypothesis; may be better as animated AVIF. | 27 | Measurement against real clips |
+| **Deferred** | VP9/WebM transcoding is written but never exercised by a test. | 27 | A fixture asserting the webm path |
+| **Accepted** | Derivation output is buffered in memory. Bounded by the ladder (720p @ 1.5 Mbps); revisit if 1080p opt-in ships. | 27 | — |
 | **Deferred** | No test proves video is routed to the `shared/*` (S3) behaviour rather than the gateway. Serving it through the chunked gateway origin makes CloudFront return whole objects and silently kills seeking. | 28 | An `e2e-aws` 206-through-CloudFront assertion |
 | ~~Deferred~~ | ~~No lifecycle rule exists.~~ **Closed (item 18)** — one tag-filtered rule requiring both tags, above a ~1 MB floor. | 4/5 | — |
 | ~~Deferred~~ | ~~Nothing declares `archive` intent.~~ **Closed (item 17)** — Photos declares it for originals; renditions stay `instant`. | 4/5 | — |
@@ -1136,6 +1140,86 @@ object into a slot sized for a chunk and the corruption only surfaces later in t
 - **No test proves video is served from the `shared/*` behaviour rather than the gateway.** The
   chunked-encoding constraint above is documented and honoured by the current routing, but a routing
   change could violate it silently. An `e2e-aws` assertion on a 206 through CloudFront would close it.
+
+### Items 26 + 27 — probing and deriving video
+
+The video ladder rules, the `video/*` grant and the metadata columns all landed earlier (items 6 and
+11). What was missing was anything that reads a container or produces bytes.
+
+**ffmpeg is discovered, not depended on.** Bundling `ffmpeg-static` would put an ~80 MB binary in
+every install whether or not it ever derives a video, so the binary is found on PATH: where it
+exists derivation works, and where it does not the ladder reports the classes it could not produce.
+That degradation is deliberately **terminal, not transient** — a missing ffmpeg is the `unsupported`
+case the import ledger already models, and retrying it every sweep would burn each run rediscovering
+that ffmpeg is still not installed.
+
+#### Three real bugs, all found by tests that nearly did not run
+
+**1. The suite was silently skipping everything.** `hasFfmpeg` was set in `beforeAll` and read when
+choosing `it` versus `it.skip` — but that choice is made during *collection*, which happens before
+any hook runs. Every ffmpeg test skipped and the file reported green. Now resolved with a top-level
+`await`, plus a `STARKEEP_REQUIRE_FFMPEG=1` guard that turns "ffmpeg is missing" into a failure
+wherever the coverage is supposed to be real. **A suite that reports green while testing nothing is
+worse than one that fails**, and this is exactly how such a suite rots.
+
+**2. Explicit rotation handling was wrong in the obvious direction.** Knowing a portrait phone clip
+is encoded landscape plus a display matrix, the instinct is to bake the rotation in with
+`transpose`. That is wrong: **ffmpeg's autorotate is on by default and has already applied it**, so
+an explicit transpose rotates a second time and turns a correctly-tagged portrait clip into a
+landscape rendition of sideways footage. Verified directly rather than reasoned about — a frame from
+a 640x480 clip carrying a 90° matrix comes out 480x640 with no filter and 640x480 under
+`-noautorotate`. `transposeFilter` is now a *named no-op with a test pinning it*, because "obviously
+we must transpose" is a change someone will otherwise make again.
+
+The rotation is still parsed and stored: consumers doing their own decoding need it, and the ladder
+compares maxima against the **display** long edge.
+
+**3. `-movflags +faststart` cannot write to a pipe.** ffmpeg refuses with "muxer does not support non
+seekable output", because faststart relocates the moov atom by rewriting the file. This would have
+broken **every** video rendition in the library. It survived the first test run because the 640x480
+fixture hits the no-op clause, so nothing ever asked for a transcode — the transcode path had no
+coverage at all. Video output now goes to a temp file. Dropping faststart would have made it
+pipeable and defeated the point: **moov-at-front is precisely what makes item 28's ranged serving
+worth anything**, since with the index at the end a player must fetch the whole file before the
+first frame.
+
+#### What the tests pin
+
+- **Rotation**: `-90` and `270` are the same quarter turn (iPhones write one, other cameras the
+  other; compared against a literal `90`, half a library ends up on its side). Quarter turns swap
+  the axes, half turns do not.
+- **Frame rate**: `30000/1001` is 29.97, not `NaN` — parsed as a float the whole string is `NaN`,
+  which then gets written to the database as a real-looking value. `0/0` is ffprobe for "unknown"
+  and must become `null`, not `NaN`.
+- **Capture time** prefers `com.apple.quicktime.creationdate` over the generic `creation_time`,
+  because on a re-muxed clip the latter is the *re-mux* time — which sorts a decade-old holiday
+  video into last Tuesday.
+- **No bitrate declared means unbounded, not zero.** Zero reads as "already below every ceiling" and
+  suppresses every transcode — failing in the direction that silently ships no renditions.
+- **Never upscale**: `min(iw,N)`, not a flat target. The other axis is `-2` (even), because an odd
+  dimension is a hard H.264 error under yuv420p, not a rounding warning.
+- **The poster is not frame zero.** Real footage often opens black — fade-in, exposure ramp — and a
+  grid of uniformly black video tiles looks broken in a way that is entirely self-inflicted. A tenth
+  in, capped at one second so a long clip's poster still shows what the clip is *of*.
+- **Partial success is reported, not discarded.** A failed transcode must not throw away a poster
+  that already succeeded, or the grid gets a hole for a thumbnail that was sitting right there.
+- **The moov atom is at the front** of produced video — verified load-bearing (without faststart
+  only `mdat` appears in the first 256 bytes).
+
+#### Gaps
+
+- **Nothing calls `deriveVideoLadder` yet.** The probe and derivation are complete and tested, but no
+  ingest path or sweeper invokes them, and no video metadata is written to the `video` columns. This
+  is the same shape as the still ladder's gap before item 24 closed it.
+- **Skim parameters remain a hypothesis, not a measurement.** 8x minimum, 20s target, 2 fps — the
+  plan says so explicitly, and skim may be better as an animated AVIF than as a video. Untested
+  against real clips of varying length.
+- **VP9/WebM is written but never exercised.** The code path exists behind `codec: "vp9"`; no test
+  produces one, so it is unverified.
+- **Output is buffered in memory.** Bounded by construction (720p at 1.5 Mbps), so acceptable now,
+  but a 1080p opt-in on a long clip would make this worth streaming.
+- **No audio-bearing fixture.** The `-c:a aac` path and the skim's `-an` are asserted only against
+  silent sources, so "strips audio" is proven while "keeps and re-encodes audio" is not.
 
 ## Phase 4
 
