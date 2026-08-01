@@ -1558,9 +1558,14 @@ async function main() {
                         // Long-lived on purpose: keys are content-addressed, so a longer
                         // TTL saves a client re-listing records just to refresh
                         // links while a user scrolls.
+                        // The variant's own type, not application/octet-stream.
+                        // A browser will sniff its way to displaying an <img>
+                        // regardless, but <video> is strict: served as
+                        // octet-stream a perfectly good MP4 simply refuses to
+                        // play, with nothing in the console to say why.
                         url: `http://127.0.0.1:${PORT}/data/files/${createFileToken(
                           v.objectStorageKey,
-                          "application/octet-stream",
+                          v.type,
                           VARIANT_URL_TTL_SECONDS,
                         )}`,
                       },

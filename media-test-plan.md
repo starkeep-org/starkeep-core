@@ -57,7 +57,8 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Blocking** | Multipart uploads are unverified above the part threshold in the buffered `put()` path; the streamed path verifies, the convenience method does not. | 1b-i / 2 | An `e2e-aws` test plus routing all large writes through `putStream` |
 | **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily. | 7 | A node-local (non-syncable) table |
 | **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
-| **Deferred** | Nothing produces a video yet, so the ranged byte layer is exercised only with synthetic bytes. | 28 | Items 26/27 |
+| ~~Deferred~~ | ~~Nothing produces a video yet.~~ **Closed** by items 26/27. | 28 | — |
+| **Deferred** | The video player is not visually verified, and no test drives a real `<video>` element. | 28 | Human review (same class as 9b) |
 | ~~Blocking~~ | ~~Nothing calls `deriveVideoLadder`.~~ **Closed** — `deriveAndPublishVideo` wires probe → facts → derive → publish → gate; the import loop now discovers video and no longer buffers whole files. | 26/27 | — |
 | **Deferred** | Skim parameters (8x / 20s / 2fps) are an untested hypothesis; may be better as animated AVIF. | 27 | Measurement against real clips |
 | **Deferred** | VP9/WebM transcoding is written but never exercised by a test. | 27 | A fixture asserting the webm path |
@@ -1131,10 +1132,43 @@ The HTTP adapter treats a **200 response to a ranged request as an error**. A se
 `Range` answers with a success status carrying the wrong bytes; unchecked, the caller writes a whole
 object into a slot sized for a chunk and the corruption only surfaces later in the assembled file.
 
+#### The player, and a collision only video exposes
+
+The player is a plain `<video>` with `preload="metadata"`. Below the length where adaptive streaming
+earns its keep, a progressive MP4 with moov-at-front seeks correctly over ordinary range requests;
+HLS would add a manifest, a segmenter and a JS player to achieve the same thing. `metadata` rather
+than `auto` because a viewer should fetch the few kilobytes that make the scrub bar work, not start
+pulling the whole file — and under Intelligent-Tiering a read promotes an object back to Frequent
+Access for 30 days, so speculative full reads quietly undo the tiering that makes storage cheap.
+
+**Wiring the player surfaced a real hole in variant resolution.** A video's children include a
+poster *and* a transcode **at the same long edge** — `video-poster-720p` and `video-720p` are both
+1280 — and resolution orders by long edge, breaking ties on id. Asking for 1280 could therefore hand
+back either. The client had no way to tell: the variant entry was `{url, width, height}` with no
+type. Painting a tile from whatever came back eventually puts an MP4 in an `<img>`; playing it puts
+a JPEG in a `<video>`. **Neither fails loudly.**
+
+The server already resolved the variant's `type` and simply was not surfacing it in the response
+shape the app consumed. Now `posterSrc` and `playbackSrc` filter on it. Variants with no type are
+treated as stills, which keeps a still-only library working against an older server and errs in the
+safe direction — assuming video would blank the grid for everyone.
+
+**A second bug in the same area**: variant URLs were minted with `application/octet-stream`. A
+browser sniffs its way to displaying an `<img>` regardless, but `<video>` is strict — served as
+octet-stream a perfectly good MP4 simply refuses to play, with nothing in the console to explain it.
+Variant URLs now carry the variant's own type.
+
+`playbackSrc` returning `null` is a real answer meaning "show the poster, do not offer play". A clip
+whose transcode has not been derived is *not ready*, not broken — and falling back to the original
+would be worse than useless, since it is the large file the transcode exists to avoid streaming.
+
 #### Gaps
 
-- **Nothing yet produces a video to serve.** The byte layer is complete and exercised with synthetic
-  bytes; probe and transcode (items 26/27) are what make it reachable from the app.
+- ~~**Nothing yet produces a video to serve.**~~ **Closed** by items 26/27.
+- **The player is not visually verified.** Same class as item 9b: whether seeking feels right, and
+  whether the poster-to-first-frame transition is clean, is human judgement.
+- **No test drives a real `<video>` element.** The source-selection logic is covered; that a browser
+  actually plays what it is handed is not, and cannot be without a browser.
 - **`Accept-Ranges` is advertised by the local server only.** CloudFront and S3 emit it themselves,
   so the cloud path is covered, but that is inherited behaviour rather than something asserted here.
 - **No test proves video is served from the `shared/*` behaviour rather than the gateway.** The
