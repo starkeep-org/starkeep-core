@@ -39,6 +39,8 @@ import {
   resolveVariants,
   isRetrievalIntent,
   tagsForIntent,
+  observationFor,
+  shouldReplace,
   INTENT_TAG_KEY,
   LADDER_TAG_KEY,
   LADDER_TAG_COMPLETE,
@@ -61,6 +63,7 @@ import type {
   HLCClock,
   MetadataRow,
   RecordLabel,
+  AvailabilityEventKind,
   RecordAvailability,
   ResolvedVariant,
   RetrievalIntent,
@@ -1188,7 +1191,151 @@ async function loadAppLabelValueSets(
 // Handler
 // ---------------------------------------------------------------------------
 
+/**
+ * One S3 event notification record, in the shape S3 actually delivers.
+ *
+ * Typed structurally rather than imported from the SDK because this Lambda's
+ * bundle is size-sensitive and the fields consumed are four.
+ */
+interface S3EventRecord {
+  eventName?: string;
+  eventTime?: string;
+  s3?: { object?: { key?: string } };
+  // Present on lifecycle-transition and restore events.
+  glacierEventData?: { restoreEventData?: { lifecycleRestorationExpiryTime?: string } };
+  lifecycleEventData?: { transitionEventData?: { destinationStorageClass?: string } };
+}
+
+interface S3EventEnvelope {
+  Records?: S3EventRecord[];
+}
+
+/**
+ * True when this invocation is an S3 notification rather than an HTTP request.
+ *
+ * The same Lambda serves both because the alternative — a second function — is
+ * a second deployment, a second role, and a second place for the availability
+ * vocabulary to drift out of step with the endpoint that reads it.
+ */
+function isS3Event(event: unknown): event is S3EventEnvelope {
+  const records = (event as S3EventEnvelope | undefined)?.Records;
+  return Array.isArray(records) && records.length > 0 && "s3" in (records[0] ?? {});
+}
+
+/**
+ * Apply S3 notifications to stored availability.
+ *
+ * **This is what makes `availability` mean anything.** Without it every record
+ * reports whatever it was written as, forever — so an archived original would
+ * still claim to be instantly readable and the 409 that protects callers would
+ * never fire.
+ *
+ * Failures are logged and swallowed per record rather than failing the batch: a
+ * malformed or unrecognized notification must not cause S3 to redeliver the
+ * whole batch indefinitely, and the daily reconcile is the backstop for
+ * anything genuinely missed.
+ */
+export async function handleS3Availability(
+  event: S3EventEnvelope,
+  db: DatabaseAdapter,
+): Promise<{ applied: number; skipped: number }> {
+  let applied = 0;
+  let skipped = 0;
+
+  for (const record of event.Records ?? []) {
+    try {
+      const rawKey = record.s3?.object?.key;
+      if (!rawKey) {
+        skipped += 1;
+        continue;
+      }
+      // S3 URL-encodes keys in notifications, and ours contain slashes.
+      const objectStorageKey = decodeURIComponent(rawKey.replace(/\+/g, " "));
+      const observedAtMs = record.eventTime ? Date.parse(record.eventTime) : Date.now();
+
+      const kind = eventKindOf(record.eventName ?? "");
+      if (!kind) {
+        skipped += 1;
+        continue;
+      }
+
+      const expiry =
+        record.glacierEventData?.restoreEventData?.lifecycleRestorationExpiryTime;
+      const observation = observationFor({
+        kind,
+        objectStorageKey,
+        observedAtMs,
+        ...(record.lifecycleEventData?.transitionEventData?.destinationStorageClass
+          ? {
+              storageClass:
+                record.lifecycleEventData.transitionEventData.destinationStorageClass,
+            }
+          : {}),
+        ...(expiry ? { restoredUntilMs: Date.parse(expiry) } : {}),
+      });
+      if (!observation) {
+        skipped += 1;
+        continue;
+      }
+
+      // Out-of-order delivery is normal, so the stored observation time decides
+      // rather than arrival order.
+      const stored = (await db.getAvailability([objectStorageKey])).get(objectStorageKey);
+      if (!shouldReplace(stored ?? null, observation)) {
+        skipped += 1;
+        continue;
+      }
+      await db.putAvailability(observation);
+      applied += 1;
+    } catch (err) {
+      // Swallowed deliberately: a poison record must not make S3 redeliver the
+      // batch forever, and the reconcile catches anything genuinely lost.
+      console.warn(`[availability] skipping event: ${(err as Error).message}`);
+      skipped += 1;
+    }
+  }
+
+  return { applied, skipped };
+}
+
+function eventKindOf(eventName: string): AvailabilityEventKind | null {
+  if (eventName.startsWith("LifecycleTransition")) return "transition";
+  if (eventName.startsWith("ObjectRestore:Completed")) return "restore-completed";
+  if (eventName.startsWith("ObjectRestore:Delete")) return "restore-expired";
+  if (eventName.startsWith("ObjectRemoved")) return "removed";
+  return null;
+}
+
 export async function handler(event: APIGatewayEvent, context: LambdaContext) {
+  // S3 notifications arrive at the same function as HTTP requests, so the shape
+  // has to be discriminated before anything reads `requestContext` — which an
+  // S3 event does not have, and which would throw before any of the routing
+  // below ran.
+  //
+  // Handled first and returned early: an availability event has no subject, no
+  // grants, and no app id, so none of the per-app machinery below applies to it.
+  if (isS3Event(event as unknown)) {
+    // Written as Starkeep Drive — the standing cloud-write identity for shared
+    // record custody. Availability is a fact about shared blobs, so Drive is
+    // already the role that may write it, and the Lambda's own execution role
+    // deliberately has no data-plane access of its own.
+    const creds = await getAppCreds(
+      DRIVE_APP_ID,
+      getAccountId(context.invokedFunctionArn),
+    );
+    const { db } = makeAdapters(DRIVE_APP_ID, creds);
+    try {
+      const result = await handleS3Availability(event as unknown as S3EventEnvelope, db);
+      // Returned in the HTTP shape even though nothing reads it: an
+      // S3-triggered invocation's return value is discarded, and keeping one
+      // return type keeps every caller and test from having to narrow a union
+      // they will never see the other half of.
+      return { statusCode: 200, body: JSON.stringify(result) };
+    } finally {
+      await db.close();
+    }
+  }
+
   // Track every DB client opened during this request so we can close them in
   // the finally below. Leaving clients open across Lambda freeze/thaw causes
   // their underlying TCP socket to fire 'error' on a later invocation, which
@@ -2272,6 +2419,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const limited = await checkRestoreRateLimit(db, appId, record.sizeBytes);
       if (!limited.ok) return clientErr(limited.message, 429);
 
+      // Actually ask S3 to thaw it. Recording `restoring` without issuing this
+      // would produce an endpoint that reports progress on a restore nobody
+      // started — which is worse than not having the endpoint, because it looks
+      // like it worked and the object never becomes readable.
+      const outcome = await storage.restoreObject(record.objectStorageKey, {
+        tier,
+        days: RESTORED_COPY_RETENTION_DAYS,
+      });
+
       const readyAtMs = Date.now() + estimate.estimatedHours * 60 * 60 * 1000;
       await db.putAvailability({
         objectStorageKey: record.objectStorageKey,
@@ -2285,6 +2441,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
       return ok({
         restoring: true,
+        // Distinguished so a caller can tell "I started this" from "someone
+        // else already had". Both are successes; only one is billable.
+        alreadyInProgress: outcome === "already-in-progress",
         estimate,
         availability: {
           state: "restoring",

@@ -94,6 +94,10 @@ const objectLockConfig = (): CreatedResource[] =>
   byTypeSuffix("bucketObjectLockConfigurationV2:BucketObjectLockConfigurationV2");
 const lifecycle = (): CreatedResource[] =>
   byTypeSuffix("bucketLifecycleConfigurationV2:BucketLifecycleConfigurationV2");
+const bucketNotification = (): CreatedResource[] =>
+  byTypeSuffix("s3/bucketNotification:BucketNotification");
+const lambdaPermissions = (): CreatedResource[] =>
+  byTypeSuffix("lambda/permission:Permission");
 const intelligentTiering = (): CreatedResource[] =>
   byTypeSuffix("bucketIntelligentTieringConfiguration:BucketIntelligentTieringConfiguration");
 
@@ -229,6 +233,52 @@ describe("the archive lifecycle rule (media plan item 18)", () => {
   });
 });
 
+describe("availability maintenance (media plan item 19b)", () => {
+  // Without this subscription, `availability` reports whatever a record was
+  // written as, forever — so an archived original still claims to be instantly
+  // readable and the 409 protecting callers from a silent twelve-hour stall
+  // never fires. The stored field would be decoration.
+  it("subscribes the Lambda to the events that change readability", async () => {
+    await run(false);
+    const notifications = bucketNotification();
+    expect(notifications).toHaveLength(1);
+    const fns = notifications[0]!.inputs.lambdaFunctions as Array<{ events: string[] }>;
+    expect(fns).toHaveLength(1);
+    expect(fns[0]!.events.sort()).toEqual([
+      "s3:LifecycleTransition",
+      "s3:ObjectRestore:Completed",
+      "s3:ObjectRestore:Delete",
+    ]);
+  });
+
+  // The one most easily forgotten. Without it an object reads as available
+  // forever after a single restore — fine for a week, wrong for months, and
+  // only discovered when someone opens it.
+  it("subscribes to restore expiry, not just restore completion", async () => {
+    await run(false);
+    const fns = bucketNotification()[0]!.inputs.lambdaFunctions as Array<{ events: string[] }>;
+    expect(fns[0]!.events).toContain("s3:ObjectRestore:Delete");
+  });
+
+  // A newly written object is instant, which is already the default for a key
+  // with no stored row. Subscribing would write a row per upload to record
+  // something nothing needed told.
+  it("does not subscribe to object creation", async () => {
+    await run(false);
+    const fns = bucketNotification()[0]!.inputs.lambdaFunctions as Array<{ events: string[] }>;
+    expect(fns[0]!.events.join(",")).not.toContain("ObjectCreated");
+  });
+
+  it("grants S3 permission to invoke the function, scoped to the bucket", async () => {
+    await run(false);
+    const perm = lambdaPermissions().find((p) => p.inputs.principal === "s3.amazonaws.com");
+    expect(perm, "S3 cannot invoke the Lambda without an explicit permission").toBeTruthy();
+    expect(perm!.inputs.action).toBe("lambda:InvokeFunction");
+    // Scoped: any bucket in the account could otherwise invoke this function.
+    expect(perm!.inputs.sourceArn).toBeTruthy();
+  });
+});
+
 describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
   it("leaves the DSQL cluster unprotected so teardown can drop it", async () => {
     await run(true);
@@ -260,5 +310,10 @@ describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
   it("creates no lifecycle rule", async () => {
     await run(true);
     expect(lifecycle()).toHaveLength(0);
+  });
+
+  it("creates no bucket notification", async () => {
+    await run(true);
+    expect(bucketNotification()).toHaveLength(0);
   });
 });

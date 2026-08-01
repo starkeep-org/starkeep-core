@@ -142,6 +142,21 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
     if (storageClass !== undefined) entry.storageClass = storageClass;
   }
 
+  async restoreObject(
+    key: string,
+    options: { tier: string; days: number },
+  ): Promise<"started" | "already-in-progress"> {
+    const entry = this.store.get(key);
+    if (!entry) throw new Error(`restoreObject: no object at key ${key}`);
+    if (entry.availability.state === "restoring") return "already-in-progress";
+    entry.availability = { state: "restoring", readyAt: null };
+    this.restoreRequests.push({ key, ...options });
+    return "started";
+  }
+
+  /** Test accessor: every restore that was actually requested. */
+  readonly restoreRequests: Array<{ key: string; tier: string; days: number }> = [];
+
   async setTags(key: string, tags: Record<string, string>): Promise<void> {
     const entry = this.store.get(key);
     if (!entry) throw new Error(`setTags: no object at key ${key}`);

@@ -68,6 +68,24 @@ export interface ObjectStorageAdapter {
    * respec.
    */
   setTags(key: string, tags: Record<string, string>): Promise<void>;
+  /**
+   * Ask the backend to make an archived object readable again.
+   *
+   * Returns `"started"` when a restore was newly initiated, and
+   * `"already-in-progress"` when one was already running — S3 answers the
+   * second case with a distinct error rather than a success, and collapsing
+   * them into a throw would make a retry look like a failure when it is the
+   * ordinary outcome of two clients asking at once.
+   *
+   * Restoring does not move the object out of its archived storage class. It
+   * creates a temporary readable copy that lapses after `days`, which is why
+   * `availability` returns to `archived` on its own and no code has to
+   * remember to undo anything.
+   */
+  restoreObject(
+    key: string,
+    options: { tier: string; days: number },
+  ): Promise<"started" | "already-in-progress">;
   delete(key: string): Promise<void>;
   list(prefix: string, options?: ListOptions): Promise<ListResult>;
   getSignedUrl?(key: string, options?: SignedUrlOptions): Promise<string>;
