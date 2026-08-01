@@ -10,6 +10,7 @@ import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
+  ResidencyHooks,
 } from "../../packages/sync-engine/src/types.js";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
@@ -65,6 +66,15 @@ export interface SyncSupervisorOptions {
    * (`SyncEngineOptions.pageLimit`). Engine default (1000) when omitted.
    */
   readonly pageLimit?: number;
+  /**
+   * Residency decision + byte accounting, consulted before every inbound blob
+   * pull on every channel.
+   *
+   * Handed to both the Drive engine and each per-app engine, because a budget
+   * that only bound one of them wouldn't bind: app-syncable blobs and shared
+   * record blobs land on the same disk.
+   */
+  readonly residency?: ResidencyHooks;
 }
 
 interface EngineEntry {
@@ -159,6 +169,7 @@ export function createSyncSupervisor(
     exchangeIntervalMs,
     nudgeDebounceMs,
     pageLimit,
+    residency,
   } = options;
 
   const engines = new Map<string, EngineEntry>();
@@ -254,6 +265,7 @@ export function createSyncSupervisor(
       syncState,
       syncSharedRecords: true,
       pageLimit,
+      ...(residency ? { residency } : {}),
       // No appSyncableSource: the Drive channel never carries app-specific rows.
     });
     makeEngineEntry(DRIVE_APP_ID, engine, baseUrl);
@@ -295,6 +307,7 @@ export function createSyncSupervisor(
       syncState,
       syncSharedRecords: false,
       pageLimit,
+      ...(residency ? { residency } : {}),
       appSyncableSource: {
         namespaces: narrowedNamespaces,
         applier: appApplier,

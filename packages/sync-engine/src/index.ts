@@ -23,7 +23,55 @@ export type {
   SyncExchangeRequest,
   SyncExchangeResponse,
   ExchangeResult,
+  ResidencyDecider,
+  ResidencyHooks,
 } from "./types.js";
+
+export {
+  decideResidency,
+  validateRetentionPolicy,
+  type KeepRule,
+  type SizeClassRetention,
+  type NodeRetentionPolicy,
+  type RecordConstraints,
+  type LocalOverrides,
+  type BlobCandidate,
+  type ResidencyDecision,
+  type ResidencyVerdict,
+  type ClassUsageLookup,
+  type DecideResidencyInputs,
+} from "./residency-policy.js";
+
+export {
+  createSqliteResidentSetIndex,
+  type ResidentEntry,
+  type ResidentSetIndex,
+  type EvictionCandidateQuery,
+} from "./resident-set.js";
+
+export {
+  assessDurability,
+  type ReplicaProbe,
+  type ReplicaState,
+  type ReplicaReport,
+  type DurabilityPolicy,
+  type DurabilityVerdict,
+  type DurabilityQuery,
+} from "./durability.js";
+
+export {
+  evictClass,
+  previewBudgetReduction,
+  shedLoad,
+  SHED_ORDER,
+  DEFAULT_WATER_MARKS,
+  type WaterMarks,
+  type RetentionReason,
+  type EvictionOutcome,
+  type EvictionRequest,
+  type ReductionPreview,
+  type ShedStep,
+} from "./eviction.js";
 
 export { createSqliteSyncStateStore } from "./sync-state-sqlite.js";
 export { createChangeNotifier } from "./change-notifier.js";

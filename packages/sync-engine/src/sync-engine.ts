@@ -25,6 +25,7 @@ import type {
 import { createChangeNotifier } from "./change-notifier.js";
 import { createFileSyncEngine } from "./file-sync-engine.js";
 import { advanceWatermark } from "./watermarks.js";
+import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
 
 /**
  * Sync engine: drives one version-vector exchange round per tick.
@@ -56,6 +57,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     syncSharedRecords = true,
     pageLimit = 1000,
     scanPageSize = 500,
+    residency,
   } = options;
 
   const changeNotifier = createChangeNotifier();
@@ -321,6 +323,53 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       );
       const appliedIds: StarkeepId[] = [];
       const ownSafeAdvance = new Map<string, HLCTimestamp>();
+      let elidedCount = 0;
+
+      /**
+       * Pull a blob unless this node has decided it doesn't want it.
+       *
+       * The three outcomes are deliberately distinct and only two of them
+       * existed before:
+       *   - "landed"  — bytes are here (or there were none to fetch).
+       *   - "elided"  — bytes deliberately declined. **Advances the watermark**,
+       *                 because the record is not owed. This is the whole point
+       *                 of the residency work: without it, declining a blob is
+       *                 indistinguishable from failing to fetch one, so the
+       *                 watermark holds and the peer re-ships forever.
+       *   - "failed"  — wanted and didn't arrive. Watermark holds; retry next
+       *                 round, exactly as before.
+       */
+      async function pullBlob(
+        manifest: FileSyncManifest | null,
+        candidate: BlobCandidate | null,
+        itemId: string,
+      ): Promise<"landed" | "elided" | "failed"> {
+        if (!manifest) return "landed";
+        let verdict: ResidencyVerdict | null = null;
+        if (residency && candidate) {
+          verdict = await residency.decide(candidate);
+          if (verdict.decision === "elide") {
+            elidedCount += 1;
+            return "elided";
+          }
+        }
+        const ok = await transferBlobSafe(
+          manifest,
+          remoteObjectStorage,
+          localObjectStorage,
+          fileSyncEngine,
+          "download",
+          itemId,
+        );
+        if (!ok) return "failed";
+        // Accounting moves only once the bytes are here. Crediting a decision
+        // rather than an arrival would let a node with a flaky link slowly
+        // convince itself it is full of things it doesn't have.
+        if (residency?.onLanded && candidate && verdict) {
+          await residency.onLanded(candidate, verdict);
+        }
+        return "landed";
+      }
 
       for (const [nodeId, items] of inboundByNode) {
         let contiguous = true;
@@ -343,15 +392,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             // residency) — without this, the watermark would advance past
             // the failed blob in round 2 and the record would be stuck.
             const manifest = manifestForRecord(snapshot);
-            const blobOk = await transferBlobSafe(
+            const outcome = await pullBlob(
               manifest,
-              remoteObjectStorage,
-              localObjectStorage,
-              fileSyncEngine,
-              "download",
+              candidateForRecord(snapshot),
               snapshot.id,
             );
-            if (!blobOk) {
+            if (outcome === "failed") {
               // Metadata applied (or already was), but blob fetch failed.
               // Don't advance own watermark past this item — next round the
               // responder still ships it (because our advertised watermarks
@@ -418,15 +464,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             }
 
             const manifest = manifestForAppRow(entry);
-            const blobOk = await transferBlobSafe(
+            const outcome = await pullBlob(
               manifest,
-              remoteObjectStorage,
-              localObjectStorage,
-              fileSyncEngine,
-              "download",
+              candidateForAppRow(entry),
               `${entry.appId}.${entry.table}`,
             );
-            if (!blobOk) {
+            if (outcome === "failed") {
               contiguous = false;
               continue;
             }
@@ -464,6 +507,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         applied: appliedIds.length,
         shipped: outboundRecords.length + outboundAppRows.length,
         hasMore: response.hasMore,
+        elided: elidedCount,
       };
     },
 
@@ -559,6 +603,55 @@ function outboundManifest(item: OutboundItem): FileSyncManifest | null {
   // A label is a row, never a blob — it has nothing to transfer.
   if (item.kind === "label") return null;
   return manifestForAppRow(item.entry);
+}
+
+/**
+ * Normalize a shared record into the shape the residency decision reads.
+ *
+ * Deliberately carries no size class: the sync engine must not learn what
+ * `image-medium` is. The host's decider resolves the class from the record's
+ * labels, so class names and maxima can move without touching the platform.
+ *
+ * `recencyAtMs` is left null here because capture time lives in the
+ * per-category metadata table, not on the record row, and this function has
+ * only the row. A null reads as "unknown", which makes `recent-only` fetch
+ * rather than decline — a metadata gap must not silently cost you the bytes.
+ * A host that can do better (it has the metadata join) overrides it in its
+ * decider.
+ */
+function candidateForRecord(record: AnyRecord): BlobCandidate | null {
+  if (!record.objectStorageKey) return null;
+  return {
+    recordId: record.id,
+    objectStorageKey: record.objectStorageKey,
+    sizeBytes: record.sizeBytes,
+    type: record.type,
+    parentId: record.parentId,
+    appId: null,
+    recencyAtMs: null,
+    lastOpenedAtMs: null,
+  };
+}
+
+/** Same, for a row in the reserved `_starkeep_sync_records` table. */
+function candidateForAppRow(entry: AppSyncableRowEntry): BlobCandidate | null {
+  if (entry.table !== FILE_RECORDS_TABLE || entry.op === "delete") return null;
+  const row = entry.row;
+  if (!row) return null;
+  const key = row["object_storage_key"];
+  if (typeof key !== "string" || key.length === 0) return null;
+  const sizeBytes = row["size_bytes"];
+  const id = row["id"];
+  return {
+    recordId: typeof id === "string" ? id : key,
+    objectStorageKey: key,
+    sizeBytes: typeof sizeBytes === "number" ? sizeBytes : Number(sizeBytes) || 0,
+    type: null,
+    parentId: null,
+    appId: entry.appId,
+    recencyAtMs: null,
+    lastOpenedAtMs: null,
+  };
 }
 
 function manifestForRecord(record: AnyRecord): FileSyncManifest | null {

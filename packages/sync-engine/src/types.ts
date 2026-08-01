@@ -5,6 +5,31 @@ import type {
   RecordLabel,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
+
+/**
+ * The fetch-time residency decision. Async because a real implementation reads
+ * the node's byte accounting and the record's labels.
+ */
+export type ResidencyDecider = (
+  candidate: BlobCandidate,
+) => Promise<ResidencyVerdict> | ResidencyVerdict;
+
+/**
+ * The decision and the accounting that follows from it, together — because a
+ * budget that isn't updated when bytes land is a budget that never binds. The
+ * two were split in an earlier draft and the split let a node decide "yes,
+ * room for this" forever.
+ */
+export interface ResidencyHooks {
+  decide: ResidencyDecider;
+  /**
+   * Called after a blob has actually landed locally, not when it was decided
+   * on. A transfer that fails must not move the byte accounting, or the node
+   * slowly convinces itself it is full of things it doesn't have.
+   */
+  onLanded?(candidate: BlobCandidate, verdict: ResidencyVerdict): void | Promise<void>;
+}
 
 // ---------------------------------------------------------------------------
 // Per-table schema info stored in the namespace registry so appliers can UPSERT
@@ -228,6 +253,26 @@ export interface FileSyncEngine {
     source: ObjectStorageAdapter,
     destination: ObjectStorageAdapter,
   ): Promise<boolean>;
+  /**
+   * Fetch a blob this node previously declined.
+   *
+   * This exists because eliding **advances the watermark**: the peer will not
+   * re-ship the record, so nothing in a sync round will ever bring those bytes
+   * down again. Without an explicit path, `keep: "on-demand-only"` would mean
+   * "never", and raising a budget would not backfill anything.
+   *
+   * Deliberately bypasses `decideResidency` — it is the answer to a direct
+   * request ("the user opened this photo"), not a policy question. Byte
+   * accounting still sees the arrival, so an on-demand fetch can push a class
+   * over budget and be evicted later; that is the intended shape, because
+   * refusing to show someone their own photo to stay under a cache budget is
+   * not a defensible behaviour.
+   */
+  fetchBlobOnDemand(
+    manifest: FileSyncManifest,
+    source: ObjectStorageAdapter,
+    destination: ObjectStorageAdapter,
+  ): Promise<boolean>;
 }
 
 export type ChangeEventType =
@@ -279,6 +324,14 @@ export interface ExchangeResult {
   readonly applied: number;
   readonly shipped: number;
   readonly hasMore: boolean;
+  /**
+   * Inbound items whose metadata landed and whose blob was **deliberately not
+   * fetched**. Counted separately from `applied` because a declined blob is a
+   * legitimate terminal state, not a partial success and not a failure — and
+   * because a node that is quietly declining everything looks identical to a
+   * healthy one if this number isn't surfaced.
+   */
+  readonly elided: number;
 }
 
 export interface SyncEngine {
@@ -326,6 +379,23 @@ export interface SyncEngineOptions {
    * shared-record sync is identical regardless of which apps are cloud-installed.
    */
   readonly syncSharedRecords?: boolean;
+  /**
+   * Consulted before every inbound blob pull. Returning `"elide"` applies the
+   * metadata, skips the blob, and **advances the watermark** — the record is
+   * not owed and will not be re-shipped.
+   *
+   * Omitting this preserves the pre-residency behaviour exactly: every blob is
+   * wanted, and a missing one is a failure that holds the watermark. That is
+   * the right default for the cloud node and for any node that has not been
+   * given a retention policy, because the failure mode of over-fetching is a
+   * full disk and the failure mode of under-fetching is data that quietly
+   * isn't anywhere.
+   *
+   * Fetch-time only. It cannot stop an *outbound* push, so a constraint that
+   * must hold cloud-side (`starkeep/no-cloud`) needs a server-side refusal as
+   * well — a decision consulted on one side of a transfer is not an invariant.
+   */
+  readonly residency?: ResidencyHooks;
   /**
    * Max items per exchange round, applied to both the outbound local scan and
    * the inbound request limit. Default 1000. Tests use small values (e.g. 5)

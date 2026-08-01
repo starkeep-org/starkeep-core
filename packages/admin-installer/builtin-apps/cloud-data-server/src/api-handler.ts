@@ -33,6 +33,7 @@ import {
   serializeHLC,
   deserializeHLC,
   appSyncableObjectKey,
+  contentHashFromDataRecordObjectKey,
   dataRecordObjectKey,
   typeCategory,
   getCategory,
@@ -64,6 +65,7 @@ import type {
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
 import type { Filter, DatabaseAdapter } from "@starkeep/storage-adapter";
+import { sha256HexToBase64 } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
 import {
   loadAccessGrants,
@@ -809,6 +811,50 @@ async function planCloudLabelWrites(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Cloud exclusion (`starkeep/no-cloud`)
+// ---------------------------------------------------------------------------
+
+/** Label namespace for platform-level record constraints. */
+const STARKEEP_LABEL_APP_ID = "starkeep";
+/** Record label forbidding these bytes from reaching cloud storage. */
+const NO_CLOUD_LABEL_KEY = "no-cloud";
+
+const NO_CLOUD_REFUSAL =
+  "This record is marked starkeep/no-cloud; its bytes may not be written to cloud storage.";
+
+/**
+ * True when a live record at this object key is marked `starkeep/no-cloud`.
+ *
+ * The residency decision on the cloud node elides such a record's blob, but a
+ * fetch-time decision cannot stop an inbound *push* — so without this, any node
+ * could upload the bytes and the constraint would be advisory. A guarantee that
+ * only one side of a transfer enforces is not a guarantee.
+ *
+ * Keys are content-addressed, so two records can legitimately share one. Any
+ * one of them saying no-cloud is enough to refuse: the exclusion is about the
+ * *bytes*, and there is no way to store them for one record and not the other.
+ */
+async function keyIsCloudExcluded(db: DatabaseAdapter, objectStorageKey: string): Promise<boolean> {
+  const found = await db.query({
+    filters: [
+      { field: "objectStorageKey", operator: "eq", value: objectStorageKey },
+      { field: "deletedAt", operator: "isNull" },
+    ],
+    limit: 100,
+  });
+  if (found.records.length === 0) return false;
+
+  const byId = await db.getLabelsByRecordIds(found.records.map((r) => r.id));
+  for (const labels of byId.values()) {
+    for (const l of labels) {
+      if (l.deletedAt) continue;
+      if (l.appId === STARKEEP_LABEL_APP_ID && l.key === NO_CLOUD_LABEL_KEY) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * This app's live values per `(record, key)`, for the value-cardinality cap.
  *
@@ -1460,7 +1506,16 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (fileBuffer.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
       const hex = createHash("sha256").update(fileBuffer).digest("hex");
       const key = dataRecordObjectKey(typeId, hex);
-      await storage.put(key, fileBuffer, { contentType: mimeType });
+      // Same refusal as the presign path. Both are blob-write entry points, and
+      // guarding only the one the sync engine happens to use would leave the
+      // constraint enforceable by convention rather than by the server.
+      if (await keyIsCloudExcluded(db, key)) return clientErr(NO_CLOUD_REFUSAL, 403);
+      await storage.put(key, fileBuffer, {
+        contentType: mimeType,
+        // Single-part path (capped at 20 MB above), so a whole-object SHA-256
+        // is the right checksum type and S3 rejects a mismatched body.
+        checksumSha256: sha256HexToBase64(hex),
+      });
       return ok({ key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
     }
 
@@ -1475,11 +1530,29 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!body.key) return clientErr("key is required", 400);
       const check = parseObjectKey(appId, body.key, grants, "write");
       if (!check.ok) return clientErr(check.message, check.status);
+      // Pin the permitted body into the signature. Shared record keys *are*
+      // the SHA-256, so the expected checksum is derivable from the key alone —
+      // the caller is never asked for it and could not influence it if it
+      // tried. S3 then rejects a body that hashes to anything else instead of
+      // storing it, which is what turns "the upload returned 200" into
+      // "S3 confirmed these bytes are the bytes this key names".
+      //
+      // App-syncable keys are deliberately not content-addressed, so they get
+      // no pin; the helper returns null for them.
+      const noCloud = await keyIsCloudExcluded(db, body.key);
+      if (noCloud) return clientErr(NO_CLOUD_REFUSAL, 403);
+
+      const contentHash = contentHashFromDataRecordObjectKey(body.key);
+      const checksumSha256 = contentHash ? sha256HexToBase64(contentHash) : undefined;
       const url = await storage.getSignedPutUrl!(body.key, {
         expiresIn: 3600,
         ...(body.contentType ? { contentType: body.contentType } : {}),
+        ...(checksumSha256 ? { checksumSha256 } : {}),
       });
-      return ok({ url });
+      // Returned so the uploader can send the mandatory header without
+      // re-deriving it (and without needing to know the encoding differs from
+      // the hex contentHash it already holds).
+      return ok({ url, ...(checksumSha256 ? { checksumSha256 } : {}) });
     }
 
     // GET /apps/{appId}/files/{encodedKey}/presign — presigned S3 GET URL.
@@ -1503,6 +1576,24 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
       const url = await storage.getSignedUrl!(key, { expiresIn: 3600 });
       return ok({ url });
+    }
+
+    // GET /apps/{appId}/files/{encodedKey}/stat — the object facts a HEAD
+    // already returns: size, stored checksum, storage class, and whether the
+    // bytes are readable right now.
+    //
+    // This exists because a bare existence check is the wrong question for
+    // anything that might delete a local copy or promise a caller a successful
+    // read: an archived object exists and cannot be read. Same cost as the HEAD
+    // below — one HeadObject — so there is no reason to throw the rest away.
+    const fileStatMatch = subPath.match(/^\/files\/(.+)\/stat$/);
+    if (fileStatMatch && method === "GET") {
+      const key = decodeURIComponent(fileStatMatch[1]!);
+      const check = parseObjectKey(appId, key, grants, "read");
+      if (!check.ok) return clientErr(check.message, check.status);
+      const facts = await storage.stat(key);
+      if (!facts) return clientErr("Not found", 404);
+      return ok(facts);
     }
 
     // HEAD|DELETE /apps/{appId}/files/{encodedKey} — same multi-segment key

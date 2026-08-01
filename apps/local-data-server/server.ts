@@ -48,7 +48,10 @@ import {
   type AccessGrants,
 } from "../../packages/protocol-primitives/src/access/grants.js";
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
-import { dataRecordObjectKey, appSyncableObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
+import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
+import { sha256HexToBase64 } from "@starkeep/storage-adapter";
+import type { NodeRetentionPolicy } from "../../packages/sync-engine/src/index.js";
+import { createResidencyManager, residencyHooks } from "./residency.js";
 import {
   createStarkeepId,
   planLabelWrites,
@@ -233,6 +236,26 @@ interface StarkeepConfig {
   pushDebounceMs?: number;
   /** Max items per exchange round (sync-engine pageLimit). Default 1000. */
   syncPageLimit?: number;
+  /**
+   * Per-size-class retention for *this node*. Absent means the node keeps
+   * everything, which is the right default for a laptop and preserves the
+   * pre-residency behaviour exactly.
+   *
+   * Note what is *not* here: there is no residency-class enum. `Full` /
+   * `Library` / `Browse`-style presets may front this in the UI, but they write
+   * these rows rather than being stored, so nothing downstream can condition on
+   * "which preset is this".
+   */
+  retention?: NodeRetentionPolicy;
+  /**
+   * How many confirmed replicas elsewhere before this node may evict a blob it
+   * cannot re-derive. Default 1.
+   *
+   * Raise it for a `no-cloud`-heavy library: excluding the cloud moves the
+   * single-copy risk onto the device, and this number is the only thing that
+   * keeps that from being a data-loss feature.
+   */
+  minimumReplicas?: number;
   // Cloud fields — populated by the admin wizard's PATCH /config, absent
   // until then. nodeId stands alone so cloud-disabled installs still get a
   // stable replica identity.
@@ -521,6 +544,29 @@ async function main() {
   // tables (registry, grants) that have no adapter wrapper.
   const localDb = databaseAdapter.getRawDatabase();
 
+  // Residency: only constructed when this node has actually been given a
+  // retention policy. Without one there is no budget to enforce and no class to
+  // resolve, so the engine runs without the hook and every blob is wanted —
+  // exactly the pre-residency behaviour, which is the right default for a
+  // laptop and means an unconfigured node cannot silently start declining data.
+  const residencyManager = starkeepConfig.retention
+    ? createResidencyManager({
+        localDb,
+        databaseAdapter,
+        localObjectStorage: localAdapter,
+        // Configured, not constant: the platform-side plumbing never names
+        // `photos/rendition`, so the ladder can be respecified — or owned by a
+        // different app — without a change here.
+        classLabel: { appId: "photos", key: "rendition" },
+        // The local data server is never the cloud node. `starkeep/no-cloud`
+        // is a constraint about cloud storage; a laptop holding such a record
+        // is the intended outcome, not a violation.
+        isCloudNode: false,
+        policy: starkeepConfig.retention,
+        durability: { minimumReplicas: starkeepConfig.minimumReplicas ?? 1 },
+      })
+    : null;
+
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
   const appApplier = new SqliteAppSyncableApplier(localDb, namespaceStore);
 
@@ -578,6 +624,7 @@ async function main() {
       sdk,
       databaseAdapter,
       localObjectStorage: localAdapter,
+      ...(residencyManager ? { residency: residencyHooks(residencyManager) } : {}),
       localDb: databaseAdapter.getRawDatabase(),
       cloudUrl: CLOUD_URL,
       // Outbound auth is per-request HMAC, not bearer JWT (see sync-supervisor.ts
@@ -1631,8 +1678,17 @@ async function main() {
         const mimeType = body.contentType ?? "application/octet-stream";
         const expiresIn = body.expiresIn ?? 3600;
         const token = createUploadToken(body.key, mimeType, expiresIn);
+        // Returned for parity with the cloud broker so one client code path
+        // works against either backend. The upload endpoint below independently
+        // hashes the body and rejects a mismatch, so locally this is a
+        // convenience rather than the enforcement — the enforcement is there,
+        // and it predates this item. (Against S3 it is the other way round: the
+        // pinned checksum *is* the enforcement, because the local server is not
+        // in the byte path at all.)
+        const contentHash = contentHashFromDataRecordObjectKey(body.key);
         json(res, {
           url: `http://127.0.0.1:${PORT}/data/files/upload/${token}`,
+          ...(contentHash ? { checksumSha256: sha256HexToBase64(contentHash) } : {}),
         });
         return;
       }
