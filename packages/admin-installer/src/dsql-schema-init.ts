@@ -404,6 +404,26 @@ export async function initializeSharedSchema(
          NULLS NOT DISTINCT`,
     );
 
+    // Record-level dedup: "is there already a live record for these bytes
+    // under this parent?", asked on every registration.
+    //
+    // uq_records_filename_hash cannot serve it — its leading column is the
+    // filename, so a hash-only lookup scans the table once per write. Leading
+    // with content_hash is what makes the check affordable enough to be
+    // unconditional, and unconditional is what makes "one object key, one
+    // record" an invariant rather than a hope.
+    //
+    // deleted_at is folded in rather than expressed as a WHERE, because DSQL
+    // rejects partial indexes (SQLSTATE 0A000) — the same reason the unique
+    // index above carries it as a column.
+    await ensureIndex(
+      db,
+      "shared",
+      "idx_records_content_hash",
+      `CREATE INDEX ASYNC idx_records_content_hash
+         ON shared.records (content_hash, parent_id, deleted_at)`,
+    );
+
     // Backs the sync responder's per-node coverage watermark
     // (getNodeWatermarks): MAX(updated_at) GROUP BY node_id as an
     // index-only scan instead of a per-exchange table scan.

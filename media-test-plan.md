@@ -65,7 +65,7 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Deferred** | `protectedLocally` is never set, so the durability predicate is the only thing between eviction and a last copy. | 1b | Item 7's derivation-input tracking |
 | **Deferred** | `recencyAtMs` is always null from the sync engine, so `recent-only` behaves as `all`. | 1b | Host decider supplying capture time |
 | **Deferred** | Only one rung is produced by the resize path in practice until every ingest route uses `deriveStillLadder`. | 6/7 | Item 7 completion |
-| **Deferred** | ~~ThumbHash~~ **closed (item 9)**; perceptual hash is still not computed. | 4/21 | Derivation populating it |
+| ~~Deferred~~ | ~~ThumbHash and perceptual hash are not computed.~~ **Closed** (items 9 and 22) — both computed during derivation. | 4/21 | — |
 | **Deferred** | Video derivation is not wired; the ladder helpers are tested and uncalled. | 6 | Item 27 |
 | **Deferred** | Renditions do not sync before originals. **The plan's claim that this is a scheduling change is wrong** — it needs blob transfer decoupled from the metadata prefix rule. | 7 | A protocol change, not yet scoped |
 | ~~Deferred~~ | ~~No test asserts consumers never name a size class.~~ **Closed (item 9)** — a grep test over `src`/`app`/`infra` with a small reviewed allowlist, verified to fire on an injected violation. | 6 | — |
@@ -1060,6 +1060,86 @@ is that its equivalent is a HeadObject per record — O(library) in network requ
 - **Inventory reports are never reaped.** They accumulate daily under `_starkeep/inventory/`. Small
   (a few MB) and outside `shared/`, so nothing breaks, but a lifecycle rule expiring them after a
   week is the obvious follow-up.
+
+## Phase 4
+
+### Items 20 / 22 / 23 / 24 — dedup and local import
+
+#### Item 20 — one object key, one record
+
+Keys are content-addressed, so two registrations of the same bytes name the **same object**. If
+both create records, deleting either has to decide whether the bytes may go — a refcount the reaper
+cannot compute cheaply and must never get wrong. Collapsing at registration is what unblocks it:
+after this, "delete the record, delete the object" is sound.
+
+| Test | Asserts |
+|---|---|
+| `dedups a byte-identical top-level record, not just a derived child` | idempotent (200 + existing record), **no insert issued** |
+| `does not collapse a top-level record into a child with the same bytes` | the lookup is scoped by parent — the same bytes may legitimately be a standalone photo *and* a rendition of something else, and those are different records sharing storage |
+
+**A performance trap was avoided here.** The dedup query now runs on *every* registration, and the
+existing `(original_filename, content_hash)` unique index cannot serve it — its leading column is
+the filename, so a hash-only lookup would scan the table once per write. New indexes lead with
+`content_hash` on both backends. Unconditional is what makes this an invariant rather than a hope,
+and it is only affordable because of the index.
+
+#### Item 22 — three tiers, and only one of them acts
+
+**Nothing here deletes anything.** A duplicate is something *not imported*, which leaves the library
+as it was — the reversible outcome. Deleting on a match would make a false positive permanent, and a
+false positive here is somebody's photo.
+
+| Tier | Acts? | Why |
+|---|---|---|
+| `identical` (content hash) | **skip** | the same file, definitionally — no threshold to get wrong |
+| `same-capture` (timestamp + UID, else make/model + dimensions) | report | **a burst shares all of it** |
+| `similar` (perceptual hash) | report | catches re-encodes; also catches things that merely resemble each other |
+
+The adversarial cases are the point of the test file, not an afterthought:
+
+- `only reports, never skips, because a burst looks exactly like this` — ten frames shot in one
+  second share a capture second, a camera and dimensions, and every one is a photo somebody chose
+  to keep.
+- `does not match two screenshots against each other` — screenshots, exports and anything through a
+  messaging app have no EXIF, and a *partial* fingerprint would match every one against every other.
+  `captureFingerprint` returns `null` rather than something partial.
+- `reports maximum distance for malformed input rather than throwing` — one bad stored hash must not
+  abort an import scan, and 64 is the safe direction: maximally different never causes a false
+  duplicate.
+
+Perceptual hashing is dHash rather than aHash: it compares adjacent pixels, so it survives the
+brightness/contrast changes a Storage Saver re-encode or an auto-levels pass introduce. Written
+without BigInt because the project targets below ES2020 — a nibble-at-a-time build rather than
+moving the whole project's target for one function.
+
+#### Items 23 / 24
+
+`GoogleImportPanel` and its types are deleted — a dead shell against an API Google withdrew in
+March 2025.
+
+The import run model is keyed by **content hash, not path**: paths move, and a resumed import must
+recognise a file the operator reorganised between runs and must not re-import a merely-renamed one.
+
+`shouldAttempt` distinguishes `failed` (retry) from `unsupported` (terminal), which is what makes a
+resume useful rather than merely restartable — conflating them means either abandoning files that
+would succeed on a second attempt, or spending every subsequent run re-failing on the same
+unreadable hundred, which on a large import is indistinguishable from the tool being broken.
+`isComplete` treats a run whose remainder is terminal-but-not-imported as **finished**, so an
+operator is not left waiting for progress that will never come.
+
+**Gaps**
+
+- **The import run model has no storage and no driver.** The state machine, pacing and summary are
+  defined and tested; nothing walks a folder, hashes files, or persists an `ImportItem`. This is
+  the largest gap in this group — item 24 is a model without its loop.
+- **`findDuplicate` is O(library) per candidate.** It scans a list. Real use needs the tier-1 check
+  as an indexed `contentHash` lookup (which the new index now supports) and tier 3 as a bounded
+  candidate query, not a linear scan of every record per imported file.
+- **Nothing calls `computePerceptualHash`.** It is computed nowhere in the derivation path yet, so
+  the `perceptual_hash` column stays empty and tier 3 has nothing to compare — the same shape of
+  gap ThumbHash had before item 9.
+- **Tiers 2 and 3 are uncalibrated**, which is why they ship report-only. Calibrating needs a real
+  Takeout export; until then the thresholds are guesses and are labelled as such.
 
 *(Sections for items 9b, 8 and onward are appended as each lands.)*
 

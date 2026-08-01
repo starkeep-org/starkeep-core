@@ -70,6 +70,19 @@ function applyLocalSchemaDdl(db: DatabaseSync): void {
       .ifNotExists()
       .on("shared_records")
       .column("parent_id"),
+    // Record-level dedup: "is there already a live record for these bytes
+    // under this parent?", asked on **every** registration.
+    //
+    // The (filename, content_hash) unique index below cannot serve it — its
+    // leading column is the filename, so a hash-only lookup would scan the
+    // table once per write. Leading with content_hash is what makes the dedup
+    // check affordable enough to be unconditional, and unconditional is what
+    // makes "one object key, one record" an invariant rather than a hope.
+    qb.schema
+      .createIndex("idx_shared_records_content_hash")
+      .ifNotExists()
+      .on("shared_records")
+      .columns(["content_hash", "parent_id", "deleted_at"]),
     // Duplicate-file prevention: (filename + bytes) is unique among live
     // records. Tombstoned rows (deleted_at IS NOT NULL) are excluded so a
     // re-upload after delete is allowed. Records with NULL filename are not

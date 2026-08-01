@@ -75,6 +75,16 @@ export function fakeDsqlWithGrants(
    * let a test say otherwise.
    */
   availabilityRows: Rows = [],
+  /**
+   * Rows the record-level dedup lookup should find, if the test needs any.
+   *
+   * A parameter for the same reason as `availabilityRows`: routes match in
+   * registration order and this helper registers first, so a default here
+   * would shadow any per-test `.on(...)` — and the dedup query's SQL is also
+   * matched by the broad `select * from "shared"."records"` pattern most
+   * registration tests use, which makes the shadowing silent rather than loud.
+   */
+  dedupRows: Rows = [],
 ): FakeDsql {
   return new FakeDsql()
     .on(/from "shared"\."access_grants"/, grantRows)
@@ -93,6 +103,10 @@ export function fakeDsqlWithGrants(
     // Issuing a restore records the new state.
     .on(/insert into "shared"\."object_availability"/, [])
     .on(/from "shared"\."records" where "updated_at" like/, [])
+    // Record-level dedup runs on every registration now, not just for
+    // children. Empty by default: no existing record for these bytes, which is
+    // the ordinary case. Tests that exercise dedup override it.
+    .on(/from "shared"\."records" where "content_hash" =/, dedupRows)
     .on(/from "shared"\."record_labels" order by "record_id"/, [])
     .on(/from "shared"\."record_labels" group by "node_id"/, [])
     // DELETE /data/records/:id cascades to labels on every record delete,

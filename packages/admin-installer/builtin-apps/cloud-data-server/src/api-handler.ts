@@ -2144,23 +2144,38 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // `created` distinguishes a fresh insert (201) from returning an existing
       // duplicate (200).
       const { record, created } = await withOccRetry("POST /data/records", async () => {
-        // Dedup derived children (thumbnails) by (parentId, contentHash). A
-        // byte-identical child of the same parent is a duplicate — e.g. two
-        // concurrent /api/resize calls for one original. contentHash is part of
-        // the key so distinct crops of the same source (same parent, different
-        // bytes) are not collapsed. Idempotent: return the existing record.
-        if (body.parentId) {
-          const dup = await db.query({
-            filters: [
-              { field: "parentId", operator: "eq", value: body.parentId },
-              { field: "contentHash", operator: "eq", value: contentHash },
-              { field: "deletedAt", operator: "isNull" },
-            ],
-            limit: 1,
-          });
-          const existing = dup.records[0];
-          if (existing) return { record: existing, created: false };
-        }
+        // Record-level dedup: **one object key, at most one live record.**
+        //
+        // Keys are content-addressed, so two registrations of the same bytes
+        // name the same object. Letting both create records would mean the
+        // object has two referents — and then deleting either record has to
+        // decide whether the bytes may go, which is a refcount the reaper
+        // cannot compute cheaply and must never get wrong. Collapsing here is
+        // what unblocks it: after this, a key has exactly one record, so
+        // "delete the record, delete the object" is sound.
+        //
+        // Scoped by parent, because the parent edge is part of what the record
+        // *is*: the same bytes may legitimately be both a standalone photo and
+        // a rendition of something else, and those are different records that
+        // happen to share storage. Within one parent (or within the top level),
+        // a byte-identical registration is the same thing arriving twice.
+        //
+        // Idempotent rather than an error. The second arrival is usually a
+        // retry, a re-import, or two concurrent derivations of one original —
+        // none of which is a mistake the caller can act on, and all of which
+        // want the existing record back.
+        const dupFilters: Filter[] = [
+          { field: "contentHash", operator: "eq", value: contentHash },
+          { field: "deletedAt", operator: "isNull" },
+        ];
+        dupFilters.push(
+          body.parentId
+            ? { field: "parentId", operator: "eq", value: body.parentId }
+            : { field: "parentId", operator: "isNull" },
+        );
+        const dup = await db.query({ filters: dupFilters, limit: 1 });
+        const existing = dup.records[0];
+        if (existing) return { record: existing, created: false };
 
         const now = clock.now();
         const fresh: DataRecord = {
