@@ -30,3 +30,11 @@ export {
   formatLabelRef,
   parseLabelRef,
 } from "./labels.js";
+export {
+  resolveVariant,
+  resolveVariants,
+  parseVariantLongEdges,
+  MAX_VARIANT_TARGETS,
+  type VariantCandidate,
+  type ResolvedVariant,
+} from "./variants.js";

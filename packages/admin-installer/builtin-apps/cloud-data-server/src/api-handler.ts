@@ -35,6 +35,8 @@ import {
   appSyncableObjectKey,
   contentHashFromDataRecordObjectKey,
   dataRecordObjectKey,
+  parseVariantLongEdges,
+  resolveVariants,
   typeCategory,
   getCategory,
   isCategoryId,
@@ -50,6 +52,8 @@ import type {
   HLCClock,
   MetadataRow,
   RecordLabel,
+  ResolvedVariant,
+  VariantCandidate,
 } from "@starkeep/protocol-primitives";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
 import {
@@ -65,7 +69,7 @@ import type {
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
 import type { Filter, DatabaseAdapter } from "@starkeep/storage-adapter";
-import { sha256HexToBase64 } from "@starkeep/storage-adapter";
+import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
 import {
   loadAccessGrants,
@@ -689,6 +693,7 @@ function recordToResponse(
   record: DataRecord,
   metadata?: MetadataRow | null,
   labels?: RecordLabel[],
+  variants?: Record<string, ResolvedVariant & { url?: string }>,
 ) {
   return {
     id: record.id,
@@ -717,6 +722,27 @@ function recordToResponse(
             // Wire/UI rendering only — storage has no such string.
             label: `${l.appId}/${l.key}`,
           })),
+        }
+      : {}),
+    // Keyed by the requested pixel size, carrying the *actual* dimensions of
+    // what was chosen. A client that wants to reason about what it got can —
+    // it just never has to ask in those terms.
+    ...(variants !== undefined
+      ? {
+          variants: Object.fromEntries(
+            Object.entries(variants).map(([target, v]) => [
+              target,
+              {
+                id: v.id,
+                type: v.type,
+                object_storage_key: v.objectStorageKey,
+                width: v.width,
+                height: v.height,
+                long_edge: v.longEdge,
+                ...(v.url ? { url: v.url } : {}),
+              },
+            ]),
+          ),
         }
       : {}),
   };
@@ -748,6 +774,60 @@ async function loadLabelsForPage(
   }
   return filtered;
 }
+
+/**
+ * Attach a signed URL to each resolved variant.
+ *
+ * The URLs ride the record list rather than costing a round trip each, which is
+ * the whole reason resolution lives on the list endpoint: a grid that had to
+ * presign every tile separately would have given back the hop this design
+ * exists to remove. Shared bytes go through the CloudFront chokepoint, which
+ * re-checks the grant — so a variant the caller may not read simply arrives
+ * without a URL rather than being silently omitted, which would read as "this
+ * record has no variant that size".
+ */
+async function signVariantsForPage(
+  appId: string,
+  grants: AccessGrants,
+  byRecord: Map<StarkeepId, Record<string, ResolvedVariant>>,
+): Promise<Map<StarkeepId, Record<string, ResolvedVariant & { url?: string }>>> {
+  const out = new Map<StarkeepId, Record<string, ResolvedVariant & { url?: string }>>();
+  // One signature per distinct variant, not per (record, target) pair —
+  // progressive presentation asks for several sizes and they frequently
+  // resolve to the same child.
+  const urlByKey = new Map<string, string>();
+  for (const [recordId, resolved] of byRecord) {
+    const withUrls: Record<string, ResolvedVariant & { url?: string }> = {};
+    for (const [target, variant] of Object.entries(resolved)) {
+      let url = urlByKey.get(variant.objectStorageKey);
+      if (url === undefined) {
+        const signed = await signSharedCloudFrontUrl(
+          appId,
+          variant.objectStorageKey,
+          grants,
+          VARIANT_URL_TTL_SECONDS,
+        );
+        if (signed.ok) {
+          url = signed.url;
+          urlByKey.set(variant.objectStorageKey, url);
+        }
+      }
+      withUrls[target] = url === undefined ? variant : { ...variant, url };
+    }
+    out.set(recordId, withUrls);
+  }
+  return out;
+}
+
+/**
+ * How long an inline variant URL stays valid.
+ *
+ * Long, deliberately. Keys are content-addressed and the cache policy already
+ * excludes the signature from the cache key, so a longer TTL costs nothing in
+ * cache efficiency and saves a client re-listing records just to refresh links
+ * while a user scrolls.
+ */
+const VARIANT_URL_TTL_SECONDS = 6 * 60 * 60;
 
 /**
  * Batch-load per-category metadata for a page of records so the list endpoint
@@ -1082,6 +1162,38 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         excludeLabel = { appId: ref.appId, key: ref.key };
       }
 
+      // `variant=<appId>/<key>&variantLongEdge=400,1280` — resolve, per record,
+      // which derived child best answers each requested pixel size.
+      //
+      // Expressed generically over child records, a label key and the
+      // width/height columns, so the platform never learns what any particular
+      // size class is. That is what lets the ladder be respecified without a
+      // client change, and what lets any image-granted app get the same
+      // resolution rather than reimplementing it.
+      const variantParam = query["variant"];
+      const variantLongEdgeParam = query["variantLongEdge"];
+      let variantLabel: { appId: string; key: string } | undefined;
+      let variantTargets: number[] = [];
+      if (variantParam !== undefined || variantLongEdgeParam !== undefined) {
+        if (variantParam === undefined || variantLongEdgeParam === undefined) {
+          // Either alone is meaningless, and answering it as though it were
+          // valid would silently return no variants — which reads as "this
+          // record has none" rather than "you asked wrongly".
+          return clientErr("variant and variantLongEdge must be given together", 400);
+        }
+        const ref = parseLabelRef(variantParam);
+        if (!ref) {
+          return clientErr(
+            `variant must be of the form "<appId>/<key>" (got "${variantParam}")`,
+            400,
+          );
+        }
+        const parsed = parseVariantLongEdges(variantLongEdgeParam);
+        if (!parsed.ok) return clientErr(parsed.message, 400);
+        variantLabel = { appId: ref.appId, key: ref.key };
+        variantTargets = parsed.targets;
+      }
+
       // Per-type read enforcement. An explicit ?type= must be in the caller's
       // readable set; otherwise constrain the scan to readable types.
       if (type !== undefined) {
@@ -1150,12 +1262,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const labelsById = includeLabels
           ? await loadLabelsForPage(db, labelled, labelApps)
           : null;
+        const variantsById = variantLabel
+          ? await signVariantsForPage(
+              appId,
+              grants,
+              await loadVariantsForPage(db, labelled, variantLabel, variantTargets),
+            )
+          : null;
         return ok({
           records: labelled.map((r) =>
             recordToResponse(
               r,
               metaById ? metaById.get(r.id) ?? null : undefined,
               labelsById ? labelsById.get(r.id) ?? [] : undefined,
+              variantsById ? variantsById.get(r.id) ?? {} : undefined,
             ),
           ),
           hasMore: found.hasMore,
@@ -1190,12 +1310,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const records = hasMore ? result.records.slice(0, limit) : result.records;
       const metadataById = includeMetadata ? await loadMetadataForPage(db, grants, records) : null;
       const labelsById = includeLabels ? await loadLabelsForPage(db, records, labelApps) : null;
+      const variantsById = variantLabel
+        ? await signVariantsForPage(
+            appId,
+            grants,
+            await loadVariantsForPage(db, records, variantLabel, variantTargets),
+          )
+        : null;
       return ok({
         records: records.map((r) =>
           recordToResponse(
             r,
             metadataById ? metadataById.get(r.id) ?? null : undefined,
             labelsById ? labelsById.get(r.id) ?? [] : undefined,
+            variantsById ? variantsById.get(r.id) ?? {} : undefined,
           ),
         ),
         hasMore,

@@ -49,7 +49,7 @@ import {
 } from "../../packages/protocol-primitives/src/access/grants.js";
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
-import { sha256HexToBase64 } from "@starkeep/storage-adapter";
+import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
 import type { NodeRetentionPolicy } from "../../packages/sync-engine/src/index.js";
 import { createResidencyManager, residencyHooks } from "./residency.js";
 import {
@@ -58,6 +58,7 @@ import {
   planLabelRetractions,
   parseLabelRef,
   labelValueSetKey,
+  parseVariantLongEdges,
 } from "@starkeep/protocol-primitives";
 import type { RecordLabel, DataRecord } from "@starkeep/protocol-primitives";
 import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
@@ -1290,6 +1291,42 @@ async function main() {
           excludeLabel = { appId: ref.appId, key: ref.key };
         }
 
+        // `variant=<appId>/<key>&variantLongEdge=400,1280` — resolve, per
+        // record, which derived child best answers each requested pixel size.
+        // Generic over child records, a label key and the width/height
+        // columns, so this server never learns what a size class is.
+        const variantParam = url.searchParams.get("variant");
+        const variantLongEdgeParam = url.searchParams.get("variantLongEdge");
+        let variantLabel: { appId: string; key: string } | undefined;
+        let variantTargets: number[] = [];
+        if (variantParam !== null || variantLongEdgeParam !== null) {
+          if (variantParam === null || variantLongEdgeParam === null) {
+            // Either alone is meaningless, and answering it as though it were
+            // valid would return no variants — which reads as "this record has
+            // none" rather than "you asked wrongly".
+            res.writeHead(400);
+            json(res, { error: "variant and variantLongEdge must be given together" });
+            return;
+          }
+          const vref = parseLabelRef(variantParam);
+          if (!vref) {
+            res.writeHead(400);
+            json(res, {
+              error: "InvalidLabel",
+              detail: `variant must be of the form "<appId>/<key>" (got "${variantParam}")`,
+            });
+            return;
+          }
+          const parsed = parseVariantLongEdges(variantLongEdgeParam);
+          if (!parsed.ok) {
+            res.writeHead(400);
+            json(res, { error: parsed.message });
+            return;
+          }
+          variantLabel = { appId: vref.appId, key: vref.key };
+          variantTargets = parsed.targets;
+        }
+
         // Per-type read enforcement, pushed into the query rather than applied
         // after it: a post-filter would let a page come back short of `limit`
         // for reasons the caller can't see, and would make the cursor derived
@@ -1424,6 +1461,14 @@ async function main() {
           }
         }
 
+        // Variant resolution, when asked for. Generic over child records, a
+        // label key and the width/height columns, so this server never learns
+        // what any particular size class is — the same resolver the cloud
+        // broker uses, in @starkeep/protocol-primitives.
+        const variantsById = variantLabel
+          ? await loadVariantsForPage(databaseAdapter, readable, variantLabel, variantTargets)
+          : null;
+
         // Label hydration: one batched primary-key-prefix seek for the whole
         // page, the same shape `include=metadata` uses.
         //
@@ -1483,6 +1528,34 @@ async function main() {
                     // Wire/UI rendering only — storage has no such string.
                     label: `${l.appId}/${l.key}`,
                   })),
+                }
+              : {}),
+            // Keyed by the requested pixel size, carrying the *actual*
+            // dimensions of what was chosen, so a client that wants to reason
+            // about what it got can — it just never has to ask in those terms.
+            ...(variantsById
+              ? {
+                  variants: Object.fromEntries(
+                    Object.entries(variantsById.get(r.id) ?? {}).map(([target, v]) => [
+                      target,
+                      {
+                        id: v.id,
+                        type: v.type,
+                        object_storage_key: v.objectStorageKey,
+                        width: v.width,
+                        height: v.height,
+                        long_edge: v.longEdge,
+                        // Long-lived on purpose: keys are content-addressed, so a longer
+                        // TTL saves a client re-listing records just to refresh
+                        // links while a user scrolls.
+                        url: `http://127.0.0.1:${PORT}/data/files/${createFileToken(
+                          v.objectStorageKey,
+                          "application/octet-stream",
+                          VARIANT_URL_TTL_SECONDS,
+                        )}`,
+                      },
+                    ]),
+                  ),
                 }
               : {}),
           })),
@@ -2801,6 +2874,12 @@ function json(res: import("node:http").ServerResponse, body: unknown) {
 }
 
 /** Encode storage key + mime + expiry into a URL-safe signed token. */
+/**
+ * How long an inline variant URL stays valid. Long, deliberately — see the
+ * call site.
+ */
+const VARIANT_URL_TTL_SECONDS = 6 * 60 * 60;
+
 function createFileToken(key: string, mimeType: string, expiresIn: number): string {
   const expires = Math.floor(Date.now() / 1000) + expiresIn;
   const payload = `r|${key}|${mimeType}|${expires}`;
