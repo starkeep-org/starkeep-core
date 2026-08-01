@@ -7,6 +7,35 @@ export function createFileSyncEngine(): FileSyncEngine {
   // the retry pass to skip records whose transfer is already in flight.
   const inFlightKeys = new Set<string>();
 
+  async function transfer(
+    manifest: FileSyncManifest,
+    source: ObjectStorageAdapter,
+    destination: ObjectStorageAdapter,
+  ): Promise<boolean> {
+    const key = manifest.objectStorageKey;
+    if (inFlightKeys.has(key)) {
+      return false;
+    }
+    inFlightKeys.add(key);
+    try {
+      // Destination already has it — no-op success. Lets callers fire-and-
+      // forget transferFile without needing to HEAD first.
+      if (await destination.has(key)) {
+        return true;
+      }
+      const file = await source.get(key);
+      if (!file) {
+        return false;
+      }
+      await destination.put(key, file.data, {
+        contentType: manifest.mimeType,
+      });
+      return true;
+    } finally {
+      inFlightKeys.delete(key);
+    }
+  }
+
   return {
     isTransferInFlight(key: string): boolean {
       return inFlightKeys.has(key);
@@ -62,33 +91,14 @@ export function createFileSyncEngine(): FileSyncEngine {
       return manifests;
     },
 
-    async transferFile(
-      manifest: FileSyncManifest,
-      source: ObjectStorageAdapter,
-      destination: ObjectStorageAdapter,
-    ): Promise<boolean> {
-      const key = manifest.objectStorageKey;
-      if (inFlightKeys.has(key)) {
-        return false;
-      }
-      inFlightKeys.add(key);
-      try {
-        // Destination already has it — no-op success. Lets callers fire-and-
-        // forget transferFile without needing to HEAD first.
-        if (await destination.has(key)) {
-          return true;
-        }
-        const file = await source.get(key);
-        if (!file) {
-          return false;
-        }
-        await destination.put(key, file.data, {
-          contentType: manifest.mimeType,
-        });
-        return true;
-      } finally {
-        inFlightKeys.delete(key);
-      }
-    },
+    transferFile: transfer,
+
+    // Same mechanics as transferFile; a distinct entry point because the two
+    // have different *authority*. transferFile runs inside a sync round and is
+    // subject to the node's residency decision; this one is the answer to a
+    // direct request and is not. Keeping them separate means a call site
+    // cannot accidentally acquire the ability to ignore policy — it has to
+    // name the intent.
+    fetchBlobOnDemand: transfer,
   };
 }

@@ -1002,6 +1002,10 @@ describe("/app-data routes", () => {
     expect(String(body["url"])).toContain("fake-bucket");
     // The broker never reads or writes bytes on the presign path.
     expect(db.calls(FILE_RECORDS_INSERT)).toHaveLength(0);
+    // No checksum is pinned for an app-syncable key: the subKey is a stable
+    // app-chosen name, not a hash, so there is nothing to derive from it.
+    // Inventing one would reject every legitimate rewrite of such a file.
+    expect(body["checksumSha256"]).toBeUndefined();
   });
 
   it("registers the index row for a presigned upload without holding bytes", async () => {
@@ -1054,4 +1058,100 @@ describe("/app-data routes", () => {
     );
     expect(gone.statusCode).toBe(404);
   });
+});
+
+// ---- Verified uploads: the checksum pinned into the presigned PUT ----
+//
+// The property under test is that the broker decides what may be written at a
+// content-addressed key, and the uploader has no say in it. Everything else
+// here follows from that.
+describe("POST /files/presign pins the expected checksum", () => {
+  const hash = "b".repeat(64);
+  const sharedKey = `shared/image/bb/${hash}`;
+  const expectedChecksum = Buffer.from(hash, "hex").toString("base64");
+
+  // Every presign first asks whether a live record at this key is marked
+  // no-cloud. Stubbed empty here: the ordinary case is that the bytes are
+  // uploaded before the record is registered, so there is nothing at the key
+  // yet. (Registered per test rather than in `fakeDsqlWithGrants`, because
+  // routes match in registration order and a shared default would shadow the
+  // refusal test's own stub.)
+  const noRecordAtKey = /from "shared"\."records" where "object_storage_key" =/;
+
+  it("derives the checksum from the content-addressed key and returns it", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+    );
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/presign",
+        body: { key: sharedKey, contentType: "image/jpeg" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res);
+    expect(body["checksumSha256"]).toBe(expectedChecksum);
+    // Signed into the URL, not merely advertised beside it — otherwise an
+    // uploader could drop the header and write whatever it liked.
+    expect(String(body["url"])).toContain("x-amz-checksum-sha256");
+  });
+
+  // The caller never supplies the checksum, so it cannot lie about it. A body
+  // field is ignored rather than honoured: honouring it would reduce the
+  // guarantee to "the uploader verified its own bytes", which is no guarantee.
+  // The residency decision on the cloud node elides a no-cloud record's blob,
+  // but a fetch-time decision cannot stop an inbound *push*. Without this
+  // refusal any node could upload the bytes and the constraint would be
+  // advisory — a guarantee only one side of a transfer enforces is not one.
+  it("refuses to presign a write for a record marked starkeep/no-cloud", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }])
+      .on(noRecordAtKey, [
+        recordRow({ id: "rec-nc", type: "image/jpeg", object_storage_key: sharedKey }),
+      ])
+      .on(/from "shared"\."record_labels" where "record_id" in/, [
+        {
+          record_id: "rec-nc",
+          app_id: "starkeep",
+          key: "no-cloud",
+          value: "",
+          record_type: "image/jpeg",
+          created_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
+          updated_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
+          node_id: "n",
+          deleted_at: null,
+        },
+      ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/presign",
+        body: { key: sharedKey },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(String(bodyOf(res)["error"])).toMatch(/no-cloud/);
+  });
+
+  it("ignores a caller-supplied checksum in favour of the key's", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+    );
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/presign",
+        body: { key: sharedKey, checksumSha256: Buffer.from("f".repeat(64), "hex").toString("base64") },
+      }),
+      context,
+    );
+    expect(bodyOf(res)["checksumSha256"]).toBe(expectedChecksum);
+  });
+
 });
