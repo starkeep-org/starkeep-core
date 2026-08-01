@@ -1129,17 +1129,54 @@ operator is not left waiting for progress that will never come.
 
 **Gaps**
 
-- **The import run model has no storage and no driver.** The state machine, pacing and summary are
-  defined and tested; nothing walks a folder, hashes files, or persists an `ImportItem`. This is
-  the largest gap in this group — item 24 is a model without its loop.
-- **`findDuplicate` is O(library) per candidate.** It scans a list. Real use needs the tier-1 check
-  as an indexed `contentHash` lookup (which the new index now supports) and tier 3 as a bounded
-  candidate query, not a linear scan of every record per imported file.
-- **Nothing calls `computePerceptualHash`.** It is computed nowhere in the derivation path yet, so
-  the `perceptual_hash` column stays empty and tier 3 has nothing to compare — the same shape of
-  gap ThumbHash had before item 9.
+#### Closing the loop
+
+The three gaps above — no storage, no driver, and an O(library) tier-1 scan — are closed.
+
+**The ledger is node-local and deliberately not syncable**, under
+`$STARKEEP_DIR/app-local/photos/import/`, the same convention Photos' vision state already uses.
+Syncing it would push a laptop's progress to a phone that has none of those files, and would let
+one device's `unsupported` verdict tell another not to bother with a file it could read perfectly
+well. SQLite rather than JSON because the lookup is "have I handled this hash" once per file across
+tens of thousands — a JSON ledger is fine at a thousand items and quadratic misery at fifty
+thousand, exactly when resumption matters most.
+
+**Tier 1 became the server's job.** The loop registers and reads `deduped` off the answer rather
+than scanning the library, so the O(library)-per-file scan is now one indexed lookup per file — and
+the authoritative check is the one the library actually enforces rather than a second
+implementation that can disagree with it. Tiers 2 and 3 fetch their candidate set **once per run**
+rather than once per file: still linear in library size, but paid once.
+
+| Test | Asserts |
+|---|---|
+| `does not re-register anything already imported` | the point of resumption |
+| `recognises a file that moved between runs` | the hash is the identity precisely so an operator who reorganised the folder does not re-import everything |
+| `retries a file that failed transiently` | `failed` is not terminal |
+| `never retries a file this build cannot decode` | **counts attempts across two runs** — without this, every subsequent run spends itself re-failing on the same unreadable files, which on a large import is indistinguishable from the tool being broken |
+| `treats byte-identical files as one item` | two copies in one folder are one object |
+| `records a server-side dedup as skipped, not imported` | tier 1's answer comes from the server |
+| `imports the file and reports the similarity, rather than skipping` | **tiers 2/3 run after the import, never instead of it** — the finding is a note for a human, not a reason to have withheld somebody's photo |
+| `stops at the per-run cap and reports that it did` / `finishes the rest on the next run` | pacing, because an import competes with the derivation it triggers |
+| `skips dotfiles and dot-directories` | `.thumbnails` and `.DS_Store` are noise |
+| `includes camera raw` | the reason item 29 registered those types |
+
+`computePerceptualHash` is now called during derivation, written alongside ThumbHash in one metadata
+request — both are derived deterministically from the same decode, and two writes for one record
+would be two round trips for nothing.
+
+**Gaps**
+
+- **No HTTP surface starts an import.** `runImport` takes its dependencies as arguments and nothing
+  wires them to a route, so an operator cannot yet start one from the UI. The loop is exercised by
+  tests, not by the app.
 - **Tiers 2 and 3 are uncalibrated**, which is why they ship report-only. Calibrating needs a real
   Takeout export; until then the thresholds are guesses and are labelled as such.
+- **The library index for tiers 2/3 has no loader.** `loadLibraryIndex` is a dependency the tests
+  stub; nothing implements it against `/data/records`, so in practice those tiers currently report
+  nothing.
+- **`unsupported` is decided by matching an error message.** A decode failure is distinguished from
+  a transient one by a regex over the thrown text, which is brittle — a reworded error silently
+  becomes retry-forever. A typed error from the derivation path would be better.
 
 *(Sections for items 9b, 8 and onward are appended as each lands.)*
 
