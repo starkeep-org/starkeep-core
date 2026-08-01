@@ -111,7 +111,9 @@ deleted.
   on mismatch. **That belongs to item 2 (streaming/multipart transfer) and is not done yet** —
   today the >5 MB path in `S3ObjectStorageAdapter.put` uploads unverified. This is the plan's
   own "matters exactly for the largest and least replaceable objects", so it must not be
-  forgotten when item 2 lands.
+  forgotten when item 2 lands. **Closed by item 2** — see its section below for both halves
+  (per-part checksums, plus whole-object verification that errors the stream before the upload
+  can complete).
 - **No test proves S3 itself rejects a bad body.** Everything above is against mocks and the
   fake cloud. Only a real presigned PUT against a real bucket does that; it belongs in the AWS
   tier (`e2e-aws`).
@@ -248,7 +250,80 @@ label would let one device's preference silently rewrite every other device's ca
   not the assembled server. Closing this needs a fixture with a `retention` policy in
   `config.json`.
 
-*(Sections for items 2, 3, 3b, 4, 5, 5b and onward are appended as each lands.)*
+### Item 2 — streaming / multipart blob transfer
+
+Two properties the previous buffered implementation could not have.
+
+#### (a) A transfer never materializes the object
+
+`source.get()` → `destination.put()` held the whole object in memory, so a 2 GB clip could not
+sync at all — not slowly, at all. `ObjectStorageAdapter` gains `getStream` / `putStream` over
+**web `ReadableStream`** (not Node streams, so the same interface stays implementable on React
+Native and in a browser for Phase 2), and `transferFile` uses them.
+
+| Test | Where | Asserts |
+|---|---|---|
+| `never calls the buffered get/put` | `sync-engine/__tests__/streamed-transfer.test.ts` | counts calls to `get`/`put` and requires **zero** — this is how we know the streaming path is the real one and not a wrapper around the old behaviour |
+| `round-trips a streamed write and read` | `storage-fs/__tests__/adapter.test.ts` | multi-chunk source, so the write path is exercised as a stream rather than a single enqueue that happens to look like one |
+| `short-circuits when the destination already holds the key` | streamed-transfer | no stream is opened at all |
+| `does not leave the key marked in-flight after a failure` | streamed-transfer | a leaked in-flight marker would make every retry return false without attempting anything, and the record would be stuck forever |
+
+#### (b) A corrupted transfer fails rather than landing — and this closes the item 1b-i gap
+
+The gap recorded under item 1b-i was that multipart uploads went up unverified, because a
+whole-object SHA-256 is not available for multipart (composite-only; full-object multipart
+checksums are CRC-only). Both halves of the fix are now in:
+
+- **Per part** — `putStream` passes `ChecksumAlgorithm: "SHA256"` to `Upload`, so S3 validates
+  each `UploadPart` and rejects a corrupted one, with the stored composite attesting the
+  assembly.
+- **Whole object** — the writer hashes as the bytes go past and **errors the stream at
+  end-of-input** on a mismatch. The ordering is the point: the digest is only final when the
+  stream ends, which is also when the upload wants to complete, so checking *after* the pipe
+  resolves would mean the multipart upload has already completed and the bad object is stored.
+  `verifyingStream` fails from inside `pull` at `done`, which makes the upload reject and abort.
+
+| Guard | Test |
+|---|---|
+| A corrupt transfer stores nothing | `rejects a transfer whose bytes don't match the key, storing nothing` |
+| A truncated stream is caught | `catches a truncated stream` (`stream-verify.test.ts`) — what a dropped connection looks like, and what a length check alone would miss |
+| The failure is a stream *error*, not a return value | `errors the stream rather than closing it when the digest disagrees` — a consumer that finalizes on close would already have stored the object |
+| The FS write is atomic | `leaves nothing at the key when the digest disagrees`, `leaves no partial file behind either`, `does not clobber an existing object when the replacement fails` — writes go to a temp name and rename in, because a half-written file at the real key looks exactly like a complete one to `has()`, which is how a corrupt object becomes something the durability predicate counts as a replica |
+| Records with no derivable hash still transfer | `transfers unverified when no hash is derivable` — `fileHash` falls back to the object key when a record has no `contentHash`, and a key is not a hash; failing those every round would break records predating content hashing |
+| A content-addressed key alone is enough | `still recovers the hash from a content-addressed key alone` |
+| The multipart upload is aborted, not abandoned | code-level: `upload.abort()` in the catch, so a failed upload doesn't linger as billable orphaned parts (S3 charges for them and there is no lifecycle rule to reap them) |
+
+**Bugs found while doing this**
+
+- **A leaked source stream on a failed write.** `transferFile` abandoned the source stream when
+  `putStream` threw, keeping the underlying HTTP response open. Since a failed transfer is
+  retried every round, leaked responses accumulate until the connection pool starves — which
+  surfaces much later as *unrelated* requests hanging. Now explicitly cancelled on both the
+  transfer path and inside the HTTP adapter.
+- **A test fixture with a made-up content hash.** `residency-exchange.test.ts` used
+  `"d".repeat(64)` as the hash of bytes `[4,5,6]`. Once transfers were verified, the transfer
+  correctly failed — and the test looked like a residency bug. Fixture now derives the hash from
+  the bytes. Worth noting as a pattern: **fixtures with fake hashes are now load-bearing lies.**
+
+**Gaps**
+
+- **Nothing exercises a real multipart upload.** The per-part checksum path, `Upload`'s
+  switch-over at the part-size threshold, and `abort()` are all untested — `storage-s3` has no
+  harness that runs a >8 MB body through the SDK. This is the plan's own "matters exactly for
+  the largest and least replaceable objects", so it needs an `e2e-aws` test against a real
+  bucket, not a mock.
+- **A corrupt source retries forever.** A checksum mismatch surfaces as a blob-transfer failure,
+  so the watermark holds and the next round tries again. That is the safe direction — neither
+  silently accepting nor silently skipping corrupt bytes — but it means a permanently corrupt
+  source loops with a warning rather than escalating. Worth an explicit surfaced state when the
+  residency inspector lands.
+- **`Content-Length` on the streamed PUT depends on `sizeBytes`.** S3 rejects a presigned PUT
+  with chunked transfer encoding, so a streamed upload needs an explicit length. Records always
+  carry `sizeBytes`, so this holds in practice; when it doesn't, the request goes out chunked
+  and will fail against real S3 rather than silently uploading something truncated. Untested
+  against real S3 — same `e2e-aws` gap as above.
+
+*(Sections for items 3, 3b, 4, 5, 5b and onward are appended as each lands.)*
 
 ---
 

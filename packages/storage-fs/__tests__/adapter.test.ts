@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -189,6 +190,78 @@ describe("FsObjectStorageAdapter", () => {
       const target = await adapter.resolvePath("real");
       await adapter.putSymlink("linked", target!);
       expect((await adapter.stat("linked"))?.sizeBytes).toBe(10);
+    });
+  });
+
+  describe("streaming", () => {
+    const payload = Buffer.from("streamed contents, not buffered");
+    const hex = createHash("sha256").update(payload as unknown as Uint8Array).digest("hex");
+
+    function source(data: Buffer): ReadableStream<Uint8Array> {
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Two chunks, so the write path is exercised as a stream rather than
+          // as a single enqueue that happens to look like one.
+          controller.enqueue(new Uint8Array(data.subarray(0, 4)));
+          controller.enqueue(new Uint8Array(data.subarray(4)));
+          controller.close();
+        },
+      });
+    }
+
+    async function drain(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
+      const chunks: Buffer[] = [];
+      const reader = stream.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(Buffer.from(value));
+      }
+      return Buffer.concat(chunks);
+    }
+
+    it("round-trips a streamed write and read", async () => {
+      await adapter.putStream("k", source(payload), { contentType: "text/plain" });
+      const stream = await adapter.getStream("k");
+      expect(stream).not.toBeNull();
+      expect((await drain(stream!)).equals(payload)).toBe(true);
+      expect((await adapter.stat("k"))?.contentType).toBe("text/plain");
+    });
+
+    it("returns null streaming a key that isn't there", async () => {
+      expect(await adapter.getStream("nope")).toBeNull();
+    });
+
+    it("accepts a stream matching the expected digest", async () => {
+      await adapter.putStream("k", source(payload), { expectedSha256Hex: hex });
+      expect(await adapter.has("k")).toBe(true);
+    });
+
+    // The write goes to a temp name and is renamed into place, so a stream that
+    // fails partway leaves nothing at the key. A half-written file there would
+    // look exactly like a complete one to has() — which is how a corrupt object
+    // becomes something the durability predicate would count as a replica.
+    it("leaves nothing at the key when the digest disagrees", async () => {
+      await expect(
+        adapter.putStream("k", source(payload), { expectedSha256Hex: "f".repeat(64) }),
+      ).rejects.toThrow(/aborted/);
+      expect(await adapter.has("k")).toBe(false);
+    });
+
+    it("leaves no partial file behind either", async () => {
+      await expect(
+        adapter.putStream("k", source(payload), { expectedSha256Hex: "f".repeat(64) }),
+      ).rejects.toThrow();
+      const listed = await adapter.list("");
+      expect(listed.keys.filter((k) => k.includes("partial"))).toEqual([]);
+    });
+
+    it("does not clobber an existing object when the replacement fails", async () => {
+      await adapter.put("k", Buffer.from("the good bytes"));
+      await expect(
+        adapter.putStream("k", source(payload), { expectedSha256Hex: "f".repeat(64) }),
+      ).rejects.toThrow();
+      expect((await adapter.get("k"))!.data.toString()).toBe("the good bytes");
     });
   });
 });

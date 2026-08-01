@@ -1,7 +1,12 @@
-import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink, readlink, access } from "node:fs/promises";
+import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink, readlink, access, rename } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import type { PutOptions, GetResult, ListOptions, ListResult, ObjectFacts } from "@starkeep/storage-adapter";
+import { verifyingStream } from "@starkeep/storage-adapter";
+import type { PutOptions, PutStreamOptions, GetResult, ListOptions, ListResult, ObjectFacts } from "@starkeep/storage-adapter";
 
 export interface FsObjectStorageAdapterOptions {
   basePath: string;
@@ -58,6 +63,54 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       // Symlink already exists — content-addressed key guarantees same content, skip.
+    }
+  }
+
+  async getStream(key: string): Promise<ReadableStream<Uint8Array> | null> {
+    const filePath = this.keyToPath(key);
+    try {
+      await access(filePath);
+    } catch {
+      return null;
+    }
+    // Node's own conversion — the file is read in chunks, never held whole.
+    return Readable.toWeb(createReadStream(filePath)) as ReadableStream<Uint8Array>;
+  }
+
+  async putStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    options?: PutStreamOptions,
+  ): Promise<void> {
+    const filePath = this.keyToPath(key);
+    await mkdir(dirname(filePath), { recursive: true });
+
+    // Write to a temporary name and rename into place. A stream can fail
+    // partway — including deliberately, when the checksum doesn't match — and
+    // a half-written file at the real key would look exactly like a complete
+    // one to `has()`, which is how a corrupt object becomes a "replica".
+    // rename() within a directory is atomic.
+    const tempPath = `${filePath}.partial-${randomUUID()}`;
+    const verified = options?.expectedSha256Hex
+      ? verifyingStream(body, { key, expectedSha256Hex: options.expectedSha256Hex })
+      : body;
+
+    try {
+      await pipeline(
+        Readable.fromWeb(verified as Parameters<typeof Readable.fromWeb>[0]),
+        createWriteStream(tempPath),
+      );
+      await rename(tempPath, filePath);
+    } catch (err) {
+      await unlink(tempPath).catch(() => {});
+      throw err;
+    }
+
+    if (options?.contentType || options?.metadata) {
+      await writeFile(
+        `${filePath}.meta.json`,
+        JSON.stringify({ contentType: options.contentType, metadata: options.metadata }),
+      );
     }
   }
 

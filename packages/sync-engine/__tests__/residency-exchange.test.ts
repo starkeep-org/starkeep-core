@@ -8,6 +8,7 @@
  * a phone node was impossible.
  */
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import { createHLCClock, createDataRecord } from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../src/sync-engine.js";
@@ -71,19 +72,25 @@ async function setup(
   const cloudStorage = new MockObjectStorageAdapter();
   await Promise.all([localDb.init(), cloudDb.init(), localStorage.init(), cloudStorage.init()]);
 
+  // Real bytes and their real hash. The transfer path verifies the whole
+  // object as it streams, so a fixture with a made-up content hash would fail
+  // the transfer for the right reason and make this test look like a residency
+  // bug.
+  const blob = Buffer.from([4, 5, 6]);
+  const blobHash = createHash("sha256").update(blob as unknown as Uint8Array).digest("hex");
   const cloudRecord = createDataRecord(
     {
       type: "image/jpeg",
       originAppId: "test",
-      contentHash: "d".repeat(64),
-      objectStorageKey: `shared/image/dd/${"d".repeat(64)}`,
+      contentHash: blobHash,
+      objectStorageKey: `shared/image/${blobHash.slice(0, 2)}/${blobHash}`,
       mimeType: "image/jpeg",
-      sizeBytes: 3,
+      sizeBytes: blob.length,
     },
     cloudClock,
   );
   await cloudDb.put(cloudRecord);
-  await cloudStorage.put(cloudRecord.objectStorageKey, new Uint8Array([4, 5, 6]));
+  await cloudStorage.put(cloudRecord.objectStorageKey, blob);
 
   const decisions: BlobCandidate[] = [];
   const landed: BlobCandidate[] = [];
