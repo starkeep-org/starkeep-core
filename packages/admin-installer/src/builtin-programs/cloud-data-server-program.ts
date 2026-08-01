@@ -112,6 +112,15 @@ const ARCHIVE_MIN_OBJECT_BYTES = 1024 * 1024;
 
 const DEFAULT_ARCHIVE_HOLD_DAYS = 7;
 
+/**
+ * Where inventory reports land.
+ *
+ * A reserved prefix inside the files bucket, deliberately outside `shared/` so
+ * the reports are not themselves inventoried, are not served by CloudFront, and
+ * cannot be mistaken for record blobs by anything walking the shared namespace.
+ */
+const INVENTORY_PREFIX = "_starkeep/inventory/";
+
 export function buildCloudDataServerProgram(
   ctx: CloudDataServerProgramContext,
 ): () => Promise<Record<string, unknown>> {
@@ -419,6 +428,19 @@ export function buildCloudDataServerProgram(
               ],
               filterPrefix: "shared/",
             },
+            {
+              // The daily inventory report landing. Keyed on the checksum file
+              // because S3 writes the data files first and the checksum last,
+              // so anything else would trigger ingestion of a partial report.
+              //
+              // A separate entry rather than widening the prefix above: these
+              // are different events about different things, and one filter
+              // covering both would deliver every shared-object creation too.
+              lambdaFunctionArn: fn.arn,
+              events: ["s3:ObjectCreated:*"],
+              filterPrefix: INVENTORY_PREFIX,
+              filterSuffix: "manifest.checksum",
+            },
           ],
         },
         // S3 validates that it may invoke the function while *creating* the
@@ -426,6 +448,53 @@ export function buildCloudDataServerProgram(
         // with an unhelpful "unable to validate the following destination".
         { dependsOn: [s3InvokePermission] },
       );
+    }
+
+    // -----------------------------------------------------------------------
+    // Availability backstop — daily S3 Inventory
+    // -----------------------------------------------------------------------
+    //
+    // Event delivery is at-least-once, not exactly-once, and the handler
+    // deliberately swallows a malformed notification rather than letting S3
+    // redeliver a batch forever. Both are right, and both mean something can be
+    // lost — so without this a record can stay wrong indefinitely, and the
+    // wrongness is invisible until somebody tries to read it.
+    //
+    // Inventory rather than a HeadObject sweep: at roughly $0.0025 per million
+    // objects listed it is nearly free, where probing a 300k-object library
+    // daily is 300k requests. That cost difference is the reason availability
+    // is a maintained fact at all.
+    //
+    // Written back into the same bucket under a reserved prefix. A second
+    // bucket would need its own policy, lifecycle and teardown for data that is
+    // regenerated daily and worthless the moment it is read.
+    if (!ctx.ephemeral) {
+      new aws.s3.Inventory(`${ctx.stackPrefix}-files-inventory`, {
+        bucket: bucket.id,
+        name: "availability",
+        includedObjectVersions: "Current",
+        schedule: { frequency: "Daily" },
+        // Only shared blobs. App-syncable files are not subject to archiving,
+        // so listing them would be paying to enumerate rows nothing reads.
+        filter: { prefix: "shared/" },
+        optionalFields: [
+          "StorageClass",
+          // The field that distinguishes a cheap-but-readable I-T object from
+          // one that has sunk into an asynchronous archive tier. Without it the
+          // reconcile would read storage class alone and call the second one
+          // readable — the exact confusion `stat()` was widened to avoid.
+          "IntelligentTieringAccessTier",
+          "Size",
+        ],
+        destination: {
+          bucket: {
+            bucketArn: bucket.arn,
+            format: "CSV",
+            prefix: INVENTORY_PREFIX,
+            accountId: ctx.accountId,
+          },
+        },
+      });
     }
 
     // -----------------------------------------------------------------------

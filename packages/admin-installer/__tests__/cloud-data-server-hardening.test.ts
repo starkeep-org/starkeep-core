@@ -242,9 +242,16 @@ describe("availability maintenance (media plan item 19b)", () => {
     await run(false);
     const notifications = bucketNotification();
     expect(notifications).toHaveLength(1);
-    const fns = notifications[0]!.inputs.lambdaFunctions as Array<{ events: string[] }>;
-    expect(fns).toHaveLength(1);
-    expect(fns[0]!.events.sort()).toEqual([
+    // Two subscriptions: readability events on shared blobs, and the inventory
+    // manifest landing. Separate entries rather than one broad filter, because
+    // a filter covering both would deliver every shared-object creation too.
+    const fns = notifications[0]!.inputs.lambdaFunctions as Array<{
+      events: string[];
+      filterPrefix?: string;
+    }>;
+    expect(fns).toHaveLength(2);
+    const shared = fns.find((f) => f.filterPrefix === "shared/")!;
+    expect(shared.events.sort()).toEqual([
       "s3:LifecycleTransition",
       "s3:ObjectRestore:Completed",
       "s3:ObjectRestore:Delete",
@@ -256,8 +263,13 @@ describe("availability maintenance (media plan item 19b)", () => {
   // only discovered when someone opens it.
   it("subscribes to restore expiry, not just restore completion", async () => {
     await run(false);
-    const fns = bucketNotification()[0]!.inputs.lambdaFunctions as Array<{ events: string[] }>;
-    expect(fns[0]!.events).toContain("s3:ObjectRestore:Delete");
+    const fns = bucketNotification()[0]!.inputs.lambdaFunctions as Array<{
+      events: string[];
+      filterPrefix?: string;
+    }>;
+    expect(fns.find((f) => f.filterPrefix === "shared/")!.events).toContain(
+      "s3:ObjectRestore:Delete",
+    );
   });
 
   // A newly written object is instant, which is already the default for a key
@@ -265,8 +277,60 @@ describe("availability maintenance (media plan item 19b)", () => {
   // something nothing needed told.
   it("does not subscribe to object creation", async () => {
     await run(false);
-    const fns = bucketNotification()[0]!.inputs.lambdaFunctions as Array<{ events: string[] }>;
-    expect(fns[0]!.events.join(",")).not.toContain("ObjectCreated");
+    const fns = bucketNotification()[0]!.inputs.lambdaFunctions as Array<{
+      events: string[];
+      filterPrefix?: string;
+    }>;
+    // The inventory subscription does use ObjectCreated, but only under its own
+    // reserved prefix — the shared-blob subscription must not.
+    expect(fns.find((f) => f.filterPrefix === "shared/")!.events.join(",")).not.toContain(
+      "ObjectCreated",
+    );
+  });
+
+  // Without a backstop, an event that was never delivered leaves a record
+  // wrong indefinitely — and the wrongness is invisible until somebody reads
+  // it. Inventory rather than a HeadObject sweep because at ~$0.0025 per
+  // million objects it is nearly free, where probing a 300k-object library
+  // daily is 300k requests.
+  it("configures a daily inventory as the backstop", async () => {
+    await run(false);
+    const inventories = byTypeSuffix("s3/inventory:Inventory");
+    expect(inventories).toHaveLength(1);
+    expect((inventories[0]!.inputs.schedule as { frequency: string }).frequency).toBe("Daily");
+  });
+
+  // Storage class alone would call an object in I-T's asynchronous archive
+  // tier readable. It exists and cannot be read.
+  it("asks for the access tier, not just the storage class", async () => {
+    await run(false);
+    const fields = byTypeSuffix("s3/inventory:Inventory")[0]!.inputs.optionalFields as string[];
+    expect(fields).toContain("StorageClass");
+    expect(fields).toContain("IntelligentTieringAccessTier");
+  });
+
+  // App-syncable files are not subject to archiving, so listing them would be
+  // paying to enumerate rows nothing reads.
+  it("inventories only shared blobs", async () => {
+    await run(false);
+    const filter = byTypeSuffix("s3/inventory:Inventory")[0]!.inputs.filter as { prefix: string };
+    expect(filter.prefix).toBe("shared/");
+  });
+
+  // The report has to trigger its own ingestion, or it accumulates unread and
+  // availability quietly has no backstop while appearing to have one.
+  it("subscribes to the inventory manifest landing, keyed on the checksum file", async () => {
+    await run(false);
+    const fns = bucketNotification()[0]!.inputs.lambdaFunctions as Array<{
+      events: string[];
+      filterPrefix?: string;
+      filterSuffix?: string;
+    }>;
+    const inventoryTrigger = fns.find((f) => f.filterPrefix?.includes("inventory"));
+    expect(inventoryTrigger, "nothing ingests the inventory report").toBeTruthy();
+    // S3 writes data files first and the checksum last, so keying on anything
+    // else would ingest a partial report.
+    expect(inventoryTrigger!.filterSuffix).toBe("manifest.checksum");
   });
 
   it("grants S3 permission to invoke the function, scoped to the bucket", async () => {
@@ -315,5 +379,10 @@ describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
   it("creates no bucket notification", async () => {
     await run(true);
     expect(bucketNotification()).toHaveLength(0);
+  });
+
+  it("creates no inventory", async () => {
+    await run(true);
+    expect(byTypeSuffix("s3/inventory:Inventory")).toHaveLength(0);
   });
 });
