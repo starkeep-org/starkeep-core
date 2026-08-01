@@ -10,7 +10,12 @@ import { generateKeyPairSync } from "node:crypto";
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
-import { S3Client, HeadObjectCommand, PutObjectTaggingCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  HeadObjectCommand,
+  PutObjectTaggingCommand,
+  RestoreObjectCommand,
+} from "@aws-sdk/client-s3";
 import { signRequest } from "@starkeep/app-client";
 import { dataRecordObjectKey, serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
@@ -1427,6 +1432,7 @@ describe("availability and restore", () => {
     it("issues the restore only on explicit confirmation", async () => {
       const db = archivedDb();
       setDbFactory(db);
+      s3Mock.on(RestoreObjectCommand).resolves({});
       const res = await handler(
         signedEvent({
           appId: "app1",
@@ -1439,6 +1445,47 @@ describe("availability and restore", () => {
       expect(res.statusCode).toBe(200);
       expect(bodyOf(res)["restoring"]).toBe(true);
       expect(db.calls(/insert into "shared"\."object_availability"/)).toHaveLength(1);
+    });
+
+    // The gap this closes: the endpoint used to record `restoring` and thaw
+    // nothing, which is worse than not having it — it reports progress on a
+    // restore nobody started, and the object never becomes readable.
+    it("actually asks S3 to thaw the object", async () => {
+      setDbFactory(archivedDb());
+      s3Mock.on(RestoreObjectCommand).resolves({});
+      await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/data/records/rec-1/restore",
+          body: { confirm: true },
+        }),
+        context,
+      );
+      const calls = s3Mock.commandCalls(RestoreObjectCommand);
+      expect(calls, "no RestoreObject was issued").toHaveLength(1);
+      const input = calls[0]!.args[0].input as {
+        RestoreRequest?: { Days?: number; GlacierJobParameters?: { Tier?: string } };
+      };
+      expect(input.RestoreRequest?.GlacierJobParameters?.Tier).toBe("Standard");
+      // The thawed copy is held long enough that a print session or an export
+      // does not re-thaw the same object; the charge is per restore.
+      expect(input.RestoreRequest?.Days).toBeGreaterThan(1);
+    });
+
+    it("does not ask S3 to thaw anything when only an estimate was requested", async () => {
+      setDbFactory(archivedDb());
+      s3Mock.on(RestoreObjectCommand).resolves({});
+      await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/data/records/rec-1/restore",
+          body: {},
+        }),
+        context,
+      );
+      expect(s3Mock.commandCalls(RestoreObjectCommand)).toHaveLength(0);
     });
 
     // Standard rather than Bulk by default: the difference is hundredths of a

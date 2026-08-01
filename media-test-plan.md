@@ -52,14 +52,14 @@ Severity is about the consequence of shipping with it, not the effort to close i
 
 | Severity | Gap | Item | What closes it |
 |---|---|---|---|
-| **Blocking** | `RestoreObject` is never actually called — the endpoint records state, returns an estimate, and thaws nothing. It **looks complete and is not**. | 5b | Item 19 |
-| **Blocking** | Nothing maintains `availability`. Every record reads `instant` in a real deployment regardless of what happened to it. | 5b | Item 19b |
+| ~~Blocking~~ | ~~`RestoreObject` is never called.~~ **Closed (item 19)** — the endpoint issues it, and a test asserts the SDK call rather than the recorded state. | 5b | — |
+| ~~Blocking~~ | ~~Nothing maintains `availability`.~~ **Closed (item 19b)** — S3 notifications for transition/restore/expiry are subscribed and applied. The daily Inventory reconcile is still absent; see below. | 5b | — |
 | **Blocking** | Multipart uploads are unverified above the part threshold in the buffered `put()` path; the streamed path verifies, the convenience method does not. | 1b-i / 2 | An `e2e-aws` test plus routing all large writes through `putStream` |
 | **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily. | 7 | A node-local (non-syncable) table |
 | **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
 | ~~Deferred~~ | ~~No lifecycle rule exists.~~ **Closed (item 18)** — one tag-filtered rule requiring both tags, above a ~1 MB floor. | 4/5 | — |
 | ~~Deferred~~ | ~~Nothing declares `archive` intent.~~ **Closed (item 17)** — Photos declares it for originals; renditions stay `instant`. | 4/5 | — |
-| **Deferred** | `absent` is never written on the cloud, so a `no-cloud` record reads `instant` there. | 5b | Item 19b |
+| **Deferred** | `absent` is written on object removal, but a `no-cloud` record that was never uploaded still reads `instant` — there is no event for an object that never existed. | 5b | The Inventory reconcile |
 | **Deferred** | The local data server does not report `availability` at all. Harmless today (local bytes are readable or elided) and therefore invisible. | 5b | Wiring the local `/data/records` response |
 | **Deferred** | No eviction pass is scheduled; `runEviction` is reachable and uncalled. | 1b | Item 15/34 (residency inspector) |
 | **Deferred** | `protectedLocally` is never set, so the durability predicate is the only thing between eviction and a last copy. | 1b | Item 7's derivation-input tracking |
@@ -930,6 +930,84 @@ holds got wider.
   "original is functionally the top of its own ladder" floor is defined in `ladder.ts`
   (`isOwnTopOfLadder`) and **not consulted by the gate**, so a 300 px original that satisfies the
   size floor could still be tagged despite archiving saving nothing.
+
+### Items 19 + 19b — the restore actually restores; availability is maintained
+
+Closes both remaining **Blocking** gaps.
+
+#### Item 19 — the endpoint stopped lying
+
+It previously recorded `restoring`, returned a correct estimate, enforced the rate limit, and
+**thawed nothing**. That is worse than not having the endpoint: it reports progress on a restore
+nobody started, and the object never becomes readable.
+
+| Test | Asserts |
+|---|---|
+| `actually asks S3 to thaw the object` | the **SDK call**, not the recorded state — asserting the state is what let the gap exist |
+| — same test | Standard tier, and a hold of more than a day so a print session does not re-thaw |
+| `does not ask S3 to thaw anything when only an estimate was requested` | the estimate step has no side effects |
+
+`restoreObject` returns `"already-in-progress"` rather than throwing when S3 reports one, because
+that is the ordinary outcome of two clients asking at once — treating it as a failure would tempt
+a caller into a retry that cannot help and costs a request.
+
+#### Item 19b — availability is fed by real events
+
+Without this, `availability` reports whatever a record was written as **forever**: an archived
+original still claims to be instantly readable, and the 409 protecting callers from a silent
+twelve-hour stall never fires. The field would be decoration.
+
+**The wiring is real, not just the logic** — that distinction is what separates closing this gap
+from moving it. `BucketNotification` + `lambda.Permission` are created in the Pulumi program and
+asserted:
+
+| Test | Asserts |
+|---|---|
+| `subscribes the Lambda to the events that change readability` | exactly transition / restore-completed / restore-expired |
+| `subscribes to restore expiry, not just restore completion` | the one most easily forgotten — without it an object reads as available **forever** after one restore, fine for a week and wrong for months |
+| `does not subscribe to object creation` | a new object is instant, which is already the default for a key with no row; subscribing would write a row per upload to record nothing |
+| `grants S3 permission to invoke the function, scoped to the bucket` | S3 cannot invoke without it, and the apply fails with an unhelpful message if the permission is created second |
+| `creates no bucket notification` (ephemeral) | — |
+
+The mapping layer (`availability-events.ts`, 14 tests) is pure and provider-shaped-but-not-coupled:
+
+- **Transitions between readable classes record nothing.** One row per object per tiering decision,
+  all saying the same thing, is churn rather than information.
+- **A removal is `absent`, not `archived`.** Collapsing them would send a caller to a restore
+  endpoint with nothing to restore.
+- **Intelligent-Tiering's async tiers are handled** even though the installer asserts we never
+  enable them — "must never" is doing a lot of work in a sentence about someone else's console,
+  and the cost of ignoring them is a read that hangs for twelve hours while availability insists
+  everything is fine.
+- **Out-of-order delivery is resolved by observation time, not arrival order.** A nightly snapshot
+  taken at 03:00 must not overwrite a transition that happened at 04:00 merely by arriving after
+  it. A tie keeps what is stored, because at-least-once delivery redelivers the same event.
+
+Events are written as **Starkeep Drive**, the standing cloud-write identity for shared-record
+custody — the Lambda's own execution role deliberately has no data-plane access. They are
+delivered straight to the same Lambda rather than via SNS/SQS: the handler is idempotent, so
+at-least-once needs no deduplication, and a queue would add a component whose only job is holding
+events for a consumer that is already warm.
+
+**Gaps**
+
+- **No daily Inventory reconcile.** The plan specifies one as the *backstop* for events that were
+  never delivered, and it does not exist. Events are best-effort by design (a poison record is
+  swallowed so S3 does not redeliver a batch forever), which makes the absent backstop more
+  significant than it sounds: anything genuinely lost stays wrong until something else touches the
+  object. It is also what would populate `absent` for records whose bytes were never uploaded, and
+  what the plan wants for reporting objects whose actual class disagrees with their declared
+  intent.
+- **Nothing polls a restore to completion.** The endpoint records `restoring` with an *estimated*
+  ready time; the `ObjectRestore:Completed` event is what actually flips it. If that event is
+  missed, the record stays `restoring` indefinitely — precisely the case the reconcile would fix.
+- **No notification test against real S3.** Whether the event shape matches what
+  `handleS3Availability` parses is only observable against a real bucket. The key decoding
+  (`+` → space, then percent-decode) is exactly the sort of thing that is wrong in one direction
+  for keys containing unusual characters and silent about it.
+- **The local data server still does not report availability.** Intended to close alongside this
+  and deferred for size; harmless today because local bytes are readable or elided, and therefore
+  still invisible.
 
 *(Sections for items 9b, 8 and onward are appended as each lands.)*
 

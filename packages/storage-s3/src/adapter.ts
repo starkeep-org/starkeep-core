@@ -7,6 +7,7 @@ import {
   HeadBucketCommand,
   HeadObjectCommand,
   PutObjectTaggingCommand,
+  RestoreObjectCommand,
 } from "@aws-sdk/client-s3";
 import type { PutObjectCommandInput } from "@aws-sdk/client-s3";
 import { getSignedUrl as awsGetSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -302,6 +303,34 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
         },
       }),
     );
+  }
+
+  async restoreObject(
+    key: string,
+    options: { tier: string; days: number },
+  ): Promise<"started" | "already-in-progress"> {
+    try {
+      await this.getClient().send(
+        new RestoreObjectCommand({
+          Bucket: this.options.bucketName,
+          Key: this.resolveKey(key),
+          RestoreRequest: {
+            Days: options.days,
+            GlacierJobParameters: { Tier: options.tier as "Standard" | "Bulk" | "Expedited" },
+          },
+        }),
+      );
+      return "started";
+    } catch (error: unknown) {
+      // S3 reports an in-flight restore as an error, not a success. Treating it
+      // as a failure would make the ordinary case of two clients asking at once
+      // look broken, and would tempt a caller into retrying — which cannot help
+      // and costs another request.
+      if ((error as Error)?.name === "RestoreAlreadyInProgress") {
+        return "already-in-progress";
+      }
+      throw error;
+    }
   }
 
   async delete(key: string): Promise<void> {

@@ -368,6 +368,67 @@ export function buildCloudDataServerProgram(
     );
 
     // -----------------------------------------------------------------------
+    // Availability maintenance — S3 event notifications
+    // -----------------------------------------------------------------------
+    //
+    // This is what makes `availability` mean anything. Without it every record
+    // reports whatever it was written as, forever: an archived original would
+    // still claim to be instantly readable, and the 409 that protects callers
+    // from a silent twelve-hour stall would never fire.
+    //
+    // Only the event kinds that change *readability* are subscribed. Object
+    // creation is deliberately not among them — a newly written object is
+    // instant, which is already the default for a key with no stored row, so
+    // subscribing would write a row per upload to record something nothing
+    // needed told.
+    //
+    // Delivered straight to the same Lambda rather than through SNS or SQS: the
+    // handler is idempotent (observations carry their own timestamp and older
+    // ones are discarded), so at-least-once delivery needs no deduplication,
+    // and a queue would add a component whose only job is holding events for a
+    // consumer that is already warm.
+    if (!ctx.ephemeral) {
+      const s3InvokePermission = new aws.lambda.Permission(
+        `${ctx.stackPrefix}-files-notify-invoke`,
+        {
+          action: "lambda:InvokeFunction",
+          function: fn.name,
+          principal: "s3.amazonaws.com",
+          sourceArn: bucket.arn,
+        },
+      );
+
+      new aws.s3.BucketNotification(
+        `${ctx.stackPrefix}-files-notify`,
+        {
+          bucket: bucket.id,
+          lambdaFunctions: [
+            {
+              lambdaFunctionArn: fn.arn,
+              events: [
+                // A lifecycle transition into Deep Archive is the moment an
+                // object stops being readable.
+                "s3:LifecycleTransition",
+                // A thaw finished; a temporary readable copy now exists.
+                "s3:ObjectRestore:Completed",
+                // The thawed copy lapsed and the object is archived again.
+                // Without this an object reads as available forever after one
+                // restore — the failure mode that looks fine right up until
+                // someone opens it months later.
+                "s3:ObjectRestore:Delete",
+              ],
+              filterPrefix: "shared/",
+            },
+          ],
+        },
+        // S3 validates that it may invoke the function while *creating* the
+        // notification, so the permission must exist first or the apply fails
+        // with an unhelpful "unable to validate the following destination".
+        { dependsOn: [s3InvokePermission] },
+      );
+    }
+
+    // -----------------------------------------------------------------------
     // API Gateway v2 + Cognito JWT authorizer + explicit reserved sub-namespaces
     //
     // The cloud-data-server lambda is reached via:

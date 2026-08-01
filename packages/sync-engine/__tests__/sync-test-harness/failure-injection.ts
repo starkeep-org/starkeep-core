@@ -112,6 +112,13 @@ export class FailingObjectStorageAdapter implements ObjectStorageAdapter {
     return this.base.stat(key);
   }
 
+  restoreObject(
+    key: string,
+    options: { tier: string; days: number },
+  ): Promise<"started" | "already-in-progress"> {
+    return this.base.restoreObject(key, options);
+  }
+
   setTags(key: string, tags: Record<string, string>): Promise<void> {
     return this.base.setTags(key, tags);
   }

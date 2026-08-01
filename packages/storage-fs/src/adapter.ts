@@ -202,6 +202,17 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     );
   }
 
+  async restoreObject(
+    key: string,
+    _options: { tier: string; days: number },
+  ): Promise<"started" | "already-in-progress"> {
+    // A local filesystem has no archive tier, so nothing is ever unreadable and
+    // there is nothing to restore. Reporting "started" rather than throwing is
+    // the honest answer to "make this readable": it already is.
+    void key;
+    return "started";
+  }
+
   async delete(key: string): Promise<void> {
     const filePath = this.keyToPath(key);
     try {

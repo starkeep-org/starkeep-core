@@ -352,6 +352,23 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     }
   }
 
+  async restoreObject(
+    key: string,
+    options: { tier: string; days: number },
+  ): Promise<"started" | "already-in-progress"> {
+    const body = JSON.stringify(options);
+    const res = await this.fetchImpl(`${this.url(key)}/restore`, {
+      method: "POST",
+      headers: this.headers("POST", `/files/${key}/restore`, body, {
+        "Content-Type": "application/json",
+      }),
+      body,
+    });
+    if (!res.ok) throw new Error(`restore ${key} failed: ${res.status} ${res.statusText}`);
+    const parsed = (await res.json()) as { result?: "started" | "already-in-progress" };
+    return parsed.result ?? "started";
+  }
+
   async delete(key: string): Promise<void> {
     // DELETE signs over the empty body — matches the cloud verifier, which
     // treats GET/HEAD as empty and accepts an empty DELETE body the same way
