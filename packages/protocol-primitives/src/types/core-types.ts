@@ -76,6 +76,21 @@ const IMAGE_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
   { name: "focal_length_mm", type: "real" },
   { name: "gps_lat", type: "real" },
   { name: "gps_lon", type: "real" },
+  // Both are deterministic from the bytes, which is what makes them metadata
+  // rather than labels: a label is an app's *assertion* about a record, and
+  // these are facts anyone re-deriving from the same file would reproduce. Both
+  // are computed during derivation, when the decoded bitmap is already in hand.
+  //
+  // perceptual_hash — near-duplicate detection. Deliberately not a substitute
+  // for content_hash: it matches re-encodes and resizes, which is exactly what
+  // makes it useful for import dedup and exactly what makes it unsafe as an
+  // identity. It is a candidate-finder, never a decision.
+  { name: "perceptual_hash", type: "text" },
+  // thumb_hash — a ~25-byte inline placeholder, rendered client-side with zero
+  // requests. It rides the record itself precisely so that the first frame of a
+  // grid needs no network at all; putting it in object storage would defeat the
+  // entire point by making the placeholder cost a request.
+  { name: "thumb_hash", type: "text" },
 ];
 
 const VIDEO_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
@@ -89,6 +104,10 @@ const VIDEO_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
   { name: "captured_at", type: "timestamp" },
   { name: "gps_lat", type: "real" },
   { name: "gps_lon", type: "real" },
+  // Same rationale as the image columns: a video's poster frame gets a
+  // ThumbHash too, and a grid mixing stills and clips must not have a hole
+  // where one kind of placeholder should be.
+  { name: "thumb_hash", type: "text" },
 ];
 
 const AUDIO_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
@@ -211,6 +230,24 @@ const TYPE_SPECS: readonly TypeSpec[] = [
   { category: "image", format: "tiff", extensions: ["tif", "tiff"] },
   { category: "image", format: "svg", extensions: ["svg"] },
   { category: "image", format: "ico", extensions: ["ico"] },
+  // Camera raw. Until these existed, `.dng` fell through to `other/other` —
+  // which is Drive-only and ungrantable to installable apps, so ProRAW was
+  // invisible to Photos entirely. That was a live bug, not a missing feature:
+  // the files synced and no app could be granted them.
+  //
+  // Each maker's raw format is its own type rather than one shared `image/raw`,
+  // because they are not interchangeable — the embedded-preview layout that
+  // derivation reads differs per vendor, and a single type would leave nothing
+  // to branch on. Grants are per category, so an app granted `image` gets all
+  // of them regardless.
+  { category: "image", format: "dng", extensions: ["dng"] },
+  { category: "image", format: "cr2", extensions: ["cr2"] },
+  { category: "image", format: "cr3", extensions: ["cr3"] },
+  { category: "image", format: "nef", extensions: ["nef"] },
+  { category: "image", format: "arw", extensions: ["arw"] },
+  { category: "image", format: "raf", extensions: ["raf"] },
+  { category: "image", format: "orf", extensions: ["orf"] },
+  { category: "image", format: "rw2", extensions: ["rw2"] },
   // video
   { category: "video", format: "mp4", extensions: ["mp4"] },
   { category: "video", format: "mov", extensions: ["mov"] },
