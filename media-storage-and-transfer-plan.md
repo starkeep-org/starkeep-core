@@ -1,7 +1,13 @@
 # Media storage & transfer plan — photos and video
 
 **Status:** proposal, not yet implemented. Branch `media-storage-and-video` in both `starkeep-core` and `starkeep-apps`.
-**Date:** 2026-07-31
+**Date:** 2026-07-31 *(video-poster rename and the §8.1 libvips rejection added 2026-08-01)*
+
+> **This is the working document — the reasoning, the alternatives considered, the cost derivations,
+> and the verification of current behaviour. It is kept for reference.**
+> **For the build spec, see [`media-implementation-plan.md`](./media-implementation-plan.md)**, which
+> distils this into what to build and in what order. That doc is the one to work from; this one is
+> where its decisions are justified.
 
 Covers: which reduced sizes to generate, when and where they are generated, how they are stored, which sizes are served to which consumer (UIs and on-device AI), cloud and local storage policy, configuration, and the AWS/latency cost model. Adds video support and modern-format support to Photos as part of the same design, because they are the same problem.
 
@@ -95,7 +101,7 @@ There are two ladders — one for stills, one for video — and an earlier draft
 | Ladder | Classes, smallest first |
 |---|---|
 | **Still** (§3.1) | `image-thumb`, `image-medium`, `image-screen`, `image-large` — plus `image-motion` / `image-motion-preview` for Live Photos (§8.4) |
-| **Video** (§3.3) | `video-poster-thumb`, `video-poster-screen` *(stills)*; `video-skim`, `video-720p`, `video-1080p` *(motion)* |
+| **Video** (§3.3) | `video-poster-thumb`, `video-poster-720p` *(stills)*; `video-skim`, `video-720p`, `video-1080p` *(motion)* |
 | **Both** | `original`, `crop` — unprefixed, see rule 4 |
 
 The two ladders are not in correspondence rung-for-rung and should not be read as a matrix: the
@@ -105,8 +111,8 @@ nothing analogous to `video-skim`.
 Four rules make this unambiguous:
 
 1. **The prefix names the parent record's media type, not the rendition's own.** A video's poster frames are still images but belong to the video ladder, hence `video-poster-thumb`. The converse case is §8.4's Live Photo motion clip: video bytes hanging off an *image* record, hence `image-motion`. That one reads awkwardly and is the only place the rule strains; the alternative — prefixing by the bytes — would break the far more common poster case and split the video ladder in half.
-2. **`poster-` is kept rather than folded away.** `video-poster-screen` is longer than `video-screen`, but it preserves the distinction that matters inside the video ladder: `video-poster-*` are stills, `video-skim`/`video-720p`/`video-1080p` are motion. A `video-screen` that turned out to be an AVIF still would be a new instance of exactly the confusion this section removes.
-3. **The video playback rungs are named by resolution, not by role.** They were `preview` and `hd`, which was the worse half of the naming problem: "preview" is used in this document for at least four unrelated things — the ThumbHash placeholder (§3.2), the DNG embedded JPEG preview (§7.6, §8.2), "print preview" in the `image-large` row, and the Live Photo playback clip (§8.4) — and "HD" does not say which HD. `video-720p` and `video-1080p` say exactly what they are and cannot collide with anything. The still classes stay role-named (`thumb`/`medium`/`screen`/`large`) because their long edges are still under test (§3.4) and pinning a pixel count into the name would make the §3.4 outputs a rename; the video playback tiers, by contrast, are standard resolutions that will not move.
+2. **`poster-` is kept rather than folded away.** `video-poster-720p` is one token longer than `video-720p`, but it preserves the distinction that matters inside the video ladder: `video-poster-*` are stills, `video-skim`/`video-720p`/`video-1080p` are motion. A bare `video-720p` that turned out to be an AVIF still would be a new instance of exactly the confusion this section removes. That the two names differ only by `poster-` is right rather than risky: the poster's maximum is 1280 px *because* it must match the playback rung (§3.3), so the near-identical names record a real coupling.
+3. **The video playback rungs are named by resolution, not by role.** They were `preview` and `hd`, which was the worse half of the naming problem: "preview" is used in this document for at least four unrelated things — the ThumbHash placeholder (§3.2), the DNG embedded JPEG preview (§7.6, §8.2), "print preview" in the `image-large` row, and the Live Photo playback clip (§8.4) — and "HD" does not say which HD. `video-720p` and `video-1080p` say exactly what they are and cannot collide with anything. The still classes stay role-named (`thumb`/`medium`/`screen`/`large`) because their long edges are still under test (§3.4) and pinning a pixel count into the name would make the §3.4 outputs a rename; the video playback tiers, by contrast, are standard resolutions that will not move. **`video-poster-720p` follows the same rule for a derived reason**: its maximum is not an independent choice but is pinned to `video-720p`'s (§3.3), so it inherits that rung's fixed resolution and can safely carry it in the name. `video-poster-thumb` stays role-named because it is pinned to the grid tile, not to a playback resolution.
 4. **`original` and `crop` stay unprefixed.** They mean the same thing in both ladders and are never ambiguous. *(An earlier draft also had `native`; §3.1.1's max-size semantics removed it.)* `original` is the one class that exists in both, so where the two need distinguishing — §7.2's budgets are the only place — it is spelled out in words rather than given a prefix it would not otherwise carry.
 
 The one surviving use of "preview" as a class name is `image-motion-preview` (§8.4), the short playable clip for a Live Photo. It keeps the name only because §8.4 has not yet fixed a resolution for it; when it does, it should become `image-motion-<res>` on rule 3.
@@ -215,7 +221,7 @@ max)`. Video's two chains are independent:
 | Class | Maximum | Generated when source exceeds |
 |---|---|---|
 | `video-poster-thumb` | 400 px | *(always)* |
-| `video-poster-screen` | 1280 px | 400 px |
+| `video-poster-720p` | 1280 px | 400 px |
 | `video-skim` | 480 px, 2 fps, ≤20 s out | *(always — see below)* |
 | `video-720p` | 1280 px / ~1.5 Mbps | *(always, subject to the clause below)* |
 | `video-1080p` | 1920 px / ~4 Mbps | 1280 px |
@@ -262,7 +268,7 @@ The first and third are measurable on the Android app (§7.6) and should be sett
 | Size class | Max spec | Typical (30 s clip) | Storage class | Serves |
 |---|---|---|---|---|
 | `video-poster-thumb` | 400 px still from frame ~1 s | ~20 KB | I-T (stays at Standard rate) | grid tile |
-| `video-poster-screen` | 1280 px still | ~110 KB | I-T (stays at Standard rate) | larger-thumbnail UIs, pre-roll / paused state |
+| `video-poster-720p` | 1280 px still | ~110 KB | I-T (stays at Standard rate) | larger-thumbnail UIs, pre-roll / paused state |
 | `video-skim` | ~480 px, 2 fps, 8× speed, capped at ~20 s output | ~80 KB | I-T (stays at Standard rate) | hover / long-press identification — **generated for every video** |
 | `video-720p` | 720p H.264 ~1.5 Mbps, full framerate | ~5.6 MB | Intelligent-Tiering | actual inline playback |
 | `video-1080p` *(optional)* | 1080p H.264 ~4 Mbps | ~15 MB | Intelligent-Tiering | TV / large-screen playback |
@@ -274,7 +280,7 @@ The first and third are measurable on the Android app (§7.6) and should be sett
 - **`video-skim` sizing rule:** speed factor = `max(8, duration_seconds / 20)`, so output never exceeds ~20 s regardless of source length. A 30 s clip → 3.75 s at 2 fps ≈ 8 frames; a 5-minute clip → 20 s at 2 fps = 40 frames, not 600. Without the cap, long videos produce absurd skims. The frame *ceiling* is 40 either way; what 2 fps changes is the short-clip case, which is the common one — a typical clip's skim halves to ~80 KB, which takes the class below the 128 KB line and leaves it unmanaged at the Standard rate under Intelligent-Tiering (§5.3.2).
 - **`video-skim` is probably better as an animated image than a video.** At 8–40 frames, animated AVIF or WebP renders in a plain `<img>` — no player, autoplays, loops, trivially cacheable, no range requests. **Needs testing** (the operator's note): frame rate, speed factor, and container are all empirical, and 4 fps / 8× is a starting hypothesis rather than a known-good answer.
 - **`video-720p` is mandatory for every video.** Playback from an archive tier is impossible, so a video whose preview is missing is a video you cannot watch for 48 hours. The ladder-complete gate (§5.2) enforces this.
-- **§3.1.1's max-size semantics apply here on two axes**, and matter more than for stills because video transcodes are lossy in both directions. Resolution and bitrate are both maxima: a transcode is `min(source, class max)` on each. A 480p 800 kbps clip therefore yields no separate `video-720p` — both axes would be unchanged, so the output would be a same-size re-encode and the original *is* its `video-720p`, played directly. Old phone footage and screen recordings are the common cases, and there are usually a lot of them. **`video-poster-screen`'s maximum is 1280, matching `video-720p`.** A poster larger than the resolution the video actually plays at is wasted: the still would be sharper than the footage that replaces it, so the transition into playback visibly degrades. Sizing the poster to the playback rung keeps pre-roll and paused states consistent with what follows, and drops the class from ~350 KB to ~110 KB — below the 128 KB line at which Intelligent-Tiering stops managing an object, so it now sits at the Standard rate permanently (§5.3.2).
+- **§3.1.1's max-size semantics apply here on two axes**, and matter more than for stills because video transcodes are lossy in both directions. Resolution and bitrate are both maxima: a transcode is `min(source, class max)` on each. A 480p 800 kbps clip therefore yields no separate `video-720p` — both axes would be unchanged, so the output would be a same-size re-encode and the original *is* its `video-720p`, played directly. Old phone footage and screen recordings are the common cases, and there are usually a lot of them. **`video-poster-720p`'s maximum is 1280, matching `video-720p` — which is what its name records.** A poster larger than the resolution the video actually plays at is wasted: the still would be sharper than the footage that replaces it, so the transition into playback visibly degrades. Sizing the poster to the playback rung keeps pre-roll and paused states consistent with what follows, and drops the class from ~350 KB to ~110 KB — below the 128 KB line at which Intelligent-Tiering stops managing an object, so it now sits at the Standard rate permanently (§5.3.2).
 
 **Codec: H.264 by default, WebM/VP9 as an option — but the choice is constrained by hardware encode, not by size.** Since derivation happens on-device (§4.1), the deciding fact is what the phone can encode in hardware: iOS VideoToolbox does H.264 and HEVC and has **no VP9 or AV1 encoder**; Android MediaCodec has universal H.264, but VP9 *encode* support is patchy across devices. **H.264 is the only codec both platforms can reliably hardware-encode**, which settles the default. VP9/WebM (~30–50% smaller) makes sense as an option for laptop- or cloud-derived content, where a software encoder is acceptable — worth having as a config knob, not as the default.
 
@@ -332,7 +338,7 @@ Two existing rules keep this safe rather than merely hopeful: a locally-captured
 **Two cases where the fallback cannot reach, and what happens instead:**
 
 - **`no-cloud` records** (§7.2.2) have no cloud original by construction, so responsibility can never leave the local nodes. Such a record simply stays ladder-incomplete until its originating node catches up, is never archived (there is nothing to archive to), and is never evictable. This should be surfaced, not silent: a `no-cloud` record with an incomplete ladder and one replica is the highest-risk state in the system and belongs in the residency inspector.
-- **Formats the cloud cannot decode.** Until the custom libvips build exists (§8.1), the cloud fallback covers JPEG, PNG, WebP and AVIF only — not HEIC, and not raw. For those, ownership stays with the originating device permanently and the 24-hour sweeper will find the same records every day. Two consequences worth stating plainly: the sweeper must not retry a format it cannot handle in a loop (record the attempt outcome per record), and **the cloud fallback is not a real fallback for the operator's primary capture format until §8.1 lands**. That upgrades the custom libvips build from "deferrable" to "the thing that makes §4.2 true".
+- **Formats the cloud cannot decode.** The cloud fallback covers JPEG, PNG, WebP and AVIF only — not HEIC, and not raw. For those, ownership stays with the originating device permanently and the 24-hour sweeper would otherwise find the same records every day, so the sweeper must record the attempt outcome per record rather than retrying an undecodable format in a loop. **§8.1 rejects the custom libvips build that would close this**, deliberately: the fallback is not a real fallback for the operator's primary capture format, and we are choosing to find out how often that actually matters before paying for a custom native toolchain. The gap is bounded — such a record stays ladder-incomplete, un-archived, and holding its original locally until its originating device catches up — and it is visible in the residency inspector rather than silent.
 
 ### 4.3 Backfill
 
@@ -352,7 +358,7 @@ Two consequences to accept rather than paper over. Renditions **outlive Photos' 
 
 The three fixes:
 
-1. **Replace the `thumbnail` bare flag with `photos/rendition=<class>`** — a single-valued label written through `POST /data/labels/values` (the set-valued write that upserts and tombstones the rest, per `system-design.md`). Values: `image-thumb`, `image-medium`, `image-screen`, `image-large`, `video-poster-thumb`, `video-poster-screen`, `video-skim`, `video-720p`, `video-1080p` and `image-motion`. There is no `native` value — §3.1.1 removed it, because under max-size semantics an original is never a record's top rung. `crop` stays as it is — it is a user artifact, not a rendition.
+1. **Replace the `thumbnail` bare flag with `photos/rendition=<class>`** — a single-valued label written through `POST /data/labels/values` (the set-valued write that upserts and tombstones the rest, per `system-design.md`). Values: `image-thumb`, `image-medium`, `image-screen`, `image-large`, `video-poster-thumb`, `video-poster-720p`, `video-skim`, `video-720p`, `video-1080p` and `image-motion`. There is no `native` value — §3.1.1 removed it, because under max-size semantics an original is never a record's top rung. `crop` stays as it is — it is a user artifact, not a rendition.
 2. **Add a `parentId` filter to `/data/records`**, combinable with `label`/`labelValue`. "The screen rendition of X" becomes one indexed query. This deletes finding 4's O(library) scan outright, and is also what makes derivation state a cheap query rather than a stored flag (§4.2).
 3. **Add a negated-label filter** (or an `originals-only` flag) so the grid can page originals server-side. Without it, a 60k-photo library becomes 300k+ records and the grid's paging is meaningless.
 
@@ -362,7 +368,7 @@ The three fixes:
 
 Migrating an existing library from another service is a distinct flow from capture, and for most users it is the *first* thing that happens. It changes less of this plan than it might appear: the ladder, the residency policy, the archive gate, and the storage-class mapping are all untouched. Only **who runs the deriver** changes, which is why §4.1 is phrased about residency rather than capture.
 
-**Decision: assume the user downloads to a local machine, and stop there.** Server-side fetch of a remote library (Takeout hosted on Drive, Dropbox, a generic URL) was analysed and **deferred**. The reasoning is short: the marginal AWS cost of cloud-first is a few dollars on a one-time operation, so the only thing it buys is wall-clock time by taking home upstream off the critical path — and it costs a custom libvips build (HEIC is undecodable in the cloud without it, §8.1), cloud-side OAuth custody, and streaming archive extraction. Not worth it before we know the shape of the problem.
+**Decision: assume the user downloads to a local machine, and stop there.** Server-side fetch of a remote library (Takeout hosted on Drive, Dropbox, a generic URL) was analysed and **deferred**. The reasoning is short: the marginal AWS cost of cloud-first is a few dollars on a one-time operation, so the only thing it buys is wall-clock time by taking home upstream off the critical path — and it costs a custom libvips build (HEIC is undecodable in the cloud without it), cloud-side OAuth custody, and streaming archive extraction. Not worth it before we know the shape of the problem. **§8.1 has since rejected that build outright**, which raises the price of cloud-first import rather than lowering it — the two decisions now stand or fall together.
 
 **And we do not yet know that shape.** The right next step is to run the app against a real phone library (§7.6) and only then look at what Google Takeout actually produces. Designing the Takeout parser now would be designing against a guess. What is worth recording now is only what is already known:
 
@@ -496,7 +502,7 @@ Rebuilding one class across the library at Model B:
 | Bytes read | 21 GB (`image-screen`) | 500 GB |
 | Direct charge | ~$0.40 (I-T promotion to Frequent Access for 30 days) | $1.25 bulk + ~$2.45 staging |
 | Wall clock | minutes to hours | **48 hours before the first byte** |
-| Decoder | AVIF — works in stock sharp today | HEIC/DNG — **blocked on §8.1's custom libvips** |
+| Decoder | AVIF — works in stock sharp today | HEIC/DNG — **no cloud decoder, and §8.1 rejects building one** |
 
 At Model C the gap widens sharply, since re-derivation scales with rendition bytes (162 GB of
 `image-large`) and a thaw scales with original bytes (2 TB): roughly $2.60 against ~$15.
@@ -504,7 +510,8 @@ At Model C the gap widens sharply, since re-derivation scales with rendition byt
 **But the money is not the argument at Model B** — $0.40 against $3.70 is not what justifies this.
 Three other things do: there is no 48-hour wait and no restore window that can expire mid-job; the
 codec problem disappears, because renditions are AVIF and stock sharp handles them, so re-derivation
-works today on HEIC-captured photos without §8.1's build; and it never touches the archive, so it
+works today on HEIC-captured photos and needs no custom decoder at all — which is one of the reasons
+§8.1 can reject that build; and it never touches the archive, so it
 cannot interact with the 180-day Deep Archive minimum, with Object Lock, or with §5.1.1's restore
 rate limits.
 
@@ -730,7 +737,7 @@ That is the property that decides this. Every archive tier bills small objects p
 | `image-screen` | $0.461 | $0.119 | $0.239 |
 | `image-large` | $1.053 | $0.222 | $0.353 |
 | `video-poster-thumb` | $0.001 | $0.003 | $0.001 |
-| `video-poster-screen` | $0.007 | $0.003 | $0.007 |
+| `video-poster-720p` | $0.007 | $0.003 | $0.007 |
 | `video-skim` | $0.005 | $0.003 | $0.005 |
 | `video-720p` | $0.368 | $0.066 | $0.078 |
 | **Total** | **$2.06** | **$0.55** | **$0.86** |
@@ -768,14 +775,14 @@ Modelled at three scales, since the right answer differs by size. **Prices are A
 | Stills | 7,000 | 60,000 | 170,000 |
 | Video clips | 1,000 (~30 s) | 3,000 (~30 s) | 15,000 (~45 s, 4K-heavy) |
 
-**Derived volume** (`image-thumb` 20 KB, `image-medium` 110 KB, `image-screen` 350 KB, `image-large` 950 KB, `video-poster-thumb` 20 KB, `video-poster-screen` 110 KB, `video-skim` 80 KB, `video-720p` 5.6 MB per 30 s):
+**Derived volume** (`image-thumb` 20 KB, `image-medium` 110 KB, `image-screen` 350 KB, `image-large` 950 KB, `video-poster-thumb` 20 KB, `video-poster-720p` 110 KB, `video-skim` 80 KB, `video-720p` 5.6 MB per 30 s):
 
 | Size class | I-T behaviour | A | B | C |
 |---|---|---|---|---|
 | `image-thumb` | under 128 KB — unmanaged, Standard rate | 0.14 GB | 1.2 GB | 3.4 GB |
 | `image-medium` | under 128 KB — unmanaged, Standard rate | 0.77 GB | 6.6 GB | 18.7 GB |
 | `video-poster-thumb` | under 128 KB — unmanaged, Standard rate | 0.02 GB | 0.06 GB | 0.29 GB |
-| `video-poster-screen` | under 128 KB — unmanaged, Standard rate | 0.11 GB | 0.32 GB | 1.57 GB |
+| `video-poster-720p` | under 128 KB — unmanaged, Standard rate | 0.11 GB | 0.32 GB | 1.57 GB |
 | `video-skim` | under 128 KB — unmanaged, Standard rate | 0.08 GB | 0.23 GB | 1.6 GB |
 | `image-screen` | monitored, drifts to AIA | 2.5 GB | 21 GB | 60 GB |
 | `image-large` | monitored, drifts to AIA | 6.7 GB | 57 GB | 162 GB |
@@ -838,6 +845,8 @@ Five implementation facts, because this one has sharp edges and the first is a h
 
 ### 6.1 UIs
 
+> **Refined 2026-08-01.** The table below is still the right *outcome*, but it is no longer the interface: **consumers request a target long edge in pixels and the server resolves which rendition to serve** — no consumer names a size class. §3.1.1 already required this in principle (sizes are per-record, so `image-screen` does not mean 2560); making it the actual API is what keeps class names out of clients that update on their own schedule, across the visual test and any later respec. Read the rows below as "what this consumer's pixel request typically resolves to". See §7.1 of the implementation plan for the resolution rule and the API shape.
+
 | Consumer | Size class | Notes |
 |---|---|---|
 | Grid tile | `image-thumb` | CloudFront-cached, ~20 KB (400 px) |
@@ -866,7 +875,9 @@ All of it reads renditions, never originals — and the routine path reads **`im
 
 **Why `image-medium` and not `image-screen`.** Every routine input is 640 px or below, so `image-screen` at 2560 ships and decodes 4× the pixels the model consumes. On a full catch-up scan of 60k items that is the difference between ~7 GB and ~21 GB of transfer and decode, and on a phone the decode half of that is battery. `image-screen` remains the right source for the one case that genuinely needs more resolution — re-cropping a face that came out small — which is a small fraction of items rather than all of them.
 
-This replaces finding 18's full-original reads. Three consequences worth stating: AI stops being blocked by the archive tier entirely; per-image I/O drops from tens of MB to ~110 KB; and **at capture time on the phone, AI should read the original directly** — it is already local and free, and gives the best possible input. The rendition path is for *catch-up* processing on devices that never held the original.
+This replaces finding 18's full-original reads. Two consequences worth stating: AI stops being blocked by the archive tier entirely, and per-image I/O drops from tens of MB to ~110 KB.
+
+> **Superseded 2026-08-01 — the capture-time exception is dropped.** This section previously added that "at capture time on the phone, AI should read the original directly — it is already local and free, and gives the best possible input", with the rendition path reserved for catch-up on devices that never held the original. That does not hold up: every routine model input is ≤640 px against `image-medium`'s 1280, so there is no resolution advantage; downscaling to 640 low-passes away most of what AVIF q55 cost, so there is no meaningful quality advantage; a full-resolution ProRAW decode for a 640 px letterbox is *more* expensive than reading the rendition, not less; and — the decisive one — it would embed capture-time items from originals and catch-up items from `image-medium`, leaving the library's face and semantic embeddings drawn from two different preprocessing chains that are then compared against each other. **`image-medium` is the single input source on every device at every point in a record's life.** See §7.2 of the implementation plan.
 
 ### 6.3 The signed-URL round trip
 
@@ -926,7 +937,7 @@ So the operator's laptop is "`original`: never; everything else: all". The phone
 | `image-screen` | 2 GB | 6,000 items |
 | `image-large` | 1 GB | 1,100 items |
 | `video-poster-thumb` | 0.2 GB | 10,000 clips |
-| `video-poster-screen` | 0.3 GB | 2,700 clips |
+| `video-poster-720p` | 0.3 GB | 2,700 clips |
 | `video-skim` | 0.5 GB | 6,500 clips |
 | `video-720p` | 4 GB | 700 clips of 30 s |
 | `video-1080p` | 1 GB | 65 clips of 30 s |
@@ -1137,12 +1148,30 @@ Android-specific work that is *not* in the first build, to be added later as opt
 
 ### 8.1 HEIC — the urgent one
 
-sharp/libvips as built cannot decode HEIC (finding 13), and HEIC is what the operator's phone produces. Two paths:
+sharp/libvips as built cannot decode HEIC (finding 13), and HEIC is what the operator's phone produces.
 
-- **Primary: decode on-device.** iOS/macOS ImageIO and Android MediaCodec have hardware HEIC decoders. Since §4.1 already puts derivation at capture, this is the path that was going to be taken anyway — HEIC decoding largely stops being the cloud's problem.
-- **Fallback: a custom libvips with libheif + libde265** for the cloud Lambda and for laptop backfill of already-imported HEIC. libde265 is decode-only, which avoids the HEVC *encode* patent question that keeps HEIC out of the stock build. This means a custom sharp build and a Lambda layer — real work, but bounded.
+**Decode on-device. That is the whole answer for now.** iOS/macOS ImageIO and Android MediaCodec have hardware HEIC decoders, and §4.1 already puts derivation at the point where the bytes are resident, which for capture is the phone and for backfill is the laptop. Both of those have a working decoder; the cloud is the only place that does not.
 
-**§4.2 raises the stakes on the fallback.** Now that the cloud is the *only* fallback deriver — peer catch-up having been rejected because it would transfer an original to derive from it — "the cloud cannot decode HEIC" means there is no fallback at all for the operator's primary capture format. A phone that never catches up leaves those records ladder-incomplete, un-archivable, and holding their originals locally forever. That is a survivable state, and it is visible in the residency inspector rather than silent, but it means the custom libvips build is the thing that makes §4.2's second step true rather than an optimization of it.
+#### Rejected for now: a custom libvips with libheif + libde265
+
+An earlier draft carried a custom sharp/libvips build (libheif + libde265, decode-only, which sidesteps the HEVC *encode* patent question that keeps HEIC out of the stock build) as the cloud-side and backfill fallback, and §4.2's reasoning progressively promoted it from "deferrable" to "the thing that makes the cloud fallback true".
+
+**That promotion is not accepted. The build is rejected until we have run out of ways to avoid it.** The reasoning is about what it actually costs against what it actually buys:
+
+- It is a custom native toolchain, a Lambda layer, and a build we own forever — the least pleasant item in the whole plan (§11 item 5), and one whose maintenance burden lands on every future sharp upgrade.
+- What it buys is a *fallback*, not a path. Every primary flow in this plan already decodes HEIC: capture derives on the phone (§4.1), backfill derives on the laptop (§4.3), and re-derivation after a respec reads AVIF renditions in stock sharp (§4.6). The build serves only the case where a device ingested a HEIC and then never caught up on derivation.
+- We do not yet know how common that case is. It is measurable — the ladder-incomplete query (§4.2) is already needed for the archive gate, so the count comes for free once the Android app (Phase 2) exists — and it is much better to build a decoder because a real number demanded it than because a design document anticipated it.
+
+**Avenues to exhaust first, in the order they should be tried:**
+
+1. **Make on-device derivation reliable enough that the fallback is rarely reached.** This is Phase 2's job anyway. Risk 1b (unmeasured on-device derivation throughput) is the same question from the other end.
+2. **Use the platform decoder for laptop backfill instead of libvips.** macOS has ImageIO natively; `sips` or a small native binding decodes HEIC without touching the sharp build at all, and backfill is a laptop-side batch job (§4.3), not a Lambda. This removes the second of the build's two justifications outright.
+3. **Derive from an embedded preview where one exists**, the same trick §7.6 identifies for DNG. Worth checking what Apple's HEIC actually carries before assuming it does not help.
+4. **If the fallback is genuinely reached often, reconsider — with a number attached.**
+
+#### The consequence, stated plainly rather than mitigated
+
+**The cloud fallback in §4.2 does not cover HEIC, and will not.** A record whose originating device ingested a HEIC and never derived from it stays ladder-incomplete, is therefore never archived (§5.2's gate), and holds its original on that device indefinitely (§7.2.1 forbids evicting an original that still owes size classes). That is a survivable, self-healing-once-the-device-catches-up state, and it is visible in the residency inspector rather than silent — but it is a real gap and it is accepted deliberately, not overlooked. The sweeper must record per-record attempt outcomes so it does not re-attempt an undecodable format daily (§4.2).
 
 Note that `image/heic` and `image/heif` are already registered types and already in Photos' grant list. The registry is fine; the codec is not.
 
@@ -1265,7 +1294,8 @@ The operator's own configuration under this scheme: **Balanced**; phone keeping 
 29. `image/dng` + camera raw types in the registry (fixes the invisible-ProRAW bug).
 30. Derive from the DNG's embedded full-res JPEG preview rather than decoding raw (§7.6) — verify against real ProRAW and Pixel files first.
 31. Live Photo pairing at ingest (iOS capture gets it free; imports do not).
-32. Custom libvips (libheif + libde265) — the cloud/backfill decode fallback for HEIC. Only needed where on-device decoding cannot reach; no JXL.
+32. **HEIC decode for laptop backfill via the macOS platform decoder** (ImageIO / `sips` / a small native binding), *not* via libvips — §8.1's avenue 2. Removes the backfill half of the custom-build case without a custom build.
+32b. *(Rejected: custom libvips with libheif + libde265. §8.1 — reconsider only with a measured count of records left ladder-incomplete for want of a cloud decoder, which item 15's residency inspector produces.)*
 
 **Phase 7 — iOS, configuration, measurement.**
 
@@ -1284,7 +1314,7 @@ The operator's own configuration under this scheme: **Balanced**; phone keeping 
 2. ~~**Renditions as shared records vs. app-specific data.**~~ **Settled — shared records** (§4.4). Photos is the flagship app and after §5 the renditions are the only instantly-readable form of the library, so any other photo-adjacent app will want them; they are reachable by label like any other shared data. The accepted costs are that renditions outlive a Photos uninstall and that the label namespace stays `photos/`.
 3. **Deep Archive means one copy of every original** (§5.6). Partly answered: Object Lock in compliance mode plus versioning is decided and covers an errant lifecycle rule and a credential compromise. Account-level loss is still uncovered — cross-account replication and a second provider are deferred, deliberately and knowingly. The residual risk is real and named rather than mitigated.
 4. **AVIF encode cost on-device** — 3–10× JPEG CPU. Needs measurement on a real phone before AVIF becomes the default rendition codec rather than a setting.
-5. **The custom libvips build** is the least pleasant item here. Deferrable as long as on-device decoding covers the real cases — but **cloud-first import is not one of those cases**, and choosing to build it (Phase 6) makes libvips-with-libheif a prerequisite rather than a fallback. DNG stays out of reach in the cloud regardless without libraw.
+5. ~~**The custom libvips build**~~ **Rejected for now (§8.1).** It was the least pleasant item here, and the plan no longer contains it: on-device decoding covers capture, the macOS platform decoder covers laptop backfill, and re-derivation reads AVIF in stock sharp. **The residual risk is named rather than mitigated** — the cloud fallback (§4.2) cannot decode HEIC or raw, so records whose originating device never catches up stay ladder-incomplete and un-archived indefinitely. The open question is how often that actually happens, which the residency inspector and the ladder-incomplete query answer once Phase 2 ships; reconsider the build only against that number. Note also that cloud-first import (deferred in §4.5) would make a cloud decoder a prerequisite again — a further reason those two decisions belong together.
 6. **The Google migration path is externally fragile.** Google withdrew the Library API read scopes in March 2025, which is what left `GoogleImportPanel` dead. Verify the current state of the Picker API, the Library API scopes, and Takeout-to-Drive before building anything against them — and prefer designs that degrade to "the user hands us a folder", which no vendor can take away.
 7. **Takeout-to-Drive costs the user money to leave Google.** 300 GB of Takeout needs 300 GB of Drive quota. This may make the cleanest cloud-first path unusable in practice for exactly the people with the largest libraries.
 8. ~~**Prices are from memory.**~~ **Done** — all S3 prices in §5.3/§5.3.1/§5.4 now come from the AWS Price List API for us-east-1, and three figures changed as a result (bulk restore requests are free; standard restore requests are $0.05/1k not $0.10; lifecycle transition costs differ per target class). Object tagging at $0.0065/10k tags/month was not previously accounted for at all. **Still unverified:** CloudFront and S3 data-transfer-out rates, which did not surface cleanly from the API — and the derived-rung *byte sizes* in §5.4, which are estimates and are now the weakest input in the model. Check both against the operator's own CUR once real data lands.
