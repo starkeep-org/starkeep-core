@@ -16,6 +16,7 @@
     "@starkeep/app-client": "workspace:*",
     "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",
+    "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/storage-fs": "workspace:*",
     "@starkeep/storage-sqlite": "workspace:*",
     "@starkeep/sync-engine": "workspace:*"

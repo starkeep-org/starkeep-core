@@ -149,4 +149,46 @@ describe("FsObjectStorageAdapter", () => {
       expect(page2.hasMore).toBe(false);
     });
   });
+
+  describe("stat", () => {
+    it("returns null for an absent key", async () => {
+      expect(await adapter.stat("nope")).toBeNull();
+    });
+
+    it("reports size and the sidecar's content type", async () => {
+      await adapter.put("k", Buffer.from("12345"), { contentType: "text/plain" });
+      expect(await adapter.stat("k")).toMatchObject({
+        sizeBytes: 5,
+        contentType: "text/plain",
+      });
+    });
+
+    // A local filesystem verifies nothing at write time, so it has nothing
+    // truthful to say here. Hashing the file at stat() time would be a lie
+    // about provenance — it would report "the store confirmed these bytes"
+    // when nothing did — and the durability predicate keys on exactly that
+    // distinction before it deletes anything.
+    it("reports an unknown checksum rather than synthesizing one", async () => {
+      await adapter.put("k", Buffer.from("bytes"), {
+        checksumSha256: "irrelevant-locally",
+      });
+      expect((await adapter.stat("k"))?.checksumSha256).toBeNull();
+    });
+
+    it("has no storage classes and is always instantly readable", async () => {
+      await adapter.put("k", Buffer.from("bytes"));
+      const facts = await adapter.stat("k");
+      expect(facts?.storageClass).toBeNull();
+      expect(facts?.availability).toEqual({ state: "instant" });
+    });
+
+    // Symlinked keys are how the watcher avoids duplicating watched files, so
+    // the size that matters is the target's, not the link's.
+    it("follows a symlink to report the target's size", async () => {
+      await adapter.put("real", Buffer.from("0123456789"));
+      const target = await adapter.resolvePath("real");
+      await adapter.putSymlink("linked", target!);
+      expect((await adapter.stat("linked"))?.sizeBytes).toBe(10);
+    });
+  });
 });

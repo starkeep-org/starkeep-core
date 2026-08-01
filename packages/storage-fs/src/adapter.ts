@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink, readlink, access } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import type { PutOptions, GetResult, ListOptions, ListResult } from "@starkeep/storage-adapter";
+import type { PutOptions, GetResult, ListOptions, ListResult, ObjectFacts } from "@starkeep/storage-adapter";
 
 export interface FsObjectStorageAdapterOptions {
   basePath: string;
@@ -89,6 +89,46 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     } catch {
       return false;
     }
+  }
+
+  async stat(key: string): Promise<ObjectFacts | null> {
+    const filePath = this.keyToPath(key);
+    let fileStat;
+    try {
+      // stat(), not lstat(): a key may be a symlink into a watched folder, and
+      // the size that matters is the target's.
+      fileStat = await stat(filePath);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+
+    let contentType: string | undefined;
+    let metadata: Record<string, string> | undefined;
+    try {
+      const meta = JSON.parse(await readFile(`${filePath}.meta.json`, "utf8")) as {
+        contentType?: string;
+        metadata?: Record<string, string>;
+      };
+      contentType = meta.contentType;
+      metadata = meta.metadata;
+    } catch {
+      // No sidecar — symlinked or written before sidecars. Not an error.
+    }
+
+    return {
+      sizeBytes: fileStat.size,
+      // A local filesystem verifies nothing at write time. Reporting null here
+      // is the honest answer and callers must read it as "unknown" — hashing
+      // the file to synthesize a value would be a lie about *provenance*: it
+      // would say the store confirmed these bytes when nothing did.
+      checksumSha256: null,
+      storageClass: null,
+      // Bytes on a local disk are readable or absent; there is no third state.
+      availability: { state: "instant" },
+      ...(contentType ? { contentType } : {}),
+      ...(metadata ? { metadata } : {}),
+    };
   }
 
   async delete(key: string): Promise<void> {

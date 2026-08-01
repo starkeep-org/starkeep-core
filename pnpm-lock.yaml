@@ -877,6 +877,9 @@ importers:
       '@starkeep/shared-space-api':
         specifier: workspace:*
         version: link:../shared-space-api
+      '@starkeep/storage-adapter':
+        specifier: workspace:*
+        version: link:../storage-adapter
       '@starkeep/storage-fs':
         specifier: workspace:*
         version: link:../storage-fs

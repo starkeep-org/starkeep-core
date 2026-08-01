@@ -4,6 +4,8 @@ import type {
   GetResult,
   ListOptions,
   ListResult,
+  ObjectAvailability,
+  ObjectFacts,
 } from "@starkeep/storage-adapter";
 
 export interface HttpObjectStorageAdapterOptions {
@@ -103,12 +105,25 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!presignRes.ok) {
       throw new Error(`presign PUT ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
     }
-    const { url } = await presignRes.json() as { url: string };
+    const { url, checksumSha256 } = await presignRes.json() as {
+      url: string;
+      checksumSha256?: string;
+    };
 
     // Upload directly to S3 — presigned URL carries credentials, no auth header needed.
+    //
+    // When the server pinned a checksum into the signature (it derives one for
+    // every content-addressed key, since the key *is* the hash), the header is
+    // mandatory: it is part of the signature, so omitting it fails the request
+    // rather than silently uploading unverified bytes. That is the point — the
+    // uploader has no say in what it is allowed to write at this key, and a
+    // successful PUT means S3 confirmed the bytes are the bytes the key names.
     const s3Res = await this.fetchImpl(url, {
       method: "PUT",
-      headers: options?.contentType ? { "Content-Type": options.contentType } : {},
+      headers: {
+        ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
+        ...(checksumSha256 ? { "x-amz-checksum-sha256": checksumSha256 } : {}),
+      },
       body: Buffer.from(data),
     });
     if (!s3Res.ok) {
@@ -171,6 +186,24 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       headers: this.headers("HEAD", `/files/${key}`, ""),
     });
     return response.ok;
+  }
+
+  async stat(key: string): Promise<ObjectFacts | null> {
+    const response = await this.fetchImpl(`${this.url(key)}/stat`, {
+      headers: this.headers("GET", `/files/${key}/stat`, ""),
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`stat ${key} failed: ${response.status} ${response.statusText}`);
+    }
+    const facts = await response.json() as {
+      sizeBytes: number;
+      checksumSha256: string | null;
+      storageClass: string | null;
+      availability: ObjectAvailability;
+      contentType?: string;
+    };
+    return facts;
   }
 
   async delete(key: string): Promise<void> {

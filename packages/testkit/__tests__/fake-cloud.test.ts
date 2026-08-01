@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { createHash } from "node:crypto";
 import { serializeHLC } from "@starkeep/protocol-primitives";
 import { startFakeCloud, type FakeCloud } from "../src/index.js";
 
@@ -127,5 +128,61 @@ describe("fake cloud responder", () => {
     const rows = cloud.appRows("rowsapp", "notes");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ note_id: "n1", body: "hello" });
+  });
+
+  // The fake cloud's /__blob/ stand-in enforces the pinned checksum the way S3
+  // does. Without that, every test that "proves" the verified-upload path works
+  // would pass identically with the verification removed.
+  describe("blob uploads are verified against the key", () => {
+    const bytes = Buffer.from("content-addressed payload");
+    const hash = createHash("sha256").update(bytes as unknown as Uint8Array).digest("hex");
+    const key = `shared/image/${hash.slice(0, 2)}/${hash}`;
+    const digest = createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64");
+
+    async function presign(): Promise<{ url: string; checksumSha256?: string }> {
+      const res = await fetch(`${cloud.url}/apps/starkeep-drive/files/presign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      });
+      expect(res.status).toBe(200);
+      return res.json() as Promise<{ url: string; checksumSha256?: string }>;
+    }
+
+    it("returns the checksum derived from the key", async () => {
+      expect((await presign()).checksumSha256).toBe(digest);
+    });
+
+    it("accepts a body that matches", async () => {
+      const { url, checksumSha256 } = await presign();
+      const put = await fetch(url, {
+        method: "PUT",
+        headers: { "x-amz-checksum-sha256": checksumSha256! },
+        body: bytes,
+      });
+      expect(put.status).toBe(200);
+      expect(await cloud.hasBlob(key)).toBe(true);
+    });
+
+    it("rejects a body that hashes to something else, and stores nothing", async () => {
+      const { url, checksumSha256 } = await presign();
+      const put = await fetch(url, {
+        method: "PUT",
+        headers: { "x-amz-checksum-sha256": checksumSha256! },
+        body: Buffer.from("not the bytes this key names"),
+      });
+      expect(put.status).toBe(400);
+    });
+
+    // Against real S3 the header is part of the signature, so omitting it is
+    // not something a client can get away with. The stand-in refuses it for the
+    // same reason: an upload that skipped verification must not look like a
+    // successful one.
+    it("refuses an upload that omits the checksum header entirely", async () => {
+      const { url } = await presign();
+      const put = await fetch(url, { method: "PUT", body: bytes });
+      expect(put.status).toBe(400);
+      expect(((await put.json()) as { error: string }).error).toMatch(/missing x-amz-checksum-sha256/);
+    });
   });
 });

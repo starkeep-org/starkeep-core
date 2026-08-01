@@ -46,6 +46,21 @@ export function createHttpSyncHandler(
       return true;
     }
 
+    // Checked before the general /files/:key route, whose (.+) would otherwise
+    // swallow the trailing /stat segment as part of the key.
+    const fileStatMatch = url.pathname.match(/^\/files\/(.+)\/stat$/);
+    if (fileStatMatch && req.method === "GET") {
+      const key = decodeURIComponent(fileStatMatch[1]!);
+      const facts = await options.objectStorageAdapter.stat(key);
+      if (!facts) {
+        res.writeHead(404);
+        res.end();
+        return true;
+      }
+      sendJson(res, 200, facts);
+      return true;
+    }
+
     const fileMatch = url.pathname.match(/^\/files\/(.+)$/);
     if (fileMatch) {
       const key = decodeURIComponent(fileMatch[1]!);
