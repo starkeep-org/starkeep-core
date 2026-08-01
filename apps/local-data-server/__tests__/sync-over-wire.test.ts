@@ -174,19 +174,36 @@ describe("shared records across the wire", () => {
       });
       created.push(record.id);
     }
-    await converge();
+    // Drain to the actual end state rather than to a single quiet round.
+    //
+    // `converge()` alone is not sufficient here and the difference is a real
+    // race, not test flakiness for its own sake: creating a record nudges a
+    // background exchange on a 50 ms debounce, and `transferFile` returns false
+    // for a key whose transfer is already in flight. So a `/sync/now` round can
+    // truthfully report "nothing shipped" while a concurrent background round is
+    // mid-transfer, and converge() reads that as done. Under parallel test load
+    // that happened often enough to fail this assertion intermittently.
+    // (The idle pull interval is 600 s in this config, so rounds only happen
+    // when driven — hence converge() inside the retry rather than beside it.)
+    await eventually(async () => {
+      await converge();
+      const ids = new Set((await listRecords(driveB)).map((r) => r.id));
+      for (const id of created) expect(ids.has(id)).toBe(true);
+    });
 
     // No single exchange round carried more than the page limit.
     for (const entry of cloud.exchangeLog) {
       expect(entry.inRecords + entry.inAppRows).toBeLessThanOrEqual(PAGE_LIMIT);
       expect(entry.outRecords + entry.outAppRows).toBeLessThanOrEqual(PAGE_LIMIT);
     }
-    // …and it took more than one shipping round to drain.
-    expect(cloud.exchangeLog.filter((e) => e.inRecords > 0).length).toBeGreaterThan(1);
-
-    const onB = await listRecords(driveB);
-    const idsOnB = new Set(onB.map((r) => r.id));
-    for (const id of created) expect(idsOnB.has(id)).toBe(true);
+    // …and every record got there. With a per-round cap of PAGE_LIMIT and more
+    // than PAGE_LIMIT records, that *entails* multiple shipping rounds, which is
+    // what this test is about. Asserting the entailment rather than counting
+    // rounds directly keeps it independent of how the background nudges happen
+    // to interleave.
+    const shippedIn = cloud.exchangeLog.reduce((n, e) => n + e.inRecords, 0);
+    expect(shippedIn).toBeGreaterThanOrEqual(count);
+    expect(count).toBeGreaterThan(PAGE_LIMIT);
   });
 });
 
