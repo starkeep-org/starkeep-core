@@ -598,7 +598,79 @@ read as zero.
 - **Restore estimates are unvalidated against a real bill.** The per-GB figures come from the
   plan's cost model, itself listed as an unverified input. Item 35's CUR work settles it.
 
-*(Sections for Phase 1 onward are appended as each lands.)*
+## Phase 1
+
+### Items 4 / 21 / 29 — core type and metadata column changes
+
+**Item 29 was a live bug, not a missing feature.** `.dng` fell through to `other/other`, which is
+Drive-only and **ungrantable to installable apps** — so ProRAW files synced fine and no app could
+ever be granted them. Photos simply could not see them.
+
+| Test | Asserts |
+|---|---|
+| `maps every raw extension to a real image type, not the catch-all` | dng, cr2, cr3, nef, arw, raf, orf, rw2 |
+| `makes them grantable to installable apps` | the actual fix — the category is in `APP_GRANTABLE_CATEGORIES`, which `other` is not |
+| `registers each maker's format separately` | not one shared `image/raw`: the embedded-preview layout derivation reads differs per vendor, so a single type would leave nothing to branch on. Grants are per category, so `image` still covers all eight |
+| `routes them to the image metadata table` | they behave like any other image downstream |
+
+`perceptual_hash` and `thumb_hash` are **metadata, not labels**, because they are deterministic
+from the bytes — a label is an app's *assertion*, and anyone re-deriving from the same file
+reproduces these exactly. `thumb_hash` is on video too, so a grid mixing stills and clips has no
+hole where a placeholder should be. A test asserts `content_hash` stays on the record row:
+perceptual hash matches re-encodes and resizes, which is what makes it useful for import dedup and
+what makes it **unsafe as an identity** — a candidate-finder, never a decision.
+
+### Item 6 — the rendition ladder and `photos/rendition`
+
+**No test asserts a class maximum as a literal.** Those integers are the visual test's output
+(item 9b) and a test asserting `1280` would have to be edited by the same change that makes it
+wrong — exactly when nobody is thinking about whether it *should* be. Every test asserts a
+relationship or reads the number from the ladder itself.
+
+| Rule | Tests |
+|---|---|
+| **Rule 1** — never upscales | `emits min(original, class maximum)` swept over every class and a range of sources; `never emits a file larger than its source`. This is *why* a class name tells you nothing about a file's size, and therefore why resolution must be server-side |
+| **Rule 2** — generate when the original exceeds the next lower maximum | `adds a class exactly when the original passes the class below it` — asserts both sides of the boundary, since "no offset, no margin" is the actual specification |
+| Bottom rung unconditional | `always generates the bottom rung, however small` — so every record has an instantly-readable copy and the grid needs no fallback |
+| **Contiguous prefix** | `produces a contiguous prefix from the bottom, never a gap` — the property the ladder-complete gate and the derivation sweeper both read "top applicable class" off. Neither would be expressible if the set could have holes |
+| Own-top-of-ladder floor | `means every generated class is the same size as the original` — freezing such an original saves nothing |
+
+Video adds two clauses, both tested: **bitrate is a second maximum** (either axis dropping is
+enough to transcode; neither dropping means don't), and **skim is exempt from the no-op clause**
+because it differs from its source in the *time* dimension — a 15-second clip has no smaller
+resolution worth making but still benefits from a 2-second scrub. `video-poster-720p`'s maximum is
+asserted **equal to `video-720p`'s** rather than to a literal, because it is pinned to it: a poster
+sharper than the footage it hands off to degrades visibly at the transition into playback.
+
+`photos/rendition` replaces the bare `thumbnail` flag. It is **single-valued** and written through
+the set-valued endpoint, so a respec replaces the rung rather than leaving two with nothing to say
+which is current. There is deliberately **no `native` value**: the original is not a rendition, and
+giving it a rung would make "every applicable class is present" unsatisfiable and let variant
+resolution serve an archived original.
+
+Manifest: raw types added to the image grant (with the rationale that without them the files are
+invisible), and a `video/*` grant added — the registry and video metadata columns already existed,
+only the grant was missing.
+
+**Gaps**
+
+- **Every number in the ladder is unverified.** This is the plan's largest open item, and it
+  gates backfill. The failure mode is quiet and permanent: a quality level slightly too low is
+  invisible on a small sample and irreversible across 60k photos once originals are archived.
+- **Only one rung is ever produced.** The resize path still generates a single size and labels it
+  `image-thumb` via `THUMBNAIL_SIZE_CLASS`. That constant exists to be deleted by item 7 — the
+  places referring to it are the list of code that assumed one derived size.
+- **`isThumbnail` now reads broader than its name.** It answers "is this any rung", which is what
+  its callers (may-this-be-derived-from, should-the-grid-show-it) actually ask. Renaming it would
+  touch the grid and both resize paths for no behavioural change, so it was left; `renditionClassOf`
+  is what to use when the rung matters.
+- **No test asserts consumers never name a size class.** The cross-cutting principle calls for a
+  grep-level check, and item 9 is the first consumer that could violate it. Worth adding with
+  item 9 rather than before it, when there is something to check.
+- **Video ladder helpers are unused.** `applicableVideoClasses` and friends are tested and
+  exported but nothing calls them until item 27.
+
+*(Sections for items 7, 9, 9b, 8 and onward are appended as each lands.)*
 
 ---
 
