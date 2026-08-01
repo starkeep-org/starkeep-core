@@ -2,7 +2,40 @@ import { describe, it, expect } from "vitest";
 import {
   dataRecordObjectKey,
   appSyncableObjectKey,
+  contentHashFromDataRecordObjectKey,
 } from "../src/storage/object-keys.js";
+
+describe("contentHashFromDataRecordObjectKey", () => {
+  const hash = "abcd1234".padEnd(64, "0");
+
+  it("round-trips a key built by dataRecordObjectKey", () => {
+    for (const type of ["image/jpeg", "video/mp4", "other/other"]) {
+      expect(contentHashFromDataRecordObjectKey(dataRecordObjectKey(type, hash))).toBe(hash);
+    }
+  });
+
+  // The recovered hash becomes the checksum pinned into a presigned PUT, which
+  // decides which bytes may be written at that key. Every rejection below is a
+  // case where trusting the key would let something other than a Starkeep
+  // content-addressed blob dictate that pin.
+  it.each([
+    ["a shard that disagrees with the hash", `shared/image/zz/${hash}`],
+    ["a non-shared namespace", `apps/photos/syncable/${hash}`],
+    ["a hash that isn't 64 hex chars", "shared/image/ab/not-a-hash"],
+    ["uppercase hex", `shared/image/AB/${hash.toUpperCase()}`],
+    ["too few segments", `shared/image/${hash}`],
+    ["too many segments", `shared/image/ab/extra/${hash}`],
+    ["empty", ""],
+  ])("returns null for %s", (_label, key) => {
+    expect(contentHashFromDataRecordObjectKey(key)).toBeNull();
+  });
+
+  it("returns null for app-syncable keys, which are deliberately not content-addressed", () => {
+    expect(
+      contentHashFromDataRecordObjectKey(appSyncableObjectKey("photos", "covers/a.json")),
+    ).toBeNull();
+  });
+});
 
 describe("dataRecordObjectKey", () => {
   it("places data record blobs under shared/<category>/<shard>/<hash>", () => {

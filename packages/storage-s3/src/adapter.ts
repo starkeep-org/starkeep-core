@@ -15,6 +15,8 @@ import type {
   GetResult,
   ListOptions,
   ListResult,
+  ObjectAvailability,
+  ObjectFacts,
   SignedUrlOptions,
   SignedPutUrlOptions,
 } from "@starkeep/storage-adapter";
@@ -80,6 +82,24 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
     const contentType = options?.contentType;
 
     if (data.byteLength > MULTIPART_THRESHOLD_BYTES) {
+      // Multipart deliberately gets NO whole-object ChecksumSHA256, and this is
+      // a property of S3, not a shortcut. Confirmed against the current S3
+      // docs (`checking-object-integrity-upload`): full-object checksums for
+      // multipart are supported *only* for the CRC algorithms (CRC64NVME,
+      // CRC32, CRC32C), because only those linearize from part checksums.
+      // SHA-256 is **composite-only** for multipart — the stored value is a
+      // digest over the part digests, suffixed `-<partCount>`, which is not
+      // the SHA-256 of the object and must never be compared against a
+      // contentHash (`sha256Base64ToHex` returns null for it, deliberately).
+      //
+      // The mechanism that does work is per-part: each UploadPart carries its
+      // own ChecksumSHA256 and S3 rejects a part that doesn't match, with the
+      // composite attesting the assembly. The uploader still has to verify the
+      // whole-object hash itself as it streams and abort on mismatch. That
+      // belongs with the streaming/multipart transfer path, not this
+      // buffer-everything convenience method — which is why the bytes here go
+      // up unverified and the caller is told so via `stat()` reporting a
+      // composite checksum.
       const upload = new Upload({
         client: this.getClient(),
         params: {
@@ -97,6 +117,12 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
           Key: resolvedKey,
           Body: data,
           ...(contentType ? { ContentType: contentType } : {}),
+          // S3 rejects a body that doesn't match rather than storing it, so a
+          // 200 here means "S3 confirmed these bytes are the bytes this key
+          // names" — not merely "the request was accepted".
+          ...(options?.checksumSha256
+            ? { ChecksumSHA256: options.checksumSha256 }
+            : {}),
         }),
       );
     }
@@ -152,6 +178,40 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       }
       throw error;
     }
+  }
+
+  async stat(key: string): Promise<ObjectFacts | null> {
+    let response;
+    try {
+      response = await this.getClient().send(
+        new HeadObjectCommand({
+          Bucket: this.options.bucketName,
+          Key: this.resolveKey(key),
+          // Without this S3 omits the stored checksum from the response even
+          // when the object has one.
+          ChecksumMode: "ENABLED",
+        }),
+      );
+    } catch (error: unknown) {
+      // Same 403-means-404 caveat as has(); see the comment there.
+      if (isMissingOrForbidden(error)) return null;
+      throw error;
+    }
+
+    // S3 omits StorageClass entirely for STANDARD.
+    const storageClass = response.StorageClass ?? "STANDARD";
+    return {
+      sizeBytes: response.ContentLength ?? 0,
+      checksumSha256: response.ChecksumSHA256 ?? null,
+      storageClass,
+      availability: availabilityOf(
+        storageClass,
+        response.ArchiveStatus ?? null,
+        response.Restore ?? null,
+      ),
+      ...(response.ContentType ? { contentType: response.ContentType } : {}),
+      ...(response.Metadata ? { metadata: response.Metadata } : {}),
+    };
   }
 
   async delete(key: string): Promise<void> {
@@ -211,12 +271,79 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       Bucket: this.options.bucketName,
       Key: this.resolveKey(key),
       ...(options?.contentType ? { ContentType: options.contentType } : {}),
+      // Binds the permitted body into the signature: the holder of this URL
+      // may write these exact bytes to this key and nothing else. S3 rejects a
+      // mismatched body rather than storing it, so "200" becomes a statement
+      // about the bytes and not just about the request.
+      ...(options?.checksumSha256
+        ? { ChecksumSHA256: options.checksumSha256 }
+        : {}),
     });
 
     return awsGetSignedUrl(this.getClient(), command, {
       expiresIn: expiresInSeconds,
+      // The SDK omits x-amz-checksum-* from SignedHeaders unless it is told to
+      // hoist them, which would let an uploader simply drop the header and
+      // upload anything. Signing it makes sending the exact value mandatory.
+      ...(options?.checksumSha256
+        ? { signableHeaders: new Set(["x-amz-checksum-sha256"]) }
+        : {}),
     });
   }
+}
+
+/**
+ * Map HEAD's storage-class / archive-status / restore triple onto whether the
+ * bytes can be read right now.
+ *
+ * The three inputs disagree in a way that matters: an Intelligent-Tiering
+ * object reports `StorageClass: INTELLIGENT_TIERING` whether or not it has sunk
+ * into an async archive tier — only `ArchiveStatus` says which. Reading storage
+ * class alone would call a DEEP_ARCHIVE_ACCESS object instantly readable.
+ *
+ * (Our bucket must never enable I-T's async tiers, so `ArchiveStatus` should
+ * always be absent in practice. It is handled anyway because "should" is doing
+ * a lot of work there, and the failure mode of ignoring it is a read that hangs
+ * for 12 hours.)
+ */
+function availabilityOf(
+  storageClass: string,
+  archiveStatus: string | null,
+  restore: string | null,
+): ObjectAvailability {
+  const archivedTier =
+    storageClass === "GLACIER" || storageClass === "DEEP_ARCHIVE"
+      ? storageClass
+      : archiveStatus === "ARCHIVE_ACCESS" || archiveStatus === "DEEP_ARCHIVE_ACCESS"
+        ? archiveStatus
+        : null;
+  if (!archivedTier) return { state: "instant" };
+
+  // Restore header forms:
+  //   ongoing-request="true"                              → restore in flight
+  //   ongoing-request="false", expiry-date="<http-date>"  → temporarily readable
+  //   (absent)                                            → not restored
+  if (restore) {
+    if (/ongoing-request="true"/.test(restore)) {
+      return { state: "restoring", readyAt: null };
+    }
+    if (/ongoing-request="false"/.test(restore)) {
+      // A restored copy exists and is readable until its expiry. Callers that
+      // care when it lapses read `storageClass`; for "can I read it now" the
+      // answer is simply yes.
+      return { state: "instant" };
+    }
+  }
+
+  return {
+    state: "archived",
+    tier: archivedTier,
+    // Standard-tier retrieval, which is what the restore flow requests. Bulk is
+    // cheaper by hundredths of a cent and slower by a day and a half, so it is
+    // only used for batch restores.
+    expectedLatencyHours:
+      archivedTier === "DEEP_ARCHIVE" || archivedTier === "DEEP_ARCHIVE_ACCESS" ? 12 : 5,
+  };
 }
 
 function isMissingOrForbidden(error: unknown): boolean {

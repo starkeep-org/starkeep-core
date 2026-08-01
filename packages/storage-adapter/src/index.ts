@@ -57,7 +57,11 @@ export type {
   ListResult,
   SignedUrlOptions,
   SignedPutUrlOptions,
+  ObjectFacts,
+  ObjectAvailability,
 } from "./object-storage/types.js";
+
+export { sha256HexToBase64, sha256Base64ToHex } from "./object-storage/checksum.js";
 
 export {
   StorageError,

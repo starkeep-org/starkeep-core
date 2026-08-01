@@ -2,6 +2,7 @@ import type {
   GetResult,
   ListOptions,
   ListResult,
+  ObjectFacts,
   ObjectStorageAdapter,
   PutOptions,
 } from "@starkeep/storage-adapter";
@@ -75,6 +76,10 @@ export class FailingObjectStorageAdapter implements ObjectStorageAdapter {
 
   has(key: string): Promise<boolean> {
     return this.base.has(key);
+  }
+
+  stat(key: string): Promise<ObjectFacts | null> {
+    return this.base.stat(key);
   }
 
   delete(key: string): Promise<void> {

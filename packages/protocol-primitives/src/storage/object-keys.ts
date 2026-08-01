@@ -30,6 +30,28 @@ export function dataRecordObjectKey(type: string, contentHash: string): string {
   return `shared/${typeCategory(type)}/${shard}/${contentHash}`;
 }
 
+// Recover the content hash a `shared/<category>/<shard>/<hash>` key names, or
+// null if the key isn't one of ours in that exact shape.
+//
+// This is what makes upload verification free: the key already *is* the
+// SHA-256, so a signer can pin the expected checksum from the key alone and
+// never has to trust an uploader-supplied value. The shard must agree with the
+// hash — a key whose shard doesn't match its hash was not built by
+// `dataRecordObjectKey` and is rejected rather than trusted.
+//
+// App-syncable keys (`apps/<appId>/syncable/...`) are deliberately not
+// content-addressed and always return null here; they carry no derivable
+// checksum.
+export function contentHashFromDataRecordObjectKey(key: string): string | null {
+  const segments = key.split("/");
+  if (segments.length !== 4) return null;
+  const [namespace, , shard, hash] = segments as [string, string, string, string];
+  if (namespace !== "shared") return null;
+  if (!/^[a-f0-9]{64}$/.test(hash)) return null;
+  if (shard !== hash.slice(0, 2)) return null;
+  return hash;
+}
+
 // Build the canonical object key for an app's syncable file. `subKey` is the
 // app-relative path under apps/<appId>/syncable/. Idempotent if the caller
 // already passed a fully qualified key. Rejects keys that would escape the

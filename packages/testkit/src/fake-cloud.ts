@@ -33,8 +33,10 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   createHLCClock,
   appSyncableObjectKey,
+  contentHashFromDataRecordObjectKey,
   type AnyRecord,
 } from "@starkeep/protocol-primitives";
+import { sha256HexToBase64 } from "@starkeep/storage-adapter";
 import { createAppSpecificFactory } from "@starkeep/shared-space-api";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
@@ -281,8 +283,30 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       if (req.method === "PUT") {
         const bytes = await readBody(req);
         const contentType = req.headers["content-type"];
+        // Enforce the pinned checksum the way S3 does — reject, don't store.
+        // A content-addressed key MUST carry the header (the real presign binds
+        // it into the signature, so omitting it is not a thing a client can get
+        // away with), and the body must hash to it.
+        const expected = contentHashFromDataRecordObjectKey(key);
+        if (expected) {
+          const supplied = req.headers["x-amz-checksum-sha256"];
+          if (typeof supplied !== "string") {
+            sendJson(res, 400, {
+              error: `missing x-amz-checksum-sha256 for content-addressed key ${key}`,
+            });
+            return;
+          }
+          const actual = createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64");
+          if (actual !== supplied || supplied !== sha256HexToBase64(expected)) {
+            sendJson(res, 400, {
+              error: `BadDigest: body ${actual} vs declared ${supplied} for key ${key}`,
+            });
+            return;
+          }
+        }
         await objectStorage.put(key, bytes, {
           contentType: typeof contentType === "string" ? contentType : undefined,
+          ...(expected ? { checksumSha256: sha256HexToBase64(expected) } : {}),
         });
         res.writeHead(200);
         res.end();
@@ -364,7 +388,17 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         return;
       }
       const { key } = JSON.parse(rawBody.toString("utf8")) as { key: string };
-      sendJson(res, 200, { url: blobUrl(key) });
+      // Mirror the real broker: derive the expected checksum from the
+      // content-addressed key and pin it. The /__blob/ stand-in below enforces
+      // it, so a client that forgets the header fails here exactly as it would
+      // against S3 — which is the only reason a round-trip test of the verified
+      // upload path proves anything.
+      const contentHash = contentHashFromDataRecordObjectKey(key);
+      const checksumSha256 = contentHash ? sha256HexToBase64(contentHash) : undefined;
+      sendJson(res, 200, {
+        url: blobUrl(key),
+        ...(checksumSha256 ? { checksumSha256 } : {}),
+      });
       return;
     }
 
@@ -412,6 +446,19 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         return;
       }
       sendJson(res, 200, { url: blobUrl(key) });
+      return;
+    }
+
+    const fileStatMatch = rest.match(/^\/files\/([^/]+)\/stat$/);
+    if (fileStatMatch && req.method === "GET") {
+      const key = decodeURIComponent(fileStatMatch[1]!);
+      const facts = await objectStorage.stat(key);
+      if (!facts) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      sendJson(res, 200, facts);
       return;
     }
 

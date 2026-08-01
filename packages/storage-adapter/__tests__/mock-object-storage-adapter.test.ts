@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { createHash } from "node:crypto";
 import { MockObjectStorageAdapter } from "../src/mock/mock-object-storage-adapter.js";
 
 describe("MockObjectStorageAdapter", () => {
@@ -103,6 +104,72 @@ describe("MockObjectStorageAdapter", () => {
 
       const result = await adapter.list("");
       expect(result.keys).toEqual(["a", "b", "c"]);
+    });
+  });
+
+  // The mock stands in for S3 in most unit tests, so it has to enforce the same
+  // contract. If it accepted a wrong checksum, every test of the verified-upload
+  // path would pass whether or not the checksum was ever sent — which is the one
+  // thing those tests exist to catch.
+  describe("checksum enforcement", () => {
+    const data = Buffer.from("verified bytes");
+    const digest = createHash("sha256").update(data as unknown as Uint8Array).digest("base64");
+
+    it("stores a body that matches the declared checksum", async () => {
+      await adapter.put("k", data, { checksumSha256: digest });
+      expect((await adapter.stat("k"))?.checksumSha256).toBe(digest);
+    });
+
+    it("rejects a mismatched body rather than storing it", async () => {
+      await expect(
+        adapter.put("k", Buffer.from("different bytes"), { checksumSha256: digest }),
+      ).rejects.toThrow(/BadDigest/);
+      // Rejected, not stored — the distinction that makes a 200 mean something.
+      expect(await adapter.has("k")).toBe(false);
+    });
+
+    it("reports null when no checksum was supplied, never a synthesized one", async () => {
+      await adapter.put("k", data);
+      // "Unknown", not "verified". A store that hashed the bytes itself at read
+      // time would be answering a different question — it would say nothing
+      // about whether these are the bytes the writer intended.
+      expect((await adapter.stat("k"))?.checksumSha256).toBeNull();
+    });
+  });
+
+  describe("stat", () => {
+    it("returns null for an absent key", async () => {
+      expect(await adapter.stat("nope")).toBeNull();
+    });
+
+    it("reports size and content type alongside availability", async () => {
+      await adapter.put("k", Buffer.from("12345"), { contentType: "text/plain" });
+      expect(await adapter.stat("k")).toMatchObject({
+        sizeBytes: 5,
+        contentType: "text/plain",
+        availability: { state: "instant" },
+      });
+    });
+
+    // The whole reason stat() exists: an archived object *exists* and cannot be
+    // read. Code that decides whether a read will succeed — or whether it is
+    // safe to drop the only other copy — must be able to tell those apart, and
+    // has() cannot.
+    it("distinguishes an archived object from an absent one", async () => {
+      await adapter.put("k", Buffer.from("cold"));
+      adapter.setAvailability("k", { state: "archived", tier: "DEEP_ARCHIVE", expectedLatencyHours: 12 }, "DEEP_ARCHIVE");
+
+      expect(await adapter.has("k")).toBe(true);
+      expect(await adapter.stat("k")).toMatchObject({
+        storageClass: "DEEP_ARCHIVE",
+        availability: { state: "archived", tier: "DEEP_ARCHIVE", expectedLatencyHours: 12 },
+      });
+    });
+
+    it("reports a restore in flight", async () => {
+      await adapter.put("k", Buffer.from("thawing"));
+      adapter.setAvailability("k", { state: "restoring", readyAt: null });
+      expect((await adapter.stat("k"))?.availability).toEqual({ state: "restoring", readyAt: null });
     });
   });
 });
