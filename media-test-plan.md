@@ -65,10 +65,10 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Deferred** | `protectedLocally` is never set, so the durability predicate is the only thing between eviction and a last copy. | 1b | Item 7's derivation-input tracking |
 | **Deferred** | `recencyAtMs` is always null from the sync engine, so `recent-only` behaves as `all`. | 1b | Host decider supplying capture time |
 | **Deferred** | Only one rung is produced by the resize path in practice until every ingest route uses `deriveStillLadder`. | 6/7 | Item 7 completion |
-| **Deferred** | ThumbHash and perceptual hash are not computed despite their columns existing. | 4/21 | Derivation populating them |
+| **Deferred** | ~~ThumbHash~~ **closed (item 9)**; perceptual hash is still not computed. | 4/21 | Derivation populating it |
 | **Deferred** | Video derivation is not wired; the ladder helpers are tested and uncalled. | 6 | Item 27 |
 | **Deferred** | Renditions do not sync before originals. **The plan's claim that this is a scheduling change is wrong** — it needs blob transfer decoupled from the metadata prefix rule. | 7 | A protocol change, not yet scoped |
-| **Deferred** | No test asserts consumers never name a size class. | 6 | Item 9, when there is a consumer that could violate it |
+| ~~Deferred~~ | ~~No test asserts consumers never name a size class.~~ **Closed (item 9)** — a grep test over `src`/`app`/`infra` with a small reviewed allowlist, verified to fire on an injected violation. | 6 | — |
 | **Accepted** | Every number in the ladder is unverified. The largest open item in the plan; gates backfill. | 6 | Item 9b — human judgement, cannot be automated |
 | **Accepted** | Buckets created before item 0 can never get Object Lock. | 0 | Nothing — AWS design |
 | **Accepted** | A permanently corrupt source retries forever with a warning rather than escalating. | 2 | Surfacing it in the residency inspector |
@@ -792,7 +792,80 @@ The plan's own mitigation still holds: the archive gate makes the original wait,
 - **Video derivation is not wired.** `applicableVideoClasses` is tested; no transcode path exists
   (item 27).
 
-*(Sections for items 9, 9b, 8 and onward are appended as each lands.)*
+### Item 9 — grid and viewer serve from the ladder, by pixel size
+
+**What changed behaviourally:** the grid used to render *only records carrying the thumbnail
+label* — i.e. the renditions themselves — showing a placeholder for everything else. That
+inverted what a library is: a photo was unclickable until something was derived from it, and a
+fresh import was a grid of grey boxes. The grid now lists **originals** and displays a
+**rendition of** each, resolved server-side from a requested pixel size.
+
+#### The guard that matters most
+
+`__tests__/no-size-class-in-consumers.test.ts` — a grep over `src`, `app` and `infra` for any
+quoted size-class name, with a deliberately small allowlist (the ladder, derivation, publication,
+and the one constant naming the pre-ladder rung).
+
+This is worth more than any single behavioural test here, because the failure it prevents — a
+client hard-coding `image-screen` — is **invisible until a respec**. Everything renders, every
+test passes, right up until the maxima move and devices that update on their own schedule are
+asking for a rung that no longer means what it meant. The ladder's numbers are *expected* to be
+respecified, so this is not hypothetical.
+
+**Verified to fire**: injecting `const SNEAKY = "image-screen"` into the grid component makes it
+fail. A grep guard that has never seen a violation is worth nothing.
+
+It also asserts the allowlist stays ≤6 entries — not style, but because every entry is a place
+that must be revisited on a respec, and the list growing quietly is the thing to notice.
+
+#### End-to-end resolution (closes an item 3b gap)
+
+`apps/local-data-server/__tests__/variant-resolution.test.ts` — six tests through a **running
+server**, which is the layer where a wiring mistake (a param never read, a map never attached, a
+URL never signed) passes every unit test.
+
+The fixture uses the test app's own label key, `testapp/size-rung` — **not** `photos/rendition`.
+A platform that had quietly hard-coded Photos' vocabulary would still pass with the real key; with
+a meaningless one it cannot.
+
+| Test | Asserts |
+|---|---|
+| `returns a resolved variant per requested pixel size, with a URL` | keyed by what was *asked for*; URL rides the listing so a grid needs no per-tile round trip |
+| `rounds up to the smallest rendition at or above the target` | 500 px is not served a 400 px image and upscaled |
+| `clamps to the largest rendition rather than reaching for the original` | **rule 3, observable from outside** — exceeding the ladder never resolves to the parent, which is what would make a zoom request thaw an archived file |
+| `excludes renditions from the listing itself` | otherwise a 60k library is 300k+ records and the client cannot tell how far to page |
+| `omits variants for a record that has none` | empty map and no rendition read the same way: show the placeholder |
+| `does not attach variants when they were not asked for` | the extra child query does not creep into every existing caller |
+
+#### Client-side behaviour
+
+| Test | Asserts |
+|---|---|
+| `shows the rendition the server resolved for the tile size` | the original's own bytes are **never** fetched when a rendition exists — the entire economic argument for the ladder |
+| `does not fetch a large original's bytes just to fill a 180px tile` | a record mid-derivation shows its placeholder rather than pulling 40 MB for a thumbnail |
+| `serves a small original directly when it has no renditions yet` | below the floor the round trip is not worth waiting for |
+| `still asks for nothing until the tile is near the viewport` | lazy loading survived the rewrite |
+
+ThumbHash is stage zero: computed during derivation from the bitmap already in hand, stored on the
+**parent** record (the grid lists originals, so a hash on a child would be one join from the thing
+that needs it), and decoded client-side. It costs **zero requests**, which is the whole reason it
+lives on the record rather than in object storage.
+
+**Gaps**
+
+- **The viewer does not yet do progressive presentation.** The grid resolves a tile size and the
+  library query also requests a larger size, but the viewer still uses `getFullSizeSrc` rather
+  than stepping ThumbHash → tile → viewport. The plumbing is there; the staging is not.
+- **Requested sizes are fixed, not measured.** `LIBRARY_VARIANT_TARGETS` is `[540, 2048]` rather
+  than the actual viewport, because the list request happens before layout and a per-window size
+  would mean a different cache key per window for no visible gain. A viewer that genuinely needs
+  a larger size should issue its own request; it does not yet.
+- **`DIRECT_SERVE_MAX_BYTES` is a guess.** 512 KB is where serving an original into a tile stops
+  being obviously fine. Unmeasured.
+- **No test renders a real ThumbHash.** The decode path is exercised only through the "no
+  placeholder" branch; nothing asserts a decoded data URL appears.
+
+*(Sections for items 9b, 8 and onward are appended as each lands.)*
 
 ---
 

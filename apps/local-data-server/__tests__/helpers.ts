@@ -115,6 +115,7 @@ export async function createRecordWithBytes(
     fileName?: string;
     contentType?: string;
     parentId?: string;
+    labels?: Array<{ key: string; value?: string }>;
   } = {},
 ): Promise<{ record: { id: string; [k: string]: unknown }; deduped?: boolean }> {
   const type = options.type ?? "image/jpeg";
@@ -144,6 +145,7 @@ export async function createRecordWithBytes(
       sizeBytes,
       fileName: options.fileName,
       parentId: options.parentId,
+      labels: options.labels,
     }),
   });
   if (!register.ok) throw new Error(`register failed: ${register.status} ${await register.text()}`);
