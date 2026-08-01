@@ -110,6 +110,12 @@ export function foundationalPermissionsBoundaryStatements(
         "s3:GetBucketLogging",
         "s3:GetBucketRequestPayment",
         "s3:GetBucketObjectLockConfiguration",
+        // Creating the files bucket with `objectLockEnabled` requires this in
+        // addition to CreateBucket and PutBucketVersioning — AWS treats the
+        // creation-time flag as writing the lock configuration. It is the
+        // ceiling only: we set the flag and never a bucket-level default
+        // retention (see the files bucket in cloud-data-server-program.ts).
+        "s3:PutBucketObjectLockConfiguration",
         "s3:GetReplicationConfiguration",
         "s3:GetLifecycleConfiguration",
         "s3:GetBucketNotification",
