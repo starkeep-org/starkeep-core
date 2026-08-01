@@ -133,6 +133,27 @@ export function buildCloudDataServerProgram(
       // versioning is off (both ride ctx.ephemeral), so the existing
       // s3:DeleteObject grant suffices — no s3:DeleteObjectVersion is needed.
       forceDestroy: ctx.ephemeral,
+      // Object Lock — the flag ONLY, never a bucket-level default retention.
+      //
+      // This can only be set at bucket creation. A bucket that misses it can
+      // never get Object Lock without an AWS Support request, so it has to
+      // land before anyone has a bucket worth protecting — which is why this
+      // is item 0 of the media plan while the retention that actually uses it
+      // is item 36, deliberately last.
+      //
+      // Setting the flag makes nothing undeletable. A bucket with Object Lock
+      // enabled and no retention configured behaves exactly like an ordinary
+      // bucket; objects become undeletable only when a retain-until date is
+      // written on them individually. There must NEVER be a bucket-level
+      // default retention here — compliance retention can be extended but not
+      // reduced, so anything written under a bucket default would be
+      // permanently undeletable, which would make rendition supersession
+      // impossible. Retention is set per object, on `archive` intent only.
+      //
+      // Rides !ctx.ephemeral exactly like versioning does (Object Lock
+      // requires versioning, and AWS turns it on implicitly at creation), or
+      // an e2e bucket could never be torn down.
+      objectLockEnabled: !ctx.ephemeral,
       tags: {
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",

@@ -90,6 +90,8 @@ const versioning = (): CreatedResource[] => byTypeSuffix("bucketVersioningV2:Buc
 const sse = (): CreatedResource[] =>
   byTypeSuffix("bucketServerSideEncryptionConfigurationV2:BucketServerSideEncryptionConfigurationV2");
 const pab = (): CreatedResource[] => byTypeSuffix("bucketPublicAccessBlock:BucketPublicAccessBlock");
+const objectLockConfig = (): CreatedResource[] =>
+  byTypeSuffix("bucketObjectLockConfigurationV2:BucketObjectLockConfigurationV2");
 
 beforeEach(() => {
   created.length = 0;
@@ -154,6 +156,24 @@ describe("real installs (ephemeral=false) are hardened", () => {
       restrictPublicBuckets: true,
     });
   });
+
+  // Object Lock can only be enabled at bucket creation. A bucket that ships
+  // without the flag can never get it without an AWS Support request, so this
+  // assertion guards a genuinely irreversible property.
+  it("enables Object Lock on the files bucket", async () => {
+    await run(false);
+    expect(filesBucket().inputs.objectLockEnabled).toBe(true);
+  });
+
+  // The flag alone makes nothing undeletable. A bucket-level default retention
+  // would: compliance retention can be extended but never reduced, so every
+  // object written under a bucket default becomes permanently undeletable —
+  // which would make rendition supersession impossible. Retention belongs per
+  // object, on `archive` intent only, and that is a separate, later item.
+  it("configures no bucket-level default retention", async () => {
+    await run(false);
+    expect(objectLockConfig()).toHaveLength(0);
+  });
 });
 
 describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
@@ -172,5 +192,13 @@ describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
     expect(versioning()).toHaveLength(0);
     expect(sse()).toHaveLength(0);
     expect(pab()).toHaveLength(0);
+  });
+
+  // Object Lock requires versioning, and both would wedge repeated teardown —
+  // hence it rides !ephemeral exactly like versioning does.
+  it("leaves Object Lock off so the bucket can be torn down", async () => {
+    await run(true);
+    expect(filesBucket().inputs.objectLockEnabled).toBe(false);
+    expect(objectLockConfig()).toHaveLength(0);
   });
 });

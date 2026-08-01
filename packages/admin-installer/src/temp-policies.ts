@@ -446,6 +446,10 @@ export function buildTempInstallCloudDataServerPolicy(
           "s3:GetBucketLogging",
           "s3:GetBucketRequestPayment",
           "s3:GetBucketObjectLockConfiguration",
+          // Needed alongside CreateBucket/PutBucketVersioning to create the
+          // files bucket with Object Lock enabled. The flag only — no
+          // bucket-level default retention is ever written.
+          "s3:PutBucketObjectLockConfiguration",
           "s3:GetReplicationConfiguration",
           "s3:GetLifecycleConfiguration",
           "s3:GetBucketNotification",
