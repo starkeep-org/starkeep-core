@@ -58,7 +58,7 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily. | 7 | A node-local (non-syncable) table |
 | **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
 | **Deferred** | Nothing produces a video yet, so the ranged byte layer is exercised only with synthetic bytes. | 28 | Items 26/27 |
-| **Blocking** | Nothing calls `deriveVideoLadder`, and no video metadata is written to the `video` columns. Probe and derivation are complete, tested, and **unreachable from the app**. | 26/27 | An ingest/sweeper call site |
+| ~~Blocking~~ | ~~Nothing calls `deriveVideoLadder`.~~ **Closed** — `deriveAndPublishVideo` wires probe → facts → derive → publish → gate; the import loop now discovers video and no longer buffers whole files. | 26/27 | — |
 | **Deferred** | Skim parameters (8x / 20s / 2fps) are an untested hypothesis; may be better as animated AVIF. | 27 | Measurement against real clips |
 | **Deferred** | VP9/WebM transcoding is written but never exercised by a test. | 27 | A fixture asserting the webm path |
 | **Accepted** | Derivation output is buffered in memory. Bounded by the ladder (720p @ 1.5 Mbps); revisit if 1080p opt-in ships. | 27 | — |
@@ -1206,11 +1206,45 @@ first frame.
 - **The moov atom is at the front** of produced video — verified load-bearing (without faststart
   only `mdat` appears in the first 256 bytes).
 
+#### Wiring it up (closes the blocking gap)
+
+`deriveAndPublishVideo` is the call site: probe → write facts → derive → publish each rung → assert
+the gate. Three things fell out of connecting it that were not visible while the pieces sat apart.
+
+**The import loop could not see video at all.** Its extension set was stills only, so a camera-roll
+import walked past every `.mov` silently — half a library missing with no error to explain it.
+
+**The import loop buffered every file whole.** It did `readFile(path)` to hash and hand on the bytes,
+which is unremarkable for a 3 MB still and an **OOM for a 4 GB clip** — and video is now importable.
+`registerFile` now takes a **path**, not bytes, and the hash is computed by streaming, so no whole
+file is ever resident. A test asserts the hash is unchanged by that switch, because a different hash
+means every previously imported file looks new and the entire library re-imports.
+
+**Rendition dimensions are measured, not predicted.** Variant resolution orders by long edge, so a
+rendition with no dimensions is invisible to it — storage nobody ever reads. Computing them from the
+source and the requested maximum is wrong, because the scale filter rounds the free axis to an even
+number; a rendition whose dimensions are subtly wrong sorts into the wrong place and is served at the
+wrong size, which is worse than missing. The output is already on disk for `faststart`, so measuring
+costs one ffprobe against a local file.
+
+Two ordering decisions are pinned by tests:
+
+- **Facts are written before any rendition.** Interrupted after them, the record is a
+  correctly-shaped placeholder; interrupted the other way, the layout cannot place it at all.
+- **A poster registers as `image`, moving renditions as `video`** — and the metadata `typeId`
+  follows. The poster is what the grid paints, and registering it as video hides it from every
+  image-granted app. Sending the wrong `typeId` writes into a table the record has no row in.
+
+The archive gate is asked **only when the ladder is actually complete**. Claiming completeness with a
+rung missing is how an original gets frozen behind a 48-hour thaw while the thing that would be read
+instead does not exist.
+
 #### Gaps
 
-- **Nothing calls `deriveVideoLadder` yet.** The probe and derivation are complete and tested, but no
-  ingest path or sweeper invokes them, and no video metadata is written to the `video` columns. This
-  is the same shape as the still ladder's gap before item 24 closed it.
+- ~~**Nothing calls `deriveVideoLadder`.**~~ **Closed** — `deriveAndPublishVideo` wires probe →
+  facts → derive → publish → gate, and the import loop now discovers video.
+- **No HTTP surface starts an import**, so the video path is exercised by tests rather than by the
+  app. Same gap the still path has; one route closes both.
 - **Skim parameters remain a hypothesis, not a measurement.** 8x minimum, 20s target, 2 fps — the
   plan says so explicitly, and skim may be better as an animated AVIF than as a video. Untested
   against real clips of varying length.
