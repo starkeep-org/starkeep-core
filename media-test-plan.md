@@ -459,7 +459,65 @@ would not have to reason about classes has no way to notice a silently-empty ans
   that no size-class literal appears outside the ladder definition (see cross-cutting
   principles) has nothing to check.
 
-*(Sections for items 4, 5, 5b and onward are appended as each lands.)*
+### Items 4 + 5 — CloudFront sync downloads; presign header allowlist
+
+#### Item 4 was already built; what was missing was proof
+
+`GET /files/{key}/presign` already routed `shared/*` through the CloudFront signing chokepoint,
+and the chokepoint itself was well covered (`cloudfront-signing.test.ts`: grant enforcement,
+namespace confinement, path traversal, case-bypass). What no test asserted was that **the route
+the sync engine actually uses reaches it** — and if it handed back an S3 presigned URL instead,
+the sync path would quietly keep paying origin egress with no edge caching and nothing would
+look wrong.
+
+| Test | Asserts |
+|---|---|
+| `signs shared bytes through CloudFront, not S3` | URL carries the CF domain and `Signature=`, and **not** `X-Amz-Signature` — asserting the absence is what distinguishes the two |
+| `leaves app-syncable bytes on S3 presign` | CloudFront never serves `apps/*`; routing them there would need a second origin and grant model for no benefit, since they are not shared data |
+| `404s a key with no object behind it` | existence is still checked before signing |
+
+Uploads stay on presigned S3 PUT, unchanged — CloudFront is not the write path.
+
+#### Item 5 landed with its consumer, not as bare plumbing
+
+The header allowlist (`x-amz-storage-class`, `x-amz-tagging`, `x-amz-checksum-sha256`) on its own
+would have been a disconnected capability, so it went in together with the **declared retrieval
+intent** that uses it.
+
+**The vocabulary says nothing about AWS.** An app declares `instant` or `archive` — what latency
+it can tolerate — and has no opinion about tiers. `retrieval-intent.test.ts` asserts the
+rejection of `glacier`, `DEEP_ARCHIVE`, `standard`, `cool`: a caller reaching for a provider
+concept has escaped the abstraction and is refused rather than accommodated.
+
+| Property | Test |
+|---|---|
+| Default is `instant` | `defaults to instant when the caller says nothing` — a write that forgot to think about retrieval must not become something that takes 12 hours to read |
+| `instant` carries **no tag at all** | `gives an instant write no tag at all` — an untagged object is *structurally* ineligible for the archive lifecycle rule, a stronger guarantee than one depending on a rule reading a value the right way round |
+| Both intents land in Intelligent-Tiering | `writes both intents to Intelligent-Tiering, gating the freeze elsewhere` — `archive` is **not** written straight to Deep Archive, because the transition is gated on ladder completeness and a hold period, neither known at write time. Freezing on write would freeze originals whose ladder does not exist yet — exactly when the original is the only readable copy |
+| Class and tags are **signed** | `binds the storage class and tags into the signature` — an unsigned header is one the uploader can drop, letting it pick its own tier and tag its way into (or out of) a rule it was never granted |
+| A typo is refused | `refuses an unrecognized intent rather than defaulting` — defaulting `"archve"` is silently wrong in both directions: `instant` costs money quietly, `archive` imposes a 48-hour thaw nobody asked for |
+
+**The tag strings are defined once**, in `protocol-primitives`, because they are written by the
+presign path and read by the bucket lifecycle rule — different packages. A drift is silent both
+ways: objects that never transition (a bill nobody notices), or objects that transition before
+their ladder is complete (the only readable copy behind a 48-hour thaw).
+
+**Gaps**
+
+- **`storageClassForIntent` currently ignores its argument.** Both intents map to
+  `INTELLIGENT_TIERING` today and the distinction lives entirely in the tag. That is correct for
+  now — the freeze is the lifecycle rule's job (item 18) — but the function reads as though it
+  branches and does not. It stays a function rather than a constant because item 18 is where the
+  branch would appear if the design changed, and a constant would hide that decision point.
+- **No lifecycle rule exists yet**, so an `archive`-tagged object is tagged and nothing acts on
+  it. Item 18. Until then `archive` is inert, which is the safe direction.
+- **Nothing declares `archive` yet.** Photos will map originals to it (item 17); today every
+  write is `instant` by default, so the tagging path is exercised only by tests.
+- **No test proves S3 accepts the signed headers.** All of this is against mocks — the URL is
+  inspected for the header names, not exercised. Signature validation failures here report only
+  "SignatureDoesNotMatch", so this belongs in the `e2e-aws` tier alongside the multipart gap.
+
+*(Sections for items 5b and onward are appended as each lands.)*
 
 ---
 

@@ -7,6 +7,7 @@ import {
   HeadBucketCommand,
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
+import type { PutObjectCommandInput } from "@aws-sdk/client-s3";
 import { getSignedUrl as awsGetSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
 import { Readable } from "node:stream";
@@ -354,16 +355,24 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       ...(options?.checksumSha256
         ? { ChecksumSHA256: options.checksumSha256 }
         : {}),
+      ...(options?.storageClass
+        ? { StorageClass: options.storageClass as PutObjectCommandInput["StorageClass"] }
+        : {}),
+      ...(options?.tagging ? { Tagging: encodeTagging(options.tagging) } : {}),
     });
+
+    // The SDK omits these from SignedHeaders unless told to hoist them, and an
+    // unsigned header is one the uploader can simply drop: it would upload
+    // unverified bytes, into whichever storage class it liked, tagged however
+    // it liked. Signing them makes sending the exact values mandatory.
+    const signableHeaders = new Set<string>();
+    if (options?.checksumSha256) signableHeaders.add("x-amz-checksum-sha256");
+    if (options?.storageClass) signableHeaders.add("x-amz-storage-class");
+    if (options?.tagging) signableHeaders.add("x-amz-tagging");
 
     return awsGetSignedUrl(this.getClient(), command, {
       expiresIn: expiresInSeconds,
-      // The SDK omits x-amz-checksum-* from SignedHeaders unless it is told to
-      // hoist them, which would let an uploader simply drop the header and
-      // upload anything. Signing it makes sending the exact value mandatory.
-      ...(options?.checksumSha256
-        ? { signableHeaders: new Set(["x-amz-checksum-sha256"]) }
-        : {}),
+      ...(signableHeaders.size > 0 ? { signableHeaders } : {}),
     });
   }
 }
@@ -420,6 +429,19 @@ function availabilityOf(
     expectedLatencyHours:
       archivedTier === "DEEP_ARCHIVE" || archivedTier === "DEEP_ARCHIVE_ACCESS" ? 12 : 5,
   };
+}
+
+/**
+ * S3 takes object tags as a URL-encoded query string, not JSON.
+ *
+ * Encoded here rather than by callers because the keys involved contain a
+ * colon (`starkeep:intent`), which survives naive concatenation and then fails
+ * signature validation in a way that reports only "SignatureDoesNotMatch".
+ */
+function encodeTagging(tags: Record<string, string>): string {
+  return Object.entries(tags)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&");
 }
 
 function isMissingOrForbidden(error: unknown): boolean {

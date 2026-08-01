@@ -37,6 +37,10 @@ import {
   dataRecordObjectKey,
   parseVariantLongEdges,
   resolveVariants,
+  isRetrievalIntent,
+  tagsForIntent,
+  DEFAULT_RETRIEVAL_INTENT,
+  RETRIEVAL_INTENTS,
   typeCategory,
   getCategory,
   isCategoryId,
@@ -53,6 +57,7 @@ import type {
   MetadataRow,
   RecordLabel,
   ResolvedVariant,
+  RetrievalIntent,
   VariantCandidate,
 } from "@starkeep/protocol-primitives";
 import { createInProcessSyncTransport } from "@starkeep/sync-engine";
@@ -895,6 +900,33 @@ async function planCloudLabelWrites(
 // Cloud exclusion (`starkeep/no-cloud`)
 // ---------------------------------------------------------------------------
 
+/**
+ * The AWS storage class each declared intent lands in.
+ *
+ * This is the *only* place the platform vocabulary meets a provider concept,
+ * which is the point of having a vocabulary at all — an app says "instant" and
+ * has no opinion about tiers.
+ *
+ * `instant` maps to Intelligent-Tiering rather than Standard because I-T's
+ * automatic tiers are all millisecond-latency, so the promise still holds while
+ * cold objects get cheaper on their own. That guarantee depends on the bucket
+ * never enabling I-T's *asynchronous* archive tiers — an object in
+ * DEEP_ARCHIVE_ACCESS exists and cannot be read, which would break `instant`
+ * silently.
+ *
+ * `archive` lands in Intelligent-Tiering too, not straight into Deep Archive.
+ * The transition is gated on the record's derived ladder being complete *and*
+ * on a hold period, neither of which is known at write time — so the tag marks
+ * the object eligible later and the lifecycle rule is what acts on it. Writing
+ * straight to Deep Archive here would freeze originals whose ladder does not
+ * exist yet, which is exactly the state where the original is the only readable
+ * copy of the record.
+ */
+function storageClassForIntent(intent: RetrievalIntent): string {
+  void intent;
+  return "INTELLIGENT_TIERING";
+}
+
 /** Label namespace for platform-level record constraints. */
 const STARKEEP_LABEL_APP_ID = "starkeep";
 /** Record label forbidding these bytes from reaching cloud storage. */
@@ -1698,10 +1730,27 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const rawBody = event.isBase64Encoded && event.body
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
-      const body = JSON.parse(rawBody) as { key?: string; contentType?: string };
+      const body = JSON.parse(rawBody) as {
+        key?: string;
+        contentType?: string;
+        intent?: string;
+      };
       if (!body.key) return clientErr("key is required", 400);
       const check = parseObjectKey(appId, body.key, grants, "write");
       if (!check.ok) return clientErr(check.message, check.status);
+      // Declared retrieval intent, in the platform's vocabulary — the app says
+      // what latency it can tolerate, not which storage class it wants. An
+      // unrecognized value is refused rather than defaulted: silently writing
+      // `instant` for a typo'd "archve" costs money quietly, and silently
+      // writing `archive` would put bytes behind a 48-hour thaw nobody asked
+      // for. Neither failure announces itself.
+      if (body.intent !== undefined && !isRetrievalIntent(body.intent)) {
+        return clientErr(
+          `intent must be one of ${RETRIEVAL_INTENTS.join(", ")} (got "${body.intent}")`,
+          400,
+        );
+      }
+      const intent: RetrievalIntent = body.intent ?? DEFAULT_RETRIEVAL_INTENT;
       // Pin the permitted body into the signature. Shared record keys *are*
       // the SHA-256, so the expected checksum is derivable from the key alone —
       // the caller is never asked for it and could not influence it if it
@@ -1716,15 +1765,27 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
       const contentHash = contentHashFromDataRecordObjectKey(body.key);
       const checksumSha256 = contentHash ? sha256HexToBase64(contentHash) : undefined;
+      const tagging = tagsForIntent(intent);
       const url = await storage.getSignedPutUrl!(body.key, {
         expiresIn: 3600,
         ...(body.contentType ? { contentType: body.contentType } : {}),
         ...(checksumSha256 ? { checksumSha256 } : {}),
+        // Both are bound into the signature, so the uploader cannot choose a
+        // different tier or tag its way into a lifecycle rule it wasn't given.
+        storageClass: storageClassForIntent(intent),
+        ...(Object.keys(tagging).length > 0 ? { tagging } : {}),
       });
-      // Returned so the uploader can send the mandatory header without
-      // re-deriving it (and without needing to know the encoding differs from
-      // the hex contentHash it already holds).
-      return ok({ url, ...(checksumSha256 ? { checksumSha256 } : {}) });
+      // Returned so the uploader can send the mandatory headers without
+      // re-deriving them (and without needing to know the checksum encoding
+      // differs from the hex contentHash it already holds, or what a storage
+      // class even is).
+      return ok({
+        url,
+        ...(checksumSha256 ? { checksumSha256 } : {}),
+        intent,
+        storageClass: storageClassForIntent(intent),
+        ...(Object.keys(tagging).length > 0 ? { tagging } : {}),
+      });
     }
 
     // GET /apps/{appId}/files/{encodedKey}/presign — presigned S3 GET URL.
