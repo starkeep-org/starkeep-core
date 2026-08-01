@@ -59,6 +59,11 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
 | ~~Deferred~~ | ~~Nothing produces a video yet.~~ **Closed** by items 26/27. | 28 | — |
 | **Deferred** | The video player is not visually verified, and no test drives a real `<video>` element. | 28 | Human review (same class as 9b) |
+| ~~Blocking~~ | ~~`unsupported` decided by regex over an error message.~~ **Closed** — typed `UndecodableError` decided at the point of failure; the old fixture was a string no decoder produces, so every real HEIC was retried forever while the test passed. | 7/24 | — |
+| **Blocking** | The DNG preview parser has never been run against a real ProRAW or Pixel file, only hand-built TIFFs. The plan explicitly asks for this first. | 30 | Real camera fixtures |
+| **Deferred** | Nothing reads Apple's content identifier, so Live Photo pairing only ever reaches `filename` confidence in practice. | 31 | A QuickTime/maker-note reader |
+| **Deferred** | CR3 is ISO-BMFF, not TIFF, so preview extraction finds nothing in it and reports it undecodable. | 30 | A CR3 container parser |
+| **Accepted** | HEIC decode is macOS-only; a Linux container leaves such records ladder-incomplete and therefore unarchived. | 32 | — (measure via item 15) |
 | ~~Blocking~~ | ~~Nothing calls `deriveVideoLadder`.~~ **Closed** — `deriveAndPublishVideo` wires probe → facts → derive → publish → gate; the import loop now discovers video and no longer buffers whole files. | 26/27 | — |
 | **Deferred** | Skim parameters (8x / 20s / 2fps) are an untested hypothesis; may be better as animated AVIF. | 27 | Measurement against real clips |
 | **Deferred** | VP9/WebM transcoding is written but never exercised by a test. | 27 | A fixture asserting the webm path |
@@ -1288,6 +1293,105 @@ instead does not exist.
   but a 1080p opt-in on a long clip would make this worth streaming.
 - **No audio-bearing fixture.** The `-c:a aac` path and the skim's `-an` are asserted only against
   silent sources, so "strips audio" is proven while "keeps and re-encodes audio" is not.
+
+## Phase 6
+
+### Items 30 / 31 / 32 — raw preview, Live Photo pairing, HEIC decode
+
+#### The live bug this started from
+
+The import ledger's whole value is that `unsupported` is terminal and `failed` is retried. That
+distinction was made by matching the error text against `/unsupported|undecodable/i`. The message
+libvips actually produces for an iPhone photo is:
+
+> `heif: Error while loading plugin: Support for this compression format has not been built in`
+
+which contains **neither word**. So the most common capture format in the world was classified as a
+transient failure and **retried on every run, forever** — exactly what the ledger exists to prevent.
+
+Worse, the test covering the terminal path used the fixture string `"undecodable-here: no HEIC
+decoder"`, which no decoder has ever produced. It was written to match the classifier rather than to
+reproduce a failure, so it passed while the real thing looped. **A fixture that cannot fail the way
+production fails is not evidence of anything.** The fixture is now libvips' real message, verbatim.
+
+Classification now happens at the point of failure and is carried in the type
+(`UndecodableError`). An error message is the *presentation* of a failure, not its classification —
+upstream libraries reword them between minor versions, and each rewording silently flips a terminal
+outcome into an infinite retry. Anything unrecognised stays **retryable**, because guessing
+"terminal" abandons files a retry would have imported, silently and permanently.
+
+#### What sharp actually does with HEIC (verified, not assumed)
+
+```
+sharp.format.heif.input     → true
+sharp(heic).metadata()      → OK: heif 800x600
+sharp(heic).resize().jpeg() → FAILS: "…has not been built in"
+```
+
+The format table reports what libvips was **compiled** with. The prebuilt sharp ships libheif with
+AVIF but no HEVC decoder, because HEVC carries patent licensing a redistributed binary cannot
+assume. **HEIC therefore looks supported at the probe layer and fails at the decode layer**, and
+anything gating on "can I read the metadata" concludes it is fine.
+
+Item 32's answer is the plan's: the macOS platform decoder (`sips` → ImageIO), not a custom libvips
+build (§12 rejects that). `sips` rather than a native binding — present on every macOS install, no
+build step, no native module to recompile per Node version. The asymmetry is deliberate: a Linux
+container still cannot decode HEIC, such records stay ladder-incomplete, and **ladder-incomplete
+means never archived**. The cost is storage, not a photo nobody can open.
+
+#### Raw: the camera's own preview, not the sensor data
+
+Decoding raw means demosaicing, white balance and a tone curve — colour science whose output would
+not match what the camera showed the photographer. Every DNG already carries a JPEG the camera
+rendered itself. A DNG is a TIFF, so this walks the IFD chain *and* the SubIFDs and returns the
+largest JPEG by pixel area.
+
+**Largest, not first.** Cameras write a 160×120 thumbnail beside the full-resolution render; taking
+the first would build an entire ladder from the thumbnail — every rung produced, every one useless,
+nothing in the output resembling an error. Following only the IFD chain *or* only the SubIFDs has the
+same effect, since the full-size preview usually lives in a SubIFD.
+
+A byte scan for `FFD8…FFD9` would be shorter and is wrong: the marker pair occurs inside raw sensor
+data often enough to match, with no way to tell a real preview from a coincidence.
+
+#### Live Photo pairing must happen at ingest
+
+On iOS capture the pairing is free (`PHAsset.mediaSubtypes`); an import gets nothing but two files
+named alike. Once they are two records with different ids and arrival times, **the only thing
+connecting them is a filename the user is free to change** — so pairing happens during the walk,
+while the sibling files are still visible together.
+
+The risk is asymmetric, and the tests lean accordingly. A missed pair costs an untidy grid —
+obvious and recoverable. A **wrong** pair demotes a real photo or a real video to a component of
+something else, where the user will never look for it. So:
+
+- Apple's shared content identifier wins outright when present. A **mismatch is positive evidence
+  against** a pair, so it does not fall through to the filename heuristic — that would override the
+  file's own answer with a guess.
+- A clip longer than ~6 s is not motion, whatever it is called. Pairing a real video would bury it
+  inside a photo's detail view.
+- An ambiguous stem (`IMG_1.heic` + `IMG_1.jpg` + `IMG_1.mov`) is left **entirely unpaired**.
+- The motion half is registered **after** the whole walk, so it attaches regardless of walk order.
+  `IMG_1.heic` sorts before `IMG_1.mov` on most filesystems — precisely the kind of "usually true"
+  that breaks on somebody else's disk. A test forces the reverse order.
+- A pair whose still failed to import still imports the clip standalone. Losing the pairing costs a
+  tidier grid; dropping the file loses somebody's video.
+
+#### Gaps
+
+- **Never verified against real camera files.** The DNG parser is tested against TIFFs built byte by
+  byte — the right way to test an IFD walker, and *not* a substitute. The plan says explicitly:
+  "verify against real ProRAW and Pixel files first; preview dimensions vary by camera." Still
+  outstanding, and the most likely place this is wrong.
+- **No content-identifier reader.** `pairingFacts` is a dependency nothing implements, so pairing
+  currently reaches only `filename` confidence in practice. The authoritative signal is available in
+  the QuickTime metadata and the HEIC maker note; reading it is unwritten work.
+- **CR3 is not TIFF.** It is an ISO-BMFF container, so the IFD walker will find nothing in it and the
+  file will be reported undecodable. `isRawType` claims it as raw, which is right for grants and
+  wrong for preview extraction.
+- **Item 32 is macOS-only by design**, so HEIC on a Linux container remains underivable. Accepted,
+  not fixed — but the count of records stranded this way is exactly what item 15's residency
+  inspector should surface.
 
 ## Phase 4
 
