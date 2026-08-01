@@ -16,6 +16,7 @@ import { Readable } from "node:stream";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { verifyingStream } from "@starkeep/storage-adapter";
 import type {
+  ByteRange,
   PutOptions,
   GetResult,
   ListOptions,
@@ -142,12 +143,18 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
     }
   }
 
-  async getStream(key: string): Promise<ReadableStream<Uint8Array> | null> {
+  async getStream(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
     try {
       const response = await this.getClient().send(
         new GetObjectCommand({
           Bucket: this.options.bucketName,
           Key: this.resolveKey(key),
+          // S3's Range header is inclusive at both ends and an absent end means
+          // "to the last byte" — the same shape as ByteRange, so this is a
+          // formatting change and not a semantic one.
+          ...(range
+            ? { Range: `bytes=${range.start}-${range.end ?? ""}` }
+            : {}),
         }),
       );
       if (!response.Body) return null;

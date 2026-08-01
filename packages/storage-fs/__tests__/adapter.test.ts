@@ -232,6 +232,37 @@ describe("FsObjectStorageAdapter", () => {
       expect(await adapter.getStream("nope")).toBeNull();
     });
 
+    // Ranged reads exist for video seeking. Reading from zero and discarding
+    // the prefix would satisfy every assertion about *content* while turning a
+    // scrub to the ten-minute mark into a ten-minute read, so the point is that
+    // the range reaches the filesystem rather than being applied afterwards.
+    describe("ranged reads", () => {
+      // Distinct bytes per position, so an off-by-one is visible rather than
+      // hidden inside a run of identical characters.
+      const ranged = Buffer.from("0123456789abcdef");
+
+      beforeEach(async () => {
+        await adapter.putStream("r", source(ranged));
+      });
+
+      it("reads an inclusive range at both ends", async () => {
+        const stream = await adapter.getStream("r", { start: 2, end: 5 });
+        // Four bytes, not three: `end` is inclusive, matching HTTP and S3 so
+        // that no layer in between has to translate.
+        expect((await drain(stream!)).toString()).toBe("2345");
+      });
+
+      it("reads to the end when no end is given", async () => {
+        const stream = await adapter.getStream("r", { start: 10 });
+        expect((await drain(stream!)).toString()).toBe("abcdef");
+      });
+
+      it("reads a single byte", async () => {
+        const stream = await adapter.getStream("r", { start: 0, end: 0 });
+        expect((await drain(stream!)).toString()).toBe("0");
+      });
+    });
+
     it("accepts a stream matching the expected digest", async () => {
       await adapter.putStream("k", source(payload), { expectedSha256Hex: hex });
       expect(await adapter.has("k")).toBe(true);

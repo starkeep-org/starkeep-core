@@ -54,6 +54,7 @@ export {
 
 export type { ObjectStorageAdapter } from "./object-storage/adapter.js";
 export type {
+  ByteRange,
   PutOptions,
   PutStreamOptions,
   GetResult,

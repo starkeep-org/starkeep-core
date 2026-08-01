@@ -1,4 +1,5 @@
 import type {
+  ByteRange,
   ObjectStorageAdapter,
   PutOptions,
   GetResult,
@@ -230,7 +231,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     };
   }
 
-  async getStream(key: string): Promise<ReadableStream<Uint8Array> | null> {
+  async getStream(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
     const presignRes = await this.fetchImpl(`${this.url(key)}/presign`, {
       headers: this.headers("GET", `/files/${key}/presign`, ""),
     });
@@ -240,10 +241,24 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     }
     const { url } = await presignRes.json() as { url: string };
 
-    const res = await this.fetchImpl(url);
+    // The Range rides on the fetch, not the presign: the signature covers the
+    // URL, and a presigned URL is deliberately reusable across ranges.
+    const res = await this.fetchImpl(
+      url,
+      range ? { headers: { Range: `bytes=${range.start}-${range.end ?? ""}` } } : undefined,
+    );
     if (res.status === 404) return null;
     if (!res.ok) {
       throw new Error(`GET ${key} failed: ${res.status} ${res.statusText}`);
+    }
+    // A server that ignores Range answers 200 with the whole object, which is a
+    // *success* status carrying the wrong bytes. Left unchecked the caller
+    // writes a full object into a slot sized for one chunk and the corruption
+    // only surfaces later, in the assembled file. Fail here instead.
+    if (range && res.status !== 206) {
+      throw new Error(
+        `GET ${key} ignored the requested range (status ${res.status}, expected 206)`,
+      );
     }
     // The response body, not `arrayBuffer()` — a multi-GB clip must not be
     // materialized here, which is the entire point of this method existing
