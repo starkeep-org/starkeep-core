@@ -15,6 +15,7 @@ import {
 } from "@starkeep/protocol-primitives";
 import { loadVariantsForPage } from "@starkeep/storage-adapter";
 import { SqliteDatabaseAdapter } from "../src/adapter.js";
+import { nodeSqliteDriver } from "../src/node-driver.js";
 
 const RENDITION = { appId: "photos", key: "rendition" };
 
@@ -24,7 +25,7 @@ describe("loadVariantsForPage", () => {
   const clock = createHLCClock({ nodeId: "test", wallClockFunction: () => tick++ });
 
   beforeEach(async () => {
-    adapter = new SqliteDatabaseAdapter({ path: ":memory:" });
+    adapter = new SqliteDatabaseAdapter({ path: ":memory:", driver: nodeSqliteDriver });
     await adapter.init();
   });
 

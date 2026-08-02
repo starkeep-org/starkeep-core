@@ -6,6 +6,7 @@ import {
   type CreateDataRecordInput,
 } from "@starkeep/protocol-primitives";
 import { SqliteDatabaseAdapter } from "../src/adapter.js";
+import { nodeSqliteDriver } from "../src/node-driver.js";
 
 // Every DataRecord is now file-backed; tests must supply the file fields.
 function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
@@ -25,7 +26,7 @@ describe("SqliteDatabaseAdapter", () => {
   const clock = createHLCClock({ nodeId: "test", wallClockFunction: () => 1000 });
 
   beforeEach(async () => {
-    adapter = new SqliteDatabaseAdapter({ path: ":memory:" });
+    adapter = new SqliteDatabaseAdapter({ path: ":memory:", driver: nodeSqliteDriver });
     await adapter.init();
   });
 

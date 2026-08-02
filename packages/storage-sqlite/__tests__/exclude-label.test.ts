@@ -15,6 +15,7 @@ import {
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
 import { SqliteDatabaseAdapter } from "../src/adapter.js";
+import { nodeSqliteDriver } from "../src/node-driver.js";
 
 function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {
   return {
@@ -34,7 +35,7 @@ describe("excludeLabel", () => {
   const clock = createHLCClock({ nodeId: "test", wallClockFunction: () => tick++ });
 
   beforeEach(async () => {
-    adapter = new SqliteDatabaseAdapter({ path: ":memory:" });
+    adapter = new SqliteDatabaseAdapter({ path: ":memory:", driver: nodeSqliteDriver });
     await adapter.init();
   });
 
@@ -134,7 +135,7 @@ describe("parentId filtering", () => {
   const clock = createHLCClock({ nodeId: "test", wallClockFunction: () => tick++ });
 
   beforeEach(async () => {
-    adapter = new SqliteDatabaseAdapter({ path: ":memory:" });
+    adapter = new SqliteDatabaseAdapter({ path: ":memory:", driver: nodeSqliteDriver });
     await adapter.init();
   });
 

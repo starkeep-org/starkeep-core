@@ -24,6 +24,7 @@ import {
 } from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter, type DatabaseAdapter } from "@starkeep/storage-adapter";
 import { SqliteDatabaseAdapter } from "../src/adapter.js";
+import { nodeSqliteDriver } from "../src/node-driver.js";
 
 interface Backend {
   name: string;
@@ -44,7 +45,7 @@ const backends: Backend[] = [
   {
     name: "SqliteDatabaseAdapter",
     create: async () => {
-      const adapter = new SqliteDatabaseAdapter({ path: ":memory:" });
+      const adapter = new SqliteDatabaseAdapter({ path: ":memory:", driver: nodeSqliteDriver });
       await adapter.init();
       return adapter;
     },

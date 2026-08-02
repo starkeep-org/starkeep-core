@@ -1,7 +1,4 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, existsSync } from "node:fs";
-import { dirname } from "node:path";
 import type {
   DataRecord,
   HLCTimestamp,
@@ -60,12 +57,21 @@ export interface SqliteDatabaseAdapterOptions {
    * named `node:sqlite`, and it is the one thing that genuinely cannot be
    * driver-agnostic.
    *
-   * Defaults to `node:sqlite`, so every existing caller is unchanged. React
-   * Native passes an op-sqlite driver instead; see
-   * `apps/mobile/src/db/op-sqlite-driver.ts` for why that one emulates
-   * `prepare()` rather than using op-sqlite's prepared statements.
+   * **Required, and deliberately without a default.** It used to default to
+   * `node:sqlite`, which meant this module imported it statically — and a static
+   * `node:` import at module scope makes the whole package unbundleable on React
+   * Native, whatever driver the caller then passes. The Node driver now lives at
+   * `@starkeep/storage-sqlite/node`, so a Node caller writes one extra import
+   * and a handset can bundle this file at all.
+   *
+   * A default that only works on some platforms is worse than no default: it
+   * fails at bundle time, far from the line that chose it.
+   *
+   * React Native passes an op-sqlite driver; see `src/db/op-sqlite-driver.ts` in
+   * the `starkeep-apps` photos-mobile app for why that one emulates `prepare()`
+   * rather than using op-sqlite's prepared statements.
    */
-  driver?: SqliteDriver;
+  driver: SqliteDriver;
 }
 
 export interface SqliteDriver {
@@ -77,21 +83,6 @@ export interface SqliteDriver {
    */
   close(db: RawDatabase): void;
 }
-
-/** The default driver: Node's built-in SQLite. */
-export const nodeSqliteDriver: SqliteDriver = {
-  open: (path) => {
-    // Node's SQLite will not create a missing parent directory, so this driver
-    // must. op-sqlite manages its own location and does not want this done for
-    // it — which is why it lives here rather than in the adapter.
-    if (path !== ":memory:") {
-      const dir = dirname(path);
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    }
-    return new DatabaseSync(path);
-  },
-  close: (db) => (db as unknown as DatabaseSync).close(),
-};
 
 /**
  * How labels are spelled on this backend: the table is flat-named, SQLite
@@ -135,7 +126,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
 
   constructor(options: SqliteDatabaseAdapterOptions) {
     this.options = options;
-    this.driver = options.driver ?? nodeSqliteDriver;
+    this.driver = options.driver;
   }
 
   async init(): Promise<void> {
@@ -185,20 +176,20 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     return this.getDatabase();
   }
 
+  // The casts these three used to carry named `DatabaseSync["prepare"]` to
+  // borrow node:sqlite's parameter types. `RawStatement` declares `unknown[]`
+  // directly, so they were already no-ops — and they were the last thing in
+  // this file referring to a concrete driver.
   private runStmt(sql: string, ...params: unknown[]): void {
-    this.getDatabase().prepare(sql).run(...(params as Parameters<ReturnType<DatabaseSync["prepare"]>["run"]>));
+    this.getDatabase().prepare(sql).run(...params);
   }
 
   private getRow<T = SqliteRow>(sql: string, ...params: unknown[]): T | undefined {
-    return this.getDatabase().prepare(sql).get(
-      ...(params as Parameters<ReturnType<DatabaseSync["prepare"]>["get"]>),
-    ) as unknown as T | undefined;
+    return this.getDatabase().prepare(sql).get(...params) as T | undefined;
   }
 
   private allRows<T = SqliteRow>(sql: string, ...params: unknown[]): T[] {
-    return this.getDatabase().prepare(sql).all(
-      ...(params as Parameters<ReturnType<DatabaseSync["prepare"]>["all"]>),
-    ) as unknown as T[];
+    return this.getDatabase().prepare(sql).all(...params) as T[];
   }
 
   async put(record: DataRecord): Promise<void> {
