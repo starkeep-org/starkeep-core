@@ -16,6 +16,18 @@
  *   - **Pins.** Node-local, deliberately not a label: a pin shared as a label
  *     would let one device's preference silently rewrite every other device's
  *     cache policy. That is the expensive mistake available in this area.
+ *
+ * ## Why this lives in the sync engine rather than beside a server
+ *
+ * It used to live in `apps/local-data-server`, which was fine while exactly one
+ * node made residency decisions. The phone makes them too, and it makes them
+ * against the same rules — so the choice was between moving this or growing a
+ * second copy, and a second copy of "which bytes may this node hold" is how two
+ * nodes come to disagree about what they have.
+ *
+ * It moved unchanged: every dependency was already a package and there was not
+ * one Node-specific import in it. That it was portable all along is the reason
+ * the move is safe, and the reason it should have started here.
  */
 
 import {
@@ -23,7 +35,7 @@ import {
   NO_OVERRIDES,
   type OverrideRule,
   type OverrideVerdict,
-} from "../../packages/sync-engine/src/index.js";
+} from "./index.js";
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import {
   DummyDriver,
@@ -48,8 +60,8 @@ import {
   type ReplicaProbe,
   type ResidencyVerdict,
   type ResidentSetIndex,
-} from "@starkeep/sync-engine";
-import { typeCategory } from "../../packages/protocol-primitives/src/types/core-types.js";
+} from "./index.js";
+import { typeCategory } from "@starkeep/protocol-primitives";
 import type { StarkeepId } from "@starkeep/protocol-primitives";
 
 /** Label namespace for platform-level record constraints. */

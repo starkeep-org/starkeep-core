@@ -52,7 +52,7 @@ import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObj
 import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import type { NodeRetentionPolicy, OverrideRule } from "../../packages/sync-engine/src/index.js";
-import { createResidencyManager, residencyHooks, originalClassFor } from "./residency.js";
+import { createResidencyManager, residencyHooks, originalClassFor } from "../../packages/sync-engine/src/index.js";
 import { buildCensus } from "./census.js";
 import {
   createStarkeepId,

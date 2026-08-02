@@ -27,7 +27,11 @@ import { SqliteDatabaseAdapter, type SqliteDriver } from "@starkeep/storage-sqli
 import {
   createSyncEngine,
   createSqliteSyncStateStore,
+  createResidencyManager,
+  residencyHooks,
   type NodeRetentionPolicy,
+  type OverrideRule,
+  type ResidencyManager,
   type SyncEngine,
   type SyncTransport,
 } from "@starkeep/sync-engine";
@@ -72,6 +76,19 @@ export interface MobileNodeOptions {
    * quietly nowhere.
    */
   readonly retention?: NodeRetentionPolicy;
+  /** Per-record overrides as rules over labels. Node-local, like pins. */
+  readonly overrideRules?: readonly OverrideRule[];
+  /**
+   * Which label names a record's size class.
+   *
+   * Configured rather than constant for the same reason it is on every other
+   * node: the platform-side plumbing never names `photos/rendition`, so the
+   * ladder can be respecified — or owned by a different app — without a change
+   * here.
+   */
+  readonly classLabel?: { readonly appId: string; readonly key: string };
+  /** Replicas elsewhere required before this node may drop its only copy. */
+  readonly minimumReplicas?: number;
   readonly wallClock?: () => number;
 }
 
@@ -79,6 +96,11 @@ export interface MobileNode {
   readonly databaseAdapter: DatabaseAdapter;
   readonly objectStorage: ObjectStorageAdapter;
   readonly engine: SyncEngine;
+  /**
+   * Null when no retention policy was supplied — meaning this node wants every
+   * blob, exactly as an unconfigured laptop does.
+   */
+  readonly residency: ResidencyManager | null;
   /** Run one exchange. Safe to abandon; the watermark makes it resumable. */
   exchange(): Promise<unknown>;
   close(): Promise<void>;
@@ -115,6 +137,28 @@ export async function createMobileNode(options: MobileNodeOptions): Promise<Mobi
     db: databaseAdapter.getRawDatabase(),
   });
 
+  // Without a policy there is no budget to enforce and no class to resolve, so
+  // the engine runs without the hook and every blob is wanted. That is the same
+  // default a laptop has, and it is the right one: a node that has not been told
+  // its budget must not silently start declining data, because the failure mode
+  // of over-fetching is a full disk and the failure mode of under-fetching is a
+  // photo that is quietly nowhere.
+  const residency = options.retention
+    ? createResidencyManager({
+        localDb: databaseAdapter.getRawDatabase(),
+        databaseAdapter,
+        localObjectStorage: options.localObjectStorage,
+        classLabel: options.classLabel ?? { appId: "photos", key: "rendition" },
+        // A phone is never the cloud node. `starkeep/no-cloud` is a constraint
+        // about cloud storage; a handset holding such a record is the intended
+        // outcome, not a violation.
+        isCloudNode: false,
+        policy: options.retention,
+        overrideRules: options.overrideRules ?? [],
+        durability: { minimumReplicas: options.minimumReplicas ?? 1 },
+      })
+    : null;
+
   const engine = createSyncEngine({
     localDatabaseAdapter: databaseAdapter,
     localObjectStorage: options.localObjectStorage,
@@ -124,12 +168,14 @@ export async function createMobileNode(options: MobileNodeOptions): Promise<Mobi
     syncState,
     pageLimit: MOBILE_PAGE_LIMIT,
     scanPageSize: MOBILE_SCAN_PAGE_SIZE,
+    ...(residency ? { residency: residencyHooks(residency) } : {}),
   });
 
   return {
     databaseAdapter,
     objectStorage: options.localObjectStorage,
     engine,
+    residency,
     exchange: () => engine.exchange(),
     async close() {
       await databaseAdapter.close();

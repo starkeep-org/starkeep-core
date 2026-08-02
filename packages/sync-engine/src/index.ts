@@ -109,3 +109,14 @@ export {
   type OverrideVerdict,
   type RecordLabel,
 } from "./override-rules.js";
+
+export {
+  createResidencyManager,
+  residencyHooks,
+  originalClassFor,
+  ORIGINAL_CLASS_PREFIX,
+  STARKEEP_LABEL_APP_ID,
+  NO_CLOUD_LABEL_KEY,
+  type ResidencyManager,
+  type ResidencyManagerOptions,
+} from "./residency-manager.js";
