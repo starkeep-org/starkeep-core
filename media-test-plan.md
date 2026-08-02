@@ -61,12 +61,13 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Deferred** | The video player is not visually verified, and no test drives a real `<video>` element. | 28 | Human review (same class as 9b) |
 | **Deferred** | The admin-web Storage page has not been visually reviewed, and no test drives the page itself (only the route beneath it). | 34 | Human review (same class as 9b) |
 | ~~Blocking~~ | ~~`unsupported` decided by regex over an error message.~~ **Closed** — typed `UndecodableError` decided at the point of failure; the old fixture was a string no decoder produces, so every real HEIC was retried forever while the test passed. | 7/24 | — |
-| **Blocking** | The DNG preview parser has never been run against a real ProRAW or Pixel file, only hand-built TIFFs. The plan explicitly asks for this first. | 30 | Real camera fixtures |
+| ~~Blocking~~ | ~~The DNG parser has never seen a real camera file.~~ **Closed** — a real RICOH GR IV DNG, which found a bug no synthetic fixture could: the raw mosaic is JPEG-compressed too, and larger than any preview. | 30 | — |
 | **Deferred** | Nothing reads Apple's content identifier, so Live Photo pairing only ever reaches `filename` confidence in practice. | 31 | A QuickTime/maker-note reader |
 | **Deferred** | CR3 is ISO-BMFF, not TIFF, so preview extraction finds nothing in it and reports it undecodable. | 30 | A CR3 container parser |
 | **Accepted** | HEIC decode is macOS-only; a Linux container leaves such records ladder-incomplete and therefore unarchived. | 32 | — (measure via item 15) |
 | ~~Blocking~~ | ~~No UI is wired to the retention projection.~~ **Closed** — `/residency/projection` plus the admin-web Storage page, showing selected-vs-projected per row with capped/grows/pinned annotations. | 34 | — |
-| **Deferred** | Per-record overrides as rules over labels are unbuilt; the matrix is read-only (it projects, it does not yet edit). | 34 | An editable matrix + a label-rule editor |
+| ~~Deferred~~ | ~~The matrix is read-only and label rules are unbuilt.~~ **Closed** — dry-run projection endpoint, validated save, and a rule editor. | 34 | — |
+| ~~Blocking~~ | ~~`validateRetentionPolicy` existed and no write path called it,~~ so `PATCH /config` would save a zero budget. **Closed** — `PUT /residency/policy` validates and refuses. | 34 | — |
 | ~~Blocking~~ | ~~Nothing produces a `SizeClassCensus`.~~ **Closed** — `apps/local-data-server/census.ts`, one pass over records (not the resident set, which would only count what is already local). | 34/15 | — |
 | ~~Deferred~~ | ~~`BackfillStore` has only an in-memory test double.~~ **Closed** — node-local SQLite ledger keyed by record id. | 8 | — |
 | **Deferred** | Backfill is **built but never run** — correctly gated on item 9b. | 8 | Item 9b |
@@ -1385,10 +1386,24 @@ something else, where the user will never look for it. So:
 
 #### Gaps
 
-- **Never verified against real camera files.** The DNG parser is tested against TIFFs built byte by
-  byte — the right way to test an IFD walker, and *not* a substitute. The plan says explicitly:
-  "verify against real ProRAW and Pixel files first; preview dimensions vary by camera." Still
-  outstanding, and the most likely place this is wrong.
+- ~~**Never verified against real camera files.**~~ **Closed, and it found a bug.** A real RICOH
+  GR IV DNG showed that the raw sensor mosaic is stored with `Compression = 7` — lossless JPEG,
+  the same value a preview uses — and is *larger* than any preview, so "largest JPEG by area"
+  selected the raw every time:
+
+  ```
+  6304x4224  Compression 7  Photometric 32803 (CFA)    28 MB  <- sensor data
+  6192x4128  Compression 7  Photometric 6     (YCbCr)  3.2 MB <- the preview
+  ```
+
+  The result was 14-bit lossless JPEG no ordinary decoder opens ("Unsupported JPEG data precision
+  14"), and at 28 MB of a 30 MB file it discarded the whole point of reading a preview.
+  **`PhotometricInterpretation` is the discriminator** — it says what the pixels *are*, where
+  compression only says how they were coded. `BitsPerSample` is not usable as a second check: it is
+  an array of three shorts, so it lives behind an offset and reads as garbage inline (470, 32690).
+
+  This is the clearest vindication of the plan's instruction to verify against real files first —
+  every synthetic fixture agreed with the bug.
 - **No content-identifier reader.** `pairingFacts` is a dependency nothing implements, so pairing
   currently reaches only `filename` confidence in practice. The authoritative signal is available in
   the QuickTime metadata and the HEIC maker note; reading it is unwritten work.
@@ -1636,8 +1651,22 @@ a cap is legitimate rather than a bug).
 
 #### Gaps
 
-- **The matrix is read-only.** It projects; it does not yet edit, and **per-record overrides as rules
-  over labels are unbuilt**. That is the remaining half of item 34.
+- ~~**The matrix is read-only.**~~ **Closed.** `POST /residency/projection` dry-runs a candidate
+  policy so each edit shows its effect without saving; `PUT /residency/policy` validates and
+  refuses. That closed a real gap — `validateRetentionPolicy` existed and *nothing on the write
+  path called it*, so `PATCH /config` would happily save a zero budget, which the code documents as
+  reading like a limit and behaving as a prohibition.
+
+  The dry run projects invalid policies too, deliberately: an operator mid-edit has an invalid
+  policy more often than not, and blanking the numbers while they fix it removes the very feedback
+  they are editing against.
+
+  **Per-record overrides are rules over labels, not pinned ids.** "Keep every photo of my daughter
+  offline" is one sentence and five thousand records; pinning ids evaluates that intent once, so
+  every photo taken afterwards silently falls outside it. Excluding beats pinning, routed through
+  `constraints` rather than as a negative pin so the existing §6.1 order enforces it. A rule with an
+  empty-string value is rejected (it would match only labels whose value is literally empty, which
+  nothing writes), as is a pin shadowed by an exclude on the same selector.
 - **The Storage page has not been visually reviewed.** Same class as item 9b — layout and legibility
   are human judgement.
 - **No test drives the page**, only the route beneath it.
