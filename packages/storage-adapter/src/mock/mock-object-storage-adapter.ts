@@ -1,6 +1,11 @@
-import { createHash } from "node:crypto";
 import type { ObjectStorageAdapter } from "../object-storage/adapter.js";
-import { collectStream, streamFromBytes, verifyingStream } from "../object-storage/stream-verify.js";
+import {
+  collectStream,
+  streamFromBytes,
+  verifyingStream,
+  hashFactory,
+} from "../object-storage/stream-verify.js";
+import { sha256HexToBase64 } from "../object-storage/checksum.js";
 import type {
   ByteRange,
   PutOptions,
@@ -47,7 +52,14 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
     // path would pass whether or not the checksum was ever sent — which is the
     // one thing those tests exist to catch.
     if (options?.checksumSha256) {
-      const actual = createHash("sha256").update(data).digest("base64");
+      // Through the injectable factory rather than node:crypto directly. The
+      // mock is exported from the package index, so a module-scope
+      // `node:crypto` import here makes the whole package unbundleable on
+      // React Native — even though nothing on a phone would ever construct a
+      // mock.
+      const hash = hashFactory()();
+      hash.update(data);
+      const actual = sha256HexToBase64(hash.digestHex());
       if (actual !== options.checksumSha256) {
         throw new Error(
           `BadDigest: body sha256 ${actual} does not match declared ${options.checksumSha256} for key ${key}`,

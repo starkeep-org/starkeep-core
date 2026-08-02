@@ -68,6 +68,11 @@ export type {
 } from "./object-storage/types.js";
 
 export { sha256HexToBase64, sha256Base64ToHex } from "./object-storage/checksum.js";
+export {
+  setHashFactory,
+  type HashFactory,
+  type IncrementalHash,
+} from "./object-storage/stream-verify.js";
 
 export {
   verifyingStream,

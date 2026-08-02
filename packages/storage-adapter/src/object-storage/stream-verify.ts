@@ -22,7 +22,69 @@
  * the whole point of doing it here rather than at the call site.
  */
 
-import { createHash } from "node:crypto";
+/**
+ * An incremental SHA-256, in the shape both platforms can supply.
+ *
+ * Incremental rather than one-shot, because the whole point of verifying here
+ * is that the bytes are never all in memory at once — a one-shot digest would
+ * mean buffering a multi-gigabyte video to check it.
+ *
+ * That rules out Web Crypto's `subtle.digest`, which takes a whole buffer and
+ * is async besides. React Native therefore supplies its own implementation;
+ * Node uses the built-in one below.
+ */
+import { sha256 } from "js-sha256";
+
+export interface IncrementalHash {
+  update(chunk: Uint8Array): void;
+  digestHex(): string;
+}
+
+export type HashFactory = () => IncrementalHash;
+
+/**
+ * The default: a pure-JS SHA-256 that works on every platform.
+ *
+ * This package used to import `node:crypto` at module scope, which does not
+ * merely fail on React Native — it makes the *whole package* unbundleable
+ * there, and Metro reports it as an error in whatever file imported the
+ * package, several layers from the cause. Typechecking is perfectly happy with
+ * an import that cannot exist at runtime, so only bundling found it.
+ *
+ * The first attempt at a fix was a lazy `require("node:crypto")` inside this
+ * factory. That is worse, and worse in a quiet way: these are ESM packages, so
+ * `require` is simply undefined, and every hash threw — which surfaced as
+ * records failing to sync rather than as anything mentioning crypto.
+ *
+ * So the default is portable and correct everywhere, and Node callers that care
+ * about throughput install the native implementation at their edge with
+ * {@link setHashFactory}. Correct by default, fast where it is worth
+ * configuring — rather than fast by default and broken on a phone.
+ */
+let defaultHashFactory: HashFactory = () => {
+  const hash = sha256.create();
+  return {
+    update: (chunk) => void hash.update(chunk),
+    digestHex: () => hash.hex(),
+  };
+};
+
+/**
+ * Install the platform's hash implementation.
+ *
+ * Called once, at the app's edge, beside the other platform wiring. Global
+ * rather than threaded through every call site because the alternative is an
+ * options bag on `putStream`, `verifyingStream` and every adapter that touches
+ * them — for a value that is a property of the runtime, not of the call.
+ */
+export function setHashFactory(factory: HashFactory): void {
+  defaultHashFactory = factory;
+}
+
+/** The installed factory, for the few places that hash outside a stream. */
+export function hashFactory(): HashFactory {
+  return defaultHashFactory;
+}
 
 export class ChecksumMismatchError extends Error {
   constructor(
@@ -52,14 +114,14 @@ export function verifyingStream(
     onDigest?: (hex: string) => void;
   },
 ): ReadableStream<Uint8Array> {
-  const hash = createHash("sha256");
+  const hash = defaultHashFactory();
   const reader = source.getReader();
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       const { done, value } = await reader.read();
       if (done) {
-        const actual = hash.digest("hex");
+        const actual = hash.digestHex();
         if (options.expectedSha256Hex && actual !== options.expectedSha256Hex) {
           // Errors the stream rather than closing it, so a consumer that would
           // otherwise finalize (complete a multipart upload, close a file)
