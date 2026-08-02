@@ -98,16 +98,17 @@ plugged into a laptop.
 
 ## 4. Order of work
 
-| # | Item | Verifiable here? |
+| # | Item | State |
 |---|---|---|
-| 11a | `RawDatabase` + `DatabaseAdapter` over op-sqlite | Unit-testable against a fake driver; real driver needs a device |
-| 11b | `ObjectStorageAdapter` over expo-file-system | Same |
-| 12 | Expo dev-client shell, Cognito auth, sync peer | Buildable; runnable on the emulator |
-| 15a | Grid + viewer against the existing ladder logic | Runnable; Maestro flows |
-| 15b | Residency inspector + retention matrix | Runnable; reuses the census/projection work |
-| 14 | `WorkManager` job graph | Needs a device to mean anything |
-| 13 | Native modules — `MediaStore`, `ImageDecoder`, `MediaCodec` | Needs a device |
-| 16 | Motion Photo XMP extraction | Parser is unit-testable; capture needs a device |
+| 11a | `RawDatabase` + `DatabaseAdapter` over op-sqlite | **Done** — and the real `SqliteDatabaseAdapter` runs through it unchanged |
+| 11b | `ObjectStorageAdapter` over expo-file-system | **Done** — ranged reads verified by sabotage |
+| 12 | Sync peer + residency | **Done** — a real exchange runs on the phone's adapters; a real budget elides |
+| 16 | Motion Photo XMP extraction | **Done** (parser) — capture path needs a device |
+| 14 | `WorkManager` job graph | **Policy done**; the binding needs a device |
+| 12b | Expo dev-client shell + Cognito auth | Open — needs the RN toolchain installed |
+| 15a | Grid + viewer against the existing ladder logic | Open — needs the shell |
+| 15b | Residency inspector + retention matrix | Open — reuses the census/projection work |
+| 13 | Native modules — `MediaStore`, `ImageDecoder`, `MediaCodec` | Open — needs a device |
 
 Deliberately **not** in the order the media plan lists them. Items 13 and 14 are the ones that cannot
 be verified without a handset, so they come after the shell exists to host them — building native
@@ -139,6 +140,26 @@ windows, or on the OS killing the app. An emulator will not reproduce a phone's 
 remain honest gaps until this runs on hardware.
 
 ---
+
+## 5b. What is true so far
+
+Four of the eight items are done and 99 tests cover them, all running in Node
+against fakes. Two findings worth carrying forward:
+
+- **`SqliteDatabaseAdapter.init()` called Node's `mkdirSync` unconditionally.**
+  A phone has no Node filesystem. Moved into the driver, where "how a connection
+  comes into being" already lived. Invisible until something that is not Node
+  tried to open a database — which is what the seam was built to surface.
+- **The residency manager was in `apps/local-data-server` and was always
+  portable** — no Node imports at all. Moved into the sync engine rather than
+  copied, because a second copy of "which bytes may this node hold" is how two
+  nodes come to disagree about what they have.
+
+**The phase's stated purpose is now demonstrated in principle**: a node with a
+budget smaller than its library keeps every record and declines some bytes,
+asserted in both directions so that neither "ignores the budget" nor "declines
+everything" passes. What remains untested is that this holds on hardware, with a
+real 60k-item library and a real 8 GB budget.
 
 ## 6. Recorded risks
 
