@@ -38,6 +38,7 @@ import { AppDiscovery } from "../../src/components/AppDiscovery";
 import { LocalDriveSection } from "../../src/components/LocalDriveSection";
 import { LocalAppsSection } from "../../src/components/LocalAppsSection";
 import { CloudAppsSection } from "../../src/components/CloudAppsSection";
+import { PairedDevicesSection } from "../../src/components/PairedDevicesSection";
 import { targetsOf, type LocalAppEntry } from "../../src/lib/app-types";
 import {
   initiateAuth,
@@ -543,6 +544,8 @@ export default function DashboardPage() {
               />
 
               <CloudAppsSection apps={cloudApps} />
+
+              <PairedDevicesSection />
 
               <div className="rounded-lg border p-4">
                 <h3 className="font-medium mb-3">Costs</h3>
