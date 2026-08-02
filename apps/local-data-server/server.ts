@@ -35,7 +35,7 @@ import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import type { Filter } from "../../packages/storage-adapter/src/database/types.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
-import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
+import { createSqliteSyncStateStore, createChangeNotifier, projectPolicy } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
 import { getCategory, typeCategory, isCategoryId, isKnownType } from "../../packages/protocol-primitives/src/types/core-types.js";
 import {
@@ -52,7 +52,8 @@ import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObj
 import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import type { NodeRetentionPolicy } from "../../packages/sync-engine/src/index.js";
-import { createResidencyManager, residencyHooks } from "./residency.js";
+import { createResidencyManager, residencyHooks, originalClassFor } from "./residency.js";
+import { buildCensus } from "./census.js";
 import {
   createStarkeepId,
   planLabelWrites,
@@ -818,6 +819,13 @@ async function main() {
       /^\/admin(\/|$)/,
       /^\/watches(\/|$)/,
       /^\/events$/,
+      // This node's own disk accounting, for the operator's retention matrix.
+      // Loopback-gated rather than app-gated on purpose: it is a fact about the
+      // machine, not about anybody's library, and an app has no business
+      // asking. It reports aggregate byte counts per size class and no record
+      // ids, filenames or content — so what a loopback caller learns is roughly
+      // what `du` would already tell them.
+      /^\/residency\/projection$/,
     ];
     const TOKEN_AUTHORIZED_PATTERNS = [
       /^\/data\/files\/upload\/[^/]+$/,
@@ -2341,6 +2349,42 @@ async function main() {
       // is the whole reason keys are declared in a manifest rather than
       // counted at runtime — app B's developer (and app B's code) has to be
       // able to enumerate what app A publishes.
+      // GET /residency/projection — the retention matrix's data.
+      //
+      // Census and projection in one response, because they are only ever
+      // useful together: the census alone says what the library holds, the
+      // projection alone has nothing to project against, and two round trips
+      // would let a UI render a projection against a census it no longer
+      // matches.
+      //
+      // Deliberately not app-scoped. This is operator information about *this
+      // node's* disk, not library data — an app has no business asking, and the
+      // operator UI is not an app.
+      if (path === "/residency/projection" && req.method === "GET") {
+        const census = buildCensus(localDb, {
+          classLabel: { appId: "photos", key: "rendition" },
+          originalClassFor,
+        });
+        if (!starkeepConfig.retention) {
+          // No policy configured means every blob is wanted — so the honest
+          // projection is the whole library, and saying "no policy" lets the
+          // UI offer to create one rather than showing an empty table that
+          // reads as "nothing here".
+          json(res, {
+            configured: false,
+            census,
+            totalLibraryBytes: census.reduce((sum, c) => sum + c.totalBytes, 0),
+          });
+          return;
+        }
+        json(res, {
+          configured: true,
+          census,
+          projection: projectPolicy(starkeepConfig.retention, census),
+        });
+        return;
+      }
+
       if (path === "/data/label-keys" && req.method === "GET") {
         const filterApp = url.searchParams.get("app");
         let q = qb
