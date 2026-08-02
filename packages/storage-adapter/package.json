@@ -34,6 +34,7 @@
   },
   "dependencies": {
     "@starkeep/protocol-primitives": "workspace:*",
+    "js-sha256": "^1.0.0",
     "kysely": "^0.28.17"
   },
   "devDependencies": {

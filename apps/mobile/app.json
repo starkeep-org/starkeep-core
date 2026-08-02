@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "Starkeep",
+    "slug": "starkeep",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "android": {
+      "package": "app.starkeep.mobile",
+      "permissions": ["READ_MEDIA_IMAGES", "READ_MEDIA_VIDEO"]
+    },
+    "plugins": ["expo-file-system"]
+  }
+}

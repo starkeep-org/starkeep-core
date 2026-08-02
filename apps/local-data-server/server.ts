@@ -36,6 +36,7 @@ import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/ob
 import type { Filter } from "../../packages/storage-adapter/src/database/types.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore, createChangeNotifier, projectPolicy, validateRetentionPolicy, validateOverrideRules } from "../../packages/sync-engine/src/index.js";
+import { setHashFactory } from "@starkeep/storage-adapter";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
 import { getCategory, typeCategory, isCategoryId, isKnownType } from "../../packages/protocol-primitives/src/types/core-types.js";
 import {
@@ -86,6 +87,25 @@ import {
 // Signing key for self-hosted file tokens — regenerated each startup so
 // all outstanding tokens are invalidated on restart (revocable by design).
 const TOKEN_SECRET = randomBytes(32) as unknown as Uint8Array;
+
+/**
+ * Use Node's native SHA-256 rather than the portable default.
+ *
+ * The storage adapter defaults to a pure-JS hash so it can be bundled for React
+ * Native at all — `node:crypto` at module scope makes the whole package
+ * unbundleable there. A server has no such constraint and hashes every byte of
+ * every blob it transfers, so it opts into the fast implementation here.
+ *
+ * Installed before anything can hash, which on this process means before the
+ * sync engine exists.
+ */
+setHashFactory(() => {
+  const hash = createHash("sha256");
+  return {
+    update: (chunk) => void hash.update(chunk),
+    digestHex: () => hash.digest("hex"),
+  };
+});
 
 const STARKEEP_DIR = starkeepDir();
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
