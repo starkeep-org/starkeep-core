@@ -25,6 +25,9 @@ import {
 } from "@aws-sdk/client-ssm";
 import type { AwsCredentials } from "./session";
 
+/** Re-exported so a consumer of this subpath needs only this one import. */
+export type { AwsCredentials };
+
 export function appCredsParameterName(stackPrefix: string, appId: string): string {
   return `/${stackPrefix}/app-creds/${appId}`;
 }
