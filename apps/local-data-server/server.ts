@@ -35,7 +35,7 @@ import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import type { Filter } from "../../packages/storage-adapter/src/database/types.js";
 import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
-import { createSqliteSyncStateStore, createChangeNotifier, projectPolicy } from "../../packages/sync-engine/src/index.js";
+import { createSqliteSyncStateStore, createChangeNotifier, projectPolicy, validateRetentionPolicy, validateOverrideRules } from "../../packages/sync-engine/src/index.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
 import { getCategory, typeCategory, isCategoryId, isKnownType } from "../../packages/protocol-primitives/src/types/core-types.js";
 import {
@@ -51,7 +51,7 @@ import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives
 import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
-import type { NodeRetentionPolicy } from "../../packages/sync-engine/src/index.js";
+import type { NodeRetentionPolicy, OverrideRule } from "../../packages/sync-engine/src/index.js";
 import { createResidencyManager, residencyHooks, originalClassFor } from "./residency.js";
 import { buildCensus } from "./census.js";
 import {
@@ -253,6 +253,11 @@ interface StarkeepConfig {
    * "which preset is this".
    */
   retention?: NodeRetentionPolicy;
+  /**
+   * Per-record residency overrides as rules over labels. Node-local, like pins
+   * — this config file is never synced.
+   */
+  overrideRules?: OverrideRule[];
   /**
    * How many confirmed replicas elsewhere before this node may evict a blob it
    * cannot re-derive. Default 1.
@@ -569,6 +574,7 @@ async function main() {
         // is the intended outcome, not a violation.
         isCloudNode: false,
         policy: starkeepConfig.retention,
+        overrideRules: starkeepConfig.overrideRules ?? [],
         durability: { minimumReplicas: starkeepConfig.minimumReplicas ?? 1 },
       })
     : null;
@@ -781,7 +787,7 @@ async function main() {
       // asking. It reports aggregate byte counts per size class and no record
       // ids, filenames or content — so what a loopback caller learns is roughly
       // what `du` would already tell them.
-      /^\/residency\/projection$/,
+      /^\/residency\/(projection|policy)$/,
     ];
     const TOKEN_AUTHORIZED_PATTERNS = [
       /^\/data\/files\/upload\/[^/]+$/,
@@ -2330,6 +2336,7 @@ async function main() {
             configured: false,
             census,
             totalLibraryBytes: census.reduce((sum, c) => sum + c.totalBytes, 0),
+            overrideRules: starkeepConfig.overrideRules ?? [],
           });
           return;
         }
@@ -2337,7 +2344,94 @@ async function main() {
           configured: true,
           census,
           projection: projectPolicy(starkeepConfig.retention, census),
+          // Echoed back so an editor can seed itself from what is actually in
+          // force. Without it the UI would have to keep its own copy of the
+          // policy and could drift from the daemon's.
+          retention: starkeepConfig.retention,
+          overrideRules: starkeepConfig.overrideRules ?? [],
         });
+        return;
+      }
+
+      // POST /residency/projection — project a *candidate* policy without
+      // saving it.
+      //
+      // This is what makes the matrix editable. Every other shape of this
+      // feature is worse: saving on each keystroke restarts the daemon
+      // repeatedly, and projecting client-side would duplicate the rules that
+      // decide residency, so the preview could disagree with what actually
+      // happens — which is the one thing a preview must never do.
+      if (path === "/residency/projection" && req.method === "POST") {
+        const body = JSON.parse(await readBody(req)) as {
+          retention?: NodeRetentionPolicy;
+          overrideRules?: OverrideRule[];
+        };
+        if (!body.retention) {
+          res.writeHead(400);
+          json(res, { error: "retention policy required" });
+          return;
+        }
+        const problems = [
+          ...validateRetentionPolicy(body.retention),
+          ...validateOverrideRules(body.overrideRules ?? []),
+        ];
+        const census = buildCensus(localDb, {
+          classLabel: { appId: "photos", key: "rendition" },
+          originalClassFor,
+        });
+        // Projected even when invalid, deliberately. An operator mid-edit has a
+        // policy that does not yet validate more often than not, and blanking
+        // the numbers while they fix it removes the very feedback they are
+        // editing against. The problems ride alongside.
+        json(res, { problems, census, projection: projectPolicy(body.retention, census) });
+        return;
+      }
+
+      // PUT /residency/policy — validate and save.
+      //
+      // Separate from PATCH /config, which writes whatever it is given. The
+      // policy has rules that are documented as harmful to get wrong — a zero
+      // budget reads as a limit and behaves as a prohibition, and silently
+      // disables the recency rule above it — and `validateRetentionPolicy`
+      // existed while nothing on the write path called it.
+      if (path === "/residency/policy" && req.method === "PUT") {
+        const body = JSON.parse(await readBody(req)) as {
+          retention?: NodeRetentionPolicy;
+          overrideRules?: OverrideRule[];
+        };
+        if (!body.retention) {
+          res.writeHead(400);
+          json(res, { error: "retention policy required" });
+          return;
+        }
+        const problems = [
+          ...validateRetentionPolicy(body.retention),
+          ...validateOverrideRules(body.overrideRules ?? []),
+        ];
+        if (problems.length > 0) {
+          // Refused rather than saved-with-warnings. These are not style
+          // preferences; each one names a policy that will not do what it
+          // appears to say.
+          res.writeHead(422);
+          json(res, { error: "policy is not valid", problems });
+          return;
+        }
+        const updated: StarkeepConfig = {
+          ...starkeepConfig,
+          retention: body.retention,
+          ...(body.overrideRules ? { overrideRules: body.overrideRules } : {}),
+        };
+        await writeFile(STARKEEP_CONFIG_PATH, JSON.stringify(updated, null, 2), "utf8");
+        Object.assign(starkeepConfig, {
+          retention: body.retention,
+          ...(body.overrideRules ? { overrideRules: body.overrideRules } : {}),
+        });
+        json(res, { ok: true });
+        // The residency manager is built at boot from this config, so a restart
+        // is how the new policy takes effect. Deferred so the response lands
+        // first — otherwise the caller sees a dropped connection rather than
+        // the confirmation it was waiting for.
+        setTimeout(restartProcess, 200);
         return;
       }
 
