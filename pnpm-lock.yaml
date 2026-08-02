@@ -92,6 +92,9 @@ importers:
       '@aws-sdk/dsql-signer':
         specifier: ^3.0.0
         version: 3.1029.0
+      '@starkeep/admin-installer':
+        specifier: workspace:*
+        version: link:../../packages/admin-installer
       '@starkeep/app-client':
         specifier: workspace:*
         version: link:../../packages/app-client
