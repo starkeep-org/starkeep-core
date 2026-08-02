@@ -13,114 +13,8 @@
  * into a ten-minute read.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import {
-  ExpoObjectStorageAdapter,
-  type ExpoDirectory,
-  type ExpoFile,
-  type ExpoFileHandle,
-  type ExpoFileSystem,
-} from "../src/storage/expo-object-storage";
-
-/** In-memory expo-file-system. Tracks handle lifetime, which is a real leak risk. */
-function fakeFs() {
-  const files = new Map<string, Uint8Array>();
-  const dirs = new Set<string>();
-  const state = { openHandles: 0, rangedReads: [] as Array<{ offset: number; length: number }> };
-
-  const file = (path: string): ExpoFile => ({
-    get exists() {
-      return files.has(path);
-    },
-    get size() {
-      return files.get(path)?.byteLength ?? null;
-    },
-    get uri() {
-      return path;
-    },
-    readableStream() {
-      const bytes = files.get(path);
-      if (!bytes) throw new Error(`no such file: ${path}`);
-      // Chunked, so a consumer that assumes one chunk fails here rather than on
-      // a device.
-      let at = 0;
-      return new ReadableStream<Uint8Array>({
-        pull(controller) {
-          if (at >= bytes.byteLength) {
-            controller.close();
-            return;
-          }
-          const end = Math.min(at + 8, bytes.byteLength);
-          controller.enqueue(bytes.subarray(at, end));
-          at = end;
-        },
-      });
-    },
-    writableStream() {
-      const chunks: Uint8Array[] = [];
-      return new WritableStream<Uint8Array>({
-        write(chunk) {
-          chunks.push(chunk);
-        },
-        close() {
-          const out = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
-          let at = 0;
-          for (const c of chunks) {
-            out.set(c, at);
-            at += c.byteLength;
-          }
-          files.set(path, out);
-        },
-      });
-    },
-    open(): ExpoFileHandle {
-      const bytes = files.get(path) ?? new Uint8Array();
-      state.openHandles += 1;
-      const handle: ExpoFileHandle = {
-        offset: 0,
-        readBytes(length: number) {
-          state.rangedReads.push({ offset: handle.offset, length });
-          const slice = bytes.subarray(handle.offset, handle.offset + length);
-          handle.offset += slice.byteLength;
-          return slice;
-        },
-        close() {
-          state.openHandles -= 1;
-        },
-      };
-      return handle;
-    },
-    create() {
-      if (!files.has(path)) files.set(path, new Uint8Array());
-    },
-    delete() {
-      files.delete(path);
-    },
-    async text() {
-      return new TextDecoder().decode(files.get(path) ?? new Uint8Array());
-    },
-    write(contents: string | Uint8Array) {
-      files.set(path, typeof contents === "string" ? new TextEncoder().encode(contents) : contents);
-    },
-  });
-
-  const directory = (path: string): ExpoDirectory => ({
-    get exists() {
-      return dirs.has(path);
-    },
-    get uri() {
-      return path;
-    },
-    create() {
-      dirs.add(path);
-    },
-    list() {
-      return [];
-    },
-  });
-
-  const fs: ExpoFileSystem = { file, directory };
-  return { fs, files, state };
-}
+import { ExpoObjectStorageAdapter } from "../src/storage/expo-object-storage";
+import { fakeExpoFs } from "./helpers/fake-expo-fs";
 
 const HASH = "abcdef0123456789".repeat(4);
 const drain = async (stream: ReadableStream<Uint8Array>): Promise<Uint8Array> => {
@@ -140,7 +34,7 @@ const drain = async (stream: ReadableStream<Uint8Array>): Promise<Uint8Array> =>
   return out;
 };
 
-let harness: ReturnType<typeof fakeFs>;
+let harness: ReturnType<typeof fakeExpoFs>;
 let adapter: ExpoObjectStorageAdapter;
 
 // Distinct per position, so an off-by-one is visible rather than hidden inside
@@ -148,7 +42,7 @@ let adapter: ExpoObjectStorageAdapter;
 const PAYLOAD = new Uint8Array(Array.from({ length: 64 }, (_, i) => i));
 
 beforeEach(async () => {
-  harness = fakeFs();
+  harness = fakeExpoFs();
   adapter = new ExpoObjectStorageAdapter({ fs: harness.fs, basePath: "/docs/objects" });
   await adapter.init();
 });

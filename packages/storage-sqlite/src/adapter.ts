@@ -80,7 +80,16 @@ export interface SqliteDriver {
 
 /** The default driver: Node's built-in SQLite. */
 export const nodeSqliteDriver: SqliteDriver = {
-  open: (path) => new DatabaseSync(path),
+  open: (path) => {
+    // Node's SQLite will not create a missing parent directory, so this driver
+    // must. op-sqlite manages its own location and does not want this done for
+    // it — which is why it lives here rather than in the adapter.
+    if (path !== ":memory:") {
+      const dir = dirname(path);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    }
+    return new DatabaseSync(path);
+  },
   close: (db) => (db as unknown as DatabaseSync).close(),
 };
 
@@ -131,12 +140,12 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
 
   async init(): Promise<void> {
     if (this.database) return;
-    if (this.options.path !== ":memory:") {
-      const dir = dirname(this.options.path);
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
-      }
-    }
+    // Note what is *not* here: creating the parent directory. That used to be
+    // an unconditional `mkdirSync`, which is Node's filesystem — a phone has no
+    // such thing, and its database location is the driver's business rather
+    // than a path this layer may create. "How a connection comes into being"
+    // includes "making sure there is somewhere to put it", so both belong to
+    // the driver together.
     this.database = this.driver.open(this.options.path);
     initializeLocalSchema(this.database);
   }
