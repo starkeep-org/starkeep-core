@@ -24,6 +24,7 @@ import {
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
 import { canonicalSignedPath, signRequest, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
+import { nodeSqliteDriver } from "../../packages/storage-sqlite/src/node-driver.js";
 import {
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
@@ -511,6 +512,7 @@ async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredent
 async function main() {
   const databaseAdapter = new SqliteDatabaseAdapter({
     path: join(STARKEEP_DIR, "data.db"),
+    driver: nodeSqliteDriver,
   });
 
   // Local FS is always available — acts as a cache when S3 is configured

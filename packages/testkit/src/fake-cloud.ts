@@ -46,6 +46,7 @@ import {
   appSyncableTableName,
   sqliteCompiler,
 } from "@starkeep/storage-sqlite";
+import { nodeSqliteDriver } from "@starkeep/storage-sqlite/node";
 import { FsObjectStorageAdapter } from "@starkeep/storage-fs";
 import {
   createInProcessSyncTransport,
@@ -129,7 +130,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   const port = await getFreePort();
   const url = `http://127.0.0.1:${port}`;
 
-  const databaseAdapter = new SqliteDatabaseAdapter({ path: join(dir, "cloud.db") });
+  const databaseAdapter = new SqliteDatabaseAdapter({ path: join(dir, "cloud.db"), driver: nodeSqliteDriver });
   await databaseAdapter.init();
   const db = databaseAdapter.getRawDatabase();
   const objectStorage = new FsObjectStorageAdapter({ basePath: join(dir, "objects") });
