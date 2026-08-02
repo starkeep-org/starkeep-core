@@ -1671,6 +1671,83 @@ a cap is legitimate rather than a bug).
   are human judgement.
 - **No test drives the page**, only the route beneath it.
 
+## Phase 2 — the Android app
+
+Working plan and full reasoning: `android-implementation-plan.md`. Items 11, 12, 16 and 14's policy
+are done; 99 tests, all running in Node against fakes. **None of it has run on a device**, which is
+the honest headline and shapes everything below.
+
+### What was verified before designing against it
+
+Three package APIs were checked rather than assumed, and one held with a caveat that shaped the code.
+`op-sqlite`'s `executeSync(query, params?)` is genuinely synchronous *and* parameterised, but
+`PreparedStatement.execute()` is **async only** — so `prepare()` captures SQL and re-issues it rather
+than compiling once. That costs statement reuse and nothing about correctness; making the interface
+async instead would break the ordering the contiguous-prefix watermark depends on.
+
+`expo-file-system` 57 fits `ObjectStorageAdapter` **without a shim** — `readableStream()`,
+`writableStream()`, and `open()` with an offset handle. That retroactively vindicates the item 2
+decision to type the adapter in web `ReadableStream` on the argument that React Native would have to
+implement it one day.
+
+### Two portability defects the seam exposed
+
+- **`SqliteDatabaseAdapter.init()` called Node's `mkdirSync` unconditionally.** A phone has no Node
+  filesystem, and the database location is op-sqlite's business. Moved into the driver, where "how a
+  connection comes into being" already lived. Invisible until something that is not Node tried to
+  open a database — exactly what item 10's seam was built to surface.
+- **The residency manager lived in `apps/local-data-server` and was always portable** — not one Node
+  import. Moved into the sync engine rather than copied: a second copy of "which bytes may this node
+  hold" is how two nodes come to disagree about what they have.
+
+### The phase's stated purpose, demonstrated
+
+The media plan says the phone peer is "the only honest consumer of `Elided`". Every residency test
+before this ran against fixtures or a laptop that wanted everything — so the logic was exercised
+while the *situation* it was designed for never occurred.
+
+The new tests give a node a budget genuinely smaller than its library and assert **both directions**:
+some bytes declined, and some kept. Either alone passes on a broken node — the first on one that
+ignores the budget, the second on one that declines everything. Metadata syncing regardless of the
+byte budget is asserted separately, because a phone that dropped records to save space could not show
+the library at all, rather than merely being unable to open a photo.
+
+### Policy pinned as tests, not comments
+
+Item 14's graph encodes decisions that all work fine on a dev handset on a desk:
+
+- **Bytes move only unmetered.** A 4 GB upload over cellular is harm no retry undoes. Metadata is
+  exempt deliberately — it is what keeps the library browsable and elided records visible.
+- **Only derivation requires charging.** Requiring it for sync means a phone that is never plugged in
+  never syncs.
+- **Eviction is exempt from the storage floor**, because it is the job that fixes the storage floor.
+  Gating it on free space is a deadlock.
+- **Backoff is capped**, and the cap matters more than the curve: uncapped, a phone offline for a
+  week returns with a retry delay measured in days.
+
+### Verified by sabotage
+
+- Ignoring `range.start` in the expo adapter fails exactly the three ranged-read tests.
+- Reading `MicroVideoOffset` forward instead of back from the file's end, and summing only the
+  video's length instead of every trailing item, each fail exactly the Motion Photo tests that
+  should catch them.
+
+### Gaps
+
+- **Nothing has run on a device.** Whether op-sqlite and expo-file-system honour their own type
+  signatures is unanswered, and no emulator reproduces a phone's scheduler, Doze, or the OS killing
+  the app.
+- **`executeSync` blocks the JS thread.** The likeliest source of a janky app, and the reason sync
+  must never run on the interaction path. Argued, not measured.
+- **No Expo shell yet**, so there is no app to run — items 12b, 15a, 15b and 13 are all downstream of
+  it, and the native modules deliberately come last so they are not written against a shell that does
+  not run.
+- **The Motion Photo parser has never seen a real Pixel file.** The DNG finding earlier in this
+  project is the argument for taking that seriously: every synthetic fixture agreed with a bug that
+  one real file exposed immediately.
+- **Maestro is not installed**, and the flows are deliberately unwritten — writing e2e tests for a UI
+  that does not exist is the same anti-pattern as native modules against a shell that does not run.
+
 ## Flakes found along the way
 
 Recorded here rather than silently fixed, because each is a real signal about a test's
