@@ -18,6 +18,12 @@
  *     cache policy. That is the expensive mistake available in this area.
  */
 
+import {
+  evaluateOverrides,
+  NO_OVERRIDES,
+  type OverrideRule,
+  type OverrideVerdict,
+} from "../../packages/sync-engine/src/index.js";
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import {
   DummyDriver,
@@ -76,6 +82,13 @@ export interface ResidencyManagerOptions {
    */
   readonly classLabel: { readonly appId: string; readonly key: string };
   /**
+   * Per-record overrides expressed as rules over labels. Node-local, like pins.
+   *
+   * Empty by default so a node that has never configured any behaves exactly as
+   * it did before rules existed.
+   */
+  readonly overrideRules?: readonly OverrideRule[];
+  /**
    * True when this process is the node that `starkeep/no-cloud` forbids. False
    * for a laptop or phone, which may hold no-cloud records freely — that is the
    * entire point of the flag.
@@ -128,6 +141,7 @@ export function createResidencyManager(
     databaseAdapter,
     localObjectStorage,
     classLabel,
+    overrideRules = [],
     isCloudNode,
     policy,
     durability,
@@ -183,10 +197,12 @@ export function createResidencyManager(
    */
   async function labelInputs(
     candidate: BlobCandidate,
-  ): Promise<{ sizeClass: string | null; deniedHere: boolean }> {
+  ): Promise<{ sizeClass: string | null; deniedHere: boolean; overrides: OverrideVerdict }> {
     // App-syncable blobs are not part of anyone's rendition ladder and carry no
     // shared-record labels; they fall to the policy's fallback row.
-    if (candidate.appId !== null) return { sizeClass: null, deniedHere: false };
+    if (candidate.appId !== null) {
+      return { sizeClass: null, deniedHere: false, overrides: NO_OVERRIDES };
+    }
 
     // BlobCandidate carries ids as plain strings — the sync engine normalizes
     // shared records and app-syncable rows into one shape, and only the former
@@ -200,6 +216,11 @@ export function createResidencyManager(
     )?.value;
 
     return {
+      // Evaluated from the same label read, not a second query. Rules are the
+      // scalable form of a pin — "keep every photo of my daughter" is one
+      // sentence and five thousand records, and pinning ids would freeze that
+      // intent at pin time so every later photo silently falls outside it.
+      overrides: evaluateOverrides(overrideRules, labels),
       // No rendition label means this *is* the thing itself.
       sizeClass: classValue ?? originalClassFor(candidate.type),
       // A laptop or phone may hold a no-cloud record freely — the constraint is
@@ -218,13 +239,17 @@ export function createResidencyManager(
   }
 
   async function decide(candidate: BlobCandidate): Promise<ResidencyVerdict> {
-    const { sizeClass, deniedHere } = await labelInputs(candidate);
+    const { sizeClass, deniedHere, overrides } = await labelInputs(candidate);
     return decideResidency({
       candidate,
       sizeClass,
       policy,
-      constraints: { deniedHere },
-      overrides: { pinned: isPinned(candidate.recordId) },
+      // An `exclude` rule is a *constraint*, not a negative pin. Routing it
+      // here rather than through `overrides` is what makes it beat a pin —
+      // decideResidency checks constraints first, in the fixed §6.1 order, and
+      // restrictive winning is exactly the intent.
+      constraints: { deniedHere: deniedHere || overrides.excluded },
+      overrides: { pinned: isPinned(candidate.recordId) || overrides.pinned },
       usage: (cls) => (cls === null ? 0 : index.usageOf(cls)),
     });
   }

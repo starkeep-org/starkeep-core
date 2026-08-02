@@ -99,3 +99,13 @@ export {
   type RowProjection,
   type PolicyProjection,
 } from "./retention-projection.js";
+
+export {
+  evaluateOverrides,
+  validateOverrideRules,
+  NO_OVERRIDES,
+  type OverrideRule,
+  type OverrideEffect,
+  type OverrideVerdict,
+  type RecordLabel,
+} from "./override-rules.js";
