@@ -59,14 +59,16 @@ Severity is about the consequence of shipping with it, not the effort to close i
 | **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
 | ~~Deferred~~ | ~~Nothing produces a video yet.~~ **Closed** by items 26/27. | 28 | — |
 | **Deferred** | The video player is not visually verified, and no test drives a real `<video>` element. | 28 | Human review (same class as 9b) |
+| **Deferred** | The admin-web Storage page has not been visually reviewed, and no test drives the page itself (only the route beneath it). | 34 | Human review (same class as 9b) |
 | ~~Blocking~~ | ~~`unsupported` decided by regex over an error message.~~ **Closed** — typed `UndecodableError` decided at the point of failure; the old fixture was a string no decoder produces, so every real HEIC was retried forever while the test passed. | 7/24 | — |
 | **Blocking** | The DNG preview parser has never been run against a real ProRAW or Pixel file, only hand-built TIFFs. The plan explicitly asks for this first. | 30 | Real camera fixtures |
 | **Deferred** | Nothing reads Apple's content identifier, so Live Photo pairing only ever reaches `filename` confidence in practice. | 31 | A QuickTime/maker-note reader |
 | **Deferred** | CR3 is ISO-BMFF, not TIFF, so preview extraction finds nothing in it and reports it undecodable. | 30 | A CR3 container parser |
 | **Accepted** | HEIC decode is macOS-only; a Linux container leaves such records ladder-incomplete and therefore unarchived. | 32 | — (measure via item 15) |
-| **Blocking** | No UI is wired to the retention projection, and per-record overrides as rules over labels are unbuilt. Item 34 is half-done. | 34 | The matrix UI |
-| **Blocking** | Nothing produces a `SizeClassCensus`, so the projection has no real input. Same query the residency inspector needs. | 34/15 | A grouped local query |
-| **Deferred** | `BackfillStore` has only an in-memory test double; the durable version should be the node-local SQLite ledger import already uses. | 8 | Reuse `import-store` |
+| ~~Blocking~~ | ~~No UI is wired to the retention projection.~~ **Closed** — `/residency/projection` plus the admin-web Storage page, showing selected-vs-projected per row with capped/grows/pinned annotations. | 34 | — |
+| **Deferred** | Per-record overrides as rules over labels are unbuilt; the matrix is read-only (it projects, it does not yet edit). | 34 | An editable matrix + a label-rule editor |
+| ~~Blocking~~ | ~~Nothing produces a `SizeClassCensus`.~~ **Closed** — `apps/local-data-server/census.ts`, one pass over records (not the resident set, which would only count what is already local). | 34/15 | — |
+| ~~Deferred~~ | ~~`BackfillStore` has only an in-memory test double.~~ **Closed** — node-local SQLite ledger keyed by record id. | 8 | — |
 | **Deferred** | Backfill is **built but never run** — correctly gated on item 9b. | 8 | Item 9b |
 | ~~Blocking~~ | ~~Nothing calls `deriveVideoLadder`.~~ **Closed** — `deriveAndPublishVideo` wires probe → facts → derive → publish → gate; the import loop now discovers video and no longer buffers whole files. | 26/27 | — |
 | **Deferred** | Skim parameters (8x / 20s / 2fps) are an untested hypothesis; may be better as animated AVIF. | 27 | Measurement against real clips |
@@ -1592,14 +1594,53 @@ legitimately, and an operator needs to know that is pins and not a bug. Classes 
 mention fall to the fallback and **still appear in the table**; quietly omitting them would
 under-report exactly the disk use nobody planned for.
 
+#### The census, and why not from the resident set
+
+The resident set is the obvious source and the wrong one: it holds only what this node has **landed**.
+A census built from it answers "what do I have", while the matrix asks "what would this cost me if I
+said yes" — and the difference is exactly the elided records the operator is deciding about. Counting
+only local bytes would report **every unchecked row as free**.
+
+So the census counts records, resident or not, and reads pinned and recently-opened bytes from the
+resident set separately, since both are node-local state no record carries.
+
+It lives host-side rather than in the sync engine, for the same reason `decideResidency` takes
+`sizeClass` as an opaque string: a size class is a label value an app writes, and the platform is not
+allowed to know what one means.
+
+Two things the schema forced:
+
+- **The class-label join must be a LEFT join.** A record with no rendition label is an *original* —
+  the single largest class in any library, and precisely what the matrix exists to budget for. An
+  inner join silently drops them.
+- **Recency comes from `captured_at` alone.** `created_at` holds a serialized HLC, not a date, so
+  reading it as a timestamp yields a number that is meaningless *and plausible*. A NULL result is the
+  correct "unknown", which counts toward every cutoff — the same rule residency follows, because an
+  unknown date is not evidence of age and **missing metadata must not become deleted bytes**.
+
+One pass over the table, not a query per class per cutoff: on a 60k library the latter is slow enough
+that the matrix would need a spinner.
+
+The route is **loopback-authorized**, reusing the existing fail-closed category. It is a fact about
+the machine rather than about anyone's library, an app has no business asking, and it reports
+aggregate byte counts with no record ids, filenames or content — roughly what `du` would say.
+
+#### The matrix
+
+Every row shows **what the rule selects** and **what the budget allows**. Showing only the second
+hides that a row is capped; showing only the first promises disk use that never happens. The gap
+between them is the information. Three annotations each mark something that would otherwise be
+misread: `capped` (eviction runs forever, so the stated intent is not what happens), `grows`
+(on-demand, a floor rather than a settled figure), and pinned bytes (pins beat budgets, so exceeding
+a cap is legitimate rather than a bug).
+
 #### Gaps
 
-- **No UI is wired to the projection.** The logic is complete and tested; the matrix itself, and the
-  per-record overrides as rules over labels, are unbuilt. Item 34 is half-done and this is the half.
-- **Nothing produces a `SizeClassCensus`.** It needs a grouped query over records and blob sizes on
-  the local node — the same shape the residency inspector (item 15) needs, and worth building once.
-- **Backfill has no store implementation.** `BackfillStore` is an interface with an in-memory test
-  double; the durable version should be the node-local SQLite ledger the import already uses.
+- **The matrix is read-only.** It projects; it does not yet edit, and **per-record overrides as rules
+  over labels are unbuilt**. That is the remaining half of item 34.
+- **The Storage page has not been visually reviewed.** Same class as item 9b — layout and legibility
+  are human judgement.
+- **No test drives the page**, only the route beneath it.
 
 ## Flakes found along the way
 
