@@ -1,4 +1,4 @@
-export { SqliteDatabaseAdapter } from "./adapter.js";
+export { SqliteDatabaseAdapter, nodeSqliteDriver, type SqliteDriver } from "./adapter.js";
 export { compiler as sqliteCompiler } from "./query-builder.js";
 export type { SqliteDatabaseAdapterOptions } from "./adapter.js";
 export { initializeLocalSchema } from "./schema/bootstrap.js";
