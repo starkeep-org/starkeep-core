@@ -1,5 +1,6 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import {
+  HttpObjectStorageAdapter,
   createHttpSyncTransport,
   createSyncEngine,
 } from "../../packages/sync-engine/src/index.js";
@@ -14,7 +15,6 @@ import type {
 } from "../../packages/sync-engine/src/types.js";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
-import { HttpObjectStorageAdapter } from "./http-object-storage.js";
 import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
 import { signRequest } from "../../packages/app-client/src/sign.js";

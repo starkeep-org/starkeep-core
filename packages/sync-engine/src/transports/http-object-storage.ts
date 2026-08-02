@@ -169,7 +169,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
         ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
         ...presignHeaders({ checksumSha256, storageClass, tagging }),
       },
-      body: Buffer.from(data),
+      body: data as BodyInit,
     });
     if (!s3Res.ok) {
       throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}`);
@@ -222,12 +222,16 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!s3Res.ok) {
       throw new Error(`S3 GET ${key} failed: ${s3Res.status} ${s3Res.statusText}`);
     }
-    const buffer = Buffer.from(await s3Res.arrayBuffer());
+    // `Uint8Array`, not `Buffer` — this adapter runs on React Native now, where
+    // `Buffer` is not a global. It typechecked before because a Buffer *is* a
+    // Uint8Array in Node, which is exactly how this kind of thing reaches a
+    // handset and fails there instead of here.
+    const bytes = new Uint8Array(await s3Res.arrayBuffer());
     const contentType = s3Res.headers.get("content-type") ?? undefined;
     return {
-      data: buffer,
+      data: bytes,
       contentType,
-      size: buffer.length,
+      size: bytes.byteLength,
     };
   }
 

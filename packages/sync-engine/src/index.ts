@@ -84,6 +84,16 @@ export {
   createHttpSyncTransport,
   type HttpSyncTransportOptions,
 } from "./transports/http-transport.js";
+/**
+ * The remote side of blob transfer, over the same signed HTTP the transport
+ * uses. Exported because a node that syncs metadata but cannot move bytes is
+ * not syncing — and because the phone needs exactly this and lives outside
+ * this workspace, which is why it moved here from `apps/local-data-server`.
+ */
+export {
+  HttpObjectStorageAdapter,
+  type HttpObjectStorageAdapterOptions,
+} from "./transports/http-object-storage.js";
 export {
   createHttpSyncHandler,
   type HttpSyncServerOptions,
