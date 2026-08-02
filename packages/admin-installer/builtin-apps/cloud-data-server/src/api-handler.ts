@@ -19,7 +19,15 @@
  * Manager is not involved in the runtime data path.
  */
 
-import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  createPublicKey,
+  randomUUID,
+  timingSafeEqual,
+  verify as nodeVerify,
+  type KeyObject,
+} from "node:crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
 import { getSignedUrl as getCloudFrontSignedUrl } from "@aws-sdk/cloudfront-signer";
@@ -153,6 +161,89 @@ function getSsmClient(): SSMClient {
   return ssmClientSingleton;
 }
 
+// ---------------------------------------------------------------------------
+// Per-device public key cache (SSM, same lifetime as the app secrets above)
+// ---------------------------------------------------------------------------
+//
+// A handset cannot hold a per-app HMAC secret: it is symmetric, so whoever
+// holds it *is* the app; it is extractable from a distributable APK; it never
+// expires; and revoking it after a lost phone would break every other client of
+// that app. So devices get an asymmetric key instead — they sign, we verify,
+// and nothing secret is stored on this side.
+//
+// **Why SSM and not a table.** This runs *before* any per-app role is assumed,
+// and the cloud-data-server's own credentials deliberately have no access to
+// shared data. A device registry in `shared.*` would be unreadable by the code
+// that has to read it. The app secrets already had this problem and already
+// solved it, so devices take the identical path and inherit the cache, the
+// failure modes and the revocation story — revoking is deleting one parameter.
+//
+// **Why under `app-creds/` rather than a `device-keys/` prefix of its own.**
+// `/${stackPrefix}/app-creds/*` is the *only* SSM path this Lambda's role can
+// read, and widening it would mean editing the runtime policy *and* the
+// foundational permissions boundary — a bootstrap CloudFormation change, for a
+// parameter that is not secret. `_cloudfront-signing` already established the
+// convention of reserved names under this prefix, and it is collision-free by
+// construction: `CLOUD_APP_ID_RE` requires an app id to start `[a-z0-9]`, so no
+// app can ever claim a name beginning with an underscore.
+//
+// Registration is not self-service: admin-web writes the parameter, having
+// authenticated the operator and chosen which Cognito user the device belongs
+// to. `userId` is recorded from day one even though nothing reads it yet —
+// see todo #52. Capturing it now is what saves every device a migration when
+// shared data is finally partitioned per user.
+
+interface CachedDeviceKey {
+  /** Base64 SPKI, exactly as registered. */
+  publicKeySpki: string;
+  /** The Cognito user this device was paired for. Recorded, not yet enforced. */
+  userId: string | null;
+  fetchedAt: number;
+}
+
+const deviceKeyCache = new Map<string, CachedDeviceKey>();
+
+/**
+ * Device ids are used to build an SSM parameter name, so they are constrained
+ * rather than trusted. Without this, a crafted `X-Starkeep-Device-Id` could
+ * walk the parameter path with `../` and turn a signature check into a probe
+ * for arbitrary parameters — including the app secrets sitting one level up.
+ */
+function isValidDeviceId(deviceId: string): boolean {
+  return /^[A-Za-z0-9_-]{1,128}$/.test(deviceId);
+}
+
+async function loadDevicePublicKey(deviceId: string): Promise<CachedDeviceKey | null> {
+  if (!isValidDeviceId(deviceId)) return null;
+  const cached = deviceKeyCache.get(deviceId);
+  if (cached && Date.now() - cached.fetchedAt < HMAC_CACHE_TTL_MS) return cached;
+
+  const stackPrefix = process.env.STACK_PREFIX;
+  if (!stackPrefix) throw new Error("STACK_PREFIX env var is required");
+  try {
+    const result = await getSsmClient().send(
+      new GetParameterCommand({
+        Name: `/${stackPrefix}/app-creds/_device-${deviceId}`,
+        WithDecryption: true,
+      }),
+    );
+    const raw = result.Parameter?.Value;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { publicKeySpki?: string; userId?: string };
+    if (!parsed.publicKeySpki) return null;
+    const entry: CachedDeviceKey = {
+      publicKeySpki: parsed.publicKeySpki,
+      userId: parsed.userId ?? null,
+      fetchedAt: Date.now(),
+    };
+    deviceKeyCache.set(deviceId, entry);
+    return entry;
+  } catch (err) {
+    if (err instanceof ParameterNotFound) return null;
+    throw err;
+  }
+}
+
 async function loadAppHmacSecret(appId: string): Promise<string | null> {
   const cached = hmacSecretCache.get(appId);
   if (cached && Date.now() - cached.fetchedAt < HMAC_CACHE_TTL_MS) {
@@ -255,6 +346,89 @@ export function validateAppHmac(
     || !timingSafeEqual(Buffer.from(expected, "utf8") as unknown as Uint8Array, Buffer.from(headerSig, "utf8") as unknown as Uint8Array)
   ) {
     return { ok: false, status: 401, message: "Invalid signature" };
+  }
+  return { ok: true };
+}
+
+/**
+ * Verify a device-signed request.
+ *
+ * The signed message is **byte-identical** to the HMAC one — same prefix, same
+ * canonical path, same empty-body-on-GET rule, same skew window. Only the
+ * primitive differs. That is deliberate: a second canonicalisation is how two
+ * implementations come to disagree about what was signed, and the disagreement
+ * surfaces as an unexplainable 401 on one route long after the change.
+ *
+ * The device is authorised for whichever app it names. On a handset our app is
+ * the only thing holding the key, and it legitimately needs two channels
+ * (`starkeep-drive` for shared records, `photos` for app-specific rows), so a
+ * per-app device key would mean several registrations for one pairing. What
+ * this gives up is per-app attribution of *authorisation*; origin attribution
+ * is unaffected, since `origin_app_id` is on the record itself.
+ */
+function validateDeviceSignature(
+  pathAppId: string,
+  method: string,
+  subPath: string,
+  headers: Record<string, string | undefined>,
+  bodyBytes: Buffer,
+  device: CachedDeviceKey,
+): { ok: true } | { ok: false; status: number; message: string } {
+  const headerSig = headers["x-starkeep-device-sig"];
+  const headerTs = headers["x-starkeep-app-ts"];
+  const headerAppId = headers["x-starkeep-app-id"];
+  if (!headerSig || !headerTs || !headerAppId) {
+    return {
+      ok: false,
+      status: 401,
+      message: "Missing X-Starkeep-Device-Sig / X-Starkeep-App-{Id,Ts} headers",
+    };
+  }
+  if (headerAppId !== pathAppId) {
+    return { ok: false, status: 401, message: "Header appId does not match path" };
+  }
+  const tsMs = Number(headerTs);
+  if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > APP_SIG_MAX_SKEW_MS) {
+    return { ok: false, status: 401, message: "Stale or invalid signature timestamp" };
+  }
+
+  const isEmptyBody = method === "GET" || method === "HEAD";
+  const signedBody = isEmptyBody ? Buffer.alloc(0) : bodyBytes;
+  const message = Buffer.concat([
+    Buffer.from(
+      `${pathAppId}:${method.toUpperCase()}:${canonicalSignedPath(subPath)}:${tsMs}:`,
+      "utf8",
+    ) as unknown as Uint8Array,
+    signedBody as unknown as Uint8Array,
+  ]);
+
+  let key: KeyObject;
+  try {
+    key = createPublicKey({
+      key: Buffer.from(device.publicKeySpki, "base64"),
+      type: "spki",
+      format: "der",
+    });
+  } catch {
+    // A registered key that will not parse is a registration bug, not a caller
+    // error — but it must still deny rather than throw, or one malformed
+    // parameter turns every request from that device into a 500.
+    return { ok: false, status: 401, message: "Registered device key is unusable" };
+  }
+  if (key.asymmetricKeyType !== "ed25519") {
+    return { ok: false, status: 401, message: "Registered device key is not Ed25519" };
+  }
+
+  let signature: Buffer;
+  try {
+    signature = Buffer.from(headerSig, "base64");
+  } catch {
+    return { ok: false, status: 401, message: "Invalid device signature encoding" };
+  }
+  // `verify` is constant-time internally and returns false rather than throwing
+  // on a malformed signature.
+  if (!nodeVerify(null, message as unknown as Uint8Array, key, signature as unknown as Uint8Array)) {
+    return { ok: false, status: 401, message: "Invalid device signature" };
   }
   return { ok: true };
 }
@@ -1560,10 +1734,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // signatures are checked against the per-app SecureString in SSM. Path-
     // trust without a signature would let any cross-app caller use another
     // app's role-power simply by changing the URL.
-    const hmacSecret = await loadAppHmacSecret(appId);
-    if (!hmacSecret) {
-      return clientErr(`Unknown app: ${appId}`, 401);
-    }
     const bodyBytes = event.body
       ? (event.isBase64Encoded
         ? Buffer.from(event.body, "base64")
@@ -1573,9 +1743,52 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     for (const [key, value] of Object.entries(event.headers ?? {})) {
       if (typeof value === "string") normalizedHeaders[key.toLowerCase()] = value;
     }
-    const hmacCheck = validateAppHmac(appId, method, subPath, normalizedHeaders, bodyBytes, hmacSecret);
-    if (!hmacCheck.ok) {
-      return clientErr(hmacCheck.message, hmacCheck.status);
+
+    // Two callers, two primitives, one message. A *device* presents an Ed25519
+    // signature over the same bytes an app HMACs; a server presents the HMAC.
+    // The device branch is taken on the presence of the device id header and
+    // never falls back to the HMAC path — a device whose key is unknown or
+    // revoked must be denied, not given a second chance at a shared secret it
+    // should not have.
+    const deviceId = normalizedHeaders["x-starkeep-device-id"];
+    if (deviceId) {
+      const device = await loadDevicePublicKey(deviceId);
+      if (!device) {
+        return clientErr("Unknown or revoked device", 401);
+      }
+      const deviceCheck = validateDeviceSignature(
+        appId,
+        method,
+        subPath,
+        normalizedHeaders,
+        bodyBytes,
+        device,
+      );
+      if (!deviceCheck.ok) {
+        return clientErr(deviceCheck.message, deviceCheck.status);
+      }
+      // The app must still exist — a device may only act as an installed app,
+      // so a typo'd or uninstalled appId is rejected here rather than reaching
+      // a role assumption for something that was never provisioned.
+      if (!(await loadAppHmacSecret(appId))) {
+        return clientErr(`Unknown app: ${appId}`, 401);
+      }
+    } else {
+      const hmacSecret = await loadAppHmacSecret(appId);
+      if (!hmacSecret) {
+        return clientErr(`Unknown app: ${appId}`, 401);
+      }
+      const hmacCheck = validateAppHmac(
+        appId,
+        method,
+        subPath,
+        normalizedHeaders,
+        bodyBytes,
+        hmacSecret,
+      );
+      if (!hmacCheck.ok) {
+        return clientErr(hmacCheck.message, hmacCheck.status);
+      }
     }
 
     const accountId = getAccountId(context.invokedFunctionArn);

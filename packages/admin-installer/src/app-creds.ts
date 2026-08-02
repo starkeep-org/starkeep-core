@@ -41,6 +41,110 @@ export function cloudFrontSigningParameterName(stackPrefix: string): string {
   return `/${stackPrefix}/app-creds/_cloudfront-signing`;
 }
 
+/**
+ * Name of a paired device's public-key parameter.
+ *
+ * Same reservation trick as {@link cloudFrontSigningParameterName}, for the
+ * same three reasons: real app ids start alphanumeric so `_device-` can never
+ * collide with one; it rides the CDS Lambda's existing `app-creds/*` read grant
+ * rather than needing a new IAM path and a bootstrap change; and teardown's
+ * `app-creds/*` sweep removes paired devices along with everything else.
+ *
+ * The value is `{ publicKeySpki, userId, pairedAt, label }` and is **not
+ * secret** — it is the public half. It is still stored as a SecureString,
+ * because one convention under this prefix is cheaper to reason about than two.
+ */
+export function deviceKeyParameterName(stackPrefix: string, deviceId: string): string {
+  return `/${stackPrefix}/app-creds/_device-${deviceId}`;
+}
+
+/** What a paired device is, as admin-web records it. */
+export interface DeviceRegistration {
+  /** Base64 SPKI Ed25519 public key, as the device published it. */
+  readonly publicKeySpki: string;
+  /**
+   * The Cognito user this device was paired for.
+   *
+   * Recorded from the first pairing even though **nothing reads it yet**: the
+   * data plane is app-identified, not user-identified, and making it otherwise
+   * is a partitioning project rather than an auth change (todo #52). Capturing
+   * it now is what saves every already-paired device a migration later, and it
+   * costs one field.
+   */
+  readonly userId: string | null;
+  /** Human-readable, so the operator can tell two phones apart when revoking. */
+  readonly label: string | null;
+  readonly pairedAt: string;
+}
+
+/**
+ * Pair a device: publish its public key so the cloud will accept its signatures.
+ *
+ * Idempotent on device id, so re-pairing a reinstalled app converges rather
+ * than erroring. Revocation is {@link deleteDeviceKeyParameter} — one delete,
+ * and no other client of any app is disturbed, which is the entire reason a
+ * device gets its own asymmetric key instead of the app's shared secret.
+ */
+export async function putDeviceKeyParameter(opts: {
+  stackPrefix: string;
+  deviceId: string;
+  registration: DeviceRegistration;
+  region: string;
+  awsCreds: AwsCredentials;
+}): Promise<string> {
+  const ssm = makeSsmClient(opts.region, opts.awsCreds);
+  const name = deviceKeyParameterName(opts.stackPrefix, opts.deviceId);
+  // Shape MUST match CachedDeviceKey's parse in the cloud-data-server handler.
+  const value = JSON.stringify(opts.registration);
+  const description = `Starkeep paired device ${opts.deviceId}. Public key only.`;
+  try {
+    await ssm.send(
+      new PutParameterCommand({
+        Name: name,
+        Type: "SecureString",
+        Value: value,
+        Description: description,
+        Tags: [
+          { Key: "starkeep:appId", Value: "cloud-data-server" },
+          { Key: "starkeep:managed", Value: "true" },
+        ],
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof ParameterAlreadyExists)) throw err;
+    await ssm.send(
+      new PutParameterCommand({
+        Name: name,
+        Type: "SecureString",
+        Value: value,
+        Overwrite: true,
+        Description: description,
+      }),
+    );
+  }
+  return name;
+}
+
+/** Revoke a device. The cloud stops accepting its signatures within the cache TTL. */
+export async function deleteDeviceKeyParameter(opts: {
+  stackPrefix: string;
+  deviceId: string;
+  region: string;
+  awsCreds: AwsCredentials;
+}): Promise<void> {
+  const ssm = makeSsmClient(opts.region, opts.awsCreds);
+  try {
+    await ssm.send(
+      new DeleteParameterCommand({
+        Name: deviceKeyParameterName(opts.stackPrefix, opts.deviceId),
+      }),
+    );
+  } catch (err) {
+    // Already gone is the desired end state, not an error.
+    if (!(err instanceof ParameterNotFound)) throw err;
+  }
+}
+
 function makeSsmClient(region: string, creds: AwsCredentials): SSMClient {
   return new SSMClient({
     region,
