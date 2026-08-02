@@ -1,0 +1,21 @@
+{
+  "name": "@starkeep/mobile",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@starkeep/protocol-primitives": "workspace:*",
+    "@starkeep/storage-adapter": "workspace:*",
+    "@starkeep/storage-sqlite": "workspace:*",
+    "@starkeep/sync-engine": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.7"
+  }
+}

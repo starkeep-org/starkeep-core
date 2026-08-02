@@ -279,6 +279,31 @@ importers:
         specifier: ^3.2.7
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
 
+  apps/mobile:
+    dependencies:
+      '@starkeep/protocol-primitives':
+        specifier: workspace:*
+        version: link:../../packages/protocol-primitives
+      '@starkeep/storage-adapter':
+        specifier: workspace:*
+        version: link:../../packages/storage-adapter
+      '@starkeep/storage-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/storage-sqlite
+      '@starkeep/sync-engine':
+        specifier: workspace:*
+        version: link:../../packages/sync-engine
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.10.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.7
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.10.0)(jiti@2.7.0)(lightningcss@1.32.0)(msw@2.14.6(@types/node@22.10.0)(typescript@5.9.3))(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0)
+
   e2e:
     dependencies:
       '@starkeep/app-client':

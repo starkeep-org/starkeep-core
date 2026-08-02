@@ -50,7 +50,39 @@ import { initializeLocalSchema } from "./schema/bootstrap.js";
 
 export interface SqliteDatabaseAdapterOptions {
   path: string | ":memory:";
+  /**
+   * How to open the connection, and how to close it.
+   *
+   * Injected so a second SQLite driver can back this adapter rather than
+   * duplicating it. Everything below this line already speaks only
+   * {@link RawDatabase} — `exec` and `prepare` — which is what item 10
+   * established; opening the connection was the single remaining line that
+   * named `node:sqlite`, and it is the one thing that genuinely cannot be
+   * driver-agnostic.
+   *
+   * Defaults to `node:sqlite`, so every existing caller is unchanged. React
+   * Native passes an op-sqlite driver instead; see
+   * `apps/mobile/src/db/op-sqlite-driver.ts` for why that one emulates
+   * `prepare()` rather than using op-sqlite's prepared statements.
+   */
+  driver?: SqliteDriver;
 }
+
+export interface SqliteDriver {
+  open(path: string): RawDatabase;
+  /**
+   * Separate from the connection because `RawDatabase` deliberately does not
+   * carry `close()`. Consumers of a connection have no business closing it —
+   * only whoever opened it does, which is this adapter.
+   */
+  close(db: RawDatabase): void;
+}
+
+/** The default driver: Node's built-in SQLite. */
+export const nodeSqliteDriver: SqliteDriver = {
+  open: (path) => new DatabaseSync(path),
+  close: (db) => (db as unknown as DatabaseSync).close(),
+};
 
 /**
  * How labels are spelled on this backend: the table is flat-named, SQLite
@@ -88,11 +120,13 @@ const LABELS: LabelDialect = {
 };
 
 export class SqliteDatabaseAdapter implements DatabaseAdapter {
-  private database: DatabaseSync | null = null;
+  private database: RawDatabase | null = null;
   private readonly options: SqliteDatabaseAdapterOptions;
+  private readonly driver: SqliteDriver;
 
   constructor(options: SqliteDatabaseAdapterOptions) {
     this.options = options;
+    this.driver = options.driver ?? nodeSqliteDriver;
   }
 
   async init(): Promise<void> {
@@ -103,12 +137,12 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
         mkdirSync(dir, { recursive: true });
       }
     }
-    this.database = new DatabaseSync(this.options.path);
+    this.database = this.driver.open(this.options.path);
     initializeLocalSchema(this.database);
   }
 
   async close(): Promise<void> {
-    this.database?.close();
+    if (this.database) this.driver.close(this.database);
     this.database = null;
   }
 
@@ -122,7 +156,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
-  private getDatabase(): DatabaseSync {
+  private getDatabase(): RawDatabase {
     if (!this.database) throw new StorageError("Database not initialized. Call init() first.");
     return this.database;
   }
