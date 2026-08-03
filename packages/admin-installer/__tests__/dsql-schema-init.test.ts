@@ -175,6 +175,45 @@ describe("shared.app_label_keys", () => {
   });
 });
 
+describe("shared.object_availability", () => {
+  it("is readable and upsertable by every app", async () => {
+    // Every listing reads this table (loadAvailabilityForPage batches it per
+    // page), so a missing grant is not a degraded feature — it is a 500 on
+    // `GET /data/records` for every app. It shipped without any grant at all
+    // and reached a real deployment that way.
+    //
+    // No DELETE: putAvailability is the only writer and it upserts; nothing
+    // removes a row.
+    const statements = await init();
+    expect(statements).toContain(
+      "GRANT SELECT, INSERT, UPDATE ON shared.object_availability TO PUBLIC",
+    );
+  });
+});
+
+describe("every table in `shared` is granted to something", () => {
+  it("leaves no table reachable only by its creator", async () => {
+    // The generalisation of the bug above: a CREATE TABLE with no accompanying
+    // GRANT looks complete in review and denies every caller at runtime. This
+    // catches the next one without anyone having to remember the rule.
+    const statements = await init();
+    // Granted per-app at app-install time instead (dsql-ddl.ts), because the
+    // verbs depend on that app's declared fileAccess — SELECT always, writes
+    // only with readwrite. A blanket grant here would flatten that.
+    const grantedPerApp = new Set(["records"]);
+
+    const created = statements
+      .map((s) => /create table if not exists "shared"\."([a-z_]+)"/i.exec(s)?.[1])
+      .filter((t): t is string => Boolean(t))
+      .filter((t) => !grantedPerApp.has(t));
+    expect(created.length).toBeGreaterThan(0);
+    const ungranted = created.filter(
+      (table) => !statements.some((s) => /^GRANT /.test(s) && s.includes(`shared.${table} `)),
+    );
+    expect(ungranted, "tables created with no GRANT").toEqual([]);
+  });
+});
+
 describe("DSQL constraints the whole file lives inside", () => {
   it("issues every DDL statement separately", async () => {
     // Multiple DDL statements in one transaction is SQLSTATE 0A000 on DSQL,
