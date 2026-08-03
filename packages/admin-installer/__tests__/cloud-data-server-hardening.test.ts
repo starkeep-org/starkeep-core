@@ -23,6 +23,17 @@ interface CreatedResource {
 
 const created: CreatedResource[] = [];
 
+/**
+ * Resource *options* — `protect` and friends — recorded separately.
+ *
+ * `setMocks` cannot see them: `MockResourceArgs` carries type, name, inputs,
+ * provider and id, and nothing else. Options are the engine's business. A stack
+ * transformation is the one hook that does see them, so protection is asserted
+ * through that rather than not at all — and rather than through a test that
+ * reads the source text and passes whenever the formatting is unchanged.
+ */
+const optionsByName = new Map<string, pulumi.ResourceOptions>();
+
 pulumi.runtime.setMocks(
   {
     newResource(args: pulumi.runtime.MockResourceArgs): { id: string; state: Record<string, unknown> } {
@@ -71,6 +82,20 @@ function makeCtx(ephemeral: boolean): CloudDataServerProgramContext {
 }
 
 async function run(ephemeral: boolean): Promise<void> {
+  // Inside a stack, because `registerStackTransformation` needs a root resource
+  // to attach to — and the transformation is the only hook that sees resource
+  // *options*, which is where `protect` lives.
+  await pulumi.runtime.runInPulumiStack(async () => {
+    pulumi.runtime.registerStackTransformation((args) => {
+      optionsByName.set(args.name, args.opts);
+      return undefined;
+    });
+    await buildProgram(ephemeral);
+    return {};
+  });
+}
+
+async function buildProgram(ephemeral: boolean): Promise<void> {
   const outputs = await buildCloudDataServerProgram(makeCtx(ephemeral))();
   // Force resolution of every output so all resource registrations settle.
   for (const value of Object.values(outputs)) {
@@ -103,6 +128,7 @@ const intelligentTiering = (): CreatedResource[] =>
 
 beforeEach(() => {
   created.length = 0;
+  optionsByName.clear();
 });
 
 describe("isEphemeralInstall is fail-safe — a real install can't be marked ephemeral by accident", () => {
@@ -171,6 +197,21 @@ describe("real installs (ephemeral=false) are hardened", () => {
   it("enables Object Lock on the files bucket", async () => {
     await run(false);
     expect(filesBucket().inputs.objectLockEnabled).toBe(true);
+  });
+
+  it("protects the files bucket and the DSQL cluster from replacement", async () => {
+    // The guard against the 2026-08-02 incident. `objectLockEnabled` is
+    // ForceNew, so on a stack whose bucket predates it the provider answers
+    // "replace" rather than "error" — and S3's global namespace forces the
+    // delete to go first. Every user file survived only because DeleteBucket
+    // returned BucketNotEmpty.
+    //
+    // `protect` turns that plan into a planning-time failure. It is asserted
+    // here because it is a property of the *deployment*, not of any input, and
+    // nothing else in this suite would notice it being dropped.
+    await run(false);
+    expect(optionsByName.get("starkeep-files")?.protect).toBe(true);
+    expect(optionsByName.get("starkeep-db")?.protect).toBe(true);
   });
 
   // The flag alone makes nothing undeletable. A bucket-level default retention
@@ -367,6 +408,12 @@ describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
     await run(true);
     expect(filesBucket().inputs.objectLockEnabled).toBe(false);
     expect(objectLockConfig()).toHaveLength(0);
+  });
+
+  it("leaves ephemeral resources unprotected so the suite can tear them down", async () => {
+    await run(true);
+    expect(optionsByName.get("starkeep-files")?.protect).toBe(false);
+    expect(optionsByName.get("starkeep-db")?.protect).toBe(false);
   });
 
   // A lifecycle rule on a disposable bucket would transition objects the

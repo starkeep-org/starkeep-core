@@ -154,6 +154,21 @@ export function buildCloudDataServerProgram(
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",
       },
+    }, {
+      /**
+       * The same guard as the files bucket, and it is *not* redundant with
+       * `deletionProtectionEnabled` above.
+       *
+       * That flag is enforced by AWS at the moment of deletion. This one is
+       * enforced by Pulumi at the moment of *planning*, so a plan that would
+       * replace this cluster fails before it touches anything — rather than
+       * getting partway, as the bucket's replacement did, and leaving the
+       * stack in a state where some resources are gone and some are not.
+       *
+       * Two layers because they fail at different times, and the earlier
+       * failure is the more useful one.
+       */
+      protect: !ctx.ephemeral,
     });
 
     const auroraHostname = pulumi.interpolate`${cluster.identifier}.dsql.${ctx.region}.on.aws`;
@@ -195,6 +210,39 @@ export function buildCloudDataServerProgram(
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",
       },
+    }, {
+      /**
+       * Refuse to delete this bucket, including as half of a replacement.
+       *
+       * ## The incident this exists to prevent
+       *
+       * `objectLockEnabled` is **ForceNew** in the AWS provider, because AWS can
+       * only set Object Lock at bucket creation. So on a stack whose bucket
+       * predates that field, the provider does not report an error — it reports
+       * "this requires replacement", and Pulumi plans a delete and a create.
+       * S3 bucket names are globally unique, so the delete has to go *first*:
+       * the policy, versioning, public-access block, CORS and encryption
+       * configuration are all torn down, then the bucket itself.
+       *
+       * That ran against a real deployment on 2026-08-02. Every user file
+       * survived for exactly one reason — `DeleteBucket` returned
+       * `BucketNotEmpty`. Nothing in the design stopped it; the data was saved
+       * by the accident of existing.
+       *
+       * `protect` converts that plan from an execution into an error, which is
+       * the behaviour anyone would have assumed was already there.
+       *
+       * ## Why this does not block teardown
+       *
+       * `scripts/teardown-cloud-data-server.sh` deletes through the AWS CLI and
+       * empties the bucket first; it never runs `pulumi destroy`. A deliberate
+       * teardown is unaffected. What is blocked is an *incidental* delete —
+       * one nobody asked for, arriving as a side effect of deploying a Lambda.
+       *
+       * Off for ephemeral e2e stacks, which are created and destroyed by the
+       * suite and hold nothing.
+       */
+      protect: !ctx.ephemeral,
     });
 
     // Data-protection hardening — asserted explicitly for real user accounts;
