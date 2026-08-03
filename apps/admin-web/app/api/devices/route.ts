@@ -26,8 +26,23 @@
  * `userId` is recorded even though nothing reads it yet. See the note on
  * `DeviceRegistration` — it is what saves already-paired devices a migration
  * when shared data is finally partitioned per user.
+ *
+ * ## Why the operator's own session does not make the SSM call
+ *
+ * The credentials that arrive in the request body are the admin-app role, and
+ * that role deliberately holds no write on `/${stackPrefix}/app-creds/*` — its
+ * only SSM grant is the Pulumi passphrase. Writing app credentials is Manager's
+ * one standing non-IAM capability (see `data-roles-and-permissions.md`), which
+ * is what keeps the federated human from being a superuser over the credential
+ * prefix. So this route does the same admin-app → Manager hop the installer
+ * does before minting a per-app HMAC secret or the CloudFront signing key; the
+ * trust policy and the `sts:AssumeRole` grant for it already exist from
+ * bootstrap, so no IAM change is involved.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { starkeepDir } from "@starkeep/app-client";
 import { NextRequest, NextResponse } from "next/server";
 // The `/app-creds` subpath, not the package root. The root barrel pulls in the
 // whole installer — Pulumi, the orchestrator, the local registry — and a Next
@@ -39,7 +54,18 @@ import {
   deleteDeviceKeyParameter,
 } from "@starkeep/admin-installer/app-creds";
 import type { AwsCredentials } from "@starkeep/admin-installer/app-creds";
+// Likewise a subpath: `session` imports nothing but the STS client, so it can
+// be pulled into a Next route without dragging the installer along behind it.
+import { roleChain } from "@starkeep/admin-installer/session";
 import type { STSCredentials } from "../../../src/lib/cognito-auth";
+
+const CONFIG_PATH = join(starkeepDir(), "config.json");
+
+interface StarkeepConfig {
+  stackPrefix?: string;
+  accountId?: string;
+  managerRoleArn?: string;
+}
 
 /**
  * The two credential shapes differ by one field: admin-web carries `expiration`
@@ -54,6 +80,48 @@ function toAwsCreds(c: STSCredentials): AwsCredentials {
     sessionToken: c.sessionToken,
     expiration: new Date(c.expiration),
   };
+}
+
+/**
+ * Manager credentials for this one call, from the operator's session.
+ *
+ * The role ARN is read from `~/.starkeep/config.json` rather than taken from
+ * the request body: admin-web runs on the operator's own machine, but a role
+ * ARN is the one input here that decides *which* identity does a privileged
+ * write, and it is already on disk — there is no reason for it to make a round
+ * trip through the browser. Same fallback as the uninstall CLI for configs
+ * written before `managerRoleArn` was recorded.
+ */
+async function managerCredentials(
+  operatorCreds: STSCredentials,
+  region: string,
+): Promise<AwsCredentials> {
+  if (!existsSync(CONFIG_PATH)) {
+    throw new Error("~/.starkeep/config.json not found — complete the cloud setup first");
+  }
+  const config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
+  const managerRoleArn =
+    config.managerRoleArn ??
+    (config.accountId && config.stackPrefix
+      ? `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-manager-role`
+      : null);
+  if (!managerRoleArn) {
+    throw new Error(
+      "~/.starkeep/config.json has no managerRoleArn (and no accountId to derive it from) — complete the cloud setup first",
+    );
+  }
+
+  return roleChain([managerRoleArn], {
+    baseCredentials: toAwsCreds(operatorCreds),
+    region,
+    // Distinguishable from an install in CloudTrail — this is the one Manager
+    // call that is not part of installing or uninstalling something.
+    sessionPrefix: "starkeep-pair-device",
+    // No propagation retry: Manager has existed since bootstrap, so a denial
+    // here is a real answer (usually an expired sign-in) and the operator is
+    // watching a spinner while we decide that.
+    assumeAttempts: 1,
+  });
 }
 
 /** Must match the handler's `isValidDeviceId` — this name becomes a path. */
@@ -104,7 +172,7 @@ export async function POST(req: NextRequest) {
         pairedAt: new Date().toISOString(),
       },
       region,
-      awsCreds: toAwsCreds(credentials),
+      awsCreds: await managerCredentials(credentials, region),
     });
     return NextResponse.json({ paired: { deviceId, parameterName: name } });
   } catch (err) {
@@ -123,7 +191,14 @@ export async function DELETE(req: NextRequest) {
   }
 
   try {
-    await deleteDeviceKeyParameter({ stackPrefix, deviceId, region, awsCreds: toAwsCreds(credentials) });
+    // Revoke needs the same hop: `ssm:DeleteParameter` on `app-creds/*` is
+    // Manager's too, so this path was denied for the same reason pairing was.
+    await deleteDeviceKeyParameter({
+      stackPrefix,
+      deviceId,
+      region,
+      awsCreds: await managerCredentials(credentials, region),
+    });
     return NextResponse.json({ revoked: deviceId });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
