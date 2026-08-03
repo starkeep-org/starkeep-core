@@ -28,6 +28,34 @@ interface PresignResponse {
 }
 
 /**
+ * S3's own explanation of a failed PUT, as a suffix for the thrown message.
+ *
+ * A presigned PUT can fail 403 for reasons that demand opposite fixes —
+ * `AccessDenied` is an IAM gap, `SignatureDoesNotMatch` is a header the
+ * uploader dropped or encoded differently — and the status line alone cannot
+ * tell them apart. S3 says which in the response body; throwing it away turns
+ * a five-second diagnosis into an afternoon.
+ *
+ * Best-effort: a body that cannot be read must not replace the real error.
+ */
+async function s3ErrorDetail(res: Response): Promise<string> {
+  try {
+    const body = (await res.text()).trim();
+    if (!body) return "";
+    // Collapsed to a single line: S3's error document is pretty-printed XML,
+    // and a multi-line throw splits across log lines — where any per-line
+    // prefix or filter keeps the first line ("<?xml version…") and discards
+    // the <Code> that is the entire reason for reading it.
+    const oneLine = body.replace(/\s+/g, " ");
+    // Truncated because the Code and Message lead the document; the rest is
+    // request-id boilerplate that would bury the line it came from.
+    return ` — ${oneLine.slice(0, 500)}`;
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Turn a presign response into the headers the PUT must carry.
  *
  * These are mandatory when present, not optional extras: each one is inside the
@@ -172,7 +200,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       body: data as BodyInit,
     });
     if (!s3Res.ok) {
-      throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}`);
+      throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}${await s3ErrorDetail(s3Res)}`);
     }
 
     await this.confirm(key);
@@ -325,7 +353,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     }
     if (!s3Res.ok) {
       await verified.cancel().catch(() => {});
-      throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}`);
+      throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}${await s3ErrorDetail(s3Res)}`);
     }
 
     await this.confirm(key);
