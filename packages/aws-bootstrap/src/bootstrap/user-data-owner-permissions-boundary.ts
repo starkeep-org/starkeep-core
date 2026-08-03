@@ -55,8 +55,27 @@ export function userDataOwnerPermissionsBoundaryStatements(
       // never exceed the shared-data prefix.
       Sid: "UserDataOwnerS3SharedData",
       Effect: "Allow",
-      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      Action: [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        // Tagging an original for the archive lifecycle rule, and thawing one
+        // that has transitioned — the same pair the per-app boundary permits.
+        "s3:PutObjectTagging",
+        "s3:RestoreObject",
+      ],
       Resource: `arn:aws:s3:::${stackPrefix}-files-*/shared/*`,
+    },
+    {
+      // The daily inventory report. Drive is the identity the CDS Lambda wears
+      // when it ingests one (availability is a fact about shared blobs), and
+      // the report lands under a reserved infrastructure prefix that neither
+      // the shared nor the own-prefix grant above reaches. Read-only: nothing
+      // in Starkeep writes here, S3 does.
+      Sid: "UserDataOwnerReadInventory",
+      Effect: "Allow",
+      Action: "s3:GetObject",
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/_starkeep/inventory/*`,
     },
     {
       // Bucket-level ListBucket, scoped to the app's own prefix and the shared

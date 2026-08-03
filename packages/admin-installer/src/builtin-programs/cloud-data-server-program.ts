@@ -444,106 +444,68 @@ export function buildCloudDataServerProgram(
     // ones are discarded), so at-least-once delivery needs no deduplication,
     // and a queue would add a component whose only job is holding events for a
     // consumer that is already warm.
-    if (!ctx.ephemeral) {
-      const s3InvokePermission = new aws.lambda.Permission(
-        `${ctx.stackPrefix}-files-notify-invoke`,
-        {
-          action: "lambda:InvokeFunction",
-          function: fn.name,
-          principal: "s3.amazonaws.com",
-          sourceArn: bucket.arn,
-        },
-      );
+    //
+    // Deliberately NOT gated on ctx.ephemeral. Nothing here obstructs teardown
+    // — a notification config and an inventory config are deleted with the
+    // bucket — and gating them meant the only suite that runs a real install
+    // never exercised the IAM grants they need. That gap is exactly how a
+    // missing s3:PutInventoryConfiguration reached a real account.
+    const s3InvokePermission = new aws.lambda.Permission(
+      `${ctx.stackPrefix}-files-notify-invoke`,
+      {
+        action: "lambda:InvokeFunction",
+        function: fn.name,
+        principal: "s3.amazonaws.com",
+        sourceArn: bucket.arn,
+      },
+    );
 
-      new aws.s3.BucketNotification(
-        `${ctx.stackPrefix}-files-notify`,
-        {
-          bucket: bucket.id,
-          lambdaFunctions: [
-            {
-              lambdaFunctionArn: fn.arn,
-              events: [
-                // A lifecycle transition into Deep Archive is the moment an
-                // object stops being readable.
-                "s3:LifecycleTransition",
-                // A thaw finished; a temporary readable copy now exists.
-                "s3:ObjectRestore:Completed",
-                // The thawed copy lapsed and the object is archived again.
-                // Without this an object reads as available forever after one
-                // restore — the failure mode that looks fine right up until
-                // someone opens it months later.
-                "s3:ObjectRestore:Delete",
-              ],
-              filterPrefix: "shared/",
-            },
-            {
-              // The daily inventory report landing. Keyed on the checksum file
-              // because S3 writes the data files first and the checksum last,
-              // so anything else would trigger ingestion of a partial report.
-              //
-              // A separate entry rather than widening the prefix above: these
-              // are different events about different things, and one filter
-              // covering both would deliver every shared-object creation too.
-              lambdaFunctionArn: fn.arn,
-              events: ["s3:ObjectCreated:*"],
-              filterPrefix: INVENTORY_PREFIX,
-              filterSuffix: "manifest.checksum",
-            },
-          ],
-        },
-        // S3 validates that it may invoke the function while *creating* the
-        // notification, so the permission must exist first or the apply fails
-        // with an unhelpful "unable to validate the following destination".
-        { dependsOn: [s3InvokePermission] },
-      );
-    }
-
-    // -----------------------------------------------------------------------
-    // Availability backstop — daily S3 Inventory
-    // -----------------------------------------------------------------------
-    //
-    // Event delivery is at-least-once, not exactly-once, and the handler
-    // deliberately swallows a malformed notification rather than letting S3
-    // redeliver a batch forever. Both are right, and both mean something can be
-    // lost — so without this a record can stay wrong indefinitely, and the
-    // wrongness is invisible until somebody tries to read it.
-    //
-    // Inventory rather than a HeadObject sweep: at roughly $0.0025 per million
-    // objects listed it is nearly free, where probing a 300k-object library
-    // daily is 300k requests. That cost difference is the reason availability
-    // is a maintained fact at all.
-    //
-    // Written back into the same bucket under a reserved prefix. A second
-    // bucket would need its own policy, lifecycle and teardown for data that is
-    // regenerated daily and worthless the moment it is read.
-    if (!ctx.ephemeral) {
-      new aws.s3.Inventory(`${ctx.stackPrefix}-files-inventory`, {
+    new aws.s3.BucketNotification(
+      `${ctx.stackPrefix}-files-notify`,
+      {
         bucket: bucket.id,
-        name: "availability",
-        includedObjectVersions: "Current",
-        schedule: { frequency: "Daily" },
-        // Only shared blobs. App-syncable files are not subject to archiving,
-        // so listing them would be paying to enumerate rows nothing reads.
-        filter: { prefix: "shared/" },
-        optionalFields: [
-          "StorageClass",
-          // The field that distinguishes a cheap-but-readable I-T object from
-          // one that has sunk into an asynchronous archive tier. Without it the
-          // reconcile would read storage class alone and call the second one
-          // readable — the exact confusion `stat()` was widened to avoid.
-          "IntelligentTieringAccessTier",
-          "Size",
-        ],
-        destination: {
-          bucket: {
-            bucketArn: bucket.arn,
-            format: "CSV",
-            prefix: INVENTORY_PREFIX,
-            accountId: ctx.accountId,
+        lambdaFunctions: [
+          {
+            lambdaFunctionArn: fn.arn,
+            events: [
+              // A lifecycle transition into Deep Archive is the moment an
+              // object stops being readable.
+              "s3:LifecycleTransition",
+              // A thaw finished; a temporary readable copy now exists.
+              "s3:ObjectRestore:Completed",
+              // The thawed copy lapsed and the object is archived again.
+              // Without this an object reads as available forever after one
+              // restore — the failure mode that looks fine right up until
+              // someone opens it months later.
+              "s3:ObjectRestore:Delete",
+            ],
+            filterPrefix: "shared/",
           },
-        },
-      });
-    }
+          {
+            // The daily inventory report landing. Keyed on the checksum file
+            // because S3 writes the data files first and the checksum last,
+            // so anything else would trigger ingestion of a partial report.
+            //
+            // A separate entry rather than widening the prefix above: these
+            // are different events about different things, and one filter
+            // covering both would deliver every shared-object creation too.
+            lambdaFunctionArn: fn.arn,
+            events: ["s3:ObjectCreated:*"],
+            filterPrefix: INVENTORY_PREFIX,
+            filterSuffix: "manifest.checksum",
+          },
+        ],
+      },
+      // S3 validates that it may invoke the function while *creating* the
+      // notification, so the permission must exist first or the apply fails
+      // with an unhelpful "unable to validate the following destination".
+      { dependsOn: [s3InvokePermission] },
+    );
+
+    // NOTE: the daily S3 Inventory that backstops availability is created
+    // AFTER the files bucket policy further down, because S3 will only deliver
+    // a report into a bucket whose policy admits the inventory service — see
+    // `${ctx.stackPrefix}-files-inventory` below.
 
     // -----------------------------------------------------------------------
     // API Gateway v2 + Cognito JWT authorizer + explicit reserved sub-namespaces
@@ -896,7 +858,7 @@ export function buildCloudDataServerProgram(
     // the distribution to read shared/* objects. S3 permits only one policy per
     // bucket, so both statements live here. Created after the distribution
     // because the Allow's SourceArn condition references the distribution ARN.
-    new aws.s3.BucketPolicy(`${ctx.stackPrefix}-files-policy`, {
+    const filesBucketPolicy = new aws.s3.BucketPolicy(`${ctx.stackPrefix}-files-policy`, {
       bucket: bucket.id,
       policy: pulumi.jsonStringify({
         Version: "2012-10-17",
@@ -947,9 +909,84 @@ export function buildCloudDataServerProgram(
               },
             },
           },
+          {
+            // Part C: admit the S3 inventory service to write this bucket's own
+            // daily report back into it, under the reserved prefix only.
+            //
+            // Without this statement the inventory *configuration* still
+            // creates and reports healthy, and no report is ever delivered —
+            // the failure mode this whole backstop exists to avoid, arriving
+            // one level up. Nothing surfaces it: S3 does not retry into a
+            // console error, so availability would simply have no backstop
+            // while appearing to have one.
+            //
+            // The conditions are what keep this from being "any bucket's
+            // inventory may write here": SourceArn pins it to reports about
+            // this bucket, SourceAccount to this account.
+            Sid: "AllowInventoryDelivery",
+            Effect: "Allow",
+            Principal: { Service: "s3.amazonaws.com" },
+            Action: "s3:PutObject",
+            Resource: pulumi.interpolate`${bucket.arn}/${INVENTORY_PREFIX}*`,
+            Condition: {
+              StringEquals: {
+                "aws:SourceArn": bucket.arn,
+                "aws:SourceAccount": ctx.accountId,
+              },
+            },
+          },
         ],
       }),
     });
+
+    // -----------------------------------------------------------------------
+    // Availability backstop — daily S3 Inventory
+    // -----------------------------------------------------------------------
+    //
+    // Event delivery is at-least-once, not exactly-once, and the handler
+    // deliberately swallows a malformed notification rather than letting S3
+    // redeliver a batch forever. Both are right, and both mean something can be
+    // lost — so without this a record can stay wrong indefinitely, and the
+    // wrongness is invisible until somebody tries to read it.
+    //
+    // Inventory rather than a HeadObject sweep: at roughly $0.0025 per million
+    // objects listed it is nearly free, where probing a 300k-object library
+    // daily is 300k requests. That cost difference is the reason availability
+    // is a maintained fact at all.
+    //
+    // Written back into the same bucket under a reserved prefix. A second
+    // bucket would need its own policy, lifecycle and teardown for data that is
+    // regenerated daily and worthless the moment it is read.
+    //
+    // Created after the bucket policy (and ordered on it explicitly): the
+    // policy's AllowInventoryDelivery statement is what makes delivery
+    // possible, and Pulumi would otherwise schedule the two in parallel.
+    new aws.s3.Inventory(`${ctx.stackPrefix}-files-inventory`, {
+      bucket: bucket.id,
+      name: "availability",
+      includedObjectVersions: "Current",
+      schedule: { frequency: "Daily" },
+      // Only shared blobs. App-syncable files are not subject to archiving,
+      // so listing them would be paying to enumerate rows nothing reads.
+      filter: { prefix: "shared/" },
+      optionalFields: [
+        "StorageClass",
+        // The field that distinguishes a cheap-but-readable I-T object from
+        // one that has sunk into an asynchronous archive tier. Without it the
+        // reconcile would read storage class alone and call the second one
+        // readable — the exact confusion `stat()` was widened to avoid.
+        "IntelligentTieringAccessTier",
+        "Size",
+      ],
+      destination: {
+        bucket: {
+          bucketArn: bucket.arn,
+          format: "CSV",
+          prefix: INVENTORY_PREFIX,
+          accountId: ctx.accountId,
+        },
+      },
+    }, { dependsOn: [filesBucketPolicy] });
 
     // -----------------------------------------------------------------------
     // Billing bucket + CUR report definition

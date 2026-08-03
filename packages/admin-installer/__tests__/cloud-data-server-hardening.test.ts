@@ -423,13 +423,19 @@ describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
     expect(lifecycle()).toHaveLength(0);
   });
 
-  it("creates no bucket notification", async () => {
+  // The availability wiring is deliberately NOT skipped for ephemeral installs.
+  // Neither a notification config nor an inventory config obstructs teardown
+  // (both are deleted with the bucket), and skipping them meant the Tier-3
+  // suite — the only test that performs a real install — never exercised the
+  // IAM grants they need. That is precisely how an install reached a real
+  // account missing s3:PutInventoryConfiguration.
+  it("still creates the bucket notification, so the e2e install covers it", async () => {
     await run(true);
-    expect(bucketNotification()).toHaveLength(0);
+    expect(bucketNotification()).toHaveLength(1);
   });
 
-  it("creates no inventory", async () => {
+  it("still creates the inventory, so the e2e install covers it", async () => {
     await run(true);
-    expect(byTypeSuffix("s3/inventory:Inventory")).toHaveLength(0);
+    expect(byTypeSuffix("s3/inventory:Inventory")).toHaveLength(1);
   });
 });

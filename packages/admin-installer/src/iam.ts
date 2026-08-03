@@ -22,6 +22,7 @@ import {
   buildTempUninstallInfraPolicy,
   buildTempInstallCloudDataServerPolicy,
   buildTempInstallDdlPolicy,
+  USER_DATA_OWNER_APP_ID,
 } from "./temp-policies";
 import type { FileAccess } from "@starkeep/admin-manifest";
 import { APP_GRANTABLE_CATEGORIES, typeCategory } from "@starkeep/protocol-primitives";
@@ -89,12 +90,11 @@ const FOUNDATIONAL_APP_ID = "cloud-data-server";
 
 /**
  * The single app id permitted to use the user-data-owner permissions boundary.
- * Starkeep Drive owns the cross-cutting `shared/*` write ceiling that powers all
- * shared-record sync. Centralizing the choice here (rather than letting callers
- * pass the boundary they want) guarantees a third-party app cannot escape the
- * regular per-app boundary even if a future code path forgets to enforce it.
+ * Defined in temp-policies.ts (the runtime-policy builder needs it to decide
+ * who may read the inventory prefix) and re-exported here, which is where the
+ * rest of the installer has always looked for it.
  */
-export const USER_DATA_OWNER_APP_ID = "starkeep-drive";
+export { USER_DATA_OWNER_APP_ID } from "./temp-policies";
 
 /**
  * The local-data-server's built-in file-watcher identity. This is a
