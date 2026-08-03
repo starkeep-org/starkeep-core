@@ -12,7 +12,10 @@ import {
   CloudFormationClient,
   CreateStackCommand,
   DescribeStacksCommand,
+  GetTemplateCommand,
+  UpdateStackCommand,
   waitUntilStackCreateComplete,
+  waitUntilStackUpdateComplete,
   type Stack,
 } from "@aws-sdk/client-cloudformation";
 import { generateBootstrapTemplate } from "@starkeep/aws-bootstrap";
@@ -75,6 +78,8 @@ export async function ensureBootstrapStack(options: {
   const stackName = `${stackPrefix}-bootstrap`;
   const client = new CloudFormationClient({ region });
 
+  const template = generateBootstrapTemplate({ stackPrefix });
+
   const existing = await describeStack(client, stackName);
   if (existing) {
     if (existing.StackStatus !== "CREATE_COMPLETE" && existing.StackStatus !== "UPDATE_COMPLETE") {
@@ -83,13 +88,21 @@ export async function ensureBootstrapStack(options: {
           `tear it down (scripts/teardown-bootstrap.sh --prefix ${stackPrefix}) and re-run`,
       );
     }
-    return { outputs: outputsFromStack(existing, stackName), created: false };
+    // Reusing the stack as-is would mean testing yesterday's permissions
+    // boundaries against today's installer. That is not a theoretical concern:
+    // the boundaries are exactly where an install-blocking permission gap
+    // lives, and a run that reuses a stale one reports green on a policy the
+    // code no longer matches. So bring it up to date first.
+    await updateIfDrifted(client, stackName, stackPrefix, template);
+    const refreshed = await describeStack(client, stackName);
+    if (!refreshed) throw new Error(`stack ${stackName} vanished during update`);
+    return { outputs: outputsFromStack(refreshed, stackName), created: false };
   }
 
   await client.send(
     new CreateStackCommand({
       StackName: stackName,
-      TemplateBody: generateBootstrapTemplate({ stackPrefix }),
+      TemplateBody: template,
       Parameters: [{ ParameterKey: "StackPrefix", ParameterValue: stackPrefix }],
       Capabilities: ["CAPABILITY_NAMED_IAM"],
       // No automatic rollback-delete: a failed create should stay visible
@@ -106,6 +119,40 @@ export async function ensureBootstrapStack(options: {
   const created = await describeStack(client, stackName);
   if (!created) throw new Error(`stack ${stackName} vanished after create`);
   return { outputs: outputsFromStack(created, stackName), created: true };
+}
+
+/**
+ * Push the generated template at an existing stack when it differs from what's
+ * deployed. `GetTemplate` returns the body as submitted, so a string compare is
+ * exact — and when nothing changed, CloudFormation's own "No updates are to be
+ * performed" is the cheapest possible no-op.
+ */
+async function updateIfDrifted(
+  client: CloudFormationClient,
+  stackName: string,
+  stackPrefix: string,
+  template: string,
+): Promise<void> {
+  const deployed = await client.send(new GetTemplateCommand({ StackName: stackName }));
+  if (deployed.TemplateBody === template) return;
+
+  console.log(`bootstrap stack ${stackName} is out of date; updating…`);
+  try {
+    await client.send(
+      new UpdateStackCommand({
+        StackName: stackName,
+        TemplateBody: template,
+        Parameters: [{ ParameterKey: "StackPrefix", ParameterValue: stackPrefix }],
+        Capabilities: ["CAPABILITY_NAMED_IAM"],
+      }),
+    );
+  } catch (err) {
+    // The template text differs but resolves to the same resources (formatting,
+    // comments). Nothing to wait for.
+    if (/No updates are to be performed/i.test((err as Error).message)) return;
+    throw err;
+  }
+  await waitUntilStackUpdateComplete({ client, maxWaitTime: 15 * 60 }, { StackName: stackName });
 }
 
 async function describeStack(
