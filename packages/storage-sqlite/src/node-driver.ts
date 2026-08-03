@@ -22,7 +22,6 @@
  * imports and is safe to bundle for a handset.
  */
 
-import type { RawDatabase } from "@starkeep/storage-adapter";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";

@@ -22,7 +22,7 @@
  * and parameter binding.
  */
 
-import { sql, type CompiledQuery, type Kysely } from "kysely";
+import type { CompiledQuery, Kysely } from "kysely";
 import type { HLCTimestamp, RecordLabel, StarkeepId } from "@starkeep/protocol-primitives";
 import { serializeHLC } from "@starkeep/protocol-primitives";
 import type {
