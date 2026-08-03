@@ -84,19 +84,19 @@ Blob defaults by data type when omitted:
 
 ### Page limit
 
-`SyncEngineOptions.pageLimit` (default 1000 in production) caps both the
+`SyncEngineOptions.maxItems` (default 1000 in production) caps both the
 outbound local scan and the per-exchange request limit. The harness sets it to
 a small value (default 5) for tests, and exposes it on the spec:
 
 ```ts
 interface CaseSpec {
   // ...
-  pageLimit?: number;  // harness default: 5; overrideable per case
+  maxItems?: number;  // harness default: 5; overrideable per case
 }
 ```
 
 S6 tests pass `batch: "exceeds-page-limit"` with the default 6 records and
-implicit `pageLimit: 5`, so a single `until-converged` exchange paginates
+implicit `maxItems: 5`, so a single `until-converged` exchange paginates
 across two rounds and the invariants (`hasMore`, no dupes, watermark fan-out)
 are exercised at full fidelity. The literal 2000-record case is not needed
 for correctness — that threshold is a tuning parameter, not a code path.
@@ -123,7 +123,7 @@ a stateful transport, which is out of scope here.
 
 - `multi-homogeneous`: `batchCount` records, all same `nodeId` (local by default), HLCs in sequence.
 - `multi-mixed-nodes`: half the batch from local's nodeId, half from cloud's, interleaved by HLC.
-- `exceeds-page-limit`: `batchCount` defaulted to **6**; the harness configures the engine with **`pageLimit: 5`** so 6 records straddle a page boundary. The invariants under test (`hasMore` signaling, multi-round resume, no record loss/dup, watermark fan-out across pages) are independent of the absolute threshold, so we exercise them cheaply rather than seeding 2001 rows per test. See "Page limit" below.
+- `exceeds-page-limit`: `batchCount` defaulted to **6**; the harness configures the engine with **`maxItems: 5`** so 6 records straddle a page boundary. The invariants under test (`hasMore` signaling, multi-round resume, no record loss/dup, watermark fan-out across pages) are independent of the absolute threshold, so we exercise them cheaply rather than seeding 2001 rows per test. See "Page limit" below.
 
 `w.subjectIds[]` is populated for multi-record cases (and `w.subjectId === subjectIds[0]` for ergonomic single-record assertions).
 
@@ -368,7 +368,7 @@ top-level imports stay short because everything routes through
    we settled on. Hard-code it in the harness; tests don't pass keys in.
 
 3. **`exceeds-page-limit` performance** — *resolved*: `SyncEngine` now takes
-   a `pageLimit` option (default 1000 in production). The harness sets it to
+   a `maxItems` option (default 1000 in production). The harness sets it to
    5 for `exceeds-page-limit` cases and seeds 6 records, exercising the same
    `hasMore` / multi-round-resume / no-dup / watermark-fan-out invariants in
    ~3ms instead of seeding 2001 rows. The absolute 2000 threshold is a

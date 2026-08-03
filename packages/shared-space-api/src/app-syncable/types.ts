@@ -7,8 +7,8 @@ export type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
-  ScanSinceOptions,
   ScanSincePage,
+  StreamTruncation,
   AppSyncableRowEntry,
   FileRecordRow,
 } from "@starkeep/sync-engine";

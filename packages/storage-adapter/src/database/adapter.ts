@@ -17,6 +17,8 @@ import type {
   FindByLabelResult,
   StoredAvailability,
 } from "./types.js";
+import type { DigestBucket } from "./digest-queries.js";
+import type { SincePage } from "./since-queries.js";
 
 export interface DatabaseAdapter {
   init(): Promise<void>;
@@ -40,6 +42,33 @@ export interface DatabaseAdapter {
    * + `(node_id, updated_at)` index so it doesn't scan the table.
    */
   getNodeWatermarks(): Promise<Record<string, HLCTimestamp>>;
+
+  /**
+   * Records the peer hasn't seen: `updated_at > peerWatermarks[node_id]` per
+   * author, oldest first within each author, capped at `limit`.
+   *
+   * The delta counterpart to {@link query}, and the one the sync outbound scan
+   * uses. `query` reads the table in primary-key order and leaves the caller to
+   * discard what the peer already has, which costs O(total rows) every round;
+   * this seeks the `(node_id, updated_at)` index per author and costs O(rows
+   * owed). See `since-queries.ts` for why it is a loop of per-author seeks.
+   *
+   * No cursor, deliberately: every row returned is genuinely owed, so a caller
+   * that wants more simply asks again after the peer's watermark advances. A
+   * cursor would be a second, redundant way to express the same position and
+   * could disagree with the watermark.
+   *
+   * `hasMore` reports that rows were left behind — the signal for whether to
+   * run another round, not a pagination token. `truncated` reports *where* they
+   * were left behind, per author, which is what lets the caller cut a shipment
+   * that is still a contiguous prefix across every stream on the channel. See
+   * `sync-engine/src/round-cut.ts`.
+   */
+  querySince(
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
+  ): Promise<SincePage<DataRecord>>;
+
   batch(operations: BatchOperation[]): Promise<void>;
   transaction<T>(callback: (transaction: Transaction) => Promise<T>): Promise<T>;
 
@@ -185,6 +214,23 @@ export interface DatabaseAdapter {
    * over both tables on the Drive channel.
    */
   getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>>;
+
+  /**
+   * Row counts per author per time bucket, over records and labels together —
+   * the comparison that finds a hole a coverage watermark cannot see, and the
+   * count that answers "is my library backed up?".
+   *
+   * Runs as a `GROUP BY` on the `(node_id, updated_at)` index. Cheap, but not
+   * free over a whole table: this is an occasional integrity check, not
+   * something to run per sync round. See `digest-queries.ts`.
+   */
+  bucketDigest(prefixLength?: number): Promise<DigestBucket[]>;
+
+  /** The label half of {@link querySince}, with the same contract. */
+  queryLabelsSince(
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
+  ): Promise<SincePage<RecordLabel>>;
 
   // ---- Object availability ------------------------------------------------
   //

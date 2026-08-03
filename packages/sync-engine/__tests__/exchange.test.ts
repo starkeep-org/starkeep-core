@@ -1,3 +1,9 @@
+import {
+  mergeDigestBuckets,
+  DEFAULT_BUCKET_PREFIX_LENGTH,
+  type DigestBucket,
+} from "@starkeep/storage-adapter";
+import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
 import {
   createHLCClock,
@@ -66,27 +72,53 @@ function makeMockAppSource(
       }
       rows.set(key, entry);
     },
-    async scanSince(scanAppId, table, sinceHlcStr, options) {
-      const floor =
-        options?.cursor !== undefined && options.cursor > sinceHlcStr
-          ? options.cursor
-          : sinceHlcStr;
-      const matches: AppSyncableRowEntry[] = [];
+    // Delta scan: rows the peer hasn't seen, one fair slice per author, with
+    // per-author truncation marks — the same shape `collectSince` produces on
+    // the SQL path, because `round-cut.ts` consumes both.
+    async scanSince(scanAppId, table, peerWatermarks, limit) {
+      const byNode = new Map<string, AppSyncableRowEntry[]>();
       for (const e of rows.values()) {
         if (e.appId !== scanAppId || e.table !== table) continue;
-        if (serializeHLC(e.timestamp) > floor) matches.push(e);
+        const peer = peerWatermarks[e.timestamp.nodeId];
+        if (peer && compareHLC(e.timestamp, peer) <= 0) continue;
+        const bucket = byNode.get(e.timestamp.nodeId) ?? [];
+        bucket.push(e);
+        byNode.set(e.timestamp.nodeId, bucket);
       }
-      matches.sort((a, b) =>
-        serializeHLC(a.timestamp).localeCompare(serializeHLC(b.timestamp)),
-      );
-      const limit = options?.limit;
-      const hasMore = limit !== undefined && matches.length > limit;
-      const pageRows = hasMore ? matches.slice(0, limit) : matches;
-      const nextCursor =
-        hasMore && pageRows.length > 0
-          ? serializeHLC(pageRows[pageRows.length - 1]!.timestamp)
-          : null;
-      return { rows: pageRows, nextCursor, hasMore };
+      const nodeIds = Array.from(byNode.keys()).sort();
+      const truncated: Record<string, HLCTimestamp | null> = {};
+      if (nodeIds.length === 0) return { rows: [], hasMore: false, truncated };
+      if (limit <= 0) {
+        for (const nodeId of nodeIds) truncated[nodeId] = null;
+        return { rows: [], hasMore: true, truncated };
+      }
+      const share = Math.max(1, Math.ceil(limit / nodeIds.length));
+      const out: AppSyncableRowEntry[] = [];
+      let hasMore = false;
+      for (const nodeId of nodeIds) {
+        const bucket = byNode
+          .get(nodeId)!
+          .sort((a, b) => compareHLC(a.timestamp, b.timestamp));
+        const kept = bucket.slice(0, share);
+        out.push(...kept);
+        if (bucket.length > share) {
+          truncated[nodeId] = kept[kept.length - 1]!.timestamp;
+          hasMore = true;
+        }
+      }
+      return { rows: out, hasMore, truncated };
+    },
+    async bucketDigest(scanAppId, table, prefixLength = DEFAULT_BUCKET_PREFIX_LENGTH) {
+      const buckets: DigestBucket[] = [];
+      for (const e of rows.values()) {
+        if (e.appId !== scanAppId || e.table !== table) continue;
+        buckets.push({
+          nodeId: e.timestamp.nodeId,
+          bucket: serializeHLC(e.timestamp).slice(0, prefixLength),
+          count: 1,
+        });
+      }
+      return mergeDigestBuckets(buckets);
     },
     async getNodeWatermarks(scanAppId, table) {
       const out: Watermarks = {};
@@ -126,28 +158,6 @@ function fileRecordRow(
   };
 }
 
-function makeMockSyncState(): SyncStateStore {
-  let watermarks: Watermarks = {};
-  let peerWatermarks: Watermarks = {};
-  return {
-    async getWatermarks() {
-      return watermarks;
-    },
-    async setWatermarks(w) {
-      watermarks = w;
-    },
-    async getPeerWatermarks() {
-      return peerWatermarks;
-    },
-    async setPeerWatermarks(w) {
-      peerWatermarks = w;
-    },
-    async getHlcClockState() {
-      return null;
-    },
-    async setHlcClockState() {},
-  };
-}
 
 describe("version-vector exchange", () => {
   it("round-trips local creates to the cloud and pulls cloud-created records back", async () => {
@@ -188,7 +198,7 @@ describe("version-vector exchange", () => {
     // Blob present locally — exchange will push it as a prerequisite of
     // shipping the metadata.
     await localStorage.put(localRecord.objectStorageKey, new Uint8Array([1, 2, 3]), {
-      contentType: localRecord.mimeType,
+      contentType: localRecord.mimeType ?? undefined,
     });
 
     // Cloud already holds a record originated on the cloud (e.g. legacy data).
@@ -205,10 +215,10 @@ describe("version-vector exchange", () => {
     );
     await cloudDb.put(cloudRecord);
     await cloudStorage.put(cloudRecord.objectStorageKey, new Uint8Array([4, 5, 6]), {
-      contentType: cloudRecord.mimeType,
+      contentType: cloudRecord.mimeType ?? undefined,
     });
 
-    const syncState = makeMockSyncState();
+    const syncState = createMemorySyncStateStore();
     const cloudTransport = createInProcessSyncTransport({
       databaseAdapter: cloudDb,
       clock: cloudClock,
@@ -293,16 +303,16 @@ describe("version-vector exchange", () => {
     await localDb.put(record);
     await cloudDb.put(record);
     await localStorage.put(record.objectStorageKey, new Uint8Array([1]), {
-      contentType: record.mimeType,
+      contentType: record.mimeType ?? undefined,
     });
     await cloudStorage.put(record.objectStorageKey, new Uint8Array([1]), {
-      contentType: record.mimeType,
+      contentType: record.mimeType ?? undefined,
     });
 
     // Local soft-deletes via adapter.delete.
     await localDb.delete(record.id, localClock.now());
 
-    const syncState = makeMockSyncState();
+    const syncState = createMemorySyncStateStore();
     const cloudTransport = createInProcessSyncTransport({
       databaseAdapter: cloudDb,
       clock: cloudClock,
@@ -373,7 +383,7 @@ describe("version-vector exchange", () => {
       contentType: "image/jpeg",
     });
 
-    const syncState = makeMockSyncState();
+    const syncState = createMemorySyncStateStore();
     const cloudTransport = createInProcessSyncTransport({
       databaseAdapter: cloudDb,
       clock: cloudClock,
@@ -445,11 +455,11 @@ describe("version-vector exchange", () => {
       );
       await localDb.put(r);
       await localStorage.put(r.objectStorageKey, new Uint8Array([i]), {
-        contentType: r.mimeType,
+        contentType: r.mimeType ?? undefined,
       });
     }
 
-    const syncState = makeMockSyncState();
+    const syncState = createMemorySyncStateStore();
     const cloudTransport = createInProcessSyncTransport({
       databaseAdapter: cloudDb,
       clock: cloudClock,
@@ -511,7 +521,7 @@ describe("version-vector exchange", () => {
       contentType: "image/jpeg",
     });
 
-    const syncState = makeMockSyncState();
+    const syncState = createMemorySyncStateStore();
     const cloudTransport = createInProcessSyncTransport({
       databaseAdapter: cloudDb,
       clock: cloudClock,
@@ -541,7 +551,8 @@ describe("version-vector exchange", () => {
     const cloudPage = await cloudApp.applier.scanSince(
       "test-app",
       FILE_RECORDS_TABLE,
-      "",
+      {},
+      1000,
     );
     expect(cloudPage.rows).toHaveLength(1);
     expect(cloudPage.rows[0]!.row?.["id"]).toBe("local-photo-1");
@@ -630,7 +641,7 @@ describe("version-vector exchange", () => {
       contentType: "image/jpeg",
     });
 
-    const syncState = makeMockSyncState();
+    const syncState = createMemorySyncStateStore();
     const cloudTransport = createInProcessSyncTransport({
       databaseAdapter: cloudDb,
       clock: cloudClock,
@@ -661,7 +672,8 @@ describe("version-vector exchange", () => {
     const cloudArPage = await cloudApp.applier.scanSince(
       "test-app",
       FILE_RECORDS_TABLE,
-      "",
+      {},
+      1000,
     );
     expect(cloudArPage.rows).toHaveLength(0);
     // SR late MUST NOT ship even though its blob is fine — otherwise the
@@ -681,7 +693,8 @@ describe("version-vector exchange", () => {
     const afterPage = await cloudApp.applier.scanSince(
       "test-app",
       FILE_RECORDS_TABLE,
-      "",
+      {},
+      1000,
     );
     expect(afterPage.rows).toHaveLength(1);
     expect(await cloudStorage.has(arKey)).toBe(true);
@@ -715,7 +728,7 @@ describe("version-vector exchange", () => {
     await cloudStorage.init();
 
     // Plain AW table (no blobs) so we can focus on row pagination, not blob
-    // transfer. Seed 10 rows; pageLimit=3 and scanPageSize=2 force the
+    // transfer. Seed 10 rows; maxItems=3 forces the
     // cursor to traverse multiple scanSince pages per round.
     const ROW_COUNT = 10;
     const localApp = makeMockAppSource("test-app", [
@@ -743,7 +756,7 @@ describe("version-vector exchange", () => {
       });
     }
 
-    const syncState = makeMockSyncState();
+    const syncState = createMemorySyncStateStore();
     const cloudTransport = createInProcessSyncTransport({
       databaseAdapter: cloudDb,
       clock: cloudClock,
@@ -764,8 +777,7 @@ describe("version-vector exchange", () => {
         namespaces: localApp.namespaces,
         applier: localApp.applier as never,
       },
-      pageLimit: 3,
-      scanPageSize: 2,
+      maxItems: 3,
     });
 
     // Drive rounds until convergence (bounded to avoid hangs on regression).
@@ -778,7 +790,8 @@ describe("version-vector exchange", () => {
     const cloudPage = await cloudApp.applier.scanSince(
       "test-app",
       "items",
-      "",
+      {},
+      1000,
     );
     expect(cloudPage.rows).toHaveLength(ROW_COUNT);
     const cloudIds = cloudPage.rows

@@ -6,7 +6,7 @@
  *
  * Exchanges are driven deterministically: tick interval is effectively
  * infinite, and convergence is forced with explicit /sync/now rounds.
- * (Both servers run with a small syncPageLimit, so multi-record flows also
+ * (Both servers run with a small syncMaxItems, so multi-record flows also
  * exercise multi-round pagination drain.)
  *
  * Not covered here: shared-record LWW *update* conflict — there is no public
@@ -52,14 +52,33 @@ async function syncNow(app: InstalledApp): Promise<{ applied: number; shipped: n
 }
 
 /**
- * Alternate /sync/now on A and B until both report a quiet round (nothing
- * shipped or applied) — multi-round by design so small pageLimits drain.
+ * Drive both servers until they stop moving.
+ *
+ * Requires **two consecutive quiet rounds**, not one. A single quiet round does
+ * not mean converged: creating a record nudges a background exchange on a 50 ms
+ * debounce, and `transferFile` returns false for a key whose transfer is
+ * already in flight — so a `/sync/now` round can truthfully report nothing
+ * applied and nothing shipped while the background round is mid-transfer.
+ * Stopping there hands the test a half-finished state, which shows up as a
+ * missing blob or a 404 on a file URL, only under load, only sometimes.
+ *
+ * The short pause between the two checks is what gives the in-flight transfer
+ * somewhere to land.
  */
 async function converge(maxRounds = 30): Promise<void> {
+  let quiet = 0;
   for (let i = 0; i < maxRounds; i++) {
     const a = await syncNow(driveA);
     const b = await syncNow(driveB);
-    if (a.applied === 0 && a.shipped === 0 && b.applied === 0 && b.shipped === 0) return;
+    const still =
+      a.applied === 0 && a.shipped === 0 && b.applied === 0 && b.shipped === 0;
+    if (!still) {
+      quiet = 0;
+      continue;
+    }
+    quiet += 1;
+    if (quiet >= 2) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`did not converge within ${maxRounds} rounds`);
 }
@@ -78,7 +97,7 @@ function serverConfig(cloudUrl: string) {
     apiGatewayUrl: cloudUrl,
     pullIntervalMs: 600_000,
     pushDebounceMs: 50,
-    syncPageLimit: PAGE_LIMIT,
+    syncMaxItems: PAGE_LIMIT,
   };
 }
 
@@ -161,7 +180,7 @@ describe("shared records across the wire", () => {
     }
   });
 
-  it("drains more than one page of records with the small pageLimit", async () => {
+  it("drains more than one round of records with the small item cap", async () => {
     const count = PAGE_LIMIT * 2 + 2;
     // Clear before creating: the 50 ms debounce nudge starts shipping pages
     // while the creation loop is still running, and those rounds count too.
@@ -267,15 +286,23 @@ describe("app-specific files across the wire", () => {
 
   it("a cover set on A uploads to the cloud and resolves on B with its bytes", { timeout: 30_000 }, async () => {
     await putAppFile(filesA, "cover", "cover-from-A", "image/png");
-    await converge();
 
-    // Reached the cloud: the index row landed in the cloud-side app table.
-    const cloudKeys = cloud
-      .appRows("files-app", "_starkeep_sync_records")
-      .map((r) => r["object_storage_key"]);
-    expect(cloudKeys).toContain("apps/files-app/syncable/cover");
-    // And the blob is resident in cloud storage.
-    expect(await cloud.hasBlob("apps/files-app/syncable/cover")).toBe(true);
+    // Drained to the end state rather than trusting one quiet round.
+    // `converge()` stops when a round reports nothing applied and nothing
+    // shipped, and that is not the same as "finished": creating a file nudges a
+    // background exchange on a 50 ms debounce, and `transferFile` returns false
+    // for a key whose transfer is already in flight — so a `/sync/now` round can
+    // truthfully report quiet while the background round is mid-transfer.
+    await eventually(async () => {
+      await converge();
+      // Reached the cloud: the index row landed in the cloud-side app table.
+      const cloudKeys = cloud
+        .appRows("files-app", "_starkeep_sync_records")
+        .map((r) => r["object_storage_key"]);
+      expect(cloudKeys).toContain("apps/files-app/syncable/cover");
+      // And the blob is resident in cloud storage.
+      expect(await cloud.hasBlob("apps/files-app/syncable/cover")).toBe(true);
+    });
 
     // Came down to B: existence (index) + bytes (blob) both resident locally.
     await eventually(async () => {
@@ -332,7 +359,7 @@ describe("restart durability", () => {
     const quiet = await syncNow(driveB);
     // Watermarks/HLC came back from the SQLite state store: nothing re-ships,
     // nothing re-applies.
-    expect(quiet).toEqual({ applied: 0, shipped: 0 });
+    expect(quiet).toEqual({ applied: 0, shipped: 0, complete: true });
     expect(
       cloud.exchangeLog.filter((e) => e.appId === "starkeep-drive" && e.inRecords > 0),
     ).toEqual([]);

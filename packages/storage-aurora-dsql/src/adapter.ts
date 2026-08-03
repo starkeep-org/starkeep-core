@@ -31,6 +31,15 @@ import {
   buildLabelUpsert,
   buildLabelsByRecordIds,
   buildQueryLabels,
+  buildBucketDigest,
+  buildScanSinceForNode,
+  collectSince,
+  mergeDigestBuckets,
+  planNodeScans,
+  toDigestBuckets,
+  DEFAULT_BUCKET_PREFIX_LENGTH,
+  type DigestBucket,
+  type SincePage,
   buildTombstoneLabelsForRecord,
   groupLabelsByRecordId,
   paginateFindByLabel,
@@ -178,7 +187,11 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async getNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
-    return withOccRetry("getNodeWatermarks", async () => {
+    return withOccRetry("getNodeWatermarks", () => this.getNodeWatermarksRaw());
+  }
+
+  private async getNodeWatermarksRaw(): Promise<Record<string, HLCTimestamp>> {
+    {
       // Within one node_id group, updated_at is fixed-width hex up to the
       // nodeId suffix, so lexicographic MAX equals HLC MAX. The
       // (node_id, updated_at) index makes this an index-only scan.
@@ -195,6 +208,63 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
       }
       return out;
+    }
+  }
+
+  async querySince(
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
+  ): Promise<SincePage<DataRecord>> {
+    return withOccRetry("querySince", async () => {
+      const scans = planNodeScans(await this.getNodeWatermarksRaw(), peerWatermarks);
+      const { rows, hasMore, truncated } = await collectSince<PostgresRow>(
+        scans,
+        limit,
+        async (scan, remaining) => {
+          const result = await this.run(
+            buildScanSinceForNode(compiler, "shared.records", scan, remaining),
+          );
+          return result.rows as unknown as PostgresRow[];
+        },
+        (row) => deserializeHLC(row.updated_at),
+      );
+      return { rows: rows.map(rowToRecord), hasMore, truncated };
+    });
+  }
+
+  async queryLabelsSince(
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
+  ): Promise<SincePage<RecordLabel>> {
+    return withOccRetry("queryLabelsSince", async () => {
+      const scans = planNodeScans(await this.getLabelNodeWatermarksRaw(), peerWatermarks);
+      const { rows, hasMore, truncated } = await collectSince<LabelRow>(
+        scans,
+        limit,
+        async (scan, remaining) => {
+          const result = await this.run(
+            buildScanSinceForNode(compiler, LABELS.table, scan, remaining),
+          );
+          return result.rows as unknown as LabelRow[];
+        },
+        (row) => deserializeHLC(row.updated_at),
+      );
+      return { rows: rows.map(rowToLabel), hasMore, truncated };
+    });
+  }
+
+  async bucketDigest(
+    prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH,
+  ): Promise<DigestBucket[]> {
+    return withOccRetry("bucketDigest", async () => {
+      // Records and labels together: one channel, one coverage watermark, so a
+      // digest over half of it would report agreement while a label was lost.
+      const out: DigestBucket[] = [];
+      for (const table of ["shared.records", LABELS.table]) {
+        const result = await this.run(buildBucketDigest(compiler, table, prefixLength));
+        out.push(...toDigestBuckets(result.rows as Record<string, unknown>[]));
+      }
+      return mergeDigestBuckets(out);
     });
   }
 
@@ -549,15 +619,17 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
-    return withOccRetry("getLabelNodeWatermarks", async () => {
-      const result = await this.run(buildLabelNodeWatermarks(compiler, LABELS));
-      const out: Record<string, HLCTimestamp> = {};
-      for (const raw of result.rows) {
-        const row = raw as Record<string, unknown>;
-        out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
-      }
-      return out;
-    });
+    return withOccRetry("getLabelNodeWatermarks", () => this.getLabelNodeWatermarksRaw());
+  }
+
+  private async getLabelNodeWatermarksRaw(): Promise<Record<string, HLCTimestamp>> {
+    const result = await this.run(buildLabelNodeWatermarks(compiler, LABELS));
+    const out: Record<string, HLCTimestamp> = {};
+    for (const raw of result.rows) {
+      const row = raw as Record<string, unknown>;
+      out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
+    }
+    return out;
   }
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {

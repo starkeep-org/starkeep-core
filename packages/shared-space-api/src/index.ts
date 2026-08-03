@@ -29,8 +29,8 @@ export type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
-  ScanSinceOptions,
   ScanSincePage,
+  StreamTruncation,
   AppSyncableRowEntry,
   FileRecordRow,
 } from "./app-syncable/types.js";

@@ -7,9 +7,14 @@
  * record. Before this, declining and failing were the same event, which is why
  * a phone node was impossible.
  */
+import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
-import { createHLCClock, createDataRecord } from "@starkeep/protocol-primitives";
+import {
+  createHLCClock,
+  createDataRecord,
+  type StarkeepId,
+} from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
@@ -17,31 +22,6 @@ import { residencyOf } from "../src/residency.js";
 import type { BlobCandidate, ResidencyVerdict } from "../src/residency-policy.js";
 import type { SyncStateStore, Watermarks } from "../src/types.js";
 
-function makeMockSyncState(): SyncStateStore {
-  let own: Watermarks = {};
-  let peer: Watermarks = {};
-  let clockState: { wallTime: number; counter: number } | null = null;
-  return {
-    async getWatermarks() {
-      return own;
-    },
-    async setWatermarks(w) {
-      own = w;
-    },
-    async getPeerWatermarks() {
-      return peer;
-    },
-    async setPeerWatermarks(w) {
-      peer = w;
-    },
-    async getHlcClockState() {
-      return clockState;
-    },
-    async setHlcClockState(s) {
-      clockState = s;
-    },
-  };
-}
 
 interface Fixture {
   engine: ReturnType<typeof createSyncEngine>;
@@ -49,7 +29,7 @@ interface Fixture {
   cloudStorage: MockObjectStorageAdapter;
   localDb: MockDatabaseAdapter;
   syncState: SyncStateStore;
-  cloudRecordId: string;
+  cloudRecordId: StarkeepId;
   cloudRecordKey: string;
   decisions: BlobCandidate[];
   landed: BlobCandidate[];
@@ -94,7 +74,7 @@ async function setup(
 
   const decisions: BlobCandidate[] = [];
   const landed: BlobCandidate[] = [];
-  const syncState = makeMockSyncState();
+  const syncState = createMemorySyncStateStore();
 
   const engine = createSyncEngine({
     localDatabaseAdapter: localDb,

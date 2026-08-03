@@ -22,6 +22,8 @@ const qb = new Kysely<DB>({
 });
 
 const WATERMARKS = "watermarks";
+const REPAIR_FLOORS = "repair_floors";
+const INBOUND_FLOORS = "inbound_floors";
 const PEER_WATERMARKS = "peer_watermarks";
 const HLC_CLOCK = "hlc_clock";
 
@@ -91,6 +93,18 @@ export function createSqliteSyncStateStore(
     },
     async setPeerWatermarks(watermarks: Watermarks): Promise<void> {
       setJson(PEER_WATERMARKS, watermarks);
+    },
+    async getRepairFloors(): Promise<Watermarks> {
+      return getJson<Watermarks>(REPAIR_FLOORS) ?? {};
+    },
+    async setRepairFloors(floors: Watermarks): Promise<void> {
+      setJson(REPAIR_FLOORS, floors);
+    },
+    async getInboundFloors(): Promise<Watermarks> {
+      return getJson<Watermarks>(INBOUND_FLOORS) ?? {};
+    },
+    async setInboundFloors(floors: Watermarks): Promise<void> {
+      setJson(INBOUND_FLOORS, floors);
     },
     async getHlcClockState(): Promise<
       { wallTime: number; counter: number } | null

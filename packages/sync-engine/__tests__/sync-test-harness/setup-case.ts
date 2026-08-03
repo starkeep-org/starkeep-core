@@ -1,3 +1,4 @@
+import { createMemorySyncStateStore } from "./memory-sync-state.js";
 import { compareHLC, type HLCTimestamp, type StarkeepId } from "@starkeep/protocol-primitives";
 import type { MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../../src/sync-engine.js";
@@ -63,35 +64,12 @@ function resolveSpec(spec: CaseSpec): ResolvedSpec {
     wm: spec.wm ?? "p",
     batch,
     batchCount,
-    pageLimit: spec.pageLimit ?? (batch === "exceeds-page-limit" ? 5 : 1000),
-    scanPageSize: spec.scanPageSize ?? 500,
+    maxItems: spec.maxItems ?? (batch === "exceeds-page-limit" ? 5 : 1000),
     appId: spec.appId ?? "test-app",
     nodeIds: spec.nodeIds ?? { local: "local", cloud: "cloud" },
   };
 }
 
-function makeSyncState(): SyncStateStore {
-  let watermarks: Watermarks = {};
-  let peerWatermarks: Watermarks = {};
-  return {
-    async getWatermarks() {
-      return watermarks;
-    },
-    async setWatermarks(w) {
-      watermarks = w;
-    },
-    async getPeerWatermarks() {
-      return peerWatermarks;
-    },
-    async setPeerWatermarks(w) {
-      peerWatermarks = w;
-    },
-    async getHlcClockState() {
-      return null;
-    },
-    async setHlcClockState() {},
-  };
-}
 
 export async function setupCase(spec: CaseSpec): Promise<World> {
   const resolved = resolveSpec(spec);
@@ -114,7 +92,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
   });
 
   const seeded = await seedInitialState(local, cloud, resolved);
-  const syncState = makeSyncState();
+  const syncState = createMemorySyncStateStore();
   await applyWatermarkState(syncState, seeded, resolved, local, cloud);
 
   const cloudTransport = createInProcessSyncTransport({
@@ -137,8 +115,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
       namespaces: local.namespaces,
       applier: local.applier,
     },
-    pageLimit: resolved.pageLimit,
-    scanPageSize: resolved.scanPageSize,
+    maxItems: resolved.maxItems,
   });
 
   const subjectIds: StarkeepId[] = [...seeded.subjectIds];
@@ -237,7 +214,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
           id: rec.id,
           object_storage_key: rec.objectStorageKey,
           content_hash: rec.contentHash,
-          mime_type: rec.mimeType,
+          mime_type: rec.mimeType ?? "application/octet-stream",
           size_bytes: rec.sizeBytes,
           original_filename: rec.originalFilename ?? null,
           origin_app_id: rec.originAppId,

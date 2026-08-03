@@ -4,8 +4,13 @@ import type {
   AnyRecord,
   RecordLabel,
 } from "@starkeep/protocol-primitives";
-import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import type {
+  DatabaseAdapter,
+  DigestBucket,
+  ObjectStorageAdapter,
+} from "@starkeep/storage-adapter";
 import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
+import type { StreamTruncation } from "./round-cut.js";
 
 /**
  * The fetch-time residency decision. Async because a real implementation reads
@@ -74,41 +79,50 @@ export interface AppSyncableApplier {
   apply(entry: AppSyncableRowEntry): Promise<void> | void;
 }
 
-/** Pagination options for `ScanCapableApplier.scanSince`. */
-export interface ScanSinceOptions {
-  /** Max rows to return in this page. */
-  readonly limit?: number;
-  /**
-   * Serialized HLC of the last row returned by the previous page. The next
-   * page returns rows with `updated_at > cursor`. When omitted, the page
-   * starts from `sinceHlcStr`.
-   */
-  readonly cursor?: string;
-}
-
 /** Page returned by `ScanCapableApplier.scanSince`. */
 export interface ScanSincePage {
   readonly rows: AppSyncableRowEntry[];
   /**
-   * Cursor to pass on the next call to continue the scan. `null` when no
-   * further rows exist past this page.
+   * Whether rows were left behind by the `limit`. Not a pagination token —
+   * there is nothing to resume from, because the peer's watermark has not
+   * advanced past the leftovers and the next round selects them again from
+   * the top. It exists to answer "should we sync again immediately?".
    */
-  readonly nextCursor: string | null;
   readonly hasMore: boolean;
+  /**
+   * How far this table's scan got, per author — the input `round-cut.ts` needs
+   * to keep a shipment a contiguous prefix across every table the coverage
+   * watermark spans.
+   *
+   * Absent entry → enumerated completely. `HLCTimestamp` → complete only up to
+   * that row. `null` → not read at all, so nothing may ship for that author.
+   */
+  readonly truncated: StreamTruncation;
 }
 
 /**
  * Optional capability that appliers can implement to support exchange
- * synthesis. Scans rows with `updated_at > sinceHlcStr` (the global floor)
- * in HLC order, paginated by cursor so the engine can stop after `limit`
- * matches without buffering the whole table.
+ * synthesis. Returns rows the peer hasn't seen —
+ * `updated_at > peerWatermarks[node_id]` per author, oldest first within each
+ * author, capped at `limit`.
+ *
+ * The bound is **per author**, not one global floor. A global floor could only
+ * safely be the minimum across authors, which on a node holding writes from
+ * several peers at different positions degrades to "scan everything" — the cost
+ * this method exists to avoid. Backed by the `(node_id, updated_at)` index that
+ * every app-syncable table already carries
+ * (`admin-installer/src/local/registry.ts`, `src/dsql-ddl.ts`).
+ *
+ * No cursor: every row returned is genuinely owed, so a caller wanting more
+ * asks again once the peer's watermark advances. See `DatabaseAdapter.querySince`
+ * for the same contract on shared records.
  */
 export interface ScanCapableApplier extends AppSyncableApplier {
   scanSince(
     appId: string,
     table: string,
-    sinceHlcStr: string,
-    options?: ScanSinceOptions,
+    peerWatermarks: Watermarks,
+    limit: number,
   ): Promise<ScanSincePage>;
 
   /**
@@ -120,6 +134,22 @@ export interface ScanCapableApplier extends AppSyncableApplier {
    * direction as `scanSince`: an omitted node only causes a re-ship).
    */
   getNodeWatermarks(appId: string, table: string): Promise<Watermarks>;
+
+  /**
+   * Bucketed row counts for one table — the app-syncable half of
+   * `DatabaseAdapter.bucketDigest`, and the reason a per-app channel can be
+   * integrity-checked at all.
+   *
+   * Without it `verify()` on a per-app channel would compare shared-record
+   * digests over a channel that never carries shared records: divergence that
+   * means nothing, and repair floors for rows the channel cannot ship.
+   * A missing table returns `[]`, the same fail-safe direction as `scanSince`.
+   */
+  bucketDigest(
+    appId: string,
+    table: string,
+    prefixLength?: number,
+  ): Promise<DigestBucket[]>;
 }
 
 /**
@@ -173,8 +203,44 @@ export interface SyncExchangeRequest {
   readonly labels?: RecordLabel[];
   /** App-syncable row deltas the caller believes the peer hasn't seen. */
   readonly appSyncableRows?: AppSyncableRowEntry[];
-  /** Max records the responder should ship in this round. */
+  /** Max items the responder should ship in this round. */
   readonly limit?: number;
+  /**
+   * Byte budget for what the responder ships back, mirroring the requester's
+   * own round budget. Rows with no blob spend none of it.
+   *
+   * Without this the cap is asymmetric: a node that limits itself to 10 MB
+   * outbound could still be handed a hundred blob-carrying records inbound and
+   * be expected to pull every one of them.
+   *
+   * Optional so an older peer that omits it still works — the responder then
+   * falls back to its own default rather than shipping unbounded bytes.
+   */
+  readonly maxBytes?: number;
+  /**
+   * Ask the responder to include its bucketed row counts in the reply.
+   *
+   * The integrity check the coverage watermark cannot perform: a peer that
+   * loses a row from the *middle* of an author's range keeps the same
+   * `MAX(updated_at)`, so its watermark is unchanged and the sender never
+   * learns. Comparing per-bucket counts finds it. See `digest-queries.ts`.
+   *
+   * Opt-in and occasional. It is a `GROUP BY` over the whole index — cheap, but
+   * far too expensive to run every round, and it answers a question that only
+   * changes when something has gone wrong.
+   */
+  readonly requestDigest?: boolean;
+  /**
+   * Bucket width, as a count of leading `updated_at` hex digits.
+   *
+   * On the wire rather than assumed on both sides, because two peers bucketing
+   * at different widths would find *every* bucket disagreeing — a whole-library
+   * "repair" reported as catastrophic divergence — and nothing in the exchange
+   * would reveal why. The responder echoes back what it actually used
+   * ({@link SyncExchangeResponse.digestPrefixLength}) so the requester can
+   * refuse to compare rather than compare wrongly.
+   */
+  readonly digestPrefixLength?: number;
 }
 
 export interface SyncExchangeResponse {
@@ -209,9 +275,44 @@ export interface SyncExchangeResponse {
    * that wrong doesn't corrupt data — LWW is idempotent and a re-ship is
    * harmless — but it can make a watermark overstate coverage and silently
    * drop a label.
+   *
+   * ## Rows, never bytes
+   *
+   * **This is coverage over *rows*. It says nothing about whether the responder
+   * holds a record's blob.** The two came apart when residency landed: a node
+   * that declines a blob (`Elided`) applies the row and advances its watermark
+   * *precisely because* it decided not to want the bytes, so a node answering an
+   * exchange can honestly report coverage over records whose blobs it does not
+   * have.
+   *
+   * That is harmless while only the cloud responds — nothing pulls from a
+   * handset — and it is the one place the "every node is just a peer" symmetry
+   * is not true today. It must not be allowed to leak: concluding "the photo is
+   * safe on that node" from a watermark would be wrong the first time a node
+   * with a retention budget answers a pull.
+   *
+   * `durability.ts` states the same rule from the consuming side and refuses to
+   * accept a watermark as evidence of a blob anywhere in the eviction path —
+   * the path where being wrong destroys data. This is the reporting side of
+   * that rule. Blob presence is a **per-object** fact: ask
+   * `assessDurability` for proof, or `shared_object_availability` for what a
+   * node can currently serve. Never a timestamp.
    */
   readonly responderWatermarks: Watermarks;
   readonly hasMore: boolean;
+  /**
+   * Per-author, per-time-bucket row counts over the responder's whole channel
+   * state. Present only when the request set `requestDigest`, and absent from a
+   * responder too old to know the field — which reads as "no check performed",
+   * never as "no divergence".
+   */
+  readonly digest?: DigestBucket[];
+  /**
+   * The bucket width the responder actually used. Absent from a responder too
+   * old to know the field; a value that differs from what was asked for means
+   * the two digests are not comparable and must not be compared.
+   */
+  readonly digestPrefixLength?: number;
 }
 
 export interface SyncTransport {
@@ -316,6 +417,40 @@ export interface SyncStateStore {
   getPeerWatermarks(): Promise<Watermarks>;
   setPeerWatermarks(watermarks: Watermarks): Promise<void>;
 
+  /**
+   * Per-author floors a repair has asked the outbound scan to drop to.
+   *
+   * Separate from `peerWatermarks` because that map is replaced wholesale by
+   * the peer's own report every round, so a local correction to it would be
+   * overwritten immediately — by design. Keeping repair as its own map lets the
+   * scan take `min(peerWatermarks, repairFloors)` and re-ship a range with no
+   * second code path and no branch through the scan itself.
+   *
+   * Cleared per author once a **pushing** round has drained the outbound side
+   * without that author's shipment being cut short by a failed transfer. Not on
+   * the peer's coverage watermark, which sits *above* the floor by construction
+   * and so reads "already covered" from the first round.
+   */
+  getRepairFloors(): Promise<Watermarks>;
+  setRepairFloors(floors: Watermarks): Promise<void>;
+
+  /**
+   * The inbound mirror of {@link getRepairFloors}: per-author floors applied to
+   * what this node **advertises** as its own coverage.
+   *
+   * A hole on our own side is invisible to everything else in the protocol. Our
+   * watermark is `MAX(updated_at)`, so losing a row from the middle of a range
+   * does not move it, and the peer goes on believing we hold that row. The only
+   * lever is the number we advertise: the responder ships what sits above it, so
+   * advertising less makes the peer re-ship into the hole.
+   *
+   * Separate from `watermarks` for exactly the reason the outbound floors are
+   * separate from `peerWatermarks` — that map is recomputed from what lands
+   * every round and would swallow the correction immediately.
+   */
+  getInboundFloors(): Promise<Watermarks>;
+  setInboundFloors(floors: Watermarks): Promise<void>;
+
   getHlcClockState(): Promise<{ wallTime: number; counter: number } | null>;
   setHlcClockState(state: { wallTime: number; counter: number }): Promise<void>;
 }
@@ -323,7 +458,38 @@ export interface SyncStateStore {
 export interface ExchangeResult {
   readonly applied: number;
   readonly shipped: number;
+  /**
+   * The **responder** had more to send us than fit in this round.
+   *
+   * Strictly an inbound signal — it says nothing about whether *we* still have
+   * things to push. A caller looping until sync is complete needs
+   * {@link outboundHasMore} too; using this alone leaves a first upload of a
+   * large library requiring one round per page forever, because the responder
+   * has nothing to send and reports false the whole time.
+   */
   readonly hasMore: boolean;
+  /**
+   * **We** had more to send than fit in this round — a candidate scan hit the
+   * round's cap.
+   *
+   * The push-side counterpart to {@link hasMore}, and the reason `shipped` is
+   * not a usable substitute: `shipped` counts records and app rows but not
+   * labels, while the cap covers all three, so a round full of labels reports a
+   * `shipped` well under the cap with plenty still owed.
+   */
+  readonly outboundHasMore: boolean;
+  /**
+   * This round changed something that outlives it — a row applied or shipped, a
+   * blob declined, or any persisted position moved.
+   *
+   * The loop's termination signal, and it has to be an observation rather than
+   * a count. A repair round re-receives rows the peer already holds, applies
+   * none of them (they are LWW no-ops) and still makes real progress by
+   * advancing its floor; judged on item counts it looks idle and the repair
+   * gets abandoned one roundful in. False here means the next request would be
+   * byte-identical, so running it again cannot help.
+   */
+  readonly progressed: boolean;
   /**
    * Inbound items whose metadata landed and whose blob was **deliberately not
    * fetched**. Counted separately from `applied` because a declined blob is a
@@ -350,8 +516,138 @@ export interface SyncEngine {
    *      peer's own coverage report, not local optimism — so peer-side loss
    *      (wipe, redeploy, failed apply) is detected and re-shipped.
    */
-  exchange(): Promise<ExchangeResult>;
+  exchange(options?: ExchangeOptions): Promise<ExchangeResult>;
+
+  /**
+   * Run rounds until both directions are drained.
+   *
+   * **Pulls before it pushes**: round 0 ships nothing, so every later round
+   * decides what to send against a `peerWatermarks` map at most one round old.
+   * That is what makes a stale cache — the state left behind by a round whose
+   * response was lost — cost one small request instead of a whole redundant
+   * re-ship. Round 0 is not overhead: it still carries our watermarks and takes
+   * delivery of everything the peer holds for us, which is the entire inbound
+   * half of the sync.
+   *
+   * Abandoning mid-loop is free. Each round persists its own watermarks, so a
+   * process killed between rounds resumes from where it stopped; there is no
+   * partial state to clean up and nothing to resume *from* beyond the
+   * watermarks already on disk.
+   */
+  sync(options?: SyncOptions): Promise<SyncResult>;
+
+  /**
+   * Compare row counts with the peer, and arm a repair for anything it is
+   * missing.
+   *
+   * The check the sync protocol cannot make on its own. The contiguous-prefix
+   * rule stops a *sender* from ever leaving a gap below its watermark; nothing
+   * stops a *receiver* from developing one. A peer that loses a row from the
+   * middle of an author's range keeps the same `MAX(updated_at)`, so its
+   * coverage report is unchanged and no number of sync rounds will ever offer
+   * that row again.
+   *
+   * Arms rather than repairs: divergence is recorded as per-author floors that
+   * lower the bound the ordinary outbound scan already takes, so the next
+   * {@link sync} does the re-shipping through the path that is already tested.
+   * LWW makes everything the peer still holds a no-op.
+   *
+   * Occasional, not per-round — a `GROUP BY` over the whole index on both
+   * sides. Run it on a slow schedule, on demand, or after an unclean shutdown.
+   */
+  verify(): Promise<VerifyResult>;
   readonly changeNotifier: ChangeNotifier;
+}
+
+export interface VerifyResult {
+  /**
+   * False when the peer does not implement the digest. Distinguished from a
+   * clean result on purpose: a peer that cannot answer is not a peer that
+   * agrees, and reporting zero divergence for it would read as "verified".
+   */
+  readonly supported: boolean;
+  /**
+   * Rows held locally and by the peer, over this channel.
+   *
+   * The pair that answers "is my library backed up?" — which a coverage
+   * watermark cannot, because it is a timestamp per author and not a count.
+   * Counts rows, so it includes tombstones and labels; it is an integrity
+   * comparison between two nodes, not a user-facing photo count.
+   */
+  readonly localRows: number;
+  readonly peerRows: number;
+  /**
+   * Buckets where **the peer** holds fewer rows than we do — the repair
+   * trigger, and the answer to "did the other end lose something?".
+   *
+   * One-directional on purpose: a bucket where the peer has more is ordinary
+   * data we have not pulled yet, not corruption.
+   */
+  readonly divergentBuckets: number;
+  /**
+   * Buckets where **we** hold fewer rows than the peer — the answer to "is my
+   * library whole?", which is a different question and needs a different
+   * comparison.
+   *
+   * Reusing {@link divergentBuckets} for it reports "clean" to a node that is
+   * itself missing rows, which is the case a person most wants to know about.
+   * A non-zero value arms the inbound repair; the next sync pulls the gap.
+   */
+  readonly missingLocally: number;
+}
+
+export interface ExchangeOptions {
+  /**
+   * Whether this round may send anything. Default true.
+   *
+   * `false` makes it a pull: no outbound scan, no blob uploads, an empty
+   * payload. Used for the first round of {@link SyncEngine.sync} — see there
+   * for why that is an ordering choice rather than an extra request.
+   */
+  readonly push?: boolean;
+}
+
+export interface SyncOptions {
+  /**
+   * Backstop on rounds in one call. Default 10,000.
+   *
+   * Not a tuning knob — the loop terminates on the peer's own "there is more"
+   * answer. Hitting it means something is not converging, and stopping is safe
+   * because the watermarks make the next call resume in place.
+   */
+  readonly maxRounds?: number;
+  /**
+   * Checked after each round. Set it to stop early — mid-loop abandonment costs
+   * nothing, so a caller can cancel on app background or user navigation
+   * without leaving anything half-done.
+   */
+  readonly signal?: { readonly aborted: boolean };
+  /** Called after each round, for progress reporting. */
+  onRound?(result: ExchangeResult, round: number): void;
+}
+
+export interface SyncResult {
+  rounds: number;
+  applied: number;
+  shipped: number;
+  elided: number;
+  /**
+   * True when the loop ended because both directions were drained, false when
+   * it ended on `maxRounds`, an abort, or a stall. False is not an error — it
+   * means work remains, and the next call picks it up.
+   */
+  complete: boolean;
+  /**
+   * The loop stopped because a round achieved nothing while still reporting
+   * work outstanding — applied nothing, shipped nothing, declined nothing.
+   *
+   * Almost always a transfer that will not succeed: blob failures are swallowed
+   * into a contiguous-prefix truncation by design, so they never surface as an
+   * error, and without this the loop would reissue a byte-identical request
+   * until `maxRounds`. Worth surfacing rather than hiding — it is the
+   * difference between "sync finished" and "sync is stuck".
+   */
+  stalled: boolean;
 }
 
 export interface SyncEngineOptions {
@@ -397,17 +693,42 @@ export interface SyncEngineOptions {
    */
   readonly residency?: ResidencyHooks;
   /**
-   * Max items per exchange round, applied to both the outbound local scan and
-   * the inbound request limit. Default 1000. Tests use small values (e.g. 5)
-   * to exercise multi-round pagination without seeding thousands of records;
-   * production callers may tune this against poll frequency / throughput.
+   * Byte budget for one round's blob transfers. Default 25 MB; a handset
+   * should set this lower.
+   *
+   * The primary budget on any channel carrying files, because bytes are what a
+   * round actually costs — six photos is ~18 MB, six labels is nothing. Items
+   * with no blob spend none of it and are bounded by {@link maxItems} instead,
+   * which is what lets one pair of numbers suit both a photo channel and a
+   * channel of captions with no per-app tuning.
+   *
+   * A single item larger than the whole budget still ships, alone. The
+   * alternative is a 400 MB video stalling its channel permanently.
    */
-  readonly pageLimit?: number;
+  readonly maxBytes?: number;
   /**
-   * Internal page size for the cursor-paginated outbound scan loop. Default
-   * 500. Tests can set this small to force the cursor to advance across
-   * multiple DB queries within one exchange round (otherwise a small test
-   * dataset fits in a single page and the cursor never moves).
+   * Item cap for one round, across records, labels and app rows combined,
+   * applied to both the outbound scan and the inbound request limit.
+   * Default 1000.
+   *
+   * Binds on channels whose rows carry no blobs. Kept well above what the byte
+   * budget implies for a photo channel: a thousand rows of text is a small
+   * request, and splitting it into ten rounds would be pure round-trip
+   * overhead. Tests use small values to exercise multi-round behaviour without
+   * seeding thousands of records.
    */
-  readonly scanPageSize?: number;
+  readonly maxItems?: number;
+  /**
+   * How many blobs transfer at once within a round. Default 4.
+   *
+   * Exists because a single-stream upload does not saturate a fast link, so a
+   * strictly sequential round leaves the node idle for most of it — which
+   * matters more, not less, once rounds are small. Bounded because every
+   * in-flight transfer costs memory, and a handset has little.
+   *
+   * Does not weaken the contiguous-prefix rule: transfers overlap, but what
+   * ships is decided afterwards per author in HLC order, stopping at that
+   * author's first failure.
+   */
+  readonly transferConcurrency?: number;
 }

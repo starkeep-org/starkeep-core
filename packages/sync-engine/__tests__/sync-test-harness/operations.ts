@@ -84,7 +84,7 @@ async function driveSrOperation(
         await side.storage.put(
           existing.objectStorageKey,
           op.newContent ?? NEW_BLOB_BYTES,
-          { contentType: existing.mimeType },
+          { contentType: existing.mimeType ?? undefined },
         );
       }
       return {};

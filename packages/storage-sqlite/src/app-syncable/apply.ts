@@ -2,7 +2,16 @@ import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql, type CompiledQuery } from "kysely";
 import type { HLCTimestamp } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
-import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSinceOptions, ScanSincePage } from "@starkeep/shared-space-api";
+import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSincePage } from "@starkeep/shared-space-api";
+import {
+  buildBucketDigest,
+  buildScanSinceForNode,
+  collectSince,
+  planNodeScans,
+  toDigestBuckets,
+  DEFAULT_BUCKET_PREFIX_LENGTH,
+  type DigestBucket,
+} from "@starkeep/storage-adapter";
 import { compiler as qb } from "../query-builder.js";
 import { appSyncableTableName } from "./namespace.js";
 
@@ -139,6 +148,21 @@ export class SqliteAppSyncableApplier
     runCompiled(this.db, query.compile());
   }
 
+  /** See `ScanCapableApplier.bucketDigest`. Missing table → `[]`. */
+  async bucketDigest(
+    appId: string,
+    table: string,
+    prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH,
+  ): Promise<DigestBucket[]> {
+    const fullName = appSyncableTableName(appId, table);
+    try {
+      const compiled = buildBucketDigest(qb, fullName, prefixLength);
+      return toDigestBuckets(allCompiled<Record<string, unknown>>(this.db, compiled));
+    } catch {
+      return [];
+    }
+  }
+
   /** See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`. */
   async getNodeWatermarks(
     appId: string,
@@ -167,47 +191,36 @@ export class SqliteAppSyncableApplier
   }
 
   /**
-   * Pull-side synthesis: return rows updated after `sinceHlcStr` (or `cursor`
-   * if higher) in HLC order, paginated. `updated_at` is a serialized HLC
-   * whose lexicographic order matches HLC order (fixed-width hex), and each
-   * row's HLC is unique per node, so it doubles as the cursor — no separate
-   * tiebreaker column is needed.
+   * Pull-side synthesis: rows the peer hasn't seen, per author, seeking the
+   * `(node_id, updated_at)` index rather than reading the table and filtering.
+   * See `ScanCapableApplier.scanSince` for the contract and
+   * `storage-adapter/src/database/since-queries.ts` for why it is a loop.
    */
   async scanSince(
     appId: string,
     table: string,
-    sinceHlcStr: string,
-    options?: ScanSinceOptions,
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
   ): Promise<ScanSincePage> {
     const fullName = appSyncableTableName(appId, table);
-    const floor =
-      options?.cursor !== undefined && options.cursor > sinceHlcStr
-        ? options.cursor
-        : sinceHlcStr;
-    const limit = options?.limit;
-    let rows: Record<string, unknown>[];
+    // A missing table (app not installed locally) reads as "nothing owed"
+    // rather than an error, the same fail-safe direction getNodeWatermarks
+    // takes: understating only causes a re-ship.
+    const scans = planNodeScans(await this.getNodeWatermarks(appId, table), peerWatermarks);
     try {
-      let query = qb
-        .selectFrom(fullName)
-        .selectAll()
-        .where("updated_at", ">", floor)
-        .orderBy("updated_at", "asc");
-      if (limit !== undefined) {
-        query = query.limit(limit + 1);
-      }
-      rows = allCompiled<Record<string, unknown>>(this.db, query.compile());
+      const { rows, hasMore, truncated } = await collectSince<Record<string, unknown>>(
+        scans,
+        limit,
+        async (scan, remaining) => {
+          const compiled = buildScanSinceForNode(qb, fullName, scan, remaining);
+          return allCompiled<Record<string, unknown>>(this.db, compiled);
+        },
+        (row) => deserializeHLC(row["updated_at"] as string),
+      );
+      return { rows: rows.map((row) => rowToEntry(appId, table, row)), hasMore, truncated };
     } catch {
-      // Table might not exist yet (app not installed locally).
-      return { rows: [], nextCursor: null, hasMore: false };
+      return { rows: [], hasMore: false, truncated: {} };
     }
-    const hasMore = limit !== undefined && rows.length > limit;
-    const pageRows = hasMore ? rows.slice(0, limit) : rows;
-    const entries = pageRows.map((row) => rowToEntry(appId, table, row));
-    const nextCursor =
-      hasMore && pageRows.length > 0
-        ? (pageRows[pageRows.length - 1]!["updated_at"] as string)
-        : null;
-    return { rows: entries, nextCursor, hasMore };
   }
 
   /** Support read path from the factory's queryRows. */

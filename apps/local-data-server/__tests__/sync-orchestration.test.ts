@@ -143,30 +143,79 @@ describe("nudge routing and pause/resume (long tick interval)", () => {
     await eventually(async () => {
       const status = await syncStatus(app);
       expect(status.syncPaused).toBe(false);
-      // resume() exchanges every engine right away.
-      expect(cloud.exchangeLog.length).toBeGreaterThanOrEqual(2);
+      // The record written while paused made it up on the resume sync. Asserted
+      // as the thing actually wanted, not as a count of exchanges: resume now
+      // drains rather than running one round, so the number of requests is an
+      // implementation detail and waiting on it raced the round that carried
+      // the record.
+      expect(
+        cloud.exchangeLog.some((e) => e.appId === "starkeep-drive" && e.inRecords > 0),
+      ).toBe(true);
     });
-    // The record written while paused made it up on the resume exchange.
-    expect(
-      cloud.exchangeLog.some((e) => e.appId === "starkeep-drive" && e.inRecords > 0),
-    ).toBe(true);
     cloud.clearExchangeLog();
   });
 
-  it("/sync/now exchanges every engine and updates lastExchangeAt", async () => {
+  it("/sync/now drives every engine and updates lastExchangeAt", async () => {
     const before = (await syncStatus(app)).lastExchangeAt;
     await sleep(10); // ensure a strictly newer ISO timestamp
     const res = await app.fetch("/sync/now", { method: "POST" });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { applied: number; shipped: number };
+    const body = (await res.json()) as {
+      applied: number;
+      shipped: number;
+      complete: boolean;
+    };
     expect(body).toMatchObject({ applied: expect.any(Number), shipped: expect.any(Number) });
-    expect(cloud.exchangeLog.map((e) => e.appId).sort()).toEqual([
-      "starkeep-drive",
-      "testapp",
-    ]);
+    // Every channel was driven. Asserted as coverage rather than as a request
+    // count: a drain runs as many rounds as it needs, and pinning the number
+    // would pin an implementation detail that changes with the round budget.
+    expect(new Set(cloud.exchangeLog.map((e) => e.appId))).toEqual(
+      new Set(["starkeep-drive", "testapp"]),
+    );
+    // Bounded, so the handler returns rather than holding the connection open
+    // for a whole backlog. Nothing is owed here, so it drained.
+    expect(body.complete).toBe(true);
     const after = (await syncStatus(app)).lastExchangeAt;
     expect(after).not.toBeNull();
     if (before !== null) expect(after! > before).toBe(true);
+  });
+
+  it("/sync/verify compares row counts on every channel", async () => {
+    // The digest machinery has no other caller on this node. Without a route it
+    // is unreachable here, and a hole in the middle of an author's range —
+    // which no amount of syncing can find — would stay invisible on the laptop.
+    const res = await app.fetch("/sync/verify", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      channels: Array<{
+        appId: string;
+        result: {
+          supported: boolean;
+          localRows: number;
+          peerRows: number;
+          divergentBuckets: number;
+          missingLocally: number;
+        } | null;
+        error: string | null;
+      }>;
+    };
+    expect(new Set(body.channels.map((c) => c.appId))).toEqual(
+      new Set(["starkeep-drive", "testapp"]),
+    );
+    for (const channel of body.channels) {
+      expect(channel.error, channel.appId).toBeNull();
+      expect(channel.result?.supported, channel.appId).toBe(true);
+      // Both counts present and both directions answered — the point of the
+      // route is that "is the cloud missing anything" and "am I missing
+      // anything" are different questions with different answers.
+      expect(typeof channel.result?.divergentBuckets).toBe("number");
+      expect(typeof channel.result?.missingLocally).toBe("number");
+    }
+  });
+
+  it("/sync/verify reports sync not configured rather than pretending", async () => {
+    const res = await app.fetch("/sync/verify", { method: "GET" });
+    expect(res.status).toBe(404);
   });
 });
 
@@ -252,7 +301,7 @@ describe("auth gate (no id token)", () => {
     // Manual trigger is a clean no-op, not a 401 storm.
     const now = await drive.fetch("/sync/now", { method: "POST" });
     expect(now.status).toBe(200);
-    expect(await now.json()).toEqual({ applied: 0, shipped: 0 });
+    expect(await now.json()).toEqual({ applied: 0, shipped: 0, complete: true });
     expect(cloud.exchangeLog).toEqual([]);
   });
 

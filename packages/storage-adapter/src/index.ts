@@ -52,6 +52,28 @@ export {
   type LabelDialect,
 } from "./database/label-queries.js";
 
+export {
+  applyRepairFloors,
+  bucketsPeerIsMissing,
+  buildBucketDigest,
+  mergeDigestBuckets,
+  repairFloorsFor,
+  toDigestBuckets,
+  totalRows,
+  DEFAULT_BUCKET_PREFIX_LENGTH,
+  type DigestBucket,
+  type DigestDb,
+} from "./database/digest-queries.js";
+
+export {
+  buildScanSinceForNode,
+  collectSince,
+  planNodeScans,
+  type NodeScan,
+  type SinceDb,
+  type SincePage,
+} from "./database/since-queries.js";
+
 export type { RawDatabase, RawStatement } from "./database/raw-database.js";
 export type { ObjectStorageAdapter } from "./object-storage/adapter.js";
 export type {
