@@ -47,6 +47,7 @@ path, and a phone that can hold a 60k-item library in a bounded byte budget.
 | Size class | Max long edge | Codec | Typical | Serves |
 |---|---|---|---|---|
 | *(ThumbHash)* | ~32 px equiv | inline in metadata | ~25 B | instant placeholder, zero requests |
+| `image-xsmall` | 128 px | AVIF q50 | ~3 KB | infinite canvas, dense contact-sheet grids, filmstrips |
 | `image-thumb` | 400 px | AVIF q50 | ~20 KB | grid tiles, list rows |
 | `image-medium` | 1280 px | AVIF q55 | ~110 KB | **all routine on-device AI**, fullscreen stage 1, share/export default |
 | `image-screen` | 2560 px | AVIF q55 | ~350 KB | phone fullscreen, laptop, AI re-crops of small subjects |
@@ -59,7 +60,7 @@ path, and a phone that can hold a 60k-item library in a bounded byte budget.
 |---|---|---|---|
 | `video-poster-thumb` | 400 px still, frame ~1 s | ~20 KB | grid tile |
 | `video-poster-720p` | 1280 px still | ~110 KB | larger-thumbnail UIs, pre-roll / paused state |
-| `video-skim` | ~480 px, 2 fps, 8× speed, ≤20 s out | ~80 KB | hover / long-press identification |
+| `video-skim` | 320 px, 1 s of every 10 s at source speed, out ≈ source ÷ 10 | ~100 KB | hover / long-press identification |
 | `video-720p` | 720p H.264 ~1.5 Mbps, full framerate | ~5.6 MB | inline playback |
 | `video-1080p` *(off by default)* | 1080p H.264 ~4 Mbps | ~15 MB | TV / large-screen playback |
 | `original` | as captured | 30 MB–6 GB | export, editing |
@@ -80,21 +81,27 @@ no margin. The bottom rung is always generated.
 
 | Class | Max | Generate when original exceeds |
 |---|---|---|
-| `image-thumb` | 400 | *(always)* |
+| `image-xsmall` | 128 | *(always)* |
+| `image-thumb` | 400 | 128 |
 | `image-medium` | 1280 | 400 |
 | `image-screen` | 2560 | 1280 |
 | `image-large` | 4272 | 2560 |
 | `video-poster-thumb` | 400 px | *(always)* |
 | `video-poster-720p` | 1280 px | 400 px |
-| `video-skim` | 480 px, 2 fps, ≤20 s | *(always — see below)* |
+| `video-skim` | 320 px, 1 s per 10 s | *(always — see below)* |
 | `video-720p` | 1280 px / ~1.5 Mbps | *(always, subject to the no-op clause)* |
 | `video-1080p` | 1920 px / ~4 Mbps | 1280 px |
 
 **Video adds two clauses.** Bitrate is a second maximum (`min(source, class max)` on each axis
 independently). And **if both resolution and bitrate would be unchanged, do not transcode — use the
 original**; a 480p 800 kbps clip is its own `video-720p`. **`video-skim` is exempt** and is generated
-for every video, because it differs from its source in the time dimension. Skim speed factor is
-`max(8, duration_seconds / 20)`, capping output at ~20 s and ~40 frames.
+for every video, because it differs from its source in the time dimension. Skim keeps **1 second of
+every 10 at source speed and source frame rate**, at 320 px — real motion inside each window, with
+what lies between them skipped, rather than the whole clip sped up and decimated (2 fps at 8× reads
+as four disconnected poses for anything that moves). Output length is therefore **one tenth of the
+source, uncapped**: a 2-minute clip skims in 12 s, a 1-hour clip in 6 minutes, which makes skim that
+record's largest derived asset. If long-video libraries become common, cap it as a maximum segment
+count in the ladder, not in the ffmpeg arguments.
 
 **Consequences to build against:**
 
@@ -102,7 +109,9 @@ for every video, because it differs from its source in the time dimension. Skim 
   needs the original.
 - Applicable classes are a contiguous prefix from the bottom, so "top applicable class" fully
   describes the set. The ladder-complete gate and the derivation sweeper both rely on this.
-- Every record has an `image-thumb`, so the grid needs no fallback path.
+- Every record has an `image-xsmall` — the bottom rung is unconditional, so no dense UI needs a
+  fallback path. `image-thumb` is now conditional on the original exceeding 128 px; a sub-128 px
+  original produces `image-xsmall` alone, at its own size.
 - **No consumer may assume `image-screen` means 2560**, or name a size class at all. Consumers ask
   for a target long edge in pixels and the server resolves which rendition to serve; actual
   `width`/`height` come back with the record. See §7.1 for the rule and the API shape.
@@ -163,8 +172,8 @@ the label namespace stays `photos/`.
 Changes required:
 
 1. **`photos/rendition=<class>` replaces the `thumbnail` bare flag.** Single-valued label written
-   through `POST /data/labels/values` (upserts and tombstones the rest). Values: `image-thumb`,
-   `image-medium`, `image-screen`, `image-large`, `video-poster-thumb`, `video-poster-720p`,
+   through `POST /data/labels/values` (upserts and tombstones the rest). Values: `image-xsmall`,
+   `image-thumb`, `image-medium`, `image-screen`, `image-large`, `video-poster-thumb`, `video-poster-720p`,
    `video-skim`, `video-720p`, `video-1080p`, `image-motion`, `image-motion-preview`. **No `native`
    value.** `crop` stays as it is — it is a user artifact, not a rendition.
 2. **`parentId` filter on `/data/records`**, combinable with `label`/`labelValue`. This deletes the
@@ -358,6 +367,7 @@ rather than being stored.
 
 | Size class | Default | Roughly |
 |---|---|---|
+| `image-xsmall` | 0.25 GB | 80,000 tiles |
 | `image-thumb` | 1 GB | 50,000 tiles |
 | `image-medium` | 4 GB | 36,000 items |
 | `image-screen` | 2 GB | 6,000 items |
@@ -509,6 +519,7 @@ rather than reimplementing the ladder.
 
 | Consumer | Requests | Typically resolves to |
 |---|---|---|
+| Infinite canvas / contact sheet | tile size × device pixel ratio, when small | `image-xsmall` |
 | Grid tile | tile size × device pixel ratio | `image-thumb` |
 | Phone fullscreen | viewport long edge, progressively | `image-medium` → `image-screen` |
 | Laptop windowed | actual viewport long edge | `image-medium` or `image-screen` |
