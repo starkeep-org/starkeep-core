@@ -286,6 +286,26 @@ export async function initializeSharedSchema(
       .addColumn("observed_at_ms", "bigint", (c) => c.notNull())
       .execute();
 
+    // Granted to PUBLIC for the same reason shared.record_labels is: every app
+    // reads this table on every listing (loadAvailabilityForPage batches it per
+    // page), and DSQL has no row-level security, so the per-app cut is
+    // application-layer either way — the trade already documented in
+    // data-roles-and-permissions.md.
+    //
+    // Without this grant every `GET /data/records` 500s with "permission denied
+    // for table object_availability", for every app, because the listing path
+    // reads availability unconditionally. Relying on the `ALTER DEFAULT
+    // PRIVILEGES … TO user_data_owner` above is not enough on two counts: it
+    // covers Drive only, and the `GRANT ALL … ON ALL TABLES` beside it ran
+    // before this table existed.
+    //
+    // INSERT and UPDATE (no DELETE): rows are written by the S3-event and
+    // reconcile paths and by POST /restore recording `restoring`, always as an
+    // upsert — putAvailability is the only writer and nothing removes a row.
+    await sql
+      .raw(`GRANT SELECT, INSERT, UPDATE ON shared.object_availability TO PUBLIC`)
+      .execute(db);
+
     // shared.app_label_keys — the manifest-declared key registry.
     //
     // Capping *distinct keys per app* is the limit that actually enforces the
