@@ -410,10 +410,21 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       ...(options?.tagging ? { Tagging: encodeTagging(options.tagging) } : {}),
     });
 
-    // The SDK omits these from SignedHeaders unless told to hoist them, and an
-    // unsigned header is one the uploader can simply drop: it would upload
+    // An unsigned header is one the uploader can simply drop: it would upload
     // unverified bytes, into whichever storage class it liked, tagged however
     // it liked. Signing them makes sending the exact values mandatory.
+    //
+    // `signableHeaders` alone does NOT achieve that. The S3 presigner's default
+    // is to *hoist* every `x-amz-*` header into the query string, which leaves
+    // `SignedHeaders=host` — and a client that then sends the values as headers
+    // (which is what "signed header" asks of it) gets a 403 from S3:
+    //
+    //   AccessDenied: There were headers present in the request which were not
+    //   signed — x-amz-checksum-sha256, x-amz-storage-class
+    //
+    // `unhoistableHeaders` is what keeps them in the signature as headers. It
+    // has to name the same set: hoisting wins otherwise, and the failure lands
+    // on the uploader as an access error about permissions it does hold.
     const signableHeaders = new Set<string>();
     if (options?.checksumSha256) signableHeaders.add("x-amz-checksum-sha256");
     if (options?.storageClass) signableHeaders.add("x-amz-storage-class");
@@ -421,7 +432,9 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
 
     return awsGetSignedUrl(this.getClient(), command, {
       expiresIn: expiresInSeconds,
-      ...(signableHeaders.size > 0 ? { signableHeaders } : {}),
+      ...(signableHeaders.size > 0
+        ? { signableHeaders, unhoistableHeaders: new Set(signableHeaders) }
+        : {}),
     });
   }
 }
