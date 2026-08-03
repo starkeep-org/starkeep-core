@@ -1,4 +1,5 @@
-import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import { FileUriTransferRefused } from "@starkeep/storage-adapter";
+import type { ObjectStorageAdapter, PutStreamOptions } from "@starkeep/storage-adapter";
 import type { FileSyncEngine, FileSyncManifest, FileEntry } from "./types.js";
 
 const HEX_SHA256 = /^[a-f0-9]{64}$/;
@@ -42,6 +43,41 @@ export function createFileSyncEngine(): FileSyncEngine {
       if (await destination.has(key)) {
         return true;
       }
+      const expectedSha256Hex = expectedHashFor(manifest);
+      const options: PutStreamOptions = {
+        ...(manifest.mimeType ? { contentType: manifest.mimeType } : {}),
+        ...(manifest.sizeBytes ? { sizeBytes: manifest.sizeBytes } : {}),
+        // Verify the whole object as it passes. Above the multipart threshold
+        // the store cannot check a SHA-256 for us at all (it is composite-only
+        // for multipart), and this transfer is exactly where a large,
+        // least-replaceable object crosses a network.
+        ...(expectedSha256Hex ? { expectedSha256Hex } : {}),
+      };
+
+      // When the source can name a file and the destination can send one, the
+      // bytes go platform-to-platform and never enter the JS heap. That is not
+      // an optimization on React Native: `fetch` there buffers a stream request
+      // body into a `Uint8Array` before sending it, so the streamed path below
+      // costs several times the object size in JS heap and a 24 MB video is
+      // enough to take a memory-pressured handset down.
+      //
+      // Neither capability is load-bearing — either side absent, or a
+      // destination that declines, and this falls through to the stream path
+      // that every node has always used.
+      const fileUri = source.localFileUriFor?.(key) ?? null;
+      if (fileUri !== null && destination.putFromFileUri) {
+        try {
+          await destination.putFromFileUri(key, fileUri, options);
+          return true;
+        } catch (err) {
+          // A refusal is contractually raised before anything was sent, so
+          // retrying costs nothing but the presign round trip. Any other error
+          // is an ordinary failed transfer and must not be retried a second way
+          // — that would send a large object twice on every genuine failure.
+          if (!(err instanceof FileUriTransferRefused)) throw err;
+        }
+      }
+
       // Streamed, never buffered. The old `source.get()` → `destination.put()`
       // held the whole object in memory, so a 2 GB clip could not sync at all —
       // it wasn't slow, it was impossible. Nothing here materializes the body.
@@ -49,17 +85,8 @@ export function createFileSyncEngine(): FileSyncEngine {
       if (!body) {
         return false;
       }
-      const expectedSha256Hex = expectedHashFor(manifest);
       try {
-        await destination.putStream(key, body, {
-          ...(manifest.mimeType ? { contentType: manifest.mimeType } : {}),
-          ...(manifest.sizeBytes ? { sizeBytes: manifest.sizeBytes } : {}),
-          // Verify the whole object as it passes. Above the multipart threshold
-          // the store cannot check a SHA-256 for us at all (it is composite-only
-          // for multipart), and this transfer is exactly where a large,
-          // least-replaceable object crosses a network.
-          ...(expectedSha256Hex ? { expectedSha256Hex } : {}),
-        });
+        await destination.putStream(key, body, options);
       } catch (err) {
         // Cancel the source explicitly. A stream abandoned mid-transfer keeps
         // the underlying HTTP response open, and since a failed transfer is
