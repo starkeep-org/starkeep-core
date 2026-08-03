@@ -1,3 +1,4 @@
+import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
 import {
   compareHLC,
@@ -70,30 +71,13 @@ function appRow(
   };
 }
 
-function makeSyncState(): SyncStateStore & {
-  seedPeer(w: Watermarks): void;
-} {
-  let watermarks: Watermarks = {};
-  let peerWatermarks: Watermarks = {};
+/** The shared in-memory store, plus a way to plant a stale peer map. */
+function makeSyncState(): SyncStateStore & { seedPeer(w: Watermarks): void } {
+  const store = createMemorySyncStateStore();
   return {
-    async getWatermarks() {
-      return watermarks;
-    },
-    async setWatermarks(w) {
-      watermarks = w;
-    },
-    async getPeerWatermarks() {
-      return peerWatermarks;
-    },
-    async setPeerWatermarks(w) {
-      peerWatermarks = w;
-    },
-    async getHlcClockState() {
-      return null;
-    },
-    async setHlcClockState() {},
+    ...store,
     seedPeer(w) {
-      peerWatermarks = w;
+      void store.setPeerWatermarks(w);
     },
   };
 }

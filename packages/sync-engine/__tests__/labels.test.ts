@@ -1,3 +1,4 @@
+import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
 import { createDataRecord, generateId, type StarkeepId } from "@starkeep/protocol-primitives";
 import { createSyncEngine } from "../src/sync-engine.js";
@@ -23,28 +24,6 @@ import type { SyncStateStore, Watermarks } from "../src/types.js";
  * label goes missing.
  */
 describe("label sync", () => {
-  function makeSyncState(): SyncStateStore {
-    let watermarks: Watermarks = {};
-    let peerWatermarks: Watermarks = {};
-    return {
-      async getWatermarks() {
-        return watermarks;
-      },
-      async setWatermarks(w) {
-        watermarks = w;
-      },
-      async getPeerWatermarks() {
-        return peerWatermarks;
-      },
-      async setPeerWatermarks(w) {
-        peerWatermarks = w;
-      },
-      async getHlcClockState() {
-        return null;
-      },
-      async setHlcClockState() {},
-    };
-  }
 
   type Side = Awaited<ReturnType<typeof buildSide>>;
 
@@ -106,7 +85,7 @@ describe("label sync", () => {
   function driveEngine(
     local: Side,
     cloud: Side,
-    opts: { syncState?: SyncStateStore; pageLimit?: number; scanPageSize?: number } = {},
+    opts: { syncState?: SyncStateStore; maxItems?: number } = {},
   ) {
     const transport = createInProcessSyncTransport({
       databaseAdapter: cloud.db,
@@ -120,10 +99,9 @@ describe("label sync", () => {
       remoteObjectStorage: cloud.storage,
       transport,
       clock: local.clock,
-      syncState: opts.syncState ?? makeSyncState(),
+      syncState: opts.syncState ?? createMemorySyncStateStore(),
       syncSharedRecords: true,
-      ...(opts.pageLimit !== undefined ? { pageLimit: opts.pageLimit } : {}),
-      ...(opts.scanPageSize !== undefined ? { scanPageSize: opts.scanPageSize } : {}),
+      ...(opts.maxItems !== undefined ? { maxItems: opts.maxItems } : {}),
     });
   }
 
@@ -364,7 +342,7 @@ describe("label sync", () => {
       remoteObjectStorage: cloud.storage,
       transport,
       clock: local.clock,
-      syncState: makeSyncState(),
+      syncState: createMemorySyncStateStore(),
       syncSharedRecords: false,
       appSyncableSource: {
         namespaces: local.namespaces,
@@ -461,7 +439,7 @@ describe("label sync", () => {
     const blocked = await seedRecordWithMissingBlob(local);
     await seedLabel(local, early, "alpha", "faces-detected");
 
-    const syncState = makeSyncState();
+    const syncState = createMemorySyncStateStore();
     await driveEngine(local, cloud, { syncState }).exchange();
 
     expect(await cloud.db.get(early)).not.toBeNull();
@@ -562,10 +540,10 @@ describe("label sync", () => {
       await seedLabel(local, recordId, "alpha", `k${String(i).padStart(2, "0")}`);
     }
 
-    const syncState = makeSyncState();
-    // Both below the backlog: pageLimit caps the round, scanPageSize the scan.
+    const syncState = createMemorySyncStateStore();
+    // Below the backlog, so the round caps and the remainder follows next round.
     const engine = () =>
-      driveEngine(local, cloud, { syncState, pageLimit: 5, scanPageSize: 2 });
+      driveEngine(local, cloud, { syncState, maxItems: 5 });
 
     let rounds = 0;
     let landed = 0;
@@ -583,7 +561,7 @@ describe("label sync", () => {
 
   it("shares the round's budget between records and labels", async () => {
     // Records and labels compete for one `limit`, so neither stream can
-    // starve the other. With pageLimit=2 and both streams non-empty, a round
+    // starve the other. With maxItems=2 and both streams non-empty, a round
     // must carry two items total — not two of each.
     const { local, cloud } = await twoSides();
     const first = await seedRecord(local);
@@ -591,8 +569,8 @@ describe("label sync", () => {
     const second = await seedRecord(local);
     await seedLabel(local, second, "alpha", "k2");
 
-    const syncState = makeSyncState();
-    await driveEngine(local, cloud, { syncState, pageLimit: 2 }).exchange();
+    const syncState = createMemorySyncStateStore();
+    await driveEngine(local, cloud, { syncState, maxItems: 2 }).exchange();
 
     const records = [await cloud.db.get(first), await cloud.db.get(second)].filter(Boolean);
     const labels =
@@ -605,7 +583,7 @@ describe("label sync", () => {
 
     // Converges over further rounds without losing anything.
     for (let i = 0; i < 5; i++) {
-      await driveEngine(local, cloud, { syncState, pageLimit: 2 }).exchange();
+      await driveEngine(local, cloud, { syncState, maxItems: 2 }).exchange();
     }
     expect(await cloud.db.get(second)).not.toBeNull();
     expect(await cloud.db.getLabel(second, "alpha", "k2", "")).not.toBeNull();

@@ -4,7 +4,7 @@ import { setupCase } from "./sync-test-harness/index.js";
 /**
  * S6 — exceeds-page-limit × until-converged (SR subset).
  *
- * Strategy: cap `pageLimit` small (5) and seed a slightly larger batch (6)
+ * Strategy: cap `maxItems` small (5) and seed a slightly larger batch (6)
  * so pagination kicks in. The invariants — `hasMore`, multi-round resume,
  * no dupes, watermark fan-out — are exercised at full fidelity without
  * seeding thousands of rows.
@@ -17,14 +17,14 @@ import { setupCase } from "./sync-test-harness/index.js";
  * already does when more records exist than fit in one response.
  */
 describe("S6 — pagination / exceeds-page-limit (SR)", () => {
-  it("S6-001: local-originated 6 records, pageLimit=5, until-converged — all land, no dupes", async () => {
+  it("S6-001: local-originated 6 records, maxItems=5, until-converged — all land, no dupes", async () => {
     const w = await setupCase({
       dt: "SR",
       presence: "local-only",
       blob: "lb",
       batch: "exceeds-page-limit",
       batchCount: 6,
-      pageLimit: 5,
+      maxItems: 5,
     });
 
     await w.exchange({ rounds: "until-converged" });
@@ -41,14 +41,14 @@ describe("S6 — pagination / exceeds-page-limit (SR)", () => {
     expect(peer[w.local.nodeId]).toEqual(last.updatedAt);
   });
 
-  it("S6-002: cloud-originated 6 records, pageLimit=5, until-converged — mirror", async () => {
+  it("S6-002: cloud-originated 6 records, maxItems=5, until-converged — mirror", async () => {
     const w = await setupCase({
       dt: "SR",
       presence: "cloud-only",
       blob: "cb",
       batch: "exceeds-page-limit",
       batchCount: 6,
-      pageLimit: 5,
+      maxItems: 5,
     });
 
     await w.exchange({ rounds: "until-converged" });
@@ -62,14 +62,14 @@ describe("S6 — pagination / exceeds-page-limit (SR)", () => {
     expect(own[w.cloud.nodeId]).toEqual(last.updatedAt);
   });
 
-  it("S6-004: 2 explicit rounds — round 1 ships pageLimit, round 2 finishes the remainder", async () => {
+  it("S6-004: 2 explicit rounds — round 1 ships maxItems, round 2 finishes the remainder", async () => {
     const w = await setupCase({
       dt: "SR",
       presence: "local-only",
       blob: "lb",
       batch: "exceeds-page-limit",
       batchCount: 6,
-      pageLimit: 5,
+      maxItems: 5,
     });
 
     const [r1, r2] = await w.exchange({ rounds: 2 });
@@ -88,7 +88,7 @@ describe("S6 — pagination / exceeds-page-limit (SR)", () => {
       blob: "lb",
       batch: "exceeds-page-limit",
       batchCount: 6,
-      pageLimit: 5,
+      maxItems: 5,
     });
 
     await w.exchange({
@@ -108,7 +108,7 @@ describe("S6 — pagination / exceeds-page-limit (SR)", () => {
 
   it("regression: backlog exceeds a single scan page — cursor advances across pages so no records strand", async () => {
     // Forces the outbound cursor loop to traverse multiple DB pages within
-    // one exchange round. With the pre-cursor code (`query({ limit: pageLimit })`
+    // one exchange round. With the pre-cursor code (`query({ limit: maxItems })`
     // and no cursor), the scan would return the same first-N rows each round
     // — already-shipped after the first — and records past the first page
     // would never ship. The cursor advances over filtered (already-shipped)
@@ -119,8 +119,7 @@ describe("S6 — pagination / exceeds-page-limit (SR)", () => {
       blob: "lb",
       batch: "multi-homogeneous",
       batchCount: 10,
-      pageLimit: 3,
-      scanPageSize: 2,
+      maxItems: 3,
     });
 
     await w.exchange({ rounds: "until-converged" });
@@ -138,7 +137,7 @@ describe("S6 — pagination / exceeds-page-limit (SR)", () => {
       blob: "lb",
       batch: "multi-mixed-nodes",
       batchCount: 6,
-      pageLimit: 4,
+      maxItems: 4,
     });
 
     await w.exchange({ rounds: "until-converged" });

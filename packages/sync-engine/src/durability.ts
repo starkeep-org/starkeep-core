@@ -17,6 +17,14 @@
  * have it either. There is no version of that which is safe, so no code path
  * here accepts a watermark as input.
  *
+ * The rule has a reporting half, stated on
+ * `SyncExchangeResponse.responderWatermarks`: what a node advertises as
+ * coverage is coverage over **rows**, and a node with a retention budget can
+ * honestly advertise records whose blobs it declined. The two halves are one
+ * rule — *a timestamp is never evidence about bytes* — and they are written
+ * down in both places because each is separately easy to "simplify" into a
+ * watermark comparison by someone who has only read the other.
+ *
  * ## What counts as a replica
  *
  * `HeadObject` (via `stat()`) returns size, stored checksum, storage class and

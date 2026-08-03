@@ -101,7 +101,7 @@ describe("S4 — watermark reset (SR)", () => {
   });
 
   it("S4-010: lR + both-same + multi-homogeneous + 1r — first round picks up some but not all (hasMore semantics)", async () => {
-    // Cap pageLimit at 2 so 5 records straddle multiple rounds. After lR
+    // Cap maxItems at 2 so 5 records straddle multiple rounds. After lR
     // local has no watermarks; cloud's responder ships 2 records and signals
     // hasMore=true. We verify the single-round result rather than fully
     // converging.
@@ -112,7 +112,7 @@ describe("S4 — watermark reset (SR)", () => {
       wm: "lR",
       batch: "multi-homogeneous",
       batchCount: 5,
-      pageLimit: 2,
+      maxItems: 2,
     });
     const [result] = await w.exchange({ rounds: 1 });
     expect(result!.hasMore).toBe(true);
@@ -171,7 +171,7 @@ describe("S4 — watermark reset (SR)", () => {
       wm: "cR",
       batch: "multi-homogeneous",
       batchCount: 5,
-      pageLimit: 2,
+      maxItems: 2,
     });
     await w.wipeCloud();
 

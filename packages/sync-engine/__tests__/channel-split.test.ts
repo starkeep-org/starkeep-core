@@ -1,3 +1,4 @@
+import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
 import { createDataRecord, generateId, type StarkeepId } from "@starkeep/protocol-primitives";
 import { createSyncEngine } from "../src/sync-engine.js";
@@ -15,29 +16,6 @@ import type { AppSyncableRowEntry, SyncStateStore, Watermarks } from "../src/typ
  * both the engine (requester) and the in-process transport (responder).
  */
 describe("channel split — SR vs. AR/AW", () => {
-  function makeSyncState(): SyncStateStore {
-    // Per-channel in production; a fresh in-memory store per engine here.
-    let watermarks: Watermarks = {};
-    let peerWatermarks: Watermarks = {};
-    return {
-      async getWatermarks() {
-        return watermarks;
-      },
-      async setWatermarks(w) {
-        watermarks = w;
-      },
-      async getPeerWatermarks() {
-        return peerWatermarks;
-      },
-      async setPeerWatermarks(w) {
-        peerWatermarks = w;
-      },
-      async getHlcClockState() {
-        return null;
-      },
-      async setHlcClockState() {},
-    };
-  }
 
   async function seedSr(side: Awaited<ReturnType<typeof buildSide>>): Promise<StarkeepId> {
     const id = generateId() as StarkeepId;
@@ -96,7 +74,7 @@ describe("channel split — SR vs. AR/AW", () => {
       remoteObjectStorage: cloud.storage,
       transport,
       clock: local.clock,
-      syncState: makeSyncState(),
+      syncState: createMemorySyncStateStore(),
       syncSharedRecords: false,
       appSyncableSource: {
         namespaces: local.namespaces,
@@ -136,7 +114,7 @@ describe("channel split — SR vs. AR/AW", () => {
       remoteObjectStorage: cloud.storage,
       transport,
       clock: local.clock,
-      syncState: makeSyncState(),
+      syncState: createMemorySyncStateStore(),
       syncSharedRecords: true,
     });
 
@@ -147,5 +125,105 @@ describe("channel split — SR vs. AR/AW", () => {
     // …and no AR rows were shipped (the Drive channel carries none).
     const arRows = [...cloud.appRows.values()].filter((e) => e.table === "test_rows");
     expect(arRows.length).toBe(0);
+  });
+});
+
+/**
+ * The integrity check has to respect the channel split too.
+ *
+ * A per-app channel carries only that app's tables. A digest that always
+ * covered shared records would hand it counts over rows the channel never
+ * ships — divergence that means nothing, and repair floors for a repair the
+ * channel cannot perform.
+ */
+describe("verify() is scoped to the channel", () => {
+  it("digests the app's tables on a per-app channel, not shared records", async () => {
+    let t = 0;
+    const wallClock = () => t++;
+    const local = await buildSide({ role: "local", nodeId: "L", wallClock, appId: "test-app" });
+    const cloud = await buildSide({ role: "cloud", nodeId: "C", wallClock, appId: "test-app" });
+
+    // Shared records exist on both sides but are not this channel's business.
+    // Only the local one, so a shared-record digest would report divergence.
+    await local.db.put(
+      createDataRecord(
+        {
+          type: "image/jpeg",
+          originAppId: "test-app",
+          contentHash: "sha256:shared",
+          objectStorageKey: "",
+          mimeType: "application/octet-stream",
+          sizeBytes: 0,
+        },
+        local.clock,
+      ),
+    );
+
+    const engine = createSyncEngine({
+      localDatabaseAdapter: local.db,
+      localObjectStorage: local.storage,
+      remoteObjectStorage: cloud.storage,
+      transport: createInProcessSyncTransport({
+        databaseAdapter: cloud.db,
+        clock: cloud.clock,
+        objectStorage: cloud.storage,
+        syncSharedRecords: false,
+        appSyncableSource: { namespaces: cloud.namespaces, applier: cloud.applier },
+      }),
+      clock: local.clock,
+      syncState: createMemorySyncStateStore(),
+      syncSharedRecords: false,
+      appSyncableSource: { namespaces: local.namespaces, applier: local.applier },
+    });
+
+    const result = await engine.verify();
+    expect(result.supported).toBe(true);
+    // The local shared record is invisible to this channel in both directions.
+    expect(result.localRows).toBe(0);
+    expect(result.divergentBuckets).toBe(0);
+    expect(result.missingLocally).toBe(0);
+  });
+
+  it("counts the app's own rows and finds a hole in them", async () => {
+    let t = 0;
+    const wallClock = () => t++;
+    const local = await buildSide({ role: "local", nodeId: "L", wallClock, appId: "test-app" });
+    const cloud = await buildSide({ role: "cloud", nodeId: "C", wallClock, appId: "test-app" });
+
+    for (let i = 0; i < 3; i += 1) {
+      local.appRows.set(`test-app::test_rows::r${i}`, {
+        appId: "test-app",
+        table: "test_rows",
+        op: "insert",
+        row: { id: `r${i}`, note: `n${i}` },
+        timestamp: local.clock.now(),
+      });
+    }
+
+    const engine = createSyncEngine({
+      localDatabaseAdapter: local.db,
+      localObjectStorage: local.storage,
+      remoteObjectStorage: cloud.storage,
+      transport: createInProcessSyncTransport({
+        databaseAdapter: cloud.db,
+        clock: cloud.clock,
+        objectStorage: cloud.storage,
+        syncSharedRecords: false,
+        appSyncableSource: { namespaces: cloud.namespaces, applier: cloud.applier },
+      }),
+      clock: local.clock,
+      syncState: createMemorySyncStateStore(),
+      syncSharedRecords: false,
+      appSyncableSource: { namespaces: local.namespaces, applier: local.applier },
+    });
+    await engine.sync();
+    expect((await engine.verify()).localRows).toBe(3);
+
+    // Lose one from the peer's middle: MAX(updated_at) does not move, so only
+    // a count comparison can see it.
+    cloud.appRows.delete("test-app::test_rows::r1");
+    const after = await engine.verify();
+    expect(after.divergentBuckets).toBeGreaterThan(0);
+    expect(after.peerRows).toBe(2);
   });
 });

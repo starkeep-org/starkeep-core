@@ -26,6 +26,15 @@ import {
   buildFindByLabel,
   buildGetLabel,
   buildLabelNodeWatermarks,
+  buildBucketDigest,
+  buildScanSinceForNode,
+  collectSince,
+  mergeDigestBuckets,
+  planNodeScans,
+  toDigestBuckets,
+  DEFAULT_BUCKET_PREFIX_LENGTH,
+  type DigestBucket,
+  type SincePage,
   buildLabelRetraction,
   buildLabelValueReplacementTombstone,
   buildLabelSnapshotUpsert,
@@ -118,6 +127,8 @@ function rowToAvailability(row: AvailabilityRow): StoredAvailability {
 const LABELS: LabelDialect = {
   table: "shared_record_labels",
 };
+
+const RECORDS = "shared_records";
 
 export class SqliteDatabaseAdapter implements DatabaseAdapter {
   private database: RawDatabase | null = null;
@@ -240,6 +251,58 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       out[row.node_id] = deserializeHLC(row.max_updated_at);
     }
     return out;
+  }
+
+  async querySince(
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
+  ): Promise<SincePage<DataRecord>> {
+    const scans = planNodeScans(await this.getNodeWatermarks(), peerWatermarks);
+    const { rows, hasMore, truncated } = await collectSince<SqliteRow>(
+      scans,
+      limit,
+      async (scan, remaining) => {
+        const compiled = buildScanSinceForNode(qb, RECORDS, scan, remaining);
+        return this.allRows<SqliteRow>(compiled.sql, ...compiled.parameters);
+      },
+      (row) => deserializeHLC(row["updated_at"] as string),
+    );
+    return { rows: rows.map(rowToRecord), hasMore, truncated };
+  }
+
+  async queryLabelsSince(
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
+  ): Promise<SincePage<RecordLabel>> {
+    const scans = planNodeScans(await this.getLabelNodeWatermarks(), peerWatermarks);
+    const { rows, hasMore, truncated } = await collectSince<LabelRow>(
+      scans,
+      limit,
+      async (scan, remaining) => {
+        const compiled = buildScanSinceForNode(qb, LABELS.table, scan, remaining);
+        return this.allRows<LabelRow>(compiled.sql, ...compiled.parameters);
+      },
+      (row) => deserializeHLC(row["updated_at"] as string),
+    );
+    return { rows: rows.map(rowToLabel), hasMore, truncated };
+  }
+
+  async bucketDigest(
+    prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH,
+  ): Promise<DigestBucket[]> {
+    // Records and labels together: they are one channel and one coverage
+    // watermark, so a digest over only half of it would report agreement while
+    // a label was missing.
+    const out: DigestBucket[] = [];
+    for (const table of [RECORDS, LABELS.table]) {
+      const compiled = buildBucketDigest(qb, table, prefixLength);
+      out.push(
+        ...toDigestBuckets(
+          this.allRows<Record<string, unknown>>(compiled.sql, ...compiled.parameters),
+        ),
+      );
+    }
+    return mergeDigestBuckets(out);
   }
 
   async query(query: Query): Promise<QueryResult> {

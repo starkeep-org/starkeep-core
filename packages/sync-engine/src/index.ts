@@ -2,7 +2,6 @@ export type {
   AppSyncableRowEntry,
   AppSyncableApplier,
   ScanCapableApplier,
-  ScanSinceOptions,
   ScanSincePage,
   SyncTransport,
   FileSyncManifest,
@@ -23,9 +22,21 @@ export type {
   SyncExchangeRequest,
   SyncExchangeResponse,
   ExchangeResult,
+  ExchangeOptions,
+  SyncOptions,
+  SyncResult,
+  VerifyResult,
   ResidencyDecider,
   ResidencyHooks,
 } from "./types.js";
+export {
+  computeCeilings,
+  cutRound,
+  type RoundBudget,
+  type RoundItem,
+  type CutResult,
+  type StreamTruncation,
+} from "./round-cut.js";
 
 export {
   decideResidency,

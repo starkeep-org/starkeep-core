@@ -179,7 +179,7 @@ function recordWithId(record: DataRecord, id: StarkeepId): DataRecord {
  * - `multi-mixed-nodes`: records alternate originating nodeId (local, cloud,
  *   local, cloud, …) but are stored on whichever side `presence` says.
  * - `exceeds-page-limit`: same as multi-homogeneous; the test pairs this
- *   with a small `pageLimit` so pagination kicks in.
+ *   with a small `maxItems` so pagination kicks in.
  *
  * Tomb states (`bd`, etc.) and `cdu` aren't applied here — the multi-record
  * candidates that need them haven't surfaced yet; revisit when they do.

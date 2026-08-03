@@ -1,12 +1,16 @@
 import {
   compareHLC,
-  serializeHLC,
-  ZERO_HLC,
   type AnyRecord,
   type HLCClock,
   type RecordLabel,
 } from "@starkeep/protocol-primitives";
-import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import {
+  mergeDigestBuckets,
+  DEFAULT_BUCKET_PREFIX_LENGTH,
+  type DatabaseAdapter,
+  type DigestBucket,
+  type ObjectStorageAdapter,
+} from "@starkeep/storage-adapter";
 import type {
   SyncTransport,
   SyncExchangeRequest,
@@ -18,6 +22,42 @@ import type {
   Watermarks,
 } from "../types.js";
 import { advanceWatermark } from "../watermarks.js";
+import {
+  computeCeilings,
+  cutRound,
+  type RoundItem,
+  type StreamTruncation,
+} from "../round-cut.js";
+
+/** Mirrors the engine's own defaults; see `SyncEngineOptions.maxItems`. */
+const DEFAULT_RESPONDER_MAX_ITEMS = 1000;
+const DEFAULT_RESPONDER_MAX_BYTES = 25 * 1024 * 1024;
+
+/** Mirror of `FILE_RECORDS_TABLE`; only that table's rows carry blobs. */
+const FILE_RECORDS_TABLE = "_starkeep_sync_records";
+
+/** One row eligible to ship back, tagged with which stream it came from. */
+type OutboundRow =
+  | { kind: "record"; record: AnyRecord }
+  | { kind: "label"; label: RecordLabel }
+  | { kind: "appRow"; entry: AppSyncableRowEntry };
+
+/**
+ * Blob bytes an app-syncable row will make the caller download, or 0.
+ *
+ * Charging the byte budget for rows that carry no blob would throttle a channel
+ * of captions as if it were a channel of photos; not charging for the ones that
+ * do would hand a handset an unbounded download.
+ */
+function appRowBytes(entry: AppSyncableRowEntry): number {
+  if (entry.table !== FILE_RECORDS_TABLE || entry.op === "delete") return 0;
+  const row = entry.row;
+  if (!row) return 0;
+  const key = row["object_storage_key"];
+  if (typeof key !== "string" || key.length === 0) return 0;
+  const size = row["size_bytes"];
+  return typeof size === "number" ? size : Number(size) || 0;
+}
 
 export interface InProcessTransportOptions {
   readonly databaseAdapter: DatabaseAdapter;
@@ -153,132 +193,103 @@ export function createInProcessSyncTransport(
         );
       }
 
-      // 3. Scan local records the caller hasn't seen yet, paginated by
-      //    cursor so records past any fixed scan window are still reachable.
-      //    Collect up to `limit + 1` matches so we can set `hasMore`
-      //    correctly without an additional probe. Same performance follow-up
-      //    as the outbound scan in sync-engine.ts: production should push
-      //    the per-nodeId watermark filter into the query.
-      const limit = request.limit ?? 1000;
-      const SCAN_PAGE = 500;
-      const collected: AnyRecord[] = [];
-      let cursor: string | undefined = undefined;
+      // 3. Scan what the caller hasn't seen — records, then labels, then
+      //    app-syncable rows — as **delta scans**: the caller's per-nodeId
+      //    watermarks go into the query, which seeks the
+      //    `(node_id, updated_at)` index once per author rather than reading
+      //    the table and discarding the rest. Steady state, with nothing owed,
+      //    issues no range query at all.
+      //
+      //    The three streams share one `limit` budget so no stream can starve
+      //    another, and `hasMore` reports that something was left behind — the
+      //    caller's cue to come back immediately rather than wait for a tick.
+      const limit = request.limit ?? DEFAULT_RESPONDER_MAX_ITEMS;
+      // The caller's byte budget bounds what we hand back, so an inbound round
+      // costs the caller no more than an outbound one. An older caller that
+      // omits it gets our default rather than an unbounded pull.
+      const maxBytes = request.maxBytes ?? DEFAULT_RESPONDER_MAX_BYTES;
+
+      // Assembled exactly the way the requester assembles its own shipment, via
+      // the same module. It used to be a sequence of per-stream budgets —
+      // records trimmed to bytes, then labels against whatever item budget was
+      // left, then app rows — and that shape cannot express the invariant. A
+      // byte trim leaves the item budget untouched, so the label scan ran on and
+      // shipped labels whose HLCs sat *above* the records the trim had just
+      // withheld. The caller applied both, advanced its watermark to the label,
+      // and never saw those records again.
+      const truncations: StreamTruncation[] = [];
+      const candidates: RoundItem<OutboundRow>[] = [];
+      let unreadableStream = false;
+
       // Per-app channels (syncSharedRecords=false) never scan or ship shared
-      // records.
-      let scanHasMore = syncSharedRecords;
-      let overflowed = false;
-      while (!overflowed && scanHasMore) {
-        const page = await databaseAdapter.query({
-          limit: SCAN_PAGE,
-          ...(cursor !== undefined ? { cursor } : {}),
-        });
-        if (page.records.length === 0) break;
-        for (const r of page.records) {
-          const peerHlc = request.watermarks[r.updatedAt.nodeId];
-          if (!peerHlc || compareHLC(r.updatedAt, peerHlc) > 0) {
-            if (collected.length >= limit) {
-              overflowed = true;
-              break;
-            }
-            collected.push(r);
-          }
-        }
-        if (overflowed) break;
-        scanHasMore = page.hasMore;
-        cursor = page.nextCursor ?? undefined;
-      }
-      const records = collected;
-
-      // 3b. Labels the caller hasn't seen — same per-nodeId watermark filter
-      //     and the same cursor pagination as the record scan above. Shares
-      //     the round's `limit` budget with records so one stream can't
-      //     starve the other.
-      const labels: RecordLabel[] = [];
-      let labelOverflowed = false;
+      // records or labels.
       if (syncSharedRecords) {
-        let labelCursor: string | undefined = undefined;
-        let labelHasMore = true;
-        while (!labelOverflowed && labelHasMore) {
-          const page = await databaseAdapter.queryLabels({
-            limit: SCAN_PAGE,
-            ...(labelCursor !== undefined ? { cursor: labelCursor } : {}),
+        const page = await databaseAdapter.querySince(request.watermarks, limit);
+        truncations.push(page.truncated);
+        for (const record of page.rows) {
+          candidates.push({
+            value: { kind: "record", record },
+            hlc: record.updatedAt,
+            bytes: record.objectStorageKey && !record.deletedAt ? record.sizeBytes : 0,
           });
-          if (page.labels.length === 0) break;
-          for (const l of page.labels) {
-            const peerHlc = request.watermarks[l.updatedAt.nodeId];
-            if (!peerHlc || compareHLC(l.updatedAt, peerHlc) > 0) {
-              if (records.length + labels.length >= limit) {
-                labelOverflowed = true;
-                break;
-              }
-              labels.push(l);
-            }
-          }
-          if (labelOverflowed) break;
-          labelHasMore = page.hasMore;
-          labelCursor = page.nextCursor ?? undefined;
+        }
+
+        // Labels carry no blobs, so they spend no byte budget — only the item cap.
+        const labelPage = await databaseAdapter.queryLabelsSince(request.watermarks, limit);
+        truncations.push(labelPage.truncated);
+        for (const label of labelPage.rows) {
+          candidates.push({ value: { kind: "label", label }, hlc: label.updatedAt, bytes: 0 });
         }
       }
 
-      // 4. App-syncable rows: same per-nodeId filtering across known tables,
-      //    cursor-paginated for the same reason as the SR scan above —
-      //    records past any fixed scan window stay reachable.
-      const appSyncableRows: AppSyncableRowEntry[] = [];
-      if (appSyncableSource && records.length + labels.length < limit) {
+      // 4. App-syncable rows, same delta rule across the registered tables.
+      //    Every table is scanned every round: a table skipped for want of
+      //    budget is a stream that enumerated nothing, which pins every
+      //    author's ceiling to "nothing safe" and empties the round.
+      if (appSyncableSource) {
         const scanCapable = appSyncableSource.applier as ScanCapableApplier;
         if (typeof scanCapable.scanSince === "function") {
-          const zeroStr = serializeHLC(ZERO_HLC);
-          outer: for (const ns of appSyncableSource.namespaces.list()) {
+          for (const ns of appSyncableSource.namespaces.list()) {
             for (const tableInfo of ns.tables) {
-              let appCursor: string | undefined = undefined;
-              let appHasMore = true;
-              while (
-                records.length + labels.length + appSyncableRows.length < limit &&
-                appHasMore
-              ) {
-                let page: { rows: AppSyncableRowEntry[]; nextCursor: string | null; hasMore: boolean };
-                try {
-                  page = await scanCapable.scanSince(
-                    ns.appId,
-                    tableInfo.name,
-                    zeroStr,
-                    {
-                      limit: SCAN_PAGE,
-                      ...(appCursor !== undefined ? { cursor: appCursor } : {}),
-                    },
-                  );
-                } catch (err) {
-                  console.warn(
-                    `[sync] in-process transport scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
-                  );
-                  break;
+              try {
+                const page = await scanCapable.scanSince(
+                  ns.appId,
+                  tableInfo.name,
+                  request.watermarks,
+                  limit,
+                );
+                truncations.push(page.truncated);
+                for (const entry of page.rows) {
+                  candidates.push({
+                    value: { kind: "appRow", entry },
+                    hlc: entry.timestamp,
+                    bytes: appRowBytes(entry),
+                  });
                 }
-                if (page.rows.length === 0) break;
-                for (const r of page.rows) {
-                  const peerHlc = request.watermarks[r.timestamp.nodeId];
-                  if (!peerHlc || compareHLC(r.timestamp, peerHlc) > 0) {
-                    appSyncableRows.push(r);
-                    if (records.length + labels.length + appSyncableRows.length >= limit) break;
-                  }
-                }
-                appHasMore = page.hasMore;
-                appCursor = page.nextCursor ?? undefined;
+              } catch (err) {
+                console.warn(
+                  `[sync] in-process transport scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
+                );
+                unreadableStream = true;
               }
-              if (records.length + labels.length + appSyncableRows.length >= limit) break outer;
             }
           }
         }
       }
 
-      // hasMore reflects: (a) the SR scan overflowed past `limit`, or
-      // (b) the combined SR + app-syncable payload hit `limit` and there
-      // are still untraversed app rows. (a) is captured by `overflowed`;
-      // (b) is approximated by the app-syncable collection loop breaking
-      // out early — i.e. records.length + appSyncableRows.length >= limit.
-      const hasMore =
-        overflowed ||
-        labelOverflowed ||
-        records.length + labels.length + appSyncableRows.length >= limit;
+      const cut = unreadableStream
+        ? { taken: [] as RoundItem<OutboundRow>[], hasMore: true }
+        : cutRound(candidates, computeCeilings(truncations), { maxBytes, maxItems: limit });
+      const hasMore = cut.hasMore;
+
+      const records: AnyRecord[] = [];
+      const labels: RecordLabel[] = [];
+      const appSyncableRows: AppSyncableRowEntry[] = [];
+      for (const item of cut.taken) {
+        if (item.value.kind === "record") records.push(item.value.record);
+        else if (item.value.kind === "label") labels.push(item.value.label);
+        else appSyncableRows.push(item.value.entry);
+      }
 
       // 5. Coverage watermarks over this channel's full post-apply state
       //    (see SyncExchangeResponse.responderWatermarks). Scoped to the
@@ -322,7 +333,55 @@ export function createInProcessSyncTransport(
         }
       }
 
-      return { records, labels, appSyncableRows, responderWatermarks, hasMore };
+      // The integrity check, only when asked: a GROUP BY over the whole index
+      // is cheap but not per-round cheap, and it answers a question that only
+      // changes when something has gone wrong.
+      //
+      // Scoped to this channel's data plane, exactly like the scans and the
+      // coverage watermarks above. A per-app channel digesting shared records
+      // would hand the caller counts over rows this channel never carries.
+      const prefixLength = request.digestPrefixLength ?? DEFAULT_BUCKET_PREFIX_LENGTH;
+      let digest: DigestBucket[] | undefined;
+      if (request.requestDigest) {
+        const buckets: DigestBucket[] = [];
+        if (syncSharedRecords) {
+          buckets.push(...(await databaseAdapter.bucketDigest(prefixLength)));
+        }
+        if (appSyncableSource) {
+          const scanCapable = appSyncableSource.applier as ScanCapableApplier;
+          if (typeof scanCapable.bucketDigest === "function") {
+            for (const ns of appSyncableSource.namespaces.list()) {
+              for (const tableInfo of ns.tables) {
+                try {
+                  buckets.push(
+                    ...(await scanCapable.bucketDigest(
+                      ns.appId,
+                      tableInfo.name,
+                      prefixLength,
+                    )),
+                  );
+                } catch (err) {
+                  console.warn(
+                    `[sync] in-process transport bucketDigest failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
+                  );
+                }
+              }
+            }
+          }
+        }
+        digest = mergeDigestBuckets(buckets);
+      }
+
+      return {
+        records,
+        labels,
+        appSyncableRows,
+        responderWatermarks,
+        hasMore,
+        // Echo the width actually used, so a requester can refuse to compare
+        // rather than compare buckets that mean different things.
+        ...(digest ? { digest, digestPrefixLength: prefixLength } : {}),
+      };
     },
   };
 }

@@ -261,8 +261,13 @@ interface StarkeepConfig {
   nodeId: string;
   pullIntervalMs?: number;
   pushDebounceMs?: number;
-  /** Max items per exchange round (sync-engine pageLimit). Default 1000. */
-  syncPageLimit?: number;
+  /**
+   * Byte budget for one exchange round (sync-engine `maxBytes`). Default 25 MB.
+   * The budget that binds on a channel carrying files.
+   */
+  syncMaxBytes?: number;
+  /** Item cap for one exchange round (sync-engine `maxItems`). Default 1000. */
+  syncMaxItems?: number;
   /**
    * Per-size-class retention for *this node*. Absent means the node keeps
    * everything, which is the right default for a laptop and preserves the
@@ -674,7 +679,8 @@ async function main() {
       underlyingSyncStateStore: syncStateStore,
       exchangeIntervalMs: PULL_INTERVAL_MS,
       nudgeDebounceMs: PUSH_DEBOUNCE_MS,
-      pageLimit: starkeepConfig.syncPageLimit,
+      maxBytes: starkeepConfig.syncMaxBytes,
+      maxItems: starkeepConfig.syncMaxItems,
     });
   }
 
@@ -1074,6 +1080,29 @@ async function main() {
         }
         const result = await supervisor.exchangeAll();
         json(res, result);
+        return;
+      }
+
+      // POST /sync/verify — compare row counts with the cloud on every channel.
+      //
+      // The check no amount of syncing can perform. A coverage watermark is
+      // MAX(updated_at) per author, so a row lost from the *middle* of a range
+      // leaves it unchanged: both sides go on believing they agree, and no
+      // round ever offers that row again. Counting rows per time bucket finds
+      // it, in both directions, and arms a repair that the next ordinary sync
+      // carries out.
+      //
+      // A request rather than a timer because it is a grouped scan over the
+      // whole index on both sides — cheap, but not cheap enough to run on a
+      // tick, and it answers a question that only changes when something has
+      // already gone wrong.
+      if (path === "/sync/verify" && req.method === "POST") {
+        if (!supervisor) {
+          res.writeHead(400);
+          json(res, { error: "sync not configured" });
+          return;
+        }
+        json(res, { channels: await supervisor.verifyAll() });
         return;
       }
 

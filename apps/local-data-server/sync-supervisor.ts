@@ -12,6 +12,7 @@ import type {
   AppSyncableApplier,
   ScanCapableApplier,
   ResidencyHooks,
+  VerifyResult,
 } from "../../packages/sync-engine/src/types.js";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
@@ -62,10 +63,20 @@ export interface SyncSupervisorOptions {
   /** Debounce window for local-change-recorded → exchange. */
   readonly nudgeDebounceMs: number;
   /**
-   * Max items per exchange round, passed through to every engine
-   * (`SyncEngineOptions.pageLimit`). Engine default (1000) when omitted.
+   * Byte budget for one exchange round, passed through to every engine
+   * (`SyncEngineOptions.maxBytes`). Engine default (25 MB) when omitted.
+   *
+   * The budget that binds on the Drive channel, which carries files. Per-app
+   * channels mostly carry small rows and are bounded by {@link maxItems}
+   * instead — which is why one pair of numbers suits every engine here and no
+   * per-app knob is needed.
    */
-  readonly pageLimit?: number;
+  readonly maxBytes?: number;
+  /**
+   * Item cap for one exchange round, passed through to every engine
+   * (`SyncEngineOptions.maxItems`). Engine default (1000) when omitted.
+   */
+  readonly maxItems?: number;
   /**
    * Residency decision + byte accounting, consulted before every inbound blob
    * pull on every channel.
@@ -113,8 +124,28 @@ export interface SyncSupervisor {
   stop(): Promise<void>;
   pause(): void;
   resume(): Promise<void>;
-  /** Trigger an immediate exchange across every engine. */
-  exchangeAll(): Promise<{ applied: number; shipped: number }>;
+  /**
+   * Drive every engine now, bounded so an HTTP handler cannot block on a whole
+   * backlog.
+   *
+   * `complete` is false when rounds remain — call again to continue. That is
+   * deliberately the caller's decision: a first sync of a real library is
+   * hundreds of rounds and hours of transfer, and a request that runs until it
+   * finishes is a request that times out. Honours pause, so `/sync/pause`
+   * stops one already in flight.
+   */
+  exchangeAll(): Promise<{ applied: number; shipped: number; complete: boolean }>;
+  /**
+   * Compare row counts with the cloud on every channel and arm repairs.
+   *
+   * Occasional by nature — a grouped scan on both sides — so it is a request,
+   * not a timer. It is the only thing that can see a row lost from the middle
+   * of a range, in either direction; without a caller the digest machinery is
+   * unreachable on this node.
+   */
+  verifyAll(): Promise<
+    Array<{ appId: string; result: VerifyResult | null; error: string | null }>
+  >;
   /**
    * Reset per-app backoff and trigger an immediate exchange across every
    * engine. Use after a recoverable external state change (most notably an
@@ -153,6 +184,14 @@ function narrowNamespaceStore(
   };
 }
 
+/**
+ * Rounds one `/sync/now` will run per engine before handing control back.
+ *
+ * Enough to make visible progress on a backlog, small enough that the request
+ * returns. `complete: false` tells the caller to ask again.
+ */
+const SYNC_NOW_MAX_ROUNDS = 50;
+
 export function createSyncSupervisor(
   options: SyncSupervisorOptions,
 ): SyncSupervisor {
@@ -168,7 +207,8 @@ export function createSyncSupervisor(
     underlyingSyncStateStore,
     exchangeIntervalMs,
     nudgeDebounceMs,
-    pageLimit,
+    maxBytes,
+    maxItems,
     residency,
   } = options;
 
@@ -264,7 +304,8 @@ export function createSyncSupervisor(
       clock: sdk.clock,
       syncState,
       syncSharedRecords: true,
-      pageLimit,
+      maxBytes,
+      maxItems,
       ...(residency ? { residency } : {}),
       // No appSyncableSource: the Drive channel never carries app-specific rows.
     });
@@ -306,7 +347,8 @@ export function createSyncSupervisor(
       clock: sdk.clock,
       syncState,
       syncSharedRecords: false,
-      pageLimit,
+      maxBytes,
+      maxItems,
       ...(residency ? { residency } : {}),
       appSyncableSource: {
         namespaces: narrowedNamespaces,
@@ -332,10 +374,25 @@ export function createSyncSupervisor(
     entry.tickTimer = setTimeout(() => runExchangeOnce(entry), entry.backoffMs);
   }
 
+  /**
+   * The one abort signal every drain reads. `paused` is checked on each access
+   * rather than captured, so `/sync/pause` stops a loop already running.
+   */
+  const syncSignal = {
+    get aborted() {
+      return paused;
+    },
+  };
+
   async function runExchangeOnce(entry: EngineEntry): Promise<void> {
     entry.tickTimer = null;
     try {
-      await entry.engine.exchange();
+      // sync(), not one exchange(): a round is bounded by the byte budget, so a
+      // backlog needs many of them and running one per timer tick would make a
+      // large first sync take hours of wall clock doing nothing in between.
+      // The loop stops as soon as both directions are drained, which in steady
+      // state is after the first (pull-only) round.
+      await entry.engine.sync({ signal: syncSignal });
       entry.lastExchangeAt = new Date().toISOString();
       entry.lastError = null;
       entry.backoffMs = exchangeIntervalMs;
@@ -427,7 +484,7 @@ export function createSyncSupervisor(
       await Promise.all(
         Array.from(engines.values()).map(async (entry) => {
           try {
-            await entry.engine.exchange();
+            await entry.engine.sync({ signal: syncSignal });
             entry.lastExchangeAt = new Date().toISOString();
             entry.lastError = null;
             entry.backoffMs = exchangeIntervalMs;
@@ -443,19 +500,55 @@ export function createSyncSupervisor(
     async exchangeAll() {
       let applied = 0;
       let shipped = 0;
+      let complete = true;
       for (const entry of engines.values()) {
         try {
-          const r = await entry.engine.exchange();
+          // Bounded, and cancellable by /sync/pause. A round is deliberately
+          // small, so "sync everything" over a real backlog is hundreds of
+          // rounds and hours of transfer — running that inside a request would
+          // hold the connection open for the duration and ignore a pause. The
+          // caller polls by asking again while `complete` is false.
+          const r = await entry.engine.sync({
+            maxRounds: SYNC_NOW_MAX_ROUNDS,
+            signal: syncSignal,
+          });
           applied += r.applied;
           shipped += r.shipped;
+          if (!r.complete) complete = false;
+          if (r.stalled) {
+            // Not an error — the watermarks are intact and the next attempt
+            // resumes — but it is the difference between "done" and "wedged",
+            // and silence here is how a stuck transfer looks like success.
+            console.warn(
+              `[sync] exchangeAll stalled for app=${entry.appId}: a round made no progress with work outstanding`,
+            );
+          }
           entry.lastExchangeAt = new Date().toISOString();
           entry.lastError = null;
         } catch (err) {
           entry.lastError = (err as Error).message;
+          complete = false;
           console.error(`[sync] exchangeAll failed for app=${entry.appId}:`, err);
         }
       }
-      return { applied, shipped };
+      return { applied, shipped, complete };
+    },
+
+    async verifyAll() {
+      const out: Array<{
+        appId: string;
+        result: VerifyResult | null;
+        error: string | null;
+      }> = [];
+      for (const entry of engines.values()) {
+        try {
+          out.push({ appId: entry.appId, result: await entry.engine.verify(), error: null });
+        } catch (err) {
+          out.push({ appId: entry.appId, result: null, error: (err as Error).message });
+          console.error(`[sync] verify failed for app=${entry.appId}:`, err);
+        }
+      }
+      return out;
     },
 
     kick() {

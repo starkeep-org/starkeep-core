@@ -5,9 +5,17 @@ import type {
   AppSyncableRowEntry,
   AppSyncableNamespaceStore,
   ScanCapableApplier,
-  ScanSinceOptions,
   ScanSincePage,
 } from "@starkeep/shared-space-api";
+import {
+  buildBucketDigest,
+  buildScanSinceForNode,
+  collectSince,
+  planNodeScans,
+  toDigestBuckets,
+  DEFAULT_BUCKET_PREFIX_LENGTH,
+  type DigestBucket,
+} from "@starkeep/storage-adapter";
 import { sql, type CompiledQuery } from "kysely";
 import type { DatabaseClient } from "../types.js";
 import { withOccRetry } from "../occ-retry.js";
@@ -159,45 +167,53 @@ export class DsqlAppSyncableApplier
   }
 
   /**
-   * Scan rows updated after `sinceHlcStr` (or `cursor` if higher) in HLC
-   * order, paginated. `updated_at` is a serialized HLC whose lexicographic
-   * order matches HLC order, and each row's HLC is unique per node, so it
-   * doubles as the cursor — no separate tiebreaker column is needed.
+   * Pull-side synthesis: rows the peer hasn't seen, per author, seeking the
+   * `(node_id, updated_at)` index rather than reading the table and filtering.
+   * See `ScanCapableApplier.scanSince` for the contract and
+   * `storage-adapter/src/database/since-queries.ts` for why it is a loop.
    */
   async scanSince(
     appId: string,
     table: string,
-    sinceHlcStr: string,
-    options?: ScanSinceOptions,
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
   ): Promise<ScanSincePage> {
     const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
-    const floor =
-      options?.cursor !== undefined && options.cursor > sinceHlcStr
-        ? options.cursor
-        : sinceHlcStr;
-    const limit = options?.limit;
-    let result: { rows: Record<string, unknown>[] };
+    // A missing table (app not installed here) reads as "nothing owed" rather
+    // than an error, the same fail-safe direction getNodeWatermarks takes:
+    // understating only causes a re-ship.
+    const scans = planNodeScans(await this.getNodeWatermarks(appId, table), peerWatermarks);
     try {
-      let query = qb
-        .selectFrom(schemaTable)
-        .selectAll()
-        .where("updated_at", ">", floor)
-        .orderBy("updated_at", "asc");
-      if (limit !== undefined) {
-        query = query.limit(limit + 1);
-      }
-      result = await this.run(query.compile());
+      const { rows, hasMore, truncated } = await collectSince<Record<string, unknown>>(
+        scans,
+        limit,
+        async (scan, remaining) => {
+          const result = await this.run(
+            buildScanSinceForNode(qb, schemaTable, scan, remaining),
+          );
+          return result.rows;
+        },
+        (row) => deserializeHLC(row["updated_at"] as string),
+      );
+      return { rows: rows.map((row) => rowToEntry(appId, table, row)), hasMore, truncated };
     } catch {
-      return { rows: [], nextCursor: null, hasMore: false };
+      return { rows: [], hasMore: false, truncated: {} };
     }
-    const hasMore = limit !== undefined && result.rows.length > limit;
-    const pageRows = hasMore ? result.rows.slice(0, limit) : result.rows;
-    const entries = pageRows.map((row) => rowToEntry(appId, table, row));
-    const nextCursor =
-      hasMore && pageRows.length > 0
-        ? (pageRows[pageRows.length - 1]!["updated_at"] as string)
-        : null;
-    return { rows: entries, nextCursor, hasMore };
+  }
+
+  /** See `ScanCapableApplier.bucketDigest`. Missing table → `[]`. */
+  async bucketDigest(
+    appId: string,
+    table: string,
+    prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH,
+  ): Promise<DigestBucket[]> {
+    const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
+    try {
+      const result = await this.run(buildBucketDigest(qb, schemaTable, prefixLength));
+      return toDigestBuckets(result.rows as Record<string, unknown>[]);
+    } catch {
+      return [];
+    }
   }
 
   /** See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`. */

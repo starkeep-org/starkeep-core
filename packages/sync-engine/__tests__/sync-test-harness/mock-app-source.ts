@@ -1,3 +1,8 @@
+import {
+  mergeDigestBuckets,
+  DEFAULT_BUCKET_PREFIX_LENGTH,
+  type DigestBucket,
+} from "@starkeep/storage-adapter";
 import { compareHLC, serializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableApplier,
@@ -64,27 +69,53 @@ export function makeMockAppSource(
       }
       rows.set(key, entry);
     },
-    async scanSince(scanAppId, table, sinceHlcStr, options) {
-      const floor =
-        options?.cursor !== undefined && options.cursor > sinceHlcStr
-          ? options.cursor
-          : sinceHlcStr;
-      const matches: AppSyncableRowEntry[] = [];
+    // Delta scan: rows the peer hasn't seen, one fair slice per author, with
+    // per-author truncation marks — the same shape `collectSince` produces on
+    // the SQL path, because `round-cut.ts` consumes both.
+    async scanSince(scanAppId, table, peerWatermarks, limit) {
+      const byNode = new Map<string, AppSyncableRowEntry[]>();
       for (const e of rows.values()) {
         if (e.appId !== scanAppId || e.table !== table) continue;
-        if (serializeHLC(e.timestamp) > floor) matches.push(e);
+        const peer = peerWatermarks[e.timestamp.nodeId];
+        if (peer && compareHLC(e.timestamp, peer) <= 0) continue;
+        const bucket = byNode.get(e.timestamp.nodeId) ?? [];
+        bucket.push(e);
+        byNode.set(e.timestamp.nodeId, bucket);
       }
-      matches.sort((a, b) =>
-        serializeHLC(a.timestamp).localeCompare(serializeHLC(b.timestamp)),
-      );
-      const limit = options?.limit;
-      const hasMore = limit !== undefined && matches.length > limit;
-      const pageRows = hasMore ? matches.slice(0, limit) : matches;
-      const nextCursor =
-        hasMore && pageRows.length > 0
-          ? serializeHLC(pageRows[pageRows.length - 1]!.timestamp)
-          : null;
-      return { rows: pageRows, nextCursor, hasMore };
+      const nodeIds = Array.from(byNode.keys()).sort();
+      const truncated: Record<string, HLCTimestamp | null> = {};
+      if (nodeIds.length === 0) return { rows: [], hasMore: false, truncated };
+      if (limit <= 0) {
+        for (const nodeId of nodeIds) truncated[nodeId] = null;
+        return { rows: [], hasMore: true, truncated };
+      }
+      const share = Math.max(1, Math.ceil(limit / nodeIds.length));
+      const out: AppSyncableRowEntry[] = [];
+      let hasMore = false;
+      for (const nodeId of nodeIds) {
+        const bucket = byNode
+          .get(nodeId)!
+          .sort((a, b) => compareHLC(a.timestamp, b.timestamp));
+        const kept = bucket.slice(0, share);
+        out.push(...kept);
+        if (bucket.length > share) {
+          truncated[nodeId] = kept[kept.length - 1]!.timestamp;
+          hasMore = true;
+        }
+      }
+      return { rows: out, hasMore, truncated };
+    },
+    async bucketDigest(scanAppId, table, prefixLength = DEFAULT_BUCKET_PREFIX_LENGTH) {
+      const buckets: DigestBucket[] = [];
+      for (const e of rows.values()) {
+        if (e.appId !== scanAppId || e.table !== table) continue;
+        buckets.push({
+          nodeId: e.timestamp.nodeId,
+          bucket: serializeHLC(e.timestamp).slice(0, prefixLength),
+          count: 1,
+        });
+      }
+      return mergeDigestBuckets(buckets);
     },
     async getNodeWatermarks(scanAppId, table) {
       const out: Record<string, HLCTimestamp> = {};

@@ -94,7 +94,7 @@ const unsubscribe = syncEngine.changeNotifier.subscribe((event) => {
 
 | Type | Description |
 |---|---|
-| `SyncEngineOptions` | Local DB adapter, local object storage, transport, clock, optional `syncState`, `appSyncableSource`, `syncSharedRecords` (default `true`), `pageLimit` (default 1000), `scanPageSize` (default 500). |
+| `SyncEngineOptions` | Local DB adapter, local object storage, transport, clock, optional `syncState`, `appSyncableSource`, `syncSharedRecords` (default `true`), `maxBytes` (default 25 MB), `maxItems` (default 1000), `transferConcurrency` (default 4). |
 | `SyncTransport` | `{ exchange(request) }`. |
 | `SyncExchangeRequest` / `SyncExchangeResponse` | Wire shape: `watermarks`, `records?` (shared), `appSyncableRows?` (app-specific), `limit?` / `hasMore`. |
 | `ExchangeResult` | `{ applied, shipped, hasMore }`. |

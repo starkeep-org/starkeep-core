@@ -1,0 +1,15 @@
+{
+  // Typecheck the tests too.
+  //
+  // `tsconfig.json` scopes itself to `src` because that is what gets emitted,
+  // which left `__tests__` unchecked — and unchecked test code drifts. A dead
+  // `readonly` on its own line, left over from deleting a field, sat in the
+  // harness types happily parsing as a property named "readonly" of implicit
+  // any. Tests assert the contract; they are worth holding to it.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "__tests__/**/*.ts"]
+}

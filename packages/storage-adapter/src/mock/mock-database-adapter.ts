@@ -5,7 +5,14 @@ import type {
   RecordLabel,
   StarkeepId,
 } from "@starkeep/protocol-primitives";
+import { compareHLC, serializeHLC } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "../database/adapter.js";
+import {
+  mergeDigestBuckets,
+  DEFAULT_BUCKET_PREFIX_LENGTH,
+  type DigestBucket,
+} from "../database/digest-queries.js";
+import type { SincePage } from "../database/since-queries.js";
 import type {
   Query,
   QueryResult,
@@ -79,6 +86,53 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
       }
     }
     return out;
+  }
+
+  /**
+   * In-memory reference fold for the delta scan — the behaviour SQL adapters
+   * get from per-author seeks on `(node_id, updated_at)`.
+   *
+   * Written the slow, obvious way on purpose: this is what the indexed
+   * implementations are checked against, so it must be readable as a statement
+   * of the contract rather than as a second optimization.
+   */
+  async querySince(
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
+  ): Promise<SincePage<DataRecord>> {
+    const owed = Array.from(this.store.values()).filter((r) =>
+      isOwed(r.updatedAt, peerWatermarks),
+    );
+    return pageByNode<DataRecord>(owed, (r) => r.updatedAt, limit);
+  }
+
+  async queryLabelsSince(
+    peerWatermarks: Record<string, HLCTimestamp>,
+    limit: number,
+  ): Promise<SincePage<RecordLabel>> {
+    const owed = Array.from(this.labels.values()).filter((l) =>
+      isOwed(l.updatedAt, peerWatermarks),
+    );
+    return pageByNode<RecordLabel>(owed, (l) => l.updatedAt, limit);
+  }
+
+  /** In-memory reference fold for the bucketed digest. */
+  async bucketDigest(
+    prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH,
+  ): Promise<DigestBucket[]> {
+    const buckets: DigestBucket[] = [];
+    const rows = [
+      ...Array.from(this.store.values()).map((r) => r.updatedAt),
+      ...Array.from(this.labels.values()).map((l) => l.updatedAt),
+    ];
+    for (const hlc of rows) {
+      buckets.push({
+        nodeId: hlc.nodeId,
+        bucket: serializeHLC(hlc).slice(0, prefixLength),
+        count: 1,
+      });
+    }
+    return mergeDigestBuckets(buckets);
   }
 
   async query(query: Query): Promise<QueryResult> {
@@ -433,4 +487,55 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     }
     return { objectCount, bytes };
   }
+}
+
+/** `hlc > peerWatermarks[hlc.nodeId]`, with an absent entry meaning "owed". */
+function isOwed(hlc: HLCTimestamp, peerWatermarks: Record<string, HLCTimestamp>): boolean {
+  const peer = peerWatermarks[hlc.nodeId];
+  return !peer || compareHLC(hlc, peer) > 0;
+}
+
+/**
+ * Group by author, sort ascending within each, and give every author its own
+ * slice of `limit` — the same fair split `collectSince` performs on the SQL
+ * path, and for the same reason: spending the budget in author order lets one
+ * author that cannot drain starve every author after it, permanently.
+ *
+ * Authors that are cut short are reported in `truncated` with the last row
+ * actually returned, which is what lets the caller cut a shipment that stays a
+ * contiguous prefix across every stream. See `sync-engine/src/round-cut.ts`.
+ */
+function pageByNode<T>(
+  items: T[],
+  hlcOf: (item: T) => HLCTimestamp,
+  limit: number,
+): SincePage<T> {
+  const byNode = new Map<string, T[]>();
+  for (const item of items) {
+    const nodeId = hlcOf(item).nodeId;
+    const bucket = byNode.get(nodeId) ?? [];
+    bucket.push(item);
+    byNode.set(nodeId, bucket);
+  }
+  const nodeIds = Array.from(byNode.keys()).sort();
+  const truncated: Record<string, HLCTimestamp | null> = {};
+  if (nodeIds.length === 0) return { rows: [], hasMore: false, truncated };
+  if (limit <= 0) {
+    for (const nodeId of nodeIds) truncated[nodeId] = null;
+    return { rows: [], hasMore: true, truncated };
+  }
+
+  const share = Math.max(1, Math.ceil(limit / nodeIds.length));
+  const rows: T[] = [];
+  let hasMore = false;
+  for (const nodeId of nodeIds) {
+    const bucket = byNode.get(nodeId)!.sort((a, b) => compareHLC(hlcOf(a), hlcOf(b)));
+    const kept = bucket.slice(0, share);
+    for (const item of kept) rows.push(structuredClone(item));
+    if (bucket.length > share) {
+      truncated[nodeId] = hlcOf(kept[kept.length - 1]!);
+      hasMore = true;
+    }
+  }
+  return { rows, hasMore, truncated };
 }
