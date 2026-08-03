@@ -718,12 +718,18 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         contextVariables: {},
       };
     },
-    expectedCalls({ stackPrefix, accountId, appId }) {
+    expectedCalls({ stackPrefix, accountId, region, appId }): ExpectedCall[] {
       const id = requireAppId("install-manager", appId);
       const appRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${id}-role`;
       const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
       const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
       const appBoundaryArn = `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
+      const appCredsArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/app-creds/${id}`;
+      // A paired handset's public key. The reserved `_device-` prefix keeps it
+      // out of the real-appId keyspace while still sitting under `app-creds/*`
+      // — which is exactly why it needs no IAM of its own.
+      const deviceKeyArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/app-creds/_device-dev-01ABC`;
+      const ssmViaService = `ssm.${region}.amazonaws.com`;
       return [
         // ---- Mint / heal the per-app role (createAppRole). --------------
         {
@@ -808,6 +814,49 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "iam:ListRolePolicies",
           resource: installInfraRoleArn,
           why: "Manager sweeps orphan temp-install-infra-<appId> entries left by interrupted runs.",
+        },
+
+        // ---- Write app credentials under /app-creds/*. ------------------
+        // Manager's one standing non-IAM capability, and the reason every
+        // writer of this prefix hops admin-app → Manager first. Modeled here
+        // because admin-web's device pairing shipped calling SSM with the
+        // operator's own admin-app session, which has no grant on this prefix
+        // at all — a gap nothing caught until a real handset failed to pair.
+        {
+          action: "ssm:PutParameter",
+          resource: appCredsArn,
+          why: "Install mirrors the app's HMAC signing secret into a SecureString the cloud-data-server verifier reads.",
+        },
+        {
+          action: "ssm:AddTagsToResource",
+          resource: appCredsArn,
+          why: "PutParameter with Tags fires a separate authorization check on the create path (Tags and Overwrite cannot be combined, so creation is the tagging opportunity).",
+        },
+        {
+          action: "ssm:DeleteParameter",
+          resource: appCredsArn,
+          why: "Uninstall deletes the app's signing credential.",
+        },
+        {
+          action: "ssm:PutParameter",
+          resource: deviceKeyArn,
+          why: "admin-web device pairing writes the handset's public key; the CDS Lambda reads it to decide whose signatures to trust.",
+        },
+        {
+          action: "ssm:AddTagsToResource",
+          resource: deviceKeyArn,
+          why: "putDeviceKeyParameter creates with Tags before falling back to an Overwrite re-put, same shape as the HMAC secret.",
+        },
+        {
+          action: "ssm:DeleteParameter",
+          resource: deviceKeyArn,
+          why: "Revoking a device is deleting its one parameter — it must be as reachable as pairing, or a lost phone cannot be cut off.",
+        },
+        {
+          action: "kms:Encrypt",
+          resource: "*",
+          contextVariables: { "kms:ViaService": ssmViaService },
+          why: "Every write above is Type=SecureString, which encrypts through KMS via SSM.",
         },
 
         // ---- Role-chain into the three downstream roles. ---------------

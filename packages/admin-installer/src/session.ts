@@ -35,15 +35,17 @@ function isPropagationError(err: unknown): boolean {
 async function assumeRoleWithRetry(
   client: STSClient,
   roleArn: string,
+  sessionPrefix: string,
+  maxAttempts: number,
 ): Promise<AwsCredentials> {
   let delay = ASSUME_ROLE_INITIAL_DELAY_MS;
   const start = Date.now();
-  for (let attempt = 1; attempt <= ASSUME_ROLE_MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const result = await client.send(
         new AssumeRoleCommand({
           RoleArn: roleArn,
-          RoleSessionName: `starkeep-install-${Date.now()}`,
+          RoleSessionName: `${sessionPrefix}-${Date.now()}`,
           DurationSeconds: 3600,
         }),
       );
@@ -62,7 +64,7 @@ async function assumeRoleWithRetry(
         expiration: c.Expiration ?? new Date(Date.now() + 3600 * 1000),
       };
     } catch (err) {
-      if (!isPropagationError(err) || attempt === ASSUME_ROLE_MAX_ATTEMPTS) throw err;
+      if (!isPropagationError(err) || attempt === maxAttempts) throw err;
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
       console.log(
         `[diag] sts:AssumeRole ${roleArn}: attempt ${attempt} AccessDenied at ${elapsed}s, retrying in ${(delay / 1000).toFixed(1)}s`,
@@ -74,23 +76,58 @@ async function assumeRoleWithRetry(
   throw new Error("unreachable");
 }
 
-export async function roleChain(roleArns: string[]): Promise<AwsCredentials> {
+export interface RoleChainOptions {
+  /**
+   * Credentials to make the *first* hop with.
+   *
+   * The installer runs as a spawned CLI whose federated session arrives as
+   * `AWS_*` env vars, so the default (ambient) is right there. A long-lived
+   * server process is the opposite case: admin-web holds no AWS identity of
+   * its own and receives the operator's session per request, so it must state
+   * the base explicitly rather than inherit whatever the machine happens to
+   * have configured — which would silently chain from the developer's personal
+   * profile.
+   */
+  readonly baseCredentials?: AwsCredentials;
+  /** Also explicit for the server case, where `AWS_REGION` may be unset. */
+  readonly region?: string;
+  /** Shows up in CloudTrail as the assumed-role session name. */
+  readonly sessionPrefix?: string;
+  /**
+   * Attempts per hop before an AccessDenied is taken at face value.
+   *
+   * The default budget exists for one situation: a role minted seconds ago
+   * whose trust policy has not propagated. Chaining into a role that has
+   * existed since bootstrap is not that situation — there a denial is a real
+   * policy answer, and spending three minutes rediscovering it just leaves
+   * whoever is waiting looking at a spinner. Callers in that position pass 1.
+   */
+  readonly assumeAttempts?: number;
+}
+
+export async function roleChain(
+  roleArns: string[],
+  options: RoleChainOptions = {},
+): Promise<AwsCredentials> {
   if (roleArns.length === 0) throw new Error("roleChain requires at least one role ARN");
 
-  let credentials: AwsCredentials | undefined;
+  const sessionPrefix = options.sessionPrefix ?? "starkeep-install";
+  const maxAttempts = options.assumeAttempts ?? ASSUME_ROLE_MAX_ATTEMPTS;
+  let credentials: AwsCredentials | undefined = options.baseCredentials;
 
   for (const roleArn of roleArns) {
     const client = credentials
       ? new STSClient({
+          ...(options.region ? { region: options.region } : {}),
           credentials: {
             accessKeyId: credentials.accessKeyId,
             secretAccessKey: credentials.secretAccessKey,
             sessionToken: credentials.sessionToken,
           },
         })
-      : new STSClient({});
+      : new STSClient(options.region ? { region: options.region } : {});
 
-    credentials = await assumeRoleWithRetry(client, roleArn);
+    credentials = await assumeRoleWithRetry(client, roleArn, sessionPrefix, maxAttempts);
   }
 
   return credentials!;

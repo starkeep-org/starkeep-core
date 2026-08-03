@@ -6,7 +6,8 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./app-creds": "./src/app-creds.ts"
+    "./app-creds": "./src/app-creds.ts",
+    "./session": "./src/session.ts"
   },
   "scripts": {
     "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts",
