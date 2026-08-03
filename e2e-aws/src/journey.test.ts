@@ -27,6 +27,7 @@ import {
   installAppDirect,
   driveCreds,
   createRecordWithBytes,
+  eventually,
   solidPng,
   type LdsApp,
 } from "@starkeep/e2e";
@@ -354,19 +355,47 @@ function runTeardownScript(script: string): void {
       // exempt path), so drive it through an installed app's signed fetch.
       // `drive` here is the LdsApp from driveCreds — its dataServerUrl is the
       // local LDS, distinct from cloudApp(drive) which targets the broker.
-      const sync = await drive.fetch("/sync/now", { method: "POST" });
-      expect(sync.status).toBe(200);
-      const { shipped } = (await sync.json()) as { applied: number; shipped: number };
-      expect(shipped).toBeGreaterThan(0);
+      //
+      // Driven in a converge loop, and asserted on the record reaching the
+      // cloud rather than on a single round's `shipped` count. Creating a
+      // record nudges a background exchange on a 50 ms debounce, so an
+      // explicit `/sync/now` can truthfully report "shipped 0" for a record
+      // that the background round already carried up — that count answers
+      // which round got there first, not whether sync worked. (The LDS unit
+      // suite hit the same race; see sync-over-wire.test.ts.)
+      const cloudDrive = cloudApp(drive);
+      let synced: { id: string; originAppId?: string; origin_app_id?: string };
+      try {
+        synced = await eventually(async () => {
+          const sync = await drive.fetch("/sync/now", { method: "POST" });
+          expect(sync.status).toBe(200);
 
-      const listRes = await cloudApp(drive).fetch("/data/records");
-      expect(listRes.status).toBe(200);
-      const { records } = (await listRes.json()) as {
-        records: Array<{ id: string; originAppId?: string; origin_app_id?: string }>;
-      };
-      const synced = records.find((r) => r.id === syncedRecordId);
-      expect(synced).toBeDefined();
-      expect(synced!.originAppId ?? synced!.origin_app_id).toBe("photos");
+          const listRes = await cloudDrive.fetch("/data/records");
+          expect(listRes.status).toBe(200);
+          const { records } = (await listRes.json()) as {
+            records: Array<{ id: string; originAppId?: string; origin_app_id?: string }>;
+          };
+          const found = records.find((r) => r.id === syncedRecordId);
+          if (!found) throw new Error(`record ${syncedRecordId} has not reached the cloud yet`);
+          return found;
+        });
+      } catch (err) {
+        // The supervisor swallows per-engine exchange failures into a logged
+        // `lastError` and still returns 200 with shipped: 0, so the HTTP
+        // response cannot distinguish "nothing to ship" from "every round
+        // threw". Without these lines a sync failure here presents only as a
+        // count that didn't move, which is what makes it hard to diagnose.
+        const syncLines = (lds?.logs() ?? "")
+          .split("\n")
+          .filter((l) => /\[sync|sync\]|exchange|drive/i.test(l));
+        console.error(
+          `[e2e-aws] sync did not reach the cloud. LDS sync log:\n${
+            syncLines.length > 0 ? syncLines.join("\n") : "(no sync lines logged)"
+          }`,
+        );
+        throw err;
+      }
+      expect(synced.originAppId ?? synced.origin_app_id).toBe("photos");
 
       // Blob round-trip from S3 through the broker's presigned file-url.
       const urlRes = await cloudApp(drive).fetch(`/data/records/${syncedRecordId}/file-url`);
@@ -387,15 +416,27 @@ function runTeardownScript(script: string): void {
       const cloudPhotos = cloudApp(photos);
 
       // Two labels in one batch — one flag, one valued — on the record that
-      // synced up above. `crop` carries a value here only to exercise the
-      // valued seek; nothing reads it.
+      // synced up above.
+      //
+      // Both are keys Photos actually declares in its manifest, which is load
+      // bearing rather than cosmetic: the broker rejects an undeclared key with
+      // a 400, so an inert test string would fail here and not at the thing
+      // this step is testing. (`photos/thumbnail` used to be the flag; the
+      // rendition respec replaced it with a valued `photos/rendition`, and this
+      // step kept writing the old name until it 400'd against a real cluster.)
+      //
+      // `crop` is the flag. `faces` is the valued one, seeked by value below —
+      // which is its real use: `?label=photos/faces&labelValue=Alice`.
+      // Deliberately not `rendition`: setting `rendition=image-thumb` on this
+      // record would make the app read the original as its own thumbnail, and
+      // the later resize step would correctly refuse it.
       const write = await cloudPhotos.fetch("/data/labels", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           labels: [
-            { recordId: syncedRecordId, key: "thumbnail" },
-            { recordId: syncedRecordId, key: "crop", value: "e2e" },
+            { recordId: syncedRecordId, key: "crop" },
+            { recordId: syncedRecordId, key: "faces", value: "e2e" },
           ],
         }),
       });
@@ -408,7 +449,7 @@ function runTeardownScript(script: string): void {
       expect(keysRes.status).toBe(200);
       const { labelKeys } = (await keysRes.json()) as { labelKeys: Array<{ label: string }> };
       expect(labelKeys.map((k) => k.label)).toEqual(
-        expect.arrayContaining(["photos/thumbnail", "photos/crop"]),
+        expect.arrayContaining(["photos/crop", "photos/faces"]),
       );
 
       // Hydration: Drive holds no per-type grants but sees every app's labels
@@ -420,13 +461,13 @@ function runTeardownScript(script: string): void {
       const labelled = records.find((r) => r.id === syncedRecordId);
       expect(labelled?.labels?.map((l) => l.label).sort()).toEqual([
         "photos/crop",
-        "photos/thumbnail",
+        "photos/faces",
       ]);
 
       // The reverse query — the thing labels exist for, and the query the
       // measured index shape was chosen for. Presence first.
       const presence = await cloudApp(drive).fetch(
-        "/data/records?label=photos/thumbnail&limit=1000",
+        "/data/records?label=photos/crop&limit=1000",
       );
       expect(presence.status).toBe(200);
       const presenceBody = (await presence.json()) as {
@@ -437,13 +478,13 @@ function runTeardownScript(script: string): void {
 
       // Then the exact-value seek, which is why `value` is in the index key.
       const byValue = await cloudApp(drive).fetch(
-        "/data/records?label=photos/crop&labelValue=e2e&limit=1000",
+        "/data/records?label=photos/faces&labelValue=e2e&limit=1000",
       );
       const matched = (await byValue.json()) as { records: Array<{ id: string }> };
       expect(matched.records.map((r) => r.id)).toContain(syncedRecordId);
 
       const byWrongValue = await cloudApp(drive).fetch(
-        "/data/records?label=photos/crop&labelValue=nope&limit=1000",
+        "/data/records?label=photos/faces&labelValue=nope&limit=1000",
       );
       const unmatched = (await byWrongValue.json()) as { records: Array<{ id: string }> };
       expect(unmatched.records.map((r) => r.id)).not.toContain(syncedRecordId);
@@ -453,39 +494,36 @@ function runTeardownScript(script: string): void {
       const retract = await cloudPhotos.fetch("/data/labels/retract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ labels: [{ recordId: syncedRecordId, key: "crop" }] }),
+        body: JSON.stringify({ labels: [{ recordId: syncedRecordId, key: "faces" }] }),
       });
       expect(retract.status).toBe(200);
 
       const afterRetract = await cloudApp(drive).fetch(
-        "/data/records?label=photos/crop&limit=1000",
+        "/data/records?label=photos/faces&limit=1000",
       );
       const remaining = (await afterRetract.json()) as { records: Array<{ id: string }> };
       expect(remaining.records.map((r) => r.id)).not.toContain(syncedRecordId);
 
       // ...and the flag on the same record is untouched by it.
       const stillFlagged = await cloudApp(drive).fetch(
-        "/data/records?label=photos/thumbnail&limit=1000",
+        "/data/records?label=photos/crop&limit=1000",
       );
       const flagged = (await stillFlagged.json()) as { records: Array<{ id: string }> };
       expect(flagged.records.map((r) => r.id)).toContain(syncedRecordId);
 
-      // Now put the record back the way this step found it. These are Photos'
-      // *real* manifest keys, not inert test strings — `photos/thumbnail` is
-      // how the app records "this image is a derived thumbnail", and the later
-      // resize step reads it (canThumbnail) on this very record. Leaving the
-      // flag on claims the original photo is its own thumbnail, and resize
-      // correctly refuses with 400. Retracting the flag also covers the
-      // valueless retract path, which the `crop` retraction above does not.
+      // Now put the record back the way this step found it: later steps read
+      // this same record, and a label left on it is state leaking across steps.
+      // Retracting the flag also covers the valueless retract path, which the
+      // `faces` retraction above does not.
       const retractFlag = await cloudPhotos.fetch("/data/labels/retract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ labels: [{ recordId: syncedRecordId, key: "thumbnail" }] }),
+        body: JSON.stringify({ labels: [{ recordId: syncedRecordId, key: "crop" }] }),
       });
       expect(retractFlag.status).toBe(200);
 
       const afterFlagRetract = await cloudApp(drive).fetch(
-        "/data/records?label=photos/thumbnail&limit=1000",
+        "/data/records?label=photos/crop&limit=1000",
       );
       const unflagged = (await afterFlagRetract.json()) as { records: Array<{ id: string }> };
       expect(unflagged.records.map((r) => r.id)).not.toContain(syncedRecordId);
