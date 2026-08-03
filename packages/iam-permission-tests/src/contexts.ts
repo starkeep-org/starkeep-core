@@ -23,6 +23,7 @@ import {
   buildTempInstallDdlPolicy,
   buildTempInstallInfraPolicy,
   buildRuntimePolicy,
+  USER_DATA_OWNER_APP_ID,
 } from "../../admin-installer/src/temp-policies";
 import { adminAppPolicyStatements } from "../../aws-bootstrap/src/bootstrap/admin-app-policy";
 import { foundationalPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/foundational-permissions-boundary";
@@ -30,6 +31,7 @@ import { installDdlBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/
 import { installInfraBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/install-infra-boundary";
 import { managerPolicyStatements } from "../../aws-bootstrap/src/bootstrap/manager-policy";
 import { appPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/permissions-boundary";
+import { userDataOwnerPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/user-data-owner-permissions-boundary";
 
 export interface ContextInput {
   stackPrefix: string;
@@ -122,6 +124,16 @@ function foundationalBoundary(stackPrefix: string): PolicyDoc {
     policy: {
       Version: "2012-10-17",
       Statement: foundationalPermissionsBoundaryStatements(stackPrefix),
+    },
+  };
+}
+
+function userDataOwnerBoundary(stackPrefix: string): PolicyDoc {
+  return {
+    name: "user-data-owner-boundary",
+    policy: {
+      Version: "2012-10-17",
+      Statement: userDataOwnerPermissionsBoundaryStatements(stackPrefix),
     },
   };
 }
@@ -356,7 +368,30 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       // parameter AND kms:Decrypt via ssm. Catching a missing kms statement
       // here is the whole point of running the simulator pre-deploy.
       const passphraseArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`;
+      const filesBucketArn = `arn:aws:s3:::${stackPrefix}-files-${accountId}-${region}`;
       return [
+        // ---- The availability wiring (media plan items 19/19b). ----------
+        // These three shipped in the Pulumi program with no matching grant in
+        // either the temp policy or the foundational boundary, and the install
+        // 403'd on a real account. Modeled here so the next one is caught by
+        // `simulate` with no AWS involved.
+        {
+          action: "s3:PutBucketNotification",
+          resource: filesBucketArn,
+          why:
+            "Subscribes the CDS Lambda to the readability events that keep stored " +
+            "availability true, plus the inventory-manifest landing.",
+        },
+        {
+          action: "s3:PutInventoryConfiguration",
+          resource: filesBucketArn,
+          why: "Creates the daily inventory that backstops availability when an event is lost.",
+        },
+        {
+          action: "s3:GetInventoryConfiguration",
+          resource: filesBucketArn,
+          why: "Pulumi reads the inventory configuration back on every refresh.",
+        },
         {
           action: "ssm:GetParameter",
           resource: passphraseArn,
@@ -605,12 +640,63 @@ const CONTEXTS: Record<string, ContextBuilder> = {
     },
   },
   "runtime-app": {
-    description: "Per-app Lambda runtime (runtime policy, app boundary).",
-    build() {
-      throw new Error("context 'runtime-app' not implemented yet.");
+    description:
+      "Per-app runtime — the assumed app role the CDS broker acts under for a " +
+      "request, modeled with write access to one category. Set APP_ID to scope.",
+    build({ stackPrefix, appId, accountId }) {
+      const id = requireAppId("runtime-app", appId);
+      const runtime: PolicyDoc = {
+        name: "runtime",
+        // One granted category with write access — the ordinary shape of an
+        // installed app (photos holds `image`). Category-granular rather than
+        // all-access: an app that is NOT Drive is what this context models.
+        policy: JSON.parse(buildRuntimePolicy(stackPrefix, id, ["image"], true, false)),
+      };
+      return {
+        principalArn: assumedRoleArn(accountId, `${stackPrefix}-app-${id}-role`, "runtime"),
+        principalRoleName: `${stackPrefix}-app-${id}-role`,
+        identityPolicies: [runtime],
+        permissionBoundaryPolicies: [appPermissionsBoundary(stackPrefix)],
+        contextVariables: {
+          "aws:PrincipalTag/starkeep:appId": id,
+        },
+      };
     },
-    expectedCalls() {
-      return [];
+    expectedCalls({ stackPrefix, appId }) {
+      const id = requireAppId("runtime-app", appId);
+      const sharedObject = `arn:aws:s3:::${stackPrefix}-files-*/shared/image/photo.jpg`;
+      return [
+        {
+          action: "s3:GetObject",
+          resource: sharedObject,
+          why: "Reading a shared blob in a granted category.",
+        },
+        {
+          action: "s3:PutObject",
+          resource: sharedObject,
+          why: "Writing a shared blob in a granted category (write access granted).",
+        },
+        {
+          action: "s3:PutObjectTagging",
+          resource: sharedObject,
+          why:
+            "POST /archive tags the original with starkeep:intent + starkeep:ladder — the " +
+            "conjunction the Deep Archive lifecycle rule filters on. This runs under the " +
+            "*calling app's* assumed role, not the broker's, so the grant must be here.",
+        },
+        {
+          action: "s3:RestoreObject",
+          resource: sharedObject,
+          why:
+            "POST /restore thaws an archived original under the calling app's role. Without " +
+            "the grant the endpoint records `restoring` and nothing ever becomes readable.",
+        },
+        {
+          action: "s3:GetObject",
+          resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/${id}/blob`,
+          why: "App-private reads under the app's own prefix.",
+        },
+      ];
     },
   },
 
@@ -746,6 +832,60 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "sts:GetCallerIdentity",
           resource: "*",
           why: "cli-install-app resolves the AWS account ID up front when not in config.",
+        },
+      ];
+    },
+  },
+
+  "runtime-user-data-owner": {
+    description:
+      "Starkeep Drive's role at runtime — the identity the CDS Lambda wears " +
+      "for shared-record custody and for the availability paths (S3-event " +
+      "ingest, inventory reconcile), capped by the user-data-owner boundary.",
+    build({ stackPrefix, accountId }) {
+      const roleName = `${stackPrefix}-app-${USER_DATA_OWNER_APP_ID}-role`;
+      const runtime: PolicyDoc = {
+        name: "runtime",
+        // Drive installs with fileAccess=all — the cross-cutting shared/*
+        // write ceiling that powers every app's shared-record sync.
+        policy: JSON.parse(
+          buildRuntimePolicy(stackPrefix, USER_DATA_OWNER_APP_ID, [], true, true),
+        ),
+      };
+      return {
+        principalArn: assumedRoleArn(accountId, roleName, "runtime"),
+        principalRoleName: roleName,
+        identityPolicies: [runtime],
+        permissionBoundaryPolicies: [userDataOwnerBoundary(stackPrefix)],
+        contextVariables: {
+          "aws:PrincipalTag/starkeep:appId": USER_DATA_OWNER_APP_ID,
+        },
+      };
+    },
+    expectedCalls({ stackPrefix }) {
+      const sharedObject = `arn:aws:s3:::${stackPrefix}-files-*/shared/image/photo.jpg`;
+      return [
+        {
+          action: "s3:GetObject",
+          resource: `arn:aws:s3:::${stackPrefix}-files-*/_starkeep/inventory/availability/2026-08-03T00-00Z/manifest.json`,
+          why:
+            "The daily reconcile reads the inventory manifest and its data files as Drive " +
+            "(api-handler.ts handles S3 events under DRIVE_APP_ID). The report lands under a " +
+            "reserved prefix that neither the shared/* nor own-prefix grant reaches.",
+        },
+        {
+          action: "s3:PutObjectTagging",
+          resource: sharedObject,
+          why:
+            "POST /archive tags an original with starkeep:intent + starkeep:ladder — the " +
+            "conjunction the Deep Archive lifecycle rule filters on. Untagged, nothing archives.",
+        },
+        {
+          action: "s3:RestoreObject",
+          resource: sharedObject,
+          why:
+            "POST /restore issues RestoreObject to thaw an archived original. Without the grant " +
+            "the endpoint records `restoring` and thaws nothing — the exact gap item 19 closed.",
         },
       ];
     },

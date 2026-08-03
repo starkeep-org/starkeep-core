@@ -6,6 +6,24 @@
  */
 
 /**
+ * The single app id permitted to use the user-data-owner permissions boundary.
+ * Starkeep Drive owns the cross-cutting `shared/*` write ceiling that powers all
+ * shared-record sync. Centralizing the choice here (rather than letting callers
+ * pass the boundary they want) guarantees a third-party app cannot escape the
+ * regular per-app boundary even if a future code path forgets to enforce it.
+ *
+ * Re-exported from iam.ts, which is where the rest of the installer imports it.
+ */
+export const USER_DATA_OWNER_APP_ID = "starkeep-drive";
+
+/**
+ * Reserved infrastructure prefix inside the files bucket where the daily S3
+ * Inventory report lands. Must match the installer program's `INVENTORY_PREFIX`
+ * and the CDS handler's copy — a drift means reports nothing ingests.
+ */
+const INVENTORY_PREFIX = "_starkeep/inventory/";
+
+/**
  * Temp policy for the install-ddl-role. Single statement granting
  * dsql:DbConnectAdmin, used for both install and uninstall DDL.
  * Attached to ${stackPrefix}-install-ddl-role (not the app role).
@@ -456,6 +474,17 @@ export function buildTempInstallCloudDataServerPolicy(
           // Paired with the Get above, which Pulumi reads on every refresh.
           "s3:PutLifecycleConfiguration",
           "s3:GetBucketNotification",
+          // Subscribing the CDS Lambda to the readability events (lifecycle
+          // transition / restore completed / restore expired) that keep stored
+          // availability true, plus the inventory-manifest landing. Without the
+          // Put the notification is never written and availability silently has
+          // no source — the Get alone only lets Pulumi read what isn't there.
+          "s3:PutBucketNotification",
+          // The daily availability inventory. Get is read on every refresh;
+          // Put creates it. Neither is implied by the bucket-level Get*
+          // wildcard the foundational boundary uses — this policy enumerates.
+          "s3:GetInventoryConfiguration",
+          "s3:PutInventoryConfiguration",
           "s3:ListBucket",
         ],
         Resource: [
@@ -814,9 +843,39 @@ export function buildRuntimePolicy(
     },
   ];
 
+  // The inventory report is read by the availability reconcile, which runs as
+  // Starkeep Drive (the S3-event path in the CDS Lambda writes availability as
+  // Drive, since availability is a fact about shared blobs). The report lives
+  // under a reserved infrastructure prefix, not under shared/*, so no other
+  // grant reaches it — and without this the daily backstop fails on every
+  // manifest read, quietly, in a code path nothing else exercises.
+  if (appId === USER_DATA_OWNER_APP_ID) {
+    statements.push({
+      Sid: "UserDataOwnerReadInventory",
+      Effect: "Allow",
+      Action: "s3:GetObject",
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/${INVENTORY_PREFIX}*`,
+    });
+  }
+
   if (s3SharedResources.length > 0) {
-    const s3Actions: string[] = ["s3:GetObject"];
-    if (hasWriteAccess || fileAccessAll) s3Actions.push("s3:PutObject", "s3:DeleteObject");
+    const s3Actions: string[] = [
+      "s3:GetObject",
+      // Thawing an archived original. A read-only app still needs it: an app
+      // that may read a shared object must be able to make it readable, or the
+      // restore endpoint 403s for exactly the callers it exists to serve.
+      "s3:RestoreObject",
+    ];
+    if (hasWriteAccess || fileAccessAll) {
+      s3Actions.push(
+        "s3:PutObject",
+        "s3:DeleteObject",
+        // Writing the intent/ladder tags the archive lifecycle rule filters on.
+        // Tagging an object is asserting something about it, so it rides write
+        // access rather than read.
+        "s3:PutObjectTagging",
+      );
+    }
     statements.push({
       Sid: "AppS3SharedData",
       Effect: "Allow",

@@ -56,6 +56,12 @@ export function appPermissionsBoundaryStatements(stackPrefix: string): IamStatem
         "s3:PutObject",
         "s3:DeleteObject",
         "s3:CopyObject",
+        // The archive pair (media plan items 17/19): tagging an original for
+        // the Deep Archive lifecycle rule, and thawing one that has already
+        // transitioned. Both act on shared originals, so both belong at the
+        // same shared/* ceiling as the object verbs above.
+        "s3:PutObjectTagging",
+        "s3:RestoreObject",
       ],
       Resource: `arn:aws:s3:::${stackPrefix}-files-*/shared/*`,
     },

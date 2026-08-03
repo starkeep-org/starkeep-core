@@ -168,7 +168,22 @@ describe("user-data-owner boundary (Drive's layer-2 hard floor)", () => {
   it("caps shared-data custody at the shared/* prefix", () => {
     const shared = byId(statements, "UserDataOwnerS3SharedData");
     expect(shared.Resource).toBe(`arn:aws:s3:::${PREFIX}-files-*/shared/*`);
-    expect(shared.Action).toEqual(["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]);
+    expect(shared.Action).toEqual([
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:PutObjectTagging",
+      "s3:RestoreObject",
+    ]);
+  });
+
+  // The inventory report is infrastructure, not shared data: it lands under a
+  // reserved prefix that the shared/* and own-prefix grants deliberately do not
+  // reach, and Drive is the identity the CDS Lambda wears to ingest it.
+  it("admits reading the inventory prefix, read-only", () => {
+    const inventory = byId(statements, "UserDataOwnerReadInventory");
+    expect(inventory.Resource).toBe(`arn:aws:s3:::${PREFIX}-files-*/_starkeep/inventory/*`);
+    expect(inventory.Action).toBe("s3:GetObject");
   });
 
   it("is narrower than foundational: no Lambda, no API Gateway, no DSQL admin", () => {

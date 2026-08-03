@@ -121,6 +121,13 @@ export function foundationalPermissionsBoundaryStatements(
         "s3:PutBucketObjectLockConfiguration",
         // The single tag-filtered Deep Archive rule (media plan item 18).
         "s3:PutLifecycleConfiguration",
+        // The availability machinery (media plan items 19/19b): the event
+        // subscription that keeps stored availability true, and the daily
+        // inventory that backstops it. Both are writes, so neither rides the
+        // `s3:Get*` wildcard above — a boundary that omits them caps the
+        // install below what the temp policy grants and the apply 403s.
+        "s3:PutBucketNotification",
+        "s3:PutInventoryConfiguration",
       ],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-files-*`,
