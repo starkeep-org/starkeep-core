@@ -93,6 +93,7 @@ export {
 export {
   HttpObjectStorageAdapter,
   type HttpObjectStorageAdapterOptions,
+  type UploadFile,
 } from "./transports/http-object-storage.js";
 export {
   createHttpSyncHandler,

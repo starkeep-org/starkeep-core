@@ -86,6 +86,7 @@ export {
   ConnectionError,
   TransactionError,
   ObjectNotFoundError,
+  FileUriTransferRefused,
 } from "./errors.js";
 
 export { MockDatabaseAdapter } from "./mock/mock-database-adapter.js";

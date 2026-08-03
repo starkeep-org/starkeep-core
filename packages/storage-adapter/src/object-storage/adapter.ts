@@ -101,4 +101,48 @@ export interface ObjectStorageAdapter {
   getSignedUrl?(key: string, options?: SignedUrlOptions): Promise<string>;
   getSignedPutUrl?(key: string, options?: SignedPutUrlOptions): Promise<string>;
   putSymlink?(key: string, targetPath: string, options?: PutOptions): Promise<void>;
+
+  /**
+   * The URI of a file the platform can read directly for this key, or `null`.
+   *
+   * Half of a negotiation: a source that can name a file and a destination that
+   * can {@link putFromFileUri} one together move an object without its bytes
+   * entering the JS heap. Either side absent falls back to the stream path,
+   * which is why both are optional and why neither may be load-bearing for
+   * correctness.
+   *
+   * This matters on React Native, where `fetch` buffers a `ReadableStream`
+   * request body into a `Uint8Array` before sending it — the "streamed" path
+   * costs several times the object size in JS heap, and a 24 MB video is enough
+   * to take the process down on a memory-pressured handset.
+   *
+   * Synchronous, and must stay cheap: it is asked before every transfer. An
+   * adapter that would need a network round trip to answer should return
+   * `null`. Returning a URI is not a promise that the bytes are still there —
+   * the same staleness rules as `has()` apply.
+   */
+  localFileUriFor?(key: string): string | null;
+  /**
+   * Store an object by sending a platform file's bytes directly.
+   *
+   * The other half of the negotiation described on {@link localFileUriFor}.
+   * Implementations hand the URI to a platform uploader; the bytes never cross
+   * into JS.
+   *
+   * ## Verification, and why dropping the JS checksum is safe here
+   *
+   * {@link PutStreamOptions.expectedSha256Hex} cannot be honoured in JS on this
+   * path — nothing in JS sees a byte. An implementation may only accept the
+   * transfer when the *backend* verifies the same digest (S3 checks a
+   * whole-object SHA-256 pinned into a presigned single-part PUT), or when no
+   * verification was asked for.
+   *
+   * When it can offer neither, it must throw {@link FileUriTransferRefused},
+   * and it must do so **before any bytes move** — the caller responds by
+   * retrying through the stream path, and a refusal raised mid-upload would
+   * push the whole object through the JS heap a second time, which is the exact
+   * failure this method exists to avoid. Every other error is an ordinary
+   * failed transfer.
+   */
+  putFromFileUri?(key: string, fileUri: string, options?: PutStreamOptions): Promise<void>;
 }

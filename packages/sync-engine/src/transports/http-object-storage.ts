@@ -9,7 +9,7 @@ import type {
   ObjectFacts,
   PutStreamOptions,
 } from "@starkeep/storage-adapter";
-import { verifyingStream } from "@starkeep/storage-adapter";
+import { FileUriTransferRefused, verifyingStream } from "@starkeep/storage-adapter";
 
 /**
  * What the server hands back when it signs an upload.
@@ -99,7 +99,32 @@ export interface HttpObjectStorageAdapterOptions {
     path: string,
     body: string,
   ) => Record<string, string>;
+  /**
+   * Send a file's bytes to a URL without reading them into JS.
+   *
+   * Supplying this turns on {@link ObjectStorageAdapter.putFromFileUri}; absent,
+   * the adapter has no way to honour a file URI and does not claim to. Injected
+   * for the same reason `fetch` and `signRequest` are: the only implementation
+   * that matters is a platform one (expo-file-system's upload task on React
+   * Native, which streams from a `ContentProviderFile`'s input stream), and this
+   * package must not import it.
+   *
+   * Must not buffer the file. An implementation that reads the bytes and posts
+   * them is worse than the stream path it is displacing, and silently so.
+   */
+  readonly uploadFile?: UploadFile;
 }
+
+/**
+ * The platform uploader port. Resolves for any completed response, including a
+ * non-2xx one — a 403 from S3 is a fact about the request, not a transport
+ * failure, and the caller needs the body to tell which 403 it is.
+ */
+export type UploadFile = (
+  fileUri: string,
+  url: string,
+  init: { readonly method: "PUT"; readonly headers: Record<string, string> },
+) => Promise<{ readonly status: number; readonly body: string }>;
 
 /**
  * Adapter that speaks `/files/:key` HTTP to a remote Starkeep sync server
@@ -118,10 +143,29 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     body: string,
   ) => Record<string, string>;
 
+  /**
+   * Present only when the caller supplied an uploader.
+   *
+   * Assigned rather than declared as a method because the capability is
+   * genuinely conditional: `file-sync-engine` decides whether to offer a file
+   * URI by asking whether this exists, and a method that was always there and
+   * threw would make every phone transfer take a wrong turn before failing.
+   */
+  readonly putFromFileUri?: (
+    key: string,
+    fileUri: string,
+    options?: PutStreamOptions,
+  ) => Promise<void>;
+
   constructor(options: HttpObjectStorageAdapterOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.signRequest = options.signRequest;
+    if (options.uploadFile) {
+      const uploadFile = options.uploadFile;
+      this.putFromFileUri = (key, fileUri, putOptions) =>
+        this.sendFile(uploadFile, key, fileUri, putOptions);
+    }
   }
 
   private url(key: string): string {
@@ -168,9 +212,13 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     }
   }
 
-  async put(key: string, data: Uint8Array, options?: PutOptions): Promise<void> {
-    // Request a presigned S3 PUT URL from the server to bypass API Gateway limits.
-    const presignBody = JSON.stringify({ key, contentType: options?.contentType });
+  /**
+   * Ask the server to sign an upload of this key. One round trip, shared by
+   * every write path — the three of them must not drift in what they send, or a
+   * PUT signed one way and issued another fails as `SignatureDoesNotMatch`.
+   */
+  private async presignPut(key: string, contentType?: string): Promise<PresignResponse> {
+    const presignBody = JSON.stringify({ key, contentType });
     const presignRes = await this.fetchImpl(`${this.apiBase()}/files/presign`, {
       method: "POST",
       headers: this.headers("POST", "/files/presign", presignBody, {
@@ -181,7 +229,65 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!presignRes.ok) {
       throw new Error(`presign PUT ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
     }
-    const { url, checksumSha256, storageClass, tagging } = await presignRes.json() as PresignResponse;
+    return await presignRes.json() as PresignResponse;
+  }
+
+  /**
+   * Upload a file the platform can read, without its bytes entering JS.
+   *
+   * See `ObjectStorageAdapter.putFromFileUri` for the contract, and the plan in
+   * `photos-mobile/native-blob-transfer-plan.md` for why a phone needs it.
+   */
+  private async sendFile(
+    uploadFile: UploadFile,
+    key: string,
+    fileUri: string,
+    options?: PutStreamOptions,
+  ): Promise<void> {
+    const presigned = await this.presignPut(key, options?.contentType);
+
+    // The one refusal, raised here — after the presign round trip and before a
+    // single byte moves, which is exactly where the contract permits it.
+    //
+    // `putStream` verifies the digest in JS as the bytes pass. Nothing here
+    // sees a byte, so the only thing that can make the same promise is S3
+    // checking the checksum the server pinned into the signature. Without a
+    // pin there is nobody to check, and quietly uploading unverified bytes
+    // because the fast path was available would be the worst of the three
+    // possible behaviours.
+    if (options?.expectedSha256Hex && !presigned.checksumSha256) {
+      throw new FileUriTransferRefused(
+        key,
+        "the caller asked for a whole-object SHA-256 and the server pinned no checksum, " +
+          "so nothing would verify these bytes",
+      );
+    }
+
+    const result = await uploadFile(fileUri, presigned.url, {
+      method: "PUT",
+      headers: {
+        ...(options?.contentType ? { "Content-Type": options.contentType } : {}),
+        ...presignHeaders(presigned),
+        // No Content-Length: the uploader knows the file's length and sets it
+        // from the request body. Sending it here would duplicate the header.
+      },
+    });
+    if (result.status < 200 || result.status >= 300) {
+      const detail = result.body.trim().replace(/\s+/g, " ").slice(0, 500);
+      throw new Error(
+        `S3 PUT ${key} from ${fileUri} failed: ${result.status}${detail ? ` — ${detail}` : ""}`,
+      );
+    }
+
+    await this.confirm(key);
+  }
+
+  async put(key: string, data: Uint8Array, options?: PutOptions): Promise<void> {
+    // Request a presigned S3 PUT URL from the server to bypass API Gateway limits.
+    const { url, checksumSha256, storageClass, tagging } = await this.presignPut(
+      key,
+      options?.contentType,
+    );
 
     // Upload directly to S3 — presigned URL carries credentials, no auth header needed.
     //
@@ -303,18 +409,10 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     body: ReadableStream<Uint8Array>,
     options?: PutStreamOptions,
   ): Promise<void> {
-    const presignBody = JSON.stringify({ key, contentType: options?.contentType });
-    const presignRes = await this.fetchImpl(`${this.apiBase()}/files/presign`, {
-      method: "POST",
-      headers: this.headers("POST", "/files/presign", presignBody, {
-        "Content-Type": "application/json",
-      }),
-      body: presignBody,
-    });
-    if (!presignRes.ok) {
-      throw new Error(`presign PUT ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
-    }
-    const { url, checksumSha256, storageClass, tagging } = await presignRes.json() as PresignResponse;
+    const { url, checksumSha256, storageClass, tagging } = await this.presignPut(
+      key,
+      options?.contentType,
+    );
 
     // Hash on the way past and fail the stream on a mismatch, which aborts the
     // request rather than completing it. The server's pinned `checksumSha256`
