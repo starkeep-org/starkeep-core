@@ -401,6 +401,11 @@ export function createInProcessSyncTransport(
         appSyncableRows,
         responderWatermarks,
         hasMore,
+        // Whose items we stopped applying. The watermark already tells the
+        // requester to re-ship; this tells it the round did not land, which is
+        // the difference between "backup complete" and "nothing got through".
+        // Omitted when empty so the common response stays the shape it was.
+        ...(haltedNodes.size > 0 ? { haltedAuthors: [...haltedNodes] } : {}),
         // Echo the width actually used *and* what was counted, so a requester
         // can refuse to compare rather than compare buckets that mean different
         // things — a different width, or a different set of tables summed into

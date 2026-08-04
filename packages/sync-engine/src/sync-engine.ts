@@ -487,6 +487,19 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         maxBytes,
       });
 
+      // Authors the responder stopped applying part-way through. Our shipment
+      // for them left this node fine and was then discarded, so it is a failure
+      // this side has no other way to see: the scans both report drained, every
+      // upload succeeded, and the round nonetheless landed nothing. Treated
+      // exactly like a failed upload from here on — it is the same event with
+      // the failure at the other end of the wire.
+      const haltedByPeer = new Set(response.haltedAuthors ?? []);
+      if (haltedByPeer.size > 0) {
+        console.warn(
+          `[sync] peer halted ${haltedByPeer.size} author(s) this round: ${[...haltedByPeer].join(", ")}`,
+        );
+      }
+
       // ---------------------------------------------------------------------
       // Inbound: apply records (and pull their blobs) per nodeId in HLC order,
       // interleaving SR snapshots and AR/AW rows. Own watermark advances only
@@ -696,12 +709,20 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // repair one roundful in. What matters is whether any persisted position
       // moved, because if none did, the next request is byte-identical to this
       // one and running it again cannot help.
+      //
+      // Rows the peer halted are not counted, and that is what keeps the loop
+      // from spinning. A shipment the responder discarded left our side looking
+      // busy — the rows went out, `shipped` is non-zero — while changing nothing
+      // anywhere; counting it as progress would make a peer whose apply fails
+      // persistently run every round of the budget re-sending the same row.
+      // Excluded here, the stall detector sees the round for what it is and
+      // `sync()` returns `complete: false, stalled: true`.
+      const acceptedOutbound =
+        outboundRecords.filter((r) => !haltedByPeer.has(r.updatedAt.nodeId)).length +
+        outboundLabels.filter((l) => !haltedByPeer.has(l.updatedAt.nodeId)).length +
+        outboundAppRows.filter((e) => !haltedByPeer.has(e.timestamp.nodeId)).length;
       let progressed =
-        appliedIds.length > 0 ||
-        outboundRecords.length > 0 ||
-        outboundLabels.length > 0 ||
-        outboundAppRows.length > 0 ||
-        elidedCount > 0;
+        appliedIds.length > 0 || acceptedOutbound > 0 || elidedCount > 0;
 
       if (syncState) {
         const nextOwnWatermarks: Watermarks = { ...ownWatermarks };
@@ -732,11 +753,18 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // mid-batch: `outboundHasMore` describes the *scan*, so it stays false
         // while the shipment was silently truncated, and clearing the floor
         // there discards the only record that the hole still needs filling.
+        //
+        // Nor on an author the *peer* dropped. A repair round whose rows shipped
+        // fine and were then discarded on arrival is the same event as a failed
+        // upload — the hole is still a hole — and only `haltedAuthors` says so,
+        // because every local signal reports a clean round.
         if (push && !outboundHasMore) {
           const floors = await loadRepairFloors();
           const retained: Watermarks = {};
           for (const [nodeId, floor] of Object.entries(floors)) {
-            if (truncatedByFailure.has(nodeId)) retained[nodeId] = floor;
+            if (truncatedByFailure.has(nodeId) || haltedByPeer.has(nodeId)) {
+              retained[nodeId] = floor;
+            }
           }
           if (Object.keys(floors).length !== Object.keys(retained).length) {
             progressed = true;
@@ -801,7 +829,16 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // the shipment did not survive. Without this the loop below reads a
         // permanently failing upload as "both directions drained" and reports
         // the sync complete with the record still not in the cloud.
-        blocked: truncatedByFailure.size > 0 || inboundBrokeFor.size > 0,
+        //
+        // The third term is the peer's half of the same observation. A round
+        // whose rows the responder threw away drains both scans and fails no
+        // local transfer, so on the first two terms alone it reported a
+        // finished sync while nothing had ever landed — F2's silent success,
+        // reached from the other end of the wire.
+        blocked:
+          truncatedByFailure.size > 0 ||
+          inboundBrokeFor.size > 0 ||
+          haltedByPeer.size > 0,
       };
   }
 
