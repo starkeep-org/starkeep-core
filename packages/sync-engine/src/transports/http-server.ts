@@ -19,6 +19,36 @@ export interface HttpSyncServerOptions {
   readonly transport?: SyncTransport;
 }
 
+/**
+ * Largest exchange body this server will read.
+ *
+ * A round's payload is bounded by the requester's own item cap and byte budget,
+ * and rows carry no blobs — the bytes go through `/files/:key`, not through
+ * here — so a real request is orders of magnitude under this. The cap exists
+ * because `readBinary` otherwise buffers whatever arrives into memory with no
+ * bound at all, and a peer on a broken build (or a truncated body that never
+ * ends) takes the process down rather than getting an error.
+ */
+const MAX_EXCHANGE_BODY_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Largest object body accepted on `PUT /files/:key`.
+ *
+ * Deliberately far larger than the exchange cap: this is where a video actually
+ * crosses the wire, and refusing a big one would stall its channel forever —
+ * the same reasoning that lets a single oversized item ship alone in a round.
+ * It is a backstop against unbounded buffering, not a policy on file size.
+ */
+const MAX_FILE_BODY_BYTES = 2 * 1024 * 1024 * 1024;
+
+/** A body that exceeded its cap. Mapped to 413 rather than 400 or 500. */
+class BodyTooLarge extends Error {
+  constructor(readonly limit: number) {
+    super(`request body exceeds ${limit} bytes`);
+    this.name = "BodyTooLarge";
+  }
+}
+
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 
 /**
@@ -48,10 +78,24 @@ export function createHttpSyncHandler(
       // numbers reach a `LIMIT ?` and a `substr(…, 1, N)` a few frames down.
       let body: SyncExchangeRequest;
       try {
-        body = sanitizeExchangeRequest(await readJson<unknown>(req));
+        body = sanitizeExchangeRequest(
+          await readJson<unknown>(req, MAX_EXCHANGE_BODY_BYTES),
+        );
       } catch (err) {
         if (err instanceof InvalidExchangeRequest) {
           sendJson(res, 400, { error: err.message });
+          return true;
+        }
+        // A body that is not JSON is the caller's mistake, not this server's,
+        // and it used to escape as a 500 — the same request the cloud handler
+        // answers with a 400. Two behaviours on one route depending on which
+        // side you hit is worse than either behaviour.
+        if (err instanceof SyntaxError) {
+          sendJson(res, 400, { error: "Body is not valid JSON" });
+          return true;
+        }
+        if (err instanceof BodyTooLarge) {
+          sendJson(res, 413, { error: err.message });
           return true;
         }
         throw err;
@@ -102,7 +146,16 @@ export function createHttpSyncHandler(
         return true;
       }
       if (req.method === "PUT") {
-        const bytes = await readBinary(req);
+        let bytes: Buffer;
+        try {
+          bytes = await readBinary(req, MAX_FILE_BODY_BYTES);
+        } catch (err) {
+          if (err instanceof BodyTooLarge) {
+            sendJson(res, 413, { error: err.message });
+            return true;
+          }
+          throw err;
+        }
         const contentType = req.headers["content-type"];
         await storage.put(key, bytes, {
           contentType:
@@ -129,16 +182,43 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-async function readJson<T>(req: IncomingMessage): Promise<T> {
-  const buf = await readBinary(req);
+async function readJson<T>(req: IncomingMessage, limit: number): Promise<T> {
+  const buf = await readBinary(req, limit);
+  // A `SyntaxError` from here is the caller's, and every call site maps it to a
+  // 400. Not caught here because "this is not JSON" and "this is JSON that says
+  // the wrong thing" deserve the same status and different messages.
   return JSON.parse(buf.toString("utf-8")) as T;
 }
 
-function readBinary(req: IncomingMessage): Promise<Buffer> {
+/**
+ * Read a request body into memory, refusing one over `limit`.
+ *
+ * Counted as it arrives rather than trusted from `Content-Length`, which a
+ * caller controls and a chunked request omits entirely. The socket is destroyed
+ * on refusal: leaving it open means the sender keeps pushing bytes at a request
+ * that has already been answered.
+ */
+function readBinary(req: IncomingMessage, limit: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
+    let size = 0;
+    let done = false;
+    req.on("data", (chunk: Buffer) => {
+      if (done) return;
+      size += chunk.length;
+      if (size > limit) {
+        done = true;
+        req.destroy();
+        reject(new BodyTooLarge(limit));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (!done) resolve(Buffer.concat(chunks));
+    });
+    req.on("error", (err) => {
+      if (!done) reject(err);
+    });
   });
 }
