@@ -314,6 +314,26 @@ export interface SyncExchangeResponse {
   readonly responderWatermarks: Watermarks;
   readonly hasMore: boolean;
   /**
+   * Authors (nodeIds) whose inbound run the responder **stopped applying**
+   * part-way through this round — a row that would not apply, a namespace it
+   * does not have. Absent or empty means nothing was dropped.
+   *
+   * On the wire because the requester cannot infer it. The responder already
+   * halts an author on its first failed apply and skips the rest of that
+   * author's items, which is correct; the *watermark* half of that reaches the
+   * requester (coverage stays behind the row, so it re-ships) but the *report*
+   * half did not. Without this field a round the peer discarded entirely is
+   * indistinguishable from one that landed perfectly: `blocked` is computed
+   * from the requester's own failures, so `sync()` returned
+   * `complete: true` — a "backup finished" for a peer whose schema is behind or
+   * whose grant was never made — and a repair floor retired against a round
+   * that filled nothing.
+   *
+   * Optional so a responder too old to send it still works; absent reads as
+   * "nothing halted", which is the pre-existing behaviour and no worse than it.
+   */
+  readonly haltedAuthors?: readonly string[];
+  /**
    * Per-author, per-time-bucket row counts over the responder's whole channel
    * state. Present only when the request set `requestDigest`, and absent from a
    * responder too old to know the field — which reads as "no check performed",

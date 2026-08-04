@@ -8,6 +8,8 @@ import type {
   PutStreamOptions,
 } from "@starkeep/storage-adapter";
 import type {
+  AppSyncableRowEntry,
+  ScanCapableApplier,
   SyncExchangeRequest,
   SyncExchangeResponse,
   SyncTransport,
@@ -187,6 +189,43 @@ export function failingMethod<T extends object>(
     },
   }) as T;
   return proxy;
+}
+
+/**
+ * Make the **peer** fail, rather than this side.
+ *
+ * The requester-side injection above was built first and it left the suite
+ * lopsided: every "something went wrong" case in it happened on the node under
+ * test, so nothing ever exercised a round the *responder* discarded. That is a
+ * different failure with a different shape — every local signal reports a clean
+ * round — and two of the highest-value findings lived exactly there: a round the
+ * peer dropped entirely reported `complete: true`, and a repair floor retired
+ * against a repair that filled nothing.
+ *
+ * Wrapping the applier rather than the transport is deliberate: the responder's
+ * halt logic (stop this author on its first failed apply, skip the rest, leave
+ * the coverage watermark behind the row) is the thing under test, so the failure
+ * has to be injected *underneath* it and the real transport has to react.
+ *
+ * `shouldFail` receives each entry, so one author can be made to fail while
+ * another succeeds — which is what makes the per-author halt observable rather
+ * than merely asserted.
+ */
+export function failingApplier(
+  base: ScanCapableApplier,
+  shouldFail: (entry: AppSyncableRowEntry) => boolean,
+): ScanCapableApplier {
+  return {
+    ...base,
+    async apply(entry) {
+      if (shouldFail(entry)) {
+        throw new Error(
+          `[harness] injected responder apply failure for ${entry.appId}.${entry.table} ${String(entry.row?.["id"] ?? "")}`,
+        );
+      }
+      return base.apply(entry);
+    },
+  };
 }
 
 /**

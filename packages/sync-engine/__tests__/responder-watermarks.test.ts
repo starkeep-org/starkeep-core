@@ -19,9 +19,9 @@ import {
   makeMockAppSource,
   type MockAppRowStore,
 } from "./sync-test-harness/mock-app-source.js";
+import { failingApplier } from "./sync-test-harness/failure-injection.js";
 import type {
   AppSyncableRowEntry,
-  ScanCapableApplier,
   SyncStateStore,
   SyncTransport,
   Watermarks,
@@ -286,20 +286,9 @@ describe("responderWatermarks — coverage computation", () => {
 });
 
 describe("responderWatermarks — false-ack and contiguity (Defect C)", () => {
-  function failingApplier(
-    base: ScanCapableApplier,
-    shouldFail: (entry: AppSyncableRowEntry) => boolean,
-  ): ScanCapableApplier {
-    return {
-      ...base,
-      async apply(entry) {
-        if (shouldFail(entry)) {
-          throw new Error(`[test] injected apply failure for ${entry.row?.["id"]}`);
-        }
-        return base.apply(entry);
-      },
-    };
-  }
+  // Shared with `responder-failure.test.ts`, which covers the other two halves
+  // of the same event: this file pins that a failed apply stays out of the
+  // coverage watermark, that one pins that the requester is *told*.
 
   it("an app row that fails to apply is excluded from coverage and re-ships next round", async () => {
     const cloudApp = makeMockAppSource("test-app", [
