@@ -147,7 +147,12 @@ export interface ResidencyVerdict {
     | "outside-recency-window"
     | "within-recency-window"
     | "budget-exhausted"
-    | "unclassified";
+    | "unclassified"
+    // Not a decision this module made. `SyncEngine.fetchBlob` answers a direct
+    // request and is deliberately not subject to the policy, but the arrival
+    // still has to be charged to a budget — so it reports a verdict it did not
+    // ask for, named so the residency inspector does not read it as one.
+    | "explicit-request";
 }
 
 /** How many bytes this node currently holds for a class. Supplied by the host. */

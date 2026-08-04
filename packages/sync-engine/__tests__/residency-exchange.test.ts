@@ -18,7 +18,6 @@ import {
 import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
-import { createFileSyncEngine } from "../src/file-sync-engine.js";
 import { residencyOf } from "../src/residency.js";
 import type { BlobCandidate, ResidencyVerdict } from "../src/residency-policy.js";
 import type { SyncStateStore, Watermarks } from "../src/types.js";
@@ -29,6 +28,7 @@ interface Fixture {
   localStorage: MockObjectStorageAdapter;
   cloudStorage: MockObjectStorageAdapter;
   localDb: MockDatabaseAdapter;
+  cloudDb: MockDatabaseAdapter;
   syncState: SyncStateStore;
   cloudRecordId: StarkeepId;
   cloudRecordKey: string;
@@ -104,6 +104,7 @@ async function setup(
     localStorage,
     cloudStorage,
     localDb,
+    cloudDb,
     syncState,
     cloudRecordId: cloudRecord.id,
     cloudRecordKey: cloudRecord.objectStorageKey,
@@ -195,8 +196,11 @@ describe("the way back from a decline", () => {
    * reason it must not consult the decider: it is the answer to "the user
    * opened this photo", not a policy question that would decline it again.
    *
-   * Note that nothing in the product calls it yet; the route exists and is
-   * exercised here, but a UI asking for a declined photo has no path to it.
+   * Reached through `engine.fetchBlob` rather than through a bare
+   * `createFileSyncEngine()`, because that is how the product reaches it: the
+   * phone's placeholder tile calls `MobileNode.fetchBlob`, which calls this. A
+   * separate file-sync engine would also have its own in-flight table, which is
+   * exactly the collision the next case is about.
    */
   it("brings down a blob the node previously declined", async () => {
     const f = await setup(() => elide);
@@ -209,22 +213,59 @@ describe("the way back from a decline", () => {
     expect(await f.localStorage.has(f.cloudRecordKey)).toBe(false);
 
     const record = (await f.localDb.get(f.cloudRecordId))!;
-    const ok = await createFileSyncEngine().fetchBlobOnDemand(
-      {
-        objectStorageKey: record.objectStorageKey,
-        fileHash: record.contentHash,
-        sizeBytes: record.sizeBytes,
-        ...(record.mimeType ? { mimeType: record.mimeType } : {}),
-      },
-      f.cloudStorage,
-      f.localStorage,
-    );
+    const ok = await f.engine.fetchBlob({
+      objectStorageKey: record.objectStorageKey,
+      fileHash: record.contentHash,
+      sizeBytes: record.sizeBytes,
+      ...(record.mimeType ? { mimeType: record.mimeType } : {}),
+    });
 
     expect(ok).toBe(true);
     expect(await f.localStorage.has(f.cloudRecordKey)).toBe(true);
     // Still elided by policy — the fetch answered a request, it did not change
     // the node's mind — so the decider was never asked a second time.
     expect(f.decisions).toHaveLength(1);
+  });
+
+  it("joins a transfer already in flight rather than reporting failure", async () => {
+    // Test 14. `transferFile` and `fetchBlob` are the same function over one
+    // in-flight table, and a `Set` there meant the second caller got `false` —
+    // indistinguishable from "the fetch failed". On a phone that is a user
+    // opening a photo whose bytes a sync round happens to be pulling and being
+    // told it did not work, with the placeholder still on screen.
+    const f = await setup(() => fetch);
+    const record = (await f.cloudDb.get(f.cloudRecordId))!;
+    const manifest = {
+      objectStorageKey: record.objectStorageKey,
+      fileHash: record.contentHash,
+      sizeBytes: record.sizeBytes,
+      ...(record.mimeType ? { mimeType: record.mimeType } : {}),
+    };
+
+    // Hold the destination write open so both calls are genuinely concurrent.
+    let releaseWrite: () => void = () => {};
+    const writeStarted = new Promise<void>((resolve) => {
+      const realPutStream = f.localStorage.putStream.bind(f.localStorage);
+      f.localStorage.putStream = async (key, body, options) => {
+        resolve();
+        await new Promise<void>((r) => {
+          releaseWrite = r;
+        });
+        return realPutStream(key, body, options);
+      };
+    });
+
+    const first = f.engine.fetchBlob(manifest);
+    await writeStarted;
+    const second = f.engine.fetchBlob(manifest);
+    releaseWrite();
+
+    expect(await first).toBe(true);
+    expect(
+      await second,
+      "a caller that arrived mid-transfer must be told what happened, not told no",
+    ).toBe(true);
+    expect(await f.localStorage.has(f.cloudRecordKey)).toBe(true);
   });
 
   it("re-ships a previously elided record when a repair floor asks for it", async () => {

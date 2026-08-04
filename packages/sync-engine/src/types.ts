@@ -34,6 +34,18 @@ export interface ResidencyHooks {
    * slowly convinces itself it is full of things it doesn't have.
    */
   onLanded?(candidate: BlobCandidate, verdict: ResidencyVerdict): void | Promise<void>;
+  /**
+   * Which size class this candidate belongs to, without deciding anything.
+   *
+   * Exists for {@link SyncEngine.fetchBlob}, which must charge an arrival to the
+   * right budget while **not** consulting {@link decide} — the fetch answers a
+   * direct request, and asking the decider would let a policy refuse a photo
+   * somebody just opened, or record a second decision that never happened.
+   *
+   * Resolving the class is the host's job either way: the sync engine must not
+   * learn what `image-medium` is.
+   */
+  classOf?(candidate: BlobCandidate): Promise<string | null> | string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -612,6 +624,32 @@ export interface SyncEngine {
    * sides. Run it on a slow schedule, on demand, or after an unclean shutdown.
    */
   verify(): Promise<VerifyResult>;
+
+  /**
+   * Pull a blob this node previously declined, on request.
+   *
+   * The reversal half of eliding, and the reason eliding is safe at all. An
+   * elided record **advances the watermark** — that is what makes it a terminal
+   * state rather than a permanent retry — so the peer will never offer those
+   * bytes again and no sync round can bring them back. Without this,
+   * `keep: "on-demand-only"` would mean "never", and raising a budget would
+   * backfill nothing.
+   *
+   * On the engine rather than on `FileSyncEngine` for two reasons. It saves
+   * every caller from re-deriving which storage is local and which is remote,
+   * which is a thing to get backwards exactly once. And it shares the engine's
+   * own in-flight table, so a fetch for a key a round is currently transferring
+   * joins that transfer instead of racing it.
+   *
+   * Deliberately bypasses the residency decision: this is the answer to a direct
+   * request ("the user opened this photo"), not a policy question. Byte
+   * accounting still sees the arrival, so an on-demand fetch can push a class
+   * over budget and be evicted later — the intended shape, because refusing to
+   * show someone their own photo to stay under a cache budget is not a
+   * defensible behaviour.
+   */
+  fetchBlob(manifest: FileSyncManifest, candidate?: BlobCandidate): Promise<boolean>;
+
   readonly changeNotifier: ChangeNotifier;
 }
 

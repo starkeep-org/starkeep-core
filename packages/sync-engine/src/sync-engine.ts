@@ -888,6 +888,56 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   return {
     exchange,
 
+    /**
+     * See {@link SyncEngine.fetchBlob}. Thin on purpose: the whole value is in
+     * naming the two storages correctly and sharing `fileSyncEngine`, so a
+     * fetch for a key a round is currently moving joins that transfer rather
+     * than being told it failed.
+     *
+     * Byte accounting fires on arrival, exactly as it does for a round's pull —
+     * a budget that does not see an on-demand fetch is a budget that stops
+     * describing the disk.
+     */
+    async fetchBlob(
+      manifest: FileSyncManifest,
+      candidate?: BlobCandidate,
+    ): Promise<boolean> {
+      // `classOf`, never `decide`. The accounting needs the class so the bytes
+      // land against the right budget, and resolving it is the host's job — but
+      // the *decision* must not be asked for, because this path is not subject
+      // to it. Calling `decide` here would both let a policy refuse a photo
+      // somebody just opened and record a second decision that never happened.
+      const forAccounting = candidate ?? candidateForManifest(manifest);
+      const sizeClass = residency?.classOf
+        ? await residency.classOf(forAccounting)
+        : null;
+
+      const ok = await transferBlobSafe(
+        manifest,
+        remoteObjectStorage,
+        localObjectStorage,
+        fileSyncEngine,
+        "download",
+        manifest.objectStorageKey,
+      );
+      if (!ok) return false;
+
+      // On arrival, not on decision — an on-demand fetch that failed must not
+      // move the byte accounting any more than a round's pull may. An
+      // over-budget class is the intended outcome here, not a bug: refusing to
+      // show someone their own photo to stay under a cache budget is not a
+      // defensible behaviour, so this can push a class over and let eviction
+      // sort it out later.
+      if (residency?.onLanded) {
+        await residency.onLanded(forAccounting, {
+          decision: "fetch",
+          sizeClass,
+          reason: "explicit-request",
+        });
+      }
+      return true;
+    },
+
     async sync(options?: SyncOptions): Promise<SyncResult> {
       const maxRounds = options?.maxRounds ?? DEFAULT_MAX_ROUNDS;
       const totals: SyncResult = {
@@ -1301,6 +1351,29 @@ function candidateForRecord(record: AnyRecord): BlobCandidate | null {
     sizeBytes: record.sizeBytes,
     type: record.type,
     parentId: record.parentId,
+    appId: null,
+    recencyAtMs: null,
+    lastOpenedAtMs: null,
+  };
+}
+
+/**
+ * The least a manifest can say about itself as a residency candidate.
+ *
+ * Used only when {@link SyncEngine.fetchBlob} is called without one. Every field
+ * a manifest cannot supply is null, which reads as "unknown" throughout the
+ * policy — and unknown makes the decider fetch rather than decline, the correct
+ * direction for a path whose whole purpose is to fetch. A caller that holds the
+ * record row should pass the real candidate so the class resolves properly and
+ * the bytes are charged to the right budget.
+ */
+function candidateForManifest(manifest: FileSyncManifest): BlobCandidate {
+  return {
+    recordId: manifest.objectStorageKey,
+    objectStorageKey: manifest.objectStorageKey,
+    sizeBytes: manifest.sizeBytes,
+    type: manifest.mimeType ?? null,
+    parentId: null,
     appId: null,
     recencyAtMs: null,
     lastOpenedAtMs: null,

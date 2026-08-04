@@ -368,10 +368,14 @@ export function createResidencyManager(
 export function residencyHooks(manager: ResidencyManager): {
   decide(candidate: BlobCandidate): Promise<ResidencyVerdict>;
   onLanded(candidate: BlobCandidate, verdict: ResidencyVerdict): void;
+  classOf(candidate: BlobCandidate): Promise<string | null>;
 } {
   return {
     decide: (candidate) => manager.decide(candidate),
     onLanded: (candidate, verdict) => manager.noteArrival(candidate, verdict.sizeClass),
+    // Class without decision, for the on-demand fetch: it must charge the right
+    // budget without asking a policy that is not entitled to refuse it.
+    classOf: (candidate) => manager.classOf(candidate),
   };
 }
 
