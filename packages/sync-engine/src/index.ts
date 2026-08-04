@@ -29,6 +29,7 @@ export type {
   ResidencyDecider,
   ResidencyHooks,
 } from "./types.js";
+export { SHARED_DIGEST_SCOPE } from "./types.js";
 export {
   computeCeilings,
   cutRound,
@@ -111,6 +112,13 @@ export {
   type HttpSyncServerOptions,
 } from "./transports/http-server.js";
 export { SyncError } from "./errors.js";
+export {
+  sanitizeExchangeRequest,
+  InvalidExchangeRequest,
+  DEFAULT_RESPONDER_MAX_ITEMS,
+  DEFAULT_RESPONDER_MAX_BYTES,
+  type SanitizeExchangeRequestOptions,
+} from "./exchange-request.js";
 
 export {
   projectPolicy,

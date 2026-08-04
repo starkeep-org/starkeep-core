@@ -103,8 +103,13 @@ export interface Side {
   readonly applier: AppSyncableApplier & ScanCapableApplier;
   readonly namespaces: AppSyncableNamespaceStore;
   readonly clock: HLCClock;
-  /** Direct access to the in-memory app-row store, for assertions. */
-  readonly appRows: Map<string, AppSyncableRowEntry>;
+  /**
+   * Direct access to the in-memory app-row store, for assertions.
+   *
+   * Stored rows (column maps), not wire entries — the mock models a table now,
+   * so a tombstoned row is a row with `deleted_at` set, exactly as in SQL.
+   */
+  readonly appRows: Map<string, Record<string, unknown>>;
 }
 
 export interface World {

@@ -1,6 +1,11 @@
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
-import { createDataRecord, generateId, type StarkeepId } from "@starkeep/protocol-primitives";
+import {
+  createDataRecord,
+  generateId,
+  serializeHLC,
+  type StarkeepId,
+} from "@starkeep/protocol-primitives";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { buildSide } from "./sync-test-harness/side.js";
@@ -39,13 +44,16 @@ describe("channel split — SR vs. AR/AW", () => {
 
   async function seedAr(side: Awaited<ReturnType<typeof buildSide>>, appId: string): Promise<string> {
     const pk = generateId();
+    const ts = side.clock.now();
     const entry: AppSyncableRowEntry = {
       appId,
       table: "test_rows",
       op: "insert",
       where: { id: pk },
-      row: { id: pk, value: "v" },
-      timestamp: side.clock.now(),
+      // `updated_at` is the column every scan, watermark and digest reads. A
+      // row without it is not a row any real applier would store.
+      row: { id: pk, value: "v", updated_at: serializeHLC(ts), deleted_at: null },
+      timestamp: ts,
     };
     await side.applier.apply(entry);
     return pk;
@@ -87,7 +95,7 @@ describe("channel split — SR vs. AR/AW", () => {
     // SR did NOT cross the per-app channel…
     expect(await cloud.db.get(srId)).toBeNull();
     // …but the AR row did.
-    const arRows = [...cloud.appRows.values()].filter((e) => e.table === "test_rows");
+    const arRows = [...cloud.appRows.keys()].filter((k) => k.includes("::test_rows::"));
     expect(arRows.length).toBe(1);
   });
 
@@ -123,7 +131,7 @@ describe("channel split — SR vs. AR/AW", () => {
     // SR crossed the Drive channel…
     expect(await cloud.db.get(srId)).not.toBeNull();
     // …and no AR rows were shipped (the Drive channel carries none).
-    const arRows = [...cloud.appRows.values()].filter((e) => e.table === "test_rows");
+    const arRows = [...cloud.appRows.keys()].filter((k) => k.includes("::test_rows::"));
     expect(arRows.length).toBe(0);
   });
 });
@@ -191,12 +199,18 @@ describe("verify() is scoped to the channel", () => {
     const cloud = await buildSide({ role: "cloud", nodeId: "C", wallClock, appId: "test-app" });
 
     for (let i = 0; i < 3; i += 1) {
-      local.appRows.set(`test-app::test_rows::r${i}`, {
+      const ts = local.clock.now();
+      await local.applier.apply({
         appId: "test-app",
         table: "test_rows",
         op: "insert",
-        row: { id: `r${i}`, note: `n${i}` },
-        timestamp: local.clock.now(),
+        row: {
+          id: `r${i}`,
+          note: `n${i}`,
+          updated_at: serializeHLC(ts),
+          deleted_at: null,
+        },
+        timestamp: ts,
       });
     }
 

@@ -908,6 +908,115 @@ describe("sync exchange channel split", () => {
   });
 });
 
+describe("sync exchange request validation", () => {
+  const DIGEST = /group by "node_id", substr/;
+  const hlc = { wallTime: Date.UTC(2026, 0, 2), counter: 0, nodeId: "peer" };
+
+  /** A store with nothing in it — every response here is about the request. */
+  function emptyStore() {
+    const db = fakeDsqlWithGrants()
+      .on(RECORDS_SELECT, [])
+      .on(RECORDS_NODE_WATERMARKS, [])
+      .on(DIGEST, []);
+    setDbFactory(db);
+    return db;
+  }
+
+  function exchange(body: unknown) {
+    return handler(
+      signedEvent({
+        appId: "starkeep-drive",
+        method: "POST",
+        subPath: "/sync/exchange",
+        body,
+      }),
+      context,
+    );
+  }
+
+  it("400s a body it cannot read, rather than 500ing out of the query layer", async () => {
+    // Signed, so not an anonymous surface — but a peer on an older build or a
+    // field that drifted type used to reach `LIMIT ?` and `substr(…, 1, N)`
+    // and come back as a 500. The failure is the caller's, and now says so.
+    emptyStore();
+    for (const body of [
+      { watermarks: { peer: "not-an-hlc" } },
+      { watermarks: [] },
+      { watermarks: {}, records: { id: "x" } },
+      { watermarks: {}, limit: "lots" },
+    ]) {
+      const res = await exchange(body);
+      expect(res.statusCode, JSON.stringify(body)).toBe(400);
+    }
+  });
+
+  it("clamps a limit far above the responder's own maximum", async () => {
+    // `limit: 1e9` was a per-author scan of that size for the asking. An
+    // author has to actually owe something for a scan to be planned at all,
+    // hence the watermark row.
+    const db = fakeDsqlWithGrants()
+      .on(RECORDS_SELECT, [])
+      .on(RECORDS_NODE_WATERMARKS, [
+        { node_id: "peer", max_updated_at: serializeHLC(hlc) },
+      ]);
+    setDbFactory(db);
+    const res = await exchange({ watermarks: {}, limit: 1e9 });
+    expect(res.statusCode).toBe(200);
+
+    const scans = db.calls(RECORDS_SELECT);
+    expect(scans.length).toBeGreaterThan(0);
+    for (const scan of scans) {
+      // The scan asks for `limit + 1` — the extra row is how the responder
+      // tells "that was everything" from "there is more".
+      for (const value of scan.values) {
+        if (typeof value === "number") expect(value).toBeLessThanOrEqual(1001);
+      }
+    }
+  });
+
+  it("serves a digest request, and says what width it used", async () => {
+    // `verify()`'s half of the protocol, over the cloud handler rather than
+    // the in-process transport it is otherwise only ever tested against. A
+    // responder that answered without echoing the width would let two sides
+    // compare buckets of different sizes and call it catastrophic divergence.
+    emptyStore();
+    const res = await exchange({
+      watermarks: {},
+      limit: 0,
+      requestDigest: true,
+      digestPrefixLength: 5,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)).toMatchObject({
+      digest: [],
+      digestPrefixLength: 5,
+      digestScopes: ["shared"],
+    });
+  });
+
+  it("ignores an unusable digest width instead of failing on it", async () => {
+    // Dropped rather than refused: the requester compares the echoed width
+    // against what it asked for and declines to compare on a mismatch, which
+    // resolves this one layer up without an error.
+    emptyStore();
+    const res = await exchange({
+      watermarks: {},
+      limit: 0,
+      requestDigest: true,
+      digestPrefixLength: "wide",
+    });
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)["digestPrefixLength"]).toBe(5);
+  });
+
+  it("does not include a digest when none was asked for", async () => {
+    emptyStore();
+    const res = await exchange({ watermarks: {} });
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)["digest"]).toBeUndefined();
+  });
+});
+
 describe("/app-data routes", () => {
   const NS_SELECT = /from "shared"\."app_syncable_namespaces"/;
   const notesNamespace = {

@@ -80,7 +80,11 @@ import type {
   RetrievalIntent,
   VariantCandidate,
 } from "@starkeep/protocol-primitives";
-import { createInProcessSyncTransport } from "@starkeep/sync-engine";
+import {
+  createInProcessSyncTransport,
+  sanitizeExchangeRequest,
+  InvalidExchangeRequest,
+} from "@starkeep/sync-engine";
 import {
   DsqlAppSyncableNamespaceStore,
   DsqlAppSyncableApplier,
@@ -3148,7 +3152,19 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const rawBody = event.isBase64Encoded && event.body
         ? Buffer.from(event.body, "base64").toString("utf8")
         : (event.body ?? "{}");
-      const body = JSON.parse(rawBody);
+      // Signed, but not therefore well-formed. The budgets in this body reach
+      // a `LIMIT ?` and the digest width reaches `substr(updated_at, 1, N)`,
+      // so a peer on an older build or a field that drifted type used to come
+      // back as a 500 out of the query layer. Clamped where the caller is
+      // asking for too much, refused where it cannot be read at all.
+      let body;
+      try {
+        body = sanitizeExchangeRequest(JSON.parse(rawBody));
+      } catch (err) {
+        if (err instanceof InvalidExchangeRequest) return clientErr(err.message, 400);
+        if (err instanceof SyntaxError) return clientErr("Body is not valid JSON", 400);
+        throw err;
+      }
 
       // Channel split. The Starkeep Drive channel carries *all* shared
       // records (and nothing app-specific); every per-app channel carries only

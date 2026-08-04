@@ -2,6 +2,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { HLCClock } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createInProcessSyncTransport } from "./in-process-transport.js";
+import {
+  sanitizeExchangeRequest,
+  InvalidExchangeRequest,
+} from "../exchange-request.js";
 import type { SyncExchangeRequest, SyncTransport } from "../types.js";
 
 export interface HttpSyncServerOptions {
@@ -40,7 +44,18 @@ export function createHttpSyncHandler(
     );
 
     if (req.method === "POST" && url.pathname === "/sync/exchange") {
-      const body = await readJson<SyncExchangeRequest>(req);
+      // Checked, not cast: the parsed body is whatever the peer sent, and its
+      // numbers reach a `LIMIT ?` and a `substr(…, 1, N)` a few frames down.
+      let body: SyncExchangeRequest;
+      try {
+        body = sanitizeExchangeRequest(await readJson<unknown>(req));
+      } catch (err) {
+        if (err instanceof InvalidExchangeRequest) {
+          sendJson(res, 400, { error: err.message });
+          return true;
+        }
+        throw err;
+      }
       const response = await transport.exchange(body);
       sendJson(res, 200, response);
       return true;

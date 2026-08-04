@@ -331,13 +331,18 @@ describe("blob staging across the wire", () => {
     });
     await syncNow(driveA); // record + blob now in the cloud
 
-    cloud.failures.blobGets = 1;
-    await syncNow(driveB); // blob download fails once → staged, watermark held
+    // Fails for every round this call makes, not just the first. `/sync/now`
+    // drains in rounds and no longer reports a round whose transfer failed as
+    // complete, so a single-shot failure is repaired inside the same call and
+    // the staged state is never observable from outside.
+    cloud.failures.blobGets = 100;
+    await syncNow(driveB); // blob download fails → staged, watermark held
 
     const bytesWhileStaged = await driveB.fetch(`/data/records/${record.id}/file-url`);
     expect(bytesWhileStaged.status).not.toBe(200);
 
     // Next rounds repair: blob lands and the record is fully resident.
+    cloud.failures.blobGets = 0;
     await eventually(async () => {
       await syncNow(driveB);
       expect(await fetchBytes(driveB, record.id)).toBe("staged-bytes");

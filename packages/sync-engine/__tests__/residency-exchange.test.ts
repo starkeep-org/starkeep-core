@@ -18,6 +18,7 @@ import {
 import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
+import { createFileSyncEngine } from "../src/file-sync-engine.js";
 import { residencyOf } from "../src/residency.js";
 import type { BlobCandidate, ResidencyVerdict } from "../src/residency-policy.js";
 import type { SyncStateStore, Watermarks } from "../src/types.js";
@@ -184,6 +185,77 @@ describe("fetching a blob", () => {
     expect(f.landed).toHaveLength(0);
     // And the watermark stayed put, so this is a retry rather than a decline.
     expect(await f.syncState.getWatermarks()).toEqual({});
+  });
+});
+
+describe("the way back from a decline", () => {
+  /**
+   * Eliding advances the watermark, so no future round will offer these bytes
+   * again. That makes `fetchBlobOnDemand` the *only* route back — and the
+   * reason it must not consult the decider: it is the answer to "the user
+   * opened this photo", not a policy question that would decline it again.
+   *
+   * Note that nothing in the product calls it yet; the route exists and is
+   * exercised here, but a UI asking for a declined photo has no path to it.
+   */
+  it("brings down a blob the node previously declined", async () => {
+    const f = await setup(() => elide);
+    await f.engine.exchange();
+    expect(await f.localStorage.has(f.cloudRecordKey)).toBe(false);
+
+    // Sync cannot help: the peer considers the record delivered.
+    const another = await f.engine.sync();
+    expect(another.applied).toBe(0);
+    expect(await f.localStorage.has(f.cloudRecordKey)).toBe(false);
+
+    const record = (await f.localDb.get(f.cloudRecordId))!;
+    const ok = await createFileSyncEngine().fetchBlobOnDemand(
+      {
+        objectStorageKey: record.objectStorageKey,
+        fileHash: record.contentHash,
+        sizeBytes: record.sizeBytes,
+        ...(record.mimeType ? { mimeType: record.mimeType } : {}),
+      },
+      f.cloudStorage,
+      f.localStorage,
+    );
+
+    expect(ok).toBe(true);
+    expect(await f.localStorage.has(f.cloudRecordKey)).toBe(true);
+    // Still elided by policy — the fetch answered a request, it did not change
+    // the node's mind — so the decider was never asked a second time.
+    expect(f.decisions).toHaveLength(1);
+  });
+
+  it("re-ships a previously elided record when a repair floor asks for it", async () => {
+    // A repair lowers the *advertised* watermark, so the responder re-ships
+    // rows the elision had already carried past. What comes back down is the
+    // row, and the decision is taken again from scratch — which is what makes a
+    // budget change take effect on a library that was declined under the old
+    // one, and what stops a repair from silently reversing a policy that has
+    // not changed.
+    let verdict: ResidencyVerdict = elide;
+    const f = await setup(() => verdict);
+    await f.engine.exchange();
+    expect(await f.localStorage.has(f.cloudRecordKey)).toBe(false);
+    const covered = await f.syncState.getWatermarks();
+    expect(covered["cloud"]).toBeDefined();
+
+    // Arm the inbound repair the way `verify()` does: advertise less than we
+    // hold, from below the record.
+    await f.syncState.setInboundFloors({
+      cloud: { wallTime: 0, counter: 0, nodeId: "cloud" },
+    });
+
+    verdict = fetch;
+    await f.engine.exchange();
+
+    // The row itself is an LWW no-op — we already had it, which is why
+    // `applied` stays at zero — but the *decision* is taken again, and this
+    // time it wants the bytes.
+    expect(f.decisions.length).toBeGreaterThan(1);
+    expect(await f.localStorage.has(f.cloudRecordKey)).toBe(true);
+    expect(f.landed.map((c) => c.objectStorageKey)).toEqual([f.cloudRecordKey]);
   });
 });
 

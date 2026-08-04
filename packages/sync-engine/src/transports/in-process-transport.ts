@@ -21,6 +21,7 @@ import type {
   ScanCapableApplier,
   Watermarks,
 } from "../types.js";
+import { SHARED_DIGEST_SCOPE } from "../types.js";
 import { advanceWatermark } from "../watermarks.js";
 import {
   computeCeilings,
@@ -28,10 +29,10 @@ import {
   type RoundItem,
   type StreamTruncation,
 } from "../round-cut.js";
-
-/** Mirrors the engine's own defaults; see `SyncEngineOptions.maxItems`. */
-const DEFAULT_RESPONDER_MAX_ITEMS = 1000;
-const DEFAULT_RESPONDER_MAX_BYTES = 25 * 1024 * 1024;
+import {
+  DEFAULT_RESPONDER_MAX_ITEMS,
+  DEFAULT_RESPONDER_MAX_BYTES,
+} from "../exchange-request.js";
 
 /** Mirror of `FILE_RECORDS_TABLE`; only that table's rows carry blobs. */
 const FILE_RECORDS_TABLE = "_starkeep_sync_records";
@@ -342,16 +343,28 @@ export function createInProcessSyncTransport(
       // would hand the caller counts over rows this channel never carries.
       const prefixLength = request.digestPrefixLength ?? DEFAULT_BUCKET_PREFIX_LENGTH;
       let digest: DigestBucket[] | undefined;
+      let digestScopes: string[] | undefined;
       if (request.requestDigest) {
         const buckets: DigestBucket[] = [];
+        const scopes: string[] = [];
+        let complete = true;
         if (syncSharedRecords) {
-          buckets.push(...(await databaseAdapter.bucketDigest(prefixLength)));
+          scopes.push(SHARED_DIGEST_SCOPE);
+          try {
+            buckets.push(...(await databaseAdapter.bucketDigest(prefixLength)));
+          } catch (err) {
+            console.warn(
+              `[sync] in-process transport bucketDigest failed for shared records: ${(err as Error).message}`,
+            );
+            complete = false;
+          }
         }
         if (appSyncableSource) {
           const scanCapable = appSyncableSource.applier as ScanCapableApplier;
           if (typeof scanCapable.bucketDigest === "function") {
             for (const ns of appSyncableSource.namespaces.list()) {
               for (const tableInfo of ns.tables) {
+                scopes.push(`${ns.appId}.${tableInfo.name}`);
                 try {
                   buckets.push(
                     ...(await scanCapable.bucketDigest(
@@ -364,12 +377,22 @@ export function createInProcessSyncTransport(
                   console.warn(
                     `[sync] in-process transport bucketDigest failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
                   );
+                  complete = false;
                 }
               }
             }
           }
         }
-        digest = mergeDigestBuckets(buckets);
+        if (complete) {
+          digest = mergeDigestBuckets(buckets);
+          digestScopes = scopes.sort();
+        }
+        // Otherwise send no digest at all. A table we could not count is not a
+        // table we hold nothing in, and a short digest is worse than none: the
+        // requester would read the uncounted rows as rows the responder lost
+        // and arm a repair over all of them. Omitting it takes the branch that
+        // already exists for a peer that cannot answer — `supported: false`,
+        // which reads as "not checked" rather than "checked and broken".
       }
 
       return {
@@ -378,9 +401,11 @@ export function createInProcessSyncTransport(
         appSyncableRows,
         responderWatermarks,
         hasMore,
-        // Echo the width actually used, so a requester can refuse to compare
-        // rather than compare buckets that mean different things.
-        ...(digest ? { digest, digestPrefixLength: prefixLength } : {}),
+        // Echo the width actually used *and* what was counted, so a requester
+        // can refuse to compare rather than compare buckets that mean different
+        // things — a different width, or a different set of tables summed into
+        // them.
+        ...(digest ? { digest, digestPrefixLength: prefixLength, digestScopes } : {}),
       };
     },
   };

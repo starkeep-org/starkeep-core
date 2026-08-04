@@ -454,6 +454,9 @@ async function applyArTombState(
         updated_at: hlcStr,
         deleted_at: hlcStr,
       },
+      // The primary key. A delete without one matches every row older than it,
+      // which is how a single tombstone used to wipe the peer's whole table.
+      where: { id },
     };
     await side.applier.apply(entry);
   }
@@ -607,6 +610,7 @@ async function applyAwTombState(
         updated_at: hlcStr,
         deleted_at: hlcStr,
       },
+      where: { id },
     });
   }
 

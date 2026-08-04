@@ -12,6 +12,8 @@ import {
   buildScanSinceForNode,
   collectSince,
   planNodeScans,
+  requireKeyedWhere,
+  rowToWireEntry,
   toDigestBuckets,
   DEFAULT_BUCKET_PREFIX_LENGTH,
   type DigestBucket,
@@ -129,7 +131,7 @@ export class DsqlAppSyncableApplier
     // node_id rides along whenever updated_at changes (it's derived from it).
     const rawPatch = entry.row ?? {};
     const patch = rawPatch["updated_at"] ? withNodeId(rawPatch, entry) : rawPatch;
-    const where = entry.where ?? {};
+    const where = requireKeyedWhere(entry, "update");
     const patchCols = Object.keys(patch);
     const whereCols = Object.keys(where);
     if (patchCols.length === 0) return;
@@ -149,7 +151,7 @@ export class DsqlAppSyncableApplier
     schemaTable: string,
     entry: AppSyncableRowEntry,
   ): Promise<void> {
-    const where = entry.where ?? {};
+    const where = requireKeyedWhere(entry, "delete");
     const whereCols = Object.keys(where);
     const ts = entry.row?.["updated_at"] as string ?? serializeHLC(entry.timestamp);
 
@@ -181,8 +183,12 @@ export class DsqlAppSyncableApplier
     const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
     // A missing table (app not installed here) reads as "nothing owed" rather
     // than an error, the same fail-safe direction getNodeWatermarks takes:
-    // understating only causes a re-ship.
+    // understating only causes a re-ship. That case is settled *here*, by
+    // getNodeWatermarks returning {} so no author is planned — which is why
+    // nothing below needs a catch for it.
     const scans = planNodeScans(await this.getNodeWatermarks(appId, table), peerWatermarks);
+    const pkColumns =
+      this.namespace.get(appId)?.tables.find((t) => t.name === table)?.pkColumns ?? [];
     try {
       const { rows, hasMore, truncated } = await collectSince<Record<string, unknown>>(
         scans,
@@ -195,9 +201,26 @@ export class DsqlAppSyncableApplier
         },
         (row) => deserializeHLC(row["updated_at"] as string),
       );
-      return { rows: rows.map((row) => rowToEntry(appId, table, row)), hasMore, truncated };
-    } catch {
-      return { rows: [], hasMore: false, truncated: {} };
+      return {
+        rows: rows
+          .map((row) => rowToWireEntry(appId, table, row, pkColumns, deserializeHLC))
+          .filter((entry): entry is AppSyncableRowEntry => entry !== null),
+        hasMore,
+        truncated,
+      };
+    } catch (err) {
+      // A read that failed part-way has enumerated nothing it can vouch for,
+      // and `truncated: {}` is the wire value for the opposite — "every author
+      // complete, no ceiling". Returning that lets the round ship rows whose
+      // HLCs sit above the ones this scan never reached, which is the exact
+      // silent-loss shape `round-cut.ts` exists to prevent. Every planned
+      // author therefore gets a `null` ceiling.
+      console.warn(
+        `[app-syncable] scanSince failed for ${appId}.${table}: ${(err as Error).message}`,
+      );
+      const truncated: Record<string, HLCTimestamp | null> = {};
+      for (const scan of scans) truncated[scan.nodeId] = null;
+      return { rows: [], hasMore: true, truncated };
     }
   }
 
@@ -286,20 +309,6 @@ function nodeIdOf(updatedAt: unknown, entry: AppSyncableRowEntry): string {
   return entry.timestamp.nodeId;
 }
 
-function rowToEntry(
-  appId: string,
-  table: string,
-  row: Record<string, unknown>,
-): AppSyncableRowEntry {
-  const updatedAtStr = row["updated_at"] as string;
-  const deletedAtStr = row["deleted_at"] as string | null | undefined;
-  const timestamp = deserializeHLC(updatedAtStr);
-
-  // Upsert-on-wire: receivers may not yet have this row, so emit op="insert"
-  // for live rows and let the applier's INSERT … ON CONFLICT path do the
-  // right thing in both directions.
-  if (deletedAtStr) {
-    return { timestamp, appId, table, op: "delete", row };
-  }
-  return { timestamp, appId, table, op: "insert", row };
-}
+// The wire-entry shape is shared with the SQLite applier — see
+// `storage-adapter/src/database/app-syncable-rows.ts`. It was duplicated here,
+// and both copies emitted keyless tombstones.

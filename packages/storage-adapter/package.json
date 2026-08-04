@@ -11,6 +11,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./conformance": {
+      "types": "./dist/conformance/app-syncable-applier.d.ts",
+      "import": "./dist/conformance/app-syncable-applier.js",
+      "require": "./dist/conformance/app-syncable-applier.cjs"
     }
   },
   "files": [

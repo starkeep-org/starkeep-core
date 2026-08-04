@@ -528,6 +528,14 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
   }
 
   async list(_prefix: string, _options?: ListOptions): Promise<ListResult> {
-    return { keys: [], nextCursor: null, hasMore: false };
+    // There is no listing route behind this adapter — `/files/{key}` addresses
+    // one object and nothing enumerates the bucket. Returning an empty page
+    // said "the prefix is empty", which is a *wrong answer* rather than a
+    // missing feature: a caller reconciling against storage would conclude
+    // every object under it had been lost. Nothing in the sync path lists
+    // today; whatever does first should fail here loudly and get a route.
+    throw new Error(
+      "HttpObjectStorageAdapter cannot list: no listing route exists behind /files",
+    );
   }
 }

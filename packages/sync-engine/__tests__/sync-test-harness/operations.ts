@@ -231,6 +231,7 @@ async function driveAwOperation(
           updated_at: hlcStr,
           deleted_at: hlcStr,
         },
+        where: { id },
       });
       return {};
     }
@@ -263,5 +264,8 @@ function arEntry(
       updated_at: hlcStr,
       deleted_at: opts.deletedAt ? serializeHLC(opts.deletedAt) : null,
     },
+    // A delete has to name its row. Without a `where` the statement matches
+    // every row older than the tombstone — the wipe this harness was blind to.
+    ...(op === "delete" ? { where: { id } } : {}),
   };
 }
