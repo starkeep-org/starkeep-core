@@ -140,3 +140,63 @@ describe("digestPrefixLength is dropped rather than refused", () => {
     }
   });
 });
+
+/**
+ * HLC-shaped is not the same as an HLC.
+ *
+ * `Number.isFinite` admits a negative and a fraction, and neither is a position
+ * any clock ever produced. The map key was never checked against the value's own
+ * `nodeId` at all.
+ */
+describe("watermark values that are not positions", () => {
+  it("refuses a negative wallTime", () => {
+    // `serializeHLC` renders it as a string that sorts below every stored row,
+    // so `updated_at > since` selects the whole table — a full re-ship of the
+    // library for the asking. Fail-safe in the loss sense, which is exactly why
+    // nobody would notice it happening.
+    expect(() =>
+      sanitizeExchangeRequest({
+        watermarks: { L: { wallTime: -1, counter: 0, nodeId: "L" } },
+      }),
+    ).toThrow(InvalidExchangeRequest);
+  });
+
+  it("refuses a fractional wallTime or counter", () => {
+    for (const hlc of [
+      { wallTime: 1.5, counter: 0, nodeId: "L" },
+      { wallTime: 1, counter: 0.5, nodeId: "L" },
+    ]) {
+      expect(() => sanitizeExchangeRequest({ watermarks: { L: hlc } })).toThrow(
+        InvalidExchangeRequest,
+      );
+    }
+  });
+
+  it("refuses a negative counter", () => {
+    expect(() =>
+      sanitizeExchangeRequest({
+        watermarks: { L: { wallTime: 1, counter: -1, nodeId: "L" } },
+      }),
+    ).toThrow(InvalidExchangeRequest);
+  });
+
+  it("accepts zero, which is a real position", () => {
+    // The bottom of the range, and what a repair floor is armed at. Refusing it
+    // would refuse every inbound repair.
+    const out = sanitizeExchangeRequest({
+      watermarks: { L: { wallTime: 0, counter: 0, nodeId: "L" } },
+    });
+    expect(out.watermarks["L"]).toEqual({ wallTime: 0, counter: 0, nodeId: "L" });
+  });
+
+  it("normalizes a value whose nodeId disagrees with its key", () => {
+    // `planNodeScans` keys off the map key while the serialized bound carries
+    // the value's nodeId, so a mismatched pair shifts the tie-break at identical
+    // `(wallTime, counter)` — selecting or skipping a row at exactly the
+    // boundary. The key is what the scan is planned around, so it wins.
+    const out = sanitizeExchangeRequest({
+      watermarks: { L: { wallTime: 5, counter: 1, nodeId: "someone-else" } },
+    });
+    expect(out.watermarks["L"]).toEqual({ wallTime: 5, counter: 1, nodeId: "L" });
+  });
+});

@@ -155,6 +155,21 @@ function clampBudget(
  * of the wrong shape becomes either a comparison against `undefined` — which
  * silently selects the wrong rows — or a throw from inside the query builder.
  * The first is worse than the second, and this catches both.
+ *
+ * "HLC-shaped" is not the same as "an HLC", and the two ways they came apart
+ * are both refused here:
+ *
+ * - **A negative or fractional `wallTime`.** `Number.isFinite` admits both.
+ *   `serializeHLC` renders a negative wall time as a string that sorts below
+ *   every stored row, so `updated_at > since` selects the whole table — a full
+ *   re-ship of the library for the asking. Fail-safe in the loss sense, which is
+ *   why it went unnoticed, and not a thing a responder should do because a
+ *   number arrived with a minus sign on it.
+ * - **A key that disagrees with the value's own `nodeId`.** `planNodeScans` keys
+ *   off the map key while the serialized bound carries the value's `nodeId`, so
+ *   a mismatched pair shifts the tie-break at identical `(wallTime, counter)` —
+ *   selecting or skipping a row at exactly the boundary. Normalized to the map
+ *   key, which is the one the scan is planned around.
  */
 function sanitizeWatermarks(value: unknown): Watermarks {
   if (value === undefined || value === null) return {};
@@ -166,10 +181,8 @@ function sanitizeWatermarks(value: unknown): Watermarks {
     if (
       typeof hlc !== "object" ||
       hlc === null ||
-      typeof (hlc as HLCTimestamp).wallTime !== "number" ||
-      !Number.isFinite((hlc as HLCTimestamp).wallTime) ||
-      typeof (hlc as HLCTimestamp).counter !== "number" ||
-      !Number.isFinite((hlc as HLCTimestamp).counter) ||
+      !isHlcComponent((hlc as HLCTimestamp).wallTime) ||
+      !isHlcComponent((hlc as HLCTimestamp).counter) ||
       typeof (hlc as HLCTimestamp).nodeId !== "string"
     ) {
       throw new InvalidExchangeRequest(
@@ -177,7 +190,21 @@ function sanitizeWatermarks(value: unknown): Watermarks {
       );
     }
     const { wallTime, counter, nodeId: author } = hlc as HLCTimestamp;
-    out[nodeId] = { wallTime, counter, nodeId: author };
+    if (author !== nodeId) {
+      // Normalized rather than rejected: the map key is what the scan is
+      // planned around, and an older peer that filled the field carelessly is
+      // asking for this author's rows either way. Rejecting would refuse a
+      // request whose intent is unambiguous.
+      console.warn(
+        `[sync] watermarks["${nodeId}"] carries nodeId "${author}"; using the map key`,
+      );
+    }
+    out[nodeId] = { wallTime, counter, nodeId };
   }
   return out;
+}
+
+/** A non-negative integer — what both numeric fields of an HLC actually are. */
+function isHlcComponent(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
