@@ -57,6 +57,7 @@ export {
   bucketsPeerIsMissing,
   buildBucketDigest,
   mergeDigestBuckets,
+  raiseInboundFloors,
   repairFloorsFor,
   toDigestBuckets,
   totalRows,

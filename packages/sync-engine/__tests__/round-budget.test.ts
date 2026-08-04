@@ -16,7 +16,12 @@
 
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
-import { createDataRecord, generateId, type StarkeepId } from "@starkeep/protocol-primitives";
+import {
+  compareHLC,
+  createDataRecord,
+  generateId,
+  type StarkeepId,
+} from "@starkeep/protocol-primitives";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { buildSide } from "./sync-test-harness/side.js";
@@ -350,6 +355,31 @@ describe("sync()", () => {
     expect(result.rounds).toBe(2);
     expect(result.complete).toBe(false);
   });
+
+  it("says work remains rather than stuck when maxRounds runs out", async () => {
+    // Test 22 — what the *caller* is supposed to conclude, which is the half
+    // `honours maxRounds as a backstop` does not pin. The backstop and a stall
+    // both end the loop with `complete: false`, and they mean opposite things:
+    // one is "call again and it will finish", the other is "calling again will
+    // achieve nothing". `stalled` is the only thing separating them, so a run
+    // cut short by the budget must not set it — and the next call must finish.
+    const { local, cloud } = await twoSides();
+    const ids: StarkeepId[] = [];
+    for (let i = 0; i < 12; i += 1) ids.push(await seedBlobRecord(local, 3 * MB));
+
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 10 * MB });
+
+    const cut = await engine.sync({ maxRounds: 2 });
+    expect(cut.complete).toBe(false);
+    expect(cut.stalled, "the budget ran out; nothing is wedged").toBe(false);
+    expect(cut.shipped).toBeGreaterThan(0);
+
+    const finished = await engine.sync();
+    expect(finished.complete).toBe(true);
+    expect(finished.stalled).toBe(false);
+    for (const id of ids) expect(await cloud.db.get(id), id).not.toBeNull();
+  });
 });
 
 /**
@@ -584,6 +614,45 @@ describe("records sharing one object key", () => {
     expect(await cloud.db.get(first)).toBeNull();
     expect(await cloud.db.get(second)).toBeNull();
     expect(result.complete).toBe(false);
+  });
+
+  it("two channels naming the same key each send it, and both succeed", async () => {
+    // Test 21 — stated rather than fixed. Sharing an outcome is per *engine*:
+    // each `createSyncEngine` builds its own file-sync engine and therefore its
+    // own in-flight table, so the Drive channel and a per-app channel both
+    // upload a content-addressed key they happen to share.
+    //
+    // That is a duplicate PUT of identical bytes to a key that already names
+    // them, which costs bandwidth and nothing else — the object is the same
+    // object, and the destination's `has()` short-circuit means the second
+    // transfer usually finds it already there. Coordinating across engines would
+    // mean a shared mutable table between two channels that otherwise touch
+    // nothing in common, which is a worse trade. Written down so the next reader
+    // knows it was weighed rather than missed.
+    const { local, cloud } = await twoSides();
+    const key = "apps/photos/syncable/identical-bytes.bin";
+    const id = await seedSharingKey(local, key);
+
+    const a = engineFor(local, cloud, createMemorySyncStateStore());
+    const b = engineFor(local, cloud, createMemorySyncStateStore());
+
+    let puts = 0;
+    const realPutStream = cloud.storage.putStream.bind(cloud.storage);
+    cloud.storage.putStream = async (...args: Parameters<typeof realPutStream>) => {
+      puts += 1;
+      // Yield, so the two engines genuinely overlap rather than running in turn.
+      await new Promise((r) => setTimeout(r, 5));
+      return realPutStream(...args);
+    };
+
+    const [first, second] = await Promise.all([a.sync(), b.sync()]);
+
+    expect(first.complete && second.complete, "neither may read the other as a failure").toBe(
+      true,
+    );
+    expect(await cloud.db.get(id)).not.toBeNull();
+    expect(await cloud.storage.has(key)).toBe(true);
+    expect(puts, "each engine sends it once; nothing coordinates across them").toBe(2);
   });
 });
 
@@ -1110,6 +1179,66 @@ describe("verify() — both directions", () => {
     const result = await engine.verify();
     expect(result.supported).toBe(false);
     expect(result.missingLocally).toBe(0);
+    expect(await syncState.getInboundFloors()).toEqual({});
+  });
+
+  it("does not lower a climbed inbound cursor when verify() runs mid-repair", async () => {
+    // The inbound floor is a *cursor*: the exchange loop raises it to wherever
+    // each round's contiguous run reached. `applyRepairFloors` takes the lower
+    // of two values — right for lowering a coverage watermark, wrong for
+    // merging into a cursor — so a verify() during a repair used to put the
+    // cursor back at the bottom of the range it had been climbing out of.
+    const { local, cloud } = await twoSides();
+    const ids: StarkeepId[] = [];
+    for (let i = 0; i < 12; i += 1) ids.push(await seedBlobRecord(cloud, 1 * MB));
+
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+    await engine.sync();
+    await loseFromMiddle(local, ids[1]!);
+    await engine.verify();
+
+    // One paced round, so the cursor climbs but the repair is not finished.
+    const paced = engineFor(local, cloud, syncState, { maxBytes: 100 * MB, maxItems: 2 });
+    await paced.exchange();
+    const climbed = (await syncState.getInboundFloors())["C"];
+    expect(climbed, "the round should have moved the cursor").toBeDefined();
+
+    await engine.verify();
+
+    const after = (await syncState.getInboundFloors())["C"];
+    expect(after).toBeDefined();
+    expect(
+      compareHLC(after!, climbed!),
+      "verify() must not put the cursor back below where the repair reached",
+    ).toBeGreaterThanOrEqual(0);
+  });
+
+  it("lets a multi-round repair finish even when verify() is pressed twice", async () => {
+    // Test 12, and the user-visible version of the case above: pressing "Check
+    // backup" during a long repair used to reset it, so a repair paced across
+    // several rounds never converged while anyone kept checking on it.
+    const { local, cloud } = await twoSides();
+    const ids: StarkeepId[] = [];
+    for (let i = 0; i < 12; i += 1) ids.push(await seedBlobRecord(cloud, 1 * MB));
+
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+    await engine.sync();
+    await loseFromMiddle(local, ids[1]!);
+
+    await engine.verify();
+    await engine.verify();
+
+    const paced = engineFor(local, cloud, syncState, { maxBytes: 100 * MB, maxItems: 2 });
+    for (let i = 0; i < 3; i += 1) {
+      await paced.exchange();
+      await engine.verify();
+    }
+    const result = await paced.sync();
+
+    expect(await local.db.get(ids[1]!), "the lost row must come back").not.toBeNull();
+    expect(result.stalled).toBe(false);
     expect(await syncState.getInboundFloors()).toEqual({});
   });
 
