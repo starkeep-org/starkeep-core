@@ -5,7 +5,6 @@ export type {
   ScanSincePage,
   SyncTransport,
   FileSyncManifest,
-  FileEntry,
   FileSyncEngine,
   ChangeEventType,
   ChangeEvent,

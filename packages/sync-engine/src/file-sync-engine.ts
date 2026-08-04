@@ -1,6 +1,6 @@
 import { FileUriTransferRefused } from "@starkeep/storage-adapter";
 import type { ObjectStorageAdapter, PutStreamOptions } from "@starkeep/storage-adapter";
-import type { FileSyncEngine, FileSyncManifest, FileEntry } from "./types.js";
+import type { FileSyncEngine, FileSyncManifest } from "./types.js";
 
 const HEX_SHA256 = /^[a-f0-9]{64}$/;
 
@@ -22,139 +22,114 @@ function expectedHashFor(manifest: FileSyncManifest): string | null {
 }
 
 export function createFileSyncEngine(): FileSyncEngine {
-  // Object-storage keys currently being transferred in this process. Each
-  // transferFile call acquires the key on entry and releases on exit. Used by
-  // the retry pass to skip records whose transfer is already in flight.
-  const inFlightKeys = new Set<string>();
+  /**
+   * Transfers running right now, by object-storage key — **the outcome, not
+   * just the fact**.
+   *
+   * A `Set` here meant a second caller for a key already moving got `false`,
+   * which is indistinguishable from "the transfer failed". Inside one round the
+   * engine works around that by grouping items by key before dispatch, but
+   * nothing covers the cross-caller case: a user opening a photo whose bytes a
+   * sync round happens to be pulling gets a failure for a fetch that is in fact
+   * succeeding, and the placeholder stays on screen.
+   *
+   * Holding the promise instead lets the second caller *await the first's
+   * result*, which is the honest answer to "did those bytes arrive?" — and it
+   * makes the engine's key-grouping an optimization rather than a correctness
+   * requirement.
+   */
+  const inFlight = new Map<string, Promise<boolean>>();
 
-  async function transfer(
+  function transfer(
     manifest: FileSyncManifest,
     source: ObjectStorageAdapter,
     destination: ObjectStorageAdapter,
   ): Promise<boolean> {
     const key = manifest.objectStorageKey;
-    if (inFlightKeys.has(key)) {
+    const running = inFlight.get(key);
+    // Deliberately shares the *outcome*, not the work: the second caller may
+    // have asked for a different direction, but a transfer that has already put
+    // these bytes at their destination answers both questions. A transfer that
+    // failed answers both too, and the second caller retries on its own
+    // schedule.
+    if (running) return running;
+    const started = runTransfer(manifest, source, destination).finally(() => {
+      inFlight.delete(key);
+    });
+    inFlight.set(key, started);
+    return started;
+  }
+
+  async function runTransfer(
+    manifest: FileSyncManifest,
+    source: ObjectStorageAdapter,
+    destination: ObjectStorageAdapter,
+  ): Promise<boolean> {
+    const key = manifest.objectStorageKey;
+    // Destination already has it — no-op success. Lets callers fire-and-
+    // forget transferFile without needing to HEAD first.
+    if (await destination.has(key)) {
+      return true;
+    }
+    const expectedSha256Hex = expectedHashFor(manifest);
+    const options: PutStreamOptions = {
+      ...(manifest.mimeType ? { contentType: manifest.mimeType } : {}),
+      ...(manifest.sizeBytes ? { sizeBytes: manifest.sizeBytes } : {}),
+      // Verify the whole object as it passes. Above the multipart threshold
+      // the store cannot check a SHA-256 for us at all (it is composite-only
+      // for multipart), and this transfer is exactly where a large,
+      // least-replaceable object crosses a network.
+      ...(expectedSha256Hex ? { expectedSha256Hex } : {}),
+    };
+
+    // When the source can name a file and the destination can send one, the
+    // bytes go platform-to-platform and never enter the JS heap. That is not
+    // an optimization on React Native: `fetch` there buffers a stream request
+    // body into a `Uint8Array` before sending it, so the streamed path below
+    // costs several times the object size in JS heap and a 24 MB video is
+    // enough to take a memory-pressured handset down.
+    //
+    // Neither capability is load-bearing — either side absent, or a
+    // destination that declines, and this falls through to the stream path
+    // that every node has always used.
+    const fileUri = source.localFileUriFor?.(key) ?? null;
+    if (fileUri !== null && destination.putFromFileUri) {
+      try {
+        await destination.putFromFileUri(key, fileUri, options);
+        return true;
+      } catch (err) {
+        // A refusal is contractually raised before anything was sent, so
+        // retrying costs nothing but the presign round trip. Any other error
+        // is an ordinary failed transfer and must not be retried a second way
+        // — that would send a large object twice on every genuine failure.
+        if (!(err instanceof FileUriTransferRefused)) throw err;
+      }
+    }
+
+    // Streamed, never buffered. The old `source.get()` → `destination.put()`
+    // held the whole object in memory, so a 2 GB clip could not sync at all —
+    // it wasn't slow, it was impossible. Nothing here materializes the body.
+    const body = await source.getStream(key);
+    if (!body) {
       return false;
     }
-    inFlightKeys.add(key);
     try {
-      // Destination already has it — no-op success. Lets callers fire-and-
-      // forget transferFile without needing to HEAD first.
-      if (await destination.has(key)) {
-        return true;
-      }
-      const expectedSha256Hex = expectedHashFor(manifest);
-      const options: PutStreamOptions = {
-        ...(manifest.mimeType ? { contentType: manifest.mimeType } : {}),
-        ...(manifest.sizeBytes ? { sizeBytes: manifest.sizeBytes } : {}),
-        // Verify the whole object as it passes. Above the multipart threshold
-        // the store cannot check a SHA-256 for us at all (it is composite-only
-        // for multipart), and this transfer is exactly where a large,
-        // least-replaceable object crosses a network.
-        ...(expectedSha256Hex ? { expectedSha256Hex } : {}),
-      };
-
-      // When the source can name a file and the destination can send one, the
-      // bytes go platform-to-platform and never enter the JS heap. That is not
-      // an optimization on React Native: `fetch` there buffers a stream request
-      // body into a `Uint8Array` before sending it, so the streamed path below
-      // costs several times the object size in JS heap and a 24 MB video is
-      // enough to take a memory-pressured handset down.
-      //
-      // Neither capability is load-bearing — either side absent, or a
-      // destination that declines, and this falls through to the stream path
-      // that every node has always used.
-      const fileUri = source.localFileUriFor?.(key) ?? null;
-      if (fileUri !== null && destination.putFromFileUri) {
-        try {
-          await destination.putFromFileUri(key, fileUri, options);
-          return true;
-        } catch (err) {
-          // A refusal is contractually raised before anything was sent, so
-          // retrying costs nothing but the presign round trip. Any other error
-          // is an ordinary failed transfer and must not be retried a second way
-          // — that would send a large object twice on every genuine failure.
-          if (!(err instanceof FileUriTransferRefused)) throw err;
-        }
-      }
-
-      // Streamed, never buffered. The old `source.get()` → `destination.put()`
-      // held the whole object in memory, so a 2 GB clip could not sync at all —
-      // it wasn't slow, it was impossible. Nothing here materializes the body.
-      const body = await source.getStream(key);
-      if (!body) {
-        return false;
-      }
-      try {
-        await destination.putStream(key, body, options);
-      } catch (err) {
-        // Cancel the source explicitly. A stream abandoned mid-transfer keeps
-        // the underlying HTTP response open, and since a failed transfer is
-        // retried every round, leaked responses accumulate until the connection
-        // pool starves — which surfaces much later, as unrelated requests
-        // hanging, rather than as this transfer failing.
-        await body.cancel().catch(() => {});
-        throw err;
-      }
-      return true;
-    } finally {
-      inFlightKeys.delete(key);
+      await destination.putStream(key, body, options);
+    } catch (err) {
+      // Cancel the source explicitly. A stream abandoned mid-transfer keeps
+      // the underlying HTTP response open, and since a failed transfer is
+      // retried every round, leaked responses accumulate until the connection
+      // pool starves — which surfaces much later, as unrelated requests
+      // hanging, rather than as this transfer failing.
+      await body.cancel().catch(() => {});
+      throw err;
     }
+    return true;
   }
 
   return {
     isTransferInFlight(key: string): boolean {
-      return inFlightKeys.has(key);
-    },
-
-    async getFilesToPush(
-      localStorage: ObjectStorageAdapter,
-      remoteStorage: ObjectStorageAdapter,
-      entries: FileEntry[],
-    ): Promise<FileSyncManifest[]> {
-      const manifests: FileSyncManifest[] = [];
-
-      for (const entry of entries) {
-        const existsRemotely = await remoteStorage.has(entry.key);
-        if (!existsRemotely) {
-          const localFile = await localStorage.get(entry.key);
-          if (localFile) {
-            manifests.push({
-              fileHash: entry.key,
-              objectStorageKey: entry.key,
-              sizeBytes: localFile.size,
-              mimeType: entry.mimeType,
-            });
-          }
-        }
-      }
-
-      return manifests;
-    },
-
-    async getFilesToPull(
-      localStorage: ObjectStorageAdapter,
-      remoteStorage: ObjectStorageAdapter,
-      entries: FileEntry[],
-    ): Promise<FileSyncManifest[]> {
-      const manifests: FileSyncManifest[] = [];
-
-      for (const entry of entries) {
-        const existsLocally = await localStorage.has(entry.key);
-        if (!existsLocally) {
-          const remoteFile = await remoteStorage.get(entry.key);
-          if (remoteFile) {
-            manifests.push({
-              fileHash: entry.key,
-              objectStorageKey: entry.key,
-              sizeBytes: remoteFile.size,
-              mimeType: entry.mimeType,
-            });
-          }
-        }
-      }
-
-      return manifests;
+      return inFlight.has(key);
     },
 
     transferFile: transfer,

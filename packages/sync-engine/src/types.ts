@@ -361,28 +361,17 @@ export interface FileSyncManifest {
   readonly mimeType?: string;
 }
 
-export interface FileEntry {
-  readonly key: string;
-  readonly mimeType?: string;
-}
-
 export interface FileSyncEngine {
   /** True if a transferFile for this key is currently running in this process. */
   isTransferInFlight(key: string): boolean;
-  getFilesToPush(
-    localStorage: ObjectStorageAdapter,
-    remoteStorage: ObjectStorageAdapter,
-    entries: FileEntry[],
-  ): Promise<FileSyncManifest[]>;
-  getFilesToPull(
-    localStorage: ObjectStorageAdapter,
-    remoteStorage: ObjectStorageAdapter,
-    entries: FileEntry[],
-  ): Promise<FileSyncManifest[]>;
   /**
    * Resolve true on a successful transfer (or if the source key is now present
-   * at the destination). Resolves false if the transfer is already in flight
-   * or the source file doesn't exist.
+   * at the destination). Resolves false if the source file doesn't exist.
+   *
+   * A call for a key already being transferred **joins** that transfer and
+   * resolves with its outcome, rather than answering false. Answering false was
+   * indistinguishable from a failure, so a user opening a photo whose bytes a
+   * sync round happened to be moving was told the fetch had failed.
    */
   transferFile(
     manifest: FileSyncManifest,
