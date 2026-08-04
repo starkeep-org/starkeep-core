@@ -130,8 +130,14 @@ export interface ScanCapableApplier extends AppSyncableApplier {
    * (tombstones included) —
    * the responder-side summary that feeds `responderWatermarks`. Backed by
    * the denormalized `node_id` column + `(node_id, updated_at)` index so it
-   * doesn't scan the table. A missing table returns `{}` (same fail-safe
-   * direction as `scanSince`: an omitted node only causes a re-ship).
+   * doesn't scan the table.
+   *
+   * A **missing** table returns `{}` — the app is not installed here, it
+   * genuinely holds nothing, and an omitted node only causes a re-ship. A table
+   * that exists and will not read **throws**, and the two must not be
+   * conflated: `scanSince` plans its authors from this map, so a `{}` for an
+   * unreadable table becomes a scan that reports "nothing owed, every author
+   * complete" — silent loss, one frame above the catch written to prevent it.
    */
   getNodeWatermarks(appId: string, table: string): Promise<Watermarks>;
 
@@ -143,7 +149,14 @@ export interface ScanCapableApplier extends AppSyncableApplier {
    * Without it `verify()` on a per-app channel would compare shared-record
    * digests over a channel that never carries shared records: divergence that
    * means nothing, and repair floors for rows the channel cannot ship.
-   * A missing table returns `[]`, the same fail-safe direction as `scanSince`.
+   *
+   * A **missing** table returns `[]`. A table that exists and will not read
+   * **throws**. `[]` is the wire value for "this table holds nothing", and
+   * using it for "I could not count it" makes every bucket in the table read as
+   * a hole — an undercount locally reports the peer's rows as our own loss and
+   * arms a full re-download; an undercount on the responder re-ships the
+   * library. Neither is fail-safe, which is why this is the one place in the
+   * applier contract that is allowed to fail loudly.
    */
   bucketDigest(
     appId: string,
