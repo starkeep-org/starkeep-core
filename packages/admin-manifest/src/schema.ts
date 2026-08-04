@@ -84,11 +84,36 @@ export const syncableTableColumnSchema = z
     message: `Column names "updated_at" and "deleted_at" are reserved by the sync runtime`,
   });
 
-export const syncableTableSchema = z.object({
-  // Becomes "<appId>_syncable_<name>" in the local SQLite schema.
-  name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
-  columns: z.array(syncableTableColumnSchema).min(1),
-});
+export const syncableTableSchema = z
+  .object({
+    // Becomes "<appId>_syncable_<name>" in the local SQLite schema.
+    name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
+    columns: z.array(syncableTableColumnSchema).min(1),
+  })
+  // A syncable table without a primary key is not a table the sync protocol can
+  // carry, and the failure is silent and compounding rather than loud. With no
+  // key there is no conflict target, so the applier's `ON CONFLICT DO NOTHING`
+  // has nothing to conflict on and every replay of the same wire entry inserts
+  // another row — and a repair round, a re-ship after a lost response and a
+  // watermark reset are all replays. The duplicates then make the two sides'
+  // bucket counts disagree permanently, `verify()` reports divergence, the
+  // repair re-ships, and the re-ship duplicates again.
+  //
+  // Deletes cannot propagate either: a tombstone has to name the row it
+  // retracts, `rowToWireEntry` correctly refuses to emit a keyless one (the
+  // alternative wiped the peer's table), so the deletion stays on the node that
+  // made it forever.
+  //
+  // Refused here rather than handled downstream because this is the only place
+  // that can make it *unrepresentable*. Every consumer below — the SQLite and
+  // DSQL DDL, both appliers, `rowToWireEntry` — has a branch for the keyless
+  // case, and none of them can do anything useful in it.
+  .refine((table) => table.columns.some((c) => c.primaryKey), {
+    message:
+      `A syncable table must declare at least one column with "primaryKey": true. ` +
+      `Without one the row has no identity: replays duplicate it and deletions ` +
+      `never leave the node that made them.`,
+  });
 
 export const appSpecificSyncableSchema = z.object({
   tables: z.array(syncableTableSchema).default([]),

@@ -107,10 +107,22 @@ describe("id-bound privilege flags", () => {
 });
 
 describe("syncable table column rules", () => {
+  /**
+   * A table carrying `columns` plus a primary key, since every syncable table
+   * must have one. Keeping the key out of the cases below leaves each of them
+   * about the one rule it names.
+   */
   function withTable(columns: unknown[]): Record<string, unknown> {
     return minimal({
       infraRequirements: {
-        appSpecificSyncable: { tables: [{ name: "notes", columns }] },
+        appSpecificSyncable: {
+          tables: [
+            {
+              name: "notes",
+              columns: [{ name: "id", type: "text", primaryKey: true }, ...columns],
+            },
+          ],
+        },
       },
     });
   }
@@ -147,7 +159,14 @@ describe("syncable table column rules", () => {
     const badName = validateManifest(
       minimal({
         infraRequirements: {
-          appSpecificSyncable: { tables: [{ name: "BadName", columns: [{ name: "c", type: "text" }] }] },
+          appSpecificSyncable: {
+            tables: [
+              {
+                name: "BadName",
+                columns: [{ name: "c", type: "text", primaryKey: true }],
+              },
+            ],
+          },
         },
       }),
     );
@@ -158,6 +177,70 @@ describe("syncable table column rules", () => {
       }),
     );
     expect(noColumns.valid).toBe(false);
+  });
+
+  /**
+   * The row-identity rule, enforced where it can be made unrepresentable.
+   *
+   * A syncable table with no primary key is accepted by every layer below this
+   * one and works wrongly in all of them: the applier's UPSERT has no conflict
+   * target, so replaying the same wire entry — which is what a repair round, a
+   * re-ship after a lost response and a watermark reset all do — inserts the row
+   * again; the duplicates make the two sides' bucket counts disagree
+   * permanently, so `verify()` reports divergence and arms a repair, and the
+   * repair duplicates them further. Deletes never leave the node at all, because
+   * a tombstone cannot name a row that has no key.
+   */
+  it("requires a primary key on a syncable table", () => {
+    const noPk = validateManifest(
+      minimal({
+        infraRequirements: {
+          appSpecificSyncable: {
+            tables: [{ name: "notes", columns: [{ name: "body", type: "text" }] }],
+          },
+        },
+      }),
+    );
+    expect(noPk.valid).toBe(false);
+    expect(noPk.errors.some((e) => e.includes("primaryKey"))).toBe(true);
+
+    const explicitlyFalse = validateManifest(
+      minimal({
+        infraRequirements: {
+          appSpecificSyncable: {
+            tables: [
+              {
+                name: "notes",
+                columns: [{ name: "body", type: "text", primaryKey: false }],
+              },
+            ],
+          },
+        },
+      }),
+    );
+    expect(explicitlyFalse.valid).toBe(false);
+  });
+
+  it("accepts a composite primary key", () => {
+    const result = validateManifest(
+      minimal({
+        infraRequirements: {
+          appSpecificSyncable: {
+            tables: [
+              {
+                name: "notes",
+                columns: [
+                  { name: "record_id", type: "text", primaryKey: true },
+                  { name: "kind", type: "text", primaryKey: true },
+                  { name: "body", type: "text" },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+    );
+    expect(result.valid, result.errors.join("; ")).toBe(true);
   });
 });
 

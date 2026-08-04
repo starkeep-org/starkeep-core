@@ -333,6 +333,13 @@ function createSyncableTable(
     .addColumn("updated_at", "text", (col) => col.notNull())
     .addColumn("node_id", "text", (col) => col.notNull())
     .addColumn("deleted_at", "text");
+  // `syncableTableSchema` refuses a table with no primary key
+  // (`admin-manifest/src/schema.ts`), so this branch is now unreachable through
+  // any manifest-driven install. It stays because a table created without a
+  // constraint is *silently* wrong rather than loudly wrong: the applier's
+  // UPSERT would have nothing to conflict on, so every replay of a wire entry —
+  // a repair round, a re-ship after a lost response, a watermark reset —
+  // inserts the row again, and a tombstone could never name the row it retracts.
   const pks = columns.filter((c) => c.primaryKey).map((c) => c.name);
   if (pks.length > 0) {
     tb = tb.addPrimaryKeyConstraint(`pk_${fullName}`, pks as never[]);
