@@ -147,6 +147,23 @@ describe("DsqlAppSyncableApplier statement shape", () => {
     expect(client.calls.filter((c) => /update/i.test(c.text))).toHaveLength(0);
   });
 
+  it("treats a NULL updated_at as older than everything on an update", async () => {
+    // The same guard `applyDelete` emits. A bare `<` is *unknown* against NULL
+    // in Postgres, so a row with no position silently refused every update while
+    // accepting every tombstone — the two halves of one LWW rule disagreeing.
+    await applier.apply({
+      timestamp: clock.now(),
+      appId: "notes",
+      table: "note",
+      op: "update",
+      row: { body: "new", updated_at: "5" },
+      where: { id: "n1" },
+    });
+    const sql = sqlFor(/update .*set/i);
+    expect(sql).toMatch(/"updated_at" is null/);
+    expect(sql).toMatch(/"updated_at" < \$\d/);
+  });
+
   it("guards the upsert on the incoming row being newer", async () => {
     await applier.apply(insertEntry());
     expect(sqlFor(/insert into/)).toMatch(
@@ -156,8 +173,8 @@ describe("DsqlAppSyncableApplier statement shape", () => {
 });
 
 describe("DsqlAppSyncableApplier scanSince", () => {
-  it("reports no ceiling and no rows for a table it cannot read", async () => {
-    // getNodeWatermarks fails (missing table), so no author is even planned.
+  it("reports no ceiling and no rows for a table with nothing owed", async () => {
+    // getNodeWatermarks finds no authors, so no scan is even planned.
     const page = await applier.scanSince("notes", "note", {}, 100);
     expect(page.rows).toEqual([]);
     expect(page.truncated).toEqual({});
@@ -185,5 +202,72 @@ describe("DsqlAppSyncableApplier scanSince", () => {
     // never reached. See `round-cut.ts`.
     expect(page.truncated).toEqual({ [author]: null });
     expect(page.hasMore).toBe(true);
+  });
+});
+
+/**
+ * Absent vs. unreadable, on the responder that actually serves the cloud.
+ *
+ * `[]` and `{}` are the wire values for "this table holds nothing". Using them
+ * for "I could not read it" is what turned a revoked GRANT into a report that
+ * the peer had lost its library — in whichever direction the digest comparison
+ * happened to run. Postgres separates the two by SQLSTATE, so the applier reads
+ * the code rather than swallowing everything.
+ */
+describe("DsqlAppSyncableApplier — absent vs. unreadable", () => {
+  function failWith(err: Error): void {
+    client.query = async () => {
+      throw err;
+    };
+  }
+
+  function missingRelation(): Error {
+    return Object.assign(
+      new Error('relation "app_notes.note" does not exist'),
+      { code: "42P01" },
+    );
+  }
+
+  it("answers [] and {} when the app is simply not installed here", async () => {
+    failWith(missingRelation());
+    expect(await applier.bucketDigest("notes", "note")).toEqual([]);
+    expect(await applier.getNodeWatermarks("notes", "note")).toEqual({});
+  });
+
+  it("answers [] and {} for a missing schema too", async () => {
+    // A per-app schema and its tables are created together at install, so an
+    // app that was never installed here fails one level up.
+    failWith(
+      Object.assign(new Error('schema "app_notes" does not exist'), { code: "3F000" }),
+    );
+    expect(await applier.bucketDigest("notes", "note")).toEqual([]);
+    expect(await applier.getNodeWatermarks("notes", "note")).toEqual({});
+  });
+
+  it("throws rather than reporting an unreadable table as an empty one", async () => {
+    failWith(
+      Object.assign(new Error("permission denied for table note"), { code: "42501" }),
+    );
+    await expect(applier.bucketDigest("notes", "note")).rejects.toThrow(
+      /permission denied/,
+    );
+  });
+
+  it("throws from getNodeWatermarks too, and the failure reaches scanSince", async () => {
+    // `scanSince` plans its authors from this map and reads it outside its own
+    // catch, so a table that will not read cannot be mistaken for one with
+    // nothing owed.
+    failWith(
+      Object.assign(new Error("permission denied for table note"), { code: "42501" }),
+    );
+    await expect(applier.getNodeWatermarks("notes", "note")).rejects.toThrow();
+    await expect(applier.scanSince("notes", "note", {}, 100)).rejects.toThrow();
+  });
+
+  it("recognizes a missing relation with no SQLSTATE on the error", async () => {
+    // Not every client surfaces `code`. Being wrong in this direction costs a
+    // re-ship; being wrong in the other costs a false loss report.
+    failWith(new Error('ERROR: relation "app_notes.note" does not exist'));
+    expect(await applier.bucketDigest("notes", "note")).toEqual([]);
   });
 });

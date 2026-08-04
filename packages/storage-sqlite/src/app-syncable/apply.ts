@@ -125,7 +125,15 @@ export class SqliteAppSyncableApplier
       query = query.where(c, "=", where[c]);
     }
     if (incomingUpdatedAt) {
-      query = query.where("updated_at", "<", incomingUpdatedAt);
+      // `updated_at IS NULL OR updated_at < ?`, matching `applyDelete`. A bare
+      // `<` is unknown against NULL, so a row with no position silently refused
+      // every update while accepting every tombstone — the two halves of the
+      // same LWW rule disagreeing about what "older than everything" means.
+      // The column is NOT NULL wherever the installer created the table, which
+      // is exactly why the inconsistency could sit here unnoticed.
+      query = query.where((eb) =>
+        eb.or([eb("updated_at", "is", null), eb("updated_at", "<", incomingUpdatedAt)]),
+      );
     }
     runCompiled(this.db, query.compile());
   }
@@ -150,41 +158,74 @@ export class SqliteAppSyncableApplier
     runCompiled(this.db, query.compile());
   }
 
-  /** See `ScanCapableApplier.bucketDigest`. Missing table → `[]`. */
+  /**
+   * Whether this table exists in *this* database.
+   *
+   * Asked before the digest rather than inferred from a failed read, because
+   * those are two different answers and only one of them is `[]`. An app that
+   * is not installed here genuinely holds nothing; a table that is locked,
+   * corrupt or unreadable holds an unknown number of rows, and reporting zero
+   * for it is the loudest possible false alarm — every bucket in it reads as a
+   * hole, in whichever direction the comparison runs.
+   *
+   * `sqlite_master` is the cheapest question that separates them, and asking it
+   * cannot itself fail for a reason worth swallowing: a database whose schema
+   * table will not read is not one whose app tables are merely absent.
+   */
+  private tableExists(fullName: string): boolean {
+    const row = this.db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .all(fullName);
+    return row.length > 0;
+  }
+
+  /**
+   * See `ScanCapableApplier.bucketDigest`. Missing table → `[]`; a table that
+   * exists and will not read **throws**, so the caller's `supported: false`
+   * path can do its job.
+   *
+   * This used to be `try { … } catch { return [] }`, which is the same mistake
+   * `scanSince` made: `[]` is the wire value for "this table holds nothing", not
+   * for "I could not count it". It made both engine-side "could not count ⇒
+   * supported: false" guards unreachable on every production path, because no
+   * real applier ever threw.
+   */
   async bucketDigest(
     appId: string,
     table: string,
     prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH,
   ): Promise<DigestBucket[]> {
     const fullName = appSyncableTableName(appId, table);
-    try {
-      const compiled = buildBucketDigest(qb, fullName, prefixLength);
-      return toDigestBuckets(allCompiled<Record<string, unknown>>(this.db, compiled));
-    } catch {
-      return [];
-    }
+    if (!this.tableExists(fullName)) return [];
+    const compiled = buildBucketDigest(qb, fullName, prefixLength);
+    return toDigestBuckets(allCompiled<Record<string, unknown>>(this.db, compiled));
   }
 
-  /** See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`. */
+  /**
+   * See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`; a table
+   * that exists and will not read **throws**.
+   *
+   * The distinction matters more here than the `{}` return suggests, because
+   * `scanSince` plans its authors from this map: an unreadable table that
+   * answered `{}` produced no scans, and the scan then reported "nothing owed,
+   * every author complete" — the exact silent-loss shape `scanSince`'s own catch
+   * was written to prevent, reached one frame earlier.
+   */
   async getNodeWatermarks(
     appId: string,
     table: string,
   ): Promise<Record<string, HLCTimestamp>> {
     const fullName = appSyncableTableName(appId, table);
-    let rows: { node_id: string; max_updated_at: string }[];
-    try {
-      rows = allCompiled<{ node_id: string; max_updated_at: string }>(
-        this.db,
-        qb
-          .selectFrom(fullName)
-          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
-          .groupBy("node_id")
-          .compile(),
-      );
-    } catch {
-      // Table might not exist yet (app not installed locally).
-      return {};
-    }
+    // Table might not exist yet (app not installed locally).
+    if (!this.tableExists(fullName)) return {};
+    const rows = allCompiled<{ node_id: string; max_updated_at: string }>(
+      this.db,
+      qb
+        .selectFrom(fullName)
+        .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
+        .groupBy("node_id")
+        .compile(),
+    );
     const out: Record<string, HLCTimestamp> = {};
     for (const row of rows) {
       out[row.node_id] = deserializeHLC(row.max_updated_at);

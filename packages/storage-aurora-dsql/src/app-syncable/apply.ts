@@ -21,6 +21,7 @@ import {
 import { sql, type CompiledQuery } from "kysely";
 import type { DatabaseClient } from "../types.js";
 import { withOccRetry } from "../occ-retry.js";
+import { isMissingRelation } from "../missing-relation.js";
 import { compiler as qb } from "../query-builder.js";
 
 /**
@@ -142,7 +143,13 @@ export class DsqlAppSyncableApplier
       query = query.where(c, "=", where[c]);
     }
     if (incomingUpdatedAt) {
-      query = query.where("updated_at", "<", incomingUpdatedAt);
+      // `updated_at IS NULL OR updated_at < ?`, matching `applyDelete`. A bare
+      // `<` is unknown against NULL, so a row with no position silently refused
+      // every update while accepting every tombstone — the two halves of the
+      // same LWW rule disagreeing about what "older than everything" means.
+      query = query.where((eb) =>
+        eb.or([eb("updated_at", "is", null), eb("updated_at", "<", incomingUpdatedAt)]),
+      );
     }
     await this.run(query.compile());
   }
@@ -224,7 +231,16 @@ export class DsqlAppSyncableApplier
     }
   }
 
-  /** See `ScanCapableApplier.bucketDigest`. Missing table → `[]`. */
+  /**
+   * See `ScanCapableApplier.bucketDigest`. Missing table → `[]`; a table that
+   * exists and will not read **throws**, so the caller's `supported: false`
+   * path can do its job.
+   *
+   * This used to swallow every error into `[]`, which is the same mistake
+   * `scanSince` made: `[]` is the wire value for "this table holds nothing", not
+   * for "I could not count it". A revoked GRANT then read as a lost library, in
+   * whichever direction the digest comparison happened to run.
+   */
   async bucketDigest(
     appId: string,
     table: string,
@@ -234,12 +250,22 @@ export class DsqlAppSyncableApplier
     try {
       const result = await this.run(buildBucketDigest(qb, schemaTable, prefixLength));
       return toDigestBuckets(result.rows as Record<string, unknown>[]);
-    } catch {
-      return [];
+    } catch (err) {
+      if (isMissingRelation(err)) return [];
+      throw err;
     }
   }
 
-  /** See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`. */
+  /**
+   * See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`; a table
+   * that exists and will not read **throws**.
+   *
+   * The distinction matters more here than the `{}` return suggests, because
+   * `scanSince` plans its authors from this map: an unreadable table that
+   * answered `{}` produced no scans, and the scan then reported "nothing owed,
+   * every author complete" — the exact silent-loss shape `scanSince`'s own catch
+   * was written to prevent, reached one frame earlier.
+   */
   async getNodeWatermarks(
     appId: string,
     table: string,
@@ -254,11 +280,12 @@ export class DsqlAppSyncableApplier
           .groupBy("node_id")
           .compile(),
       );
-    } catch {
-      // Table might not exist (app not installed) or not be readable by this
-      // channel's role. Omitting its nodes only understates the coverage
-      // watermark, which is the safe direction (re-ship, idempotent LWW).
-      return {};
+    } catch (err) {
+      // The app isn't installed on this instance. Omitting its nodes only
+      // understates the coverage watermark, which is the safe direction
+      // (re-ship, idempotent LWW).
+      if (isMissingRelation(err)) return {};
+      throw err;
     }
     const out: Record<string, HLCTimestamp> = {};
     for (const row of result.rows) {
