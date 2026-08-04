@@ -471,7 +471,21 @@ export function createSyncSupervisor(
         .filter((appId) => !NO_PER_APP_CHANNEL_APP_IDS.has(appId)),
     );
     for (const appId of desired) {
-      if (!engines.has(appId)) startEngineFor(appId);
+      if (engines.has(appId)) continue;
+      try {
+        startEngineFor(appId);
+      } catch (err) {
+        // One app's problem is one app's problem. `makeSignerFor` throws when a
+        // registry row has no hmac_secret — deliberately, because unsigned
+        // traffic would 401 in a loop that is easy to miss — but it threw from
+        // inside this loop, so every app sorted after the broken one silently
+        // never got an engine at all. The loud failure was loud about the wrong
+        // scope: nothing said *which* apps had stopped syncing, or that any had.
+        console.error(
+          `[sync] could not start the loop for app=${appId}; other apps are unaffected:`,
+          err,
+        );
+      }
     }
     for (const appId of Array.from(engines.keys())) {
       if (NO_PER_APP_CHANNEL_APP_IDS.has(appId)) continue;
@@ -482,14 +496,51 @@ export function createSyncSupervisor(
   return {
     start() {
       // Always-on Drive channel first, then reconcile per-app channels.
-      startDriveEngine();
+      //
+      // Drive failing to start is serious — it is the channel that carries all
+      // shared data — but it is not a reason for the per-app channels not to
+      // run. Same argument as the per-app loop in `rescan`: one channel's
+      // missing secret must not silently take the others with it.
+      try {
+        startDriveEngine();
+      } catch (err) {
+        console.error(
+          `[sync] could not start the always-on Drive channel; shared data will not sync:`,
+          err,
+        );
+      }
       rescan();
     },
 
+    /**
+     * Stop, and mean it.
+     *
+     * Clearing the timers is not stopping: a tick's drain is a whole `sync()`
+     * with no `maxRounds`, so a first upload in progress keeps issuing requests
+     * and keeps writing `sync_state` long after the supervisor is nominally
+     * down. On a shutdown path that is a process that will not exit; in a test
+     * it is a worker that outlives its file.
+     *
+     * `paused` is the lever, because `syncSignal` reads it on every access and
+     * the loop checks the signal after every round — so setting it here is what
+     * actually ends a drain in flight. It stays set: `stop()` is a teardown, not
+     * a pause, and a supervisor that has been stopped should not quietly resume
+     * on the next tick that happens to be armed.
+     */
     async stop() {
+      paused = true;
+      const stopping = Array.from(engines.values());
       for (const appId of Array.from(engines.keys())) {
         stopEngineFor(appId);
       }
+      // Queue an empty body behind whatever each runner is doing. `run()` is
+      // strictly ordered, so this resolves only once the drain ahead of it has
+      // finished — which is the observable form of "nothing is still writing".
+      await Promise.all(
+        stopping.map((entry) =>
+          entry.runner.run(async () => {}).catch(() => undefined),
+        ),
+      );
     },
 
     pause() {
