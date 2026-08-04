@@ -226,6 +226,39 @@ export function applyRepairFloors(
   return out;
 }
 
+/**
+ * Merge fresh inbound floors into the ones already outstanding, keeping the
+ * **higher** of the two per author.
+ *
+ * The inbound floor is not a fixed mark like its outbound twin — it is a
+ * *cursor*. What a node advertises is what the responder scans above, and the
+ * node's own watermark cannot move the floor along (it already sits above the
+ * hole, which is what made the hole invisible), so the exchange loop climbs the
+ * floor to wherever each round's contiguous run reached. Leave it where it is
+ * and every round asks for the same range and the repair never gets past its
+ * first roundful.
+ *
+ * {@link applyRepairFloors} takes the *lower* of two values, which is right for
+ * lowering a coverage watermark and exactly wrong for merging into a cursor: a
+ * `verify()` run during a repair would replace the climbed position with the
+ * bottom of the lowest disagreeing bucket again. Pressing "Check backup" twice
+ * during a long repair meant the repair never finished.
+ *
+ * An author with no floor outstanding takes the fresh one outright — that is a
+ * repair being armed, not a cursor being reset.
+ */
+export function raiseInboundFloors(
+  outstanding: Record<string, HLCTimestamp>,
+  fresh: Record<string, HLCTimestamp>,
+): Record<string, HLCTimestamp> {
+  const out = { ...outstanding };
+  for (const [nodeId, floor] of Object.entries(fresh)) {
+    const current = out[nodeId];
+    if (current === undefined || compareHLC(floor, current) > 0) out[nodeId] = floor;
+  }
+  return out;
+}
+
 /** Total rows each side holds, for "is my library backed up?". */
 export function totalRows(buckets: readonly DigestBucket[]): number {
   return buckets.reduce((sum, b) => sum + b.count, 0);

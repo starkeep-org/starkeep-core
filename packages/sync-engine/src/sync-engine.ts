@@ -69,6 +69,7 @@ import {
   applyRepairFloors,
   bucketsPeerIsMissing,
   mergeDigestBuckets,
+  raiseInboundFloors,
   repairFloorsFor,
   totalRows,
   DEFAULT_BUCKET_PREFIX_LENGTH,
@@ -82,6 +83,37 @@ import {
   type StreamTruncation,
 } from "./round-cut.js";
 import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
+
+/**
+ * What the outbound backlog check found.
+ *
+ * Two facts rather than one because a table that would not read is not a table
+ * with nothing in it, and the two callers want opposite things from that:
+ * `sync()` may safely guess "nothing owed" (the pushing round re-reads it and
+ * logs properly), while `verify()` must decline the comparison entirely.
+ */
+interface OutboundBacklog {
+  /** Something is owed to the peer, as far as we could see. */
+  readonly owed: boolean;
+  /** Every stream on this channel answered. False means `owed` is a guess. */
+  readonly readable: boolean;
+}
+
+/**
+ * The shape of "no check was performed", which is not the shape of "checked and
+ * found nothing wrong". Every guard in `verify()` that declines to compare
+ * returns this with `supported: false`, so a caller cannot mistake a refusal
+ * for a clean bill of health.
+ */
+const NOT_VERIFIED: VerifyResult = {
+  supported: true,
+  localRows: 0,
+  peerRows: 0,
+  divergentBuckets: 0,
+  missingLocally: 0,
+  pendingUpload: 0,
+  pendingDownload: 0,
+};
 
 /**
  * Sync engine: drives one version-vector exchange round per tick.
@@ -209,19 +241,28 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
    * being written underneath — trading two index-only reads for a staleness
    * bug on the scan the whole design rests on. Pay the reads.
    */
-  async function hasOutboundBacklog(): Promise<boolean> {
+  async function hasOutboundBacklog(): Promise<OutboundBacklog> {
     const peerWatermarks = applyRepairFloors(
       await loadPeerWatermarks(),
       await loadRepairFloors(),
     );
     if (syncSharedRecords) {
       if ((await localDatabaseAdapter.querySince(peerWatermarks, 1)).rows.length > 0) {
-        return true;
+        return { owed: true, readable: true };
       }
       if ((await localDatabaseAdapter.queryLabelsSince(peerWatermarks, 1)).rows.length > 0) {
-        return true;
+        return { owed: true, readable: true };
       }
     }
+    // `readable` exists because the two callers want opposite things from a
+    // table that would not read. `sync()` only needs to know whether to spend a
+    // pull-first round, and guessing "no backlog" there costs nothing — the
+    // pushing round that follows reads the same table and logs the failure
+    // properly. `verify()` is about to compare row counts and arm repairs off
+    // the answer, and for that a swallowed error is a comparison it should have
+    // declined: an unreadable table would read as a drained outbound side, so
+    // every bucket it holds gets reported as loss on the peer's end.
+    let readable = true;
     if (appSyncableSource) {
       for (const ns of appSyncableSource.namespaces.list()) {
         for (const tableInfo of ns.tables) {
@@ -232,15 +273,17 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               peerWatermarks,
               1,
             );
-            if (page.rows.length > 0) return true;
-          } catch {
-            // A table we can't read owes nothing we can act on; the pushing
-            // round below logs it properly.
+            if (page.rows.length > 0) return { owed: true, readable };
+          } catch (err) {
+            console.warn(
+              `[sync] backlog check failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
+            );
+            readable = false;
           }
         }
       }
     }
-    return false;
+    return { owed: false, readable };
   }
 
   async function exchange(options?: ExchangeOptions): Promise<ExchangeResult> {
@@ -871,7 +914,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // check is local and cheap (a grouped index read, and one seek only if
       // that read shows something owed), so it costs nothing when it says no.
       let pullFirst = false;
-      if (await hasOutboundBacklog()) {
+      if ((await hasOutboundBacklog()).owed) {
         const result = await exchange({ push: false });
         totals.rounds += 1;
         totals.applied += result.applied;
@@ -935,6 +978,14 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // Whether *we* still owe the peer anything, asked before the comparison
       // so the answer describes the same moment the digests do.
       const outboundBacklog = await hasOutboundBacklog();
+      if (!outboundBacklog.readable) {
+        // A table we could not read is not a table with nothing owed in it, and
+        // "drained" is what the comparison below would take from it — arming
+        // repair floors and reporting divergence against a question we never
+        // answered. Same family as the digest guard further down.
+        console.warn("[sync] outbound backlog unreadable; skipping verification");
+        return { ...NOT_VERIFIED, supported: false };
+      }
       // Ask the peer for its counts while sending nothing. This is an integrity
       // check, not a sync round: mixing it into a pushing round would make the
       // comparison a moving target, since the peer's counts would include rows
@@ -954,26 +1005,27 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // no item to take. Removing that branch would silently turn this into a
       // one-item sync round.
       const response = await transport.exchange({
-        watermarks: await loadOwnWatermarks(),
+        // The **floored** map, not the raw one. An outstanding inbound repair
+        // *is* an inbound backlog, and advertising as if it were not made
+        // `hasMore` describe a node with no repair running: `inboundDrained`
+        // read true, `missingLocally` was reported as loss rather than as work
+        // in progress, and the floor was re-armed on every press — resetting a
+        // cursor that had been climbing. Two presses during a long repair meant
+        // the repair never finished.
+        watermarks: applyRepairFloors(
+          await loadOwnWatermarks(),
+          await loadInboundFloors(),
+        ),
         limit: 0,
         requestDigest: true,
         digestPrefixLength: DEFAULT_BUCKET_PREFIX_LENGTH,
       });
 
       const peerDigest = response.digest;
-      const unsupported: VerifyResult = {
-        supported: true,
-        localRows: 0,
-        peerRows: 0,
-        divergentBuckets: 0,
-        missingLocally: 0,
-        pendingUpload: 0,
-        pendingDownload: 0,
-      };
       if (!peerDigest) {
         // A peer that cannot answer is not a peer that agrees. Reporting
         // `divergentBuckets: 0` here would read as "verified clean".
-        return { ...unsupported, supported: false };
+        return { ...NOT_VERIFIED, supported: false };
       }
       if (
         response.digestPrefixLength !== undefined &&
@@ -984,7 +1036,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         console.warn(
           `[sync] digest prefix mismatch (asked ${DEFAULT_BUCKET_PREFIX_LENGTH}, peer used ${response.digestPrefixLength}); skipping verification`,
         );
-        return { ...unsupported, supported: false };
+        return { ...NOT_VERIFIED, supported: false };
       }
 
       // The width we asked for, passed rather than defaulted: the two values
@@ -997,7 +1049,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // arm an inbound repair over the whole library. "Not checked" is the
         // honest answer.
         console.warn("[sync] local digest incomplete; skipping verification");
-        return { ...unsupported, supported: false };
+        return { ...NOT_VERIFIED, supported: false };
       }
       if (
         response.digestScopes !== undefined &&
@@ -1011,7 +1063,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         console.warn(
           `[sync] digest scope mismatch (ours ${local.scopes.join(",")}, peer ${response.digestScopes.join(",")}); skipping verification`,
         );
-        return { ...unsupported, supported: false };
+        return { ...NOT_VERIFIED, supported: false };
       }
       const localDigest = local.buckets;
 
@@ -1043,7 +1095,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // to `null`, and a ceiling exists per author `planNodeScans` found
       // something owed for — so `hasMore` here means "the peer has rows for us"
       // and nothing else. Both flags describe the same moment as the digests.
-      const outboundDrained = !outboundBacklog;
+      const outboundDrained = !outboundBacklog.owed;
       const inboundDrained = !response.hasMore;
 
       if (syncState) {
@@ -1062,8 +1114,13 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           // above, so lowering it makes the peer re-ship into the hole. Nothing
           // else can — our watermark is unchanged by a loss underneath it, so
           // the peer believes we have the row.
+          //
+          // `raiseInboundFloors`, not `applyRepairFloors`: this floor is a
+          // cursor the exchange loop climbs, and taking the *lower* of the two
+          // — right for lowering a coverage watermark — would drop a repair
+          // already halfway through back to the bottom of the range.
           await syncState.setInboundFloors(
-            applyRepairFloors(await loadInboundFloors(), repairFloorsFor(missingHere)),
+            raiseInboundFloors(await loadInboundFloors(), repairFloorsFor(missingHere)),
           );
         }
       }
