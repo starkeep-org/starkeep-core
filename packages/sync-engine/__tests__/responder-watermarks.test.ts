@@ -241,9 +241,20 @@ describe("responderWatermarks — coverage computation", () => {
     ]);
     const dev = makeClock("device-1");
     const pRow = appRow("app-p", "test_rows", "p1", dev.now());
-    const qRow = appRow("app-q", "test_rows", "q1", dev.now()); // higher HLC
     await appSource.applier.apply(pRow);
-    await appSource.applier.apply(qRow);
+
+    // Q's row goes straight into the store rather than through apply(), which
+    // rightly refuses an app the namespace store does not know. The scenario is
+    // a *physically present* foreign table — on SQLite, `app_q_syncable_*`
+    // sitting in the same file — that this channel simply must not read.
+    const qHlc = dev.now(); // higher HLC
+    appSource.rows.set("app-q::test_rows::q1", {
+      id: "q1",
+      payload: "payload-q1",
+      updated_at: serializeHLC(qHlc),
+      deleted_at: null,
+      node_id: qHlc.nodeId,
+    });
 
     const cloud = await makeCloud(appSource, false);
     const res = await cloud.transport.exchange({ watermarks: {} });

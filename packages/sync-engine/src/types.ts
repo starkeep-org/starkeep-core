@@ -313,7 +313,29 @@ export interface SyncExchangeResponse {
    * the two digests are not comparable and must not be compared.
    */
   readonly digestPrefixLength?: number;
+  /**
+   * What the responder actually counted: one sorted scope name per data plane
+   * folded into {@link digest} — `"shared"` for the Drive channel's records and
+   * labels, `"<appId>.<table>"` for each app-syncable table.
+   *
+   * On the wire for the same reason the prefix length is. Both sides build the
+   * digest by walking *their own* namespace store, so an app upgraded on one
+   * end and not the other has each side summing a different set of tables into
+   * the same buckets. Every bucket then disagrees in both directions and
+   * `verify()` reports catastrophic divergence over a schema difference. The
+   * requester compares this against its own scope list and refuses to compare
+   * on a mismatch. Absent from a responder too old to know the field, which
+   * skips the check rather than failing it.
+   */
+  readonly digestScopes?: readonly string[];
 }
+
+/**
+ * The scope name for the Drive channel's shared records and labels in
+ * {@link SyncExchangeResponse.digestScopes}. App-syncable tables name
+ * themselves `"<appId>.<table>"`, which cannot collide with this.
+ */
+export const SHARED_DIGEST_SCOPE = "shared";
 
 export interface SyncTransport {
   exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse>;
@@ -479,6 +501,18 @@ export interface ExchangeResult {
    */
   readonly outboundHasMore: boolean;
   /**
+   * An author's run was cut short by something that would not move — a blob
+   * that failed to transfer in either direction, or a row that would not apply.
+   *
+   * Distinct from both `hasMore` fields, which describe **scans**. A round can
+   * scan a backlog that fits the budget, select it, fail every transfer, and
+   * report `hasMore: false, outboundHasMore: false` while shipping nothing —
+   * the two predictions are about what is owed, and this is an observation
+   * about what happened. `sync()` needs all three: a drained scan with a
+   * blocked shipment is not a completed sync.
+   */
+  readonly blocked: boolean;
+  /**
    * This round changed something that outlives it — a row applied or shipped, a
    * blob declined, or any persisted position moved.
    *
@@ -577,23 +611,49 @@ export interface VerifyResult {
   readonly localRows: number;
   readonly peerRows: number;
   /**
-   * Buckets where **the peer** holds fewer rows than we do — the repair
-   * trigger, and the answer to "did the other end lose something?".
+   * Buckets where **the peer** holds fewer rows than we do *and we owe it
+   * nothing* — the repair trigger, and the answer to "did the other end lose
+   * something?".
    *
    * One-directional on purpose: a bucket where the peer has more is ordinary
    * data we have not pulled yet, not corruption.
+   *
+   * Zero while an outbound backlog exists, because a bucket the peer is behind
+   * on is indistinguishable from one it has lost — see {@link pendingUpload}.
    */
   readonly divergentBuckets: number;
   /**
-   * Buckets where **we** hold fewer rows than the peer — the answer to "is my
-   * library whole?", which is a different question and needs a different
-   * comparison.
+   * Buckets where **we** hold fewer rows than the peer *and it owes us
+   * nothing* — the answer to "is my library whole?", which is a different
+   * question and needs a different comparison.
    *
    * Reusing {@link divergentBuckets} for it reports "clean" to a node that is
    * itself missing rows, which is the case a person most wants to know about.
    * A non-zero value arms the inbound repair; the next sync pulls the gap.
+   *
+   * Zero while an inbound backlog exists — see {@link pendingDownload}.
    */
   readonly missingLocally: number;
+  /**
+   * The same two comparisons when the channel is **not** drained: buckets the
+   * peer is behind on ({@link pendingUpload}) or we are behind on
+   * ({@link pendingDownload}), with a backlog outstanding in that direction.
+   *
+   * Counting these as holes is the mistake this pair exists to prevent. A phone
+   * mid-first-sync or a laptop back from a week offline disagrees in every
+   * bucket of its backlog, and a check run then would otherwise read as loss
+   * across the whole library — and arm a repair that re-requests a backlog the
+   * ordinary round was already going to deliver. "Still to download" and
+   * "missing" are different sentences and this is where they part.
+   *
+   * A direction is drained when nothing is owed in it: outbound by
+   * `hasOutboundBacklog()`, inbound by the responder's `hasMore` on the
+   * zero-limit exchange `verify()` already sends. Exactly one of
+   * {@link divergentBuckets}/{@link pendingUpload} can be non-zero, and
+   * likewise for the inbound pair.
+   */
+  readonly pendingUpload: number;
+  readonly pendingDownload: number;
 }
 
 export interface ExchangeOptions {
@@ -632,9 +692,15 @@ export interface SyncResult {
   shipped: number;
   elided: number;
   /**
-   * True when the loop ended because both directions were drained, false when
-   * it ended on `maxRounds`, an abort, or a stall. False is not an error — it
+   * True when the loop ended because both directions were drained **and
+   * nothing was left behind** — no scan had more to give and no transfer or
+   * apply failed. False when it ended on `maxRounds`, an abort, a stall, or a
+   * round that could not move what it had selected. False is not an error — it
    * means work remains, and the next call picks it up.
+   *
+   * The "nothing was left behind" half is load-bearing and used not to be: a
+   * permanently failing upload drains both scans, so on the scan signals alone
+   * this reported a finished sync for a record that was not in the cloud.
    */
   complete: boolean;
   /**

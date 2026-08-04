@@ -68,6 +68,19 @@ export interface FakeCloudExchangeLogEntry {
   readonly outAppRows: number;
 }
 
+/**
+ * Artificial slowness, so a test can observe what happens *during* a sync.
+ *
+ * Without it every exchange completes within the same tick and a drain is
+ * never in flight when anything else arrives — which makes the whole class of
+ * "a nudge landed mid-drain" questions untestable, and those are exactly the
+ * questions a supervisor that now runs multi-round drains has to answer.
+ */
+export interface FakeCloudLatency {
+  /** Milliseconds to hold each /sync/exchange before answering it. */
+  exchangeDelayMs: number;
+}
+
 export interface FakeCloudFailures {
   /** Fail this many upcoming /sync/exchange calls with a 500, then recover. */
   exchanges: number;
@@ -97,6 +110,17 @@ export interface FakeCloud {
   clearExchangeLog(): void;
   /** Mutate to inject failures; counters self-decrement as they fire. */
   failures: FakeCloudFailures;
+  /** Mutate to slow exchanges down; see {@link FakeCloudLatency}. */
+  latency: FakeCloudLatency;
+  /**
+   * The most exchanges this app ever had in flight here at once.
+   *
+   * The direct observable for "did two drains run on one engine?": one engine
+   * serializes its rounds, so anything above 1 means two overlapping loops were
+   * driving the same channel — and therefore the same read-modify-write
+   * watermark and floor rows.
+   */
+  peakConcurrentExchanges(appId: string): number;
   /**
    * Register the per-app HMAC secret the cloud should verify against. Once set,
    * every `/apps/{appId}/*` request (except `/health`) must carry a valid
@@ -149,6 +173,9 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   });
 
   const exchangeLog: FakeCloudExchangeLogEntry[] = [];
+  const latency: FakeCloudLatency = { exchangeDelayMs: 0 };
+  const inFlightExchanges = new Map<string, number>();
+  const peakExchanges = new Map<string, number>();
   const failures: FakeCloudFailures = {
     exchanges: 0,
     allExchanges: false,
@@ -367,17 +394,29 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         sendJson(res, 500, { error: "injected exchange failure" });
         return;
       }
-      const request = JSON.parse(rawBody.toString("utf8")) as SyncExchangeRequest;
-      const response = await transportFor(appId).exchange(request);
-      exchangeLog.push({
-        appId,
-        at: Date.now(),
-        inRecords: request.records?.length ?? 0,
-        inAppRows: request.appSyncableRows?.length ?? 0,
-        outRecords: response.records.length,
-        outAppRows: response.appSyncableRows?.length ?? 0,
-      });
-      sendJson(res, 200, response);
+      // Counted around the *whole* served exchange, delay included, so the peak
+      // reflects overlap as the local side experiences it.
+      const inFlight = (inFlightExchanges.get(appId) ?? 0) + 1;
+      inFlightExchanges.set(appId, inFlight);
+      peakExchanges.set(appId, Math.max(peakExchanges.get(appId) ?? 0, inFlight));
+      try {
+        if (latency.exchangeDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, latency.exchangeDelayMs));
+        }
+        const request = JSON.parse(rawBody.toString("utf8")) as SyncExchangeRequest;
+        const response = await transportFor(appId).exchange(request);
+        exchangeLog.push({
+          appId,
+          at: Date.now(),
+          inRecords: request.records?.length ?? 0,
+          inAppRows: request.appSyncableRows?.length ?? 0,
+          outRecords: response.records.length,
+          outAppRows: response.appSyncableRows?.length ?? 0,
+        });
+        sendJson(res, 200, response);
+      } finally {
+        inFlightExchanges.set(appId, (inFlightExchanges.get(appId) ?? 1) - 1);
+      }
       return;
     }
 
@@ -517,8 +556,11 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     exchangeLog,
     clearExchangeLog: () => {
       exchangeLog.length = 0;
+      peakExchanges.clear();
     },
     failures,
+    latency,
+    peakConcurrentExchanges: (appId) => peakExchanges.get(appId) ?? 0,
     setAppSecret: (appId, hmacSecret) => {
       appSecrets.set(appId, hmacSecret);
     },

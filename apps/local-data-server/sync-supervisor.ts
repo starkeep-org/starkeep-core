@@ -17,6 +17,7 @@ import type {
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
+import { createEngineRunner, type EngineRunner } from "./engine-runner.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
 import { signRequest } from "../../packages/app-client/src/sign.js";
 import { appRegistryRow } from "../../packages/admin-installer/src/local/registry.js";
@@ -100,6 +101,12 @@ interface EngineEntry {
   lastExchangeAt: string | null;
   lastError: string | null;
   backoffMs: number;
+  /**
+   * Serializes everything that touches this engine — ticks, nudges,
+   * `/sync/now`, `/sync/verify`, `resume()`. See `engine-runner.ts` for why an
+   * engine cannot have two of them at once.
+   */
+  readonly runner: EngineRunner;
 }
 
 export interface SyncSupervisorStatus {
@@ -266,6 +273,7 @@ export function createSyncSupervisor(
       lastExchangeAt: null,
       lastError: null,
       backoffMs: exchangeIntervalMs,
+      runner: createEngineRunner({ cancelled: () => paused }),
     };
     engines.set(appId, entry);
     scheduleTick(entry);
@@ -384,8 +392,18 @@ export function createSyncSupervisor(
     },
   };
 
-  async function runExchangeOnce(entry: EngineEntry): Promise<void> {
-    entry.tickTimer = null;
+  /**
+   * Exclusive use of one engine for the duration of `body`.
+   *
+   * A caller that has to wait genuinely does have to wait: the work it asked
+   * for is already happening, and its answer should describe the state after
+   * that work rather than race it.
+   */
+  function withEngine<T>(entry: EngineEntry, body: () => Promise<T>): Promise<T> {
+    return entry.runner.run(body);
+  }
+
+  async function driveDrain(entry: EngineEntry): Promise<void> {
     try {
       // sync(), not one exchange(): a round is bounded by the byte budget, so a
       // backlog needs many of them and running one per timer tick would make a
@@ -401,7 +419,16 @@ export function createSyncSupervisor(
       entry.backoffMs = Math.min(entry.backoffMs * 2, 5 * 60 * 1000);
       console.error(`[sync] exchange failed for app=${entry.appId}:`, err);
     }
-    if (!paused) scheduleTick(entry);
+  }
+
+  async function runExchangeOnce(entry: EngineEntry): Promise<void> {
+    entry.tickTimer = null;
+    // Folds into a drain already running rather than starting a second one.
+    // Only the caller that owned the drain reschedules the idle tick — a
+    // folded-in caller returns immediately, and restarting the timer from there
+    // would arm it while the drain is still going.
+    const owned = await entry.runner.drain(() => driveDrain(entry));
+    if (owned && !paused) scheduleTick(entry);
   }
 
   function scheduleNudge(appId: string): void {
@@ -483,15 +510,17 @@ export function createSyncSupervisor(
       paused = false;
       await Promise.all(
         Array.from(engines.values()).map(async (entry) => {
-          try {
-            await entry.engine.sync({ signal: syncSignal });
-            entry.lastExchangeAt = new Date().toISOString();
-            entry.lastError = null;
-            entry.backoffMs = exchangeIntervalMs;
-          } catch (err) {
-            entry.lastError = (err as Error).message;
-            console.error(`[sync] resume exchange failed for app=${entry.appId}:`, err);
-          }
+          await withEngine(entry, async () => {
+            try {
+              await entry.engine.sync({ signal: syncSignal });
+              entry.lastExchangeAt = new Date().toISOString();
+              entry.lastError = null;
+              entry.backoffMs = exchangeIntervalMs;
+            } catch (err) {
+              entry.lastError = (err as Error).message;
+              console.error(`[sync] resume exchange failed for app=${entry.appId}:`, err);
+            }
+          });
           scheduleTick(entry);
         }),
       );
@@ -508,10 +537,12 @@ export function createSyncSupervisor(
           // rounds and hours of transfer — running that inside a request would
           // hold the connection open for the duration and ignore a pause. The
           // caller polls by asking again while `complete` is false.
-          const r = await entry.engine.sync({
-            maxRounds: SYNC_NOW_MAX_ROUNDS,
-            signal: syncSignal,
-          });
+          const r = await withEngine(entry, () =>
+            entry.engine.sync({
+              maxRounds: SYNC_NOW_MAX_ROUNDS,
+              signal: syncSignal,
+            }),
+          );
           applied += r.applied;
           shipped += r.shipped;
           if (!r.complete) complete = false;
@@ -534,6 +565,24 @@ export function createSyncSupervisor(
       return { applied, shipped, complete };
     },
 
+    /**
+     * Run the integrity check on every channel — on request only.
+     *
+     * There is deliberately no timer behind this, and the absence is a decision
+     * rather than an omission. `verify()` is a `GROUP BY` over each side's whole
+     * index plus a round trip, on both ends; it answers a question whose answer
+     * only changes when something has already gone wrong, and running it on a
+     * schedule would spend that on every node, forever, to find nothing.
+     *
+     * It is also the only thing that can see a row lost from the *middle* of an
+     * author's range — the coverage watermark cannot — so "on request only"
+     * means a loss sits undetected until a person presses the button. That is
+     * the trade, stated so the next reader can take the other side of it: the
+     * check is now safe to schedule (it reports a backlog as pending rather
+     * than as loss, so a node mid-first-sync no longer alarms), and wiring it to
+     * something occasional — after an idle drain completes, say, or daily —
+     * needs no change here beyond calling this.
+     */
     async verifyAll() {
       const out: Array<{
         appId: string;
@@ -542,7 +591,10 @@ export function createSyncSupervisor(
       }> = [];
       for (const entry of engines.values()) {
         try {
-          out.push({ appId: entry.appId, result: await entry.engine.verify(), error: null });
+          // Under the lock: verify() writes repair and inbound floors, and a
+          // round running concurrently would overwrite them from a stale read.
+          const result = await withEngine(entry, () => entry.engine.verify());
+          out.push({ appId: entry.appId, result, error: null });
         } catch (err) {
           out.push({ appId: entry.appId, result: null, error: (err as Error).message });
           console.error(`[sync] verify failed for app=${entry.appId}:`, err);

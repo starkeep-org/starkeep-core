@@ -454,6 +454,48 @@ describe("verify()", () => {
     const quiet = await engine.sync();
     expect(quiet.shipped).toBe(0);
   });
+
+  it("converges when the peer holds an older version of a row we hold newer", async () => {
+    // The case counts-not-checksums rests on, and until now only prose. The
+    // peer's copy is not *missing*, it is stale — so its `updated_at` lands in
+    // an earlier bucket than ours. Both buckets therefore disagree: ours has a
+    // row the peer's does not, and the peer's has one ours does not. Only the
+    // first is a repair trigger, and the floor it arms sits below the newer
+    // row, so the ordinary scan re-ships it and LWW settles the rest.
+    const { local, cloud } = await twoSides();
+    const ids: StarkeepId[] = [];
+    for (let i = 0; i < 4; i += 1) ids.push(await seedBlobRecord(local, 1 * MB));
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+    await engine.sync();
+
+    // Update one record locally, far enough ahead to land in another bucket,
+    // and leave the peer on its old copy — a round that never arrived.
+    const stale = (await cloud.db.get(ids[1]!))!;
+    const fresh = {
+      ...(await local.db.get(ids[1]!))!,
+      updatedAt: { wallTime: 2_000_000_000_000, counter: 0, nodeId: "L" },
+    };
+    await local.db.put(fresh);
+    (cloud.db as unknown as { store: Map<string, unknown> }).store.set(ids[1]!, stale);
+    await syncState.setPeerWatermarks(await cloud.db.getNodeWatermarks());
+
+    // Row counts match — the peer is not missing anything — but the buckets do
+    // not, because the same row is filed under two different times. Reported as
+    // pending rather than as loss, which is the correct reading: the newer copy
+    // is sitting in our own outbound queue.
+    const seen = await engine.verify();
+    expect(seen.localRows).toBe(seen.peerRows);
+    expect(seen.pendingUpload).toBeGreaterThan(0);
+    expect(seen.divergentBuckets).toBe(0);
+
+    await engine.sync();
+
+    expect((await cloud.db.get(ids[1]!))!.updatedAt).toEqual(fresh.updatedAt);
+    const after = await engine.verify();
+    expect(after.divergentBuckets).toBe(0);
+    expect(after.missingLocally).toBe(0);
+  });
 });
 
 /**
@@ -467,6 +509,161 @@ describe("verify()", () => {
  * Forever. Before the loop existed the poll interval bounded that to one retry
  * per tick; adding the loop removed the bound.
  */
+describe("records sharing one object key", () => {
+  /** Two distinct records whose bytes are identical, so they name one object. */
+  async function seedSharingKey(side: Side, key: string): Promise<StarkeepId> {
+    const id = generateId() as StarkeepId;
+    await side.storage.put(key, new Uint8Array(8));
+    await side.db.put({
+      ...createDataRecord(
+        {
+          type: "image/jpeg",
+          originAppId: "photos",
+          contentHash: "sha256:identical-bytes",
+          objectStorageKey: key,
+          mimeType: "image/jpeg",
+          sizeBytes: 8,
+        },
+        side.clock,
+      ),
+      id,
+    });
+    return id;
+  }
+
+  it("ships both in one round rather than treating the second as a failure", async () => {
+    // Record blobs are content-addressed, so identical bytes mean an identical
+    // key. Dispatched as two transfers, the second met the first in flight and
+    // `transferFile` answered false — indistinguishable from a failed upload,
+    // so the author's shipment stopped at it and the round reported itself
+    // complete with a record left behind.
+    const { local, cloud } = await twoSides();
+    const key = "apps/photos/syncable/identical-bytes.bin";
+    const first = await seedSharingKey(local, key);
+    const second = await seedSharingKey(local, key);
+
+    const result = await engineFor(local, cloud, createMemorySyncStateStore()).sync();
+
+    expect(await cloud.db.get(first)).not.toBeNull();
+    expect(await cloud.db.get(second)).not.toBeNull();
+    expect(result.complete).toBe(true);
+    expect(result.stalled).toBe(false);
+  });
+
+  it("sends the shared bytes once, not once per record", async () => {
+    const { local, cloud } = await twoSides();
+    const key = "apps/photos/syncable/identical-bytes.bin";
+    await seedSharingKey(local, key);
+    await seedSharingKey(local, key);
+    await seedSharingKey(local, key);
+
+    let puts = 0;
+    const realPutStream = cloud.storage.putStream.bind(cloud.storage);
+    cloud.storage.putStream = async (...args: Parameters<typeof realPutStream>) => {
+      puts += 1;
+      return realPutStream(...args);
+    };
+
+    await engineFor(local, cloud, createMemorySyncStateStore()).sync();
+    expect(puts).toBe(1);
+  });
+
+  it("still fails every record naming a key whose transfer failed", async () => {
+    // The flip side of sharing an outcome: one failure has to reach all of them,
+    // or a record ships with bytes that never arrived.
+    const { local, cloud } = await twoSides();
+    const key = "apps/photos/syncable/identical-bytes.bin";
+    const first = await seedSharingKey(local, key);
+    const second = await seedSharingKey(local, key);
+    cloud.storage.putStream = async () => {
+      throw new Error("[test] permanent upload failure");
+    };
+
+    const result = await engineFor(local, cloud, createMemorySyncStateStore()).sync();
+
+    expect(await cloud.db.get(first)).toBeNull();
+    expect(await cloud.db.get(second)).toBeNull();
+    expect(result.complete).toBe(false);
+  });
+});
+
+describe("the responder's half of the byte budget", () => {
+  /**
+   * The budget the *caller* sets on what it will be handed back.
+   *
+   * Without it the cap is one-directional: a handset that limits itself to
+   * 10 MB outbound could still be handed a hundred blob-carrying records
+   * inbound and be expected to pull every one. The requester's own budget is
+   * covered above; this is the responder honouring what it was asked for,
+   * which is the side a phone depends on and the side nothing tested.
+   */
+  function responderFor(cloud: Side) {
+    return createInProcessSyncTransport({
+      databaseAdapter: cloud.db,
+      clock: cloud.clock,
+      objectStorage: cloud.storage,
+      syncSharedRecords: true,
+    });
+  }
+
+  it("ships back no more bytes than the caller allowed", async () => {
+    const { cloud } = await twoSides();
+    for (let i = 0; i < 6; i += 1) await seedBlobRecord(cloud, 3 * MB);
+
+    const response = await responderFor(cloud).exchange({
+      watermarks: {},
+      limit: 1000,
+      maxBytes: 10 * MB,
+    });
+
+    expect(response.records.length).toBeGreaterThan(0);
+    const bytes = response.records.reduce((sum, r) => sum + r.sizeBytes, 0);
+    expect(bytes).toBeLessThanOrEqual(10 * MB);
+    expect(response.hasMore).toBe(true);
+  });
+
+  it("falls back to its own maximum for a caller that names none", async () => {
+    // An older peer that omits the field gets the responder's default rather
+    // than an unbounded pull.
+    const { cloud } = await twoSides();
+    for (let i = 0; i < 6; i += 1) await seedBlobRecord(cloud, 10 * MB);
+
+    const response = await responderFor(cloud).exchange({ watermarks: {}, limit: 1000 });
+
+    const bytes = response.records.reduce((sum, r) => sum + r.sizeBytes, 0);
+    expect(bytes).toBeLessThanOrEqual(25 * MB);
+  });
+
+  it("still ships one record larger than the whole budget", async () => {
+    // Otherwise a single large video stalls the channel permanently: it never
+    // fits, so it never ships, so nothing behind it ever moves either.
+    const { cloud } = await twoSides();
+    await seedBlobRecord(cloud, 50 * MB);
+
+    const response = await responderFor(cloud).exchange({
+      watermarks: {},
+      limit: 1000,
+      maxBytes: 1 * MB,
+    });
+
+    expect(response.records).toHaveLength(1);
+  });
+
+  it("does not charge blob-less rows against it", async () => {
+    const { cloud } = await twoSides();
+    for (let i = 0; i < 6; i += 1) await seedBlobless(cloud);
+
+    const response = await responderFor(cloud).exchange({
+      watermarks: {},
+      limit: 1000,
+      maxBytes: 1,
+    });
+
+    expect(response.records).toHaveLength(6);
+    expect(response.hasMore).toBe(false);
+  });
+});
+
 describe("sync() termination", () => {
   it("stops when a round achieves nothing, instead of reissuing it 10,000 times", async () => {
     const { local, cloud } = await twoSides();
@@ -492,6 +689,50 @@ describe("sync() termination", () => {
     expect(result.shipped).toBe(0);
     // Not "complete" — work remains — and `stalled` says which of the two it
     // is, so a caller can tell "finished" from "wedged".
+    expect(result.complete).toBe(false);
+    expect(result.stalled).toBe(true);
+  });
+
+  it("does not report complete when the only record's upload keeps failing", async () => {
+    // The case the scan signals cannot see. One record, a budget it fits
+    // inside, and a transfer that never succeeds: both scans drain, so
+    // `hasMore` and `outboundHasMore` are false and the loop used to take the
+    // "both directions drained" exit — returning complete, not stalled, for a
+    // record that is not in the cloud. That is the value `/sync/now` returns
+    // and the one the phone's Sync button reads.
+    const { local, cloud } = await twoSides();
+    const id = await seedBlobRecord(local, 1 * MB);
+    const record = (await local.db.get(id))!;
+    cloud.storage.putStream = async () => {
+      throw new Error("[test] permanent upload failure");
+    };
+
+    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
+      maxBytes: 100 * MB,
+    }).sync();
+
+    expect(result.shipped).toBe(0);
+    expect(await cloud.db.get(id)).toBeNull();
+    expect(result.complete).toBe(false);
+    expect(result.stalled).toBe(true);
+    expect(record.objectStorageKey).not.toBe("");
+  });
+
+  it("does not report complete when an inbound blob keeps failing", async () => {
+    // The mirror. The responder has nothing further to send, so `hasMore` is
+    // false, but our own watermark cannot advance past a blob that will not
+    // download — so the round left something behind and the sync is not done.
+    const { local, cloud } = await twoSides();
+    const id = await seedBlobRecord(cloud, 1 * MB);
+    local.storage.putStream = async () => {
+      throw new Error("[test] permanent download failure");
+    };
+
+    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
+      maxBytes: 100 * MB,
+    }).sync();
+
+    expect(await local.storage.has((await cloud.db.get(id))!.objectStorageKey)).toBe(false);
     expect(result.complete).toBe(false);
     expect(result.stalled).toBe(true);
   });
@@ -761,6 +1002,115 @@ describe("verify() — both directions", () => {
     expect(result.supported).toBe(false);
     expect(result.divergentBuckets).toBe(0);
     expect(await syncState.getRepairFloors()).toEqual({});
+  });
+
+  it("reports a pull backlog as pending, not as a hole", async () => {
+    // The mirror comparison flags every bucket where the peer holds more than
+    // we do — which is exactly what a phone mid-first-sync looks like. Counting
+    // that as loss puts "this phone is missing rows in N time ranges" on the
+    // screen for a node that is merely behind, and arms an inbound repair over
+    // a backlog the next ordinary round was already going to deliver.
+    const { local, cloud } = await twoSides();
+    const ids: StarkeepId[] = [];
+    for (let i = 0; i < 5; i += 1) ids.push(await seedBlobRecord(cloud, 1 * MB));
+
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+
+    const result = await engine.verify();
+    expect(result.supported).toBe(true);
+    expect(result.missingLocally, "behind is not missing").toBe(0);
+    expect(result.pendingDownload).toBeGreaterThan(0);
+    expect(await syncState.getInboundFloors(), "no repair for a queue").toEqual({});
+
+    // Drained, the same comparison is a hole again — nothing here is masked.
+    await engine.sync();
+    await loseFromMiddle(local, ids[2]!);
+    const after = await engine.verify();
+    expect(after.missingLocally).toBeGreaterThan(0);
+    expect(after.pendingDownload).toBe(0);
+  });
+
+  it("reports a push backlog as pending, not as the peer's loss", async () => {
+    // Same argument from the other end: rows we have not shipped yet are not
+    // rows the peer lost, and arming an outbound repair over them re-scans from
+    // a floor the ordinary round already covers.
+    const { local, cloud } = await twoSides();
+    for (let i = 0; i < 5; i += 1) await seedBlobRecord(local, 1 * MB);
+
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+
+    const result = await engine.verify();
+    expect(result.supported).toBe(true);
+    expect(result.divergentBuckets).toBe(0);
+    expect(result.pendingUpload).toBeGreaterThan(0);
+    expect(await syncState.getRepairFloors()).toEqual({});
+  });
+
+  it("refuses to compare digests built over different table sets", async () => {
+    // Both sides sum their *own* tables into shared buckets, so an app upgraded
+    // on one end makes every bucket disagree in both directions over a schema
+    // difference — reported as catastrophic divergence and repaired by
+    // re-shipping the library twice.
+    const { local, cloud } = await twoSides();
+    for (let i = 0; i < 3; i += 1) await seedBlobRecord(local, 1 * MB);
+
+    const syncState = createMemorySyncStateStore();
+    const transport = createInProcessSyncTransport({
+      databaseAdapter: cloud.db,
+      clock: cloud.clock,
+      objectStorage: cloud.storage,
+      syncSharedRecords: true,
+    });
+    const engine = createSyncEngine({
+      localDatabaseAdapter: local.db,
+      localObjectStorage: local.storage,
+      remoteObjectStorage: cloud.storage,
+      // A peer that counted one table more than we did.
+      transport: {
+        async exchange(request) {
+          const response = await transport.exchange(request);
+          if (!response.digest) return response;
+          return {
+            ...response,
+            digestScopes: [...(response.digestScopes ?? []), "photos.file_records"],
+          };
+        },
+      },
+      clock: local.clock,
+      syncState,
+      syncSharedRecords: true,
+    });
+    await engine.sync();
+
+    const result = await engine.verify();
+    expect(result.supported).toBe(false);
+    expect(result.divergentBuckets).toBe(0);
+    expect(result.missingLocally).toBe(0);
+    expect(await syncState.getRepairFloors()).toEqual({});
+    expect(await syncState.getInboundFloors()).toEqual({});
+  });
+
+  it("reports unsupported when the local digest could not be counted", async () => {
+    // A table we could not count is not a table we hold nothing in. Reading the
+    // uncounted rows as rows we are missing is the loud failure mode from a
+    // quiet one — a full-library inbound repair off a read error.
+    const { local, cloud } = await twoSides();
+    for (let i = 0; i < 3; i += 1) await seedBlobRecord(cloud, 1 * MB);
+
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+    await engine.sync();
+
+    local.db.bucketDigest = async () => {
+      throw new Error("[test] digest read failure");
+    };
+
+    const result = await engine.verify();
+    expect(result.supported).toBe(false);
+    expect(result.missingLocally).toBe(0);
+    expect(await syncState.getInboundFloors()).toEqual({});
   });
 
   it("reports unsupported for a peer that cannot answer at all", async () => {

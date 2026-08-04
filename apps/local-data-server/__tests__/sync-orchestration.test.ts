@@ -321,3 +321,142 @@ describe("auth gate (no id token)", () => {
     }
   });
 });
+
+/**
+ * One engine, one drain — observed through the supervisor rather than the
+ * runner underneath it.
+ *
+ * `engine-runner.test.ts` pins the coalescing itself. What it cannot show is
+ * that the supervisor actually routes *every* trigger through it, and that is
+ * the half that broke: a tick used to run a single `exchange()` and now runs an
+ * unbounded multi-round drain, so a nudge, a `/sync/now` or a `/sync/verify`
+ * arriving inside that window used to start a second loop against the same
+ * `syncState` rows. Both loops read the watermarks and the repair floors, both
+ * write them back, and the later write wins. A regressed watermark costs a
+ * re-ship; a dropped repair floor is the only record that a hole still needs
+ * filling, so losing it makes the repair report success and do nothing.
+ *
+ * The observable is the cloud's own view: one engine serializes its rounds, so
+ * more than one exchange in flight for a channel means two loops were driving
+ * it. Exchanges are slowed down deliberately — without that no trigger ever
+ * arrives while a drain is still running, which is precisely why this class of
+ * bug went unnoticed.
+ */
+describe("concurrent triggers on one engine", () => {
+  let cloud: FakeCloud;
+  let server: LocalDataServer;
+  let app: InstalledApp;
+
+  beforeAll(async () => {
+    cloud = await startFakeCloud();
+    server = await startLocalDataServer({
+      config: {
+        apiGatewayUrl: cloud.url,
+        pullIntervalMs: 600_000,
+        pushDebounceMs: 25,
+      },
+      auth: { idToken: fakeIdToken() },
+    });
+    const manifest = testAppManifest();
+    app = await installApp(server, manifest);
+    cloud.installApp(manifest);
+    await eventually(async () => {
+      const status = await syncStatus(app);
+      if (!status.perApp.every((e) => e.lastExchangeAt !== null)) {
+        throw new Error("initial exchanges not settled");
+      }
+    });
+  }, 60_000);
+
+  afterAll(async () => {
+    cloud.latency.exchangeDelayMs = 0;
+    await server?.stop();
+    await cloud?.close();
+  });
+
+  it("folds a nudge arriving mid-drain into the drain already running", async () => {
+    cloud.latency.exchangeDelayMs = 120;
+    cloud.clearExchangeLog();
+
+    // A write while a /sync/now drain is in flight. The nudge it fires is a
+    // request for the drain's *next* round to see the write, not a request for
+    // a second drain — the running loop re-scans from the watermark every
+    // round, so it will pick it up.
+    const draining = app.fetch("/sync/now", { method: "POST" });
+    await sleep(60);
+    await createRecordWithBytes(app, { type: "image/jpeg" });
+    await sleep(60);
+    await createRecordWithBytes(app, { type: "image/jpeg" });
+    expect((await draining).status).toBe(200);
+
+    // Let the coalesced rerun finish before judging.
+    await sleep(400);
+    expect(cloud.peakConcurrentExchanges("starkeep-drive")).toBe(1);
+    expect(cloud.peakConcurrentExchanges("testapp")).toBe(1);
+  }, 30_000);
+
+  it("keeps /sync/verify off the engine while a drain is running", async () => {
+    cloud.latency.exchangeDelayMs = 120;
+    cloud.clearExchangeLog();
+
+    // verify() writes repair and inbound floors from a read of the same rows a
+    // round is reading, so overlapping them is the floor-clobbering case
+    // exactly. It waits its turn instead.
+    const draining = app.fetch("/sync/now", { method: "POST" });
+    await sleep(50);
+    const verify = await app.fetch("/sync/verify", { method: "POST" });
+    expect(verify.status).toBe(200);
+    expect((await draining).status).toBe(200);
+
+    expect(cloud.peakConcurrentExchanges("starkeep-drive")).toBe(1);
+    expect(cloud.peakConcurrentExchanges("testapp")).toBe(1);
+  }, 30_000);
+
+  it("reports the job unfinished, and finishes it on the next call", async () => {
+    // The contract `SYNC_NOW_MAX_ROUNDS` exists to create: the handler returns
+    // rather than holding a connection open for a whole backlog, and the caller
+    // polls while `complete` is false. A blob that will not upload produces the
+    // same "not done" without needing a fifty-round backlog to get there — and
+    // it is the case that used to answer `complete: true` with the photo still
+    // on the phone, because the scan had drained even though nothing shipped.
+    cloud.latency.exchangeDelayMs = 0;
+    cloud.clearExchangeLog();
+    cloud.failures.blobPuts = 100;
+    await createRecordWithBytes(app, { type: "image/jpeg" });
+
+    const stuck = await app.fetch("/sync/now", { method: "POST" });
+    expect(stuck.status).toBe(200);
+    expect(((await stuck.json()) as { complete: boolean }).complete).toBe(false);
+
+    cloud.failures.blobPuts = 0;
+    await eventually(async () => {
+      const res = await app.fetch("/sync/now", { method: "POST" });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { complete: boolean }).complete).toBe(true);
+    });
+  }, 30_000);
+
+  it("stops a coalesced rerun when the sync is paused mid-drain", async () => {
+    cloud.latency.exchangeDelayMs = 120;
+    cloud.clearExchangeLog();
+
+    const draining = app.fetch("/sync/now", { method: "POST" });
+    await sleep(50);
+    await createRecordWithBytes(app, { type: "image/jpeg" });
+    const pause = await app.fetch("/sync/pause", { method: "POST" });
+    expect(pause.status).toBe(200);
+    expect((await draining).status).toBe(200);
+
+    // A pause has to reach the rerun the nudge queued, not just fresh
+    // triggers — otherwise "pause" means "pause in a moment", which on a
+    // metered connection is the difference the setting exists to make.
+    await sleep(300);
+    const settled = cloud.exchangeLog.length;
+    await sleep(300);
+    expect(cloud.exchangeLog.length).toBe(settled);
+    expect((await syncStatus(app)).syncPaused).toBe(true);
+
+    cloud.latency.exchangeDelayMs = 0;
+    expect((await app.fetch("/sync/resume", { method: "POST" })).status).toBe(200);
+  }, 30_000);
+});

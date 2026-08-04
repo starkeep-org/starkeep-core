@@ -1,6 +1,11 @@
 import { createMemorySyncStateStore } from "./memory-sync-state.js";
-import { compareHLC, type HLCTimestamp, type StarkeepId } from "@starkeep/protocol-primitives";
-import type { MockDatabaseAdapter } from "@starkeep/storage-adapter";
+import {
+  compareHLC,
+  deserializeHLC,
+  type HLCTimestamp,
+  type StarkeepId,
+} from "@starkeep/protocol-primitives";
+import { rowToWireEntry, type MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../../src/transports/in-process-transport.js";
 import { residencyOf, type RecordResidency } from "../../src/residency.js";
@@ -154,7 +159,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
   function lookupAppRow(
     role: "local" | "cloud",
     id: StarkeepId,
-  ): AppSyncableRowEntry | null {
+  ): Record<string, unknown> | null {
     const key = `${resolved.appId}::${appRowTable()}::${id}`;
     return side(role).appRows.get(key) ?? null;
   }
@@ -185,6 +190,14 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     return side(role).db.get(id ?? subjectIds[0]!);
   }
 
+  /**
+   * The stored row as the wire entry a scan would derive from it.
+   *
+   * Derived rather than stored: the mock keeps a table of column maps now, and
+   * the entry a peer would receive is a *function of* that row — which is where
+   * the tombstone's primary key has to come from. Asserting on the derived
+   * entry therefore checks the same thing the peer would act on.
+   */
   async function getAppRow(
     role: "local" | "cloud",
     id?: StarkeepId,
@@ -194,7 +207,15 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     if (resolved.dt === "SR") {
       throw new Error("[harness] getAppRow not valid for dt=SR");
     }
-    return lookupAppRow(role, target);
+    const row = lookupAppRow(role, target);
+    if (!row) return null;
+    return rowToWireEntry(
+      resolved.appId,
+      appRowTable(),
+      row,
+      ["id"],
+      deserializeHLC,
+    ) as AppSyncableRowEntry | null;
   }
 
   async function residency(
@@ -229,15 +250,15 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     if (resolved.dt === "AW") {
       const row = lookupAppRow(role, target);
       if (!row) return "absent";
-      if (row.op === "delete" || row.row?.["deleted_at"]) return "tombstoned";
+      if (row["deleted_at"]) return "tombstoned";
       return "resident";
     }
 
     // AR
     const row = lookupAppRow(role, target);
     if (!row) return "absent";
-    if (row.op === "delete" || row.row?.["deleted_at"]) return "tombstoned";
-    const key = (row.row?.["object_storage_key"] ?? "") as string;
+    if (row["deleted_at"]) return "tombstoned";
+    const key = (row["object_storage_key"] ?? "") as string;
     if (!key) return "resident";
     return (await side(role).storage.has(key)) ? "resident" : "staged";
   }
@@ -371,7 +392,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
           newHlc = (await side(op.side).db.get(result.insertedId))?.updatedAt;
         } else {
           const row = lookupAppRow(op.side, result.insertedId);
-          newHlc = row?.timestamp;
+          newHlc = row ? deserializeHLC(String(row["updated_at"])) : undefined;
         }
         if (newHlc) {
           if (op.side === "local") hlcByLocal.set(result.insertedId, newHlc);

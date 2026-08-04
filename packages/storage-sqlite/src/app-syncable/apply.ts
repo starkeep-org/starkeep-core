@@ -8,6 +8,8 @@ import {
   buildScanSinceForNode,
   collectSince,
   planNodeScans,
+  requireKeyedWhere,
+  rowToWireEntry,
   toDigestBuckets,
   DEFAULT_BUCKET_PREFIX_LENGTH,
   type DigestBucket,
@@ -111,7 +113,7 @@ export class SqliteAppSyncableApplier
     // node_id rides along whenever updated_at changes (it's derived from it).
     const rawPatch = entry.row ?? {};
     const patch = rawPatch["updated_at"] ? withNodeId(rawPatch, entry) : rawPatch;
-    const where = entry.where ?? {};
+    const where = requireKeyedWhere(entry, "update");
     const patchCols = Object.keys(patch);
     const whereCols = Object.keys(where);
     if (patchCols.length === 0) return;
@@ -129,7 +131,7 @@ export class SqliteAppSyncableApplier
   }
 
   private applyDelete(fullName: string, entry: AppSyncableRowEntry): void {
-    const where = entry.where ?? {};
+    const where = requireKeyedWhere(entry, "delete");
     const whereCols = Object.keys(where);
     // Soft-delete: set deleted_at and updated_at (and node_id with it).
     const incomingUpdatedAt = entry.row?.["updated_at"] as string | undefined;
@@ -205,8 +207,12 @@ export class SqliteAppSyncableApplier
     const fullName = appSyncableTableName(appId, table);
     // A missing table (app not installed locally) reads as "nothing owed"
     // rather than an error, the same fail-safe direction getNodeWatermarks
-    // takes: understating only causes a re-ship.
+    // takes: understating only causes a re-ship. That case is settled *here*,
+    // by getNodeWatermarks returning {} so no author is planned — which is why
+    // nothing below needs a catch for it.
     const scans = planNodeScans(await this.getNodeWatermarks(appId, table), peerWatermarks);
+    const pkColumns = this.namespace.get(appId)?.tables.find((t) => t.name === table)
+      ?.pkColumns ?? [];
     try {
       const { rows, hasMore, truncated } = await collectSince<Record<string, unknown>>(
         scans,
@@ -217,9 +223,28 @@ export class SqliteAppSyncableApplier
         },
         (row) => deserializeHLC(row["updated_at"] as string),
       );
-      return { rows: rows.map((row) => rowToEntry(appId, table, row)), hasMore, truncated };
-    } catch {
-      return { rows: [], hasMore: false, truncated: {} };
+      return {
+        rows: rows
+          .map((row) => rowToWireEntry(appId, table, row, pkColumns, deserializeHLC))
+          .filter((entry): entry is AppSyncableRowEntry => entry !== null),
+        hasMore,
+        truncated,
+      };
+    } catch (err) {
+      // A read that failed part-way has enumerated *nothing it can vouch for*,
+      // and `truncated: {}` is the wire value for the opposite — "every author
+      // complete, no ceiling". Returning that lets the round ship rows whose
+      // HLCs sit above the ones this scan never reached, which is the exact
+      // silent-loss shape `round-cut.ts` exists to prevent.
+      //
+      // So every planned author gets a `null` ceiling: nothing is safe to ship
+      // for any of them, and `hasMore` asks for the round to be retried.
+      console.warn(
+        `[app-syncable] scanSince failed for ${appId}.${table}: ${(err as Error).message}`,
+      );
+      const truncated: Record<string, HLCTimestamp | null> = {};
+      for (const scan of scans) truncated[scan.nodeId] = null;
+      return { rows: [], hasMore: true, truncated };
     }
   }
 
@@ -265,21 +290,6 @@ function nodeIdOf(updatedAt: unknown, entry: AppSyncableRowEntry): string {
   return entry.timestamp.nodeId;
 }
 
-function rowToEntry(
-  appId: string,
-  table: string,
-  row: Record<string, unknown>,
-): AppSyncableRowEntry {
-  const updatedAtStr = row["updated_at"] as string;
-  const deletedAtStr = row["deleted_at"] as string | null | undefined;
-  const timestamp = deserializeHLC(updatedAtStr);
-
-  // For wire propagation we emit op="insert" (upsert) for live rows so the
-  // receiver creates the row if it doesn't exist yet. op="update" only
-  // targets existing rows and would silently drop new rows during initial
-  // sync. Tombstones still ride the soft-delete path.
-  if (deletedAtStr) {
-    return { timestamp, appId, table, op: "delete", row };
-  }
-  return { timestamp, appId, table, op: "insert", row };
-}
+// The wire-entry shape is shared with the DSQL applier — see
+// `storage-adapter/src/database/app-syncable-rows.ts`. It was duplicated here,
+// and both copies emitted keyless tombstones.

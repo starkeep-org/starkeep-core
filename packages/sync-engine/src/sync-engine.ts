@@ -62,6 +62,7 @@ import type {
   VerifyResult,
   Watermarks,
 } from "./types.js";
+import { SHARED_DIGEST_SCOPE } from "./types.js";
 import { createChangeNotifier } from "./change-notifier.js";
 import { createFileSyncEngine } from "./file-sync-engine.js";
 import {
@@ -152,27 +153,47 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
    * per-app channel against rows it never carries — arming floors for a repair
    * the channel cannot perform, and reporting divergence that means nothing.
    */
-  async function localBucketDigest(): Promise<DigestBucket[]> {
+  async function localBucketDigest(
+    prefixLength: number,
+  ): Promise<{ buckets: DigestBucket[]; scopes: string[]; complete: boolean }> {
     const buckets: DigestBucket[] = [];
+    const scopes: string[] = [];
+    let complete = true;
     if (syncSharedRecords) {
-      buckets.push(...(await localDatabaseAdapter.bucketDigest()));
+      scopes.push(SHARED_DIGEST_SCOPE);
+      try {
+        buckets.push(...(await localDatabaseAdapter.bucketDigest(prefixLength)));
+      } catch (err) {
+        console.warn(`[sync] bucketDigest failed for shared records: ${(err as Error).message}`);
+        complete = false;
+      }
     }
     if (appSyncableSource) {
       for (const ns of appSyncableSource.namespaces.list()) {
         for (const tableInfo of ns.tables) {
+          scopes.push(`${ns.appId}.${tableInfo.name}`);
           try {
             buckets.push(
-              ...(await appSyncableSource.applier.bucketDigest(ns.appId, tableInfo.name)),
+              ...(await appSyncableSource.applier.bucketDigest(
+                ns.appId,
+                tableInfo.name,
+                prefixLength,
+              )),
             );
           } catch (err) {
             console.warn(
               `[sync] bucketDigest failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
             );
+            // A table we could not count is not a table we hold nothing in.
+            // Treating the failure as a zero makes every bucket in it look like
+            // a hole — the loudest possible false alarm, and one that would arm
+            // a full-library repair in both directions.
+            complete = false;
           }
         }
       }
     }
-    return mergeDigestBuckets(buckets);
+    return { buckets: mergeDigestBuckets(buckets), scopes: scopes.sort(), complete };
   }
 
   /**
@@ -394,24 +415,43 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // item concurrently with one that fails is harmless — the bytes are
       // content-addressed and the item simply doesn't ship this round, so the
       // next round finds them already there.
+      // Grouped by object key, not by item, because a key can belong to more
+      // than one item. Record blobs are content-addressed
+      // (`shared/<category>/<shard>/<sha256>`), so two records with identical
+      // bytes name the same object — a photo saved twice, two renditions that
+      // compress alike. Dispatching those as separate transfers means the
+      // second one meets the first still in flight, and `transferFile` answers
+      // `false` for a key it is already moving. The engine cannot tell that
+      // apart from a failed upload, so it truncated the author's shipment on a
+      // transfer that was in fact succeeding.
+      //
+      // One transfer per key, and every item naming it takes the same outcome.
+      // Cheaper as well as correct: identical bytes were being sent twice.
       const uploadOutcomes = new Map<OutboundItem, boolean>();
-      const withBlobs: OutboundItem[] = [];
+      const itemsByKey = new Map<string, OutboundItem[]>();
       for (const items of outboundByNode.values()) {
         for (const item of items) {
-          if (outboundManifest(item)) withBlobs.push(item);
+          const manifest = outboundManifest(item);
+          if (!manifest) continue;
+          pushToBucket(itemsByKey, manifest.objectStorageKey, item);
         }
       }
-      await forEachConcurrent(withBlobs, transferConcurrency, async (item) => {
-        const ok = await transferBlobSafe(
-          outboundManifest(item)!,
-          localObjectStorage,
-          remoteObjectStorage,
-          fileSyncEngine,
-          "upload",
-          outboundItemId(item),
-        );
-        uploadOutcomes.set(item, ok);
-      });
+      await forEachConcurrent(
+        [...itemsByKey.values()],
+        transferConcurrency,
+        async (sharing) => {
+          const representative = sharing[0]!;
+          const ok = await transferBlobSafe(
+            outboundManifest(representative)!,
+            localObjectStorage,
+            remoteObjectStorage,
+            fileSyncEngine,
+            "upload",
+            outboundItemId(representative),
+          );
+          for (const item of sharing) uploadOutcomes.set(item, ok);
+        },
+      );
 
       // Authors whose shipment this round was cut short by a failed transfer,
       // as opposed to by the budget. The two are not interchangeable: the
@@ -752,6 +792,16 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         outboundHasMore,
         elided: elidedCount,
         progressed,
+        // Something this round *selected* could not be moved — a blob that
+        // would not transfer, a row that would not apply — so an author's run
+        // stopped short in one direction or the other.
+        //
+        // Kept separate from `outboundHasMore`, which describes only the scan
+        // and is therefore false in exactly this case: the scan fit the budget,
+        // the shipment did not survive. Without this the loop below reads a
+        // permanently failing upload as "both directions drained" and reports
+        // the sync complete with the record still not in the cloud.
+        blocked: truncatedByFailure.size > 0 || inboundBrokeFor.size > 0,
       };
   }
 
@@ -802,7 +852,18 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         totals.elided += result.elided;
         options?.onRound?.(result, totals.rounds);
 
-        if (!result.hasMore && !result.outboundHasMore) {
+        // Drained means drained in every sense: nothing left to scan on either
+        // side, *and* nothing this round selected was left behind.
+        //
+        // `blocked` is the third term and it is not redundant. `hasMore` and
+        // `outboundHasMore` describe scans; a round whose scan fit the budget
+        // and whose upload then failed reports both false while shipping
+        // nothing, and without the third term takes this exit — returning
+        // `complete: true, stalled: false` for a record that is not in the
+        // cloud and never will be. That is the value `/sync/now` hands back and
+        // the one the phone's "Sync now" button reads, so it is the difference
+        // between a silent success and "something could not transfer".
+        if (!result.hasMore && !result.outboundHasMore && !result.blocked) {
           totals.complete = true;
           break;
         }
@@ -834,6 +895,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     },
 
     async verify(): Promise<VerifyResult> {
+      // Whether *we* still owe the peer anything, asked before the comparison
+      // so the answer describes the same moment the digests do.
+      const outboundBacklog = await hasOutboundBacklog();
       // Ask the peer for its counts while sending nothing. This is an integrity
       // check, not a sync round: mixing it into a pushing round would make the
       // comparison a moving target, since the peer's counts would include rows
@@ -843,6 +907,15 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // sides bucketing by a different width would make every bucket disagree —
       // a full-library "repair" reported as catastrophic divergence — and there
       // would be nothing in the response to notice it by.
+      //
+      // `limit: 0` is what makes "sending nothing" also mean "receiving
+      // nothing", and the mechanism is worth naming because it is not
+      // `cutRound`: that always takes a first item regardless of budget, so an
+      // empty round cannot come from the budget alone. It comes from
+      // `collectSince`'s `limit <= 0` branch, which pins every author's ceiling
+      // to `null` — nothing safe to ship for anyone — and `cutRound` then has
+      // no item to take. Removing that branch would silently turn this into a
+      // one-item sync round.
       const response = await transport.exchange({
         watermarks: await loadOwnWatermarks(),
         limit: 0,
@@ -857,6 +930,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         peerRows: 0,
         divergentBuckets: 0,
         missingLocally: 0,
+        pendingUpload: 0,
+        pendingDownload: 0,
       };
       if (!peerDigest) {
         // A peer that cannot answer is not a peer that agrees. Reporting
@@ -875,7 +950,33 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         return { ...unsupported, supported: false };
       }
 
-      const localDigest = await localBucketDigest();
+      // The width we asked for, passed rather than defaulted: the two values
+      // are the same constant, and passing it is what keeps them from drifting
+      // apart if either side ever stops using the default.
+      const local = await localBucketDigest(DEFAULT_BUCKET_PREFIX_LENGTH);
+      if (!local.complete) {
+        // A table we could not count locally would read as rows the peer has
+        // and we do not — the loudest possible false alarm, and one that would
+        // arm an inbound repair over the whole library. "Not checked" is the
+        // honest answer.
+        console.warn("[sync] local digest incomplete; skipping verification");
+        return { ...unsupported, supported: false };
+      }
+      if (
+        response.digestScopes !== undefined &&
+        !sameScopes(local.scopes, response.digestScopes)
+      ) {
+        // Same reasoning as the prefix-length check above, one level up: both
+        // sides sum their *own* tables into shared buckets, so a table set that
+        // differs — an app upgraded on one end, a table added — makes every
+        // bucket disagree in both directions over a schema difference. Refusing
+        // is the only answer that does not manufacture a whole-library repair.
+        console.warn(
+          `[sync] digest scope mismatch (ours ${local.scopes.join(",")}, peer ${response.digestScopes.join(",")}); skipping verification`,
+        );
+        return { ...unsupported, supported: false };
+      }
+      const localDigest = local.buckets;
 
       // Two comparisons, because they are two different questions and only one
       // of them is a repair trigger.
@@ -893,8 +994,23 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       const missing = bucketsPeerIsMissing(localDigest, peerDigest);
       const missingHere = bucketsPeerIsMissing(peerDigest, localDigest);
 
+      // Neither comparison can tell a hole from a queue on its own, and the
+      // backlog is what separates them. A bucket the peer is short on is loss
+      // only if we owe it nothing; a bucket we are short on is loss only if it
+      // owes us nothing. Mid-first-sync every bucket of the backlog disagrees,
+      // and reporting that as loss — and arming a repair over it — turns the
+      // ordinary state of a phone catching up into a whole-library alarm.
+      //
+      // `inboundBacklog` comes from the zero-limit exchange this method already
+      // sent: `collectSince`'s `limit <= 0` branch pins every author's ceiling
+      // to `null`, and a ceiling exists per author `planNodeScans` found
+      // something owed for — so `hasMore` here means "the peer has rows for us"
+      // and nothing else. Both flags describe the same moment as the digests.
+      const outboundDrained = !outboundBacklog;
+      const inboundDrained = !response.hasMore;
+
       if (syncState) {
-        if (missing.length > 0) {
+        if (missing.length > 0 && outboundDrained) {
           // Arm the repair rather than performing it. The floors lower the bound
           // the ordinary outbound scan already takes, so the next `sync()` does
           // the re-shipping through the path that is already tested — LWW makes
@@ -903,7 +1019,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             applyRepairFloors(await loadRepairFloors(), repairFloorsFor(missing)),
           );
         }
-        if (missingHere.length > 0) {
+        if (missingHere.length > 0 && inboundDrained) {
           // The symmetric repair, and it works the same way from the other end:
           // what we *advertise* as our own coverage is what the responder scans
           // above, so lowering it makes the peer re-ship into the hole. Nothing
@@ -919,8 +1035,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         supported: true,
         localRows: totalRows(localDigest),
         peerRows: totalRows(peerDigest),
-        divergentBuckets: missing.length,
-        missingLocally: missingHere.length,
+        divergentBuckets: outboundDrained ? missing.length : 0,
+        missingLocally: inboundDrained ? missingHere.length : 0,
+        pendingUpload: outboundDrained ? 0 : missing.length,
+        pendingDownload: inboundDrained ? 0 : missingHere.length,
       };
     },
 
@@ -938,6 +1056,13 @@ function sameWatermarks(a: Watermarks, b: Watermarks): boolean {
     if (compareHLC(left, right) !== 0) return false;
   }
   return true;
+}
+
+/** Two digests built over the same set of data planes, in any order. */
+function sameScopes(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const right = [...b].sort();
+  return [...a].sort().every((scope, i) => scope === right[i]);
 }
 
 type OutboundItem =

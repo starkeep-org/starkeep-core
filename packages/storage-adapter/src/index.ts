@@ -74,6 +74,13 @@ export {
   type SincePage,
 } from "./database/since-queries.js";
 
+export {
+  keyedWhereFor,
+  requireKeyedWhere,
+  rowToWireEntry,
+  type KeyedRowEntry,
+} from "./database/app-syncable-rows.js";
+
 export type { RawDatabase, RawStatement } from "./database/raw-database.js";
 export type { ObjectStorageAdapter } from "./object-storage/adapter.js";
 export type {

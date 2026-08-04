@@ -7,6 +7,11 @@ import type {
   PutOptions,
   PutStreamOptions,
 } from "@starkeep/storage-adapter";
+import type {
+  SyncExchangeRequest,
+  SyncExchangeResponse,
+  SyncTransport,
+} from "../../src/types.js";
 
 /**
  * Predicate over an object-storage `put` call. The harness pre-resolves
@@ -130,6 +135,84 @@ export class FailingObjectStorageAdapter implements ObjectStorageAdapter {
   list(prefix: string, options?: ListOptions): Promise<ListResult> {
     return this.base.list(prefix, options);
   }
+}
+
+/**
+ * Make one method of an adapter fail, leaving the rest of it alone.
+ *
+ * Blob writes were for a long time the only failure this harness could inject,
+ * and that shaped what the suite could see: every test that needed "something
+ * went wrong" reached for a `put`, so the paths guarding a failed *scan*, a
+ * failed *watermark read*, a failed *row write* and a lost *response* were
+ * never entered by any test. Two of the review findings lived in exactly there
+ * — an applier that swallowed a scan error and reported "enumerated
+ * everything", and a round that called a failed shipment complete.
+ *
+ * A proxy rather than a hand-written wrapper class per adapter: these
+ * interfaces are wide (`ObjectStorageAdapter` alone is a dozen methods) and a
+ * wrapper that has to be extended every time one grows is a wrapper that
+ * silently stops forwarding. Only the named method changes behaviour.
+ *
+ * `failFor` bounds how many calls fail, so a test can make something fail once
+ * and then observe the recovery — the difference between "this round is safe"
+ * and "this channel is stuck forever".
+ */
+export function failingMethod<T extends object>(
+  base: T,
+  method: keyof T & string,
+  options: { readonly message?: string; readonly failFor?: number } = {},
+): T {
+  const message = options.message ?? `[harness] injected ${method} failure`;
+  let remaining = options.failFor ?? Number.POSITIVE_INFINITY;
+  const proxy = new Proxy(base, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      if (prop === method) {
+        return (...args: unknown[]) => {
+          if (remaining > 0) {
+            remaining -= 1;
+            return Promise.reject(new Error(message));
+          }
+          return (value as (...a: unknown[]) => unknown).apply(proxy, args);
+        };
+      }
+      // Bound to the *proxy*, not to the base, so an internal `this.foo()` call
+      // sees the injection too. That is not a detail: both real appliers reach
+      // their watermark read as `this.getNodeWatermarks(...)` from inside
+      // `scanSince`, and an injection that only caught direct calls would test
+      // a shape no production caller has.
+      return (...args: unknown[]) =>
+        (value as (...a: unknown[]) => unknown).apply(proxy, args);
+    },
+  }) as T;
+  return proxy;
+}
+
+/**
+ * A transport whose response is lost *after* the responder has applied it.
+ *
+ * Not the same failure as an unreachable peer, and the difference is the whole
+ * point: the peer's state moved and the caller's did not. The caller's cached
+ * `peerWatermarks` are now stale-low, so a round that pushed against them would
+ * re-ship everything the peer already holds. It is the case the pull-first
+ * round exists to absorb.
+ */
+export function losingResponseTransport(
+  base: SyncTransport,
+  options: { readonly loseFor?: number } = {},
+): SyncTransport {
+  let remaining = options.loseFor ?? 1;
+  return {
+    async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
+      const response = await base.exchange(request);
+      if (remaining > 0) {
+        remaining -= 1;
+        throw new Error("[harness] response lost in transit after the peer applied it");
+      }
+      return response;
+    },
+  };
 }
 
 /**
