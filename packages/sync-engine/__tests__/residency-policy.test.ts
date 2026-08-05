@@ -414,6 +414,43 @@ describe("validateRetentionPolicy", () => {
     expect(problems[0]).toMatch(/^photos: missing or malformed rows/);
   });
 
+  // The structural guard covers the sections but not the `fallback` inside
+  // them, so these used to read `.keep` off `undefined` and answer a PUT with a
+  // 500 and a stack trace instead of a 422 and a sentence.
+  it.each([
+    [
+      "platform.fallback",
+      { platform: { rows: {} }, apps: {}, appFallback: app() },
+      /^starkeep \(fallback\): missing or not an object/,
+    ],
+    [
+      "an app's fallback",
+      {
+        platform: { rows: {}, fallback: row() },
+        apps: { photos: { rows: {}, totalBudgetBytes: 1024 } },
+        appFallback: app(),
+      },
+      /^photos \(fallback\): missing or not an object/,
+    ],
+    [
+      "appFallback's fallback",
+      {
+        platform: { rows: {}, fallback: row() },
+        apps: {},
+        appFallback: { rows: {}, totalBudgetBytes: 1024 },
+      },
+      /^\(unconfigured apps\) \(fallback\): missing or not an object/,
+    ],
+    [
+      "a null row",
+      { platform: { rows: { "original:image": null }, fallback: row() }, apps: {}, appFallback: app() },
+      /^starkeep:original:image: missing or not an object/,
+    ],
+  ])("reports a missing %s rather than throwing", (_label, malformed, expected) => {
+    const problems = validateRetentionPolicy(malformed as unknown as NodeRetentionPolicy);
+    expect(problems[0]).toMatch(expected);
+  });
+
   it("names the offending row with its full class", () => {
     const problems = validateRetentionPolicy(policy({ classA: row({ budgetBytes: 0 }) }));
     expect(problems[0]).toMatch(/^appA:classA/);

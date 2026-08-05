@@ -126,6 +126,59 @@ export function originalClassFor(type: string | null): ResolvedSizeClass {
  */
 export const UNCLASSIFIED_RUNG = "unclassified";
 
+/** The shape both callers of {@link pickLadderLabel} have. */
+export interface LadderLabel {
+  readonly appId: string;
+  readonly key: string;
+  readonly value: string;
+}
+
+/**
+ * Which of a record's labels names its size class, when more than one app has
+ * labelled it.
+ *
+ * Two apps labelling one derivative is not a corner case — it is the case
+ * app-namespaced classes were introduced to support, and both places that
+ * classify a record have to answer it the *same* way. The census promises "this
+ * is what saying yes would cost", which it can only keep if the class it counts
+ * a record under is the class the manager will charge it to.
+ *
+ * So the choice is a rule rather than whichever row the database happened to
+ * return first:
+ *
+ * 1. **The record's origin app wins.** It made the record; its ladder is the one
+ *    that describes what these bytes are. Another app's label is an annotation
+ *    on someone else's file.
+ * 2. **Otherwise the lowest app id**, and within one app the lowest value — an
+ *    arbitrary rule, but a *stable* one, which is the property that matters.
+ *    An unstable choice moves a record between namespaces on re-resolution, and
+ *    the byte it moves is charged to two budgets and evicted by neither.
+ */
+export function pickLadderLabel<T extends LadderLabel>(
+  labels: readonly T[],
+  sizeClassKeys: Readonly<Record<string, string>>,
+  originAppId: string | null,
+): T | undefined {
+  let best: T | undefined;
+  for (const label of labels) {
+    if (sizeClassKeys[label.appId] !== label.key || label.value === "") continue;
+    if (best === undefined || beats(label, best, originAppId)) best = label;
+  }
+  return best;
+}
+
+function beats(a: LadderLabel, b: LadderLabel, originAppId: string | null): boolean {
+  if (a.appId !== b.appId) {
+    if (a.appId === originAppId) return true;
+    if (b.appId === originAppId) return false;
+    return a.appId < b.appId;
+  }
+  // One app, two rungs on the same key: keys are set-valued, so this is legal.
+  // Either answer is as good as the other; picking the same one every time is
+  // not optional.
+  return a.value < b.value;
+}
+
 export interface ResidencyManagerOptions {
   readonly localDb: RawDatabase;
   readonly databaseAdapter: DatabaseAdapter;
@@ -323,9 +376,9 @@ export function createResidencyManager(
     // A derivative. The namespace comes from whichever app's *own* declared key
     // this label was written under, and `appId` on a label row is server-set —
     // there is no way for an app to express another app's namespace here.
-    const rung = labels.find(
-      (l) => sizeClassKeys[l.appId] === l.key && l.value !== "",
-    );
+    // Where several apps have labelled it, the tie-break is a rule shared with
+    // the census rather than the order the label read returned.
+    const rung = pickLadderLabel(labels, sizeClassKeys, candidate.originAppId);
     if (rung !== undefined) return resolveSizeClass(rung.appId, rung.value);
 
     // Derived, but nobody labelled it — the app declares no size-class key, or

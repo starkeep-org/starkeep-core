@@ -520,7 +520,16 @@ function validateApp(appId: string, app: AppRetention): string[] {
   return problems;
 }
 
-function validateRow(name: string, row: SizeClassRetention): string[] {
+function validateRow(name: string, row: SizeClassRetention | null | undefined): string[] {
+  // The last place a missing object can still throw. The structural guard above
+  // covers the sections, but not the `fallback` inside each of them, and not a
+  // null sitting in `rows` — so `{ platform: { rows: {} } }` used to reach here
+  // and read `.keep` off `undefined`, turning a 422 with a sentence into a 500
+  // with a stack trace. Checked per row rather than adding three more entries to
+  // the guard, because this is the one function every one of them passes
+  // through, and it can then say *which* row is missing.
+  if (typeof row !== "object" || row === null) return [`${name}: missing or not an object`];
+
   const problems: string[] = [];
   // "never" is the honest way to want none of a class. A zero budget is the
   // dishonest way: it reads as a limit and behaves as a prohibition, and it

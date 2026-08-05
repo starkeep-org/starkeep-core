@@ -334,18 +334,60 @@ export function RetentionMatrix() {
     () => new Map(projection?.namespaces.map((n) => [n.namespace, n]) ?? []),
     [projection],
   );
+  // Rows come from the census *and* from the policy, not the census alone.
+  //
+  // A census-only table can only show classes the node is currently holding, so
+  // a rule written for a class whose bytes have all been evicted has no row —
+  // the rule is in force, it is what keeps the class at zero, and it is
+  // invisible and uneditable. The two-level policy makes that easy to reach: an
+  // operator can budget an app down to nothing and then not be able to budget it
+  // back up. A configured class with no bytes reads as "0 B (0)", which is the
+  // truth.
+  //
   // Platform first — the originals are what an operator is actually deciding
   // about, and an app's ladder is a consequence of that decision.
   const sections = useMemo(() => {
-    const grouped = new Map<string, CensusRow[]>();
+    const grouped = new Map<string, Map<string, CensusRow>>();
+    const sectionFor = (namespace: string) => {
+      const existing = grouped.get(namespace);
+      if (existing) return existing;
+      const created = new Map<string, CensusRow>();
+      grouped.set(namespace, created);
+      return created;
+    };
     for (const entry of census) {
-      const { namespace } = splitClass(entry.sizeClass);
-      grouped.set(namespace, [...(grouped.get(namespace) ?? []), entry]);
+      sectionFor(splitClass(entry.sizeClass).namespace).set(entry.sizeClass, entry);
     }
-    return [...grouped.entries()].sort(([a], [b]) =>
-      a === PLATFORM_NAMESPACE ? -1 : b === PLATFORM_NAMESPACE ? 1 : a.localeCompare(b),
-    );
-  }, [census]);
+    for (const rung of Object.keys(policy?.platform.rows ?? {})) {
+      const sizeClass = `${PLATFORM_NAMESPACE}:${rung}`;
+      const section = sectionFor(PLATFORM_NAMESPACE);
+      if (!section.has(sizeClass)) section.set(sizeClass, { sizeClass, recordCount: 0, totalBytes: 0 });
+    }
+    for (const [appId, app] of Object.entries(policy?.apps ?? {})) {
+      // An app entry with no rows still gets a section: its total is editable
+      // there, and the total is the budget that emptied it.
+      const section = sectionFor(appId);
+      for (const rung of Object.keys(app.rows ?? {})) {
+        const sizeClass = `${appId}:${rung}`;
+        if (!section.has(sizeClass)) section.set(sizeClass, { sizeClass, recordCount: 0, totalBytes: 0 });
+      }
+    }
+    return [...grouped.entries()]
+      .map(
+        ([namespace, entries]) =>
+          [
+            namespace,
+            // Biggest first, as the census arrives; ties broken by name so the
+            // empty rows do not shuffle between renders.
+            [...entries.values()].sort(
+              (a, b) => b.totalBytes - a.totalBytes || a.sizeClass.localeCompare(b.sizeClass),
+            ),
+          ] as const,
+      )
+      .sort(([a], [b]) =>
+        a === PLATFORM_NAMESPACE ? -1 : b === PLATFORM_NAMESPACE ? 1 : a.localeCompare(b),
+      );
+  }, [census, policy]);
   const totalLibrary = census.reduce((sum, c) => sum + c.totalBytes, 0);
 
   if (status === "loading") {
@@ -360,7 +402,11 @@ export function RetentionMatrix() {
       </p>
     );
   }
-  if (census.length === 0) return <p className="text-sm text-muted-foreground">No records yet.</p>;
+  // Nothing held *and* nothing configured. A node with a policy but no bytes
+  // still gets the table — those rows are the reason it has no bytes.
+  if (sections.length === 0) {
+    return <p className="text-sm text-muted-foreground">No records yet.</p>;
+  }
 
   return (
     <div className="space-y-6">

@@ -186,6 +186,51 @@ describe("namespace resolution", () => {
     expect(cls).toMatchObject({ namespace: "notes", rung: UNCLASSIFIED_RUNG });
   });
 
+  // Two apps labelling one derivative — the case this whole change exists to
+  // support. `labels.find` answered it with whichever row the label read
+  // happened to return first, which is not a rule and need not be the same
+  // answer twice; the census then answered it a third way and counted the
+  // record's bytes into both classes.
+  describe("when several apps have labelled one derivative", () => {
+    const twoLabels = {
+      r1: [
+        { appId: "sketcher", key: "derived-size", value: "preview" },
+        { appId: "photos", key: "rendition", value: "medium" },
+      ],
+    };
+
+    it("takes the class from the app that created the record", async () => {
+      manager = build({ photos: "rendition", sketcher: "derived-size" }, twoLabels);
+      const cls = await manager.classOf(
+        candidate({ parentId: "parent", originAppId: "sketcher" }),
+      );
+      expect(cls.qualified).toBe("sketcher:preview");
+    });
+
+    it("falls back to the lowest app id when the origin labelled nothing", async () => {
+      manager = build({ photos: "rendition", sketcher: "derived-size" }, twoLabels);
+      const cls = await manager.classOf(
+        candidate({ parentId: "parent", originAppId: "notes" }),
+      );
+      expect(cls.qualified).toBe("photos:medium");
+    });
+
+    // The property that matters more than which app wins: the same record
+    // resolves to the same class every time, whatever order the labels arrive
+    // in. An answer that moves charges a byte to two budgets and evicts it from
+    // neither.
+    it("gives the same answer whatever order the labels come back in", async () => {
+      const keys = { photos: "rendition", sketcher: "derived-size" };
+      const forward = await build(keys, twoLabels).classOf(
+        candidate({ parentId: "parent", originAppId: null }),
+      );
+      const reversed = await build(keys, { r1: [...twoLabels.r1].reverse() }).classOf(
+        candidate({ parentId: "parent", originAppId: null }),
+      );
+      expect(forward.qualified).toBe(reversed.qualified);
+    });
+  });
+
   it("assigns no rung for an app that declares no size-class key", async () => {
     manager = build(
       {},
