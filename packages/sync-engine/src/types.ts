@@ -9,7 +9,7 @@ import type {
   DigestBucket,
   ObjectStorageAdapter,
 } from "@starkeep/storage-adapter";
-import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
+import type { BlobCandidate, ResidencyVerdict, ResolvedSizeClass } from "./residency-policy.js";
 import type { StreamTruncation } from "./round-cut.js";
 
 /**
@@ -45,7 +45,9 @@ export interface ResidencyHooks {
    * Resolving the class is the host's job either way: the sync engine must not
    * learn what `image-medium` is.
    */
-  classOf?(candidate: BlobCandidate): Promise<string | null> | string | null;
+  classOf?(
+    candidate: BlobCandidate,
+  ): Promise<ResolvedSizeClass | null> | ResolvedSizeClass | null;
 }
 
 // ---------------------------------------------------------------------------

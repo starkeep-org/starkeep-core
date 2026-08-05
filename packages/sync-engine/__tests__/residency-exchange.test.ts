@@ -19,6 +19,7 @@ import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { residencyOf } from "../src/residency.js";
+import { resolveSizeClass } from "../src/residency-policy.js";
 import type { BlobCandidate, ResidencyVerdict } from "../src/residency-policy.js";
 import type { SyncStateStore, Watermarks } from "../src/types.js";
 
@@ -113,8 +114,11 @@ async function setup(
   };
 }
 
-const elide: ResidencyVerdict = { decision: "elide", sizeClass: "classA", reason: "keep-never" };
-const fetch: ResidencyVerdict = { decision: "fetch", sizeClass: "classA", reason: "keep-all" };
+// A class is a namespace and a rung, and these come from the host — so the
+// fixture names one the way a host would rather than passing a bare string.
+const classA = resolveSizeClass("photos", "classA");
+const elide: ResidencyVerdict = { decision: "elide", sizeClass: classA, reason: "keep-never" };
+const fetch: ResidencyVerdict = { decision: "fetch", sizeClass: classA, reason: "keep-all" };
 
 describe("eliding a blob", () => {
   it("applies the metadata and skips the bytes", async () => {

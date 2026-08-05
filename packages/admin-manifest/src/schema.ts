@@ -40,6 +40,19 @@ export const fileAccessSchema = z.object({
 export const labelKeySchema = z.object({
   key: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
   description: z.string().min(1),
+  /**
+   * This key's values name the app's size-class rungs, so the node's residency
+   * manager reads it to classify the app's derived records into the app's own
+   * budget namespace. At most one per manifest; zero is normal and means the
+   * app derives nothing.
+   *
+   * A **marker on an existing key** rather than a top-level
+   * `sizeClassLabelKey: string`, because a top-level string could name a key the
+   * app never declared — a cross-field rule would have to catch that, and a
+   * marker makes it unrepresentable. It also inherits the cap, the key regex,
+   * and the `description` that `GET /data/label-keys` already publishes.
+   */
+  sizeClass: z.boolean().optional(),
 });
 
 export const sharedResourceRequirementSchema = z.discriminatedUnion("kind", [

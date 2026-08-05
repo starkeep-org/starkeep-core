@@ -1352,6 +1352,7 @@ function candidateForRecord(record: AnyRecord): BlobCandidate | null {
     type: record.type,
     parentId: record.parentId,
     appId: null,
+    originAppId: record.originAppId,
     recencyAtMs: null,
     lastOpenedAtMs: null,
   };
@@ -1375,6 +1376,7 @@ function candidateForManifest(manifest: FileSyncManifest): BlobCandidate {
     type: manifest.mimeType ?? null,
     parentId: null,
     appId: null,
+    originAppId: null,
     recencyAtMs: null,
     lastOpenedAtMs: null,
   };
@@ -1396,6 +1398,9 @@ function candidateForAppRow(entry: AppSyncableRowEntry): BlobCandidate | null {
     type: null,
     parentId: null,
     appId: entry.appId,
+    // Same app either way for an app-syncable row, but `appId` is what the
+    // namespace is taken from — this is only here to keep the shape total.
+    originAppId: entry.appId,
     recencyAtMs: null,
     lastOpenedAtMs: null,
   };

@@ -154,17 +154,32 @@ describe("applying the budget", () => {
 });
 
 describe("projecting a whole policy", () => {
-  const policy: NodeRetentionPolicy = {
-    rows: {
-      "image-thumb": { keep: "all", budgetBytes: 5 * GB },
-      "image-large": { keep: "recent-only", recencyWindowDays: 90, budgetBytes: 50 * GB },
+  // Rungs live under an app namespace; the row keys are the rungs alone, and
+  // the census names classes fully qualified. Keeping the two straight is the
+  // thing this describe block is really checking.
+  const withApp = (
+    rows: Record<string, SizeClassRetention>,
+    totalBudgetBytes = 1000 * GB,
+  ): NodeRetentionPolicy => ({
+    platform: { rows: {}, fallback: { keep: "never", budgetBytes: 1 * GB } },
+    apps: {
+      photos: { rows, fallback: { keep: "never", budgetBytes: 1 * GB }, totalBudgetBytes },
     },
-    fallback: { keep: "never", budgetBytes: 1 * GB },
-  };
+    appFallback: {
+      rows: {},
+      fallback: { keep: "never", budgetBytes: 1 * GB },
+      totalBudgetBytes,
+    },
+  });
+
+  const policy = withApp({
+    "image-thumb": { keep: "all", budgetBytes: 5 * GB },
+    "image-large": { keep: "recent-only", recencyWindowDays: 90, budgetBytes: 50 * GB },
+  });
 
   const library = [
-    census({ sizeClass: "image-thumb", totalBytes: 2 * GB, bytesWithinDays: { 365: 2 * GB } }),
-    census({ sizeClass: "image-large" }),
+    census({ sizeClass: "photos:image-thumb", totalBytes: 2 * GB, bytesWithinDays: { 365: 2 * GB } }),
+    census({ sizeClass: "photos:image-large" }),
   ];
 
   it("totals the rows", () => {
@@ -173,23 +188,63 @@ describe("projecting a whole policy", () => {
   });
 
   it("names the rows that will not fit", () => {
-    const tight: NodeRetentionPolicy = {
-      ...policy,
-      rows: { ...policy.rows, "image-large": { keep: "all", budgetBytes: 1 * GB } },
-    };
-    expect(projectPolicy(tight, library).overBudgetClasses).toEqual(["image-large"]);
+    const tight = withApp({
+      "image-thumb": { keep: "all", budgetBytes: 5 * GB },
+      "image-large": { keep: "all", budgetBytes: 1 * GB },
+    });
+    expect(projectPolicy(tight, library).overBudgetClasses).toEqual(["photos:image-large"]);
   });
 
   // A projection that quietly ignored unlisted classes would under-report
   // exactly the disk use nobody planned for.
   it("applies the fallback to classes the policy does not mention", () => {
-    const withExtra = [...library, census({ sizeClass: "video-720p", totalBytes: 80 * GB })];
+    const withExtra = [...library, census({ sizeClass: "photos:video-720p", totalBytes: 80 * GB })];
     const projection = projectPolicy(policy, withExtra);
-    const extra = projection.rows.find((r) => r.sizeClass === "video-720p")!;
+    const extra = projection.rows.find((r) => r.sizeClass === "photos:video-720p")!;
     // `never` in the fallback, so nothing — but it appears in the table, which
     // is the point: the operator can see the class exists and is being dropped.
     expect(extra.projectedBytes).toBe(0);
     expect(projection.rows).toHaveLength(3);
+  });
+
+  // The total is what the app will actually be held to, so the headline figure
+  // has to respect it. Summing the rows would promise disk use that the
+  // namespace eviction pass is going to take straight back.
+  it("caps the total at the app's namespace total rather than summing rows", () => {
+    const capped = withApp(
+      {
+        "image-thumb": { keep: "all", budgetBytes: 5 * GB },
+        "image-large": { keep: "recent-only", recencyWindowDays: 90, budgetBytes: 50 * GB },
+      },
+      10 * GB,
+    );
+    const projection = projectPolicy(capped, library);
+    expect(projection.totalProjectedBytes).toBe(10 * GB);
+    expect(projection.overTotalNamespaces).toEqual(["photos"]);
+  });
+
+  // The case an operator cannot see from the rows: each one is comfortably
+  // inside its budget, and the app as a whole is not.
+  it("flags a namespace over its total even when no single row is over", () => {
+    const capped = withApp(
+      {
+        "image-thumb": { keep: "all", budgetBytes: 50 * GB },
+        "image-large": { keep: "recent-only", recencyWindowDays: 90, budgetBytes: 50 * GB },
+      },
+      5 * GB,
+    );
+    const projection = projectPolicy(capped, library);
+    expect(projection.overBudgetClasses).toEqual([]);
+    expect(projection.overTotalNamespaces).toEqual(["photos"]);
+  });
+
+  it("gives the platform namespace no total to be over", () => {
+    const projection = projectPolicy(policy, [
+      census({ sizeClass: "starkeep:original:image", totalBytes: 900 * GB }),
+    ]);
+    const platform = projection.namespaces.find((n) => n.namespace === "starkeep")!;
+    expect(platform.totalBudgetBytes).toBeNull();
+    expect(platform.overTotal).toBe(false);
   });
 });
 

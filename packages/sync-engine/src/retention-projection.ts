@@ -20,7 +20,14 @@
  * was built on the wrong assumption discovers it as a full disk.
  */
 
-import type { NodeRetentionPolicy, SizeClassRetention } from "./residency-policy.js";
+import {
+  namespaceTotalFor,
+  parseSizeClass,
+  retentionRowFor,
+  PLATFORM_NAMESPACE,
+  type NodeRetentionPolicy,
+  type SizeClassRetention,
+} from "./residency-policy.js";
 
 /**
  * What the library actually contains for one size class, measured.
@@ -78,11 +85,40 @@ export interface RowProjection {
   readonly demandDriven: boolean;
 }
 
+/**
+ * One namespace's roll-up, and the cap that applies across it.
+ *
+ * Reported as its own line because an app's total is a *second* thing that can
+ * bind, and it binds invisibly from the rows' point of view: every row can be
+ * comfortably inside its budget while the app as a whole is over. An operator
+ * looking at a table of rows that all say "fine" needs somewhere to see that.
+ */
+export interface NamespaceProjection {
+  readonly namespace: string;
+  /** Null for the platform namespace, which has rows and no total. */
+  readonly totalBudgetBytes: number | null;
+  /** What this namespace's rules select, before any budget. */
+  readonly selectedBytes: number;
+  /** What the rows alone would hold, before the total is applied. */
+  readonly rowProjectedBytes: number;
+  /** What will actually be held, after the total caps the rows. */
+  readonly projectedBytes: number;
+  /**
+   * True when the rows together want more than the total allows — meaning the
+   * namespace-wide eviction pass will run against this app continuously, and
+   * raising any single row will not change what it holds.
+   */
+  readonly overTotal: boolean;
+}
+
 export interface PolicyProjection {
   readonly rows: readonly RowProjection[];
+  readonly namespaces: readonly NamespaceProjection[];
   readonly totalProjectedBytes: number;
   /** Rows whose rule selects more than their budget. */
   readonly overBudgetClasses: readonly string[];
+  /** Namespaces whose rows together select more than the app's total. */
+  readonly overTotalNamespaces: readonly string[];
 }
 
 /**
@@ -172,22 +208,61 @@ export function projectRow(
 /**
  * Project a whole policy against a census.
  *
- * Classes present in the census but absent from the policy fall to
- * `policy.fallback` — the same rule the engine applies, so the projection
+ * Classes present in the census but absent from the policy fall through
+ * `retentionRowFor` — the same resolution the engine applies, so the projection
  * cannot disagree with what actually happens. A projection that quietly ignored
  * unlisted classes would under-report exactly the disk use nobody planned for.
+ *
+ * The total is summed over **namespaces**, not over rows, so an app whose rows
+ * add up to more than its total is reported at its total. Summing the rows
+ * would promise disk use that the namespace pass is going to evict back down.
  */
 export function projectPolicy(
   policy: NodeRetentionPolicy,
   census: readonly SizeClassCensus[],
 ): PolicyProjection {
   const rows = census.map((c) =>
-    projectRow(c.sizeClass, policy.rows[c.sizeClass] ?? policy.fallback, c),
+    projectRow(c.sizeClass, retentionRowFor(policy, parseSizeClass(c.sizeClass)), c),
   );
+
+  // A class name from before namespacing has no namespace to group under.
+  // Grouped with the platform, matching where `retentionRowFor` sends it.
+  const byNamespace = new Map<string, RowProjection[]>();
+  for (const row of rows) {
+    const namespace = parseSizeClass(row.sizeClass)?.namespace ?? PLATFORM_NAMESPACE;
+    byNamespace.set(namespace, [...(byNamespace.get(namespace) ?? []), row]);
+  }
+
+  const namespaces: NamespaceProjection[] = [...byNamespace.entries()].map(
+    ([namespace, group]) => {
+      const totalBudgetBytes = namespaceTotalFor(policy, namespace);
+      const selectedBytes = group.reduce((sum, r) => sum + r.selectedBytes, 0);
+      const rowProjectedBytes = group.reduce((sum, r) => sum + r.projectedBytes, 0);
+      // Pins win over the total for the same reason they win over a row: the
+      // engine has already been told it may not drop them, so a projection that
+      // capped below them would promise something that cannot happen.
+      const pinnedBytes = group.reduce((sum, r) => sum + r.pinnedBytes, 0);
+      const projectedBytes =
+        totalBudgetBytes === null
+          ? rowProjectedBytes
+          : Math.max(Math.min(rowProjectedBytes, totalBudgetBytes), pinnedBytes);
+      return {
+        namespace,
+        totalBudgetBytes,
+        selectedBytes,
+        rowProjectedBytes,
+        projectedBytes,
+        overTotal: totalBudgetBytes !== null && rowProjectedBytes > totalBudgetBytes,
+      };
+    },
+  );
+
   return {
     rows,
-    totalProjectedBytes: rows.reduce((sum, r) => sum + r.projectedBytes, 0),
+    namespaces,
+    totalProjectedBytes: namespaces.reduce((sum, n) => sum + n.projectedBytes, 0),
     overBudgetClasses: rows.filter((r) => r.overBudget).map((r) => r.sizeClass),
+    overTotalNamespaces: namespaces.filter((n) => n.overTotal).map((n) => n.namespace),
   };
 }
 

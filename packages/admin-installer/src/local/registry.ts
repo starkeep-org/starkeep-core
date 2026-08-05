@@ -142,6 +142,31 @@ export function listAppRegistry(db: RawDatabase): RegisteredApp[] {
   return rows.map(toRegisteredApp);
 }
 
+/**
+ * Which label key each registered app uses to name its size-class rungs.
+ *
+ * Derived from the manifests the registry already stores whole, rather than
+ * kept as a column beside the declared keys. The marker is a manifest field, so
+ * a second copy of it is a second thing that can disagree with the first — and
+ * the read that would have justified denormalizing it happens **once, at boot**,
+ * where the cost of parsing a handful of manifests does not register.
+ *
+ * Every registered app counts, whatever its install status: the map exists to
+ * read label rows that already exist, and a half-installed or half-removed
+ * app's rows are exactly the ones that would otherwise be misread as originals.
+ *
+ * An app with no such key simply has no entry, which is the ordinary case —
+ * most apps derive nothing.
+ */
+export function sizeClassKeysByApp(db: RawDatabase): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const app of listAppRegistry(db)) {
+    const key = app.manifest.infraRequirements?.labelKeys?.find((entry) => entry.sizeClass)?.key;
+    if (key !== undefined) out[app.appId] = key;
+  }
+  return out;
+}
+
 function toRegisteredApp(row: RegisteredAppRow): RegisteredApp {
   return {
     appId: row.app_id,

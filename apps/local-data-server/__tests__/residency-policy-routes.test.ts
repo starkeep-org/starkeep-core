@@ -22,8 +22,12 @@ let app: InstalledApp;
 const GB = 1024 ** 3;
 
 const validPolicy = {
-  rows: { "original:image": { keep: "all", budgetBytes: 10 * GB } },
-  fallback: { keep: "never", budgetBytes: 1024 },
+  platform: {
+    rows: { "original:image": { keep: "all", budgetBytes: 10 * GB } },
+    fallback: { keep: "never", budgetBytes: 1024 },
+  },
+  apps: {},
+  appFallback: { rows: {}, fallback: { keep: "never", budgetBytes: 1024 }, totalBudgetBytes: GB },
 };
 
 beforeAll(async () => {
@@ -59,7 +63,7 @@ describe("projecting a candidate policy without saving", () => {
       projection: { rows: Array<{ sizeClass: string; projectedBytes: number }> };
     };
     expect(body.problems).toEqual([]);
-    expect(body.projection.rows.find((r) => r.sizeClass === "original:image")).toBeDefined();
+    expect(body.projection.rows.find((r) => r.sizeClass === "starkeep:original:image")).toBeDefined();
 
     // Still unconfigured — the dry run must not have written anything.
     const after = await fetch(`${server.url}/residency/projection`);
@@ -68,12 +72,12 @@ describe("projecting a candidate policy without saving", () => {
 
   it("shows a different projection for a tighter budget", async () => {
     const res = await post({
-      retention: { ...validPolicy, rows: { "original:image": { keep: "all", budgetBytes: 1024 } } },
+      retention: { ...validPolicy, platform: { ...validPolicy.platform, rows: { "original:image": { keep: "all", budgetBytes: 1024 } } } },
     });
     const body = (await res.json()) as {
       projection: { rows: Array<{ sizeClass: string; projectedBytes: number; overBudget: boolean }> };
     };
-    const row = body.projection.rows.find((r) => r.sizeClass === "original:image")!;
+    const row = body.projection.rows.find((r) => r.sizeClass === "starkeep:original:image")!;
     expect(row.projectedBytes).toBe(1024);
     expect(row.overBudget).toBe(true);
   });
@@ -83,7 +87,7 @@ describe("projecting a candidate policy without saving", () => {
   // editing against.
   it("still projects an invalid policy, reporting the problems alongside", async () => {
     const res = await post({
-      retention: { ...validPolicy, rows: { "original:image": { keep: "all", budgetBytes: 0 } } },
+      retention: { ...validPolicy, platform: { ...validPolicy.platform, rows: { "original:image": { keep: "all", budgetBytes: 0 } } } },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { problems: string[]; projection: unknown };
@@ -103,7 +107,7 @@ describe("saving a policy", () => {
   // write path until now.
   it("refuses a zero budget rather than saving it with a warning", async () => {
     const res = await put({
-      retention: { ...validPolicy, rows: { "original:image": { keep: "all", budgetBytes: 0 } } },
+      retention: { ...validPolicy, platform: { ...validPolicy.platform, rows: { "original:image": { keep: "all", budgetBytes: 0 } } } },
     });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { problems: string[] };
@@ -114,7 +118,10 @@ describe("saving a policy", () => {
     const res = await put({
       retention: {
         ...validPolicy,
-        rows: { "original:image": { keep: "recent-only", budgetBytes: GB } },
+        platform: {
+          ...validPolicy.platform,
+          rows: { "original:image": { keep: "recent-only", budgetBytes: GB } },
+        },
       },
     });
     expect(res.status).toBe(422);
