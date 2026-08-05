@@ -70,9 +70,9 @@ export class DsqlAppSyncableApplier
       if (entry.op === "insert") {
         await this.applyInsert(schemaTable, pkColumns, entry);
       } else if (entry.op === "update") {
-        await this.applyUpdate(schemaTable, entry);
+        await this.applyUpdate(schemaTable, pkColumns, entry);
       } else {
-        await this.applyDelete(schemaTable, entry);
+        await this.applyDelete(schemaTable, pkColumns, entry);
       }
     });
   }
@@ -127,12 +127,13 @@ export class DsqlAppSyncableApplier
 
   private async applyUpdate(
     schemaTable: string,
+    pkColumns: readonly string[],
     entry: AppSyncableRowEntry,
   ): Promise<void> {
     // node_id rides along whenever updated_at changes (it's derived from it).
     const rawPatch = entry.row ?? {};
     const patch = rawPatch["updated_at"] ? withNodeId(rawPatch, entry) : rawPatch;
-    const where = requireKeyedWhere(entry, "update");
+    const where = requireKeyedWhere(entry, "update", pkColumns);
     const patchCols = Object.keys(patch);
     const whereCols = Object.keys(where);
     if (patchCols.length === 0) return;
@@ -156,11 +157,45 @@ export class DsqlAppSyncableApplier
 
   private async applyDelete(
     schemaTable: string,
+    pkColumns: readonly string[],
     entry: AppSyncableRowEntry,
   ): Promise<void> {
-    const where = requireKeyedWhere(entry, "delete");
+    const where = requireKeyedWhere(entry, "delete", pkColumns);
     const whereCols = Object.keys(where);
     const ts = entry.row?.["updated_at"] as string ?? serializeHLC(entry.timestamp);
+
+    // A tombstone that arrived over sync carries the whole row, and it has to
+    // land even on a node that never held the row it retracts. As an UPDATE
+    // alone it matched nothing and the deletion evaporated, leaving the two
+    // sides counting different numbers of rows in one bucket — a divergence
+    // `verify()` reports forever and repair cannot fill, because re-shipping
+    // the tombstone runs into the same nothing. See the SQLite applier's
+    // `applyDelete` for the long version. A delete issued locally carries only
+    // its key and goes through the UPDATE below, where the row exists by
+    // construction.
+    const carriesFullRow =
+      entry.row !== undefined &&
+      pkColumns.length > 0 &&
+      pkColumns.every((column) => entry.row?.[column] !== undefined);
+    if (carriesFullRow) {
+      const row = withNodeId({ ...entry.row, updated_at: ts, deleted_at: ts }, entry);
+      const updateCols = Object.keys(row).filter((c) => !pkColumns.includes(c));
+      await this.run(
+        qb
+          .insertInto(schemaTable)
+          .values({ ...row })
+          .onConflict((oc) =>
+            oc
+              .columns(pkColumns as never[])
+              .doUpdateSet((eb) =>
+                Object.fromEntries(updateCols.map((c) => [c, eb.ref(`excluded.${c}`)])),
+              )
+              .where(sql.ref("excluded.updated_at"), ">", sql.ref(`${schemaTable}.updated_at`)),
+          )
+          .compile(),
+      );
+      return;
+    }
 
     let query = qb
       .updateTable(schemaTable)

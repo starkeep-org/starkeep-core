@@ -21,9 +21,26 @@ import {
   UNCLASSIFIED_RUNG,
   type ResidencyManager,
 } from "../src/residency-manager.js";
-import type { BlobCandidate, NodeRetentionPolicy } from "../src/residency-policy.js";
+import type {
+  BlobCandidate,
+  NodeRetentionPolicy,
+  ResidencyVerdict,
+  ResolvedSizeClass,
+} from "../src/residency-policy.js";
 
 const MB = 1024 * 1024;
+
+/**
+ * The verdict a fetch-and-land would have produced for a class.
+ *
+ * `noteArrival` takes the whole verdict rather than the class alone, because the
+ * verdict is where the *resolved* pin lives — the pins table and any matching
+ * `effect: "pin"` rule, together. These cases are about classification, so they
+ * hand over an unpinned one.
+ */
+function landedAs(sizeClass: ResolvedSizeClass): ResidencyVerdict {
+  return { decision: "fetch", sizeClass, pinned: false, reason: "keep-all" };
+}
 
 const row = { keep: "all" as const, budgetBytes: 100 * MB };
 const policy: NodeRetentionPolicy = {
@@ -33,9 +50,13 @@ const policy: NodeRetentionPolicy = {
 };
 
 /**
- * Labels keyed by record id. Only `getLabelsByRecordIds` is reached, so the
- * rest of the adapter is deliberately absent rather than stubbed — a stub would
- * suggest this exercises more of it than it does.
+ * Labels keyed by record id, and no capture times.
+ *
+ * Two methods are reached and the rest of the adapter is deliberately absent
+ * rather than stubbed — a stub would suggest this exercises more of it than it
+ * does. `getMetadataByIds` answers empty because these cases are about
+ * classification, and an absent capture date is the ordinary state of a record
+ * whose metadata has not been derived yet.
  */
 function adapterWithLabels(
   labels: Record<string, Array<{ appId: string; key: string; value: string }>>,
@@ -50,6 +71,9 @@ function adapterWithLabels(
         );
       }
       return out as never;
+    },
+    async getMetadataByIds() {
+      return new Map();
     },
   } as unknown as DatabaseAdapter;
 }
@@ -260,14 +284,14 @@ describe("durability proof follows what can be re-derived, not the class name", 
   it("requires proof for anything in the platform namespace", async () => {
     const manager = build();
     const c = candidate({ parentId: null });
-    manager.noteArrival(c, await manager.classOf(c));
+    await manager.noteArrival(c, landedAs(await manager.classOf(c)));
     expect(manager.index.get(c.objectStorageKey)!.requiresDurabilityProof).toBe(true);
   });
 
   it("does not require proof for a labelled derivative", async () => {
     const manager = build({ r1: [{ appId: "photos", key: "rendition", value: "image-medium" }] });
     const c = candidate({ parentId: "parent" });
-    manager.noteArrival(c, await manager.classOf(c));
+    await manager.noteArrival(c, landedAs(await manager.classOf(c)));
     expect(manager.index.get(c.objectStorageKey)!.requiresDurabilityProof).toBe(false);
   });
 
@@ -279,7 +303,7 @@ describe("durability proof follows what can be re-derived, not the class name", 
     const c = candidate({ parentId: "parent" });
     const cls = await manager.classOf(c);
     expect(cls.qualified).toBe("photos:original:image");
-    manager.noteArrival(c, cls);
+    await manager.noteArrival(c, landedAs(cls));
     expect(manager.index.get(c.objectStorageKey)!.requiresDurabilityProof).toBe(false);
   });
 
@@ -293,7 +317,7 @@ describe("durability proof follows what can be re-derived, not the class name", 
     const c = candidate({ appId: "notes", parentId: null });
     const cls = await manager.classOf(c);
     expect(cls.qualified).toBe(`notes:${UNCLASSIFIED_RUNG}`);
-    manager.noteArrival(c, cls);
+    await manager.noteArrival(c, landedAs(cls));
     expect(manager.index.get(c.objectStorageKey)!.requiresDurabilityProof).toBe(true);
   });
 
@@ -303,7 +327,7 @@ describe("durability proof follows what can be re-derived, not the class name", 
   it("requires proof for a derivative whose origin is unknown", async () => {
     const manager = build();
     const c = candidate({ parentId: "parent", originAppId: null });
-    manager.noteArrival(c, await manager.classOf(c));
+    await manager.noteArrival(c, landedAs(await manager.classOf(c)));
     expect(manager.index.get(c.objectStorageKey)!.requiresDurabilityProof).toBe(true);
   });
 });
@@ -326,7 +350,7 @@ describe("byte accounting is namespaced", () => {
 
     for (const [id, size] of [["a", 100], ["b", 250], ["c", 40]] as const) {
       const c = candidate({ recordId: id, objectStorageKey: id, sizeBytes: size, parentId: "p" });
-      manager.noteArrival(c, await manager.classOf(c));
+      await manager.noteArrival(c, landedAs(await manager.classOf(c)));
     }
 
     expect(manager.usageByNamespace()).toEqual({ photos: 350, sketcher: 40 });

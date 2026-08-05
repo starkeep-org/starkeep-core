@@ -246,6 +246,75 @@ describe("round budget", () => {
     expect(await cloud.db.get(ids[3]!)).toBeNull();
     expect(await cloud.db.get(ids[4]!)).toBeNull();
   });
+
+  /**
+   * Ship `count` blobs with `transferConcurrency: limit` and report the most
+   * uploads ever in flight at once.
+   *
+   * Measured at the destination's `putStream`, which is where a transfer
+   * actually occupies a connection. The short delay is what makes overlap
+   * possible at all: without it each transfer completes inside its own
+   * microtask and the peak is 1 no matter what the limit says — a measurement
+   * that would pass for a serialized implementation and an unbounded one alike.
+   */
+  async function peakConcurrentUploads(
+    count: number,
+    limit: number,
+  ): Promise<{ peak: number; shipped: number }> {
+    const { local, cloud } = await twoSides();
+    for (let i = 0; i < count; i += 1) await seedBlobRecord(local, 1 * MB);
+
+    let inFlight = 0;
+    let peak = 0;
+    const realPutStream = cloud.storage.putStream.bind(cloud.storage);
+    cloud.storage.putStream = async (...args: unknown[]) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return await (realPutStream as (...a: unknown[]) => Promise<void>)(...args);
+      } finally {
+        inFlight -= 1;
+      }
+    };
+
+    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
+      maxBytes: 100 * MB,
+      maxItems: count,
+      transferConcurrency: limit,
+    }).exchange();
+    return { peak, shipped: result.shipped };
+  }
+
+  it("never has more transfers in flight than transferConcurrency allows", async () => {
+    // The existing concurrency case sets the limit to 4 and then asserts
+    // *truncation*, which says nothing about how many transfers ran at once: an
+    // engine that serialized every upload, and one that dispatched all eight at
+    // once, both pass it. On a handset the second is the one that matters — it
+    // is a phone opening eight uploads on a cellular link because a round
+    // happened to be large.
+    const { peak, shipped } = await peakConcurrentUploads(8, 2);
+    expect(shipped).toBe(8);
+    expect(peak).toBeLessThanOrEqual(2);
+    // …and it really did overlap, so the bound is what is holding it down
+    // rather than an implementation that never had two transfers to begin with.
+    expect(peak).toBe(2);
+  });
+
+  it("serializes at a limit of one", async () => {
+    const { peak, shipped } = await peakConcurrentUploads(6, 1);
+    expect(shipped).toBe(6);
+    expect(peak).toBe(1);
+  });
+
+  it("uses the width it is given when there is work for it", async () => {
+    // The control in the other direction: raising the limit raises the peak, so
+    // the two cases above are measuring the limit and not a ceiling that
+    // something else imposes.
+    const { peak } = await peakConcurrentUploads(8, 6);
+    expect(peak).toBeGreaterThan(2);
+    expect(peak).toBeLessThanOrEqual(6);
+  });
 });
 
 /**
@@ -1240,6 +1309,78 @@ describe("verify() — both directions", () => {
     expect(await local.db.get(ids[1]!), "the lost row must come back").not.toBeNull();
     expect(result.stalled).toBe(false);
     expect(await syncState.getInboundFloors()).toEqual({});
+  });
+
+  it("delays a second, lower hole found mid-repair rather than losing it", async () => {
+    // The cost side of `raiseInboundFloors`, made explicit. Keeping the higher
+    // of two floors is what stops a verify() from resetting a climbing cursor —
+    // but the same rule discards a *genuinely new* hole discovered below where
+    // the cursor has already reached. Round 3 asks for that trade to be shown
+    // to be a delay rather than a loss, since a repair that quietly skips a row
+    // and then retires its floor would leave the row gone with every signal
+    // reading clean.
+    //
+    // Two mechanisms conspire to defer it and neither one drops it: verify()
+    // advertises the floored map, so mid-repair it reports a pull backlog
+    // instead of loss and arms nothing; and when it does arm, the fresh floor
+    // loses to the climbed one. The repair above finishes, the floor retires,
+    // and the next check finds the lower hole with nothing in its way.
+    const { local, cloud } = await twoSides();
+    const ids: StarkeepId[] = [];
+    for (let i = 0; i < 12; i += 1) ids.push(await seedBlobRecord(cloud, 1 * MB));
+
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+    await engine.sync();
+
+    // Hole one, high in the range, so its repair takes several rounds to reach.
+    await loseFromMiddle(local, ids[9]!);
+    await engine.verify();
+    expect(Object.keys(await syncState.getInboundFloors())).toHaveLength(1);
+
+    // Climb the cursor past the position hole two is about to open at.
+    const paced = engineFor(local, cloud, syncState, { maxBytes: 100 * MB, maxItems: 2 });
+    await paced.exchange();
+    await paced.exchange();
+    const climbed = (await syncState.getInboundFloors())["C"];
+    expect(climbed, "the repair should have moved the cursor").toBeDefined();
+    expect(
+      compareHLC(climbed!, (await cloud.db.get(ids[1]!))!.updatedAt),
+      "the cursor must be above hole two for this to be the case under test",
+    ).toBeGreaterThan(0);
+
+    // Hole two, below the cursor. Nothing the peer ships from here on covers it.
+    await loseFromMiddle(local, ids[1]!);
+
+    const midRepair = await engine.verify();
+    expect(
+      (await syncState.getInboundFloors())["C"],
+      "the new hole must not drag the cursor back down",
+    ).toEqual(climbed);
+    // And it is reported as work in progress rather than as loss, because the
+    // floored advertisement makes the peer's backlog visible as a backlog.
+    expect(midRepair.missingLocally).toBe(0);
+    expect(midRepair.pendingDownload).toBeGreaterThan(0);
+
+    // The first repair runs to completion and retires its floor — while the
+    // second hole is still open. This is the moment the trade costs something.
+    const first = await paced.sync();
+    expect(first.stalled).toBe(false);
+    expect(await local.db.get(ids[9]!), "hole one is repaired").not.toBeNull();
+    expect(await syncState.getInboundFloors()).toEqual({});
+    expect(await local.db.get(ids[1]!), "hole two is still open — the delay").toBeNull();
+
+    // …and the delay is all it is. With nothing outstanding, the next check
+    // sees the lower hole, arms it, and the ordinary scan fills it.
+    const found = await engine.verify();
+    expect(found.missingLocally).toBeGreaterThan(0);
+    expect(Object.keys(await syncState.getInboundFloors())).toHaveLength(1);
+
+    const second = await paced.sync();
+    expect(await local.db.get(ids[1]!), "hole two is repaired too").not.toBeNull();
+    expect(second.stalled).toBe(false);
+    expect(await syncState.getInboundFloors()).toEqual({});
+    expect((await engine.verify()).missingLocally).toBe(0);
   });
 
   it("reports unsupported for a peer that cannot answer at all", async () => {

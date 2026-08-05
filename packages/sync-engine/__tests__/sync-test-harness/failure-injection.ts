@@ -192,6 +192,53 @@ export function failingMethod<T extends object>(
 }
 
 /**
+ * Fail only the method the *caller* invokes, leaving the object's own internal
+ * use of it working.
+ *
+ * The counterpart to {@link failingMethod}, and the distinction matters more
+ * than it looks. `failingMethod` binds to the proxy so an internal `this.foo()`
+ * sees the injection too, which is right when the question is "what does this
+ * adapter do when its own read fails" — both real appliers reach their
+ * watermark read from inside `scanSince`, so breaking one breaks both, exactly
+ * as production would.
+ *
+ * It is wrong when the question is about a *caller* that makes two independent
+ * calls and only one of them fails. The responder's coverage report is that
+ * case: `getNodeWatermarks` is what computes the report, `scanSince` is what
+ * produces the rows to ship, and R12 is specifically about a responder that
+ * still hands over rows while being unable to say what it holds. Breaking both
+ * describes a different, less interesting fault — a table that is simply gone —
+ * and it hides the finding, because a responder that ships nothing gives the
+ * requester nothing to re-ship.
+ */
+export function failingDirectMethod<T extends object>(
+  base: T,
+  method: keyof T & string,
+  options: { readonly message?: string; readonly failFor?: number } = {},
+): T {
+  const message = options.message ?? `[harness] injected ${method} failure`;
+  let remaining = options.failFor ?? Number.POSITIVE_INFINITY;
+  return new Proxy(base, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      if (prop === method) {
+        return (...args: unknown[]) => {
+          if (remaining > 0) {
+            remaining -= 1;
+            return Promise.reject(new Error(message));
+          }
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      }
+      // Bound to the base, so the object's internal calls are untouched.
+      return (...args: unknown[]) =>
+        (value as (...a: unknown[]) => unknown).apply(target, args);
+    },
+  }) as T;
+}
+
+/**
  * Make the **peer** fail, rather than this side.
  *
  * The requester-side injection above was built first and it left the suite

@@ -457,12 +457,34 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     await this.confirm(key);
   }
 
+  /**
+   * Whether the remote holds these bytes.
+   *
+   * A 404 is "no". Anything else that is not ok — a 500, a 403, a gateway
+   * timeout — is **"could not tell"**, and it throws rather than answering.
+   * Returning `response.ok` made every one of those read as absence, which is
+   * the same family as the bug `list()` was fixed for a few lines below:
+   * returning an empty page said "the prefix is empty", *a wrong answer* rather
+   * than a missing feature. `stat()` above already draws this distinction; this
+   * did not.
+   *
+   * The immediate consequence was mild — `runTransfer` re-uploads on a false,
+   * which is the safe direction — but `has()` is also what an eviction pass
+   * would reach for to ask "is it safe to drop my copy?", and there a 403
+   * reading as absence is the wrong answer in the direction that destroys data.
+   * (`assessDurability` deliberately uses `stat()` and treats a throw as
+   * `probe-failed`, which is exactly this rule stated one layer up.)
+   */
   async has(key: string): Promise<boolean> {
     const response = await this.fetchImpl(this.url(key), {
       method: "HEAD",
       headers: this.headers("HEAD", `/files/${key}`, ""),
     });
-    return response.ok;
+    if (response.status === 404) return false;
+    if (!response.ok) {
+      throw new Error(`has ${key} failed: ${response.status} ${response.statusText}`);
+    }
+    return true;
   }
 
   async stat(key: string): Promise<ObjectFacts | null> {

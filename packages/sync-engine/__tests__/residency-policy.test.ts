@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   decideResidency,
   resolveSizeClass,
+  retentionRowFor,
   validateRetentionPolicy,
   PLATFORM_NAMESPACE,
   type AppRetention,
@@ -454,5 +455,113 @@ describe("validateRetentionPolicy", () => {
   it("names the offending row with its full class", () => {
     const problems = validateRetentionPolicy(policy({ classA: row({ budgetBytes: 0 }) }));
     expect(problems[0]).toMatch(/^appA:classA/);
+  });
+
+  /**
+   * N2 — `{ keep: "never" }` with no budget at all.
+   *
+   * It used to validate clean, because `never` was exempted from the budget
+   * check entirely. That looked like a simplification and was a hole: two
+   * separate consumers read the field afterwards and both misread a missing one.
+   * `evictClass` refuses to run on a non-finite budget, so *the one class an
+   * operator had just switched off* became the one class the eviction pass would
+   * never touch; and `projectRow`'s `Math.min(selected, budgetBytes)` returned
+   * `NaN`, which propagates through the whole matrix total.
+   */
+  describe('keep: "never" still needs a budget', () => {
+    it("refuses a never row with the field omitted", () => {
+      const problems = validateRetentionPolicy(
+        policy({ classA: { keep: "never" } as SizeClassRetention }),
+      );
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/even for keep="never"/);
+    });
+
+    it.each([
+      ["NaN", Number.NaN],
+      ["infinite", Number.POSITIVE_INFINITY],
+      ["a string", "0"],
+      ["negative", -1],
+    ])("refuses a never budget that is %s", (_label, budgetBytes) => {
+      const problems = validateRetentionPolicy(
+        policy({ classA: { keep: "never", budgetBytes } as unknown as SizeClassRetention }),
+      );
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/even for keep="never"/);
+    });
+
+    // Zero is the coherent value and the only one; a non-zero one is accepted by
+    // the validator and then normalized away, because "hold none of this class"
+    // and "hold up to 40 GB of it" cannot both be true.
+    it("normalizes a never row's budget to zero however it was written", () => {
+      const resolved = retentionRowFor(
+        policy({ classA: { keep: "never", budgetBytes: 40_000_000_000 } }),
+        CLASS_A,
+      );
+      expect(resolved.budgetBytes).toBe(0);
+    });
+
+    // The reason normalization belongs on the resolution function rather than in
+    // each consumer: `decideResidency`, `evictClass` and `projectPolicy` all pass
+    // through it, and a rule they can disagree about is a rule the matrix cannot
+    // promise.
+    it("leaves every other rule's budget alone", () => {
+      expect(
+        retentionRowFor(policy({ classA: row({ budgetBytes: 4096 }) }), CLASS_A).budgetBytes,
+      ).toBe(4096);
+    });
+  });
+
+  /**
+   * N3 — a `keep` value nobody recognises.
+   *
+   * A policy arrives as JSON, where the union type is a claim rather than a
+   * check. `{ keep: "kepp-all" }` validated clean, fell through every branch of
+   * `decideResidency` to the final `return { decision: "fetch" }`, and was
+   * labelled `within-recency-window` — a reason describing something that did
+   * not happen. Silent, and in the direction that merely costs disk, which is
+   * the combination that keeps a typo in a config file for a year.
+   */
+  describe("an unrecognised keep rule", () => {
+    const typo = { keep: "kepp-all", budgetBytes: 1000 } as unknown as SizeClassRetention;
+
+    it("is refused, and the message lists what was allowed", () => {
+      const problems = validateRetentionPolicy(policy({ classA: typo }));
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/keep must be one of/);
+      expect(problems[0]).toMatch(/"on-demand-only"/);
+      // And it quotes what it actually got, so the typo is visible in the
+      // message rather than only in the file.
+      expect(problems[0]).toMatch(/kepp-all/);
+    });
+
+    // Nothing below the rule can be judged against a rule nobody recognises — a
+    // budget complaint here would name the wrong remedy and send an operator to
+    // fix the wrong field.
+    it("reports only the rule, not a second complaint about the budget", () => {
+      const problems = validateRetentionPolicy(
+        policy({
+          classA: { keep: "kepp-all", budgetBytes: 0 } as unknown as SizeClassRetention,
+        }),
+      );
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/keep must be one of/);
+    });
+
+    it.each([
+      ["absent", undefined],
+      ["null", null],
+      ["a number", 1],
+    ])("refuses a keep that is %s", (_label, keep) => {
+      const problems = validateRetentionPolicy(
+        policy({ classA: { keep, budgetBytes: 1000 } as unknown as SizeClassRetention }),
+      );
+      expect(problems[0]).toMatch(/keep must be one of/);
+    });
+
+    it("checks the fallback rows too, where an invented rung actually lands", () => {
+      const problems = validateRetentionPolicy(policy({}, { fallback: typo }));
+      expect(problems[0]).toMatch(/^appA \(fallback\): keep must be one of/);
+    });
   });
 });

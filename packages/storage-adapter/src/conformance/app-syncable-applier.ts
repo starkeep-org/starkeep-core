@@ -40,6 +40,7 @@
 
 import { serializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
 import type { KeyedRowEntry } from "../database/app-syncable-rows.js";
+import type { DigestBucket } from "../database/digest-queries.js";
 
 /** The applier surface these cases exercise. */
 export interface ConformanceApplier {
@@ -58,6 +59,11 @@ export interface ConformanceApplier {
     appId: string,
     table: string,
   ): Promise<Record<string, HLCTimestamp>>;
+  bucketDigest(
+    appId: string,
+    table: string,
+    prefixLength?: number,
+  ): Promise<DigestBucket[]>;
 }
 
 /**
@@ -72,8 +78,38 @@ export interface ConformanceHarness {
   readonly appId: string;
   /** A table whose primary key is the single column `id`. */
   readonly table: string;
+  /**
+   * A second declared table whose primary key is `(tenant, id)`.
+   *
+   * A composite key is not an exotic configuration — it is what any table
+   * scoped by owner, workspace or device looks like — and it is the one shape
+   * where "name the row" can go *partly* right. `keyedWhereFor` returns null
+   * rather than a partial `where` for exactly that reason, and until this table
+   * existed no test reached the branch: a `where` naming one of two key columns
+   * matches every row sharing that column's value, so a tombstone for one row
+   * would retract a whole tenant.
+   *
+   * Its columns are `tenant`, `id`, `payload`, plus the three the protocol owns.
+   */
+  readonly compositeTable: string;
   /** Ids of rows that are present and not tombstoned, sorted ascending. */
   liveIds(): Promise<string[]>;
+  /**
+   * Make {@link table} exist but refuse to read.
+   *
+   * The contract distinguishes three answers and only two of them were ever
+   * asked for: a table that is *absent* answers empty, a table that is *present*
+   * answers its contents, and a table that is present and **will not read** must
+   * throw. The third is what every "I could not count it" guard upstream is
+   * waiting for, and no test could reach it because no real applier ever threw —
+   * both SQL appliers used to swallow the error and return the empty value,
+   * which is the wire value for "this table holds nothing".
+   *
+   * Implementation-specific by nature, so the harness supplies it. Dropping a
+   * column the applier's own queries name is the usual way: the table still
+   * exists, and every read of it fails.
+   */
+  breakReads(): Promise<void>;
   /** A second, independent instance of the same implementation — the "peer". */
   peer(): Promise<ConformanceHarness>;
 }
@@ -439,6 +475,332 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
       const watermarks = await h.applier.getNodeWatermarks(h.appId, "no_such_table");
       if (Object.keys(watermarks).length !== 0) {
         fail("an unknown table reported watermarks");
+      }
+      const digest = await h.applier.bucketDigest(h.appId, "no_such_table");
+      if (digest.length !== 0) fail("an unknown table reported digest buckets");
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // bucketDigest — the whole of it was absent from this suite
+  // -------------------------------------------------------------------------
+
+  {
+    // `verify()` compares these counts across two nodes and arms a repair off
+    // the difference, so two implementations that bucket the same rows
+    // differently would manufacture divergence between a phone and a laptop
+    // holding identical data. Nothing checked that they agreed.
+    name: "buckets rows by author and by updated_at prefix",
+    async run(h) {
+      await seed(h, ["r1", "r2", "r3"]);
+      const digest = await h.applier.bucketDigest(h.appId, h.table, 4);
+
+      const total = digest.reduce((n, b) => n + b.count, 0);
+      if (total !== 3) fail(`three rows must produce three counted rows, got ${total}`);
+      if (digest.some((b) => b.nodeId !== AUTHOR)) {
+        fail(`every bucket belongs to the only author: ${JSON.stringify(digest)}`);
+      }
+      for (const bucket of digest) {
+        if (bucket.bucket.length !== 4) {
+          fail(`bucket key must be the requested prefix width: "${bucket.bucket}"`);
+        }
+      }
+    },
+  },
+
+  {
+    // Two nodes counting at different widths compare buckets that mean
+    // different things, which the engine refuses — but only if both sides
+    // honour the width they were handed.
+    name: "honours the prefix width it was given",
+    async run(h) {
+      await seed(h, ["r1", "r2", "r3"]);
+      for (const width of [2, 6, 10]) {
+        const digest = await h.applier.bucketDigest(h.appId, h.table, width);
+        for (const bucket of digest) {
+          if (bucket.bucket.length !== width) {
+            fail(`asked for width ${width}, got "${bucket.bucket}"`);
+          }
+        }
+      }
+    },
+  },
+
+  {
+    /**
+     * A tombstone is a row, and the digest counts rows.
+     *
+     * The alternative reading — a digest over *live* rows — is the one that
+     * looks natural and breaks the comparison: a node that has applied a
+     * deletion and one that has not would then report the same count, so the
+     * one integrity check that can see a lost tombstone reports agreement. The
+     * counts are an integrity comparison between two stores, not a user-facing
+     * item count.
+     */
+    name: "counts tombstones, because a deletion is a row the peer must also hold",
+    async run(h) {
+      await seed(h, ["r1", "r2", "r3"]);
+      const before = (await h.applier.bucketDigest(h.appId, h.table, 4)).reduce(
+        (n, b) => n + b.count,
+        0,
+      );
+      await h.applier.apply({
+        timestamp: hlc(10),
+        appId: h.appId,
+        table: h.table,
+        op: "delete",
+        row: { updated_at: serialized(hlc(10)) },
+        where: { id: "r2" },
+      });
+      equalIds(await h.liveIds(), ["r1", "r3"], "after deleting r2");
+
+      const after = (await h.applier.bucketDigest(h.appId, h.table, 4)).reduce(
+        (n, b) => n + b.count,
+        0,
+      );
+      if (after !== before) {
+        fail(`a tombstone must not change the row count: ${before} → ${after}`);
+      }
+    },
+  },
+
+  {
+    // The property the digest exists for, stated across two stores rather than
+    // within one: identical contents ⇒ identical buckets. An implementation
+    // that was self-consistent and disagreed with its peer would pass every
+    // case above.
+    name: "two stores holding the same rows produce the same buckets",
+    async run(h) {
+      await seed(h, ["r1", "r2", "r3"]);
+      await h.applier.apply({
+        timestamp: hlc(10),
+        appId: h.appId,
+        table: h.table,
+        op: "delete",
+        row: { updated_at: serialized(hlc(10)) },
+        where: { id: "r2" },
+      });
+
+      const page = await h.applier.scanSince(h.appId, h.table, {}, 100);
+      const peer = await h.peer();
+      const ordered = [...page.rows].sort((a, b) =>
+        String(a.row?.["updated_at"] ?? "").localeCompare(
+          String(b.row?.["updated_at"] ?? ""),
+        ),
+      );
+      for (const entry of ordered) await peer.applier.apply(entry);
+
+      const key = (buckets: DigestBucket[]) =>
+        JSON.stringify(
+          buckets
+            .map((b) => [b.nodeId, b.bucket, b.count])
+            .sort((a, b) => String(a).localeCompare(String(b))),
+        );
+      const mine = key(await h.applier.bucketDigest(h.appId, h.table, 4));
+      const theirs = key(await peer.applier.bucketDigest(peer.appId, peer.table, 4));
+      if (mine !== theirs) {
+        fail(`two stores with the same rows disagree:\n  ours   ${mine}\n  theirs ${theirs}`);
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // "I could not read it" is not "there is nothing there"
+  // -------------------------------------------------------------------------
+
+  {
+    /**
+     * The distinction three separate guards upstream are waiting for, asserted
+     * as a contract rather than per-engine.
+     *
+     * Both SQL appliers used to answer an unreadable table with the *empty*
+     * value — `[]` from `bucketDigest`, `{}` from `getNodeWatermarks` — which is
+     * the wire value for "this table holds nothing". So the engine's
+     * `complete: false` and `supported: false` paths existed, were tested with
+     * injected failures, and were unreachable on every production path, because
+     * no real applier ever threw.
+     *
+     * `getNodeWatermarks` is the sharper of the two: `scanSince` plans its
+     * authors from that map, so an unreadable table answering `{}` produced no
+     * scans at all and the scan then reported "nothing owed, every author
+     * complete" — silent loss under a watermark claiming coverage.
+     */
+    name: "throws rather than answering empty when a table it has will not read",
+    async run(h) {
+      await seed(h, ["r1", "r2"]);
+      await h.breakReads();
+
+      await expectRejection("bucketDigest over an unreadable table", () =>
+        h.applier.bucketDigest(h.appId, h.table, 4).then(() => undefined),
+      );
+      await expectRejection("getNodeWatermarks over an unreadable table", () =>
+        h.applier.getNodeWatermarks(h.appId, h.table).then(() => undefined),
+      );
+    },
+  },
+
+  {
+    // …and the absent table still answers empty, so the two cases have not
+    // simply been collapsed into "throw on everything". Absent really does mean
+    // nothing here, and a node that has not installed an app must not read as a
+    // node whose storage is broken.
+    name: "still answers empty for a table it does not have at all",
+    async run(h) {
+      await seed(h, ["r1", "r2"]);
+      await h.breakReads();
+
+      const digest = await h.applier.bucketDigest(h.appId, "no_such_table", 4);
+      if (digest.length !== 0) fail("an absent table must answer with no buckets");
+      const watermarks = await h.applier.getNodeWatermarks(h.appId, "no_such_table");
+      if (Object.keys(watermarks).length !== 0) {
+        fail("an absent table must answer with no watermarks");
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Composite primary keys
+  // -------------------------------------------------------------------------
+
+  {
+    name: "stores and retracts one row of a composite-key table",
+    async run(h) {
+      const insert = (tenant: string, id: string, ts: HLCTimestamp): KeyedRowEntry => ({
+        timestamp: ts,
+        appId: h.appId,
+        table: h.compositeTable,
+        op: "insert",
+        row: {
+          tenant,
+          id,
+          payload: `${tenant}/${id}`,
+          updated_at: serialized(ts),
+          deleted_at: null,
+        },
+      });
+      await h.applier.apply(insert("acme", "r1", hlc(1)));
+      await h.applier.apply(insert("acme", "r2", hlc(2)));
+      await h.applier.apply(insert("globex", "r1", hlc(3)));
+
+      await h.applier.apply({
+        timestamp: hlc(10),
+        appId: h.appId,
+        table: h.compositeTable,
+        op: "delete",
+        row: { updated_at: serialized(hlc(10)) },
+        where: { tenant: "acme", id: "r1" },
+      });
+
+      const page = await h.applier.scanSince(h.appId, h.compositeTable, {}, 100);
+      const live = page.rows
+        .filter((e) => e.op === "insert")
+        .map((e) => `${String(e.row?.["tenant"])}/${String(e.row?.["id"])}`)
+        .sort();
+      // Only the named row went. `globex/r1` shares the `id` and `acme/r2`
+      // shares the `tenant`, so either half of the key alone would have taken
+      // one of them with it.
+      equalIds(live, ["acme/r2", "globex/r1"], "live rows after a composite delete");
+    },
+  },
+
+  {
+    /**
+     * The branch `keyedWhereFor` exists for, and the reason it returns null
+     * rather than a partial `where`.
+     *
+     * A tombstone that names `tenant` but not `id` matches *every row of that
+     * tenant* — quieter than the keyless tombstone that wiped a whole table, and
+     * worse to diagnose, because the damage is bounded and looks like a
+     * legitimate bulk delete. So a row that cannot name itself does not
+     * propagate its retraction at all: the deletion stays local, which loses one
+     * node's intent rather than another node's data.
+     */
+    name: "will not propagate a tombstone that can only name part of a composite key",
+    async run(h) {
+      const ts = hlc(1);
+      await h.applier.apply({
+        timestamp: ts,
+        appId: h.appId,
+        table: h.compositeTable,
+        op: "insert",
+        row: {
+          tenant: "acme",
+          id: "r1",
+          payload: "p",
+          updated_at: serialized(ts),
+          deleted_at: null,
+        },
+      });
+      await h.applier.apply({
+        timestamp: hlc(2),
+        appId: h.appId,
+        table: h.compositeTable,
+        op: "insert",
+        row: {
+          tenant: "acme",
+          id: "r2",
+          payload: "p",
+          updated_at: serialized(hlc(2)),
+          deleted_at: null,
+        },
+      });
+
+      // A partial `where` is refused on the way *in* as well, for the same
+      // reason: it names more rows than the one it came from.
+      await expectRejection("a delete naming only part of a composite key", () =>
+        h.applier.apply({
+          timestamp: hlc(10),
+          appId: h.appId,
+          table: h.compositeTable,
+          op: "delete",
+          row: { updated_at: serialized(hlc(10)) },
+          where: { tenant: "acme" },
+        }),
+      );
+
+      const page = await h.applier.scanSince(h.appId, h.compositeTable, {}, 100);
+      const live = page.rows.filter((e) => e.op === "insert");
+      if (live.length !== 2) {
+        fail(`a refused partial delete must leave both rows: got ${live.length}`);
+      }
+    },
+  },
+
+  {
+    // A scanned tombstone from a composite table carries *both* columns, since
+    // the receiving side applies it verbatim and a half-named row is what the
+    // case above refuses.
+    name: "a scanned composite tombstone names every key column",
+    async run(h) {
+      const ts = hlc(1);
+      await h.applier.apply({
+        timestamp: ts,
+        appId: h.appId,
+        table: h.compositeTable,
+        op: "insert",
+        row: {
+          tenant: "acme",
+          id: "r1",
+          payload: "p",
+          updated_at: serialized(ts),
+          deleted_at: null,
+        },
+      });
+      await h.applier.apply({
+        timestamp: hlc(10),
+        appId: h.appId,
+        table: h.compositeTable,
+        op: "delete",
+        row: { updated_at: serialized(hlc(10)) },
+        where: { tenant: "acme", id: "r1" },
+      });
+
+      const page = await h.applier.scanSince(h.appId, h.compositeTable, {}, 100);
+      const tombstone = page.rows.find((e) => e.op === "delete");
+      if (!tombstone) fail("scan returned no tombstone for the composite row");
+      const where = tombstone.where ?? {};
+      if (where["tenant"] !== "acme" || where["id"] !== "r1") {
+        fail(`composite tombstone names ${JSON.stringify(where)}, not both columns`);
       }
     },
   },

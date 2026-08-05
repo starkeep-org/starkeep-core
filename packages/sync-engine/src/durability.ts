@@ -77,12 +77,35 @@ export interface ReplicaReport {
   readonly detail?: string;
 }
 
+/**
+ * The floor under {@link DurabilityPolicy.minimumReplicas}, and the reason this
+ * module has one at all.
+ *
+ * The predicate is `counted >= policy.minimumReplicas`. At zero that is true for
+ * every blob with **zero probes and zero evidence** — every deletion authorized,
+ * no questions asked — and the number arrives from a JSON config file
+ * (`starkeepConfig.minimumReplicas ?? 1`, passed straight through) where nothing
+ * validated it. The field's own documentation says this number "is the only
+ * thing that keeps that from being a data-loss feature", which is exactly the
+ * kind of claim that should not depend on every caller remembering to clamp.
+ *
+ * Clamped here as well as where the config is read. Two places for one rule
+ * looks redundant and is not: the config clamp is what tells an operator their
+ * setting was refused, and this one is what holds when a caller is constructed
+ * some other way — a test, a future host, a policy assembled in code.
+ */
+export const MINIMUM_REPLICAS_FLOOR = 1;
+
 export interface DurabilityPolicy {
   /**
    * How many confirmed replicas elsewhere before this node may drop its copy.
    * One is the minimum that is arithmetically defensible and still leaves no
    * margin for a second failure; the plan's `no-cloud` mode is precisely the
    * case where the operator should raise it.
+   *
+   * Values below {@link MINIMUM_REPLICAS_FLOOR} are raised to it rather than
+   * honoured. There is no coherent reading of "delete my only copy once zero
+   * other copies are confirmed".
    */
   readonly minimumReplicas: number;
   /**
@@ -147,13 +170,27 @@ export async function assessDurability(
   );
 
   const counted = confirmed.length + (policy.countUnverified ? unverified.length : 0);
+  // See MINIMUM_REPLICAS_FLOOR. A zero here makes `counted >= minimum` true for
+  // a blob nothing was asked about, which is the one arithmetic in this file
+  // that turns "fail closed" into "delete everything".
+  //
+  // Non-finite is checked explicitly rather than left to `Math.max`, which
+  // returns `NaN` for one. The verdict was still safe — every comparison against
+  // a NaN is false, so `durable` came out false — but safe *by accident*, in
+  // exactly the way the note above objects to: the guarantee emerged from
+  // arithmetic somewhere else rather than from the clamp that claims to provide
+  // it. And it was reported dishonestly, since `minimumRequired: NaN` tells a
+  // caller inspecting the verdict nothing about the threshold actually applied.
+  const minimumRequired = Number.isFinite(policy.minimumReplicas)
+    ? Math.max(policy.minimumReplicas, MINIMUM_REPLICAS_FLOOR)
+    : MINIMUM_REPLICAS_FLOOR;
 
   return {
-    durable: counted >= policy.minimumReplicas,
+    durable: counted >= minimumRequired,
     confirmedReplicas: confirmed.length,
     instantReplicas: confirmed.filter((r) => r.readableNow).length,
     unverifiedReplicas: unverified.length,
-    minimumRequired: policy.minimumReplicas,
+    minimumRequired,
     corruptionSuspected,
     replicas,
   };

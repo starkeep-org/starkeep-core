@@ -72,12 +72,69 @@ export type DigestDb = Record<string, Record<string, unknown>>;
  */
 export const DEFAULT_BUCKET_PREFIX_LENGTH = 5;
 
-/** One author's row count within one time bucket. */
+/** One author's row count within one time bucket, for one data plane. */
 export interface DigestBucket {
   readonly nodeId: string;
   /** The `updated_at` prefix this bucket covers. Opaque; compare, don't parse. */
   readonly bucket: string;
   readonly count: number;
+  /**
+   * Which data plane this count came from — `shared` for records and labels,
+   * `<appId>.<table>` for an app-syncable table. Absent on buckets produced
+   * before scoping existed, and on the wire from a peer too old to send it.
+   *
+   * ## Why a count needs to say what it counted
+   *
+   * The "counts, not checksums" argument above is sound **per table** — a
+   * restore loses a tail, a bad delete removes rows, both move the count. It
+   * stops being sound the moment N tables are summed into one counter, because
+   * that reintroduces exactly the compensating-error case the argument
+   * dismissed: five records and two labels agrees with four records and three
+   * labels, and a 3.1-day bucket is wide enough for a record loss and a label
+   * write to land in the same one. The lost record then reads as agreement, and
+   * the only check that would ever *find* it reports clean.
+   *
+   * The scopes were already on the wire ({@link SyncExchangeResponse.digestScopes})
+   * to guard the *set* of tables being compared. Carrying them per bucket makes
+   * the comparison itself scope-aware, which closes the swap with no protocol
+   * change beyond a field.
+   */
+  readonly scope?: string;
+}
+
+/**
+ * Tag a producer's buckets with the data plane they were counted over.
+ *
+ * Applied where the digest is assembled rather than inside the adapters,
+ * because a table does not know what it is called in this channel's vocabulary
+ * — the caller iterating namespaces does.
+ */
+export function scopeDigestBuckets(
+  buckets: readonly DigestBucket[],
+  scope: string,
+): DigestBucket[] {
+  return buckets.map((b) => ({ ...b, scope }));
+}
+
+/**
+ * Drop scopes and sum, for comparing against a peer that cannot express them.
+ *
+ * A peer running an older build sends unscoped buckets. Comparing those against
+ * scoped ones would make every bucket disagree in both directions over a
+ * *field*, manufacturing exactly the whole-library repair the prefix-length and
+ * scope-set guards exist to prevent. So both sides fold to the coarser
+ * granularity the older one can express, which is the same rule applied
+ * everywhere else here: claim only what the evidence supports. The compensating
+ * swap stays undetectable against such a peer, which is a known limit of talking
+ * to it rather than something this side can fix.
+ */
+export function foldDigestScopes(buckets: readonly DigestBucket[]): DigestBucket[] {
+  return mergeDigestBuckets(buckets.map(({ scope: _scope, ...rest }) => rest));
+}
+
+/** Whether any bucket in a digest names its data plane. */
+export function digestIsScoped(buckets: readonly DigestBucket[]): boolean {
+  return buckets.some((b) => b.scope !== undefined);
 }
 
 export function buildBucketDigest(
@@ -111,11 +168,14 @@ export function toDigestBuckets(rows: readonly Record<string, unknown>[]): Diges
 }
 
 /**
- * Fold two tables' digests into one, summing counts for the same
- * `(author, bucket)`.
+ * Fold a channel's digests into one, summing counts for the same
+ * `(author, bucket, scope)`.
  *
  * Records and labels are one channel under one coverage watermark, so a digest
- * over only half of it would report agreement while a label went missing.
+ * over only half of it would report agreement while a label went missing — that
+ * is why they merge at all. They merge **within** a scope rather than across
+ * scopes, so the sum stays a per-table count and a loss in one table cannot be
+ * masked by a write in another. See {@link DigestBucket.scope}.
  */
 export function mergeDigestBuckets(buckets: readonly DigestBucket[]): DigestBucket[] {
   const totals = new Map<string, DigestBucket>();
@@ -145,17 +205,21 @@ export function bucketsPeerIsMissing(
 }
 
 /**
- * `(nodeId, bucket)` as one map key.
+ * `(nodeId, bucket, scope)` as one map key.
  *
- * The separator is `\u0000` because it is the one character neither field can
- * contain — a nodeId is a ULID and a bucket is a prefix of a serialized HLC —
- * so no pair of distinct buckets can collide on it. Written as an escape and
- * not as a literal NUL: a literal makes the whole file binary as far as git is
- * concerned, and this one had been doing exactly that, so every diff of this
- * file showed up as `Bin 8881 -> 9488` with nothing reviewable in it.
+ * The separator is `\u0000` because it is the one character none of the fields
+ * can contain — a nodeId is a ULID, a bucket is a prefix of a serialized HLC,
+ * and a scope is an app id and a table name — so no pair of distinct buckets
+ * can collide on it. Written as an escape and not as a literal NUL: a literal
+ * makes the whole file binary as far as git is concerned, and this one had been
+ * doing exactly that, so every diff of this file showed up as
+ * `Bin 8881 -> 9488` with nothing reviewable in it.
+ *
+ * An absent scope keys as the empty string, so unscoped buckets group with each
+ * other and never silently merge into a scoped one.
  */
-function bucketKey(b: { nodeId: string; bucket: string }): string {
-  return `${b.nodeId}\u0000${b.bucket}`;
+function bucketKey(b: { nodeId: string; bucket: string; scope?: string }): string {
+  return `${b.nodeId}\u0000${b.bucket}\u0000${b.scope ?? ""}`;
 }
 
 /**

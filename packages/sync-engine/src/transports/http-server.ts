@@ -17,6 +17,17 @@ export interface HttpSyncServerOptions {
    * default in-process transport.
    */
   readonly transport?: SyncTransport;
+  /**
+   * Body caps, in bytes. Default to the two constants below.
+   *
+   * Overridable because the file cap is 2 GB and a test that wanted to see the
+   * refusal would otherwise have to push two gigabytes through a socket — so
+   * the one route where unbounded buffering actually costs something was the
+   * one route whose cap nothing checked. A server embedding this handler behind
+   * a smaller upstream limit has the same reason to lower them.
+   */
+  readonly maxExchangeBodyBytes?: number;
+  readonly maxFileBodyBytes?: number;
 }
 
 /**
@@ -66,6 +77,8 @@ export function createHttpSyncHandler(
       clock: options.clock,
       objectStorage: options.objectStorageAdapter,
     });
+  const maxExchangeBody = options.maxExchangeBodyBytes ?? MAX_EXCHANGE_BODY_BYTES;
+  const maxFileBody = options.maxFileBodyBytes ?? MAX_FILE_BODY_BYTES;
 
   return async (req, res) => {
     const url = new URL(
@@ -79,7 +92,7 @@ export function createHttpSyncHandler(
       let body: SyncExchangeRequest;
       try {
         body = sanitizeExchangeRequest(
-          await readJson<unknown>(req, MAX_EXCHANGE_BODY_BYTES),
+          await readJson<unknown>(req, maxExchangeBody),
         );
       } catch (err) {
         if (err instanceof InvalidExchangeRequest) {
@@ -95,7 +108,7 @@ export function createHttpSyncHandler(
           return true;
         }
         if (err instanceof BodyTooLarge) {
-          sendJson(res, 413, { error: err.message });
+          refuseTooLarge(req, res, err);
           return true;
         }
         throw err;
@@ -148,10 +161,10 @@ export function createHttpSyncHandler(
       if (req.method === "PUT") {
         let bytes: Buffer;
         try {
-          bytes = await readBinary(req, MAX_FILE_BODY_BYTES);
+          bytes = await readBinary(req, maxFileBody);
         } catch (err) {
           if (err instanceof BodyTooLarge) {
-            sendJson(res, 413, { error: err.message });
+            refuseTooLarge(req, res, err);
             return true;
           }
           throw err;
@@ -191,16 +204,44 @@ async function readJson<T>(req: IncomingMessage, limit: number): Promise<T> {
 }
 
 /**
+ * Answer an oversized body with a 413, then stop the upload.
+ *
+ * The order is the point. `readBinary` used to destroy the socket the instant
+ * it saw the limit crossed, which raced the response out of existence: the
+ * sender usually saw the connection vanish and never learned *why* it was
+ * refused — a peer on a broken build got "socket hang up" for a condition the
+ * server understood exactly. It also made the refusal untestable, since a test
+ * could only assert "413 or nothing".
+ *
+ * Nothing is buffered past the limit either way, so waiting for the response to
+ * flush before destroying costs a small, bounded window of discarded bytes and
+ * buys a client that can read its own error.
+ */
+function refuseTooLarge(
+  req: IncomingMessage,
+  res: ServerResponse,
+  err: BodyTooLarge,
+): void {
+  res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+  res.end(JSON.stringify({ error: err.message }), () => {
+    // Now the sender can stop: leaving the socket open means it keeps pushing
+    // bytes at a request that has already been answered.
+    req.destroy();
+  });
+}
+
+/**
  * Read a request body into memory, refusing one over `limit`.
  *
  * Counted as it arrives rather than trusted from `Content-Length`, which a
- * caller controls and a chunked request omits entirely. The socket is destroyed
- * on refusal: leaving it open means the sender keeps pushing bytes at a request
- * that has already been answered.
+ * caller controls and a chunked request omits entirely. Bytes past the limit
+ * are discarded rather than accumulated, so the refusal is bounded in memory
+ * whatever the caller does next; closing the socket is the call site's job (see
+ * {@link refuseTooLarge}) because the response has to go out first.
  */
 function readBinary(req: IncomingMessage, limit: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
+    let chunks: Buffer[] = [];
     let size = 0;
     let done = false;
     req.on("data", (chunk: Buffer) => {
@@ -208,7 +249,10 @@ function readBinary(req: IncomingMessage, limit: number): Promise<Buffer> {
       size += chunk.length;
       if (size > limit) {
         done = true;
-        req.destroy();
+        // Drop what was read: the request is refused, and holding a limit's
+        // worth of it until the socket closes is the buffering this cap exists
+        // to prevent.
+        chunks = [];
         reject(new BodyTooLarge(limit));
         return;
       }

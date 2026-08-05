@@ -46,6 +46,7 @@ import type { DatabaseClient } from "../src/types.js";
 
 const APP = "conformance-app";
 const TABLE = "test_rows";
+const COMPOSITE_TABLE = "tenant_rows";
 /** What the applier derives from `APP`: dashes become underscores. */
 const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
 
@@ -94,13 +95,27 @@ async function makeHarness(): Promise<ConformanceHarness> {
     );
     CREATE INDEX idx_${TABLE}_node_watermark
       ON ${SCHEMA}.${TABLE} (node_id, updated_at);
+    CREATE TABLE ${SCHEMA}.${COMPOSITE_TABLE} (
+      tenant TEXT,
+      id TEXT,
+      payload TEXT,
+      updated_at TEXT,
+      node_id TEXT,
+      deleted_at TEXT,
+      PRIMARY KEY (tenant, id)
+    );
+    CREATE INDEX idx_${COMPOSITE_TABLE}_node_watermark
+      ON ${SCHEMA}.${COMPOSITE_TABLE} (node_id, updated_at);
   `);
 
   const ns: AppSyncableNamespace = {
     appId: APP,
-    tables: [{ name: TABLE, pkColumns: ["id"] }],
+    tables: [
+      { name: TABLE, pkColumns: ["id"] },
+      { name: COMPOSITE_TABLE, pkColumns: ["tenant", "id"] },
+    ],
     filesEnabled: false,
-    tableNames: [TABLE],
+    tableNames: [TABLE, COMPOSITE_TABLE],
   };
   const namespaces: AppSyncableNamespaceStore = {
     get: (id) => (id === APP ? ns : null),
@@ -111,11 +126,19 @@ async function makeHarness(): Promise<ConformanceHarness> {
     applier: new DsqlAppSyncableApplier(clientFor(pg), namespaces) as never,
     appId: APP,
     table: TABLE,
+    compositeTable: COMPOSITE_TABLE,
     async liveIds() {
       const result = await pg.query<{ id: string }>(
         `SELECT id FROM ${SCHEMA}.${TABLE} WHERE deleted_at IS NULL ORDER BY id`,
       );
       return result.rows.map((r) => String(r.id));
+    },
+    async breakReads() {
+      // The table still exists — `tableExists` goes on answering true — and
+      // every read the applier issues names `node_id`, so each of them now
+      // fails. Present, and will not read: the third answer the contract
+      // distinguishes and the one no test could reach before.
+      await pg.exec(`ALTER TABLE ${SCHEMA}.${TABLE} DROP COLUMN node_id CASCADE`);
     },
     peer: makeHarness,
   };

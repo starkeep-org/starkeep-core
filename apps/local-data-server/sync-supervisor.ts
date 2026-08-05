@@ -107,6 +107,18 @@ interface EngineEntry {
    * engine cannot have two of them at once.
    */
   readonly runner: EngineRunner;
+  /**
+   * Set when this engine has been torn down, so a drain already running stops
+   * at its next round boundary.
+   *
+   * `paused` is the global lever and covers `stop()` and `/sync/pause`. It does
+   * not cover `rescan()` dropping one uninstalled app: that cleared the timers
+   * and unsubscribed, then returned — leaving the `sync()` for an app that no
+   * longer exists running for however long its backlog took, still writing that
+   * app's `sync_state` rows. Per-entry, because the whole point is stopping one
+   * engine while the others keep going.
+   */
+  stopped: boolean;
 }
 
 export interface SyncSupervisorStatus {
@@ -273,7 +285,8 @@ export function createSyncSupervisor(
       lastExchangeAt: null,
       lastError: null,
       backoffMs: exchangeIntervalMs,
-      runner: createEngineRunner({ cancelled: () => paused }),
+      stopped: false,
+      runner: createEngineRunner({ cancelled: () => paused || entry.stopped }),
     };
     engines.set(appId, entry);
     scheduleTick(entry);
@@ -370,11 +383,30 @@ export function createSyncSupervisor(
   function stopEngineFor(appId: string): void {
     const entry = engines.get(appId);
     if (!entry) return;
+    // Set before anything else. Clearing the timers stops the *next* tick; this
+    // stops the one that may be running right now, at its next round boundary.
+    // Without it, `rescan()` dropping an app left that app's `sync()` draining
+    // — issuing requests against a channel that no longer exists and writing
+    // `sync_state` for an app that has been uninstalled.
+    entry.stopped = true;
     if (entry.tickTimer) clearTimeout(entry.tickTimer);
     if (entry.nudgeTimer) clearTimeout(entry.nudgeTimer);
     entry.unsubscribeForwarding();
     engines.delete(appId);
     console.log(`[sync] stopped loop for app=${appId}`);
+  }
+
+  /**
+   * Wait for whatever a stopped engine was still doing.
+   *
+   * An empty body queued behind the runner: `run()` is strictly ordered, so this
+   * resolves only once the drain ahead of it has finished, which is the
+   * observable form of "nothing is still writing". `stop()` awaits these;
+   * `rescan()` is synchronous by contract and cannot, so it settles them in the
+   * background — the `stopped` flag has already made the drain short.
+   */
+  function drained(entry: EngineEntry): Promise<void> {
+    return entry.runner.run(async () => {}).catch(() => undefined);
   }
 
   function scheduleTick(entry: EngineEntry): void {
@@ -383,14 +415,20 @@ export function createSyncSupervisor(
   }
 
   /**
-   * The one abort signal every drain reads. `paused` is checked on each access
-   * rather than captured, so `/sync/pause` stops a loop already running.
+   * The abort signal one engine's drains read.
+   *
+   * Both flags are checked on each access rather than captured, so a drain
+   * already in flight stops: `paused` is the global lever behind `/sync/pause`
+   * and `stop()`, and `entry.stopped` is the per-engine one behind `rescan()`
+   * dropping an uninstalled app.
    */
-  const syncSignal = {
-    get aborted() {
-      return paused;
-    },
-  };
+  function signalFor(entry: EngineEntry): { readonly aborted: boolean } {
+    return {
+      get aborted() {
+        return paused || entry.stopped;
+      },
+    };
+  }
 
   /**
    * Exclusive use of one engine for the duration of `body`.
@@ -410,7 +448,7 @@ export function createSyncSupervisor(
       // large first sync take hours of wall clock doing nothing in between.
       // The loop stops as soon as both directions are drained, which in steady
       // state is after the first (pull-only) round.
-      await entry.engine.sync({ signal: syncSignal });
+      await entry.engine.sync({ signal: signalFor(entry) });
       entry.lastExchangeAt = new Date().toISOString();
       entry.lastError = null;
       entry.backoffMs = exchangeIntervalMs;
@@ -489,7 +527,12 @@ export function createSyncSupervisor(
     }
     for (const appId of Array.from(engines.keys())) {
       if (NO_PER_APP_CHANNEL_APP_IDS.has(appId)) continue;
-      if (!desired.has(appId)) stopEngineFor(appId);
+      if (desired.has(appId)) continue;
+      const entry = engines.get(appId)!;
+      stopEngineFor(appId);
+      // Not awaited: `rescan()` is synchronous by contract and its callers are
+      // registry-change handlers. `stopped` is what makes this short.
+      void drained(entry);
     }
   }
 
@@ -533,14 +576,7 @@ export function createSyncSupervisor(
       for (const appId of Array.from(engines.keys())) {
         stopEngineFor(appId);
       }
-      // Queue an empty body behind whatever each runner is doing. `run()` is
-      // strictly ordered, so this resolves only once the drain ahead of it has
-      // finished — which is the observable form of "nothing is still writing".
-      await Promise.all(
-        stopping.map((entry) =>
-          entry.runner.run(async () => {}).catch(() => undefined),
-        ),
-      );
+      await Promise.all(stopping.map(drained));
     },
 
     pause() {
@@ -563,7 +599,7 @@ export function createSyncSupervisor(
         Array.from(engines.values()).map(async (entry) => {
           await withEngine(entry, async () => {
             try {
-              await entry.engine.sync({ signal: syncSignal });
+              await entry.engine.sync({ signal: signalFor(entry) });
               entry.lastExchangeAt = new Date().toISOString();
               entry.lastError = null;
               entry.backoffMs = exchangeIntervalMs;
@@ -591,7 +627,7 @@ export function createSyncSupervisor(
           const r = await withEngine(entry, () =>
             entry.engine.sync({
               maxRounds: SYNC_NOW_MAX_ROUNDS,
-              signal: syncSignal,
+              signal: signalFor(entry),
             }),
           );
           applied += r.applied;

@@ -6,6 +6,7 @@ import {
 } from "@starkeep/protocol-primitives";
 import {
   mergeDigestBuckets,
+  scopeDigestBuckets,
   DEFAULT_BUCKET_PREFIX_LENGTH,
   type DatabaseAdapter,
   type DigestBucket,
@@ -150,6 +151,28 @@ export function createInProcessSyncTransport(
       //    (syncSharedRecords=true) applies shared records. Records from
       //    nodes halted in step 1 are skipped to preserve the contiguous
       //    prefix (they re-ship next round).
+      //
+      //    ## This iterates the wire order and does not sort. That is load-bearing.
+      //
+      //    Step 1 sorts app rows per node by HLC before applying, because their
+      //    failures are silent and the contiguous prefix has to be maintained by
+      //    hand. Steps 2 and 2b deliberately do not, and the reason they are
+      //    allowed not to is narrow: **a shared-record `put()` that throws
+      //    aborts the whole exchange.** No response is produced, so no coverage
+      //    watermark is ever reported over a partially-applied author, so
+      //    holdings cannot end up as a non-contiguous prefix — the requester
+      //    simply re-ships everything next round and LWW makes it idempotent.
+      //
+      //    The moment shared-record apply becomes non-fatal — caught and folded
+      //    into `haltedNodes` the way app rows already are — the missing sort
+      //    stops being harmless and becomes silent loss under a watermark that
+      //    claims coverage: a later row applies, an earlier one does not, and
+      //    the union-of-MAX below reports the author as fully covered. Anyone
+      //    relaxing the throw has to sort here in the same commit.
+      //
+      //    (Records are also applied entirely before labels rather than merged
+      //    per author in HLC order, unlike the requester's inbound loop. Same
+      //    argument, same dependency: safe only while the halt rule is a throw.)
       if (syncSharedRecords) {
         for (const snapshot of request.records ?? []) {
           if (haltedNodes.has(snapshot.updatedAt.nodeId)) continue;
@@ -296,19 +319,56 @@ export function createInProcessSyncTransport(
       //    (see SyncExchangeResponse.responderWatermarks). Scoped to the
       //    channel's own data plane: shared records only on the Drive
       //    channel, only the registered namespaces' tables on per-app
-      //    channels. A failed per-table query omits its nodes (watermark
-      //    understates → requester re-ships → idempotent LWW) rather than
-      //    failing the exchange.
+      //    channels.
+      //
+      //    A failed per-scope query omits its nodes, and **says so** through
+      //    `coverageComplete`. The omission on its own was correct about
+      //    correctness and silent about volume: an absent author is a floor of
+      //    `undefined` on the requester, whose next outbound scan therefore
+      //    starts from the beginning of that author's history — and since the
+      //    requester replaces rather than merges the map, nothing anywhere
+      //    notices. `progressed` is true (re-shipping the library *is*
+      //    progress), `sync()` reports `complete: true`, the supervisor resets
+      //    its backoff, and the next tick does it again. The only evidence was a
+      //    console warning on the responder, which in the deployment that
+      //    matters is a Lambda.
+      //
+      //    Two different facts were being encoded in one absence:
+      //      - "I hold nothing from node N."  True and important — it is what
+      //        makes re-ship after peer-side loss work, and the requester's
+      //        authoritative-replace rule exists to serve it.
+      //      - "I could not read my own coverage for scope S."  Unknown. It must
+      //        not lower anything.
+      //    The response type gave no way to say the second, so it said the
+      //    first. `coverageComplete: false` is that missing sentence.
+      //
+      //    Deliberately **not** failing the exchange instead. The coverage
+      //    report being unreadable does not make the round useless: the inbound
+      //    direction still works and this side still applied what it was sent.
+      //    Refusing would convert a degraded report into a total sync outage for
+      //    that app. Report the degradation; do not weaponize it.
       const responderWatermarks: Watermarks = {};
+      const unreadableCoverage: string[] = [];
       if (syncSharedRecords) {
         // A union over BOTH tables on this channel. Missing the label half
         // would let the watermark overstate coverage — the requester would
         // stop re-shipping labels the responder never received.
-        for (const hlc of Object.values(await databaseAdapter.getNodeWatermarks())) {
-          advanceWatermark(responderWatermarks, hlc);
-        }
-        for (const hlc of Object.values(await databaseAdapter.getLabelNodeWatermarks())) {
-          advanceWatermark(responderWatermarks, hlc);
+        //
+        // Caught, where it used to be bare. The identical fault threw out of the
+        // exchange here and was swallowed four lines below, so one of the two
+        // was wrong by inspection; now both report through the same field.
+        try {
+          for (const hlc of Object.values(await databaseAdapter.getNodeWatermarks())) {
+            advanceWatermark(responderWatermarks, hlc);
+          }
+          for (const hlc of Object.values(await databaseAdapter.getLabelNodeWatermarks())) {
+            advanceWatermark(responderWatermarks, hlc);
+          }
+        } catch (err) {
+          console.warn(
+            `[sync] in-process transport getNodeWatermarks failed for shared records: ${(err as Error).message}`,
+          );
+          unreadableCoverage.push(SHARED_DIGEST_SCOPE);
         }
       }
       if (appSyncableSource) {
@@ -328,6 +388,7 @@ export function createInProcessSyncTransport(
                 console.warn(
                   `[sync] in-process transport getNodeWatermarks failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
                 );
+                unreadableCoverage.push(`${ns.appId}.${tableInfo.name}`);
               }
             }
           }
@@ -351,7 +412,12 @@ export function createInProcessSyncTransport(
         if (syncSharedRecords) {
           scopes.push(SHARED_DIGEST_SCOPE);
           try {
-            buckets.push(...(await databaseAdapter.bucketDigest(prefixLength)));
+            buckets.push(
+              ...scopeDigestBuckets(
+                await databaseAdapter.bucketDigest(prefixLength),
+                SHARED_DIGEST_SCOPE,
+              ),
+            );
           } catch (err) {
             console.warn(
               `[sync] in-process transport bucketDigest failed for shared records: ${(err as Error).message}`,
@@ -364,14 +430,18 @@ export function createInProcessSyncTransport(
           if (typeof scanCapable.bucketDigest === "function") {
             for (const ns of appSyncableSource.namespaces.list()) {
               for (const tableInfo of ns.tables) {
-                scopes.push(`${ns.appId}.${tableInfo.name}`);
+                const scope = `${ns.appId}.${tableInfo.name}`;
+                scopes.push(scope);
                 try {
                   buckets.push(
-                    ...(await scanCapable.bucketDigest(
-                      ns.appId,
-                      tableInfo.name,
-                      prefixLength,
-                    )),
+                    ...scopeDigestBuckets(
+                      await scanCapable.bucketDigest(
+                        ns.appId,
+                        tableInfo.name,
+                        prefixLength,
+                      ),
+                      scope,
+                    ),
                   );
                 } catch (err) {
                   console.warn(
@@ -401,6 +471,19 @@ export function createInProcessSyncTransport(
         appSyncableRows,
         responderWatermarks,
         hasMore,
+        // Omitted when the report is whole, so the common response stays the
+        // shape it was and an older requester is unaffected. A single boolean is
+        // the honest granularity: the watermarks are a per-node union *across*
+        // scopes, so a per-scope gap cannot be attributed to particular nodes —
+        // if any scope failed, the whole map is a lower bound rather than the
+        // truth. The scope names ride alongside for the requester to log,
+        // because "which table" is the first thing anyone will ask.
+        ...(unreadableCoverage.length > 0
+          ? {
+              coverageComplete: false,
+              coverageDetail: `could not read coverage for: ${unreadableCoverage.join(", ")}`,
+            }
+          : {}),
         // Whose items we stopped applying. The watermark already tells the
         // requester to re-ship; this tells it the round did not land, which is
         // the difference between "backup complete" and "nothing got through".

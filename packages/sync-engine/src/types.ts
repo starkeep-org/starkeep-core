@@ -35,6 +35,20 @@ export interface ResidencyHooks {
    */
   onLanded?(candidate: BlobCandidate, verdict: ResidencyVerdict): void | Promise<void>;
   /**
+   * Charge the budget for bytes a `fetch` verdict is about to pull, before they
+   * arrive; `release` undoes it when they do not.
+   *
+   * The pair exists for one situation and is a no-op everywhere else: several
+   * engines sharing one host's byte accounting. The supervisor hands the same
+   * hooks to the Drive engine and to every per-app engine, each with its own
+   * timer, so two ticking at once each read the usage, each see room for a
+   * 400 MB video, and each land it. Within a single engine the inbound loop is
+   * sequential and no reservation is needed — which is why this is optional and
+   * why a host without the problem can leave both out.
+   */
+  reserve?(candidate: BlobCandidate, verdict: ResidencyVerdict): void | Promise<void>;
+  release?(objectStorageKey: string): void | Promise<void>;
+  /**
    * Which size class this candidate belongs to, without deciding anything.
    *
    * Exists for {@link SyncEngine.fetchBlob}, which must charge an arrival to the
@@ -326,6 +340,44 @@ export interface SyncExchangeResponse {
    * node can currently serve. Never a timestamp.
    */
   readonly responderWatermarks: Watermarks;
+  /**
+   * Whether {@link responderWatermarks} is the responder's whole coverage, or a
+   * lower bound because some scope of it would not read.
+   *
+   * **Absent means true**, which is what every responder too old to send it
+   * means and what the field defaulted to before it existed.
+   *
+   * ## Why an omission needed a word for itself
+   *
+   * The map is a union over the responder's own tables, and a per-table query
+   * that throws omits that table's authors. Omission is indistinguishable from
+   * "I hold nothing from node N" — and those two facts want opposite handling.
+   * The first is the case `responderWatermarks`' replace-not-merge rule exists
+   * to serve: it is how peer-side loss triggers a re-ship. The second is "I
+   * could not look", which under this codebase's own rule must not lower
+   * anything.
+   *
+   * With no way to distinguish them, a single unreadable table on the responder
+   * made the requester re-scan that author's history from the floor — every
+   * tick, forever, with `progressed` true, `complete: true`, and the supervisor
+   * resetting its backoff on the "success". The trigger is durable rather than
+   * transient (a per-app grant denying one table, schema drift after an app
+   * update), so it does not resolve on its own.
+   *
+   * A requester seeing `false` merges **upward** — `max(prior, reported)` per
+   * node — instead of replacing. Raising on a partial report is safe in a way
+   * lowering is not: an omitted table can only understate the union, never
+   * invent coverage.
+   *
+   * A single boolean rather than per-node or per-scope detail is deliberate. The
+   * watermarks are already a union across scopes, so a gap in one scope cannot
+   * be attributed to particular nodes; if any scope failed, the whole map is a
+   * lower bound. {@link coverageDetail} carries the scope names for logging, and
+   * nothing branches on it.
+   */
+  readonly coverageComplete?: boolean;
+  /** Human-readable note naming the scopes that would not read. Never parsed. */
+  readonly coverageDetail?: string;
   readonly hasMore: boolean;
   /**
    * Authors (nodeIds) whose inbound run the responder **stopped applying**
@@ -568,6 +620,37 @@ export interface ExchangeResult {
    * healthy one if this number isn't surfaced.
    */
   readonly elided: number;
+  /**
+   * The peer could not report its own coverage for some scope this round, so
+   * {@link SyncExchangeResponse.responderWatermarks} was a lower bound and was
+   * merged upward rather than replacing the map.
+   *
+   * Surfaced this far up because the alternative was a `console.warn` on the
+   * *responder*, which in the deployment that matters is a Lambda writing to
+   * CloudWatch — somewhere no user and no local node will ever see it. "The
+   * cloud cannot report its own coverage" is a degraded state someone should be
+   * able to read off the node's status, not a line in a log nobody reads.
+   */
+  readonly peerCoverageDegraded?: string;
+  /**
+   * Highest position actually **shipped** per author this round.
+   *
+   * Read from what left this node rather than from what the scan selected, so a
+   * shipment cut short by a failed transfer is not credited with the part that
+   * never went. `sync()` compares it against the peer's coverage to notice a
+   * range being re-shipped forever; see `RESHIP_STRIKES_BEFORE_REFUSAL`.
+   */
+  readonly shippedHighWater?: Readonly<Record<string, HLCTimestamp>>;
+  /**
+   * Authors this round declined to push, because several consecutive drained
+   * syncs shipped their range and the peer's coverage never reached it.
+   *
+   * Not a failure of this round — nothing was attempted. It is this node
+   * refusing to spend another full re-scan of an author's history on something
+   * that has demonstrably not been working, and saying which author so the
+   * condition is diagnosable rather than merely quiet.
+   */
+  readonly refusedAuthors?: readonly string[];
 }
 
 export interface SyncEngine {
@@ -776,6 +859,27 @@ export interface SyncResult {
    * difference between "sync finished" and "sync is stuck".
    */
   stalled: boolean;
+  /**
+   * Authors this node has stopped pushing, because several consecutive drained
+   * syncs shipped their range and the peer's coverage never reached it.
+   *
+   * A degraded state that needs a person, not a retry: the realistic causes are
+   * a per-app grant that denies one table on the responder, schema drift after
+   * an app update, or a peer that applies rows and loses them. Surfaced here
+   * because every other signal about this condition reads as success — the
+   * scans drain, the uploads succeed, and the round reports progress precisely
+   * *because* it re-shipped the library.
+   *
+   * Cleared by a `verify()`, which is the deliberate "try again" — an integrity
+   * check is exactly the thing a person runs when they think sync is wrong, and
+   * making it re-arm the push is more useful than a counter nothing can reset.
+   */
+  refusedAuthors?: readonly string[];
+  /**
+   * The peer reported that its own coverage map was incomplete during this sync.
+   * Carries the scopes it named. See `SyncExchangeResponse.coverageComplete`.
+   */
+  peerCoverageDegraded?: string;
 }
 
 export interface SyncEngineOptions {

@@ -38,7 +38,11 @@ export function createFileSyncEngine(): FileSyncEngine {
    * makes the engine's key-grouping an optimization rather than a correctness
    * requirement.
    */
-  const inFlight = new Map<string, Promise<boolean>>();
+  interface InFlight {
+    readonly destination: ObjectStorageAdapter;
+    readonly promise: Promise<boolean>;
+  }
+  const inFlight = new Map<string, InFlight>();
 
   function transfer(
     manifest: FileSyncManifest,
@@ -47,17 +51,50 @@ export function createFileSyncEngine(): FileSyncEngine {
   ): Promise<boolean> {
     const key = manifest.objectStorageKey;
     const running = inFlight.get(key);
-    // Deliberately shares the *outcome*, not the work: the second caller may
-    // have asked for a different direction, but a transfer that has already put
-    // these bytes at their destination answers both questions. A transfer that
-    // failed answers both too, and the second caller retries on its own
-    // schedule.
-    if (running) return running;
-    const started = runTransfer(manifest, source, destination).finally(() => {
-      inFlight.delete(key);
-    });
-    inFlight.set(key, started);
-    return started;
+    if (!running) return start(manifest, source, destination);
+
+    // Same destination is the same work, so the second caller simply awaits it.
+    // This is the common case — one round grouping two records that share
+    // content-addressed bytes.
+    if (running.destination === destination) return running.promise;
+
+    // A *different* destination is the opposite direction, and the two answers
+    // are not interchangeable in both outcomes.
+    //
+    // On success they are: an upload that has put these bytes in the cloud means
+    // the local copy it read them from is still here, so a concurrent download
+    // to that same local store is already satisfied. Sharing `true` is right and
+    // saves the transfer.
+    //
+    // On **failure** they are not, and this is the case the map was introduced
+    // to end, surviving in one direction. An upload fails when the local source
+    // cannot produce the bytes — and that is precisely the situation in which a
+    // download would have worked, because the remote is where the bytes are.
+    // Handing that `false` to someone who asked to fetch a photo reports a
+    // failure for a transfer that was never attempted, and the placeholder stays
+    // on screen. So the other direction runs on its own.
+    return running.promise.then((ok) =>
+      ok ? true : transfer(manifest, source, destination),
+    );
+  }
+
+  function start(
+    manifest: FileSyncManifest,
+    source: ObjectStorageAdapter,
+    destination: ObjectStorageAdapter,
+  ): Promise<boolean> {
+    const key = manifest.objectStorageKey;
+    const entry: InFlight = {
+      destination,
+      promise: runTransfer(manifest, source, destination).finally(() => {
+        // Only if it is still ours: the opposite direction may have started its
+        // own after this one failed, and clearing that one's registration would
+        // let a third caller start a duplicate transfer.
+        if (inFlight.get(key) === entry) inFlight.delete(key);
+      }),
+    };
+    inFlight.set(key, entry);
+    return entry.promise;
   }
 
   async function runTransfer(

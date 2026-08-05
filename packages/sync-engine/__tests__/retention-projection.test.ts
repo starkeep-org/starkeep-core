@@ -16,7 +16,11 @@ import {
   formatBytes,
   type SizeClassCensus,
 } from "../src/retention-projection.js";
-import type { NodeRetentionPolicy, SizeClassRetention } from "../src/residency-policy.js";
+import {
+  validateRetentionPolicy,
+  type NodeRetentionPolicy,
+  type SizeClassRetention,
+} from "../src/residency-policy.js";
 
 const GB = 1024 ** 3;
 
@@ -245,6 +249,110 @@ describe("projecting a whole policy", () => {
     const platform = projection.namespaces.find((n) => n.namespace === "starkeep")!;
     expect(platform.totalBudgetBytes).toBeNull();
     expect(platform.overTotal).toBe(false);
+  });
+});
+
+/**
+ * r4 #11 — the projection never produces `NaN` for a policy the validator
+ * accepted.
+ *
+ * Stated as a property rather than as cases, because the two ways it happened
+ * were unrelated to each other and neither was on anybody's list: a `never` row
+ * with no `budgetBytes` (N2) reached `Math.min(selected, undefined)`, and an
+ * unrecognised `keep` (N3) fell off the end of a switch and returned
+ * `undefined`. What they share is only the symptom, and the symptom is silent:
+ * one `NaN` three levels down propagates through the namespace subtotal into
+ * `totalProjectedBytes`, and an operator sees a blank headline figure with no
+ * indication which row caused it.
+ *
+ * So the property is the assertion, and the pairing with `validateRetentionPolicy`
+ * is the point: **anything the validator lets through must project to a number.**
+ * Any future rule that breaks that has to break it here.
+ */
+describe("a policy the validator accepted always projects to a number", () => {
+  const rules: SizeClassRetention[] = [
+    { keep: "all", budgetBytes: 5 * GB },
+    { keep: "never", budgetBytes: 0 },
+    { keep: "on-demand-only", budgetBytes: 5 * GB },
+    { keep: "on-demand-only", openedWithinDays: 30, budgetBytes: 5 * GB },
+    { keep: "recent-only", recencyWindowDays: 90, budgetBytes: 5 * GB },
+    { keep: "recent-only", openedWithinDays: 7, budgetBytes: 5 * GB },
+    { keep: "recent-only", recencyWindowDays: 3650, openedWithinDays: 30, budgetBytes: 5 * GB },
+  ];
+
+  const libraries: SizeClassCensus[][] = [
+    [],
+    [census({ sizeClass: "photos:image-large" })],
+    [
+      census({ sizeClass: "photos:image-large" }),
+      census({ sizeClass: "photos:video-720p", totalBytes: 80 * GB, bytesWithinDays: {} }),
+      census({ sizeClass: "starkeep:original:image", totalBytes: 900 * GB }),
+      // A class the census measured at zero, and one it measured with no
+      // cutoffs at all — both are ordinary states of a young library.
+      census({ sizeClass: "photos:image-thumb", totalBytes: 0, bytesWithinDays: {} }),
+    ],
+  ];
+
+  function isFiniteNumber(value: unknown): boolean {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+
+  it.each(rules.map((r) => [JSON.stringify(r), r] as const))(
+    "projects finite bytes everywhere for %s",
+    (_label, rule) => {
+      for (const library of libraries) {
+        const policy: NodeRetentionPolicy = {
+          platform: { rows: { "original:image": rule }, fallback: rule },
+          apps: {
+            photos: { rows: { "image-large": rule }, fallback: rule, totalBudgetBytes: 100 * GB },
+          },
+          appFallback: { rows: {}, fallback: rule, totalBudgetBytes: 100 * GB },
+        };
+        // The pairing that makes this a property and not a sample: if the
+        // validator would refuse the policy, the projection owes it nothing.
+        expect(validateRetentionPolicy(policy)).toEqual([]);
+
+        const projection = projectPolicy(policy, library);
+        expect(isFiniteNumber(projection.totalProjectedBytes)).toBe(true);
+        for (const row of projection.rows) {
+          expect(isFiniteNumber(row.projectedBytes)).toBe(true);
+          expect(isFiniteNumber(row.selectedBytes)).toBe(true);
+        }
+        for (const ns of projection.namespaces) {
+          expect(isFiniteNumber(ns.projectedBytes)).toBe(true);
+        }
+      }
+    },
+  );
+
+  // The specific shape N2 produced. `{ keep: "never" }` with no budget used to
+  // validate, and `Math.min(0, undefined)` is `NaN`.
+  it("survives a never row whose budget the resolution normalizes", () => {
+    const policy: NodeRetentionPolicy = {
+      platform: { rows: {}, fallback: { keep: "never", budgetBytes: 40 * GB } },
+      apps: {},
+      appFallback: { rows: {}, fallback: { keep: "never", budgetBytes: 0 }, totalBudgetBytes: GB },
+    };
+    expect(validateRetentionPolicy(policy)).toEqual([]);
+    const projection = projectPolicy(policy, [census({ sizeClass: "starkeep:original:image" })]);
+    expect(projection.totalProjectedBytes).toBe(0);
+  });
+
+  /**
+   * N3 from the projection's side.
+   *
+   * `selectedBytesFor` throws rather than returning `undefined`, and the
+   * distinction is the whole finding: `undefined` becomes `NaN` two lines later
+   * and travels silently to the headline total, while a throw names the rule and
+   * the class. Unreachable for any policy the validator accepted — which is why
+   * throwing costs nothing and is the right answer when it happens anyway.
+   */
+  it("throws on a rule nobody recognises rather than quietly returning NaN", () => {
+    const typo = { keep: "kepp-all", budgetBytes: GB } as unknown as SizeClassRetention;
+    expect(() => selectedBytesFor(typo, census())).toThrow(/unrecognised keep rule/);
+    // Names both halves an operator needs to find it.
+    expect(() => selectedBytesFor(typo, census())).toThrow(/kepp-all/);
+    expect(() => selectedBytesFor(typo, census())).toThrow(/image-large/);
   });
 });
 

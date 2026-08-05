@@ -163,6 +163,17 @@ export function selectedBytesFor(row: SizeClassRetention, census: SizeClassCensu
       }
       return Math.min(bytes, census.totalBytes);
     }
+    default:
+      // Unreachable for any policy `validateRetentionPolicy` accepted, which is
+      // exactly why it throws rather than returning a number. Falling off the
+      // end returned `undefined`, which `projectRow` turned into `NaN` and then
+      // propagated silently through `NamespaceProjection.projectedBytes` into
+      // `totalProjectedBytes` — an operator staring at a blank total with no
+      // indication that a typo three levels down caused it. A thrown error names
+      // the rule and the class.
+      throw new Error(
+        `unrecognised keep rule ${JSON.stringify((row as SizeClassRetention).keep)} for "${census.sizeClass}" — validateRetentionPolicy should have refused this policy`,
+      );
   }
 }
 
