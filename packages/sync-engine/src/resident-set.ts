@@ -47,8 +47,17 @@ export interface ResidentEntry {
   readonly recordId: string;
   readonly objectStorageKey: string;
   readonly sizeBytes: number;
-  /** Opaque budget-row key, supplied by the host. */
+  /** Opaque budget-row key, supplied by the host. `<namespace>:<rung>`. */
   readonly sizeClass: string;
+  /**
+   * The namespace half of `sizeClass`, stored rather than derived.
+   *
+   * A column, not a `LIKE 'photos:%'` scan: "what is this app holding" is a hot
+   * question — it is checked on every fetch decision and on every eviction pass
+   * — and a prefix scan is exactly the full table scan the class index was
+   * added to avoid, over a table with one row per held blob.
+   */
+  readonly namespace: string;
   /**
    * This node insists on holding these bytes. Pins **count against** their
    * class's budget — otherwise someone pins 200 GB into a small budget and the
@@ -76,8 +85,20 @@ export interface ResidentEntry {
   readonly addedAtMs: number;
 }
 
+/**
+ * What an eviction pass is working over.
+ *
+ * A pass is triggered by one of two budgets — a class row, or an app's total
+ * across every rung it holds — and the second is not expressible as a set of
+ * the first: an app can be over its total while every individual class is
+ * inside its row. Same ordering either way, wider `WHERE`.
+ */
+export type EvictionScope =
+  | { readonly kind: "class"; readonly sizeClass: string }
+  | { readonly kind: "namespace"; readonly namespace: string };
+
 export interface EvictionCandidateQuery {
-  readonly sizeClass: string;
+  readonly scope: EvictionScope;
   /** Stop once this many bytes of candidates have been collected. */
   readonly targetBytes: number;
 }
@@ -90,8 +111,12 @@ export interface ResidentSetIndex {
   get(objectStorageKey: string): ResidentEntry | null;
   /** Bytes currently held for one class. */
   usageOf(sizeClass: string): number;
+  /** Bytes held across every class of one namespace, for the app-total check. */
+  usageOfNamespace(namespace: string): number;
   /** Bytes held per class, for the retention UI's projected-use column. */
   usageByClass(): Record<string, number>;
+  /** Bytes held per namespace, for the per-app row of the same UI. */
+  usageByNamespace(): Record<string, number>;
   /** Entry count per class. */
   countByClass(): Record<string, number>;
   setPinned(objectStorageKey: string, pinned: boolean): void;
@@ -129,6 +154,7 @@ interface Row {
   object_storage_key: string;
   size_bytes: number;
   size_class: string;
+  namespace: string;
   pinned: number;
   protected_locally: number;
   requires_durability_proof: number;
@@ -150,6 +176,7 @@ export function createSqliteResidentSetIndex(options: {
       .addColumn("record_id", "text", (c) => c.notNull())
       .addColumn("size_bytes", "integer", (c) => c.notNull())
       .addColumn("size_class", "text", (c) => c.notNull())
+      .addColumn("namespace", "text", (c) => c.notNull())
       .addColumn("pinned", "integer", (c) => c.notNull().defaultTo(0))
       .addColumn("protected_locally", "integer", (c) => c.notNull().defaultTo(0))
       .addColumn("requires_durability_proof", "integer", (c) => c.notNull().defaultTo(1))
@@ -167,6 +194,17 @@ export function createSqliteResidentSetIndex(options: {
       .ifNotExists()
       .on(TABLE)
       .columns(["size_class"])
+      .compile().sql,
+  );
+  // The namespace total is checked on every fetch decision, so it has to be as
+  // cheap as the per-class sum beside it — this is the index that lets the
+  // namespace be a column rather than a prefix scan.
+  db.exec(
+    qb.schema
+      .createIndex(`${TABLE}_by_namespace`)
+      .ifNotExists()
+      .on(TABLE)
+      .columns(["namespace"])
       .compile().sql,
   );
   // Pinning or opening a record updates every rendition of it, and that has to
@@ -188,6 +226,7 @@ export function createSqliteResidentSetIndex(options: {
         record_id: sql.raw("?"),
         size_bytes: sql.raw("?"),
         size_class: sql.raw("?"),
+        namespace: sql.raw("?"),
         pinned: sql.raw("?"),
         protected_locally: sql.raw("?"),
         requires_durability_proof: sql.raw("?"),
@@ -200,6 +239,7 @@ export function createSqliteResidentSetIndex(options: {
           record_id: eb.ref("excluded.record_id"),
           size_bytes: eb.ref("excluded.size_bytes"),
           size_class: eb.ref("excluded.size_class"),
+          namespace: eb.ref("excluded.namespace"),
           protected_locally: eb.ref("excluded.protected_locally"),
           requires_durability_proof: eb.ref("excluded.requires_durability_proof"),
           recency_at_ms: eb.ref("excluded.recency_at_ms"),
@@ -223,6 +263,20 @@ export function createSqliteResidentSetIndex(options: {
       .selectFrom(TABLE)
       .select(({ fn }) => [fn.sum<number>("size_bytes").as("total")])
       .where("size_class", "=", sql.raw("?"))
+      .compile().sql,
+  );
+  const namespaceUsageStmt = db.prepare(
+    qb
+      .selectFrom(TABLE)
+      .select(({ fn }) => [fn.sum<number>("size_bytes").as("total")])
+      .where("namespace", "=", sql.raw("?"))
+      .compile().sql,
+  );
+  const usageByNamespaceStmt = db.prepare(
+    qb
+      .selectFrom(TABLE)
+      .select(({ fn }) => ["namespace", fn.sum<number>("size_bytes").as("total")])
+      .groupBy("namespace")
       .compile().sql,
   );
   const usageByClassStmt = db.prepare(
@@ -257,21 +311,28 @@ export function createSqliteResidentSetIndex(options: {
   // then oldest-opened, then oldest by the record's own date. Structurally
   // non-evictable rows are excluded here rather than filtered by the caller,
   // so a caller cannot forget to.
-  const candidatesStmt = db.prepare(
-    qb
-      .selectFrom(TABLE)
-      .selectAll()
-      .where("size_class", "=", sql.raw("?"))
-      // sql.lit, not a bare 0: Kysely parameterizes plain values, which would
-      // put unbound `?` placeholders into a statement prepared once and bound
-      // with a single argument. These are constants, so they belong in the SQL.
-      .where("pinned", "=", sql.lit(0))
-      .where("protected_locally", "=", sql.lit(0))
-      .orderBy(sql`last_opened_at_ms IS NULL`, "desc")
-      .orderBy("last_opened_at_ms", "asc")
-      .orderBy("recency_at_ms", "asc")
-      .compile().sql,
-  );
+  //
+  // Two statements rather than one with a nullable predicate: the column being
+  // filtered on is what the query planner picks an index by, and a single
+  // statement that tests both would use neither.
+  const candidatesForColumn = (column: "size_class" | "namespace") =>
+    db.prepare(
+      qb
+        .selectFrom(TABLE)
+        .selectAll()
+        .where(column, "=", sql.raw("?"))
+        // sql.lit, not a bare 0: Kysely parameterizes plain values, which would
+        // put unbound `?` placeholders into a statement prepared once and bound
+        // with a single argument. These are constants, so they belong in the SQL.
+        .where("pinned", "=", sql.lit(0))
+        .where("protected_locally", "=", sql.lit(0))
+        .orderBy(sql`last_opened_at_ms IS NULL`, "desc")
+        .orderBy("last_opened_at_ms", "asc")
+        .orderBy("recency_at_ms", "asc")
+        .compile().sql,
+    );
+  const candidatesStmt = candidatesForColumn("size_class");
+  const namespaceCandidatesStmt = candidatesForColumn("namespace");
 
   function toEntry(row: Row): ResidentEntry {
     return {
@@ -279,6 +340,7 @@ export function createSqliteResidentSetIndex(options: {
       objectStorageKey: row.object_storage_key,
       sizeBytes: row.size_bytes,
       sizeClass: row.size_class,
+      namespace: row.namespace,
       pinned: row.pinned === 1,
       protectedLocally: row.protected_locally === 1,
       requiresDurabilityProof: row.requires_durability_proof === 1,
@@ -295,6 +357,7 @@ export function createSqliteResidentSetIndex(options: {
         entry.recordId,
         entry.sizeBytes,
         entry.sizeClass,
+        entry.namespace,
         entry.pinned ? 1 : 0,
         entry.protectedLocally ? 1 : 0,
         entry.requiresDurabilityProof ? 1 : 0,
@@ -318,6 +381,16 @@ export function createSqliteResidentSetIndex(options: {
       return row?.total ?? 0;
     },
 
+    usageOfNamespace(namespace: string): number {
+      const row = namespaceUsageStmt.get(namespace) as { total: number | null } | undefined;
+      return row?.total ?? 0;
+    },
+
+    usageByNamespace(): Record<string, number> {
+      const rows = usageByNamespaceStmt.all() as Array<{ namespace: string; total: number }>;
+      return Object.fromEntries(rows.map((r) => [r.namespace, r.total]));
+    },
+
     usageByClass(): Record<string, number> {
       const rows = usageByClassStmt.all() as Array<{ size_class: string; total: number }>;
       return Object.fromEntries(rows.map((r) => [r.size_class, r.total]));
@@ -337,7 +410,11 @@ export function createSqliteResidentSetIndex(options: {
     },
 
     evictionCandidates(query: EvictionCandidateQuery): ResidentEntry[] {
-      const rows = candidatesStmt.all(query.sizeClass) as unknown as Row[];
+      const rows = (
+        query.scope.kind === "class"
+          ? candidatesStmt.all(query.scope.sizeClass)
+          : namespaceCandidatesStmt.all(query.scope.namespace)
+      ) as unknown as Row[];
       const out: ResidentEntry[] = [];
       let collected = 0;
       for (const row of rows) {

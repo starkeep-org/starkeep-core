@@ -388,6 +388,41 @@ describe("labelKeys", () => {
     expect(validateManifest(minimal()).manifest?.infraRequirements.labelKeys).toEqual([]);
   });
 
+  // The size-class marker is a flag on a key the app has already declared, so
+  // it cannot name a key that does not exist — which a top-level
+  // `sizeClassLabelKey: string` would have needed a cross-field rule to catch.
+  it("accepts one key marked as the app's size class", () => {
+    const result = validateManifest(
+      withGrant([
+        { key: "rendition", description: "which rung", sizeClass: true },
+        { key: "crop", description: "a user crop" },
+      ]),
+    );
+    expect(result.errors).toEqual([]);
+    expect(
+      result.manifest?.infraRequirements.labelKeys.find((k) => k.sizeClass)?.key,
+    ).toBe("rendition");
+  });
+
+  // Two ladders would leave the node choosing between two answers to "which
+  // rung is this" — and whichever it picked would decide the record's budget
+  // row and whether it counts as re-derivable.
+  it("rejects a manifest declaring two size-class keys", () => {
+    const result = validateManifest(
+      withGrant([
+        { key: "rendition", description: "which rung", sizeClass: true },
+        { key: "derived-size", description: "also which rung", sizeClass: true },
+      ]),
+    );
+    expect(result.errors.some((e) => /at most one key may set sizeClass/.test(e))).toBe(true);
+  });
+
+  // Zero is the ordinary case: most apps derive nothing.
+  it("accepts a manifest with no size-class key at all", () => {
+    const result = validateManifest(withGrant([{ key: "crop", description: "a user crop" }]));
+    expect(result.errors).toEqual([]);
+  });
+
   it("accepts identifier-shaped keys with descriptions", () => {
     const result = validateManifest(
       withGrant([{ key: "ocr-available", description: "This app holds OCR text" }]),

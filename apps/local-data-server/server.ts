@@ -19,6 +19,7 @@ import {
 import {
   appRegistryRow,
   listAppRegistry,
+  sizeClassKeysByApp,
   listInstallSteps,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
@@ -587,15 +588,21 @@ async function main() {
   // resolve, so the engine runs without the hook and every blob is wanted —
   // exactly the pre-residency behaviour, which is the right default for a
   // laptop and means an unconfigured node cannot silently start declining data.
+  // Read once at boot, like the policy beside it: the registry changes on
+  // install and uninstall, and both already restart this process. A node that
+  // rebuilt the map without restarting would be resolving classes against one
+  // map while the resident-set rows were written under another.
+  const sizeClassKeys = sizeClassKeysByApp(localDb);
+
   const residencyManager = starkeepConfig.retention
     ? createResidencyManager({
         localDb,
         databaseAdapter,
         localObjectStorage: localAdapter,
-        // Configured, not constant: the platform-side plumbing never names
-        // `photos/rendition`, so the ladder can be respecified — or owned by a
-        // different app — without a change here.
-        classLabel: { appId: "photos", key: "rendition" },
+        // Read from what is installed, not configured here: the platform-side
+        // plumbing never names `photos/rendition`, so a ladder can be
+        // respecified — and a second app can own one — without a change here.
+        sizeClassKeys,
         // The local data server is never the cloud node. `starkeep/no-cloud`
         // is a constraint about cloud storage; a laptop holding such a record
         // is the intended outcome, not a violation.
@@ -2375,7 +2382,7 @@ async function main() {
       // operator UI is not an app.
       if (path === "/residency/projection" && req.method === "GET") {
         const census = buildCensus(localDb, {
-          classLabel: { appId: "photos", key: "rendition" },
+          sizeClassKeys,
           originalClassFor,
         });
         if (!starkeepConfig.retention) {
@@ -2427,7 +2434,7 @@ async function main() {
           ...validateOverrideRules(body.overrideRules ?? []),
         ];
         const census = buildCensus(localDb, {
-          classLabel: { appId: "photos", key: "rendition" },
+          sizeClassKeys,
           originalClassFor,
         });
         // Projected even when invalid, deliberately. An operator mid-edit has a

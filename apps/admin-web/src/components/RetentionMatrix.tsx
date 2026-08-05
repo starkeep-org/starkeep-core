@@ -22,6 +22,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
  * with what actually happens, which is the one thing a preview must never do.
  * Each edit posts the candidate policy and renders what the daemon says it
  * would mean.
+ *
+ * ## Why the table has sections
+ *
+ * A size class belongs to a namespace — the platform's originals, or one app's
+ * ladder — and an app has a second budget on top of its rows: a total across
+ * every rung it holds. The two fail independently, so a flat list of rows could
+ * show every row comfortably inside its budget while the app as a whole is over
+ * and being evicted continuously. The section header is where that is visible.
  */
 
 type KeepRule = "all" | "recent-only" | "on-demand-only" | "never";
@@ -43,6 +51,15 @@ interface RowProjection {
   demandDriven: boolean;
 }
 
+interface NamespaceProjection {
+  namespace: string;
+  totalBudgetBytes: number | null;
+  selectedBytes: number;
+  rowProjectedBytes: number;
+  projectedBytes: number;
+  overTotal: boolean;
+}
+
 interface CensusRow {
   sizeClass: string;
   recordCount: number;
@@ -57,9 +74,16 @@ interface OverrideRule {
   note?: string;
 }
 
-interface Policy {
+interface AppRetention {
   rows: Record<string, RetentionRow>;
   fallback: RetentionRow;
+  totalBudgetBytes: number;
+}
+
+interface Policy {
+  platform: { rows: Record<string, RetentionRow>; fallback: RetentionRow };
+  apps: Record<string, AppRetention>;
+  appFallback: AppRetention;
 }
 
 interface ProjectionResponse {
@@ -68,14 +92,29 @@ interface ProjectionResponse {
   problems?: string[];
   projection?: {
     rows: RowProjection[];
+    namespaces: NamespaceProjection[];
     totalProjectedBytes: number;
     overBudgetClasses: string[];
+    overTotalNamespaces: string[];
   };
   error?: string;
   offline?: boolean;
 }
 
 const GB = 1024 ** 3;
+
+/** Matches `PLATFORM_NAMESPACE` in the sync engine. */
+const PLATFORM_NAMESPACE = "starkeep";
+
+/**
+ * Split `photos:image-medium` into its halves, at the **first** colon — a
+ * platform rung is itself `original:image`.
+ */
+function splitClass(qualified: string): { namespace: string; rung: string } {
+  const at = qualified.indexOf(":");
+  if (at <= 0) return { namespace: PLATFORM_NAMESPACE, rung: qualified };
+  return { namespace: qualified.slice(0, at), rung: qualified.slice(at + 1) };
+}
 
 /**
  * Binary units, matching what the operator's OS reports.
@@ -94,6 +133,48 @@ function formatBytes(bytes: number): string {
 }
 
 const DEFAULT_ROW: RetentionRow = { keep: "all", budgetBytes: 50 * GB };
+
+/**
+ * The total given to an app the operator has never budgeted for.
+ *
+ * It cannot be unbounded — an unconfigured app would then be the hole every
+ * bound in this table is trying to close — and it cannot be zero, which reads
+ * as a limit and behaves as a prohibition. So: enough for an app to be useful
+ * before anyone looks at this page, small enough that a newly installed app
+ * cannot quietly take the disk. Surfaced as "unconfigured" rather than silently
+ * applied, because the number is a placeholder for a decision, not the decision.
+ */
+const DEFAULT_APP_TOTAL = 8 * GB;
+
+const DEFAULT_APP: AppRetention = {
+  rows: {},
+  fallback: { keep: "recent-only", budgetBytes: 2 * GB, recencyWindowDays: 90 },
+  totalBudgetBytes: DEFAULT_APP_TOTAL,
+};
+
+/**
+ * A starting policy for a node that has never had one, shaped from its own
+ * library rather than from an empty table — an operator should be editing
+ * something that already describes what they have.
+ */
+function seedPolicy(census: CensusRow[]): Policy {
+  const policy: Policy = {
+    platform: { rows: {}, fallback: { keep: "all", budgetBytes: 50 * GB } },
+    apps: {},
+    appFallback: { ...DEFAULT_APP },
+  };
+  for (const entry of census) {
+    const { namespace, rung } = splitClass(entry.sizeClass);
+    if (namespace === PLATFORM_NAMESPACE) {
+      policy.platform.rows[rung] = { ...DEFAULT_ROW };
+      continue;
+    }
+    const app = policy.apps[namespace] ?? { ...DEFAULT_APP, rows: {} };
+    app.rows[rung] = { ...DEFAULT_ROW };
+    policy.apps[namespace] = app;
+  }
+  return policy;
+}
 
 export function RetentionMatrix() {
   const [census, setCensus] = useState<CensusRow[]>([]);
@@ -121,10 +202,7 @@ export function RetentionMatrix() {
         // A node with no policy gets one seeded from its own classes rather
         // than an empty table: an operator should be editing something that
         // already describes their library, not building it from nothing.
-        const seeded: Policy = body.retention ?? {
-          rows: Object.fromEntries((body.census ?? []).map((c) => [c.sizeClass, { ...DEFAULT_ROW }])),
-          fallback: { keep: "never", budgetBytes: 1024 },
-        };
+        const seeded: Policy = body.retention ?? seedPolicy(body.census ?? []);
         setPolicy(seeded);
         setRules(body.overrideRules ?? []);
         setProjection(body.projection);
@@ -161,14 +239,54 @@ export function RetentionMatrix() {
 
   const update = useCallback(
     (sizeClass: string, patch: Partial<RetentionRow>) => {
+      const { namespace, rung } = splitClass(sizeClass);
       setPolicy((current) => {
         if (!current) return current;
+        let next: Policy;
+        if (namespace === PLATFORM_NAMESPACE) {
+          next = {
+            ...current,
+            platform: {
+              ...current.platform,
+              rows: {
+                ...current.platform.rows,
+                [rung]: { ...(current.platform.rows[rung] ?? DEFAULT_ROW), ...patch },
+              },
+            },
+          };
+        } else {
+          // An app the policy has never named starts from the fallback that is
+          // already governing it, not from a blank row — otherwise editing one
+          // rung would silently change every other rung's rule.
+          const app = current.apps[namespace] ?? { ...current.appFallback, rows: {} };
+          next = {
+            ...current,
+            apps: {
+              ...current.apps,
+              [namespace]: {
+                ...app,
+                rows: { ...app.rows, [rung]: { ...(app.rows[rung] ?? DEFAULT_ROW), ...patch } },
+              },
+            },
+          };
+        }
+        project(next, rules);
+        return next;
+      });
+      setDirty(true);
+      setStatus("ready");
+    },
+    [project, rules],
+  );
+
+  const updateAppTotal = useCallback(
+    (namespace: string, totalBudgetBytes: number) => {
+      setPolicy((current) => {
+        if (!current) return current;
+        const app = current.apps[namespace] ?? { ...current.appFallback, rows: {} };
         const next: Policy = {
           ...current,
-          rows: {
-            ...current.rows,
-            [sizeClass]: { ...(current.rows[sizeClass] ?? DEFAULT_ROW), ...patch },
-          },
+          apps: { ...current.apps, [namespace]: { ...app, totalBudgetBytes } },
         };
         project(next, rules);
         return next;
@@ -212,6 +330,22 @@ export function RetentionMatrix() {
     () => new Map(projection?.rows.map((r) => [r.sizeClass, r]) ?? []),
     [projection],
   );
+  const byNamespace = useMemo(
+    () => new Map(projection?.namespaces.map((n) => [n.namespace, n]) ?? []),
+    [projection],
+  );
+  // Platform first — the originals are what an operator is actually deciding
+  // about, and an app's ladder is a consequence of that decision.
+  const sections = useMemo(() => {
+    const grouped = new Map<string, CensusRow[]>();
+    for (const entry of census) {
+      const { namespace } = splitClass(entry.sizeClass);
+      grouped.set(namespace, [...(grouped.get(namespace) ?? []), entry]);
+    }
+    return [...grouped.entries()].sort(([a], [b]) =>
+      a === PLATFORM_NAMESPACE ? -1 : b === PLATFORM_NAMESPACE ? 1 : a.localeCompare(b),
+    );
+  }, [census]);
   const totalLibrary = census.reduce((sum, c) => sum + c.totalBytes, 0);
 
   if (status === "loading") {
@@ -242,13 +376,28 @@ export function RetentionMatrix() {
               <th className="py-2 font-medium text-right">Projected on disk</th>
             </tr>
           </thead>
-          <tbody>
-            {census.map((c) => {
-              const row = policy?.rows[c.sizeClass] ?? DEFAULT_ROW;
+          {sections.map(([namespace, entries]) => (
+            <tbody key={namespace}>
+              <NamespaceHeader
+                namespace={namespace}
+                projection={byNamespace.get(namespace)}
+                totalBudgetBytes={
+                  (policy?.apps[namespace] ?? policy?.appFallback)?.totalBudgetBytes ??
+                  DEFAULT_APP_TOTAL
+                }
+                configured={policy?.apps[namespace] !== undefined}
+                onTotalChange={(bytes) => updateAppTotal(namespace, bytes)}
+              />
+              {entries.map((c) => {
+              const { namespace: ns, rung } = splitClass(c.sizeClass);
+              const row =
+                (ns === PLATFORM_NAMESPACE
+                  ? policy?.platform.rows[rung]
+                  : policy?.apps[ns]?.rows[rung]) ?? DEFAULT_ROW;
               const proj = byClass.get(c.sizeClass);
               return (
                 <tr key={c.sizeClass} className="border-b last:border-0">
-                  <td className="py-2 pr-4 font-mono text-xs">{c.sizeClass}</td>
+                  <td className="py-2 pr-4 pl-4 font-mono text-xs">{rung}</td>
                   <td className="py-2 pr-4 text-right tabular-nums text-muted-foreground">
                     {formatBytes(c.totalBytes)}
                     <span className="ml-1 text-xs">({c.recordCount.toLocaleString()})</span>
@@ -328,8 +477,9 @@ export function RetentionMatrix() {
                   </td>
                 </tr>
               );
-            })}
-          </tbody>
+              })}
+            </tbody>
+          ))}
           <tfoot>
             <tr className="font-medium">
               <td className="py-2 pr-4">Total</td>
@@ -374,6 +524,86 @@ export function RetentionMatrix() {
         </span>
       </div>
     </div>
+  );
+}
+
+/**
+ * The section header for one namespace, and — for an app — its total.
+ *
+ * The total gets a row of its own rather than a column on each class because it
+ * is a different kind of number: the class budgets say how the app's bytes are
+ * divided, and this one says how many there may be at all. An app can be inside
+ * every one of its class budgets and over this, which is the case the header
+ * exists to make visible.
+ */
+function NamespaceHeader({
+  namespace,
+  projection,
+  totalBudgetBytes,
+  configured,
+  onTotalChange,
+}: {
+  namespace: string;
+  projection: NamespaceProjection | undefined;
+  /**
+   * From the edited policy, not from `projection` — the projection is what the
+   * daemon last said, and it arrives a debounce behind the keystroke. Binding
+   * the input to it would make the field fight whoever is typing in it.
+   */
+  totalBudgetBytes: number;
+  configured: boolean;
+  onTotalChange: (bytes: number) => void;
+}) {
+  const isPlatform = namespace === PLATFORM_NAMESPACE;
+  return (
+    <tr className="border-b bg-muted/30">
+      <td className="py-2 pr-4 font-medium" colSpan={2}>
+        {isPlatform ? "Originals" : namespace}
+        {isPlatform ? (
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            the files themselves — no app can write here
+          </span>
+        ) : (
+          !configured && (
+            <span
+              className="ml-2 text-xs font-normal text-amber-600"
+              title="This app has no budget of its own yet, so the default for unconfigured apps applies. Set a total to decide it deliberately."
+            >
+              unconfigured
+            </span>
+          )
+        )}
+      </td>
+      <td className="py-2 pr-4 text-xs text-muted-foreground" colSpan={2}>
+        {/* The platform namespace has rows and no total: a cap above them would
+            be a second way to say the same thing, and the two could disagree. */}
+        {isPlatform ? "" : "Total for this app"}
+      </td>
+      <td className="py-2 pr-4 text-right">
+        {!isPlatform && (
+          <input
+            aria-label={`Total budget in GiB for ${namespace}`}
+            type="number"
+            min={0}
+            step="0.5"
+            value={totalBudgetBytes ? (totalBudgetBytes / GB).toString() : ""}
+            className="w-24 rounded border bg-transparent px-2 py-1 text-right text-xs"
+            onChange={(e) => onTotalChange(Number(e.target.value) * GB)}
+          />
+        )}
+      </td>
+      <td className="py-2 text-right tabular-nums text-xs">
+        {projection ? formatBytes(projection.projectedBytes) : "—"}
+        {projection?.overTotal && (
+          <span
+            className="ml-2 text-amber-600"
+            title={`These classes together want ${formatBytes(projection.rowProjectedBytes)}, more than the app's total allows — raising any single class budget will not change what it holds.`}
+          >
+            over total
+          </span>
+        )}
+      </td>
+    </tr>
   );
 }
 

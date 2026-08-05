@@ -41,15 +41,25 @@ export {
 export {
   decideResidency,
   validateRetentionPolicy,
+  resolveSizeClass,
+  parseSizeClass,
+  isPlatformClass,
+  retentionRowFor,
+  hasRowFor,
+  namespaceTotalFor,
+  PLATFORM_NAMESPACE,
   type KeepRule,
   type SizeClassRetention,
+  type AppRetention,
   type NodeRetentionPolicy,
+  type ResolvedSizeClass,
   type RecordConstraints,
   type LocalOverrides,
   type BlobCandidate,
   type ResidencyDecision,
   type ResidencyVerdict,
   type ClassUsageLookup,
+  type NamespaceUsageLookup,
   type DecideResidencyInputs,
 } from "./residency-policy.js";
 
@@ -57,6 +67,7 @@ export {
   createSqliteResidentSetIndex,
   type ResidentEntry,
   type ResidentSetIndex,
+  type EvictionScope,
   type EvictionCandidateQuery,
 } from "./resident-set.js";
 
@@ -72,6 +83,7 @@ export {
 
 export {
   evictClass,
+  evictNamespace,
   previewBudgetReduction,
   shedLoad,
   SHED_ORDER,
@@ -126,6 +138,7 @@ export {
   formatBytes,
   type SizeClassCensus,
   type RowProjection,
+  type NamespaceProjection,
   type PolicyProjection,
 } from "./retention-projection.js";
 
@@ -143,6 +156,7 @@ export {
   createResidencyManager,
   residencyHooks,
   originalClassFor,
+  UNCLASSIFIED_RUNG,
   ORIGINAL_CLASS_PREFIX,
   STARKEEP_LABEL_APP_ID,
   NO_CLOUD_LABEL_KEY,

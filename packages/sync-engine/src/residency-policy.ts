@@ -22,6 +22,27 @@
  * maxima move when the visual test lands and can move again on a respec, and a
  * platform that hard-codes them is a platform that has to be changed on each of
  * those events.
+ *
+ * ## Classes are namespaced by the app that produced the bytes
+ *
+ * A class name alone was ambiguous the moment a second app derived anything:
+ * one app's ladder was legible and everyone else's derivatives fell through to
+ * the fallback and were treated as originals — the most protected tier. So a
+ * class is now a **namespace and a rung**, `photos:image-medium`, and the two
+ * halves answer different questions:
+ *
+ *   - The **namespace** says whose bytes these are, and an app cannot choose it
+ *     — the host derives it from structure (does this record have a parent?)
+ *     and from server-set identity (which app wrote the label?).
+ *   - The **rung** says which step of that app's ladder this is, and the app
+ *     names it freely inside its own namespace.
+ *
+ * The rule that falls out, and the one worth remembering: **a label picks the
+ * rung, never the namespace.** An app therefore cannot promote an original into
+ * a cheap rung, cannot demote a rendition into the protected tier, and cannot
+ * spend another app's budget. The one thing it can still do — invent rung names
+ * to escape into a fallback row — is what {@link AppRetention.totalBudgetBytes}
+ * bounds.
  */
 
 /** What a node does with a given size class. There is no residency-class enum. */
@@ -61,21 +82,154 @@ export interface SizeClassRetention {
 }
 
 /**
- * A node's whole retention policy: one row per size class.
+ * The namespace holding classes no app may write into: the records that are the
+ * thing itself rather than something derived from it.
+ *
+ * Named for the platform rather than left blank so that every class name has
+ * the same shape, and so an app id can never be confused for it — app ids and
+ * this constant share one namespace, and `starkeep` is already reserved as the
+ * platform's label app id (`STARKEEP_LABEL_APP_ID`).
+ */
+export const PLATFORM_NAMESPACE = "starkeep";
+
+/**
+ * A size class, resolved into the two halves that mean different things.
+ *
+ * Carried as a resolved object rather than re-parsed at each use. The qualified
+ * string is what gets stored and displayed; the split is what gets *decided*
+ * on, and a decision that re-derives the namespace by string surgery is one
+ * rename away from charging an app's bytes to the platform's budget.
+ */
+export interface ResolvedSizeClass {
+  /** Whose bytes these are. Never chosen by the app itself. */
+  readonly namespace: string;
+  /** Which rung of that namespace's ladder. Named by the app, inside its own namespace. */
+  readonly rung: string;
+  /** `<namespace>:<rung>` — the resident-set key and the name an operator sees. */
+  readonly qualified: string;
+}
+
+export function resolveSizeClass(namespace: string, rung: string): ResolvedSizeClass {
+  return { namespace, rung, qualified: `${namespace}:${rung}` };
+}
+
+/**
+ * Split a stored class name back into its halves.
+ *
+ * Splits at the **first** colon only: a platform rung is itself `original:image`,
+ * and an app is free to put colons in a rung name. Everything after the first
+ * separator belongs to the rung.
+ *
+ * Returns null for a string with no separator at all, which is a pre-namespacing
+ * class name. Callers treat that as unresolvable rather than guessing a
+ * namespace for it — guessing would land it in whichever budget the guess named.
+ */
+export function parseSizeClass(qualified: string): ResolvedSizeClass | null {
+  const separator = qualified.indexOf(":");
+  if (separator <= 0 || separator === qualified.length - 1) return null;
+  return {
+    namespace: qualified.slice(0, separator),
+    rung: qualified.slice(separator + 1),
+    qualified,
+  };
+}
+
+export function isPlatformClass(sizeClass: ResolvedSizeClass): boolean {
+  return sizeClass.namespace === PLATFORM_NAMESPACE;
+}
+
+/** One app's namespace: its rungs, and the cap across all of them. */
+export interface AppRetention {
+  /** Rungs this app declares, keyed by the label value. */
+  readonly rows: Readonly<Record<string, SizeClassRetention>>;
+  /** Applied to a rung with no row — an unknown or invented rung name. */
+  readonly fallback: SizeClassRetention;
+  /**
+   * Cap across every rung of this app, enforced *in addition* to the rows.
+   *
+   * This is what makes rung invention safe. Without it, an app that names a
+   * thousand rungs gets a thousand fallback budgets; with it, it still cannot
+   * exceed one number.
+   */
+  readonly totalBudgetBytes: number;
+}
+
+/**
+ * A node's whole retention policy: platform classes, then one namespace per app.
+ *
+ * Two levels rather than one flat table because the requirement is a budget
+ * *per app* and per classification within the app, and a flat table can only
+ * express the second. It also puts the one boundary that matters — platform
+ * versus app — in the structure rather than in a naming convention.
  *
  * `Full`/`Library`/`Browse`-style presets may front this in the UI, but they
  * **write** these rows rather than being stored — nothing here records which
  * preset produced a table, and no behaviour is conditioned on one.
  */
 export interface NodeRetentionPolicy {
-  readonly rows: Readonly<Record<string, SizeClassRetention>>;
   /**
-   * Applied to records whose class the host could not resolve. Defaults to
-   * fetching: a node that cannot classify something should not silently
-   * decline it, because the failure mode of over-fetching is a full disk and
-   * the failure mode of under-fetching is data that quietly isn't anywhere.
+   * Platform-owned classes — the originals. No app can write here, because
+   * membership is decided by the record having no parent rather than by any
+   * label. Keyed `original:<category>`.
    */
-  readonly fallback: SizeClassRetention;
+  readonly platform: {
+    readonly rows: Readonly<Record<string, SizeClassRetention>>;
+    /**
+     * Applied to a platform class with no row. Defaults to fetching: a node
+     * that cannot classify something should not silently decline it, because
+     * the failure mode of over-fetching is a full disk and the failure mode of
+     * under-fetching is data that quietly isn't anywhere.
+     */
+    readonly fallback: SizeClassRetention;
+  };
+  /** Per-app namespaces, keyed by appId. */
+  readonly apps: Readonly<Record<string, AppRetention>>;
+  /**
+   * Applied to an app with no entry above — one the operator has never
+   * configured, which is the ordinary state right after installing something.
+   */
+  readonly appFallback: AppRetention;
+}
+
+/**
+ * The namespace's whole budget, for the app-total check.
+ *
+ * The platform namespace has no total: its rows *are* the originals, and a cap
+ * above them would be a second way to say the same thing that could disagree
+ * with the first. So it returns null and the total check is skipped.
+ */
+export function namespaceTotalFor(
+  policy: NodeRetentionPolicy,
+  namespace: string,
+): number | null {
+  if (namespace === PLATFORM_NAMESPACE) return null;
+  return (policy.apps[namespace] ?? policy.appFallback).totalBudgetBytes;
+}
+
+/**
+ * The row governing one class, through both levels.
+ *
+ * A class in an unconfigured app's namespace falls to `appFallback.fallback`,
+ * not to the platform fallback: an app nobody has budgeted for must not inherit
+ * the rule written for originals.
+ */
+export function retentionRowFor(
+  policy: NodeRetentionPolicy,
+  sizeClass: ResolvedSizeClass | null,
+): SizeClassRetention {
+  if (sizeClass === null) return policy.platform.fallback;
+  if (isPlatformClass(sizeClass)) {
+    return policy.platform.rows[sizeClass.rung] ?? policy.platform.fallback;
+  }
+  const app = policy.apps[sizeClass.namespace] ?? policy.appFallback;
+  return app.rows[sizeClass.rung] ?? app.fallback;
+}
+
+/** Whether the policy names this exact class, as opposed to falling back to it. */
+export function hasRowFor(policy: NodeRetentionPolicy, sizeClass: ResolvedSizeClass | null): boolean {
+  if (sizeClass === null) return false;
+  if (isPlatformClass(sizeClass)) return policy.platform.rows[sizeClass.rung] !== undefined;
+  return policy.apps[sizeClass.namespace]?.rows[sizeClass.rung] !== undefined;
 }
 
 /**
@@ -122,6 +276,17 @@ export interface BlobCandidate {
   /** Owning app for an app-syncable row; null for shared records. */
   readonly appId: string | null;
   /**
+   * The app that created this shared record (`shared_records.origin_app_id`),
+   * or null where the caller had only a transfer manifest to go on.
+   *
+   * Read but never trusted as a *choice*: it is set from the authenticated
+   * writer at record creation, so an app cannot claim another's identity with
+   * it. It is the last resort for naming a derivative's namespace when no app
+   * has labelled it with a rung — without it such a record would have to be
+   * either guessed into someone's budget or treated as an original.
+   */
+  readonly originAppId: string | null;
+  /**
    * The record's own recency signal in epoch ms — capture time where the host
    * knows it, else creation. Null when unknown, which makes `recent-only`
    * fetch rather than decline: an unknown date is not evidence of age.
@@ -137,7 +302,7 @@ export type ResidencyDecision = "fetch" | "elide";
 export interface ResidencyVerdict {
   readonly decision: ResidencyDecision;
   /** The class the host resolved, or null if it could not. */
-  readonly sizeClass: string | null;
+  readonly sizeClass: ResolvedSizeClass | null;
   readonly reason:
     | "record-constraint"
     | "pinned"
@@ -147,6 +312,10 @@ export interface ResidencyVerdict {
     | "outside-recency-window"
     | "within-recency-window"
     | "budget-exhausted"
+    // The class's own row had room, but its app has spent its whole namespace
+    // total. Reported distinctly because the fix is a different number: raising
+    // the row does nothing until the total moves.
+    | "namespace-budget-exhausted"
     | "unclassified"
     // Not a decision this module made. `SyncEngine.fetchBlob` answers a direct
     // request and is deliberately not subject to the policy, but the arrival
@@ -156,15 +325,19 @@ export interface ResidencyVerdict {
 }
 
 /** How many bytes this node currently holds for a class. Supplied by the host. */
-export type ClassUsageLookup = (sizeClass: string | null) => number;
+export type ClassUsageLookup = (sizeClass: ResolvedSizeClass | null) => number;
+
+/** How many bytes this node currently holds across a whole namespace. */
+export type NamespaceUsageLookup = (namespace: string) => number;
 
 export interface DecideResidencyInputs {
   readonly candidate: BlobCandidate;
-  readonly sizeClass: string | null;
+  readonly sizeClass: ResolvedSizeClass | null;
   readonly policy: NodeRetentionPolicy;
   readonly constraints: RecordConstraints;
   readonly overrides: LocalOverrides;
   readonly usage: ClassUsageLookup;
+  readonly namespaceUsage: NamespaceUsageLookup;
   /** Injected for testability; defaults to `Date.now()`. */
   readonly nowMs?: number;
 }
@@ -176,7 +349,7 @@ export interface DecideResidencyInputs {
  * Restrictive wins, and it wins first.
  */
 export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict {
-  const { candidate, sizeClass, policy, constraints, overrides, usage } = inputs;
+  const { candidate, sizeClass, policy, constraints, overrides, usage, namespaceUsage } = inputs;
   const now = inputs.nowMs ?? Date.now();
 
   // 1. Record constraints — carried on the record, honoured identically
@@ -192,8 +365,8 @@ export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict
   }
 
   // 3. The node's rule for this record's class, then that class's budget.
-  const row = sizeClass === null ? policy.fallback : (policy.rows[sizeClass] ?? policy.fallback);
-  const unclassified = sizeClass === null || policy.rows[sizeClass] === undefined;
+  const row = retentionRowFor(policy, sizeClass);
+  const unclassified = !hasRowFor(policy, sizeClass);
 
   if (row.keep === "never") {
     return { decision: "elide", sizeClass, reason: "keep-never" };
@@ -213,6 +386,20 @@ export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict
   // declined for want of room, never for want of interest.
   if (usage(sizeClass) + candidate.sizeBytes > row.budgetBytes) {
     return { decision: "elide", sizeClass, reason: "budget-exhausted" };
+  }
+
+  // The namespace total, on top of the row. A fetch must fit **both** — the
+  // restrictive one wins, as everywhere else in this function. This is the
+  // check that makes an unrecognised rung cheap instead of free: the fallback
+  // row above it is per-rung, so an app naming a thousand rungs would otherwise
+  // get a thousand budgets.
+  const namespaceTotal = sizeClass === null ? null : namespaceTotalFor(policy, sizeClass.namespace);
+  if (
+    sizeClass !== null &&
+    namespaceTotal !== null &&
+    namespaceUsage(sizeClass.namespace) + candidate.sizeBytes > namespaceTotal
+  ) {
+    return { decision: "elide", sizeClass, reason: "namespace-budget-exhausted" };
   }
 
   if (unclassified) {
@@ -251,10 +438,85 @@ function withinRecencyWindow(
  */
 export function validateRetentionPolicy(policy: NodeRetentionPolicy): string[] {
   const problems: string[] = [];
-  for (const [name, row] of Object.entries(policy.rows)) {
-    problems.push(...validateRow(name, row));
+
+  // Structure first, and defensively: a policy arrives as JSON from a config
+  // file or a PUT body, where the type above is a claim rather than a
+  // guarantee. Reaching into a missing section would throw a TypeError out of
+  // the function whose entire job is to turn bad policies into sentences — and
+  // the caller that catches it is a node refusing to boot with a stack trace
+  // instead of a node saying which part of its policy is missing.
+  for (const [name, present] of [
+    ["platform", isObject(policy?.platform) && isObject(policy.platform.rows)],
+    ["apps", isObject(policy?.apps)],
+    ["appFallback", isObject(policy?.appFallback) && isObject(policy.appFallback.rows)],
+  ] as const) {
+    if (!present) problems.push(`${name}: missing or not an object`);
   }
-  problems.push(...validateRow("(fallback)", policy.fallback));
+  if (problems.length > 0) return problems;
+
+  for (const [rung, row] of Object.entries(policy.platform.rows)) {
+    problems.push(...validateRow(`${PLATFORM_NAMESPACE}:${rung}`, row));
+  }
+  problems.push(...validateRow(`${PLATFORM_NAMESPACE} (fallback)`, policy.platform.fallback));
+
+  for (const [appId, app] of Object.entries(policy.apps)) {
+    problems.push(...validateApp(appId, app));
+    // An app id that collides with the platform namespace would write rows
+    // nothing can ever read: the resolution above sends every platform class to
+    // `policy.platform`, so this whole entry would sit there being ignored.
+    if (appId === PLATFORM_NAMESPACE) {
+      problems.push(
+        `apps.${appId}: "${PLATFORM_NAMESPACE}" is the platform namespace — its rows belong in platform.rows, and here they are unreachable`,
+      );
+    }
+  }
+  problems.push(...validateApp("(unconfigured apps)", policy.appFallback));
+
+  return problems;
+}
+
+function isObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * A budget is a finite number of bytes, and this is the test for that.
+ *
+ * `<= 0` on its own is not it. A policy is JSON, so a budget can arrive
+ * missing or unparseable, and both `undefined <= 0` and `NaN <= 0` are false —
+ * a check written that way passes exactly the values that mean nothing. What
+ * follows is worse than a policy nobody validated: every comparison the number
+ * takes part in is false too, so `bytesBefore <= budget * high` does not hold
+ * and the eviction pass triggers, then `held <= target` does not hold either
+ * and it never stops. One absent field empties the budget it governs.
+ */
+function isUsableBudget(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function validateApp(appId: string, app: AppRetention): string[] {
+  if (!isObject(app) || !isObject(app.rows)) return [`${appId}: missing or malformed rows`];
+
+  const problems: string[] = [];
+  for (const [rung, row] of Object.entries(app.rows)) {
+    problems.push(...validateRow(`${appId}:${rung}`, row));
+  }
+  problems.push(...validateRow(`${appId} (fallback)`, app.fallback));
+
+  // Zero is refused here for the same reason it is refused on a row, and it
+  // matters more: a zero total is a prohibition on every rung the app has,
+  // including ones whose rows say "keep everything". An app that should hold
+  // nothing is expressed by its rows saying so.
+  //
+  // A *missing* total is refused for a different and sharper reason — see
+  // {@link isUsableBudget}. There is no such thing as an app with no total:
+  // the total is what bounds an app that invents rung names, so an entry
+  // without one is the hole this whole level exists to close.
+  if (!isUsableBudget(app.totalBudgetBytes)) {
+    problems.push(
+      `${appId}: totalBudgetBytes must be > 0 and finite (got ${String(app.totalBudgetBytes)}) — a missing or zero total silently overrides every row in the namespace`,
+    );
+  }
   return problems;
 }
 
@@ -263,9 +525,9 @@ function validateRow(name: string, row: SizeClassRetention): string[] {
   // "never" is the honest way to want none of a class. A zero budget is the
   // dishonest way: it reads as a limit and behaves as a prohibition, and it
   // silently disables the recency rule sitting above it.
-  if (row.keep !== "never" && row.budgetBytes <= 0) {
+  if (row.keep !== "never" && !isUsableBudget(row.budgetBytes)) {
     problems.push(
-      `${name}: budgetBytes must be > 0 for keep="${row.keep}" — use keep:"never" to hold none of a class`,
+      `${name}: budgetBytes must be > 0 for keep="${row.keep}" (got ${String(row.budgetBytes)}) — use keep:"never" to hold none of a class`,
     );
   }
   if (row.keep === "recent-only" && row.recencyWindowDays === undefined && row.openedWithinDays === undefined) {

@@ -61,7 +61,9 @@ describe("with no retention policy configured", () => {
   // The largest class in any library, and the one an inner join would drop.
   it("counts unlabelled records as originals", async () => {
     const body = await fetchProjection();
-    const originals = body.census.filter((c) => c.sizeClass.startsWith("original:"));
+    // `starkeep:` is the platform namespace — the classes no app can write
+    // into, which is exactly what "this is the file itself" means now.
+    const originals = body.census.filter((c) => c.sizeClass.startsWith("starkeep:original:"));
     expect(originals.length).toBeGreaterThan(0);
     expect(originals[0]!.totalBytes).toBeGreaterThan(0);
   });
@@ -95,12 +97,16 @@ describe("with a retention policy configured", () => {
     configured = await startLocalDataServer({
       config: {
         retention: {
-          rows: {
-            // Tiny budget against a class that will exceed it, so the
-            // over-budget path is exercised rather than merely present.
-            "original:image": { keep: "all", budgetBytes: 1024 },
+          platform: {
+            rows: {
+              // Tiny budget against a class that will exceed it, so the
+              // over-budget path is exercised rather than merely present.
+              "original:image": { keep: "all", budgetBytes: 1024 },
+            },
+            fallback: { keep: "never", budgetBytes: 1024 },
           },
-          fallback: { keep: "never", budgetBytes: 1024 },
+          apps: {},
+          appFallback: { rows: {}, fallback: { keep: "never", budgetBytes: 1024 }, totalBudgetBytes: 1024 },
         },
       },
     });
@@ -121,12 +127,12 @@ describe("with a retention policy configured", () => {
 
     expect(body.configured).toBe(true);
     expect(body.projection).toBeDefined();
-    const row = body.projection!.rows.find((r) => r.sizeClass === "original:image")!;
+    const row = body.projection!.rows.find((r) => r.sizeClass === "starkeep:original:image")!;
     // Capped at the budget, and flagged — the flag is what tells the operator
     // eviction will run continuously against this row, so what they asked for
     // is not what they will get.
     expect(row.projectedBytes).toBe(1024);
     expect(row.overBudget).toBe(true);
-    expect(body.projection!.overBudgetClasses).toContain("original:image");
+    expect(body.projection!.overBudgetClasses).toContain("starkeep:original:image");
   });
 });

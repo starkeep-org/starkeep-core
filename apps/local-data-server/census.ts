@@ -27,7 +27,7 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sqliteCompiler as qb } from "@starkeep/storage-sqlite";
 import { sql } from "kysely";
-import type { SizeClassCensus } from "@starkeep/sync-engine";
+import { resolveSizeClass, UNCLASSIFIED_RUNG, type SizeClassCensus } from "@starkeep/sync-engine";
 
 /**
  * Cutoffs the census measures, in days.
@@ -41,15 +41,21 @@ import type { SizeClassCensus } from "@starkeep/sync-engine";
 export const CENSUS_CUTOFF_DAYS: readonly number[] = [7, 30, 90, 180, 365, 730, 1825];
 
 export interface CensusOptions {
-  /** The label whose value names a record's size class. */
-  readonly classLabel: { appId: string; key: string };
   /**
-   * Class assigned to a record carrying no such label — the originals.
-   *
-   * Supplied by the host for the same reason the label is: "an unlabelled
-   * image record is an original" is Photos' rule, not the platform's.
+   * Which label key each installed app uses to name its ladder rungs, keyed by
+   * app id. The same map the residency manager resolves classes with — passing
+   * one app's key here while the manager reads several would produce a matrix
+   * that budgets classes the node never assigns.
    */
-  readonly originalClassFor: (type: string | null) => string;
+  readonly sizeClassKeys: Readonly<Record<string, string>>;
+  /**
+   * Platform class for a record that is the thing itself.
+   *
+   * Supplied by the host for the same reason the keys are: "an image record
+   * with no parent is an original" is a host rule, and this module does
+   * arithmetic without learning what any of it means.
+   */
+  readonly originalClassFor: (type: string | null) => { qualified: string };
   readonly nowMs?: number;
 }
 
@@ -58,6 +64,9 @@ interface RecordRow {
   type: string | null;
   size_bytes: number | null;
   recency_at_ms: number | null;
+  parent_id: string | null;
+  origin_app_id: string | null;
+  label_app_id: string | null;
   size_class: string | null;
 }
 
@@ -79,13 +88,31 @@ export function buildCensus(
   // A left join, not an inner one: a record with no rendition label is an
   // *original*, which is the single largest class in any library. Inner-joining
   // would silently drop exactly the rows the retention matrix exists to budget.
+  //
+  // The join matches **every** installed app's ladder key, not one configured
+  // pair, so a second rendition-producing app's rungs show up as their own rows
+  // instead of being counted as originals.
+  const ladderPairs = Object.entries(options.sizeClassKeys);
   const compiled = qb
     .selectFrom("shared_records as r")
     .leftJoin("shared_record_labels as l", (join) =>
       join
         .onRef("l.record_id", "=", "r.id")
-        .on("l.app_id", "=", sql.lit(options.classLabel.appId))
-        .on("l.key", "=", sql.lit(options.classLabel.key))
+        .on((eb) =>
+          // No installed app declares a size-class key: match nothing rather
+          // than everything. An empty `or` is `false` in Kysely, but saying so
+          // explicitly keeps a future reader from having to know that.
+          ladderPairs.length === 0
+            ? eb.and([sql<boolean>`1 = 0`])
+            : eb.or(
+                ladderPairs.map(([appId, key]) =>
+                  eb.and([
+                    eb("l.app_id", "=", sql.lit(appId)),
+                    eb("l.key", "=", sql.lit(key)),
+                  ]),
+                ),
+              ),
+        )
         .on("l.deleted_at", "is", null),
     )
     .leftJoin("shared_record_image_metadata as im", "im.record_id", "r.id")
@@ -94,6 +121,9 @@ export function buildCensus(
       "r.id as id",
       "r.type as type",
       "r.size_bytes as size_bytes",
+      "r.parent_id as parent_id",
+      "r.origin_app_id as origin_app_id",
+      "l.app_id as label_app_id",
       "l.value as size_class",
       // Capture time only, converted from the stored timestamp to epoch ms.
       //
@@ -115,7 +145,7 @@ export function buildCensus(
 
   const byClass = new Map<string, MutableCensus>();
   for (const row of rows) {
-    const sizeClass = row.size_class ?? options.originalClassFor(row.type);
+    const sizeClass = classOfRow(row, options);
     const bytes = row.size_bytes ?? 0;
     const entry = byClass.get(sizeClass) ?? blank(sizeClass);
     entry.recordCount += 1;
@@ -133,6 +163,26 @@ export function buildCensus(
 
   applyLocalState(db, byClass);
   return [...byClass.values()].map(freeze).sort((a, b) => b.totalBytes - a.totalBytes);
+}
+
+/**
+ * The class a record counts toward — the census's copy of the residency
+ * manager's `resolveClass`, over a row rather than a `BlobCandidate`.
+ *
+ * The two must agree, because the matrix's whole promise is "this is what
+ * saying yes would cost": a census that grouped by different rules would budget
+ * classes the node never assigns and miss the ones it does. Same order, same
+ * evidence — parent first, then the label's own app, then the record's origin.
+ */
+function classOfRow(row: RecordRow, options: CensusOptions): string {
+  if (row.parent_id === null) return options.originalClassFor(row.type).qualified;
+  if (row.label_app_id !== null && row.size_class !== null && row.size_class !== "") {
+    return resolveSizeClass(row.label_app_id, row.size_class).qualified;
+  }
+  if (row.origin_app_id !== null) {
+    return resolveSizeClass(row.origin_app_id, UNCLASSIFIED_RUNG).qualified;
+  }
+  return options.originalClassFor(row.type).qualified;
 }
 
 /**

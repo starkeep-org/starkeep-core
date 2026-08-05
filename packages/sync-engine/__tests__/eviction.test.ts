@@ -15,6 +15,7 @@ import { createSqliteResidentSetIndex, type ResidentEntry, type ResidentSetIndex
 import { assessDurability, type ReplicaProbe } from "../src/durability.js";
 import {
   evictClass,
+  evictNamespace,
   previewBudgetReduction,
   shedLoad,
   SHED_ORDER,
@@ -29,7 +30,8 @@ const keyFor = (hash: string) => `shared/image/${hash.slice(0, 2)}/${hash}`;
 function entry(over: Partial<ResidentEntry> & { objectStorageKey: string; sizeBytes: number }): ResidentEntry {
   return {
     recordId: over.recordId ?? over.objectStorageKey,
-    sizeClass: "classA",
+    sizeClass: CLASS_A,
+    namespace: "appA",
     pinned: false,
     protectedLocally: false,
     requiresDurabilityProof: true,
@@ -40,10 +42,28 @@ function entry(over: Partial<ResidentEntry> & { objectStorageKey: string; sizeBy
   };
 }
 
-const policy = (budgetBytes: number): NodeRetentionPolicy => ({
-  rows: { classA: { keep: "all", budgetBytes } },
-  fallback: { keep: "all", budgetBytes },
+const policy = (
+  budgetBytes: number,
+  totalBudgetBytes = Number.MAX_SAFE_INTEGER,
+): NodeRetentionPolicy => ({
+  platform: { rows: {}, fallback: { keep: "all", budgetBytes } },
+  apps: {
+    appA: {
+      rows: { classA: { keep: "all", budgetBytes } },
+      fallback: { keep: "all", budgetBytes },
+      totalBudgetBytes,
+    },
+  },
+  appFallback: {
+    rows: {},
+    fallback: { keep: "all", budgetBytes },
+    totalBudgetBytes,
+  },
 });
+
+/** Class names are stored fully qualified; the row key is only the rung. */
+const CLASS_A = "appA:classA";
+const CLASS_B = "appA:classB";
 
 describe("resident-set index", () => {
   let db: DatabaseSync;
@@ -57,17 +77,17 @@ describe("resident-set index", () => {
   it("sums bytes per class without probing storage", () => {
     index.add(entry({ objectStorageKey: "a", sizeBytes: 100 }));
     index.add(entry({ objectStorageKey: "b", sizeBytes: 250 }));
-    index.add(entry({ objectStorageKey: "c", sizeBytes: 40, sizeClass: "classB" }));
+    index.add(entry({ objectStorageKey: "c", sizeBytes: 40, sizeClass: CLASS_B }));
 
-    expect(index.usageOf("classA")).toBe(350);
-    expect(index.usageByClass()).toEqual({ classA: 350, classB: 40 });
-    expect(index.countByClass()).toEqual({ classA: 2, classB: 1 });
+    expect(index.usageOf(CLASS_A)).toBe(350);
+    expect(index.usageByClass()).toEqual({ [CLASS_A]: 350, [CLASS_B]: 40 });
+    expect(index.countByClass()).toEqual({ [CLASS_A]: 2, [CLASS_B]: 1 });
   });
 
   it("is idempotent on the object key, so a re-sync does not double-count", () => {
     index.add(entry({ objectStorageKey: "a", sizeBytes: 100 }));
     index.add(entry({ objectStorageKey: "a", sizeBytes: 100 }));
-    expect(index.usageOf("classA")).toBe(100);
+    expect(index.usageOf(CLASS_A)).toBe(100);
   });
 
   // A pin and a last-opened time are node-local *user* state. A re-arrival of
@@ -85,7 +105,7 @@ describe("resident-set index", () => {
 
   it("finds every held blob of one record, so a pin covers all its renditions", () => {
     index.add(entry({ objectStorageKey: "orig", sizeBytes: 100, recordId: "r1" }));
-    index.add(entry({ objectStorageKey: "thumb", sizeBytes: 10, recordId: "r1", sizeClass: "classB" }));
+    index.add(entry({ objectStorageKey: "thumb", sizeBytes: 10, recordId: "r1", sizeClass: CLASS_B }));
     index.add(entry({ objectStorageKey: "other", sizeBytes: 10, recordId: "r2" }));
 
     expect(index.entriesOfRecord("r1").map((e) => e.objectStorageKey).sort()).toEqual([
@@ -103,7 +123,7 @@ describe("resident-set index", () => {
       index.add(entry({ objectStorageKey: "opened-long-ago", sizeBytes: 10, lastOpenedAtMs: 100 }));
 
       const order = index
-        .evictionCandidates({ sizeClass: "classA", targetBytes: 999 })
+        .evictionCandidates({ scope: { kind: "class", sizeClass: CLASS_A }, targetBytes: 999 })
         .map((e) => e.objectStorageKey);
       expect(order).toEqual(["never-opened", "opened-long-ago", "opened-recently"]);
     });
@@ -116,7 +136,7 @@ describe("resident-set index", () => {
       index.add(entry({ objectStorageKey: "ordinary", sizeBytes: 10 }));
 
       const keys = index
-        .evictionCandidates({ sizeClass: "classA", targetBytes: 999 })
+        .evictionCandidates({ scope: { kind: "class", sizeClass: CLASS_A }, targetBytes: 999 })
         .map((e) => e.objectStorageKey);
       expect(keys).toEqual(["ordinary"]);
     });
@@ -264,7 +284,7 @@ describe("eviction pass", () => {
 
   function request(seeded: { probes: ReplicaProbe[]; hashes: Map<string, string> }, budget: number) {
     return {
-      sizeClass: "classA",
+      sizeClass: CLASS_A,
       index,
       policy: policy(budget),
       localStorage,
@@ -379,6 +399,175 @@ describe("eviction pass", () => {
   });
 });
 
+describe("namespace-total eviction pass", () => {
+  let db: DatabaseSync;
+  let index: ResidentSetIndex;
+  let localStorage: MockObjectStorageAdapter;
+
+  beforeEach(async () => {
+    db = new DatabaseSync(":memory:");
+    index = createSqliteResidentSetIndex({ db });
+    localStorage = new MockObjectStorageAdapter();
+    await localStorage.init();
+  });
+
+  /**
+   * Spread `count` blobs of `size` bytes across two rungs of one app, all
+   * confirmed on a peer. Two rungs on purpose: the point of this pass is that
+   * it works across a namespace rather than a class.
+   */
+  async function seedTwoRungs(count: number, size: number) {
+    const peerStorage = new MockObjectStorageAdapter();
+    await peerStorage.init();
+    const hashes = new Map<string, string>();
+    for (let i = 0; i < count; i++) {
+      const data = Buffer.alloc(size, i + 1);
+      const hash = hashOf(data);
+      const key = keyFor(hash);
+      hashes.set(key, hash);
+      await localStorage.put(key, data);
+      await peerStorage.put(key, data, { checksumSha256: b64Of(data) });
+      index.add(
+        entry({
+          objectStorageKey: key,
+          sizeBytes: size,
+          lastOpenedAtMs: i,
+          sizeClass: i % 2 === 0 ? CLASS_A : CLASS_B,
+          // Renditions: this pass is about an app's total, and everything in
+          // an app namespace has a parent by construction.
+          requiresDurabilityProof: false,
+        }),
+      );
+    }
+    return {
+      index,
+      localStorage,
+      probes: [{ nodeId: "peer", storage: peerStorage }] as ReplicaProbe[],
+      durability: { minimumReplicas: 1 },
+      contentHashOf: (e: ResidentEntry) => hashes.get(e.objectStorageKey) ?? null,
+    };
+  }
+
+  it("does nothing while the app is under its total", async () => {
+    const seeded = await seedTwoRungs(5, 100);
+    const outcome = await evictNamespace({
+      ...seeded,
+      namespace: "appA",
+      policy: policy(1_000_000, 1000),
+    });
+    expect(outcome.triggered).toBe(false);
+  });
+
+  // The case the whole pass exists for. Every class row is enormous, so a
+  // per-class pass finds nothing to do, and without this the total would stay
+  // breached forever.
+  it("evicts across rungs when the total is breached and no single row is", async () => {
+    const seeded = await seedTwoRungs(10, 100);
+    const perClass = await evictClass({ ...seeded, sizeClass: CLASS_A, policy: policy(1_000_000, 1000) });
+    expect(perClass.triggered).toBe(false);
+
+    const outcome = await evictNamespace({
+      ...seeded,
+      namespace: "appA",
+      policy: policy(1_000_000, 1000),
+    });
+    expect(outcome.triggered).toBe(true);
+    expect(outcome.bytesAfter).toBeLessThanOrEqual(800);
+    // Both rungs gave something up: the ordering is least-recently-useful
+    // across the namespace, not "pick on the biggest class".
+    const evictedClasses = new Set(outcome.evicted.map((e) => e.sizeClass));
+    expect(evictedClasses.size).toBe(2);
+  });
+
+  it("reports the namespace it was working over", async () => {
+    const seeded = await seedTwoRungs(10, 100);
+    const outcome = await evictNamespace({
+      ...seeded,
+      namespace: "appA",
+      policy: policy(1_000_000, 1000),
+    });
+    expect(outcome.scope).toEqual({ kind: "namespace", namespace: "appA" });
+  });
+
+  // The platform namespace has rows and no total, so there is nothing here for
+  // this pass to enforce — and inventing one would be a second way to say what
+  // the rows already say.
+  it("never triggers on the platform namespace", async () => {
+    const seeded = await seedTwoRungs(10, 100);
+    for (let i = 0; i < 10; i++) {
+      index.add(
+        entry({
+          objectStorageKey: `platform-${i}`,
+          sizeBytes: 1_000_000,
+          sizeClass: "starkeep:original:image",
+          namespace: "starkeep",
+        }),
+      );
+    }
+    const outcome = await evictNamespace({
+      ...seeded,
+      namespace: "starkeep",
+      policy: policy(1_000_000, 1000),
+    });
+    expect(outcome.triggered).toBe(false);
+    expect(outcome.evicted).toHaveLength(0);
+  });
+
+  // `validateRetentionPolicy` refuses a policy whose total is missing, so this
+  // is the second line rather than the first — but it is the line that matters,
+  // because a NaN budget does not read as "small". Every comparison against it
+  // is false: the high-water check does not hold, so the pass runs, and the
+  // target check does not hold either, so it runs until there is nothing left.
+  it("refuses to run at all against a budget that is not a number", async () => {
+    const seeded = await seedTwoRungs(10, 100);
+    const broken = policy(1_000_000);
+    const outcome = await evictNamespace({
+      ...seeded,
+      namespace: "appA",
+      policy: {
+        ...broken,
+        apps: { appA: { ...broken.apps.appA!, totalBudgetBytes: undefined as unknown as number } },
+      },
+    });
+    expect(outcome.triggered).toBe(false);
+    expect(outcome.evicted).toHaveLength(0);
+    expect(index.usageOfNamespace("appA")).toBe(1000);
+  });
+
+  // Zero is not the same case, and must keep working: it is what `keep:"never"`
+  // means, and evicting the whole class is the point.
+  it("still evicts everything against a real zero budget", async () => {
+    const seeded = await seedTwoRungs(10, 100);
+    const outcome = await evictClass({
+      ...seeded,
+      sizeClass: CLASS_A,
+      policy: policy(0),
+    });
+    expect(outcome.triggered).toBe(true);
+    expect(index.usageOf(CLASS_A)).toBe(0);
+  });
+
+  // A pin wins over the app total exactly as it wins over a class row: the pass
+  // treats the pinned set as fixed and reports the overage rather than
+  // swallowing it.
+  it("still refuses to drop pinned bytes", async () => {
+    const seeded = await seedTwoRungs(10, 100);
+    for (const e of index.evictionCandidates({
+      scope: { kind: "namespace", namespace: "appA" },
+      targetBytes: Number.MAX_SAFE_INTEGER,
+    })) {
+      index.setPinned(e.objectStorageKey, true);
+    }
+    const outcome = await evictNamespace({
+      ...seeded,
+      namespace: "appA",
+      policy: policy(1_000_000, 1000),
+    });
+    expect(outcome.evicted).toHaveLength(0);
+    expect(outcome.shortfall).toBe(true);
+  });
+});
+
 describe("backpressure", () => {
   // Capture never blocks, so everything else gives way first — in a defined
   // order rather than whichever check happens to run.
@@ -429,7 +618,7 @@ describe("budget reduction preview", () => {
   it("reports nothing to do when the class already fits", async () => {
     const s = await seedIndexed(5, 100, true);
     const preview = await previewBudgetReduction({
-      sizeClass: "classA",
+      sizeClass: CLASS_A,
       newBudgetBytes: 1000,
       index,
       durability: { minimumReplicas: 1 },
@@ -444,7 +633,7 @@ describe("budget reduction preview", () => {
   it("separates what would go from what is held back, and says how much", async () => {
     const s = await seedIndexed(10, 100, true);
     const preview = await previewBudgetReduction({
-      sizeClass: "classA",
+      sizeClass: CLASS_A,
       newBudgetBytes: 500,
       index,
       durability: { minimumReplicas: 1 },
@@ -458,7 +647,7 @@ describe("budget reduction preview", () => {
   it("holds back what is not confirmed elsewhere and reports it separately", async () => {
     const s = await seedIndexed(10, 100, false);
     const preview = await previewBudgetReduction({
-      sizeClass: "classA",
+      sizeClass: CLASS_A,
       newBudgetBytes: 500,
       index,
       durability: { minimumReplicas: 1 },
@@ -473,7 +662,7 @@ describe("budget reduction preview", () => {
   it("refuses outright when no peer is available to confirm anything", async () => {
     const s = await seedIndexed(10, 100, false);
     const preview = await previewBudgetReduction({
-      sizeClass: "classA",
+      sizeClass: CLASS_A,
       newBudgetBytes: 500,
       index,
       probes: [],

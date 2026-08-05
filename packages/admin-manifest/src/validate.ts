@@ -99,11 +99,25 @@ export function validateManifest(raw: unknown): ValidationResult {
   // second `description` — the one a reader of the cross-app registry sees —
   // would depend on insert order.
   const seenLabelKeys = new Set<string>();
+  const sizeClassKeys: string[] = [];
   for (const entry of manifest.infraRequirements.labelKeys) {
     if (seenLabelKeys.has(entry.key)) {
       errors.push(`infraRequirements.labelKeys: duplicate key "${entry.key}"`);
     }
     seenLabelKeys.add(entry.key);
+    if (entry.sizeClass) sizeClassKeys.push(entry.key);
+  }
+
+  // One ladder per app. A second key would leave the node choosing between two
+  // answers to "which rung is this", and whichever it picked would decide the
+  // record's budget row and whether it counts as re-derivable — so the ambiguity
+  // is refused at install time rather than resolved by iteration order.
+  if (sizeClassKeys.length > 1) {
+    errors.push(
+      `infraRequirements.labelKeys: at most one key may set sizeClass: true (got ${sizeClassKeys
+        .map((k) => `"${k}"`)
+        .join(", ")})`,
+    );
   }
 
   // Writing a label needs only a `read` grant on the record's type (requiring
