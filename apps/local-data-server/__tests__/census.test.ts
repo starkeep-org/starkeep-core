@@ -178,6 +178,50 @@ describe("grouping by size class", () => {
     expect(classOf(census, "sketcher:unclassified")!.recordCount).toBe(1);
   });
 
+  // Two apps labelling one derivative is the case app-namespaced classes exist
+  // to support, and the join emits a row per label — so counting the joined rows
+  // charged one 1 MiB record to two classes and inflated the library total with
+  // it. The matrix promises "this is what saying yes would cost"; a census that
+  // doubles a record is answering a different question.
+  describe("a record two apps have labelled", () => {
+    const bothKeys = { photos: "rendition", sketcher: "derived-size" };
+
+    function addTwiceLabelled(originAppId: string | null): void {
+      db.prepare("INSERT INTO shared_records VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+        "d", "image/jpeg", MB, "01J3XZ8Q4K0000-0001-node-a", null, "d-parent", originAppId,
+      );
+      db.prepare("INSERT INTO shared_record_labels VALUES (?, ?, ?, ?, ?)").run(
+        "d", "photos", "rendition", "medium", null,
+      );
+      db.prepare("INSERT INTO shared_record_labels VALUES (?, ?, ?, ?, ?)").run(
+        "d", "sketcher", "derived-size", "preview", null,
+      );
+    }
+
+    it("counts it once, in one class", () => {
+      addTwiceLabelled("photos");
+      const census = buildCensus(db, { ...options, sizeClassKeys: bothKeys });
+      expect(census.reduce((sum, c) => sum + c.recordCount, 0)).toBe(1);
+      expect(census.reduce((sum, c) => sum + c.totalBytes, 0)).toBe(MB);
+    });
+
+    it("counts it under the origin app's rung", () => {
+      addTwiceLabelled("sketcher");
+      const census = buildCensus(db, { ...options, sizeClassKeys: bothKeys });
+      expect(classOf(census, "sketcher:preview")).toMatchObject({ recordCount: 1 });
+      expect(classOf(census, photos("medium"))).toBeUndefined();
+    });
+
+    // No origin to prefer: still one class, and the same one every time — an
+    // unstable answer moves the record between budgets on each re-resolution.
+    it("falls back to the lowest app id when nothing names an origin", () => {
+      addTwiceLabelled(null);
+      const census = buildCensus(db, { ...options, sizeClassKeys: bothKeys });
+      expect(classOf(census, photos("medium"))).toMatchObject({ recordCount: 1 });
+      expect(classOf(census, "sketcher:preview")).toBeUndefined();
+    });
+  });
+
   it("puts the biggest class first, which is what the matrix leads with", () => {
     addRecord("small", { sizeClass: "image-thumb", sizeBytes: 100 });
     addRecord("big", { sizeClass: "image-large", sizeBytes: 50 * MB });

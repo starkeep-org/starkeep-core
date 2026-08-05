@@ -632,11 +632,24 @@ async function main() {
   // resolve, so the engine runs without the hook and every blob is wanted —
   // exactly the pre-residency behaviour, which is the right default for a
   // laptop and means an unconfigured node cannot silently start declining data.
-  // Read once at boot, like the policy beside it: the registry changes on
-  // install and uninstall, and both already restart this process. A node that
-  // rebuilt the map without restarting would be resolving classes against one
-  // map while the resident-set rows were written under another.
-  const sizeClassKeys = sizeClassKeysByApp(localDb);
+  // Rebuilt whenever the registry changes, which is on install and uninstall —
+  // neither of which restarts this process (they call `supervisor.rescan()` and
+  // nothing more). Read once at boot instead and a freshly installed app's
+  // derivatives land under `<app>:unclassified` rather than its declared rungs,
+  // for however long it is until an unrelated restart — and those rows keep that
+  // class permanently, since nothing reclassifies a resident-set row.
+  //
+  // Mutated in place rather than reassigned: the residency manager closes over
+  // this object at construction, so a fresh object would leave it reading the
+  // boot-time map forever.
+  const sizeClassKeys: Record<string, string> = sizeClassKeysByApp(localDb);
+  function refreshSizeClassKeys(): void {
+    const next = sizeClassKeysByApp(localDb);
+    for (const appId of Object.keys(sizeClassKeys)) {
+      if (!(appId in next)) delete sizeClassKeys[appId];
+    }
+    Object.assign(sizeClassKeys, next);
+  }
 
   const residencyManager = starkeepConfig.retention
     ? createResidencyManager({
@@ -3018,6 +3031,10 @@ async function main() {
           const result = installLocal(localDb, body);
           // Bring up a sync loop for the freshly-installed app.
           supervisor?.rescan();
+          // And make its ladder legible before it writes anything, so its
+          // derivatives are classified by the rungs it declares rather than
+          // landing in `<app>:unclassified` until the next restart.
+          refreshSizeClassKeys();
           json(res, { appId: result.appId, hmacSecret: result.hmacSecret });
         } catch (err) {
           if (err instanceof ManifestValidationError) {
@@ -3048,8 +3065,9 @@ async function main() {
             await rm(target, { recursive: true, force: true });
           },
         });
-        // Tear down the per-app sync loop.
+        // Tear down the per-app sync loop, and drop its ladder key with it.
         supervisor?.rescan();
+        refreshSizeClassKeys();
         json(res, { ok: true, appId: targetAppId });
         return;
       }

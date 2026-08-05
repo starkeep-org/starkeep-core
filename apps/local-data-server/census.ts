@@ -27,7 +27,13 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sqliteCompiler as qb } from "@starkeep/storage-sqlite";
 import { sql } from "kysely";
-import { resolveSizeClass, UNCLASSIFIED_RUNG, type SizeClassCensus } from "@starkeep/sync-engine";
+import {
+  pickLadderLabel,
+  resolveSizeClass,
+  UNCLASSIFIED_RUNG,
+  type LadderLabel,
+  type SizeClassCensus,
+} from "@starkeep/sync-engine";
 
 /**
  * Cutoffs the census measures, in days.
@@ -67,6 +73,7 @@ interface RecordRow {
   parent_id: string | null;
   origin_app_id: string | null;
   label_app_id: string | null;
+  label_key: string | null;
   size_class: string | null;
 }
 
@@ -91,7 +98,9 @@ export function buildCensus(
   //
   // The join matches **every** installed app's ladder key, not one configured
   // pair, so a second rendition-producing app's rungs show up as their own rows
-  // instead of being counted as originals.
+  // instead of being counted as originals. That means a record can come back
+  // more than once; `collapseByRecord` puts it back to one before anything is
+  // counted.
   const ladderPairs = Object.entries(options.sizeClassKeys);
   const compiled = qb
     .selectFrom("shared_records as r")
@@ -124,6 +133,7 @@ export function buildCensus(
       "r.parent_id as parent_id",
       "r.origin_app_id as origin_app_id",
       "l.app_id as label_app_id",
+      "l.key as label_key",
       "l.value as size_class",
       // Capture time only, converted from the stored timestamp to epoch ms.
       //
@@ -144,8 +154,8 @@ export function buildCensus(
   const rows = db.prepare(compiled.sql).all() as unknown as RecordRow[];
 
   const byClass = new Map<string, MutableCensus>();
-  for (const row of rows) {
-    const sizeClass = classOfRow(row, options);
+  for (const { row, labels } of collapseByRecord(rows)) {
+    const sizeClass = classOfRow(row, labels, options);
     const bytes = row.size_bytes ?? 0;
     const entry = byClass.get(sizeClass) ?? blank(sizeClass);
     entry.recordCount += 1;
@@ -165,6 +175,36 @@ export function buildCensus(
   return [...byClass.values()].map(freeze).sort((a, b) => b.totalBytes - a.totalBytes);
 }
 
+interface CensusRecord {
+  readonly row: RecordRow;
+  readonly labels: LadderLabel[];
+}
+
+/**
+ * One entry per record, with every ladder label that record carries.
+ *
+ * The join emits a row per matching label, so a derivative two installed apps
+ * have both labelled arrives twice — and counting the joined rows would count
+ * the record *and its bytes* into two classes at once. That is the exact
+ * over-report the census exists to prevent: it would tell an operator a 1 MiB
+ * file costs 2 MiB, and inflate `totalLibraryBytes` with it.
+ *
+ * Collapsed here rather than in SQL because the tie-break that follows is a
+ * rule the residency manager also applies, and it can only be *the same* rule
+ * if it is the same code.
+ */
+function collapseByRecord(rows: readonly RecordRow[]): CensusRecord[] {
+  const byRecord = new Map<string, CensusRecord>();
+  for (const row of rows) {
+    const entry = byRecord.get(row.id) ?? { row, labels: [] };
+    if (row.label_app_id !== null && row.label_key !== null && row.size_class !== null) {
+      entry.labels.push({ appId: row.label_app_id, key: row.label_key, value: row.size_class });
+    }
+    byRecord.set(row.id, entry);
+  }
+  return [...byRecord.values()];
+}
+
 /**
  * The class a record counts toward — the census's copy of the residency
  * manager's `resolveClass`, over a row rather than a `BlobCandidate`.
@@ -172,13 +212,18 @@ export function buildCensus(
  * The two must agree, because the matrix's whole promise is "this is what
  * saying yes would cost": a census that grouped by different rules would budget
  * classes the node never assigns and miss the ones it does. Same order, same
- * evidence — parent first, then the label's own app, then the record's origin.
+ * evidence — parent first, then the label's own app, then the record's origin —
+ * and where several apps have labelled one record, the same `pickLadderLabel`
+ * deciding which of them names the class.
  */
-function classOfRow(row: RecordRow, options: CensusOptions): string {
+function classOfRow(
+  row: RecordRow,
+  labels: readonly LadderLabel[],
+  options: CensusOptions,
+): string {
   if (row.parent_id === null) return options.originalClassFor(row.type).qualified;
-  if (row.label_app_id !== null && row.size_class !== null && row.size_class !== "") {
-    return resolveSizeClass(row.label_app_id, row.size_class).qualified;
-  }
+  const rung = pickLadderLabel(labels, options.sizeClassKeys, row.origin_app_id);
+  if (rung !== undefined) return resolveSizeClass(rung.appId, rung.value).qualified;
   if (row.origin_app_id !== null) {
     return resolveSizeClass(row.origin_app_id, UNCLASSIFIED_RUNG).qualified;
   }
