@@ -56,6 +56,24 @@ export type KeepRule =
   /** Never hold this class on this node at all. */
   | "never";
 
+/**
+ * Every legal {@link KeepRule}, as a value rather than only as a type.
+ *
+ * A policy arrives as JSON, where the union above is a claim and not a check.
+ * Nothing validated membership, so `{ keep: "kepp-all" }` passed
+ * {@link validateRetentionPolicy} clean, fell through every branch of
+ * {@link decideResidency} to the final `return { decision: "fetch" }`, and was
+ * labelled `within-recency-window` — a reason that did not happen. The direction
+ * of that failure is the safe one for data and completely silent, which is the
+ * combination that keeps a typo in a config file for a year.
+ */
+export const KEEP_RULES: readonly KeepRule[] = [
+  "all",
+  "recent-only",
+  "on-demand-only",
+  "never",
+];
+
 /** One row of the §6.2 retention table. */
 export interface SizeClassRetention {
   readonly keep: KeepRule;
@@ -73,10 +91,19 @@ export interface SizeClassRetention {
   /**
    * Cap on this row, in bytes.
    *
-   * **No row may be zero.** A zero budget makes the class unreachable offline
-   * *and* silently disables the recency rule above it, so re-opening
-   * yesterday's photo re-downloads it. If a node genuinely wants none of a
-   * class, that is `keep: "never"` — which says so.
+   * **No row may be zero, except a `never` row, where zero is the only
+   * coherent value.** A zero budget on any other rule makes the class
+   * unreachable offline *and* silently disables the recency rule above it, so
+   * re-opening yesterday's photo re-downloads it. If a node genuinely wants none
+   * of a class, that is `keep: "never"` — which says so.
+   *
+   * Required on every row including `never`, and normalized to zero there by
+   * {@link retentionRowFor}. Leaving it optional for `never` was not the
+   * simplification it looked like: `evictClass` reads this field and refuses to
+   * run on a non-finite one — so the one class an operator had just set to "keep
+   * nothing" became the one class the eviction pass would never touch — and
+   * `projectRow`'s `Math.min(selectedBytes, budgetBytes)` turned the whole
+   * matrix total into `NaN`.
    */
   readonly budgetBytes: number;
 }
@@ -217,12 +244,42 @@ export function retentionRowFor(
   policy: NodeRetentionPolicy,
   sizeClass: ResolvedSizeClass | null,
 ): SizeClassRetention {
+  return normalizeRow(rawRetentionRowFor(policy, sizeClass));
+}
+
+function rawRetentionRowFor(
+  policy: NodeRetentionPolicy,
+  sizeClass: ResolvedSizeClass | null,
+): SizeClassRetention {
   if (sizeClass === null) return policy.platform.fallback;
   if (isPlatformClass(sizeClass)) {
     return policy.platform.rows[sizeClass.rung] ?? policy.platform.fallback;
   }
   const app = policy.apps[sizeClass.namespace] ?? policy.appFallback;
   return app.rows[sizeClass.rung] ?? app.fallback;
+}
+
+/**
+ * The one interpretation of a row that every consumer sees.
+ *
+ * Only one rule today: **a `never` row's budget is zero**, whatever the stored
+ * value says. "Hold none of this class" and "hold up to 40 GB of it" are
+ * contradictory, and something had to break the tie — leaving it to each
+ * consumer meant `evictClass` read a stale 40 GB and declined to empty a class
+ * the operator had just switched off, while `selectedBytesFor` read the rule and
+ * returned zero. Normalizing here means the eviction pass's own guard reads
+ * correctly ("Zero is left alone, because zero is a real answer — it is what
+ * `keep: \"never\"` means, and evicting everything is the point") rather than
+ * being defeated by the field beside it.
+ *
+ * Placed on the resolution function rather than in each caller because this is
+ * the one function `decideResidency`, `evictClass` and `projectPolicy` all pass
+ * through, and a rule they can disagree about is a rule the matrix cannot
+ * promise.
+ */
+function normalizeRow(row: SizeClassRetention): SizeClassRetention {
+  if (row?.keep !== "never" || row.budgetBytes === 0) return row;
+  return { ...row, budgetBytes: 0 };
 }
 
 /** Whether the policy names this exact class, as opposed to falling back to it. */
@@ -303,6 +360,29 @@ export interface ResidencyVerdict {
   readonly decision: ResidencyDecision;
   /** The class the host resolved, or null if it could not. */
   readonly sizeClass: ResolvedSizeClass | null;
+  /**
+   * Whether this node insists on holding these bytes — the **resolved** pin,
+   * covering both of its sources.
+   *
+   * A pin comes from the `local_pins` table or from an `effect: "pin"` override
+   * rule matching the record's labels, and only the decision path saw both.
+   * `noteArrival` re-read the table alone, so a record kept by a rule — "keep
+   * every photo of my daughter offline", the motivating example the rules exist
+   * for — was fetched past its budget and then written into the resident set
+   * with `pinned = 0`. From there the eviction pass offered it, its
+   * belt-and-braces re-check read the same column and agreed, and the census
+   * reported zero pinned bytes for it: the rule that made the node fetch the
+   * photo was invisible to everything that might delete it.
+   *
+   * Carried on the verdict rather than recomputed on arrival because the labels
+   * have already been read by then, and a second evaluation is a second chance
+   * to disagree.
+   *
+   * Optional because `SyncEngine.fetchBlob` synthesizes a verdict it never
+   * asked the policy for; absent there means "nobody resolved this", and the
+   * accounting falls back to the pins table.
+   */
+  readonly pinned?: boolean;
   readonly reason:
     | "record-constraint"
     | "pinned"
@@ -355,13 +435,13 @@ export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict
   // 1. Record constraints — carried on the record, honoured identically
   //    everywhere. Nothing below may override.
   if (constraints.deniedHere) {
-    return { decision: "elide", sizeClass, reason: "record-constraint" };
+    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "record-constraint" };
   }
 
   // 2. Local pin. Beats every budget and recency rule, and deliberately does
   //    not beat step 1.
   if (overrides.pinned) {
-    return { decision: "fetch", sizeClass, reason: "pinned" };
+    return { decision: "fetch", sizeClass, pinned: overrides.pinned, reason: "pinned" };
   }
 
   // 3. The node's rule for this record's class, then that class's budget.
@@ -369,23 +449,23 @@ export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict
   const unclassified = !hasRowFor(policy, sizeClass);
 
   if (row.keep === "never") {
-    return { decision: "elide", sizeClass, reason: "keep-never" };
+    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "keep-never" };
   }
   if (row.keep === "on-demand-only") {
     // Not a failure and not a permanent refusal — an explicit fetch (a user
     // opening the item) still gets the bytes. It just never happens as part of
     // a sync round.
-    return { decision: "elide", sizeClass, reason: "on-demand-only" };
+    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "on-demand-only" };
   }
 
   if (row.keep === "recent-only" && !withinRecencyWindow(candidate, row, now)) {
-    return { decision: "elide", sizeClass, reason: "outside-recency-window" };
+    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "outside-recency-window" };
   }
 
   // Budget. Checked last so that a class the node has decided to keep is only
   // declined for want of room, never for want of interest.
   if (usage(sizeClass) + candidate.sizeBytes > row.budgetBytes) {
-    return { decision: "elide", sizeClass, reason: "budget-exhausted" };
+    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "budget-exhausted" };
   }
 
   // The namespace total, on top of the row. A fetch must fit **both** — the
@@ -399,15 +479,16 @@ export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict
     namespaceTotal !== null &&
     namespaceUsage(sizeClass.namespace) + candidate.sizeBytes > namespaceTotal
   ) {
-    return { decision: "elide", sizeClass, reason: "namespace-budget-exhausted" };
+    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "namespace-budget-exhausted" };
   }
 
   if (unclassified) {
-    return { decision: "fetch", sizeClass, reason: "unclassified" };
+    return { decision: "fetch", sizeClass, pinned: overrides.pinned, reason: "unclassified" };
   }
   return {
     decision: "fetch",
     sizeClass,
+    pinned: overrides.pinned,
     reason: row.keep === "all" ? "keep-all" : "within-recency-window",
   };
 }
@@ -531,12 +612,44 @@ function validateRow(name: string, row: SizeClassRetention | null | undefined): 
   if (typeof row !== "object" || row === null) return [`${name}: missing or not an object`];
 
   const problems: string[] = [];
-  // "never" is the honest way to want none of a class. A zero budget is the
-  // dishonest way: it reads as a limit and behaves as a prohibition, and it
-  // silently disables the recency rule sitting above it.
-  if (row.keep !== "never" && !isUsableBudget(row.budgetBytes)) {
+
+  // Membership, before anything reads the rule. An unrecognised value is not a
+  // rule this module has an opinion about — it falls through every branch of
+  // `decideResidency` to "fetch", labelled with a reason that did not happen,
+  // and makes `selectedBytesFor` return `undefined` so the projection is `NaN`.
+  // Refusing here is the whole reason a validator exists on a field that
+  // arrives as JSON from a PUT body.
+  if (!KEEP_RULES.includes(row.keep)) {
     problems.push(
-      `${name}: budgetBytes must be > 0 for keep="${row.keep}" (got ${String(row.budgetBytes)}) — use keep:"never" to hold none of a class`,
+      `${name}: keep must be one of ${KEEP_RULES.map((r) => `"${r}"`).join(", ")} (got ${JSON.stringify(row.keep)})`,
+    );
+    // Nothing below can be judged against a rule nobody recognises — a budget
+    // check would name the wrong remedy.
+    return problems;
+  }
+
+  // "never" is the honest way to want none of a class. A zero budget is the
+  // dishonest way on every *other* rule: it reads as a limit and behaves as a
+  // prohibition, and it silently disables the recency rule sitting above it.
+  //
+  // A `never` row still needs the field, which is the part that was missing.
+  // Exempting it entirely let `{ keep: "never" }` validate and then defeat the
+  // two things that act on the row: `evictClass` refuses a non-finite budget, so
+  // the class the operator had just set to "keep nothing" was the one class the
+  // eviction pass would never touch, and `projectRow` returned `NaN` into the
+  // matrix total. The value itself is normalized to zero by `retentionRowFor` —
+  // this asks only that a number be there, so a hand-written config or an app
+  // default cannot omit it into that state.
+  const budgetOk = row.keep === "never"
+    ? typeof row.budgetBytes === "number" &&
+      Number.isFinite(row.budgetBytes) &&
+      row.budgetBytes >= 0
+    : isUsableBudget(row.budgetBytes);
+  if (!budgetOk) {
+    problems.push(
+      row.keep === "never"
+        ? `${name}: budgetBytes must be a finite number >= 0 even for keep="never" (got ${String(row.budgetBytes)}) — it is read by the eviction pass and by the projection, and both misread a missing one`
+        : `${name}: budgetBytes must be > 0 for keep="${row.keep}" (got ${String(row.budgetBytes)}) — use keep:"never" to hold none of a class`,
     );
   }
   if (row.keep === "recent-only" && row.recencyWindowDays === undefined && row.openedWithinDays === undefined) {

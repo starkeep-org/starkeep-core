@@ -50,16 +50,33 @@ export interface KeyedRowEntry {
  * the watermark holds and the entry is offered again instead of being silently
  * dropped; on the HTTP path it surfaces to the caller. Both are better than a
  * statement that quietly matches everything.
+ *
+ * `pkColumns`, when the caller knows them, makes the check the *whole* key
+ * rather than any key at all. A `where` naming `tenant` and not `id` on a
+ * `(tenant, id)` table matches every row of that tenant — quieter than the
+ * keyless case above and worse to diagnose, because the damage is bounded and
+ * reads as a legitimate bulk delete. {@link keyedWhereFor} refuses to *produce*
+ * such a `where`; this refuses to act on one that arrives anyway, which is the
+ * same rule from the other end.
  */
 export function requireKeyedWhere(
   entry: KeyedRowEntry,
   op: "update" | "delete",
+  pkColumns: readonly string[] = [],
 ): Record<string, unknown> {
   const where = entry.where ?? {};
   if (Object.keys(where).length === 0) {
     throw new Error(
       `app-syncable ${op} for ${entry.appId}.${entry.table} carries no "where" — ` +
         `a keyless ${op} would match every row in the table and is refused`,
+    );
+  }
+  const missing = pkColumns.filter((column) => where[column] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `app-syncable ${op} for ${entry.appId}.${entry.table} names only part of the ` +
+        `primary key (missing ${missing.join(", ")}) — a partial key matches more ` +
+        `rows than the one it came from and is refused`,
     );
   }
   return where;

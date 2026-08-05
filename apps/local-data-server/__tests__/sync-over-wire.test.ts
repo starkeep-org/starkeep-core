@@ -18,6 +18,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, writeFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   startLocalDataServer,
   startFakeCloud,
@@ -347,6 +348,110 @@ describe("blob staging across the wire", () => {
       await syncNow(driveB);
       expect(await fetchBytes(driveB, record.id)).toBe("staged-bytes");
     });
+  });
+});
+
+describe("verification and repair across the wire", () => {
+  /**
+   * Delete a shared record from a running server's SQLite, behind its back.
+   *
+   * The point of the case is a loss the node itself did not perform — a
+   * corrupted page, a restore from an older backup, a bug in something else. A
+   * deletion the server *made* would write a tombstone and sync it, which is
+   * ordinary convergence and not what the digest exists for.
+   */
+  function loseSharedRecord(server: LocalDataServer, id: string): void {
+    const db = new DatabaseSync(join(server.starkeepDir, "data.db"));
+    try {
+      db.prepare("DELETE FROM shared_records WHERE id = ?").run(id);
+    } finally {
+      db.close();
+    }
+  }
+
+  async function verifyDrive(app: InstalledApp) {
+    const res = await app.fetch("/sync/verify", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      channels: Array<{
+        appId: string;
+        result: {
+          supported: boolean;
+          localRows: number;
+          peerRows: number;
+          divergentBuckets: number;
+          missingLocally: number;
+        } | null;
+        error: string | null;
+      }>;
+    };
+    const drive = body.channels.find((c) => c.appId === "starkeep-drive");
+    expect(drive, "the Drive channel must be among the verified channels").toBeDefined();
+    expect(drive!.error).toBeNull();
+    expect(drive!.result?.supported, "the peer must have answered with a digest").toBe(true);
+    return drive!.result!;
+  }
+
+  it("finds a row lost from the middle of B's table and repairs it", { timeout: 60_000 }, async () => {
+    // The whole digest/repair mechanism has only ever run in-process. Over the
+    // wire it has three more places to fail than the engine tests can see: the
+    // digest has to survive JSON both ways, the peer has to be a responder that
+    // actually computes buckets rather than a harness, and the repair floor has
+    // to reach the SQLite state store and come back out on the next tick.
+    const created = [];
+    for (let i = 0; i < 3; i += 1) {
+      const { record } = await createRecordWithBytes(driveA, {
+        bytes: `verify-bytes-${i}`,
+        fileName: `verify-${i}.jpg`,
+      });
+      created.push(record);
+    }
+    await converge();
+    for (let i = 0; i < 3; i += 1) {
+      expect(await fetchBytes(driveB, created[i]!.id)).toBe(`verify-bytes-${i}`);
+    }
+
+    // Lose the middle row on B. Not the newest: B's coverage watermark is a
+    // MAX per author, so a loss underneath it leaves the watermark exactly
+    // where it was and the cloud goes on believing B holds the row.
+    const lost = created[1]!;
+    loseSharedRecord(serverB, lost.id);
+
+    // An ordinary round is blind to it, which is the finding the digest exists
+    // for rather than a quirk of this test.
+    const blind = await syncNow(driveB);
+    expect(blind.applied).toBe(0);
+    expect((await listRecords(driveB)).some((r) => r.id === lost.id)).toBe(false);
+
+    // The check sees it, in the direction that means "am I whole?".
+    const found = await verifyDrive(driveB);
+    expect(found.missingLocally).toBeGreaterThan(0);
+    expect(found.localRows).toBe(found.peerRows - 1);
+    // And it is not confused about which side lost something: the cloud is
+    // missing nothing, so the outbound repair trigger stays silent.
+    expect(found.divergentBuckets).toBe(0);
+
+    // The repair is armed, not performed — the ordinary scan carries it out on
+    // the next round, through the path every other test already exercises.
+    await eventually(async () => {
+      await syncNow(driveB);
+      expect(await fetchBytes(driveB, lost.id)).toBe("verify-bytes-1");
+    });
+
+    // …and the follow-up check reports whole, so the floor retired rather than
+    // leaving the channel re-shipping that range forever.
+    const after = await verifyDrive(driveB);
+    expect(after.missingLocally).toBe(0);
+    expect(after.divergentBuckets).toBe(0);
+    expect(after.localRows).toBe(after.peerRows);
+  });
+
+  it("reports a healthy channel as whole, in both directions", async () => {
+    await converge();
+    const result = await verifyDrive(driveA);
+    expect(result.divergentBuckets).toBe(0);
+    expect(result.missingLocally).toBe(0);
+    expect(result.localRows).toBe(result.peerRows);
   });
 });
 

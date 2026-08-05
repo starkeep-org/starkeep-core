@@ -87,10 +87,11 @@ import {
   type ReductionPreview,
   type ReplicaProbe,
   type ResidencyVerdict,
+  type ReconcileReport,
   type ResidentSetIndex,
   type ResolvedSizeClass,
 } from "./index.js";
-import { typeCategory } from "@starkeep/protocol-primitives";
+import { getCategory, typeCategory } from "@starkeep/protocol-primitives";
 import type { StarkeepId } from "@starkeep/protocol-primitives";
 
 /** Label namespace for platform-level record constraints. */
@@ -223,9 +224,39 @@ export interface ResidencyManager {
   /**
    * Record that a blob landed. Called after a successful transfer, so byte
    * accounting reflects what is actually on disk rather than what was intended.
+   *
+   * Takes the whole verdict rather than just its class, because the verdict is
+   * the only place the *resolved* pin exists — `decide` honours the pins table
+   * and any `effect: "pin"` override rule, and this used to re-read the table
+   * alone. See {@link ResidencyVerdict.pinned}.
    */
-  noteArrival(candidate: BlobCandidate, sizeClass: ResolvedSizeClass | null): void;
+  noteArrival(candidate: BlobCandidate, verdict: ResidencyVerdict | null): Promise<void>;
+  /**
+   * Charge a budget for bytes that are about to be fetched.
+   *
+   * Called between the decision and the transfer, and undone by
+   * {@link releaseReservation} if the transfer does not happen. See
+   * {@link ResidentSetIndex.reserve} for why the accounting has to move early in
+   * this one case: the supervisor hands one index to several engines that tick
+   * independently, so without it each of them sees the same room and lands into
+   * it.
+   */
+  reserve(candidate: BlobCandidate, verdict: ResidencyVerdict): void;
+  /** Undo a reservation whose transfer failed or was declined. */
+  releaseReservation(objectStorageKey: string): void;
   noteDeparture(objectStorageKey: string): void;
+  /**
+   * Reconcile the index against what this node's object storage actually holds,
+   * correcting rows the index believed and storage does not have.
+   *
+   * Returns keys storage holds that the index has never seen — locally imported
+   * originals and derived renditions, which arrived by a route that never
+   * touched `noteArrival` and are therefore invisible to every budget. Resolving
+   * those needs the record row, which is the host's to join.
+   */
+  reconcile(): Promise<ReconcileReport>;
+  /** Whether this node held these bytes and let them go. */
+  wasEvicted(objectStorageKey: string): boolean;
   isPinned(recordId: string): boolean;
   setPinned(recordId: string, pinned: boolean): void;
   markOpened(recordId: string, atMs: number): void;
@@ -399,6 +430,95 @@ export function createResidencyManager(
   }
 
   /**
+   * The two dates the policy's recency axis reads, which only the host can
+   * answer.
+   *
+   * ## Why this had to exist for `recent-only` to mean anything
+   *
+   * `decideResidency` has a whole recency branch, and both fields it reads were
+   * hard-coded `null` at every construction site the sync path uses
+   * (`candidateForRecord`, `candidateForManifest`, `candidateForAppRow`) — the
+   * engine has only the record row, and capture time lives in the per-category
+   * metadata table. Null reads as "unknown", and unknown deliberately means
+   * *fetch* ("an unknown date is not evidence of age"), so the window never
+   * excluded anything: `keep: "recent-only"` was `keep: "all"` capped by the
+   * budget, reporting `budget-exhausted` — a different reason with a different
+   * remedy — once the class filled.
+   *
+   * Worse than merely inert, because the projection did not share the gap.
+   * `census.ts` reads a real `COALESCE(im.captured_at, vm.captured_at)` and
+   * tells the operator that "keep the last 90 days" costs 12 GB, an outcome the
+   * engine could not produce. The census and the manager are required to
+   * classify by the same rule — `resolveClass` and `pickLadderLabel` exist as
+   * shared code precisely so they cannot drift — and the recency axis was the
+   * one place that requirement did not hold.
+   *
+   * Read here rather than pushed down into the engine because it is a host fact
+   * in exactly the sense the module header describes: the platform must not
+   * learn that a photograph has a capture date. Widening a query this function
+   * already makes per candidate, rather than adding a new one to the hot path.
+   */
+  async function recencyInputs(
+    candidate: BlobCandidate,
+  ): Promise<{ recencyAtMs: number | null; lastOpenedAtMs: number | null }> {
+    // Whatever the caller already knew wins. `MobileNode.fetchBlob` passes
+    // `lastOpenedAtMs: Date.now()` because opening a photo is the event, and it
+    // knows that better than any row does.
+    const lastOpenedAtMs =
+      candidate.lastOpenedAtMs ?? lastOpenedFromIndex(candidate.recordId);
+    if (candidate.recencyAtMs !== null) {
+      return { recencyAtMs: candidate.recencyAtMs, lastOpenedAtMs };
+    }
+    return { recencyAtMs: await capturedAtMs(candidate), lastOpenedAtMs };
+  }
+
+  /** The most recent open across every blob this node holds for the record. */
+  function lastOpenedFromIndex(recordId: string): number | null {
+    let latest: number | null = null;
+    for (const entry of index.entriesOfRecord(recordId)) {
+      if (entry.lastOpenedAtMs === null) continue;
+      if (latest === null || entry.lastOpenedAtMs > latest) latest = entry.lastOpenedAtMs;
+    }
+    return latest;
+  }
+
+  /**
+   * Capture time in epoch ms from the record's per-category metadata, or null.
+   *
+   * Null on every uncertainty — an app-syncable row (no shared-record metadata
+   * exists for one), a category with no `captured_at` column, a missing row, an
+   * unparseable value, a table that would not read. That is the fail-open
+   * direction *for data*: unknown makes `recent-only` fetch, and the census
+   * agrees ("an unknown date must not read as 'ancient', or every undated
+   * record falls outside every recency window and is quietly marked for
+   * eviction"). Missing metadata must not become deleted bytes.
+   *
+   * Deliberately **not** falling back to the record's `createdAt`. That column
+   * holds a serialized HLC, not a date, and reading it as a timestamp yields a
+   * number that is meaningless and — worse — plausible.
+   */
+  async function capturedAtMs(candidate: BlobCandidate): Promise<number | null> {
+    if (candidate.appId !== null || candidate.type === null) return null;
+    // Asked of the type system rather than hard-coded to image and video: which
+    // categories carry a capture date is the core type table's business, and a
+    // category gaining one should start working here without an edit.
+    const category = getCategory(typeCategory(candidate.type));
+    if (!category?.metadataColumns.some((c) => c.name === CAPTURED_AT_COLUMN)) {
+      return null;
+    }
+    try {
+      const recordId = candidate.recordId as StarkeepId;
+      const rows = await databaseAdapter.getMetadataByIds(candidate.type, [recordId]);
+      return parseCapturedAt(rows.get(recordId)?.[CAPTURED_AT_COLUMN]);
+    } catch (err) {
+      console.warn(
+        `[residency] could not read capture time for ${candidate.recordId}; treating it as unknown: ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Whether these bytes may only be dropped once a replica is confirmed.
    *
    * The question is "can this be made again?", and only one fact answers it:
@@ -413,6 +533,17 @@ export function createResidencyManager(
    * that app's total — but it is not derived from anything, and this node may
    * hold the only copy. Reading proof off the namespace would have made every
    * app's own files freely deletable.
+   *
+   * ## What it means that only arrivals reach this
+   *
+   * Answered on `reserve` and `noteArrival` — the inbound paths — so the
+   * question is asked only about bytes the index knows about. Bytes it does not
+   * know about are not *unprotected*, they are **invisible**: the eviction pass
+   * draws its candidates from this table, so a blob with no row is never offered
+   * for deletion at all. The direction of that gap is the safe one — it costs
+   * disk, not data — and `reconcile` is what surfaces those keys so a host can
+   * charge them to a budget deliberately rather than have them quietly not
+   * count.
    */
   function requiresProof(candidate: BlobCandidate, cls: ResolvedSizeClass): boolean {
     if (candidate.appId !== null) return true;
@@ -421,8 +552,12 @@ export function createResidencyManager(
 
   async function decide(candidate: BlobCandidate): Promise<ResidencyVerdict> {
     const { sizeClass, deniedHere, overrides } = await labelInputs(candidate);
+    // The recency axis reads two dates the engine cannot know. Without this the
+    // `recent-only` branch of `decideResidency` could never decline anything —
+    // see {@link recencyInputs}.
+    const enriched: BlobCandidate = { ...candidate, ...(await recencyInputs(candidate)) };
     return decideResidency({
-      candidate,
+      candidate: enriched,
       sizeClass,
       policy,
       // An `exclude` rule is a *constraint*, not a negative pin. Routing it
@@ -442,22 +577,46 @@ export function createResidencyManager(
     classOf,
     isPinned,
 
-    noteArrival(candidate: BlobCandidate, sizeClass: ResolvedSizeClass | null): void {
+    async noteArrival(
+      candidate: BlobCandidate,
+      verdict: ResidencyVerdict | null,
+    ): Promise<void> {
       // A null class means the caller had no residency decision to hand over —
       // the conservative reading is the thing itself, which is what an
       // unclassified arrival has always been charged as.
-      const cls = sizeClass ?? originalClassFor(candidate.type);
+      const cls = verdict?.sizeClass ?? originalClassFor(candidate.type);
+      // Resolved again rather than carried from the decision, because there is
+      // no decision on every path here — `fetchBlob` lands bytes without one.
+      // The row's `recency_at_ms` is the eviction pass's third ordering term, so
+      // a null here is not cosmetic: it collapses "oldest first" into whatever
+      // order the index happens to return.
+      const dates = await recencyInputs(candidate);
       index.add({
         recordId: candidate.recordId,
         objectStorageKey: candidate.objectStorageKey,
         sizeBytes: candidate.sizeBytes,
         sizeClass: cls.qualified,
         namespace: cls.namespace,
-        pinned: isPinned(candidate.recordId),
+        // The pin the *decision* resolved, which is the only one that saw both
+        // sources. Falling back to the table alone — as this used to do
+        // unconditionally — dropped every rule-derived pin on the floor, so a
+        // record a rule had just made this node fetch past its budget landed
+        // with `pinned = 0` and was evictable by the very pass the rule existed
+        // to survive. The fallback remains for `fetchBlob`, which synthesizes a
+        // verdict it never asked the policy for.
+        pinned: verdict?.pinned ?? isPinned(candidate.recordId),
         // Set by the derivation work (item 7), which is what knows whether
         // these bytes are still needed as an input here. Until then nothing is
         // marked protected, and the durability predicate is what stands
         // between the eviction pass and a last copy.
+        //
+        // That used to be a load-bearing dependency between two unfinished
+        // things: `protectedLocally` waits on item 7, *and* the pass skipped the
+        // durability check for renditions on the grounds that item 7 could remake
+        // them. Both halves assumed a capability nobody had.
+        // `EvictionRequest.canRederive` now defaults false, so the missing
+        // derivation makes the pass more careful rather than silently less, and
+        // this field can stay honest about being unimplemented.
         protectedLocally: false,
         // A rendition can be re-derived; nothing else here can. Decided from
         // the record's structure rather than by testing the class name for an
@@ -466,14 +625,51 @@ export function createResidencyManager(
         // a class rename breaking it is that originals silently become
         // evictable.
         requiresDurabilityProof: requiresProof(candidate, cls),
-        recencyAtMs: candidate.recencyAtMs,
-        lastOpenedAtMs: candidate.lastOpenedAtMs,
+        recencyAtMs: dates.recencyAtMs,
+        lastOpenedAtMs: dates.lastOpenedAtMs,
         addedAtMs: Date.now(),
       });
     },
 
+    reserve(candidate: BlobCandidate, verdict: ResidencyVerdict): void {
+      const cls = verdict.sizeClass ?? originalClassFor(candidate.type);
+      index.reserve({
+        recordId: candidate.recordId,
+        objectStorageKey: candidate.objectStorageKey,
+        sizeBytes: candidate.sizeBytes,
+        sizeClass: cls.qualified,
+        namespace: cls.namespace,
+        pinned: verdict.pinned ?? isPinned(candidate.recordId),
+        protectedLocally: false,
+        requiresDurabilityProof: requiresProof(candidate, cls),
+        // Deliberately not resolved here. A reservation exists for a few seconds
+        // and is replaced by `noteArrival`, which reads them properly; spending
+        // a metadata query per in-flight blob to populate a row that is about to
+        // be overwritten would put a read on the hot path for nothing.
+        recencyAtMs: null,
+        lastOpenedAtMs: null,
+        addedAtMs: Date.now(),
+      });
+    },
+
+    releaseReservation(objectStorageKey: string): void {
+      index.release(objectStorageKey);
+    },
+
+    reconcile(): Promise<ReconcileReport> {
+      return index.reconcile(localObjectStorage);
+    },
+
+    wasEvicted(objectStorageKey: string): boolean {
+      return index.wasEvicted(objectStorageKey);
+    },
+
     noteDeparture(objectStorageKey: string): void {
-      index.remove(objectStorageKey);
+      // Departed, not forgotten — same reason as the eviction pass. "This node
+      // let these bytes go" and "this node never had them" are different facts,
+      // and only the first one tells `residencyOf` that no sync round will bring
+      // them back.
+      index.markDeparted(objectStorageKey);
     },
 
     setPinned(recordId: string, pinned: boolean): void {
@@ -558,16 +754,47 @@ export function createResidencyManager(
  */
 export function residencyHooks(manager: ResidencyManager): {
   decide(candidate: BlobCandidate): Promise<ResidencyVerdict>;
-  onLanded(candidate: BlobCandidate, verdict: ResidencyVerdict): void;
+  onLanded(candidate: BlobCandidate, verdict: ResidencyVerdict): Promise<void>;
+  reserve(candidate: BlobCandidate, verdict: ResidencyVerdict): void;
+  release(objectStorageKey: string): void;
   classOf(candidate: BlobCandidate): Promise<ResolvedSizeClass>;
 } {
   return {
     decide: (candidate) => manager.decide(candidate),
-    onLanded: (candidate, verdict) => manager.noteArrival(candidate, verdict.sizeClass),
+    onLanded: (candidate, verdict) => manager.noteArrival(candidate, verdict),
+    // The pair that makes one budget bind across several engines sharing this
+    // manager, rather than each of them landing into the same apparent room.
+    reserve: (candidate, verdict) => manager.reserve(candidate, verdict),
+    release: (objectStorageKey) => manager.releaseReservation(objectStorageKey),
     // Class without decision, for the on-demand fetch: it must charge the right
     // budget without asking a policy that is not entitled to refuse it.
     classOf: (candidate) => manager.classOf(candidate),
   };
+}
+
+/** The per-category metadata column holding a record's own date. */
+const CAPTURED_AT_COLUMN = "captured_at";
+
+/**
+ * A stored `captured_at` as epoch ms, or null for anything unusable.
+ *
+ * The column is a SQL `timestamp`, which SQLite hands back as a string with no
+ * zone. `Date.parse` reads a bare `2024-01-01T10:00:00` as *local* time while
+ * the census's `strftime('%s', ...)` reads the same string as UTC, so the two
+ * would disagree by the operator's offset — up to fourteen hours, which is
+ * enough to move a record across a day boundary at the edge of a recency
+ * window. A zone is appended when none is present so both read it the same way.
+ */
+function parseCapturedAt(value: unknown): number | null {
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value.getTime() : null;
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const text = value.trim().replace(" ", "T");
+  const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text}Z`;
+  const parsed = Date.parse(zoned);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /**

@@ -167,7 +167,7 @@ export function makeMockAppSource(
       }
 
       if (entry.op === "update") {
-        const where = requireKeyedWhere(entry, "update");
+        const where = requireKeyedWhere(entry, "update", pkColumnsFor(entry.table));
         const patch = { ...(entry.row ?? {}) };
         if (Object.keys(patch).length === 0) return;
         if (patch["updated_at"]) {
@@ -181,11 +181,29 @@ export function makeMockAppSource(
         return;
       }
 
-      const where = requireKeyedWhere(entry, "delete");
+      const pkColumns = pkColumnsFor(entry.table);
+      const where = requireKeyedWhere(entry, "delete", pkColumns);
       const ts =
         (entry.row?.["updated_at"] as string | undefined) ??
         serializeHLC(entry.timestamp);
-      for (const row of matching(entry.appId, entry.table, where)) {
+      const found = matching(entry.appId, entry.table, where);
+      if (found.length === 0 && entry.row !== undefined && pkColumns.length > 0) {
+        // A tombstone for a row this store never held still has to land, or the
+        // two sides count different numbers of rows in the same bucket forever
+        // — see `applyDelete` in the SQLite applier for what that costs. The
+        // wire form carries the whole row, so there is nothing to invent.
+        const materialized: Record<string, unknown> = {
+          ...entry.row,
+          updated_at: ts,
+          deleted_at: ts,
+        };
+        if (pkColumns.every((c) => materialized[c] !== undefined)) {
+          materialized["node_id"] = nodeIdOf(ts, entry);
+          rows.set(keyFor(entry.appId, entry.table, materialized), materialized);
+          return;
+        }
+      }
+      for (const row of found) {
         if (updatedAtOf(row) >= ts) continue;
         row["deleted_at"] = ts;
         row["updated_at"] = ts;

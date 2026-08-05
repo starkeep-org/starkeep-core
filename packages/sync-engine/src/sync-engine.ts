@@ -1,5 +1,6 @@
 import {
   compareHLC,
+  isCategoryId,
   type AnyRecord,
   type HLCTimestamp,
   type RecordLabel,
@@ -49,6 +50,39 @@ const DEFAULT_TRANSFER_CONCURRENCY = 4;
  * bounds a pathological loop.
  */
 const DEFAULT_MAX_ROUNDS = 10_000;
+
+/**
+ * How many consecutive drained syncs may re-ship an author's range without the
+ * peer's coverage ever moving past it, before this node stops pushing that
+ * author and says so.
+ *
+ * The backstop for the failure R12 describes, and deliberately independent of
+ * its mechanism. A responder that cannot read one of its own tables omits that
+ * table's authors from its coverage report, so the requester's next scan starts
+ * from the beginning of that author's history — and every signal reads as
+ * success: `progressed` is true because re-shipping *is* progress, `sync()`
+ * returns `complete: true`, and the supervisor resets its backoff and does it
+ * again 30 seconds later. `coverageComplete` closes that specific hole; this
+ * catches the shape of it without anyone having predicted the mechanism,
+ * including the case that field cannot cover — a peer that reports complete
+ * coverage honestly, applies what it receives, and loses it again.
+ *
+ * Three rather than one because the honest reasons to re-ship a range exist and
+ * are transient: a response lost after the peer applied it, a round abandoned
+ * mid-flight, a repair floor doing exactly what it is for. Three consecutive
+ * *drained* syncs is well past any of those.
+ *
+ * ## Why this counter is not persisted
+ *
+ * It lives on the engine instance, so a restart forgets it and the node tries
+ * again. That is the right trade: the cost of forgetting is a few more redundant
+ * re-ships before the count rebuilds, and the alternative is a schema in
+ * `SyncStateStore` holding a diagnostic — a durable record of a suspicion, which
+ * is a thing to have to migrate and reason about forever. The condition is
+ * standing rather than transient (a per-app grant, schema drift), so it will
+ * reproduce.
+ */
+const RESHIP_STRIKES_BEFORE_REFUSAL = 3;
 import type {
   AppSyncableRowEntry,
   ExchangeOptions,
@@ -68,9 +102,12 @@ import { createFileSyncEngine } from "./file-sync-engine.js";
 import {
   applyRepairFloors,
   bucketsPeerIsMissing,
+  digestIsScoped,
+  foldDigestScopes,
   mergeDigestBuckets,
   raiseInboundFloors,
   repairFloorsFor,
+  scopeDigestBuckets,
   totalRows,
   DEFAULT_BUCKET_PREFIX_LENGTH,
   type DigestBucket,
@@ -82,7 +119,11 @@ import {
   type RoundItem,
   type StreamTruncation,
 } from "./round-cut.js";
-import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
+import type {
+  BlobCandidate,
+  ResidencyVerdict,
+  ResolvedSizeClass,
+} from "./residency-policy.js";
 
 /**
  * What the outbound backlog check found.
@@ -102,11 +143,20 @@ interface OutboundBacklog {
 /**
  * The shape of "no check was performed", which is not the shape of "checked and
  * found nothing wrong". Every guard in `verify()` that declines to compare
- * returns this with `supported: false`, so a caller cannot mistake a refusal
- * for a clean bill of health.
+ * returns this, so a caller cannot mistake a refusal for a clean bill of health.
+ *
+ * `supported: false` is **in the constant**, not added by each call site. It was
+ * the other way round — a constant declaring `true` and five callers each
+ * remembering to spread it and override the field. All five did remember. The
+ * sixth would not have, and the failure mode of forgetting is the worst one
+ * available here: a verification that answers "clean" when nothing was verified
+ * is how a divergence stays undiscovered, which is the entire thing `verify()`
+ * exists to prevent. A caller that genuinely checked says `supported: true`
+ * explicitly, which is one site rather than five and reads as a claim rather
+ * than as the absence of an override.
  */
 const NOT_VERIFIED: VerifyResult = {
-  supported: true,
+  supported: false,
   localRows: 0,
   peerRows: 0,
   divergentBuckets: 0,
@@ -156,6 +206,15 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   const changeNotifier = createChangeNotifier();
   const fileSyncEngine = createFileSyncEngine();
 
+  /**
+   * Per author: the highest position this node has shipped, and how many
+   * consecutive drained syncs have shipped at-or-below it without the peer's
+   * coverage ever reaching it. See {@link RESHIP_STRIKES_BEFORE_REFUSAL}.
+   */
+  const reshipWatch = new Map<string, { shipped: HLCTimestamp; strikes: number }>();
+  /** Authors this node has stopped pushing, because re-shipping is not working. */
+  const refusedAuthors = new Set<string>();
+
   async function loadOwnWatermarks(): Promise<Watermarks> {
     if (!syncState) return {};
     return syncState.getWatermarks();
@@ -194,7 +253,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     if (syncSharedRecords) {
       scopes.push(SHARED_DIGEST_SCOPE);
       try {
-        buckets.push(...(await localDatabaseAdapter.bucketDigest(prefixLength)));
+        buckets.push(
+          ...scopeDigestBuckets(
+            await localDatabaseAdapter.bucketDigest(prefixLength),
+            SHARED_DIGEST_SCOPE,
+          ),
+        );
       } catch (err) {
         console.warn(`[sync] bucketDigest failed for shared records: ${(err as Error).message}`);
         complete = false;
@@ -203,14 +267,18 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     if (appSyncableSource) {
       for (const ns of appSyncableSource.namespaces.list()) {
         for (const tableInfo of ns.tables) {
-          scopes.push(`${ns.appId}.${tableInfo.name}`);
+          const scope = `${ns.appId}.${tableInfo.name}`;
+          scopes.push(scope);
           try {
             buckets.push(
-              ...(await appSyncableSource.applier.bucketDigest(
-                ns.appId,
-                tableInfo.name,
-                prefixLength,
-              )),
+              ...scopeDigestBuckets(
+                await appSyncableSource.applier.bucketDigest(
+                  ns.appId,
+                  tableInfo.name,
+                  prefixLength,
+                ),
+                scope,
+              ),
             );
           } catch (err) {
             console.warn(
@@ -246,23 +314,40 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       await loadPeerWatermarks(),
       await loadRepairFloors(),
     );
-    if (syncSharedRecords) {
-      if ((await localDatabaseAdapter.querySince(peerWatermarks, 1)).rows.length > 0) {
-        return { owed: true, readable: true };
-      }
-      if ((await localDatabaseAdapter.queryLabelsSince(peerWatermarks, 1)).rows.length > 0) {
-        return { owed: true, readable: true };
-      }
-    }
     // `readable` exists because the two callers want opposite things from a
-    // table that would not read. `sync()` only needs to know whether to spend a
+    // stream that would not read. `sync()` only needs to know whether to spend a
     // pull-first round, and guessing "no backlog" there costs nothing — the
-    // pushing round that follows reads the same table and logs the failure
+    // pushing round that follows reads the same rows and logs the failure
     // properly. `verify()` is about to compare row counts and arm repairs off
     // the answer, and for that a swallowed error is a comparison it should have
-    // declined: an unreadable table would read as a drained outbound side, so
+    // declined: an unreadable stream would read as a drained outbound side, so
     // every bucket it holds gets reported as loss on the peer's end.
     let readable = true;
+    // The shared-record probes are inside the guard for the same reason the
+    // app-table loop below is, and their absence from it was the whole of R5:
+    // on the Drive channel these are the *only* two streams, so `readable` could
+    // never be false there and `verify()`'s unreadable-outbound guard could
+    // never fire. Worse, both callers got an exception rather than the
+    // fail-safe answer — including the one whose comment promised the pushing
+    // round would log it properly, which it does not: it throws too.
+    // `localBucketDigest` already catches this exact failure for shared
+    // records, so leaving it uncaught here meant one fault produced
+    // `supported: false` through one guard and a thrown round through the other.
+    if (syncSharedRecords) {
+      try {
+        if ((await localDatabaseAdapter.querySince(peerWatermarks, 1)).rows.length > 0) {
+          return { owed: true, readable: true };
+        }
+        if ((await localDatabaseAdapter.queryLabelsSince(peerWatermarks, 1)).rows.length > 0) {
+          return { owed: true, readable: true };
+        }
+      } catch (err) {
+        console.warn(
+          `[sync] backlog check failed for shared records: ${(err as Error).message}`,
+        );
+        readable = false;
+      }
+    }
     if (appSyncableSource) {
       for (const ns of appSyncableSource.namespaces.list()) {
         for (const tableInfo of ns.tables) {
@@ -352,33 +437,48 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // syncSharedRecords=false and leave this empty — they carry only
       // app-specific rows.
       if (push && syncSharedRecords) {
-        const page = await localDatabaseAdapter.querySince(peerWatermarks, maxItems);
-        truncations.push(page.truncated);
-        for (const rec of page.rows) {
-          candidates.push({
-            value: { kind: "record", record: rec },
-            hlc: rec.updatedAt,
-            // A tombstone or a record with no blob transfers no bytes, so it
-            // must not be charged for them — otherwise a delete-heavy round
-            // budgets as if it were re-uploading the library.
-            bytes: manifestForRecord(rec) ? rec.sizeBytes : 0,
-          });
-        }
+        // Caught for the same reason the app-table scan below is, and the
+        // absence of this was the other half of R5: an unreadable shared-record
+        // stream threw straight out of `exchange()` and out of `sync()`, so the
+        // Drive channel had no fail-safe path at all while every per-app channel
+        // did. A stream that would not read might hold rows older than anything
+        // else this round would ship, for any author — so the round ships
+        // nothing and asks to be retried, rather than shipping a prefix with a
+        // hole underneath it.
+        try {
+          const page = await localDatabaseAdapter.querySince(peerWatermarks, maxItems);
+          truncations.push(page.truncated);
+          for (const rec of page.rows) {
+            candidates.push({
+              value: { kind: "record", record: rec },
+              hlc: rec.updatedAt,
+              // A tombstone or a record with no blob transfers no bytes, so it
+              // must not be charged for them — otherwise a delete-heavy round
+              // budgets as if it were re-uploading the library.
+              bytes: manifestForRecord(rec) ? rec.sizeBytes : 0,
+            });
+          }
 
-        // Labels are shared data too, so the same channel rule and the same
-        // delta scan apply. A label is a row, never a blob, so it costs no
-        // byte budget.
-        const labelPage = await localDatabaseAdapter.queryLabelsSince(
-          peerWatermarks,
-          maxItems,
-        );
-        truncations.push(labelPage.truncated);
-        for (const label of labelPage.rows) {
-          candidates.push({
-            value: { kind: "label", label },
-            hlc: label.updatedAt,
-            bytes: 0,
-          });
+          // Labels are shared data too, so the same channel rule and the same
+          // delta scan apply. A label is a row, never a blob, so it costs no
+          // byte budget.
+          const labelPage = await localDatabaseAdapter.queryLabelsSince(
+            peerWatermarks,
+            maxItems,
+          );
+          truncations.push(labelPage.truncated);
+          for (const label of labelPage.rows) {
+            candidates.push({
+              value: { kind: "label", label },
+              hlc: label.updatedAt,
+              bytes: 0,
+            });
+          }
+        } catch (err) {
+          console.warn(
+            `[sync] exchange scan failed for shared records: ${(err as Error).message}`,
+          );
+          unreadableStream = true;
         }
       }
 
@@ -503,7 +603,23 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // that a repair floor may be the only thing still asking for. Retiring a
       // floor on such a round is how a repair reports success and does nothing.
       const truncatedByFailure = new Set<string>();
+      // Highest position actually shipped per author this round — what the
+      // repeat-shipment backstop compares against the peer's coverage. Recorded
+      // from what *shipped*, not from what the scan selected, so a shipment cut
+      // short by a failed transfer is not credited with the part that never left.
+      const shippedHighWater: Record<string, HLCTimestamp> = {};
+      // Authors this node has stopped pushing this round. Distinct from
+      // `truncatedByFailure`: nothing failed, we are declining to try again.
+      const suppressedThisRound = new Set<string>();
       for (const [nodeId, items] of outboundByNode) {
+        if (refusedAuthors.has(nodeId)) {
+          // Re-shipping this author has not worked for several drained syncs
+          // running, so stop. Continuing is not free — it is a full re-scan of
+          // that author's history every tick — and it is not achieving anything
+          // that the last three attempts did not also fail to achieve.
+          suppressedThisRound.add(nodeId);
+          continue;
+        }
         for (const item of items) {
           // `false` only for an item that had a blob and failed it; an item
           // with no blob was never entered into the map at all.
@@ -518,7 +634,17 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           } else {
             outboundAppRows.push(item.entry);
           }
+          const hlc = outboundItemHlc(item);
+          const seen = shippedHighWater[nodeId];
+          if (seen === undefined || compareHLC(hlc, seen) > 0) {
+            shippedHighWater[nodeId] = hlc;
+          }
         }
+      }
+      if (suppressedThisRound.size > 0) {
+        console.warn(
+          `[sync] not pushing ${suppressedThisRound.size} author(s) — repeatedly re-shipped without the peer's coverage advancing: ${[...suppressedThisRound].join(", ")}`,
+        );
       }
 
       const response = await transport.exchange({
@@ -599,10 +725,40 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         if (!manifest) return "landed";
         let verdict: ResidencyVerdict | null = null;
         if (residency && candidate) {
-          verdict = await residency.decide(candidate);
+          // Both residency hooks are caught, because both are *host callbacks
+          // doing real I/O* — `decide` runs a label query plus a pin lookup,
+          // `onLanded` writes a row — and they were the one fallible operation
+          // in this file with no catch. Every comparable one is folded into the
+          // contiguous-prefix rule instead: `scanSince`, `bucketDigest`, the
+          // blob transfer, the app-row apply. A throw here propagated out of
+          // `exchange()` and out of `sync()`, which on a handset means a
+          // transient SQLite error takes down the whole round rather than
+          // holding one author's watermark for one tick.
+          try {
+            verdict = await residency.decide(candidate);
+          } catch (err) {
+            console.warn(
+              `[sync] residency decide failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
+            );
+            return "failed";
+          }
           if (verdict.decision === "elide") {
             elidedCount += 1;
             return "elided";
+          }
+          // Charge the budget now, and undo it below if the bytes do not come.
+          // The accounting properly moves on arrival, and still does — this is a
+          // provisional row that `onLanded` replaces. It exists because the
+          // budget is shared across engines that tick independently, so between
+          // this decision and its arrival another engine can make the same
+          // decision against the same apparent room. See `ResidencyHooks.reserve`.
+          try {
+            await residency.reserve?.(candidate, verdict);
+          } catch (err) {
+            console.warn(
+              `[sync] residency reserve failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
+            );
+            return "failed";
           }
         }
         const ok = await transferBlobSafe(
@@ -613,14 +769,54 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           "download",
           itemId,
         );
-        if (!ok) return "failed";
+        if (!ok) {
+          await releaseQuietly(candidate);
+          return "failed";
+        }
         // Accounting moves only once the bytes are here. Crediting a decision
         // rather than an arrival would let a node with a flaky link slowly
         // convince itself it is full of things it doesn't have.
+        //
+        // A failure here reports `failed` even though the bytes did arrive, and
+        // that is the right way round: the watermark holds, the next round finds
+        // the blob already present (`transferFile` short-circuits on
+        // `destination.has`), and the accounting is retried. The opposite —
+        // calling it landed — leaves bytes on disk that no budget knows about,
+        // which is R2's defect arriving through the error path.
         if (residency?.onLanded && candidate && verdict) {
-          await residency.onLanded(candidate, verdict);
+          try {
+            await residency.onLanded(candidate, verdict);
+          } catch (err) {
+            console.warn(
+              `[sync] residency accounting failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
+            );
+            // The reservation goes too. Leaving it would charge the budget for
+            // bytes nothing will ever claim as landed — a permanent phantom that
+            // only a reconcile could clear.
+            await releaseQuietly(candidate);
+            return "failed";
+          }
         }
         return "landed";
+      }
+
+      /**
+       * Drop a reservation, never letting that failure become the round's.
+       *
+       * Called on paths that are already reporting a failure, where a second one
+       * has nothing to add: the transfer did not happen, the caller is about to
+       * hold the watermark, and the worst case of a lost release is a budget
+       * that overstates until the next reconcile.
+       */
+      async function releaseQuietly(candidate: BlobCandidate | null): Promise<void> {
+        if (!residency?.release || !candidate) return;
+        try {
+          await residency.release(candidate.objectStorageKey);
+        } catch (err) {
+          console.warn(
+            `[sync] residency release failed for ${candidate.objectStorageKey}: ${(err as Error).message}`,
+          );
+        }
       }
 
       // Authors whose inbound run broke — a blob that would not download, a row
@@ -775,13 +971,30 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         if (!sameWatermarks(ownWatermarks, nextOwnWatermarks)) progressed = true;
         await syncState.setWatermarks(nextOwnWatermarks);
 
-        // Authoritative replace (never merge): the responder's coverage
-        // report is the truth about what it holds. Replacing lets the map
-        // move *down* after peer-side loss, which is what triggers re-ship.
-        if (!sameWatermarks(priorPeerWatermarks, response.responderWatermarks)) {
+        // Authoritative replace when the report is whole; merge upward when it
+        // is not.
+        //
+        // Replacing is what lets the map move *down* after peer-side loss, and
+        // that is the behaviour a re-ship depends on — it stays exactly as it
+        // was for `coverageComplete: true`, which is every ordinary round.
+        //
+        // `coverageComplete: false` says the responder could not read some scope
+        // of its own coverage, so the map is a lower bound rather than the
+        // truth. Replacing with a lower bound is what re-shipped the requester's
+        // whole library every tick: an omitted author became a floor of
+        // `undefined` and the next scan started from the beginning of that
+        // author's history. Taking `max(prior, reported)` instead can only fail
+        // in the harmless direction — an omitted table understates the union, it
+        // cannot invent coverage the peer does not have, and if the peer really
+        // has lost rows the *next* complete report lowers the map properly.
+        const nextPeerWatermarks =
+          response.coverageComplete === false
+            ? mergeWatermarksUpward(priorPeerWatermarks, response.responderWatermarks)
+            : response.responderWatermarks;
+        if (!sameWatermarks(priorPeerWatermarks, nextPeerWatermarks)) {
           progressed = true;
         }
-        await syncState.setPeerWatermarks(response.responderWatermarks);
+        await syncState.setPeerWatermarks(nextPeerWatermarks);
 
         // Retire repair floors, per author, once a **pushing** round has
         // drained the outbound side *and that author's shipment was not cut
@@ -878,10 +1091,28 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // local transfer, so on the first two terms alone it reported a
         // finished sync while nothing had ever landed — F2's silent success,
         // reached from the other end of the wire.
+        //
+        // A suppressed author counts too. Nothing failed and nothing was
+        // selected-then-dropped, but rows this node holds are not reaching the
+        // peer and will not without intervention — reporting `complete: true`
+        // over that is the same silent success the other three terms exist to
+        // prevent.
         blocked:
           truncatedByFailure.size > 0 ||
           inboundBrokeFor.size > 0 ||
-          haltedByPeer.size > 0,
+          haltedByPeer.size > 0 ||
+          suppressedThisRound.size > 0,
+        shippedHighWater,
+        ...(suppressedThisRound.size > 0
+          ? { refusedAuthors: [...suppressedThisRound] }
+          : {}),
+        ...(response.coverageComplete === false
+          ? {
+              peerCoverageDegraded:
+                response.coverageDetail ??
+                "the peer could not report its own coverage for one or more scopes",
+            }
+          : {}),
       };
   }
 
@@ -908,9 +1139,21 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // to it. Calling `decide` here would both let a policy refuse a photo
       // somebody just opened and record a second decision that never happened.
       const forAccounting = candidate ?? candidateForManifest(manifest);
-      const sizeClass = residency?.classOf
-        ? await residency.classOf(forAccounting)
-        : null;
+      // Caught, and unlike the round's pull this does **not** abandon the
+      // operation: someone is waiting to see their photo, and refusing to fetch
+      // it because a class could not be resolved would trade a visible failure
+      // for an accounting detail. A null class is already a defined input —
+      // `noteArrival` charges it as the thing itself, the conservative reading.
+      let sizeClass: ResolvedSizeClass | null = null;
+      if (residency?.classOf) {
+        try {
+          sizeClass = await residency.classOf(forAccounting);
+        } catch (err) {
+          console.warn(
+            `[sync] residency classOf failed for ${manifest.objectStorageKey}; charging it as an original: ${(err as Error).message}`,
+          );
+        }
+      }
 
       const ok = await transferBlobSafe(
         manifest,
@@ -929,11 +1172,23 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // defensible behaviour, so this can push a class over and let eviction
       // sort it out later.
       if (residency?.onLanded) {
-        await residency.onLanded(forAccounting, {
-          decision: "fetch",
-          sizeClass,
-          reason: "explicit-request",
-        });
+        // Same asymmetry as `classOf` above: the bytes are on disk and the
+        // caller's question — "can I show this photo?" — is answered yes. An
+        // accounting write that failed leaves the budget understating this
+        // node's disk until the index is rebuilt, which is a real cost and a
+        // smaller one than telling someone their photo did not arrive when it
+        // did.
+        try {
+          await residency.onLanded(forAccounting, {
+            decision: "fetch",
+            sizeClass,
+            reason: "explicit-request",
+          });
+        } catch (err) {
+          console.warn(
+            `[sync] residency accounting failed for on-demand fetch of ${manifest.objectStorageKey}: ${(err as Error).message}`,
+          );
+        }
       }
       return true;
     },
@@ -947,6 +1202,32 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         elided: 0,
         complete: false,
         stalled: false,
+      };
+
+      // Checked here as well as at the top of the loop, because the loop is not
+      // the first thing that runs: an already-aborted signal used to buy one
+      // full exchange — the pull-only round below — before anything looked at
+      // it. On a handset that is a real request over a real radio, issued for a
+      // caller that had already gone away.
+      if (options?.signal?.aborted) return totals;
+
+      // Highest position shipped per author across this whole sync, for the
+      // repeat-shipment backstop below. Accumulated across rounds rather than
+      // judged per round: within one sync the rounds walk *forward* through an
+      // author's range, so a per-round comparison would see ordinary progress as
+      // a repeat. What the backstop is looking for is the next sync starting
+      // over from the same place.
+      const shippedThisSync = new Map<string, HLCTimestamp>();
+      const noteShipped = (result: ExchangeResult): void => {
+        for (const [nodeId, hlc] of Object.entries(result.shippedHighWater ?? {})) {
+          const seen = shippedThisSync.get(nodeId);
+          if (seen === undefined || compareHLC(hlc, seen) > 0) {
+            shippedThisSync.set(nodeId, hlc);
+          }
+        }
+        if (result.peerCoverageDegraded) {
+          totals.peerCoverageDegraded = result.peerCoverageDegraded;
+        }
       };
 
       // Refresh before pushing, but only when there is something to push.
@@ -969,6 +1250,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         totals.rounds += 1;
         totals.applied += result.applied;
         totals.elided += result.elided;
+        noteShipped(result);
         options?.onRound?.(result, totals.rounds);
         pullFirst = true;
       }
@@ -980,6 +1262,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         totals.applied += result.applied;
         totals.shipped += result.shipped;
         totals.elided += result.elided;
+        noteShipped(result);
         options?.onRound?.(result, totals.rounds);
 
         // Drained means drained in every sense: nothing left to scan on either
@@ -1021,10 +1304,56 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
+      // The repeat-shipment backstop, judged once per sync rather than per
+      // round — see {@link RESHIP_STRIKES_BEFORE_REFUSAL}.
+      //
+      // Gated on the sync having drained, because that is the condition that
+      // makes a repeat meaningful. A sync abandoned by its signal, or stopped by
+      // the round cap, has an honest reason for not having got the range across
+      // and must not accumulate a strike for it. The failure this catches is
+      // specifically the one that looks like success: drained, complete, and
+      // about to do exactly the same thing again on the next tick.
+      if (totals.complete) {
+        const peerCoverage = await loadPeerWatermarks();
+        for (const [nodeId, shipped] of shippedThisSync) {
+          const covered = peerCoverage[nodeId];
+          if (covered !== undefined && compareHLC(covered, shipped) >= 0) {
+            // The peer took it. Whatever this author's history was, it is over.
+            reshipWatch.delete(nodeId);
+            refusedAuthors.delete(nodeId);
+            continue;
+          }
+          const prior = reshipWatch.get(nodeId);
+          // A strike only for shipping the same ground again. Shipping *higher*
+          // than last time is progress even without acknowledgement — a large
+          // backlog crossing in several syncs looks exactly like that, and
+          // counting it would refuse an author for being slow.
+          const repeated = prior !== undefined && compareHLC(shipped, prior.shipped) <= 0;
+          const strikes = repeated ? prior.strikes + 1 : 1;
+          reshipWatch.set(nodeId, { shipped, strikes });
+          if (strikes >= RESHIP_STRIKES_BEFORE_REFUSAL) refusedAuthors.add(nodeId);
+        }
+      }
+      if (refusedAuthors.size > 0) {
+        totals.refusedAuthors = [...refusedAuthors];
+        // Not `stalled`. Stalled means a round achieved nothing; this sync may
+        // have done plenty of other work. What it means is that some of this
+        // node's rows are not reaching the peer and no further retry is going to
+        // change that on its own.
+        totals.complete = false;
+      }
+
       return totals;
     },
 
     async verify(): Promise<VerifyResult> {
+      // A verification is the deliberate "try again": it is what a person runs
+      // when they think sync is wrong, and it is about to compare row counts and
+      // arm repairs off the answer. Holding a refusal across it would mean the
+      // repair it arms cannot ship. Clearing here rather than on a timer keeps
+      // the re-arm attached to an intent rather than to a schedule.
+      reshipWatch.clear();
+      refusedAuthors.clear();
       // Whether *we* still owe the peer anything, asked before the comparison
       // so the answer describes the same moment the digests do.
       const outboundBacklog = await hasOutboundBacklog();
@@ -1034,7 +1363,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // repair floors and reporting divergence against a question we never
         // answered. Same family as the digest guard further down.
         console.warn("[sync] outbound backlog unreadable; skipping verification");
-        return { ...NOT_VERIFIED, supported: false };
+        return NOT_VERIFIED;
       }
       // Ask the peer for its counts while sending nothing. This is an integrity
       // check, not a sync round: mixing it into a pushing round would make the
@@ -1075,7 +1404,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       if (!peerDigest) {
         // A peer that cannot answer is not a peer that agrees. Reporting
         // `divergentBuckets: 0` here would read as "verified clean".
-        return { ...NOT_VERIFIED, supported: false };
+        return NOT_VERIFIED;
       }
       if (
         response.digestPrefixLength !== undefined &&
@@ -1086,7 +1415,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         console.warn(
           `[sync] digest prefix mismatch (asked ${DEFAULT_BUCKET_PREFIX_LENGTH}, peer used ${response.digestPrefixLength}); skipping verification`,
         );
-        return { ...NOT_VERIFIED, supported: false };
+        return NOT_VERIFIED;
       }
 
       // The width we asked for, passed rather than defaulted: the two values
@@ -1099,7 +1428,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // arm an inbound repair over the whole library. "Not checked" is the
         // honest answer.
         console.warn("[sync] local digest incomplete; skipping verification");
-        return { ...NOT_VERIFIED, supported: false };
+        return NOT_VERIFIED;
       }
       if (
         response.digestScopes !== undefined &&
@@ -1113,9 +1442,21 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         console.warn(
           `[sync] digest scope mismatch (ours ${local.scopes.join(",")}, peer ${response.digestScopes.join(",")}); skipping verification`,
         );
-        return { ...NOT_VERIFIED, supported: false };
+        return NOT_VERIFIED;
       }
-      const localDigest = local.buckets;
+      // Compare at the finest granularity **both** sides can express.
+      //
+      // A scoped digest keys counts by `(author, bucket, scope)`, which is what
+      // stops one table's loss being masked by another table's write inside the
+      // same 3.1-day bucket. A peer running an older build sends unscoped
+      // buckets; comparing those against scoped ones would make every bucket
+      // disagree over a missing *field* and manufacture the whole-library repair
+      // the prefix-length and scope-set guards exist to prevent. So when either
+      // side cannot name its scopes, both fold — the compensating swap stays
+      // undetectable against such a peer, which is a limit of talking to it.
+      const bothScoped = digestIsScoped(local.buckets) && digestIsScoped(peerDigest);
+      const localDigest = bothScoped ? local.buckets : foldDigestScopes(local.buckets);
+      const comparablePeerDigest = bothScoped ? peerDigest : foldDigestScopes(peerDigest);
 
       // Two comparisons, because they are two different questions and only one
       // of them is a repair trigger.
@@ -1130,8 +1471,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // my library backed up?" — it says whether *we* are whole. Reusing the
       // repair trigger for that reads "clean" to a node that is itself missing
       // rows, which is precisely the case worth knowing about.
-      const missing = bucketsPeerIsMissing(localDigest, peerDigest);
-      const missingHere = bucketsPeerIsMissing(peerDigest, localDigest);
+      const missing = bucketsPeerIsMissing(localDigest, comparablePeerDigest);
+      const missingHere = bucketsPeerIsMissing(comparablePeerDigest, localDigest);
 
       // Neither comparison can tell a hole from a queue on its own, and the
       // backlog is what separates them. A bucket the peer is short on is loss
@@ -1178,7 +1519,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       return {
         supported: true,
         localRows: totalRows(localDigest),
-        peerRows: totalRows(peerDigest),
+        peerRows: totalRows(comparablePeerDigest),
         divergentBuckets: outboundDrained ? missing.length : 0,
         missingLocally: inboundDrained ? missingHere.length : 0,
         pendingUpload: outboundDrained ? 0 : missing.length,
@@ -1188,6 +1529,21 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
     changeNotifier,
   };
+}
+
+/**
+ * The higher of two positions per author, keeping authors present in either.
+ *
+ * Used only for a peer coverage report that admits it is incomplete. The
+ * ordinary path replaces the map outright, deliberately — see the call site.
+ */
+function mergeWatermarksUpward(prior: Watermarks, reported: Watermarks): Watermarks {
+  const out: Watermarks = { ...prior };
+  for (const [nodeId, hlc] of Object.entries(reported)) {
+    const current = out[nodeId];
+    if (current === undefined || compareHLC(hlc, current) > 0) out[nodeId] = hlc;
+  }
+  return out;
 }
 
 /** Two watermark maps holding the same positions for the same authors. */
@@ -1364,22 +1720,59 @@ function candidateForRecord(record: AnyRecord): BlobCandidate | null {
  * Used only when {@link SyncEngine.fetchBlob} is called without one. Every field
  * a manifest cannot supply is null, which reads as "unknown" throughout the
  * policy — and unknown makes the decider fetch rather than decline, the correct
- * direction for a path whose whole purpose is to fetch. A caller that holds the
- * record row should pass the real candidate so the class resolves properly and
- * the bytes are charged to the right budget.
+ * direction for a path whose whole purpose is to fetch.
+ *
+ * ## Two known weaknesses, so nobody has to rediscover them
+ *
+ * `recordId` is the object storage key, because a manifest has no record id.
+ * The resident-set row that results is therefore filed under a name
+ * `entriesOfRecord(realRecordId)` will never match, so pinning or opening that
+ * record will not reach it.
+ *
+ * `type` is derived from a MIME type, which is a *different vocabulary* from a
+ * Starkeep type id even though the two coincide for the common cases —
+ * `image/jpeg` reads identically as both. {@link starkeepTypeForMimeType}
+ * converts explicitly rather than relying on that coincidence, because the
+ * coincidence is one respec away from ending and the failure would be silent:
+ * an original charged to the wrong platform budget.
+ *
+ * **A caller holding the record row should pass the real candidate**, which
+ * fixes both. `MobileNode.fetchBlob` does.
  */
 function candidateForManifest(manifest: FileSyncManifest): BlobCandidate {
   return {
     recordId: manifest.objectStorageKey,
     objectStorageKey: manifest.objectStorageKey,
     sizeBytes: manifest.sizeBytes,
-    type: manifest.mimeType ?? null,
+    type: starkeepTypeForMimeType(manifest.mimeType),
     parentId: null,
     appId: null,
     originAppId: null,
     recencyAtMs: null,
     lastOpenedAtMs: null,
   };
+}
+
+/**
+ * A Starkeep type id for a MIME type, or null when there is no honest answer.
+ *
+ * The two vocabularies overlap and are not the same. A Starkeep type is
+ * `<category>/<format>` where the category comes from a fixed list; a MIME type
+ * is `<top-level>/<subtype>` from a much larger one. They agree for `image/*`
+ * and `video/*`, which is why passing a MIME type straight into a
+ * Starkeep-type field worked — `typeCategory` splits on the slash and gets the
+ * right answer for the wrong reason.
+ *
+ * Where the top level is not a Starkeep category (`application/pdf`,
+ * `text/csv`), this returns null rather than guessing. Null reads as "unknown"
+ * and lands the bytes in `starkeep:original:other`, which is exactly where
+ * `typeCategory` was sending them anyway — but now because this function said
+ * so, rather than because a fallback in a different module happened to.
+ */
+function starkeepTypeForMimeType(mimeType: string | undefined): string | null {
+  if (!mimeType) return null;
+  const [top] = mimeType.split("/");
+  return top !== undefined && isCategoryId(top) ? mimeType : null;
 }
 
 /** Same, for a row in the reserved `_starkeep_sync_records` table. */

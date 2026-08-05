@@ -47,6 +47,7 @@ export {
   retentionRowFor,
   hasRowFor,
   namespaceTotalFor,
+  KEEP_RULES,
   PLATFORM_NAMESPACE,
   type KeepRule,
   type SizeClassRetention,
@@ -65,6 +66,8 @@ export {
 
 export {
   createSqliteResidentSetIndex,
+  type ReconcileReport,
+  type ResidentArrival,
   type ResidentEntry,
   type ResidentSetIndex,
   type EvictionScope,
@@ -125,6 +128,7 @@ export {
 export { SyncError } from "./errors.js";
 export {
   sanitizeExchangeRequest,
+  sanitizeWatermarkMap,
   InvalidExchangeRequest,
   DEFAULT_RESPONDER_MAX_ITEMS,
   DEFAULT_RESPONDER_MAX_BYTES,

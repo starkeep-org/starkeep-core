@@ -33,6 +33,15 @@
  * ({@link SyncExchangeResponse.digestPrefixLength}). A requester that asked for
  * nonsense sees a width it did not ask for and refuses to compare, which is
  * already the right outcome and needs no error to reach it.
+ *
+ * ## The response direction reuses the rules, it does not restate them
+ *
+ * {@link sanitizeWatermarkMap} is exported for `http-transport.ts` to call on
+ * `responderWatermarks`. The reasoning below about HLC-shaped-but-not-an-HLC
+ * values is *stronger* there, not weaker: a request's watermarks bound one scan
+ * and are then forgotten, while a response's coverage map is written to disk and
+ * becomes the bound on every future outbound scan. It was unchecked in exactly
+ * the direction where the value survives the round.
  */
 
 import { StarkeepError } from "@starkeep/protocol-primitives";
@@ -149,7 +158,7 @@ function clampBudget(
 }
 
 /**
- * The caller's watermarks, with every entry confirmed to be an HLC.
+ * A watermark map with every entry confirmed to be an HLC.
  *
  * These reach `compareHLC` and `serializeHLC` on the scan path, where a value
  * of the wrong shape becomes either a comparison against `undefined` — which
@@ -170,11 +179,32 @@ function clampBudget(
  *   a mismatched pair shifts the tie-break at identical `(wallTime, counter)` —
  *   selecting or skipping a row at exactly the boundary. Normalized to the map
  *   key, which is the one the scan is planned around.
+ *
+ * ## Why this takes a field name and an error factory
+ *
+ * Every hazard above is worse in the **response** direction, and that is where
+ * the check was missing. A request's watermarks bound one scan on a responder
+ * that is about to answer anyway; a response's `responderWatermarks` is
+ * *persisted* and becomes the bound on every future outbound scan. So the same
+ * rules have to apply to both, and the only differences are which field is being
+ * named and which error type the caller's layer raises —
+ * {@link InvalidExchangeRequest} for a body a responder is refusing, `SyncError`
+ * for an answer a requester will not accept. Two copies of this reasoning is how
+ * one of them drifts, which is how it came to be missing on one side already.
  */
-function sanitizeWatermarks(value: unknown): Watermarks {
+export function sanitizeWatermarkMap(
+  value: unknown,
+  context: {
+    /** The field being validated, quoted verbatim into every message. */
+    readonly field: string;
+    /** Raises the error type this caller's layer speaks. */
+    readonly fail: (message: string) => Error;
+  },
+): Watermarks {
+  const { field, fail } = context;
   if (value === undefined || value === null) return {};
   if (typeof value !== "object" || Array.isArray(value)) {
-    throw new InvalidExchangeRequest(`"watermarks" must be an object`);
+    throw fail(`"${field}" must be an object`);
   }
   const out: Record<string, HLCTimestamp> = {};
   for (const [nodeId, hlc] of Object.entries(value as Record<string, unknown>)) {
@@ -185,9 +215,7 @@ function sanitizeWatermarks(value: unknown): Watermarks {
       !isHlcComponent((hlc as HLCTimestamp).counter) ||
       typeof (hlc as HLCTimestamp).nodeId !== "string"
     ) {
-      throw new InvalidExchangeRequest(
-        `"watermarks[${nodeId}]" is not an HLC timestamp`,
-      );
+      throw fail(`"${field}[${nodeId}]" is not an HLC timestamp`);
     }
     const { wallTime, counter, nodeId: author } = hlc as HLCTimestamp;
     if (author !== nodeId) {
@@ -196,12 +224,19 @@ function sanitizeWatermarks(value: unknown): Watermarks {
       // asking for this author's rows either way. Rejecting would refuse a
       // request whose intent is unambiguous.
       console.warn(
-        `[sync] watermarks["${nodeId}"] carries nodeId "${author}"; using the map key`,
+        `[sync] ${field}["${nodeId}"] carries nodeId "${author}"; using the map key`,
       );
     }
     out[nodeId] = { wallTime, counter, nodeId };
   }
   return out;
+}
+
+function sanitizeWatermarks(value: unknown): Watermarks {
+  return sanitizeWatermarkMap(value, {
+    field: "watermarks",
+    fail: (message) => new InvalidExchangeRequest(message),
+  });
 }
 
 /** A non-negative integer — what both numeric fields of an HLC actually are. */

@@ -129,6 +129,13 @@ async function build(options: {
   readonly apps: Array<{ appId: string; hmacSecret: string | null }>;
   readonly exchangeIntervalMs?: number;
   readonly cloudUrl?: string;
+  /**
+   * What the registry reports as installed, if it has to change during a test.
+   * Defaults to `apps` — the registry row itself stays put, because an
+   * uninstall the supervisor is meant to notice is a change in what is
+   * *listed*, not a row disappearing out from under a signer.
+   */
+  readonly installed?: () => Array<{ appId: string }>;
 }) {
   const databaseAdapter = new MockDatabaseAdapter();
   const localObjectStorage = new MockObjectStorageAdapter();
@@ -139,7 +146,10 @@ async function build(options: {
     ...options.apps,
   ]);
   const listInstalledApps = (): AppRegistryEntry[] =>
-    options.apps.map((a) => ({ appId: a.appId, status: "active" }));
+    (options.installed ? options.installed() : options.apps).map((a) => ({
+      appId: a.appId,
+      status: "active",
+    }));
 
   const sdk = {
     clock: createHLCClock({ nodeId: "L" }),
@@ -266,6 +276,81 @@ describe("stop() during a drain", () => {
       expect(served, "a stopped supervisor kept exchanging").toBe(settled);
       supervisor = null;
     } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 20_000);
+});
+
+describe("rescan() dropping an app during its drain", () => {
+  it("stops that app's channel and leaves the others running", async () => {
+    // N8.3. `stop()` had this covered through `paused`; `rescan()` did not.
+    // Clearing an entry's timers stops the *next* tick and says nothing about
+    // the drain running right now — and a tick's drain is a whole `sync()` with
+    // no `maxRounds`. So uninstalling an app left its `sync()` issuing requests
+    // against a channel that no longer existed and writing `sync_state` rows
+    // for an app that was gone.
+    //
+    // Observed at the cloud, like the `stop()` case above and for the same
+    // reason: "nothing is still running for this app" is a claim about requests,
+    // and the supervisor's own status reports the entry as absent either way.
+    const requests: string[] = [];
+    const server = createServer((req, res) => {
+      requests.push(req.url ?? "");
+      setTimeout(() => {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "nope" }));
+      }, 40);
+      req.resume();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const forApp = (appId: string) => requests.filter((u) => u.includes(`/apps/${appId}/`)).length;
+
+    let installed = [{ appId: "aaa-app" }, { appId: "bbb-app" }];
+    try {
+      supervisor = await build({
+        apps: [
+          { appId: "aaa-app", hmacSecret: "s1" },
+          { appId: "bbb-app", hmacSecret: "s2" },
+        ],
+        installed: () => installed,
+        exchangeIntervalMs: 5,
+        cloudUrl: `http://127.0.0.1:${port}`,
+      });
+      supervisor.start();
+      await new Promise((r) => setTimeout(r, 80));
+      expect(forApp("bbb-app"), "the dropped app must be busy for this to mean anything")
+        .toBeGreaterThan(0);
+
+      // Uninstall, the way a registry-change handler does it.
+      installed = [{ appId: "aaa-app" }];
+      supervisor.rescan();
+      expect(supervisor.status().perApp.map((p) => p.appId)).not.toContain("bbb-app");
+
+      // One round may still be on the wire when rescan returns — it is
+      // synchronous by contract and cannot await the drain. What it must do is
+      // make that drain the *last* one.
+      await new Promise((r) => setTimeout(r, 120));
+      const settled = forApp("bbb-app");
+      await new Promise((r) => setTimeout(r, 200));
+      expect(forApp("bbb-app"), "the uninstalled app kept draining").toBe(settled);
+
+      // …and the app that is still installed is unaffected, so this is a
+      // targeted stop rather than everything grinding to a halt. Polled rather
+      // than slept on: every exchange here fails, so the survivor's backoff is
+      // growing and a fixed window would be racing it.
+      const others = forApp("aaa-app");
+      const deadline = Date.now() + 5_000;
+      while (forApp("aaa-app") === others && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(forApp("aaa-app"), "the surviving app stopped syncing too").toBeGreaterThan(others);
+      // The dropped one made no progress across that whole window either.
+      expect(forApp("bbb-app")).toBe(settled);
+    } finally {
+      await supervisor?.stop();
+      supervisor = null;
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   }, 20_000);

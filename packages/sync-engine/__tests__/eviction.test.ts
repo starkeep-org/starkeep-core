@@ -38,6 +38,11 @@ function entry(over: Partial<ResidentEntry> & { objectStorageKey: string; sizeBy
     recencyAtMs: null,
     lastOpenedAtMs: null,
     addedAtMs: 0,
+    // These entries stand for bytes already on disk, which is what every case
+    // in this file is about — a pass deciding whether to delete something it
+    // holds.
+    resident: true,
+    reserved: false,
     ...over,
   };
 }
@@ -314,13 +319,34 @@ describe("eviction pass", () => {
     expect(outcome.shortfall).toBe(false);
   });
 
-  it("deletes the bytes and forgets the index row together", async () => {
+  // The row survives the bytes, deliberately. Deleting it would leave nothing
+  // able to distinguish "this node declined these bytes and the peer will offer
+  // them again if the policy changes" from "this node held them, dropped them,
+  // and no sync round will ever send them again" — because eviction happens long
+  // after the watermark moved past the record. Without the departed row,
+  // `residencyOf` reports `staged` (still owed) for bytes nobody is going to
+  // send.
+  it("deletes the bytes and marks the index row departed", async () => {
     const seeded = await seed(10, 100);
     const outcome = await evictClass(request(seeded, 1000));
+    expect(outcome.evicted.length).toBeGreaterThan(0);
     for (const e of outcome.evicted) {
       expect(await localStorage.has(e.objectStorageKey)).toBe(false);
-      expect(index.get(e.objectStorageKey)).toBeNull();
+      expect(index.get(e.objectStorageKey)?.resident).toBe(false);
+      expect(index.wasEvicted(e.objectStorageKey)).toBe(true);
     }
+  });
+
+  // The half that makes the departed row safe to keep: it must not go on being
+  // counted. A class whose bytes are gone but whose usage still reports them
+  // full is a class the next pass will try to empty again, forever.
+  it("stops counting departed bytes toward the budget", async () => {
+    const seeded = await seed(10, 100);
+    const before = index.usageOf(CLASS_A);
+    const outcome = await evictClass(request(seeded, 1000));
+    const freed = outcome.evicted.reduce((n, e) => n + e.sizeBytes, 0);
+    expect(freed).toBeGreaterThan(0);
+    expect(index.usageOf(CLASS_A)).toBe(before - freed);
   });
 
   // ---- The cases that would destroy data if the guard were removed ----
@@ -389,13 +415,30 @@ describe("eviction pass", () => {
 
   // Renditions are cheaply re-derivable, so they don't need a durable replica
   // elsewhere — that distinction is what makes a phone's cache workable at all.
-  it("evicts re-derivable blobs without requiring durability proof", async () => {
+  // But "re-derivable" is a claim about the *host*, not about the bytes, so the
+  // host has to make it.
+  it("evicts re-derivable blobs without proof, on a host that can re-derive", async () => {
+    const seeded = await seed(10, 100, {
+      confirmedElsewhere: false,
+      requiresDurabilityProof: false,
+    });
+    const outcome = await evictClass({ ...request(seeded, 1000), canRederive: true });
+    expect(outcome.evicted.length).toBeGreaterThan(0);
+  });
+
+  // The default, and the case this branch is actually in: derivation (item 7) is
+  // not implemented, so a deleted rendition is gone until something writes it
+  // for the first time. Skipping the durability check for it would be deleting
+  // on the strength of a capability nobody has.
+  it("still demands proof for a rendition when nothing can re-derive it", async () => {
     const seeded = await seed(10, 100, {
       confirmedElsewhere: false,
       requiresDurabilityProof: false,
     });
     const outcome = await evictClass(request(seeded, 1000));
-    expect(outcome.evicted.length).toBeGreaterThan(0);
+    expect(outcome.evicted).toHaveLength(0);
+    expect(outcome.kept.every((k) => k.reason === "not-confirmed-elsewhere")).toBe(true);
+    expect(outcome.shortfall).toBe(true);
   });
 });
 

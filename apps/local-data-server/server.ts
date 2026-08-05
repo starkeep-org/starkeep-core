@@ -292,6 +292,9 @@ interface StarkeepConfig {
    * Raise it for a `no-cloud`-heavy library: excluding the cloud moves the
    * single-copy risk onto the device, and this number is the only thing that
    * keeps that from being a data-loss feature.
+   *
+   * Anything below 1 — including a `0` someone typed to mean "don't require
+   * proof" — is refused by {@link clampMinimumReplicas} rather than honoured.
    */
   minimumReplicas?: number;
   // Cloud fields — populated by the admin wizard's PATCH /config, absent
@@ -317,6 +320,32 @@ function isDuplicateFileError(err: unknown): boolean {
     message.includes("uq_shared_records_filename_hash") ||
     message.includes("uq_records_filename_hash")
   );
+}
+
+/**
+ * The durability threshold this node will actually enforce.
+ *
+ * A config value below 1 — a `0`, a missing field, a string that arrived from
+ * hand-edited JSON — is refused rather than honoured, and refused *loudly*
+ * because the operator is entitled to know their setting did not take. There is
+ * no coherent reading of "delete my only copy once zero other copies are
+ * confirmed": at zero the predicate `counted >= minimumReplicas` is true for a
+ * blob nothing was even asked about.
+ *
+ * `assessDurability` clamps as well. That is not redundancy for its own sake:
+ * this one exists so the refusal is *visible*, and that one exists so the
+ * guarantee does not depend on every future host remembering to call this.
+ */
+function clampMinimumReplicas(configured: number | undefined): number {
+  if (configured === undefined) return 1;
+  if (typeof configured !== "number" || !Number.isFinite(configured) || configured < 1) {
+    console.warn(
+      `[residency] minimumReplicas=${String(configured)} is not a usable threshold; using 1. ` +
+        `Below 1 authorizes deleting a last copy with no evidence at all.`,
+    );
+    return 1;
+  }
+  return Math.floor(configured);
 }
 
 function regionFromUserPoolId(userPoolId: string): string {
@@ -622,7 +651,16 @@ async function main() {
         isCloudNode: false,
         policy: starkeepConfig.retention,
         overrideRules: starkeepConfig.overrideRules ?? [],
-        durability: { minimumReplicas: starkeepConfig.minimumReplicas ?? 1 },
+        // Clamped, not passed through. The predicate is
+        // `counted >= minimumReplicas`, so a config value of `0` makes every
+        // blob durable with zero probes and zero evidence — every deletion
+        // authorized, no questions asked. The field's own documentation says
+        // this number "is the only thing that keeps that from being a data-loss
+        // feature", and nothing validated it. `assessDurability` clamps too;
+        // this is the one that can tell the operator their setting was refused.
+        durability: {
+          minimumReplicas: clampMinimumReplicas(starkeepConfig.minimumReplicas),
+        },
       })
     : null;
 

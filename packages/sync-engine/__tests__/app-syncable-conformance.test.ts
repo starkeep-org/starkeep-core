@@ -17,19 +17,54 @@ import { makeMockAppSource } from "./sync-test-harness/mock-app-source.js";
 
 const APP = "conformance-app";
 const TABLE = "test_rows";
+const COMPOSITE_TABLE = "tenant_rows";
 
 function makeHarness(): ConformanceHarness {
-  const store = makeMockAppSource(APP, [{ name: TABLE, pkColumns: ["id"] }]);
+  const store = makeMockAppSource(APP, [
+    { name: TABLE, pkColumns: ["id"] },
+    { name: COMPOSITE_TABLE, pkColumns: ["tenant", "id"] },
+  ]);
+  const applier = store.applier;
+  const broken = new Set<string>();
+
+  /**
+   * The mock's stand-in for a table that exists and will not read.
+   *
+   * The SQL harnesses drop a column the applier's own queries name, which is a
+   * fault in the storage. There is no storage here to fault, so the two read
+   * methods are wrapped instead. What matters for the contract is the same
+   * either way: a present table whose read fails must throw rather than answer
+   * with the empty value, which is the wire value for "this table holds
+   * nothing".
+   */
+  const guarded = {
+    ...applier,
+    apply: applier.apply.bind(applier),
+    scanSince: applier.scanSince.bind(applier),
+    async bucketDigest(appId: string, table: string, prefixLength?: number) {
+      if (broken.has(table)) throw new Error(`[harness] ${table} will not read`);
+      return applier.bucketDigest(appId, table, prefixLength);
+    },
+    async getNodeWatermarks(appId: string, table: string) {
+      if (broken.has(table)) throw new Error(`[harness] ${table} will not read`);
+      return applier.getNodeWatermarks(appId, table);
+    },
+  };
+
   return {
-    applier: store.applier as never,
+    applier: guarded as never,
     appId: APP,
     table: TABLE,
+    compositeTable: COMPOSITE_TABLE,
     async liveIds() {
       const prefix = `${APP}::${TABLE}::`;
       return [...store.rows.entries()]
         .filter(([key, row]) => key.startsWith(prefix) && !row["deleted_at"])
         .map(([, row]) => String(row["id"]))
         .sort();
+    },
+    async breakReads() {
+      broken.add(TABLE);
     },
     async peer() {
       return makeHarness();

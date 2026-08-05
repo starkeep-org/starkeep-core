@@ -66,9 +66,9 @@ export class SqliteAppSyncableApplier
     if (entry.op === "insert") {
       this.applyInsert(fullName, pkColumns, entry);
     } else if (entry.op === "update") {
-      this.applyUpdate(fullName, entry);
+      this.applyUpdate(fullName, pkColumns, entry);
     } else {
-      this.applyDelete(fullName, entry);
+      this.applyDelete(fullName, pkColumns, entry);
     }
   }
 
@@ -109,11 +109,15 @@ export class SqliteAppSyncableApplier
     );
   }
 
-  private applyUpdate(fullName: string, entry: AppSyncableRowEntry): void {
+  private applyUpdate(
+    fullName: string,
+    pkColumns: readonly string[],
+    entry: AppSyncableRowEntry,
+  ): void {
     // node_id rides along whenever updated_at changes (it's derived from it).
     const rawPatch = entry.row ?? {};
     const patch = rawPatch["updated_at"] ? withNodeId(rawPatch, entry) : rawPatch;
-    const where = requireKeyedWhere(entry, "update");
+    const where = requireKeyedWhere(entry, "update", pkColumns);
     const patchCols = Object.keys(patch);
     const whereCols = Object.keys(where);
     if (patchCols.length === 0) return;
@@ -138,12 +142,64 @@ export class SqliteAppSyncableApplier
     runCompiled(this.db, query.compile());
   }
 
-  private applyDelete(fullName: string, entry: AppSyncableRowEntry): void {
-    const where = requireKeyedWhere(entry, "delete");
+  private applyDelete(
+    fullName: string,
+    pkColumns: readonly string[],
+    entry: AppSyncableRowEntry,
+  ): void {
+    const where = requireKeyedWhere(entry, "delete", pkColumns);
     const whereCols = Object.keys(where);
     // Soft-delete: set deleted_at and updated_at (and node_id with it).
     const incomingUpdatedAt = entry.row?.["updated_at"] as string | undefined;
     const ts = incomingUpdatedAt ?? serializeHLC(entry.timestamp);
+
+    // A tombstone that arrived over sync carries the whole row (see
+    // `rowToWireEntry`), and it has to *land* even on a node that never held
+    // the row it retracts.
+    //
+    // As an UPDATE alone it did not: the statement matched nothing and the
+    // deletion evaporated. Both sides then held different numbers of rows for
+    // the same author bucket — tombstones are counted, deliberately, because a
+    // deletion is a row the peer must also hold — so `verify()` reported a
+    // permanent hole, armed a repair, and the repair re-shipped the same
+    // tombstone into the same nothing. Forever. The nodes that hit it are
+    // exactly the ones repair exists for: one that joined after the delete, or
+    // one that lost the row and is being filled back in.
+    //
+    // Upserting is safe precisely because the wire form carries every column,
+    // so nothing has to be invented for a NOT NULL the app declared. A delete
+    // issued locally through the API carries only its key and its timestamp,
+    // and that one still goes through the UPDATE below — the row is here by
+    // construction, and inventing a half-empty row for it would be wrong.
+    const carriesFullRow =
+      entry.row !== undefined &&
+      pkColumns.length > 0 &&
+      pkColumns.every((column) => entry.row?.[column] !== undefined);
+    if (carriesFullRow) {
+      const row = withNodeId(
+        { ...entry.row, updated_at: ts, deleted_at: ts },
+        entry,
+      );
+      const updateCols = Object.keys(row).filter((c) => !pkColumns.includes(c));
+      runCompiled(
+        this.db,
+        qb
+          .insertInto(fullName)
+          .values({ ...row })
+          .onConflict((oc) =>
+            oc
+              .columns(pkColumns as never[])
+              .doUpdateSet((eb) =>
+                Object.fromEntries(updateCols.map((c) => [c, eb.ref(`excluded.${c}`)])),
+              )
+              // The same LWW guard the UPDATE path carries, and for the same
+              // reason: a replayed tombstone must not move a newer row back.
+              .where(sql.ref("excluded.updated_at"), ">", sql.ref(`${fullName}.updated_at`)),
+          )
+          .compile(),
+      );
+      return;
+    }
 
     let query = qb
       .updateTable(fullName)

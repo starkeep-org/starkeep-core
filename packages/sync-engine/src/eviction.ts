@@ -84,6 +84,17 @@ export interface EvictionOutcome {
    * reach a human rather than merely suppressing an eviction.
    */
   readonly corruptionSuspected: readonly string[];
+  /**
+   * Set when the pass could not proceed on the evidence available — today, when
+   * there is no peer to ask and something needed asking about.
+   *
+   * The same sentence `ReductionPreview.refusal` gives an operator, from the
+   * pass that actually deletes. Its absence here was the asymmetry: a preview
+   * would say "no peer is available to confirm these survive elsewhere, nothing
+   * was removed", and the pass doing the deleting would silently report a
+   * shortfall with no reason attached.
+   */
+  readonly refusal: string | null;
 }
 
 /** Everything a pass needs apart from which budget it is enforcing. */
@@ -106,6 +117,52 @@ export interface EvictionRequest {
    * drop costs someone a twelve-hour wait to see their own photo.
    */
   readonly keepLastInstantCopy?: boolean;
+  /**
+   * Whether this host can actually re-derive a rendition it deletes.
+   *
+   * **Defaults to false, and that default is the point.** The pass skips the
+   * durability check entirely for anything with `requiresDurabilityProof: false`
+   * — a rendition — on the stated grounds that a rendition can be made again.
+   * That is a claim about the *host*, not about the bytes, and on this branch it
+   * is not true: the derivation work is unimplemented, so a deleted rendition is
+   * gone until it is written for the first time. The rest of this file is
+   * scrupulous about failing closed, and this was the one place a capability
+   * nobody had was assumed.
+   *
+   * A host that has derivation passes true and gets the cheap path back. The
+   * same dependency runs the other way through `protectedLocally`, which is
+   * hardwired false pending the same work — so until it lands, the durability
+   * predicate is the only thing standing between this pass and a last copy, and
+   * it should be asked about renditions too.
+   */
+  readonly canRederive?: boolean;
+}
+
+/**
+ * The refusal both passes owe an operator when nothing can confirm anything.
+ *
+ * `previewBudgetReduction` had this and the loop that actually deletes did not.
+ * The loop was saved only by the arithmetic in `assessDurability` — `counted >=
+ * minimumReplicas` is false at zero probes *as long as* the minimum is at least
+ * one — which is exactly the invariant `MINIMUM_REPLICAS_FLOOR` had to be
+ * introduced to hold, and exactly the invariant a config value of `0` used to
+ * break. One predicate, called by both, so neither can be quietly deleting on no
+ * evidence because of arithmetic happening elsewhere.
+ *
+ * Returns null when there is nothing to refuse: no probes but nothing that
+ * needed them (a class of re-derivable renditions on a host that can re-derive),
+ * or probes that simply did not confirm.
+ */
+function noProbeRefusal(
+  what: string,
+  probes: readonly ReplicaProbe[],
+  keptForWantOfProof: number,
+): string | null {
+  if (probes.length > 0 || keptForWantOfProof === 0) return null;
+  return (
+    `Cannot free ${what}: no peer is available to confirm that ${keptForWantOfProof} blob(s) ` +
+    `survive elsewhere. Nothing was removed that needed proof.`
+  );
 }
 
 /**
@@ -161,6 +218,7 @@ function untriggered(scope: EvictionScope, bytesBefore: number): EvictionOutcome
     kept: [],
     shortfall: false,
     corruptionSuspected: [],
+    refusal: null,
   };
 }
 
@@ -169,6 +227,21 @@ function untriggered(scope: EvictionScope, bytesBefore: number): EvictionOutcome
  *
  * One body deliberately: this is the loop that deletes user data, and the one
  * thing worse than a bug in it is two copies of it that drift.
+ *
+ * ## `bytesBefore` and `bytesAfter` are a snapshot and a running subtraction
+ *
+ * `bytesBefore` is read once, before the loop; `bytesAfter` is it minus what
+ * this pass deleted. Neither observes a *concurrent arrival*, and a pass is not
+ * instantaneous — the durability probes are network calls, so a long one can run
+ * while a sync round lands new bytes into the same class. `shortfall` is
+ * therefore computed against a figure that may be stale by whatever landed
+ * meanwhile.
+ *
+ * Left as is rather than re-read at the end, and the reason is that re-reading
+ * would be *worse*: it would attribute bytes this pass never considered to this
+ * pass's outcome, so a class that received a 400 MB video mid-sweep would report
+ * that the eviction failed. A stale figure understates progress once; a fresh
+ * one misreports the cause. The next pass sees the real number either way.
  */
 async function runPass(
   scope: EvictionScope,
@@ -179,6 +252,7 @@ async function runPass(
   const { index, localStorage, probes, durability, contentHashOf } = request;
   const marks = request.waterMarks ?? DEFAULT_WATER_MARKS;
   const keepLastInstantCopy = request.keepLastInstantCopy ?? true;
+  const canRederive = request.canRederive ?? false;
 
   // A budget that is not a number is not a small budget — it is no answer at
   // all, and an unanswered question must not authorize deletion. Refused here
@@ -223,7 +297,12 @@ async function runPass(
       continue;
     }
 
-    if (entry.requiresDurabilityProof) {
+    // A rendition skips the durability check on the grounds that it can be made
+    // again — which is a claim about the host, not about the bytes, and is false
+    // wherever derivation is not implemented. `canRederive` makes that
+    // dependency explicit and defaults to false, so an unimplemented derivation
+    // makes this pass *more* careful rather than silently less.
+    if (entry.requiresDurabilityProof || !canRederive) {
       const contentHash = contentHashOf(entry);
       if (contentHash === null) {
         // No hash means no way to tell a correct replica from an object that
@@ -254,7 +333,12 @@ async function runPass(
     }
 
     await localStorage.delete(entry.objectStorageKey);
-    index.remove(entry.objectStorageKey);
+    // Marked departed, not removed. The row is the only durable record that this
+    // node held these bytes and let them go, and without it `residencyOf`
+    // reports an evicted blob as `staged` — "still owed" — for bytes the peer
+    // will never offer again, because eliding and eviction both leave the
+    // watermark above the record.
+    index.markDeparted(entry.objectStorageKey);
     evicted.push(entry);
     held -= entry.sizeBytes;
   }
@@ -268,6 +352,11 @@ async function runPass(
     kept,
     shortfall: held > target,
     corruptionSuspected,
+    refusal: noProbeRefusal(
+      scope.kind === "class" ? `"${scope.sizeClass}"` : `namespace "${scope.namespace}"`,
+      probes,
+      kept.filter((k) => k.reason === "not-confirmed-elsewhere").length,
+    ),
   };
 }
 
@@ -322,6 +411,32 @@ export interface ReductionPreview {
   readonly keptNotConfirmedCount: number;
   readonly keptNotConfirmedBytes: number;
   /**
+   * Bytes in this class that no reduction can free — pinned, or locally
+   * protected.
+   *
+   * Reported because the two numbers this preview was built from disagree about
+   * them: `usageOf` counts pinned bytes toward the class, and
+   * `evictionCandidates` excludes them from what may be dropped. Without this
+   * figure the preview computed a shortfall it could not name, ran out of
+   * candidates before reaching the target, and reported `wouldEvictBytes` short
+   * of the gap with `refusal: null` — "confirm and this class will fit", when it
+   * will not.
+   *
+   * This also grows in importance rather than shrinking: `protectedLocally` is
+   * hardwired false today and will not stay that way once derivation lands.
+   */
+  readonly unevictableBytes: number;
+  /**
+   * True when the class cannot reach `newBudgetBytes` even if the operator
+   * confirms everything on offer.
+   *
+   * The honest version of the sentence a confirmation prompt needs: "12 GB of
+   * this class is pinned and will remain." `EvictionOutcome` has always carried
+   * this and the preview did not, which is how the preview came to promise an
+   * outcome the pass could not deliver.
+   */
+  readonly shortfall: boolean;
+  /**
    * Set when the reduction cannot proceed at all. The plan is explicit: until
    * the durability predicate can answer, a reduction that would evict
    * originals must **refuse rather than proceed, and say so**.
@@ -348,6 +463,10 @@ export async function previewBudgetReduction(request: {
   const { sizeClass, newBudgetBytes, index, probes, durability, contentHashOf } = request;
 
   const held = index.usageOf(sizeClass);
+  // Includes pinned and locally protected bytes, which `held` counts and
+  // `evictionCandidates` will not offer. The gap between those two facts is what
+  // made this preview promise targets it could not reach.
+  const unevictableBytes = index.unevictableBytesOf({ kind: "class", sizeClass });
   if (held <= newBudgetBytes) {
     return {
       sizeClass,
@@ -356,6 +475,8 @@ export async function previewBudgetReduction(request: {
       wouldEvictBytes: 0,
       keptNotConfirmedCount: 0,
       keptNotConfirmedBytes: 0,
+      unevictableBytes,
+      shortfall: false,
       refusal: null,
     };
   }
@@ -401,11 +522,13 @@ export async function previewBudgetReduction(request: {
   // No probes at all means the predicate cannot answer for anything. Proceeding
   // would delete originals on no evidence whatsoever, so the reduction is
   // refused rather than silently degraded into "keep everything" — the operator
-  // asked for a reduction and is entitled to know it did not happen.
-  const refusal =
-    probes.length === 0 && (keptCount > 0 || unprovable > 0)
-      ? `Cannot reduce "${sizeClass}": no peer is available to confirm that ${keptCount} blob(s) survive elsewhere. Nothing was removed.`
-      : null;
+  // asked for a reduction and is entitled to know it did not happen. Shared with
+  // the pass that actually deletes, so the two cannot drift.
+  const refusal = noProbeRefusal(
+    `"${sizeClass}"`,
+    probes,
+    keptCount > 0 || unprovable > 0 ? Math.max(keptCount, 1) : 0,
+  );
 
   return {
     sizeClass,
@@ -414,6 +537,11 @@ export async function previewBudgetReduction(request: {
     wouldEvictBytes,
     keptNotConfirmedCount: keptCount,
     keptNotConfirmedBytes: keptBytes,
+    unevictableBytes,
+    // What is left after everything on offer goes. Pinned and protected bytes
+    // stay whatever the operator confirms, so a class whose pins alone exceed
+    // the new budget cannot reach it and the prompt has to say so.
+    shortfall: held - wouldEvictBytes > newBudgetBytes,
     refusal,
   };
 }
