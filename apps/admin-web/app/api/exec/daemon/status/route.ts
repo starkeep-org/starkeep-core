@@ -47,7 +47,16 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ running: false });
   }
 
-  const pid = parseInt(readFileSync(pf, "utf-8"), 10);
+  // A workspace daemon that replaced itself (the local-data-server does exactly
+  // that on PATCH /config, with a detached successor) leaves this file naming
+  // the launcher that exited alongside the old instance. Re-point it at
+  // whatever holds the fixed port, so the pid reported here — and the one Stop
+  // will later signal — is the process actually serving.
+  let pid = parseInt(readFileSync(pf, "utf-8"), 10);
+  if (isWorkspaceDaemonId(id) && !isAlive(pid)) {
+    pid = adoptOrphanWorkspaceDaemon(id)?.pid ?? pid;
+  }
+
   const metaPath = resolve(PIDS_DIR, `${id}.meta.json`);
   const meta: DaemonMeta | null = existsSync(metaPath)
     ? JSON.parse(readFileSync(metaPath, "utf-8")) as DaemonMeta
