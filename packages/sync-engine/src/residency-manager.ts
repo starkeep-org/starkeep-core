@@ -70,7 +70,9 @@ import {
   sql,
 } from "kysely";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import type { AcquisitionConsideration } from "./acquisition-scan.js";
 import {
+  budgetBytesFor,
   budgetLineFor,
   budgetLinesOf,
   createSqliteResidentSetIndex,
@@ -80,6 +82,7 @@ import {
   parseSizeClass,
   previewBudgetReduction,
   resolveSizeClass,
+  retentionRowFor,
   validateRetentionPolicy,
   PLATFORM_NAMESPACE,
   type BlobCandidate,
@@ -89,8 +92,11 @@ import {
   type NodeRetentionPolicy,
   type ReductionPreview,
   type ReplicaProbe,
+  type ResidencyTrigger,
   type ResidencyVerdict,
   type ReconcileReport,
+  type ResidentArrival,
+  type ResidentEntry,
   type ResidentSetIndex,
   type ResolvedSizeClass,
 } from "./index.js";
@@ -225,16 +231,14 @@ export interface ResidencyManager {
   /**
    * The fetch-time decision, ready to hand to `createSyncEngine`.
    *
-   * `requested: true` marks a decision made because something actually asked
-   * for these bytes rather than a sync round offering them. It skips the
-   * prefetch question — which is about speculation, and a request is not
-   * speculation — and is otherwise judged identically, budget included. That is
-   * what makes read-through and admission the same rule rather than two that
-   * can disagree.
+   * `trigger` says what is asking, and two of the policy's rules turn on it —
+   * whether `prefetch` applies, and whether the line may displace what it
+   * already holds. Defaults to `"round"`, the most restrictive of the three.
+   * See {@link ResidencyTrigger}.
    */
   decide(
     candidate: BlobCandidate,
-    options?: { readonly requested?: boolean },
+    trigger?: ResidencyTrigger,
   ): Promise<ResidencyVerdict>;
   /**
    * Record that a blob landed. Called after a successful transfer, so byte
@@ -246,6 +250,44 @@ export interface ResidencyManager {
    * alone. See {@link ResidencyVerdict.pinned}.
    */
   noteArrival(candidate: BlobCandidate, verdict: ResidencyVerdict | null): Promise<void>;
+  /**
+   * Record that a blob this node wants could not be taken right now.
+   *
+   * The queue write behind {@link ResidencyHooks.defer}, and the reason the
+   * queue is worth having at all: `decide` has already resolved this
+   * candidate's rank — including the parent walk a rendition needs for its
+   * capture date — so deferring writes down an answer that has just been
+   * computed. A pass that instead re-derived rank from the catalogue would
+   * repeat that join over the whole library on every tick, forever.
+   *
+   * The row it writes is a hint and is allowed to be stale. Nothing is fetched
+   * on its authority: the acquisition pass re-runs the real decision against
+   * the current policy before it spends a byte.
+   */
+  noteDeferred(candidate: BlobCandidate, verdict: ResidencyVerdict): Promise<void>;
+  /**
+   * One page of a budget line's acquisition queue, best-first.
+   *
+   * The mirror of the eviction pass's candidate query, and deliberately the
+   * same shape: the pass walks it in order and stops at the first candidate the
+   * policy declines for want of room, because a best-first queue means nothing
+   * behind that one can win either.
+   */
+  deferredCandidates(budgetLineKey: string, limit: number): ResidentEntry[];
+  /**
+   * Forget a queued blob the acquisition pass established can never win — a
+   * class the node has since disabled, a record constraint that now forbids it.
+   *
+   * Never touches a departed row; see {@link ResidentSetIndex.dropDeferred}.
+   */
+  dropDeferred(objectStorageKey: string): void;
+  /**
+   * Would this node want these bytes if there were room — and if so, queue
+   * them. The catalogue scan's per-record step.
+   *
+   * Deliberately *not* the residency decision. See the implementation.
+   */
+  considerForAcquisition(candidate: BlobCandidate): Promise<AcquisitionConsideration>;
   /**
    * Charge a budget for bytes that are about to be fetched.
    *
@@ -591,7 +633,7 @@ export function createResidencyManager(
 
   async function decide(
     candidate: BlobCandidate,
-    options?: { readonly requested?: boolean },
+    trigger?: ResidencyTrigger,
   ): Promise<ResidencyVerdict> {
     const { sizeClass, deniedHere, overrides } = await labelInputs(candidate);
     // The ordering terms the engine cannot know. Without them every candidate
@@ -611,8 +653,76 @@ export function createResidencyManager(
       usage: (budgetLine) => index.usageOf(budgetLine.key),
       displaces: (budgetLine, rank, bytesNeeded) =>
         index.displaceableBytes(budgetLine.key, rank, bytesNeeded),
-      requested: options?.requested,
+      ...(trigger === undefined ? {} : { trigger }),
     });
+  }
+
+  /**
+   * The resident-set row for a candidate, as either an arrival or a deferral.
+   *
+   * One function because the two calls describe the *same blob* — same class,
+   * same budget line, same rank, same durability question — and differ only in
+   * whether the bytes are here. Building the row twice is how the queue would
+   * come to disagree with the index it writes into: a deferred row ordered by
+   * one reading of recency and a landed row by another would make the
+   * acquisition pass and the eviction pass rank the same photograph differently.
+   */
+  async function rowFor(
+    candidate: BlobCandidate,
+    resolved: { sizeClass: ResolvedSizeClass | null; pinned?: boolean },
+  ): Promise<ResidentArrival> {
+    // A null class means the caller had no residency decision to hand over —
+    // the conservative reading is the thing itself, which is what an
+    // unclassified arrival has always been charged as.
+    const cls = resolved.sizeClass ?? originalClassFor(candidate.type);
+    // Resolved again rather than carried from the decision, because there is
+    // no decision on every path here — `fetchBlob` lands bytes without one.
+    // The row's `recency_at_ms` is the eviction pass's third ordering term, so
+    // a null here is not cosmetic: it collapses "oldest first" into whatever
+    // order the index happens to return.
+    const dates = await recencyInputs(candidate);
+    return {
+      recordId: candidate.recordId,
+      objectStorageKey: candidate.objectStorageKey,
+      sizeBytes: candidate.sizeBytes,
+      sizeClass: cls.qualified,
+      // Resolved from the policy now, so a class that has gained or lost a row
+      // of its own is charged to the line it belongs to today rather than the
+      // one it landed on last time.
+      budgetLineKey: budgetLineFor(policy, cls).key,
+      namespace: cls.namespace,
+      // The pin the *decision* resolved, which is the only one that saw both
+      // sources. Falling back to the table alone — as this used to do
+      // unconditionally — dropped every rule-derived pin on the floor, so a
+      // record a rule had just made this node fetch past its budget landed
+      // with `pinned = 0` and was evictable by the very pass the rule existed
+      // to survive. The fallback remains for `fetchBlob`, which synthesizes a
+      // verdict it never asked the policy for.
+      pinned: resolved.pinned ?? isPinned(candidate.recordId),
+      // Set by the derivation work (item 7), which is what knows whether
+      // these bytes are still needed as an input here. Until then nothing is
+      // marked protected, and the durability predicate is what stands
+      // between the eviction pass and a last copy.
+      //
+      // That used to be a load-bearing dependency between two unfinished
+      // things: `protectedLocally` waits on item 7, *and* the pass skipped the
+      // durability check for renditions on the grounds that item 7 could remake
+      // them. Both halves assumed a capability nobody had.
+      // `EvictionRequest.canRederive` now defaults false, so the missing
+      // derivation makes the pass more careful rather than silently less, and
+      // this field can stay honest about being unimplemented.
+      protectedLocally: false,
+      // A rendition can be re-derived; nothing else here can. Decided from
+      // the record's structure rather than by testing the class name for an
+      // `original:` prefix, as this once did — the prefix test was a naming
+      // convention standing in for a structural fact, and the failure mode of
+      // a class rename breaking it is that originals silently become
+      // evictable.
+      requiresDurabilityProof: requiresProof(candidate, cls),
+      recencyAtMs: dates.recencyAtMs,
+      lastOpenedAtMs: dates.lastOpenedAtMs,
+      addedAtMs: Date.now(),
+    };
   }
 
   return {
@@ -625,58 +735,80 @@ export function createResidencyManager(
       candidate: BlobCandidate,
       verdict: ResidencyVerdict | null,
     ): Promise<void> {
-      // A null class means the caller had no residency decision to hand over —
-      // the conservative reading is the thing itself, which is what an
-      // unclassified arrival has always been charged as.
-      const cls = verdict?.sizeClass ?? originalClassFor(candidate.type);
-      // Resolved again rather than carried from the decision, because there is
-      // no decision on every path here — `fetchBlob` lands bytes without one.
-      // The row's `recency_at_ms` is the eviction pass's third ordering term, so
-      // a null here is not cosmetic: it collapses "oldest first" into whatever
-      // order the index happens to return.
-      const dates = await recencyInputs(candidate);
-      index.add({
-        recordId: candidate.recordId,
-        objectStorageKey: candidate.objectStorageKey,
-        sizeBytes: candidate.sizeBytes,
-        sizeClass: cls.qualified,
-        // Resolved from the policy at arrival, so a class that has gained or
-        // lost a row of its own is charged to the line it belongs to now rather
-        // than the one it landed on last time.
-        budgetLineKey: budgetLineFor(policy, cls).key,
-        namespace: cls.namespace,
-        // The pin the *decision* resolved, which is the only one that saw both
-        // sources. Falling back to the table alone — as this used to do
-        // unconditionally — dropped every rule-derived pin on the floor, so a
-        // record a rule had just made this node fetch past its budget landed
-        // with `pinned = 0` and was evictable by the very pass the rule existed
-        // to survive. The fallback remains for `fetchBlob`, which synthesizes a
-        // verdict it never asked the policy for.
-        pinned: verdict?.pinned ?? isPinned(candidate.recordId),
-        // Set by the derivation work (item 7), which is what knows whether
-        // these bytes are still needed as an input here. Until then nothing is
-        // marked protected, and the durability predicate is what stands
-        // between the eviction pass and a last copy.
-        //
-        // That used to be a load-bearing dependency between two unfinished
-        // things: `protectedLocally` waits on item 7, *and* the pass skipped the
-        // durability check for renditions on the grounds that item 7 could remake
-        // them. Both halves assumed a capability nobody had.
-        // `EvictionRequest.canRederive` now defaults false, so the missing
-        // derivation makes the pass more careful rather than silently less, and
-        // this field can stay honest about being unimplemented.
-        protectedLocally: false,
-        // A rendition can be re-derived; nothing else here can. Decided from
-        // the record's structure rather than by testing the class name for an
-        // `original:` prefix, as this once did — the prefix test was a naming
-        // convention standing in for a structural fact, and the failure mode of
-        // a class rename breaking it is that originals silently become
-        // evictable.
-        requiresDurabilityProof: requiresProof(candidate, cls),
-        recencyAtMs: dates.recencyAtMs,
-        lastOpenedAtMs: dates.lastOpenedAtMs,
-        addedAtMs: Date.now(),
-      });
+      index.add(
+        await rowFor(candidate, {
+          sizeClass: verdict?.sizeClass ?? null,
+          ...(verdict?.pinned === undefined ? {} : { pinned: verdict.pinned }),
+        }),
+      );
+    },
+
+    async noteDeferred(candidate: BlobCandidate, verdict: ResidencyVerdict): Promise<void> {
+      // The same row an arrival would write, minus the claim that the bytes are
+      // here. `index.defer` is what refuses to overwrite anything that is —
+      // this function deliberately does not check first, because the interesting
+      // case is a race and a guard in SQL cannot lose one.
+      index.defer(
+        await rowFor(candidate, {
+          sizeClass: verdict.sizeClass,
+          ...(verdict.pinned === undefined ? {} : { pinned: verdict.pinned }),
+        }),
+      );
+    },
+
+    /**
+     * The catalogue scan's per-record step: would this node want these bytes if
+     * there were room, and if so, queue them.
+     *
+     * ## Why this is not `decide()`
+     *
+     * A blob worth queueing *is* `budget-exhausted` — that is what it means for
+     * the queue to have anything in it — so a scan gated on `decide()` saying
+     * `fetch` would filter out exactly the population it exists to find. The
+     * test here is therefore the structural one: does this class get prefetched
+     * at all, and does its line have a share to spend. The real question is
+     * asked later, once, per candidate the acquisition pass actually reaches.
+     *
+     * ## The cheap filter is a row lookup, not a storage probe
+     *
+     * `index.get` is a primary-key hit; `localStorage.has` is a filesystem call,
+     * and the whole reason this index exists is that one of those per record is
+     * 300k+ of them. A row this scan wrongly believes resident is corrected by
+     * `reconcile`, which is the mechanism for that disagreement — it does not
+     * need a second one here.
+     */
+    async considerForAcquisition(candidate: BlobCandidate): Promise<AcquisitionConsideration> {
+      const existing = index.get(candidate.objectStorageKey);
+      // Resident, reserved, or resident-and-departed are all "not a question
+      // for the scan": the first two are here or arriving, and a departed row
+      // is already in the queue by virtue of being non-resident, with an
+      // eviction record `defer` must not overwrite.
+      if (existing !== null && (existing.resident || existing.heldEver)) return "held";
+
+      const { sizeClass, deniedHere, overrides } = await labelInputs(candidate);
+      const budgetLine = budgetLineFor(policy, sizeClass);
+      const row = retentionRowFor(policy, budgetLine);
+      // A standing refusal, in each of the three forms it takes. None of them
+      // is contention, so none of them belongs in a queue whose entire meaning
+      // is "wanted, no room right now".
+      if (deniedHere || overrides.excluded) return "unwanted";
+      if (!row.prefetch || budgetBytesFor(policy, budgetLine) <= 0) return "unwanted";
+
+      index.defer(
+        await rowFor(candidate, {
+          sizeClass,
+          pinned: isPinned(candidate.recordId) || overrides.pinned,
+        }),
+      );
+      return "queued";
+    },
+
+    deferredCandidates(budgetLineKey: string, limit: number): ResidentEntry[] {
+      return index.deferredCandidates({ budgetLineKey, limit });
+    },
+
+    dropDeferred(objectStorageKey: string): void {
+      index.dropDeferred(objectStorageKey);
     },
 
     reserve(candidate: BlobCandidate, verdict: ResidencyVerdict): void {
@@ -812,15 +944,22 @@ export function createResidencyManager(
  * decide, and account for what landed — rather than the whole management API.
  */
 export function residencyHooks(manager: ResidencyManager): {
-  decide(candidate: BlobCandidate): Promise<ResidencyVerdict>;
+  decide(candidate: BlobCandidate, trigger: ResidencyTrigger): Promise<ResidencyVerdict>;
   onLanded(candidate: BlobCandidate, verdict: ResidencyVerdict): Promise<void>;
   reserve(candidate: BlobCandidate, verdict: ResidencyVerdict): void;
   release(objectStorageKey: string): void;
   classOf(candidate: BlobCandidate): Promise<ResolvedSizeClass>;
+  defer(candidate: BlobCandidate, verdict: ResidencyVerdict): Promise<void>;
 } {
   return {
-    decide: (candidate) => manager.decide(candidate),
+    // The trigger travels through untouched. The engine is the only thing that
+    // knows whether a decision came from a round or from the acquisition pass,
+    // and it is the difference between the two that bounds a cold sync.
+    decide: (candidate, trigger) => manager.decide(candidate, trigger),
     onLanded: (candidate, verdict) => manager.noteArrival(candidate, verdict),
+    // The other half of a decision. A round that declines a blob for want of
+    // room says so here, and the acquisition pass is what comes back for it.
+    defer: (candidate, verdict) => manager.noteDeferred(candidate, verdict),
     // The pair that makes one budget bind across several engines sharing this
     // manager, rather than each of them landing into the same apparent room.
     reserve: (candidate, verdict) => manager.reserve(candidate, verdict),

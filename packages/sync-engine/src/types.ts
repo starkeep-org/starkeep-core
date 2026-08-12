@@ -9,15 +9,31 @@ import type {
   DigestBucket,
   ObjectStorageAdapter,
 } from "@starkeep/storage-adapter";
-import type { BlobCandidate, ResidencyVerdict, ResolvedSizeClass } from "./residency-policy.js";
+import type {
+  BlobCandidate,
+  ResidencyTrigger,
+  ResidencyVerdict,
+  ResolvedSizeClass,
+} from "./residency-policy.js";
 import type { StreamTruncation } from "./round-cut.js";
 
 /**
  * The fetch-time residency decision. Async because a real implementation reads
  * the node's byte accounting and the record's labels.
+ *
+ * `trigger` names what is asking, because two of the policy's rules turn on it
+ * and a decider that could not tell a round from a background pass would have
+ * to apply the same one to both. See {@link ResidencyTrigger}: a round may not
+ * displace already-held bytes, and only a direct request ignores `prefetch`.
+ *
+ * Passed as an argument rather than split into two hooks because it is a
+ * property of the *occasion*, not an authority the caller is claiming — the one
+ * thing this codebase does insist on naming at the call site is the right to
+ * bypass the policy, and none of these three do.
  */
 export type ResidencyDecider = (
   candidate: BlobCandidate,
+  trigger: ResidencyTrigger,
 ) => Promise<ResidencyVerdict> | ResidencyVerdict;
 
 /**
@@ -62,6 +78,26 @@ export interface ResidencyHooks {
   classOf?(
     candidate: BlobCandidate,
   ): Promise<ResolvedSizeClass | null> | ResolvedSizeClass | null;
+  /**
+   * Write down a blob this round wanted and could not take, so something can
+   * come back for it.
+   *
+   * Called for exactly one verdict — `elide` with `budget-exhausted` — and the
+   * narrowness is the point. The other elide reasons are standing refusals:
+   * `not-prefetched` classes exist *precisely* so they are not acquired
+   * speculatively, and queueing them would make `prefetch: false` mean nothing;
+   * `class-disabled` and `record-constraint` are the node saying no rather than
+   * saying not now.
+   *
+   * A round that defers keeps its own behaviour otherwise: the blob is still
+   * elided, the watermark still advances. What changes is that the record is no
+   * longer only reachable through a user tapping it — which is what made a
+   * budget on a phone a one-way door.
+   *
+   * Optional, and a host without a queue simply omits it. It must also never be
+   * allowed to fail a round: see the call site in `pullBlob`.
+   */
+  defer?(candidate: BlobCandidate, verdict: ResidencyVerdict): void | Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -735,7 +771,51 @@ export interface SyncEngine {
    */
   fetchBlob(manifest: FileSyncManifest, candidate?: BlobCandidate): Promise<boolean>;
 
+  /**
+   * Pull a blob the acquisition queue says this node wants — speculatively, and
+   * **subject to the policy**.
+   *
+   * The other half of {@link fetchBlob}, and deliberately a separate method
+   * rather than a flag on it. `fetchBlob` answers a direct request ("the user
+   * opened this photo") and bypasses the residency decision on purpose; this
+   * answers a background pass working through a queue, and the decision is
+   * exactly what it must respect — a pass that ignored the budget would fetch
+   * the whole library back the moment the queue existed.
+   *
+   * Passing the difference as a boolean would put those two authorities on the
+   * same call, which is the mistake `file-sync-engine.ts` already names: the
+   * right to override a policy is named at the call site, never handed over as
+   * an argument.
+   *
+   * Three outcomes, and the middle one is what makes a pass cheap:
+   *   - `"landed"`   — the bytes are here and charged to their budget.
+   *   - `"declined"` — the policy said no. The verdict's reason rides on
+   *     {@link AcquireResult.reason}, because `budget-exhausted` means "stop
+   *     walking this line" while `class-disabled` means "drop this row".
+   *   - `"failed"`   — wanted, and did not arrive. The queue row stays and the
+   *     next tick retries; this is the retry path a watermark that has already
+   *     advanced cannot provide.
+   */
+  acquireBlob(
+    manifest: FileSyncManifest,
+    candidate: BlobCandidate,
+  ): Promise<AcquireResult>;
+
   readonly changeNotifier: ChangeNotifier;
+}
+
+/** What {@link SyncEngine.acquireBlob} did, and why. */
+export interface AcquireResult {
+  readonly outcome: "landed" | "declined" | "failed";
+  /**
+   * The verdict's reason when the policy declined, so the caller can tell
+   * "this line is full" from "this node will never want this".
+   *
+   * Null on `landed` and on `failed` — a transfer that did not happen has no
+   * policy reason attached, and inventing one would let a network fault read as
+   * a decision.
+   */
+  readonly reason: ResidencyVerdict["reason"] | null;
 }
 
 export interface VerifyResult {

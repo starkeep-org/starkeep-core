@@ -14,6 +14,7 @@ import {
   type EvictionRank,
   type NamespaceRetention,
   type NodeRetentionPolicy,
+  type ResidencyTrigger,
   type ResolvedSizeClass,
   type SizeClassRetention,
 } from "../src/residency-policy.js";
@@ -73,7 +74,7 @@ function decide(
     used?: number;
     /** Whether the host says enough worse-ranked bytes exist to displace. */
     displaces?: boolean;
-    requested?: boolean;
+    trigger?: ResidencyTrigger;
   } = {},
 ) {
   return decideResidency({
@@ -84,7 +85,7 @@ function decide(
     overrides: { pinned: over.pinned ?? false },
     usage: () => over.used ?? 0,
     displaces: () => over.displaces ?? false,
-    ...(over.requested === undefined ? {} : { requested: over.requested }),
+    ...(over.trigger === undefined ? {} : { trigger: over.trigger }),
   });
 }
 
@@ -129,12 +130,11 @@ describe("decideResidency — the two fields a row has left", () => {
     expect(v).toMatchObject({ decision: "elide", reason: "not-prefetched" });
   });
 
-  // The one input that separates the two triggers. A request is not
-  // speculation, so the field about speculation does not apply to it — and
-  // everything else still does, which is what makes read-through and admission
-  // one rule rather than two that can disagree.
+  // A request is not speculation, so the field about speculation does not apply
+  // to it — and everything else still does, which is what makes read-through and
+  // admission one rule rather than two that can disagree.
   it("fetches an unprefetched class when something actually asked for it", () => {
-    const v = decide({ rows: { classA: row({ prefetch: false }) }, requested: true });
+    const v = decide({ rows: { classA: row({ prefetch: false }) }, trigger: "request" });
     expect(v).toMatchObject({ decision: "fetch", reason: "within-budget" });
   });
 
@@ -144,7 +144,7 @@ describe("decideResidency — the two fields a row has left", () => {
   it("still declines a request that would be the first thing evicted", () => {
     const v = decide({
       rows: { classA: row({ prefetch: false }) },
-      requested: true,
+      trigger: "request",
       used: 999_999_999,
       displaces: false,
     });
@@ -154,7 +154,7 @@ describe("decideResidency — the two fields a row has left", () => {
   // A zero share is not "ask and you shall receive": it is this node holding
   // none of the class, so a request cannot conjure a budget for it.
   it("refuses a request for a class whose share is zero", () => {
-    const v = decide({ rows: { classA: row({ share: 0 }) }, requested: true });
+    const v = decide({ rows: { classA: row({ share: 0 }) }, trigger: "request" });
     expect(v).toMatchObject({ decision: "elide", reason: "class-disabled" });
   });
 });
@@ -170,12 +170,47 @@ describe("decideResidency — budget and displacement", () => {
   // a budget that simply stopped at full would fill a device with its oldest
   // material and decline everything since.
   it("fetches past a full line when the blob outranks enough of what is held", () => {
-    const v = decide({ used: 999_999_999, displaces: true });
+    const v = decide({ used: 999_999_999, displaces: true, trigger: "acquisition" });
+    expect(v).toMatchObject({ decision: "fetch", reason: "displaces-worse" });
+  });
+
+  /**
+   * The rule that bounds a cold sync, and the one place the three triggers
+   * genuinely disagree about the same blob.
+   *
+   * A round walks the change log oldest-first, so on a device whose budget
+   * binds *every* arrival outranks everything held — and admitting each of them
+   * pulls the whole library across the network to keep the last budget's worth
+   * of it. The round therefore declines and queues; the acquisition pass, whose
+   * queue is best-first, is where a displacement is a swap rather than a
+   * stampede.
+   */
+  it("refuses to displace for a round, and does not even ask the host", () => {
+    let asked = false;
+    const v = decideResidency({
+      candidate: candidate(),
+      sizeClass: CLASS_A,
+      policy: policy({ classA: row() }),
+      constraints: { deniedHere: false },
+      overrides: { pinned: false },
+      usage: () => 999_999_999,
+      displaces: () => {
+        asked = true;
+        return true;
+      },
+      trigger: "round",
+    });
+    expect(v).toMatchObject({ decision: "elide", reason: "budget-exhausted" });
+    expect(asked).toBe(false);
+  });
+
+  it("displaces for a direct request", () => {
+    const v = decide({ used: 999_999_999, displaces: true, trigger: "request" });
     expect(v).toMatchObject({ decision: "fetch", reason: "displaces-worse" });
   });
 
   it("elides a full line when nothing held ranks worse", () => {
-    const v = decide({ used: 999_999_999, displaces: false });
+    const v = decide({ used: 999_999_999, displaces: false, trigger: "acquisition" });
     expect(v).toMatchObject({ decision: "elide", reason: "budget-exhausted" });
   });
 
@@ -195,6 +230,7 @@ describe("decideResidency — budget and displacement", () => {
         asked = bytesNeeded;
         return true;
       },
+      trigger: "request",
     });
     // 499,800 held + 1,000 incoming - 500,000 budget.
     expect(asked).toBe(800);
@@ -211,6 +247,7 @@ describe("decideResidency — budget and displacement", () => {
       constraints: { deniedHere: false },
       overrides: { pinned: false },
       usage: () => 999_999_999,
+      trigger: "acquisition",
       displaces: (_line, rank) => {
         seen = rank;
         return false;

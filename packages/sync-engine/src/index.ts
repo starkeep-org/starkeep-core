@@ -27,6 +27,7 @@ export type {
   VerifyResult,
   ResidencyDecider,
   ResidencyHooks,
+  AcquireResult,
 } from "./types.js";
 export { SHARED_DIGEST_SCOPE } from "./types.js";
 export {
@@ -63,6 +64,7 @@ export {
   type LocalOverrides,
   type BlobCandidate,
   type ResidencyDecision,
+  type ResidencyTrigger,
   type ResidencyVerdict,
   type LineUsageLookup,
   type DisplacementLookup,
@@ -76,6 +78,7 @@ export {
   type ResidentEntry,
   type ResidentSetIndex,
   type EvictionCandidateQuery,
+  type DeferredCandidateQuery,
 } from "./resident-set.js";
 
 export {
@@ -93,8 +96,6 @@ export {
   previewBudgetReduction,
   shedLoad,
   SHED_ORDER,
-  DEFAULT_WATER_MARKS,
-  type WaterMarks,
   type RetentionReason,
   type EvictionOutcome,
   type EvictionRequest,
@@ -102,12 +103,32 @@ export {
   type ShedStep,
 } from "./eviction.js";
 
+export {
+  scanForAcquirable,
+  SCAN_PAGE_ROWS,
+  type AcquisitionScanRequest,
+  type AcquisitionScanResult,
+  type AcquisitionCandidateSink,
+  type AcquisitionConsideration,
+} from "./acquisition-scan.js";
+
+export {
+  runAcquisition,
+  ACQUISITION_PAGE_ROWS,
+  type AcquisitionRequest,
+  type AcquisitionOutcome,
+} from "./acquisition.js";
+
 export { createSqliteSyncStateStore } from "./sync-state-sqlite.js";
 export { createChangeNotifier } from "./change-notifier.js";
 export { advanceWatermark, mergeWatermarks, watermarkFor, selectUnseen } from "./watermarks.js";
 export { createFileSyncEngine } from "./file-sync-engine.js";
 export { createSyncEngine } from "./sync-engine.js";
-export { residencyOf, type RecordResidency } from "./residency.js";
+export {
+  residencyOf,
+  type RecordResidency,
+  type RecordResidencyState,
+} from "./residency.js";
 export { createInProcessSyncTransport } from "./transports/in-process-transport.js";
 export {
   createHttpSyncTransport,

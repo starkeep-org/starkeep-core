@@ -320,7 +320,7 @@ describe("a failed fetch is not a decline", () => {
   });
 });
 
-describe("residencyOf names the two ways a blob can be missing", () => {
+describe("residencyOf names the ways a blob can be missing", () => {
   const row = {
     id: "r1",
     object_storage_key: "shared/image/aa/" + "a".repeat(64),
@@ -334,46 +334,85 @@ describe("residencyOf names the two ways a blob can be missing", () => {
     deleted_at: null,
   };
 
+  /** A verdict with nothing on it but the two fields this derivation reads. */
+  const verdict = (
+    decision: "fetch" | "elide",
+    reason: ResidencyVerdict["reason"],
+  ): ResidencyVerdict => ({ decision, sizeClass: null, reason });
+
+  const stateOf = async (
+    decide?: (r: typeof row) => ResidencyVerdict,
+    over: Partial<typeof row> = {},
+  ) => {
+    const storage = new MockObjectStorageAdapter();
+    await storage.init();
+    return residencyOf({ ...row, ...over }, storage, decide);
+  };
+
   it("reports resident when the blob is here", async () => {
     const storage = new MockObjectStorageAdapter();
     await storage.init();
     await storage.put(row.object_storage_key, new Uint8Array([1]));
-    expect(await residencyOf(row, storage)).toBe("resident");
+    expect(await residencyOf(row, storage)).toEqual({ state: "resident", reason: null });
   });
 
   // Without a decider every blobless row reads as "still owed" — the exact
   // conflation that made Elided impossible.
   it("reports staged with no decider, and elided when the node declined it", async () => {
-    const storage = new MockObjectStorageAdapter();
-    await storage.init();
-    expect(await residencyOf(row, storage)).toBe("staged");
-    expect(await residencyOf(row, storage, () => "elide")).toBe("elided");
-    expect(await residencyOf(row, storage, () => "fetch")).toBe("staged");
+    expect(await stateOf()).toEqual({ state: "staged", reason: null });
+    expect(await stateOf(() => verdict("elide", "class-disabled"))).toEqual({
+      state: "elided",
+      reason: "class-disabled",
+    });
+    expect(await stateOf(() => verdict("fetch", "within-budget"))).toEqual({
+      state: "staged",
+      reason: "within-budget",
+    });
+  });
+
+  /**
+   * The distinction the acquisition queue introduced, and the reason `elided`
+   * is now honest.
+   *
+   * Every other elide reason is a standing statement about this node: it does
+   * not want this class and will not until a policy changes. `budget-exhausted`
+   * is contention — the node wants these bytes, the line was full at the moment
+   * it was asked, and the queue is going to come back for them. Reporting that
+   * as `elided` told a UI to stop waiting for a blob that is genuinely owed.
+   */
+  it("reports a budget-deferred blob as staged and everything else as elided", async () => {
+    expect(await stateOf(() => verdict("elide", "budget-exhausted"))).toEqual({
+      state: "staged",
+      reason: "budget-exhausted",
+    });
+    for (const reason of ["class-disabled", "not-prefetched", "record-constraint"] as const) {
+      expect(await stateOf(() => verdict("elide", reason))).toEqual({
+        state: "elided",
+        reason,
+      });
+    }
   });
 
   // Elided-ness is re-evaluated rather than stored, so raising a budget makes a
   // record staged again with no migration and no stale flag to clean up.
   it("follows current policy rather than a stored flag", async () => {
-    const storage = new MockObjectStorageAdapter();
-    await storage.init();
     let declining = true;
-    const decide = () => (declining ? "elide" as const : "fetch" as const);
-    expect(await residencyOf(row, storage, decide)).toBe("elided");
+    const decide = () =>
+      declining ? verdict("elide", "class-disabled") : verdict("fetch", "within-budget");
+    expect((await stateOf(decide)).state).toBe("elided");
     declining = false;
-    expect(await residencyOf(row, storage, decide)).toBe("staged");
+    expect((await stateOf(decide)).state).toBe("staged");
   });
 
   it("reports tombstoned regardless of the blob or the policy", async () => {
-    const storage = new MockObjectStorageAdapter();
-    await storage.init();
-    expect(await residencyOf({ ...row, deleted_at: "t" }, storage, () => "elide")).toBe(
-      "tombstoned",
-    );
+    expect(
+      await stateOf(() => verdict("elide", "class-disabled"), { deleted_at: "t" }),
+    ).toEqual({ state: "tombstoned", reason: null });
   });
 
   it("reports absent for no row at all", async () => {
     const storage = new MockObjectStorageAdapter();
     await storage.init();
-    expect(await residencyOf(null, storage)).toBe("absent");
+    expect(await residencyOf(null, storage)).toEqual({ state: "absent", reason: null });
   });
 });

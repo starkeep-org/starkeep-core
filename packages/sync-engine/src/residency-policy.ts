@@ -581,21 +581,50 @@ export interface DecideResidencyInputs {
   readonly overrides: LocalOverrides;
   readonly usage: LineUsageLookup;
   readonly displaces: DisplacementLookup;
-  /**
-   * True when something actually asked for these bytes, rather than a sync
-   * round offering them.
-   *
-   * The one input that distinguishes the two triggers, and the reason
-   * admission and read-through are the same rule rather than two: a request
-   * ignores {@link SizeClassRetention.prefetch} — that field is about
-   * speculation, and this is not speculation — and is otherwise judged exactly
-   * as an arrival is, including being declined when it would be the first thing
-   * evicted. Declining there is not stinginess; landing a blob that the next
-   * pass deletes is a download and a delete, and the read is served remotely
-   * either way.
-   */
-  readonly requested?: boolean;
+  /** What is asking. Defaults to {@link ResidencyTrigger} `"round"`. */
+  readonly trigger?: ResidencyTrigger;
 }
+
+/**
+ * What occasioned this decision. One rule, three callers, and the differences
+ * between them are exactly two questions.
+ *
+ * This replaced a `requested?: boolean`, which could name only one of the three
+ * and was silent about the distinction that turned out to matter more.
+ *
+ * | | honours `prefetch` | may displace held bytes |
+ * |---|---|---|
+ * | `round`       | yes | **no** |
+ * | `acquisition` | yes | yes |
+ * | `request`     | no  | yes |
+ *
+ * ## Why a round may not displace
+ *
+ * A round walks the change log **oldest-first**, because forward order is the
+ * coverage claim the watermark makes. On a device whose budget binds, that
+ * makes every single arrival newer than everything currently held — so a rule
+ * that admits anything outranking what is held admits nearly all of them. The
+ * line converges on the right bytes, having transferred the whole library to
+ * get there: a twenty-year, 400 GB library pulls close to 400 GB to retain
+ * 19 GB, rewriting a phone's flash in budget-sized increments on the way.
+ *
+ * Declining instead is not a worse answer to the same question — it is the same
+ * answer reached without the transfer. A round that finds its line full defers,
+ * and the acquisition pass comes back for the blob in the order the node
+ * actually wants it, which is where displacement belongs: the queue is
+ * best-first, so a displacement there swaps in the best available blob rather
+ * than whatever the change log happened to reach next.
+ *
+ * The end state is identical. What changes is that the bytes that are going to
+ * be evicted are never fetched in the first place.
+ */
+export type ResidencyTrigger =
+  /** A sync round offering bytes in change-log order. */
+  | "round"
+  /** The acquisition pass working a best-first queue. */
+  | "acquisition"
+  /** Something actually asked for these bytes — a person opening the item. */
+  | "request";
 
 /**
  * The decision, in the fixed order of §6.1. The order matters because two of
@@ -605,6 +634,7 @@ export interface DecideResidencyInputs {
  */
 export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict {
   const { candidate, sizeClass, policy, constraints, overrides, usage, displaces } = inputs;
+  const trigger: ResidencyTrigger = inputs.trigger ?? "round";
   const budgetLine = budgetLineFor(policy, sizeClass);
   const base = { sizeClass, budgetLine, pinned: overrides.pinned } as const;
 
@@ -626,7 +656,7 @@ export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict
   if (budgetBytes <= 0) {
     return { ...base, decision: "elide", reason: "class-disabled" };
   }
-  if (!row.prefetch && inputs.requested !== true) {
+  if (!row.prefetch && trigger !== "request") {
     // Not a failure and not a permanent refusal — an explicit fetch (a user
     // opening the item) reaches the budget check below. It just never happens
     // as part of a sync round.
@@ -635,6 +665,15 @@ export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict
 
   // 4. The budget. Checked last so that a class the node has decided to keep is
   //    only declined for want of room, never for want of interest.
+  //
+  //    **The budget is the only level in this system**, and that is load-bearing
+  //    now that something actively refills a line. The eviction pass frees down
+  //    to exactly this number and the acquisition pass fills up to exactly this
+  //    number, so the two share a fixed point. Any two *different* levels — a
+  //    pass filling to 100% against an eviction target of 80%, say — would pump
+  //    against each other for ever: fill, evict, refetch what was just evicted,
+  //    re-evict. That is the waste the acquisition order exists to remove,
+  //    arriving from the other end.
   if (usage(budgetLine) + candidate.sizeBytes <= budgetBytes) {
     return {
       ...base,
@@ -644,19 +683,27 @@ export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict
   }
 
   // Full — but "full" is a statement about *these particular* bytes, not about
-  // the class. A sync round walks the change log forward, which is oldest
-  // first, so a budget that simply stopped at full would fill a phone with 2005
-  // and decline everything since. Admitting anything that outranks enough of
-  // what is already held is what makes the line converge on the best of the
-  // class regardless of the order things arrived in, and it is the same rule
-  // that decides whether a read-miss lands.
-  const needed = usage(budgetLine) + candidate.sizeBytes - budgetBytes;
-  const rank: EvictionRank = {
-    lastOpenedAtMs: candidate.lastOpenedAtMs,
-    recencyAtMs: candidate.recencyAtMs,
-  };
-  if (displaces(budgetLine, rank, needed)) {
-    return { ...base, decision: "fetch", reason: "displaces-worse" };
+  // the class. Admitting anything that outranks enough of what is already held
+  // is what makes the line converge on the best of the class regardless of the
+  // order things arrived in, and it is the same rule that decides whether a
+  // read-miss lands.
+  //
+  // **Not for a round.** A round walks oldest-first, so on a binding budget
+  // every arrival outranks everything held and this branch admits the whole
+  // library one displacement at a time — the right contents, at the cost of
+  // transferring everything that is about to be evicted. A full line therefore
+  // declines, the round writes the candidate onto the acquisition queue, and
+  // the displacement happens there instead, where the queue is best-first and a
+  // swap is a swap rather than a stampede. See {@link ResidencyTrigger}.
+  if (trigger !== "round") {
+    const needed = usage(budgetLine) + candidate.sizeBytes - budgetBytes;
+    const rank: EvictionRank = {
+      lastOpenedAtMs: candidate.lastOpenedAtMs,
+      recencyAtMs: candidate.recencyAtMs,
+    };
+    if (displaces(budgetLine, rank, needed)) {
+      return { ...base, decision: "fetch", reason: "displaces-worse" };
+    }
   }
   return { ...base, decision: "elide", reason: "budget-exhausted" };
 }

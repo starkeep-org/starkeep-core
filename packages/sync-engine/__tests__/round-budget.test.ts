@@ -940,7 +940,13 @@ describe("repair floor retirement", () => {
     if (record?.objectStorageKey) await cloud.storage.delete(record.objectStorageKey);
   }
 
-  it("keeps the floor when the repair round's upload failed", async () => {
+  // Explicitly timed out, generously. These two seed several megabytes of real
+  // bytes and hash every one of them through the transfer path — they sit
+  // around two seconds on an idle machine and several times that when the
+  // workspace's other suites are running beside them, which is exactly when a
+  // 5-second default bites. A slow test is not a failing one, and a flake here
+  // reads as a sync regression.
+  it("keeps the floor when the repair round's upload failed", { timeout: 30_000 }, async () => {
     const { local, cloud } = await twoSides();
     const ids: StarkeepId[] = [];
     for (let i = 0; i < 5; i += 1) ids.push(await seedBlobRecord(local, 1 * MB));
@@ -981,7 +987,7 @@ describe("repair floor retirement", () => {
     expect(await syncState.getRepairFloors()).toEqual({});
   });
 
-  it("retires only the authors whose shipment was not truncated", async () => {
+  it("retires only the authors whose shipment was not truncated", { timeout: 30_000 }, async () => {
     // Retirement is per author because failure is. One device's failed upload
     // must not discard a repair armed for another's.
     const { local, cloud } = await twoSides();

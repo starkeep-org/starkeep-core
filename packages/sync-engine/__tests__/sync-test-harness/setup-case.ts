@@ -229,8 +229,9 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
       const rec = await side(role).db.get(target);
       if (!rec) return "absent";
       // Reshape SR DataRecord into the FileRecordRow snake_case form
-      // residencyOf expects.
-      return residencyOf(
+      // residencyOf expects. Only the state is of interest here — the harness
+      // has no policy, so there is never a reason to report.
+      return (await residencyOf(
         {
           id: rec.id,
           object_storage_key: rec.objectStorageKey,
@@ -244,7 +245,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
           deleted_at: rec.deletedAt ? "deleted" : null,
         },
         side(role).storage,
-      );
+      )).state;
     }
 
     if (resolved.dt === "AW") {
