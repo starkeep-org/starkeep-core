@@ -63,12 +63,13 @@ Runtime settings live in `~/.starkeep/config.json` (or `$STARKEEP_DIR/config.jso
 
 Recognised keys: `nodeId` (generated once, never change), `pullIntervalMs` (default 30000), `pushDebounceMs` (default 500), `stage`, `userPoolId`, `userPoolClientId`, `identityPoolId`, `s3Bucket`, `s3Region`, `auroraEndpoint`, `apiGatewayUrl`.
 
-Only two env vars are recognised — both bootstrap concerns that can't live in the config file:
+Only three env vars are recognised — none of them runtime settings, which belong in the config file:
 
 | Environment Variable | Default | Description |
 |---|---|---|
 | `STARKEEP_PORT` | `9820` | HTTP port |
 | `STARKEEP_DIR` | `~/.starkeep` | Root directory for local data (chicken-and-egg with the config file's own location) |
+| `STARKEEP_EXIT_WITH_PID` | unset | Exit once this pid is gone. For supervisors that can't hold a parent link — a `PATCH /config` restart detaches the replacement, so whoever started the server loses its handle. Set by the test harness; leave unset in normal use, where the daemon should outlive its launcher. |
 
 ## Local Storage
 
