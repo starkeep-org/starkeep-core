@@ -129,7 +129,7 @@ export interface ResidentEntry {
    * makes declining a blob a terminal state rather than a permanent retry — so
    * the peer will never offer those bytes again. A blob that was *fetched and
    * later evicted* is in exactly the same position, and nothing said so: once
-   * the pass had freed the class back under its low-water mark,
+   * the pass had freed the class back to its budget,
    * `decideResidency` answered `fetch` again and `residencyOf` therefore
    * reported `staged` — "row present, blob wanted, blob not yet here", i.e.
    * *still owed* — for bytes no sync round will ever send. `staged`'s durable
@@ -151,6 +151,24 @@ export interface ResidentEntry {
    * everywhere else.
    */
   readonly reserved: boolean;
+  /**
+   * Whether this node has ever actually held these bytes.
+   *
+   * False is a **deferred** row: a blob this node wants and has never had,
+   * written down by {@link ResidentSetIndex.defer} so the acquisition pass can
+   * find it later. It exists because `resident = 0` had been carrying two
+   * meanings the moment a queue was introduced, and one of them is
+   * unrecoverable while the other is merely pending.
+   *
+   * That distinction is `wasEvicted`'s whole job, so this column is what keeps
+   * it honest: without it every queued blob would report `evicted` — "held and
+   * gone" — for bytes that were never here, which is the one state
+   * `residencyOf` defines as beyond recovery.
+   *
+   * Defaults to true on write, which is what every existing row was: a row
+   * only came to exist by being fetched.
+   */
+  readonly heldEver: boolean;
 }
 
 export interface EvictionCandidateQuery {
@@ -179,11 +197,20 @@ export interface ReconcileReport {
 }
 
 /**
- * What a caller supplies about a blob. The two lifecycle flags are set by the
- * index itself — `add` means resident, `reserve` means reserved — so a caller
- * cannot state them inconsistently with the call it is making.
+ * What a caller supplies about a blob. The three lifecycle flags are set by the
+ * index itself — `add` means resident and held, `reserve` means reserved, and
+ * `defer` means wanted and never held — so a caller cannot state them
+ * inconsistently with the call it is making.
  */
-export type ResidentArrival = Omit<ResidentEntry, "resident" | "reserved">;
+export type ResidentArrival = Omit<ResidentEntry, "resident" | "reserved" | "heldEver">;
+
+/** One page of the acquisition queue for a budget line. */
+export interface DeferredCandidateQuery {
+  /** `BudgetLine.key` — the line whose queue this is. */
+  readonly budgetLineKey: string;
+  /** How many rows to return. The caller pages; see `deferredCandidates`. */
+  readonly limit: number;
+}
 
 export interface ResidentSetIndex {
   /** Record an arrival. Idempotent on `objectStorageKey`. */
@@ -213,6 +240,64 @@ export interface ResidentSetIndex {
   /** Drop a reservation whose transfer did not happen. No-op for a landed row. */
   release(objectStorageKey: string): void;
   /**
+   * Write down a blob this node wants and could not take — the acquisition
+   * queue's only write path.
+   *
+   * A round that declines a blob for `budget-exhausted` calls this, and so does
+   * the catalogue scan. The row it writes is not a claim about disk: it carries
+   * `resident = 0, reserved = 0, held_ever = 0`, counts toward no usage sum, and
+   * is never an eviction candidate. It is a *hint*, and a stale one is
+   * harmless — the pass re-runs the real decision before it spends a byte.
+   *
+   * ## What it is structurally unable to do
+   *
+   * The upsert can only ever refresh a row that is *already* deferred
+   * (`WHERE resident = 0 AND held_ever = 0`). Two things that must never happen
+   * are therefore impossible rather than merely avoided:
+   *
+   *   - **Un-resident a held blob.** A deferred write landing on a resident row
+   *     would take bytes that are on disk out of their budget's usage sum, and
+   *     the next pass would work to a target it had already passed.
+   *   - **Erase an eviction record.** A departed row is the only durable
+   *     evidence that this node held these bytes and let them go; overwriting
+   *     it with `held_ever = 0` would make `residencyOf` report a blob no round
+   *     will resend as merely queued.
+   *
+   * Both are guarded in the SQL rather than in a caller, because the callers
+   * are a sync round and a background scan and neither is in a position to know.
+   */
+  defer(entry: ResidentArrival): void;
+  /**
+   * The acquisition queue for a budget line, **best-first**.
+   *
+   * The exact reverse of {@link evictionCandidates}: most-recently-opened first,
+   * then by the record's own date, with never-opened material last. That is not
+   * a second opinion about what matters — it is {@link compareEvictionRank}
+   * read backwards, because the best thing to acquire is by definition the last
+   * thing this line would give up.
+   *
+   * Every non-resident row of the line is a candidate, deferred and departed
+   * alike. An evicted blob is exactly a blob this node wanted, held, and let go
+   * under contention, so a queue that skipped it would leave the population
+   * §3.2 of the plan calls out — bytes evicted after their round completed —
+   * with no route home at all.
+   *
+   * Paged for the reason `evictionCandidates` is: a cold library's queue is the
+   * whole library, and reading 300k rows into a handset's heap is the problem
+   * this file exists to avoid, one level up.
+   */
+  deferredCandidates(query: DeferredCandidateQuery): ResidentEntry[];
+  /**
+   * Forget a deferred row — a candidate the acquisition pass established can
+   * never win.
+   *
+   * Guarded to rows that are actually deferred. Asked to drop a departed row it
+   * does nothing, for the same reason `defer` cannot overwrite one: the row is
+   * the eviction record, and a queue tidying itself must not be able to delete
+   * the fact that these bytes were once here.
+   */
+  dropDeferred(objectStorageKey: string): void;
+  /**
    * Forget a blob entirely — the row goes.
    *
    * Distinct from {@link markDeparted}, which keeps the row as a record that
@@ -231,6 +316,12 @@ export interface ResidentSetIndex {
    *
    * The fact `residencyOf` needs to distinguish "declined, and the peer will
    * re-offer it if policy changes" from "held, evicted, and gone for good".
+   *
+   * `resident = 0` alone stopped answering this once a queue existed: a
+   * deferred row is also not resident, and it names bytes that were never here.
+   * Hence `held_ever` — without it every queued blob would report `evicted`,
+   * which is the one state `residencyOf` defines as unrecoverable, for a blob
+   * the acquisition pass is about to fetch.
    */
   wasEvicted(objectStorageKey: string): boolean;
   /**
@@ -313,9 +404,9 @@ const TABLE = "resident_blobs";
 /**
  * Rows the first eviction-candidate query asks for.
  *
- * Sized so an ordinary pass — freeing the ~15% of a budget that hysteresis
- * implies — is answered in one query for objects of any realistic size, while
- * still being a few hundred kilobytes of row rather than a whole class.
+ * Sized so an ordinary pass — freeing whatever a line has gone over its budget
+ * by — is answered in one query for objects of any realistic size, while still
+ * being a few hundred kilobytes of row rather than a whole class.
  */
 const CANDIDATE_PAGE_ROWS = 512;
 
@@ -334,6 +425,7 @@ interface Row {
   added_at_ms: number;
   resident: number;
   reserved: number;
+  held_ever: number;
 }
 
 export function createSqliteResidentSetIndex(options: {
@@ -365,6 +457,14 @@ export function createSqliteResidentSetIndex(options: {
       // an eviction candidate, because a pass that deleted a key mid-transfer
       // would leave the arriving stream writing a file nothing knows about.
       .addColumn("reserved", "integer", (c) => c.notNull().defaultTo(0))
+      // Defaults to 1 so every row written before the acquisition queue existed
+      // reads as "held", which is what it was — a row only came to exist by
+      // being fetched. See {@link ResidentEntry.heldEver}.
+      //
+      // Adding a column to an existing table is not what `createTable()
+      // .ifNotExists()` does, and there is deliberately no migration here: this
+      // is development, so the dev path is to drop the database (CLAUDE.md).
+      .addColumn("held_ever", "integer", (c) => c.notNull().defaultTo(1))
       .compile().sql,
   );
   // Every hot query here is "everything on one budget line": the usage sum, the
@@ -401,6 +501,23 @@ export function createSqliteResidentSetIndex(options: {
       .columns(["record_id"])
       .compile().sql,
   );
+  // The acquisition queue, best-first. `_by_budget_line` cannot serve it: the
+  // ordering is two more columns deep, so SQLite would filter on that index and
+  // then build a temp b-tree over the result — which on a cold library is the
+  // whole library, sorted, on every tick of a background pass. The equality
+  // columns come first and the two ordering columns follow in the direction the
+  // query asks for, so the index *is* the sort.
+  db.exec(
+    qb.schema
+      .createIndex(`${TABLE}_deferred`)
+      .ifNotExists()
+      .on(TABLE)
+      .column("budget_line")
+      .column("resident")
+      .column("last_opened_at_ms desc")
+      .column("recency_at_ms desc")
+      .compile().sql,
+  );
 
   const addStmt = db.prepare(
     qb
@@ -420,6 +537,7 @@ export function createSqliteResidentSetIndex(options: {
         added_at_ms: sql.raw("?"),
         resident: sql.raw("?"),
         reserved: sql.raw("?"),
+        held_ever: sql.raw("?"),
       })
       .onConflict((oc) =>
         oc.column("object_storage_key").doUpdateSet((eb) => ({
@@ -440,6 +558,12 @@ export function createSqliteResidentSetIndex(options: {
           resident: eb.ref("excluded.resident"),
           // Bytes landing is what turns a reservation into the real thing.
           reserved: eb.ref("excluded.reserved"),
+          // Overwritten too, and only ever upward in practice: `add` and
+          // `reserve` write 1, and `defer` never reaches this statement. A
+          // deferred row whose bytes have arrived is a row that has now been
+          // held, and the eviction record it becomes on the way out depends on
+          // saying so.
+          held_ever: eb.ref("excluded.held_ever"),
           // pinned and last_opened_at_ms are deliberately NOT overwritten: they
           // are node-local user state, and a re-arrival of the same bytes (a
           // re-sync, a re-derivation) is not a reason to forget that someone
@@ -596,6 +720,111 @@ export function createSqliteResidentSetIndex(options: {
       .compile().sql,
   );
 
+  /**
+   * The queue write. See {@link ResidentSetIndex.defer} for what the guard is
+   * for; what follows is why it is written as a conflict clause rather than a
+   * read-then-write.
+   *
+   * A caller that checked `get()` first and then wrote would be two statements
+   * where the interesting case is a race — a scan and a round both reaching the
+   * same key, or a round landing bytes between the check and the write. One
+   * guarded upsert cannot lose that race, and it also means the two callers
+   * (`pullBlob`'s elide branch and the catalogue scan) have no invariant to
+   * remember between them.
+   */
+  const deferStmt = db.prepare(
+    qb
+      .insertInto(TABLE)
+      .values({
+        object_storage_key: sql.raw("?"),
+        record_id: sql.raw("?"),
+        size_bytes: sql.raw("?"),
+        size_class: sql.raw("?"),
+        budget_line: sql.raw("?"),
+        namespace: sql.raw("?"),
+        pinned: sql.raw("?"),
+        protected_locally: sql.raw("?"),
+        requires_durability_proof: sql.raw("?"),
+        recency_at_ms: sql.raw("?"),
+        last_opened_at_ms: sql.raw("?"),
+        added_at_ms: sql.raw("?"),
+        resident: sql.lit(0),
+        reserved: sql.lit(0),
+        held_ever: sql.lit(0),
+      })
+      .onConflict((oc) =>
+        oc
+          .column("object_storage_key")
+          .doUpdateSet((eb) => ({
+            record_id: eb.ref("excluded.record_id"),
+            size_bytes: eb.ref("excluded.size_bytes"),
+            size_class: eb.ref("excluded.size_class"),
+            // Re-resolved by the caller against the current policy, exactly as
+            // an arrival is: a rung that has gained a row of its own queues on
+            // the line it belongs to now.
+            budget_line: eb.ref("excluded.budget_line"),
+            namespace: eb.ref("excluded.namespace"),
+            protected_locally: eb.ref("excluded.protected_locally"),
+            requires_durability_proof: eb.ref("excluded.requires_durability_proof"),
+            recency_at_ms: eb.ref("excluded.recency_at_ms"),
+            // `pinned` and `last_opened_at_ms` are left alone for the same
+            // reason `add` leaves them: they are node-local user state, and
+            // re-queueing a blob is not a reason to forget that somebody pinned
+            // it or opened it yesterday.
+          }))
+          // The whole guarantee. A row that is resident, reserved, or departed
+          // is untouched by a deferred write — the queue can refresh its own
+          // rows and nothing else.
+          .where("resident", "=", sql.lit(0))
+          .where("held_ever", "=", sql.lit(0)),
+      )
+      .compile().sql,
+  );
+
+  const dropDeferredStmt = db.prepare(
+    qb
+      .deleteFrom(TABLE)
+      .where("object_storage_key", "=", sql.raw("?"))
+      .where("resident", "=", sql.lit(0))
+      .where("held_ever", "=", sql.lit(0))
+      .compile().sql,
+  );
+
+  /**
+   * The acquisition queue, best-first — `compareEvictionRank` read backwards.
+   *
+   * `ORDER BY last_opened_at_ms DESC, recency_at_ms DESC` is the exact reverse
+   * of the eviction order above, including where the nulls go: SQLite sorts
+   * NULL first ascending, so descending puts it last, which is where
+   * never-opened and undated material belongs when the question is what to
+   * acquire *first*. The eviction statement spells its null placement out with
+   * an `IS NULL` term and this does not need to, because the reversal already
+   * carries it — and adding one would be a second expression the composite
+   * index could not serve.
+   *
+   * Every non-resident row of the line, not only the deferred ones. A departed
+   * row names bytes this node wanted, held, and let go under contention; it is
+   * a queue entry with better provenance than most, and skipping it would leave
+   * every evicted blob with no route home but a user tapping it. `held_ever`
+   * separates the two facts for `wasEvicted`; it does not separate them for the
+   * question "what should this line take next", where they are the same thing.
+   *
+   * Reservations are excluded because they are already resident for accounting
+   * purposes — acquiring one would be a second transfer of bytes in flight.
+   */
+  const deferredCandidatesStmt = db.prepare(
+    qb
+      .selectFrom(TABLE)
+      .selectAll()
+      .where("budget_line", "=", sql.raw("?"))
+      .where("resident", "=", sql.lit(0))
+      .where("reserved", "=", sql.lit(0))
+      .orderBy("last_opened_at_ms", "desc")
+      .orderBy("recency_at_ms", "desc")
+      .limit(sql.raw("?") as never)
+      .compile().sql,
+  );
+
   function toEntry(row: Row): ResidentEntry {
     return {
       recordId: row.record_id,
@@ -612,6 +841,7 @@ export function createSqliteResidentSetIndex(options: {
       addedAtMs: row.added_at_ms,
       resident: row.resident === 1,
       reserved: row.reserved === 1,
+      heldEver: row.held_ever === 1,
     };
   }
 
@@ -631,6 +861,7 @@ export function createSqliteResidentSetIndex(options: {
       entry.addedAtMs,
       entry.resident ? 1 : 0,
       entry.reserved ? 1 : 0,
+      entry.heldEver ? 1 : 0,
     );
   }
 
@@ -678,7 +909,7 @@ export function createSqliteResidentSetIndex(options: {
     evictionCandidates,
 
     add(entry: ResidentArrival): void {
-      write({ ...entry, resident: true, reserved: false });
+      write({ ...entry, resident: true, reserved: false, heldEver: true });
     },
 
     reserve(entry: ResidentArrival): void {
@@ -691,7 +922,12 @@ export function createSqliteResidentSetIndex(options: {
       if (existing !== undefined && existing.resident === 1 && existing.reserved === 0) {
         return;
       }
-      write({ ...entry, resident: true, reserved: true });
+      // `heldEver: true` on a reservation, not because the bytes are here, but
+      // because they are charged to a budget as though they were — the same
+      // reading `resident: true` takes two lines up. A reservation that failed
+      // is deleted by `release`, so this value is only ever observed by a row
+      // that went on to land.
+      write({ ...entry, resident: true, reserved: true, heldEver: true });
     },
 
     release(objectStorageKey: string): void {
@@ -699,6 +935,33 @@ export function createSqliteResidentSetIndex(options: {
       // — the bytes landed — and a failed sibling transfer must not delete it.
       const row = getStmt.get(objectStorageKey) as Row | undefined;
       if (row !== undefined && row.reserved === 1) removeStmt.run(objectStorageKey);
+    },
+
+    defer(entry: ResidentArrival): void {
+      deferStmt.run(
+        entry.objectStorageKey,
+        entry.recordId,
+        entry.sizeBytes,
+        entry.sizeClass,
+        entry.budgetLineKey,
+        entry.namespace,
+        entry.pinned ? 1 : 0,
+        entry.protectedLocally ? 1 : 0,
+        entry.requiresDurabilityProof ? 1 : 0,
+        entry.recencyAtMs,
+        entry.lastOpenedAtMs,
+        entry.addedAtMs,
+      );
+    },
+
+    deferredCandidates(query: DeferredCandidateQuery): ResidentEntry[] {
+      return (
+        deferredCandidatesStmt.all(query.budgetLineKey, query.limit) as unknown as Row[]
+      ).map(toEntry);
+    },
+
+    dropDeferred(objectStorageKey: string): void {
+      dropDeferredStmt.run(objectStorageKey);
     },
 
     remove(objectStorageKey: string): void {
@@ -711,7 +974,10 @@ export function createSqliteResidentSetIndex(options: {
 
     wasEvicted(objectStorageKey: string): boolean {
       const row = getStmt.get(objectStorageKey) as Row | undefined;
-      return row !== undefined && row.resident === 0;
+      // `held_ever` is what keeps this from answering "held and gone" for a
+      // deferred row, which is not resident either and names bytes that were
+      // never here.
+      return row !== undefined && row.resident === 0 && row.held_ever === 1;
     },
 
     async reconcile(storage): Promise<ReconcileReport> {

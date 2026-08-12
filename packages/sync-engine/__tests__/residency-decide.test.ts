@@ -572,9 +572,12 @@ describe("a full line still admits something that outranks what is held", () => 
     await land(manager, "opened", Date.now());
     await land(manager, "never-opened", null);
 
-    // A newcomer that has been opened outranks the never-opened resident.
+    // A newcomer that has been opened outranks the never-opened resident. Asked
+    // as the acquisition pass asks it, because that is the only trigger allowed
+    // to displace — see the round's case below.
     const wanted = await manager.decide(
       candidate({ recordId: "wanted", objectStorageKey: "key-wanted", sizeBytes: 1000, lastOpenedAtMs: Date.now() }),
+      "acquisition",
     );
     expect(wanted).toMatchObject({ decision: "fetch", reason: "displaces-worse" });
 
@@ -583,8 +586,30 @@ describe("a full line still admits something that outranks what is held", () => 
     // a delete.
     const unwanted = await manager.decide(
       candidate({ recordId: "unwanted", objectStorageKey: "key-unwanted", sizeBytes: 1000 }),
+      "acquisition",
     );
     expect(unwanted).toMatchObject({ decision: "elide", reason: "budget-exhausted" });
+  });
+
+  /**
+   * The same blob, offered by a round, is declined — and that is the change
+   * that bounds a cold sync.
+   *
+   * A round walks oldest-first, so on a binding budget every arrival outranks
+   * everything held and displacement would admit the whole library to keep the
+   * last budget's worth of it. The round defers instead; the pass above is
+   * where the displacement happens, in the order the node actually wants.
+   */
+  it("declines the same blob when a round offers it", async () => {
+    const manager = build({ policy: tiny });
+    await land(manager, "opened", Date.now());
+    await land(manager, "never-opened", null);
+
+    const verdict = await manager.decide(
+      candidate({ recordId: "wanted", objectStorageKey: "key-wanted", sizeBytes: 1000, lastOpenedAtMs: Date.now() }),
+      "round",
+    );
+    expect(verdict).toMatchObject({ decision: "elide", reason: "budget-exhausted" });
   });
 
   // A pinned resident is not displaceable, so it cannot make room for anything —
@@ -599,6 +624,7 @@ describe("a full line still admits something that outranks what is held", () => 
 
     const verdict = await manager.decide(
       candidate({ recordId: "wanted", objectStorageKey: "key-wanted", sizeBytes: 1000, lastOpenedAtMs: Date.now() }),
+      "acquisition",
     );
     expect(verdict).toMatchObject({ decision: "elide", reason: "budget-exhausted" });
   });

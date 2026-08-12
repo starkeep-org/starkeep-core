@@ -87,8 +87,9 @@ const unsubscribe = syncEngine.changeNotifier.subscribe((event) => {
 
 | Function | Description |
 |---|---|
-| `residencyOf(row, localStorage)` | Canonical derivation of `Absent` / `Staged` / `Resident` / `Tombstoned`. |
-| `RecordResidency` (type) | The four-state enum. |
+| `residencyOf(row, localStorage, decide?, wasEvicted?)` | Canonical derivation. Returns the state **and** the policy reason behind it. |
+| `RecordResidency` (type) | `Absent` / `Staged` / `Elided` / `Evicted` / `Resident` / `Tombstoned`. |
+| `RecordResidencyState` (type) | `{ state, reason }` — the reason distinguishes "arriving" from "queued". |
 
 ### Key types
 

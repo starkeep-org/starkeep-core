@@ -320,23 +320,40 @@ describe("eviction pass", () => {
     };
   }
 
-  it("does nothing below the high-water mark", async () => {
+  it("does nothing while a line is inside its budget", async () => {
     const seeded = await seed(5, 100);
-    // 500 held against a 1000 budget — 50%, well under 95%.
+    // 500 held against a 1000 budget.
     const outcome = await evictLine(request(seeded, 1000));
     expect(outcome.triggered).toBe(false);
     expect(outcome.evicted).toHaveLength(0);
   });
 
-  // Hysteresis: without it a full budget evicts on every single arrival.
-  it("frees down to the low-water mark once the high one is crossed", async () => {
+  /**
+   * **The budget is the only level**, and a line sitting exactly on it is a
+   * line doing what it was told.
+   *
+   * This used to trigger at 95% and free to 80%, as hysteresis against evicting
+   * on every arrival. Both fractions are gone, because something now refills a
+   * line: the acquisition pass fills back up to the budget, so any gap between
+   * where this pass stops and where that one stops is a pump — free to 80%,
+   * refetch to 100%, free again, for ever. Equal numbers are the whole of what
+   * makes the pair stable.
+   */
+  it("does nothing when a line is exactly at its budget", async () => {
     const seeded = await seed(10, 100);
-    // 1000 held, budget 1000 → 100% ≥ 95%, so evict down to 80% (800).
     const outcome = await evictLine(request(seeded, 1000));
+    expect(outcome.triggered).toBe(false);
+    expect(outcome.evicted).toHaveLength(0);
+  });
+
+  it("frees down to exactly the budget once a line is over it", async () => {
+    const seeded = await seed(10, 100);
+    // 1000 held against a 700 budget, so 300 has to go.
+    const outcome = await evictLine(request(seeded, 700));
     expect(outcome.triggered).toBe(true);
-    expect(outcome.bytesAfter).toBeLessThanOrEqual(800);
+    expect(outcome.bytesAfter).toBeLessThanOrEqual(700);
     // …and not far past it: this is a trim, not a purge.
-    expect(outcome.bytesAfter).toBeGreaterThan(600);
+    expect(outcome.bytesAfter).toBeGreaterThan(500);
     expect(outcome.shortfall).toBe(false);
   });
 
@@ -349,7 +366,7 @@ describe("eviction pass", () => {
   // send.
   it("deletes the bytes and marks the index row departed", async () => {
     const seeded = await seed(10, 100);
-    const outcome = await evictLine(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 700));
     expect(outcome.evicted.length).toBeGreaterThan(0);
     for (const e of outcome.evicted) {
       expect(await localStorage.has(e.objectStorageKey)).toBe(false);
@@ -364,7 +381,7 @@ describe("eviction pass", () => {
   it("stops counting departed bytes toward the budget", async () => {
     const seeded = await seed(10, 100);
     const before = index.usageOf(CLASS_A);
-    const outcome = await evictLine(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 700));
     const freed = outcome.evicted.reduce((n, e) => n + e.sizeBytes, 0);
     expect(freed).toBeGreaterThan(0);
     expect(index.usageOf(CLASS_A)).toBe(before - freed);
@@ -374,7 +391,7 @@ describe("eviction pass", () => {
 
   it("refuses to evict anything not confirmed elsewhere", async () => {
     const seeded = await seed(10, 100, { confirmedElsewhere: false });
-    const outcome = await evictLine(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 700));
 
     expect(outcome.evicted).toHaveLength(0);
     expect(outcome.kept.every((k) => k.reason === "not-confirmed-elsewhere")).toBe(true);
@@ -386,7 +403,7 @@ describe("eviction pass", () => {
 
   it("refuses when there is no content hash to verify a replica against", async () => {
     const seeded = await seed(10, 100);
-    const outcome = await evictLine({ ...request(seeded, 1000), contentHashOf: () => null });
+    const outcome = await evictLine({ ...request(seeded, 700), contentHashOf: () => null });
     expect(outcome.evicted).toHaveLength(0);
     expect(outcome.kept[0]!.reason).toBe("not-confirmed-elsewhere");
   });
@@ -402,7 +419,7 @@ describe("eviction pass", () => {
       });
     }
 
-    const outcome = await evictLine(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 700));
     expect(outcome.evicted).toHaveLength(0);
     expect(outcome.kept.every((k) => k.reason === "last-instantly-readable-copy")).toBe(true);
   });
@@ -417,7 +434,7 @@ describe("eviction pass", () => {
         expectedLatencyHours: 12,
       });
     }
-    const outcome = await evictLine({ ...request(seeded, 1000), keepLastInstantCopy: false });
+    const outcome = await evictLine({ ...request(seeded, 700), keepLastInstantCopy: false });
     expect(outcome.evicted.length).toBeGreaterThan(0);
   });
 
@@ -430,7 +447,7 @@ describe("eviction pass", () => {
     await peerStorage.delete(badKey);
     await peerStorage.put(badKey, wrong, { checksumSha256: b64Of(wrong) });
 
-    const outcome = await evictLine(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 700));
     expect(outcome.corruptionSuspected).toContain(badKey);
   });
 
@@ -443,7 +460,7 @@ describe("eviction pass", () => {
       confirmedElsewhere: false,
       requiresDurabilityProof: false,
     });
-    const outcome = await evictLine({ ...request(seeded, 1000), canRederive: true });
+    const outcome = await evictLine({ ...request(seeded, 700), canRederive: true });
     expect(outcome.evicted.length).toBeGreaterThan(0);
   });
 
@@ -456,7 +473,7 @@ describe("eviction pass", () => {
       confirmedElsewhere: false,
       requiresDurabilityProof: false,
     });
-    const outcome = await evictLine(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 700));
     expect(outcome.evicted).toHaveLength(0);
     expect(outcome.kept.every((k) => k.reason === "not-confirmed-elsewhere")).toBe(true);
     expect(outcome.shortfall).toBe(true);
@@ -543,7 +560,7 @@ describe("the pooled fallback line", () => {
     const seeded = await seedInventedRungs(20, 100);
     const outcome = await evictLine({ ...seeded, budgetLine: fallbackLine, policy: pooling });
     expect(outcome.triggered).toBe(true);
-    expect(outcome.bytesAfter).toBeLessThanOrEqual(800);
+    expect(outcome.bytesAfter).toBeLessThanOrEqual(1000);
     // Both class names gave something up: the ordering is least-recently-useful
     // across the line, not "pick on the biggest class".
     expect(new Set(outcome.evicted.map((e) => e.sizeClass)).size).toBe(2);
@@ -567,7 +584,7 @@ describe("the pooled fallback line", () => {
   // `validateRetentionPolicy` refuses a policy whose budget is missing, so this
   // is the second line rather than the first — but it is the line that matters,
   // because a NaN budget does not read as "small". Every comparison against it
-  // is false: the high-water check does not hold, so the pass runs, and the
+  // is false: the over-budget check does not hold, so the pass runs, and the
   // target check does not hold either, so it runs until there is nothing left.
   it("refuses to run at all against a budget that is not a number", async () => {
     const seeded = await seedInventedRungs(20, 100);

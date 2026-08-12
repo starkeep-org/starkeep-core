@@ -623,7 +623,7 @@ describe("a class whose share is zero", () => {
   // every comparison against a NaN is false, so the pass would trigger and then
   // never reach its target, while a real zero triggers and empties the line —
   // which is the point.
-  it("is emptied all the way rather than down to a water mark", async () => {
+  it("is emptied all the way, because zero is the budget", async () => {
     const built = await build({
       policy: policyWith({
         platform: noOriginals(),
@@ -838,12 +838,13 @@ describe("what the pass does when it cannot ask anyone", () => {
   });
 
   // The control for the three cases above: with a peer that genuinely has the
-  // bytes, the same class does empty down to its low-water mark. Without this,
-  // every assertion above could be satisfied by a pass that never evicts.
+  // bytes, the same class does empty back to its budget. Without this, every
+  // assertion above could be satisfied by a pass that never evicts — which is
+  // why this one has to share their budget exactly, 500 held against 100.
   it("does evict once a peer actually confirms the bytes", async () => {
     const built = await build({
       policy: policyWith({
-        platform: onlyOriginals(500),
+        platform: onlyOriginals(100),
       }),
     });
     const peer = await newPeer();

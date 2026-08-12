@@ -20,12 +20,32 @@
  * what this pass would do; the evidence this pass demands before it deletes
  * anything is the part that was never a prediction.
  *
- * ## Hysteresis, per budget line
+ * ## One level, per budget line
  *
- * A single threshold makes a full budget evict on every single arrival. So:
- * cross the **high-water mark** (default 95%) to trigger, then free down to the
- * **low-water mark** (default 80%). Evaluated per line, so a full video budget
- * evicts video and does not touch stills.
+ * A pass triggers when a line is **over its budget** and frees down to
+ * **exactly its budget**. Evaluated per line, so a full video budget evicts
+ * video and does not touch stills.
+ *
+ * This used to be two fractions — trigger at 95%, free to 80% — as hysteresis
+ * against evicting on every single arrival. Both are gone, and the reason they
+ * could go is worth stating, because the arithmetic looks like a regression
+ * until you see what replaced it:
+ *
+ *   - **Something now refills a line.** The acquisition pass fills back up to
+ *     the budget, so any gap between where eviction stops and where acquisition
+ *     stops is a pump: free to 80%, refill to 100%, free again — re-downloading
+ *     a fifth of every budget for ever, which on a 4 GB line is ~600 MB per
+ *     cycle. Two levels can only be safe while nothing reclaims the headroom
+ *     between them, and that stopped being true.
+ *   - **The batching hysteresis bought is now the job graph's.** Eviction is a
+ *     scheduled job that runs after a fetch pass has admitted many blobs, not
+ *     an inline reaction to each arrival. And the expensive part of a pass — a
+ *     durability probe and a delete **per candidate** — is linear in bytes
+ *     freed however the work is grouped. What batching actually saved was two
+ *     SQLite queries per pass.
+ *
+ * So the budget is the only number, and "the budget is the budget" is a much
+ * easier sentence to keep true than three fractions that have to agree.
  *
  * ## One pass, because there is one budget
  *
@@ -46,14 +66,6 @@ import {
   type NodeRetentionPolicy,
 } from "./residency-policy.js";
 
-export interface WaterMarks {
-  /** Fraction of budget at which eviction triggers. Default 0.95. */
-  readonly high: number;
-  /** Fraction of budget to free down to once triggered. Default 0.80. */
-  readonly low: number;
-}
-
-export const DEFAULT_WATER_MARKS: WaterMarks = { high: 0.95, low: 0.8 };
 
 /** Why a blob was kept when the pass wanted to drop it. */
 export type RetentionReason =
@@ -72,8 +84,9 @@ export interface EvictionOutcome {
   /** Wanted to evict, refused to. Each carries its reason. */
   readonly kept: readonly { entry: ResidentEntry; reason: RetentionReason }[];
   /**
-   * True when the pass could not reach the low-water mark. The caller must
-   * apply backpressure ({@link shedLoad}) rather than treating this as done.
+   * True when the pass could not free the line back to its budget. The caller
+   * must apply backpressure ({@link shedLoad}) rather than treating this as
+   * done.
    */
   readonly shortfall: boolean;
   /**
@@ -102,7 +115,6 @@ export interface EvictionRequest {
   readonly localStorage: ObjectStorageAdapter;
   readonly probes: readonly ReplicaProbe[];
   readonly durability: DurabilityPolicy;
-  readonly waterMarks?: WaterMarks;
   /**
    * Content hash for a held key, from the record. Needed to verify a replica
    * is the *right* bytes and not merely something at that key.
@@ -216,7 +228,6 @@ async function runPass(
   request: EvictionRequest,
 ): Promise<EvictionOutcome> {
   const { index, localStorage, probes, durability, contentHashOf } = request;
-  const marks = request.waterMarks ?? DEFAULT_WATER_MARKS;
   const keepLastInstantCopy = request.keepLastInstantCopy ?? true;
   const canRederive = request.canRederive ?? false;
 
@@ -231,11 +242,15 @@ async function runPass(
     return untriggered(budgetLine, bytesBefore);
   }
 
-  if (bytesBefore <= budget * marks.high) {
+  // Over budget, and nothing else. A line sitting exactly at its budget is a
+  // line doing what it was told, and the acquisition pass fills to the same
+  // number — so this is the one condition under which the two can both be
+  // satisfied at once.
+  if (bytesBefore <= budget) {
     return untriggered(budgetLine, bytesBefore);
   }
 
-  const target = budget * marks.low;
+  const target = budget;
   // Over-collect: some candidates will be refused, and a pass that collected
   // exactly the shortfall would stop short every time anything was protected.
   const candidates = index.evictionCandidates({
