@@ -89,14 +89,22 @@ export function stopById(id: string): StopResult {
       } catch {
         /* already gone, or group no longer exists — nothing left to stop */
       }
+      unlinkSync(pf);
+      const mf = metaFile(id);
+      if (existsSync(mf)) unlinkSync(mf);
+      return { stopped: true };
     }
+    // A dead recorded pid does not mean the daemon is dead. What we record is
+    // the pnpm launcher, and the local-data-server replaces itself on
+    // PATCH /config with a *detached* successor in a new process group that the
+    // launcher does not outlive. Reporting "stopped" here deleted the only
+    // record we had and left the daemon serving while telling the operator it
+    // was gone. Drop the stale pid and let the port decide instead — keeping
+    // the meta file, which is where the port is recorded.
     unlinkSync(pf);
-    const mf = metaFile(id);
-    if (existsSync(mf)) unlinkSync(mf);
-    return { stopped: true };
   }
 
-  // No PID file — fall back to the recorded port (from meta) or the fixed
+  // No live PID — fall back to the recorded port (from meta) or the fixed
   // workspace-daemon port if applicable.
   let port: number | undefined;
   if (isWorkspaceDaemonId(id)) {
@@ -124,7 +132,11 @@ export function stopById(id: string): StopResult {
     }
   }
 
-  return { stopped: false, error: "Not running (no PID file)" };
+  // Nothing alive under either identity; clear any meta left by the stale-pid
+  // path above so status doesn't keep reporting a ghost.
+  const mf = metaFile(id);
+  if (existsSync(mf)) unlinkSync(mf);
+  return { stopped: false, error: "Not running (no live PID, nothing on its port)" };
 }
 
 export interface StartSuccess {
@@ -377,21 +389,39 @@ export async function startWorkspaceDaemon(id: DaemonId): Promise<StartOutcome> 
   return spawnDaemon({ id, command: cmd, args, cwd: REPO_ROOT, port: daemon.port });
 }
 
-// True if the daemon's recorded pid is alive. Used to decide whether a restart
-// is warranted: if the daemon isn't running, a later manual start will read the
-// updated config anyway, so there's nothing to restart.
-export function isWorkspaceDaemonRunning(id: DaemonId): boolean {
+// The pid actually serving a workspace daemon, re-recording the pid file when
+// what we wrote down has gone stale.
+//
+// The recorded pid is the pnpm launcher, which does not always name the process
+// that ends up serving: the local-data-server replaces itself on PATCH /config
+// with a *detached* successor in its own process group, and the launcher exits
+// with the instance it started. The fixed port is the durable identity, so fall
+// back to it and re-record — otherwise every caller below is reasoning about a
+// process that no longer exists.
+export function resolveWorkspaceDaemonPid(id: DaemonId): number | null {
   const pf = pidFile(id);
-  if (!existsSync(pf)) return false;
-  const pid = parseInt(readFileSync(pf, "utf-8"), 10);
-  return !isNaN(pid) && isAlive(pid);
+  if (existsSync(pf)) {
+    const pid = parseInt(readFileSync(pf, "utf-8"), 10);
+    if (!isNaN(pid) && isAlive(pid)) return pid;
+  }
+  return adoptOrphanWorkspaceDaemon(id)?.pid ?? null;
+}
+
+// True if the daemon is serving, by either identity. Used to decide whether a
+// restart is warranted: if the daemon isn't running, a later manual start will
+// read the updated config anyway, so there's nothing to restart.
+export function isWorkspaceDaemonRunning(id: DaemonId): boolean {
+  return resolveWorkspaceDaemonPid(id) !== null;
 }
 
 // Restart a running workspace daemon so it re-reads boot-time config (the
 // local-data-server captures ~/.starkeep/config.json once at startup). No-op
 // when the daemon isn't running.
 export async function restartWorkspaceDaemonIfRunning(id: DaemonId): Promise<StartOutcome | null> {
-  if (!isWorkspaceDaemonRunning(id)) return null;
+  // Resolving first is what makes the stop below land: it re-records the pid of
+  // a daemon that replaced itself, which the stale pid file would otherwise
+  // hide — leaving the daemon serving its boot-time config forever.
+  if (resolveWorkspaceDaemonPid(id) === null) return null;
   stopById(id);
   // Wait for the old instance to release its fixed port; otherwise the start
   // preflight would see it still bound and "adopt" the dying process.

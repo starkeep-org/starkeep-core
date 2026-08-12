@@ -111,6 +111,15 @@ setHashFactory(() => {
 
 const STARKEEP_DIR = starkeepDir();
 const PORT = parseInt(process.env.STARKEEP_PORT || "9820", 10);
+// A supervisor that cannot rely on the parent/child link may name itself here,
+// and this daemon exits once that pid is gone. The link is not always available:
+// restartProcess() deliberately detaches the replacement, so anything that
+// started this server loses its handle the first time a PATCH /config lands, and
+// the replacement then outlives its owner with nothing to reap it. Set by the
+// test harness (packages/testkit) to the test process's pid; unset in normal
+// operation, where the daemon is meant to outlive whoever launched it.
+const OWNER_PID = parseInt(process.env.STARKEEP_EXIT_WITH_PID || "", 10);
+const OWNER_CHECK_INTERVAL_MS = 5_000;
 // Intentionally not configurable. The request-auth model in this server treats
 // the loopback bind as the boundary for administrative and host-level routes
 // (see LOOPBACK_AUTHORIZED_PATTERNS below). Changing this address without
@@ -394,7 +403,42 @@ function restartProcess(): void {
     },
   );
   child.unref();
+  // The replacement has no parent link to whoever started us, so its pid is the
+  // only handle anyone gets. Print it before exiting (stdout is synchronous on
+  // POSIX pipes and files, so this survives the exit) — the test harness reads
+  // it back off our stdout to reap the replacement at teardown, and an operator
+  // reading the log can tell which process is now serving.
+  console.log(`[server] Restarted as pid ${child.pid}`);
   process.exit(0);
+}
+
+/**
+ * Exit when the process named by STARKEEP_EXIT_WITH_PID goes away.
+ *
+ * Signal 0 tests for existence without delivering anything. EPERM means the pid
+ * is alive but owned by another user, which still counts as present. Nothing
+ * here signals the owner — the only process this can ever kill is our own.
+ *
+ * The pid could in principle be recycled by an unrelated process, which would
+ * keep the guard from firing; that only delays cleanup and never takes down the
+ * wrong process, so no attempt is made to detect it.
+ */
+function exitWhenOwnerIsGone(shutdown: () => Promise<void>): void {
+  // Strictly positive: 0 and negatives address process *groups* in kill(2), and
+  // this is only ever meant to name one process.
+  if (!Number.isFinite(OWNER_PID) || OWNER_PID <= 0) return;
+  const timer = setInterval(() => {
+    try {
+      process.kill(OWNER_PID, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EPERM") return;
+      clearInterval(timer);
+      console.log(`[server] Owner process ${OWNER_PID} is gone — shutting down.`);
+      void shutdown();
+    }
+  }, OWNER_CHECK_INTERVAL_MS);
+  // Never a reason to hold the event loop open on its own.
+  timer.unref();
 }
 
 const WATCHES_CONFIG_PATH = join(STARKEEP_DIR, "watches.json");
@@ -3141,6 +3185,7 @@ async function main() {
     // Reuse shutdown so Ctrl-C on a dev process drains cleanly.
     await shutdown();
   });
+  exitWhenOwnerIsGone(shutdown);
 }
 
 // We cache the raw bytes (not the utf-8 string), so a handler called after the
