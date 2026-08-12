@@ -7,6 +7,12 @@
  * its config at module load, and a real process is the honest test surface —
  * restarts, signal handling, and the per-startup file-token secret all behave
  * exactly as in production.
+ *
+ * Orphans are the hazard of that choice, and this harness closes both routes to
+ * one: it reaps the detached replacement a PATCH /config restart leaves behind
+ * (which is no longer its child), and it stamps every server it starts with
+ * STARKEEP_EXIT_WITH_PID so a run that never reaches teardown still cannot leave
+ * a cloud-syncing daemon behind.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -78,6 +84,11 @@ export interface LocalDataServer {
   child: ChildProcess;
   /** Combined stdout+stderr captured so far (for debugging assertions). */
   logs(): string;
+  /**
+   * Pids of the detached replacements a PATCH /config restart spawned, oldest
+   * first. Empty unless the server restarted itself. stop() reaps these.
+   */
+  successorPids(): number[];
   /** Resolves when the child exits (e.g. after PATCH /config). */
   waitForExit(timeoutMs?: number): Promise<number | null>;
   /** SIGTERM, wait, SIGKILL fallback. Removes the temp dir it created. */
@@ -132,6 +143,13 @@ export async function startLocalDataServer(
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     STARKEEP_PORT: String(port),
+    // Backstop against orphans. Teardown is not guaranteed to run — a killed
+    // runner, a hung spec, a failure before the `finally` — and the server the
+    // PATCH /config restart leaves behind is detached from us anyway. This tells
+    // every server in the chain (the env is inherited across the respawn) to
+    // exit once this test process is gone, so a missed teardown self-heals in
+    // seconds instead of leaving a cloud-syncing daemon running for days.
+    STARKEEP_EXIT_WITH_PID: String(process.pid),
     ...options.env,
   };
   if (options.loadDirFromEnvFile) {
@@ -145,8 +163,27 @@ export async function startLocalDataServer(
     env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stdout!.on("data", (chunk: Buffer) => (output += chunk.toString()));
-  child.stderr!.on("data", (chunk: Buffer) => (output += chunk.toString()));
+  // A PATCH /config restart replaces the server with a *detached* process that
+  // is not our child, so `child` stops naming the thing that has to be killed.
+  // The outgoing server prints its replacement's pid on the way out; collect
+  // those so stop() reaps whoever is actually serving. Only the first
+  // replacement announces itself here — later ones log to a file under
+  // STARKEEP_DIR, not to this pipe — which is why STARKEEP_EXIT_WITH_PID above
+  // still has to be the general answer.
+  const successors: number[] = [];
+  let partialLine = "";
+  const collect = (chunk: Buffer) => {
+    const text = chunk.toString();
+    output += text;
+    const lines = (partialLine + text).split("\n");
+    partialLine = lines.pop() ?? "";
+    for (const line of lines) {
+      const match = /\[server\] Restarted as pid (\d+)/.exec(line);
+      if (match) successors.push(Number(match[1]));
+    }
+  };
+  child.stdout!.on("data", collect);
+  child.stderr!.on("data", collect);
 
   const exited = new Promise<number | null>((resolveExit) => {
     child.once("exit", (code) => resolveExit(code));
@@ -177,12 +214,44 @@ export async function startLocalDataServer(
     );
   }
 
+  function isAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      // EPERM: alive, just not ours to signal.
+      return (err as NodeJS.ErrnoException).code === "EPERM";
+    }
+  }
+
   async function terminate(): Promise<void> {
     if (child.exitCode === null) {
       child.kill("SIGTERM");
       const killTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
       await exited;
       clearTimeout(killTimer);
+    }
+    // Usually empty; only a restart test gets here with anything to reap.
+    if (successors.length === 0) return;
+    for (const pid of successors) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        /* already gone */
+      }
+    }
+    // Wait for them before the caller deletes the data dir out from under a
+    // replacement that is still draining, then insist.
+    const deadline = Date.now() + 5_000;
+    while (successors.some(isAlive) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    for (const pid of successors.filter(isAlive)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
     }
   }
 
@@ -192,6 +261,7 @@ export async function startLocalDataServer(
     starkeepDir,
     child,
     logs: () => output,
+    successorPids: () => [...successors],
     async waitForExit(timeoutMs = 10_000) {
       const timeout = new Promise<never>((_, rejectExit) =>
         setTimeout(() => rejectExit(new Error("server did not exit in time")), timeoutMs),

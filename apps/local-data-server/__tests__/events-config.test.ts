@@ -9,8 +9,6 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import {
   installApp,
@@ -19,8 +17,6 @@ import {
   eventually,
   openSse,
 } from "./helpers.js";
-
-const execFileAsync = promisify(execFile);
 
 describe("/events SSE", () => {
   let server: LocalDataServer;
@@ -84,6 +80,7 @@ describe("config & lifecycle", () => {
   it("PATCH /config persists the patch, exits, and the replacement respawns serving it", { timeout: 30_000 }, async () => {
     const server = await startLocalDataServer();
     const { port, starkeepDir } = server;
+    let replacements: number[] = [];
     try {
       const originalNodeId = (
         JSON.parse(await readFile(join(starkeepDir, "config.json"), "utf8")) as {
@@ -128,17 +125,20 @@ describe("config & lifecycle", () => {
       );
       expect(booted).not.toMatch(/ERR_MODULE_NOT_FOUND/);
       expect(booted).toMatch(/listening on/);
+
+      // The replacement is detached and reparented to init, so nothing about
+      // the process tree will clean it up — the harness has to know its pid.
+      replacements = server.successorPids();
+      expect(replacements).toHaveLength(1);
     } finally {
-      // Reap the detached replacement now holding the port.
-      try {
-        const { stdout } = await execFileAsync("lsof", ["-ti", `tcp:${port}`]);
-        for (const pid of stdout.trim().split("\n").filter(Boolean)) {
-          process.kill(Number(pid), "SIGTERM");
-        }
-      } catch {
-        // Nothing listening — already gone.
-      }
       await server.stop();
     }
+
+    // stop() reaped the replacement rather than leaving it running against the
+    // cloud on a temp dir it no longer owns — the orphan-accumulation bug.
+    for (const pid of replacements) {
+      expect(() => process.kill(pid, 0)).toThrow();
+    }
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
   });
 });
