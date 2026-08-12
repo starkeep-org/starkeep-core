@@ -30,6 +30,15 @@
  * the other) — it simply hands down `original:image` and `original:video` as
  * two class names. Every other class gets that split for free from its name
  * prefix, which is why this file needs no concept of media kind.
+ *
+ * ## What a blob *is* and what it is *charged to* are two columns
+ *
+ * `size_class` is the first and `budget_line` is the second, and they are not
+ * the same thing: a namespace pools every rung it does not recognise onto one
+ * line, so a dozen invented class names spend one budget between them. Grouping
+ * the budget by class is what once made rung invention free and needed a
+ * separate namespace-wide cap to bound it. Both columns are stored because both
+ * are grouping keys — one for the operator's reporting, one for every decision.
  */
 
 import type { ObjectStorageAdapter, RawDatabase } from "@starkeep/storage-adapter";
@@ -41,21 +50,46 @@ import {
   SqliteQueryCompiler,
   sql,
 } from "kysely";
+import { compareEvictionRank, type EvictionRank } from "./residency-policy.js";
 
 /** One held blob. */
 export interface ResidentEntry {
   readonly recordId: string;
   readonly objectStorageKey: string;
   readonly sizeBytes: number;
-  /** Opaque budget-row key, supplied by the host. `<namespace>:<rung>`. */
+  /**
+   * Opaque class name, supplied by the host. `<namespace>:<rung>`.
+   *
+   * What this blob *is*, for reporting — the census, the storage report, the
+   * matrix row an operator reads. Not what it is charged to: several classes
+   * can share one budget line, which is how a namespace bounds an app that
+   * invents rung names.
+   */
   readonly sizeClass: string;
+  /**
+   * Which budget these bytes are charged to — `BudgetLine.key`, resolved by the
+   * host against the policy.
+   *
+   * A column rather than a derivation, for the same reason `namespace` was one:
+   * it is the grouping key of every hot query here — the usage sum, the
+   * eviction scan, the displacement check — and computing it per row would make
+   * each of them a full table scan over one row per held blob.
+   *
+   * It is stored *resolved*, which means a policy edit that adds or removes a
+   * row changes which line a class belongs to. The host re-resolves on arrival;
+   * anything already held keeps the line it landed on until it is touched
+   * again, and the reconciliation that fixes that is the same one that fixes
+   * every other stale row here.
+   */
+  readonly budgetLineKey: string;
   /**
    * The namespace half of `sizeClass`, stored rather than derived.
    *
-   * A column, not a `LIKE 'photos:%'` scan: "what is this app holding" is a hot
-   * question — it is checked on every fetch decision and on every eviction pass
-   * — and a prefix scan is exactly the full table scan the class index was
-   * added to avoid, over a table with one row per held blob.
+   * Kept for reporting only — "what is this app holding" is a question the
+   * storage report and the matrix header ask. It stopped being a *budget* when
+   * rows became shares of one namespace total: a namespace is now over budget
+   * only if one of its lines is, so there is nothing left for a namespace-wide
+   * pass to catch.
    */
   readonly namespace: string;
   /**
@@ -119,20 +153,9 @@ export interface ResidentEntry {
   readonly reserved: boolean;
 }
 
-/**
- * What an eviction pass is working over.
- *
- * A pass is triggered by one of two budgets — a class row, or an app's total
- * across every rung it holds — and the second is not expressible as a set of
- * the first: an app can be over its total while every individual class is
- * inside its row. Same ordering either way, wider `WHERE`.
- */
-export type EvictionScope =
-  | { readonly kind: "class"; readonly sizeClass: string }
-  | { readonly kind: "namespace"; readonly namespace: string };
-
 export interface EvictionCandidateQuery {
-  readonly scope: EvictionScope;
+  /** `BudgetLine.key` — the one budget a pass enforces. */
+  readonly budgetLineKey: string;
   /** Stop once this many bytes of candidates have been collected. */
   readonly targetBytes: number;
 }
@@ -219,10 +242,8 @@ export interface ResidentSetIndex {
    */
   reconcile(storage: ObjectStorageAdapter): Promise<ReconcileReport>;
   get(objectStorageKey: string): ResidentEntry | null;
-  /** Bytes currently held for one class. */
-  usageOf(sizeClass: string): number;
-  /** Bytes held across every class of one namespace, for the app-total check. */
-  usageOfNamespace(namespace: string): number;
+  /** Bytes currently charged to one budget line. */
+  usageOf(budgetLineKey: string): number;
   /** Bytes held per class, for the retention UI's projected-use column. */
   usageByClass(): Record<string, number>;
   /** Bytes held per namespace, for the per-app row of the same UI. */
@@ -232,21 +253,41 @@ export interface ResidentSetIndex {
   setPinned(objectStorageKey: string, pinned: boolean): void;
   markOpened(objectStorageKey: string, atMs: number): void;
   /**
-   * Eviction candidates for a class, worst-to-keep first, excluding everything
-   * that is structurally not evictable (pinned, locally protected). Ordering is
-   * least-recently-useful: never-opened and oldest first.
+   * Eviction candidates for a budget line, worst-to-keep first, excluding
+   * everything that is structurally not evictable (pinned, locally protected).
+   * Ordering is {@link compareEvictionRank}: never-opened and oldest first.
    */
   evictionCandidates(query: EvictionCandidateQuery): ResidentEntry[];
   /**
-   * Bytes in a scope that no pass can free — pinned or locally protected.
+   * Whether this line holds at least `bytesNeeded` of evictable blobs ranked
+   * *worse* than `rank`.
+   *
+   * The admission half of the ordering. A sync round walks the change log
+   * oldest-first, so a budget that simply stopped at full would fill a device
+   * with its oldest material and decline everything since; admitting whatever
+   * outranks enough of what is held is what makes the line converge on the best
+   * of its class whatever order things arrived in.
+   *
+   * Answered from {@link evictionCandidates} rather than its own aggregate,
+   * deliberately: that query already returns worst-first, so the walk stops at
+   * the first entry the candidate does not beat, and the two halves of the
+   * ordering cannot disagree because there is only one of them.
+   */
+  displaceableBytes(
+    budgetLineKey: string,
+    rank: EvictionRank,
+    bytesNeeded: number,
+  ): boolean;
+  /**
+   * Bytes on a line that no pass can free — pinned or locally protected.
    *
    * A separate aggregate rather than a filter over `entriesOf`, because the
-   * question is asked by a preview that must not read a whole class into memory
+   * question is asked by a preview that must not read a whole line into memory
    * to answer it, and because the answer is a *floor*: `usageOf` counts pinned
    * bytes and `evictionCandidates` excludes them, so anything comparing the two
    * without this number promises a target that pins make unreachable.
    */
-  unevictableBytesOf(scope: EvictionScope): number;
+  unevictableBytesOf(budgetLineKey: string): number;
   /** Every entry of a class, for a budget-reduction impact preview. */
   entriesOf(sizeClass: string): ResidentEntry[];
   /**
@@ -283,6 +324,7 @@ interface Row {
   object_storage_key: string;
   size_bytes: number;
   size_class: string;
+  budget_line: string;
   namespace: string;
   pinned: number;
   protected_locally: number;
@@ -307,6 +349,7 @@ export function createSqliteResidentSetIndex(options: {
       .addColumn("record_id", "text", (c) => c.notNull())
       .addColumn("size_bytes", "integer", (c) => c.notNull())
       .addColumn("size_class", "text", (c) => c.notNull())
+      .addColumn("budget_line", "text", (c) => c.notNull())
       .addColumn("namespace", "text", (c) => c.notNull())
       .addColumn("pinned", "integer", (c) => c.notNull().defaultTo(0))
       .addColumn("protected_locally", "integer", (c) => c.notNull().defaultTo(0))
@@ -324,26 +367,28 @@ export function createSqliteResidentSetIndex(options: {
       .addColumn("reserved", "integer", (c) => c.notNull().defaultTo(0))
       .compile().sql,
   );
-  // Every hot query here is "everything in one class": the usage sum, the
-  // eviction scan, the reduction preview. Without this they are full scans of
-  // a table that has one row per held blob — 300k+ once renditions exist.
+  // Every hot query here is "everything on one budget line": the usage sum, the
+  // eviction scan, the displacement check, the reduction preview. Without this
+  // they are full scans of a table that has one row per held blob — 300k+ once
+  // renditions exist.
+  db.exec(
+    qb.schema
+      .createIndex(`${TABLE}_by_budget_line`)
+      .ifNotExists()
+      .on(TABLE)
+      .columns(["budget_line"])
+      .compile().sql,
+  );
+  // Reporting only — the census and the storage report group by class, and
+  // neither is on a decision path. There is deliberately no namespace index:
+  // the one query that groups by namespace is a whole-table roll-up for a UI
+  // header, which an index would not help.
   db.exec(
     qb.schema
       .createIndex(`${TABLE}_by_class`)
       .ifNotExists()
       .on(TABLE)
       .columns(["size_class"])
-      .compile().sql,
-  );
-  // The namespace total is checked on every fetch decision, so it has to be as
-  // cheap as the per-class sum beside it — this is the index that lets the
-  // namespace be a column rather than a prefix scan.
-  db.exec(
-    qb.schema
-      .createIndex(`${TABLE}_by_namespace`)
-      .ifNotExists()
-      .on(TABLE)
-      .columns(["namespace"])
       .compile().sql,
   );
   // Pinning or opening a record updates every rendition of it, and that has to
@@ -365,6 +410,7 @@ export function createSqliteResidentSetIndex(options: {
         record_id: sql.raw("?"),
         size_bytes: sql.raw("?"),
         size_class: sql.raw("?"),
+        budget_line: sql.raw("?"),
         namespace: sql.raw("?"),
         pinned: sql.raw("?"),
         protected_locally: sql.raw("?"),
@@ -380,6 +426,10 @@ export function createSqliteResidentSetIndex(options: {
           record_id: eb.ref("excluded.record_id"),
           size_bytes: eb.ref("excluded.size_bytes"),
           size_class: eb.ref("excluded.size_class"),
+          // Overwritten because a policy edit can move a class between lines —
+          // a rung gaining a row of its own leaves the pooled fallback — and an
+          // arrival is the moment the host has re-resolved it.
+          budget_line: eb.ref("excluded.budget_line"),
           namespace: eb.ref("excluded.namespace"),
           protected_locally: eb.ref("excluded.protected_locally"),
           requires_durability_proof: eb.ref("excluded.requires_durability_proof"),
@@ -413,15 +463,7 @@ export function createSqliteResidentSetIndex(options: {
     qb
       .selectFrom(TABLE)
       .select(({ fn }) => [fn.sum<number>("size_bytes").as("total")])
-      .where("size_class", "=", sql.raw("?"))
-      .where("resident", "=", sql.lit(1))
-      .compile().sql,
-  );
-  const namespaceUsageStmt = db.prepare(
-    qb
-      .selectFrom(TABLE)
-      .select(({ fn }) => [fn.sum<number>("size_bytes").as("total")])
-      .where("namespace", "=", sql.raw("?"))
+      .where("budget_line", "=", sql.raw("?"))
       .where("resident", "=", sql.lit(1))
       .compile().sql,
   );
@@ -470,20 +512,17 @@ export function createSqliteResidentSetIndex(options: {
   const entriesOfRecordStmt = db.prepare(
     qb.selectFrom(TABLE).selectAll().where("record_id", "=", sql.raw("?")).compile().sql,
   );
-  const unevictableForColumn = (column: "size_class" | "namespace") =>
-    db.prepare(
-      qb
-        .selectFrom(TABLE)
-        .select(({ fn }) => [fn.sum<number>("size_bytes").as("total")])
-        .where(column, "=", sql.raw("?"))
-        .where("resident", "=", sql.lit(1))
-        .where((eb) =>
-          eb.or([eb("pinned", "=", sql.lit(1)), eb("protected_locally", "=", sql.lit(1))]),
-        )
-        .compile().sql,
-    );
-  const unevictableByClassStmt = unevictableForColumn("size_class");
-  const unevictableByNamespaceStmt = unevictableForColumn("namespace");
+  const unevictableStmt = db.prepare(
+    qb
+      .selectFrom(TABLE)
+      .select(({ fn }) => [fn.sum<number>("size_bytes").as("total")])
+      .where("budget_line", "=", sql.raw("?"))
+      .where("resident", "=", sql.lit(1))
+      .where((eb) =>
+        eb.or([eb("pinned", "=", sql.lit(1)), eb("protected_locally", "=", sql.lit(1))]),
+      )
+      .compile().sql,
+  );
   const markDepartedStmt = db.prepare(
     qb
       .updateTable(TABLE)
@@ -514,9 +553,15 @@ export function createSqliteResidentSetIndex(options: {
   // non-evictable rows are excluded here rather than filtered by the caller,
   // so a caller cannot forget to.
   //
-  // Two statements rather than one with a nullable predicate: the column being
-  // filtered on is what the query planner picks an index by, and a single
-  // statement that tests both would use neither.
+  // **This `ORDER BY` and `compareEvictionRank` are one ordering written twice**
+  // — once for SQLite and once for the admission check, which has to ask the
+  // same question about a blob that has no row yet. They must not drift; the
+  // comparison function's doc comment is the specification and this mirrors it,
+  // including SQLite putting NULL first in an ascending sort.
+  //
+  // One statement now, not two: the second existed because a pass could be
+  // scoped to a whole namespace, and namespaces stopped being budgets when rows
+  // became shares of one.
   //
   // ## The `LIMIT ?` is not an optimization
   //
@@ -527,32 +572,29 @@ export function createSqliteResidentSetIndex(options: {
   // Bytes are not rows, so the limit cannot be computed from `targetBytes`
   // directly; the caller pages, growing the request until it has collected
   // enough bytes or run out of rows. See `evictionCandidates`.
-  const candidatesForColumn = (column: "size_class" | "namespace") =>
-    db.prepare(
-      qb
-        .selectFrom(TABLE)
-        .selectAll()
-        .where(column, "=", sql.raw("?"))
-        // sql.lit, not a bare 0: Kysely parameterizes plain values, which would
-        // put unbound `?` placeholders into a statement prepared once and bound
-        // with a single argument. These are constants, so they belong in the SQL.
-        .where("pinned", "=", sql.lit(0))
-        .where("protected_locally", "=", sql.lit(0))
-        // A departed row names bytes this node already let go. Offering one as
-        // an eviction candidate would have the pass delete a key that is not
-        // there and count the freed bytes twice.
-        .where("resident", "=", sql.lit(1))
-        // Bytes still in flight. Deleting the key underneath an arriving
-        // stream leaves a file nothing has a row for.
-        .where("reserved", "=", sql.lit(0))
-        .orderBy(sql`last_opened_at_ms IS NULL`, "desc")
-        .orderBy("last_opened_at_ms", "asc")
-        .orderBy("recency_at_ms", "asc")
-        .limit(sql.raw("?") as never)
-        .compile().sql,
-    );
-  const candidatesStmt = candidatesForColumn("size_class");
-  const namespaceCandidatesStmt = candidatesForColumn("namespace");
+  const candidatesStmt = db.prepare(
+    qb
+      .selectFrom(TABLE)
+      .selectAll()
+      .where("budget_line", "=", sql.raw("?"))
+      // sql.lit, not a bare 0: Kysely parameterizes plain values, which would
+      // put unbound `?` placeholders into a statement prepared once and bound
+      // with a single argument. These are constants, so they belong in the SQL.
+      .where("pinned", "=", sql.lit(0))
+      .where("protected_locally", "=", sql.lit(0))
+      // A departed row names bytes this node already let go. Offering one as
+      // an eviction candidate would have the pass delete a key that is not
+      // there and count the freed bytes twice.
+      .where("resident", "=", sql.lit(1))
+      // Bytes still in flight. Deleting the key underneath an arriving
+      // stream leaves a file nothing has a row for.
+      .where("reserved", "=", sql.lit(0))
+      .orderBy(sql`last_opened_at_ms IS NULL`, "desc")
+      .orderBy("last_opened_at_ms", "asc")
+      .orderBy("recency_at_ms", "asc")
+      .limit(sql.raw("?") as never)
+      .compile().sql,
+  );
 
   function toEntry(row: Row): ResidentEntry {
     return {
@@ -560,6 +602,7 @@ export function createSqliteResidentSetIndex(options: {
       objectStorageKey: row.object_storage_key,
       sizeBytes: row.size_bytes,
       sizeClass: row.size_class,
+      budgetLineKey: row.budget_line,
       namespace: row.namespace,
       pinned: row.pinned === 1,
       protectedLocally: row.protected_locally === 1,
@@ -578,6 +621,7 @@ export function createSqliteResidentSetIndex(options: {
       entry.recordId,
       entry.sizeBytes,
       entry.sizeClass,
+      entry.budgetLineKey,
       entry.namespace,
       entry.pinned ? 1 : 0,
       entry.protectedLocally ? 1 : 0,
@@ -590,7 +634,49 @@ export function createSqliteResidentSetIndex(options: {
     );
   }
 
+  /**
+   * Worst-to-keep first, until `targetBytes` is covered.
+   *
+   * Paged rather than read whole. The query is `ORDER BY` over a line, and
+   * `.all()` on it was a full materialization of that line — the same
+   * 300k-rows-into-memory problem this file exists to avoid, one level up.
+   *
+   * The page size has to be a guess because bytes are not rows: the caller
+   * asks for bytes and the `LIMIT` counts rows, and the average object size
+   * that would relate them is exactly what varies (a library of screenshots
+   * and a library of ProRAW have wildly different answers). So it starts from
+   * a fixed page, doubles on each pass, and stops when the target is covered or
+   * the line runs out. In the ordinary case — a pass freeing a few percent of a
+   * budget — that is one query.
+   *
+   * A free function rather than only a method, because `displaceableBytes`
+   * calls it and a method reaching for a sibling through `this` breaks the
+   * moment somebody destructures the index.
+   */
+  function evictionCandidates(query: EvictionCandidateQuery): ResidentEntry[] {
+    const out: ResidentEntry[] = [];
+    let collected = 0;
+    let limit = CANDIDATE_PAGE_ROWS;
+    for (;;) {
+      const rows = candidatesStmt.all(query.budgetLineKey, limit) as unknown as Row[];
+      out.length = 0;
+      collected = 0;
+      for (const row of rows) {
+        if (collected >= query.targetBytes) break;
+        const entry = toEntry(row);
+        out.push(entry);
+        collected += entry.sizeBytes;
+      }
+      // Enough bytes, or the line has no more rows to offer — either way this
+      // is the whole answer.
+      if (collected >= query.targetBytes || rows.length < limit) return out;
+      limit *= 2;
+    }
+  }
+
   return {
+    evictionCandidates,
+
     add(entry: ResidentArrival): void {
       write({ ...entry, resident: true, reserved: false });
     },
@@ -679,13 +765,8 @@ export function createSqliteResidentSetIndex(options: {
       return row ? toEntry(row) : null;
     },
 
-    usageOf(sizeClass: string): number {
-      const row = usageStmt.get(sizeClass) as { total: number | null } | undefined;
-      return row?.total ?? 0;
-    },
-
-    usageOfNamespace(namespace: string): number {
-      const row = namespaceUsageStmt.get(namespace) as { total: number | null } | undefined;
+    usageOf(budgetLineKey: string): number {
+      const row = usageStmt.get(budgetLineKey) as { total: number | null } | undefined;
       return row?.total ?? 0;
     },
 
@@ -712,53 +793,30 @@ export function createSqliteResidentSetIndex(options: {
       markOpenedStmt.run(atMs, objectStorageKey);
     },
 
-    /**
-     * Worst-to-keep first, until `targetBytes` is covered.
-     *
-     * Paged rather than read whole. The query is `ORDER BY` over a class, and
-     * `.all()` on it was a full materialization of that class — the same
-     * 300k-rows-into-memory problem this file exists to avoid, one level up.
-     *
-     * The page size has to be a guess because bytes are not rows: the caller
-     * asks for bytes and the `LIMIT` counts rows, and the average object size
-     * that would relate them is exactly what varies (a library of screenshots
-     * and a library of ProRAW have wildly different answers). So it starts from
-     * the running average of what has been read so far, doubles on each pass,
-     * and stops when the target is covered or the class runs out. In the
-     * ordinary case — a pass freeing a few percent of a budget — that is one
-     * query.
-     */
-    evictionCandidates(query: EvictionCandidateQuery): ResidentEntry[] {
-      const scopeValue =
-        query.scope.kind === "class" ? query.scope.sizeClass : query.scope.namespace;
-      const stmt = query.scope.kind === "class" ? candidatesStmt : namespaceCandidatesStmt;
-
-      const out: ResidentEntry[] = [];
-      let collected = 0;
-      let limit = CANDIDATE_PAGE_ROWS;
-      for (;;) {
-        const rows = stmt.all(scopeValue, limit) as unknown as Row[];
-        out.length = 0;
-        collected = 0;
-        for (const row of rows) {
-          if (collected >= query.targetBytes) break;
-          const entry = toEntry(row);
-          out.push(entry);
-          collected += entry.sizeBytes;
+    displaceableBytes(budgetLineKey: string, rank: EvictionRank, bytesNeeded: number): boolean {
+      if (bytesNeeded <= 0) return true;
+      let freeable = 0;
+      // `evictionCandidates` returns worst-first, so the first entry the
+      // candidate does not beat ends the walk — everything after it is better
+      // still. Asking for `bytesNeeded` bounds the page: the walk cannot read
+      // more of the line than an eviction pass freeing the same bytes would.
+      for (const entry of evictionCandidates({ budgetLineKey, targetBytes: bytesNeeded })) {
+        if (
+          compareEvictionRank(
+            { lastOpenedAtMs: entry.lastOpenedAtMs, recencyAtMs: entry.recencyAtMs },
+            rank,
+          ) >= 0
+        ) {
+          return false;
         }
-        // Enough bytes, or the class has no more rows to offer — either way this
-        // is the whole answer.
-        if (collected >= query.targetBytes || rows.length < limit) return out;
-        limit *= 2;
+        freeable += entry.sizeBytes;
+        if (freeable >= bytesNeeded) return true;
       }
+      return false;
     },
 
-    unevictableBytesOf(scope: EvictionScope): number {
-      const row = (
-        scope.kind === "class"
-          ? unevictableByClassStmt.get(scope.sizeClass)
-          : unevictableByNamespaceStmt.get(scope.namespace)
-      ) as { total: number | null } | undefined;
+    unevictableBytesOf(budgetLineKey: string): number {
+      const row = unevictableStmt.get(budgetLineKey) as { total: number | null } | undefined;
       return row?.total ?? 0;
     },
 

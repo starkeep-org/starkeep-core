@@ -469,8 +469,8 @@ export interface FileSyncEngine {
    *
    * This exists because eliding **advances the watermark**: the peer will not
    * re-ship the record, so nothing in a sync round will ever bring those bytes
-   * down again. Without an explicit path, `keep: "on-demand-only"` would mean
-   * "never", and raising a budget would not backfill anything.
+   * down again. Without an explicit path, `prefetch: false` would mean "never",
+   * and raising a budget would not backfill anything.
    *
    * Deliberately bypasses `decideResidency` — it is the answer to a direct
    * request ("the user opened this photo"), not a policy question. Byte
@@ -717,8 +717,8 @@ export interface SyncEngine {
    * elided record **advances the watermark** — that is what makes it a terminal
    * state rather than a permanent retry — so the peer will never offer those
    * bytes again and no sync round can bring them back. Without this,
-   * `keep: "on-demand-only"` would mean "never", and raising a budget would
-   * backfill nothing.
+   * `prefetch: false` would mean "never", and raising a budget would backfill
+   * nothing.
    *
    * On the engine rather than on `FileSyncEngine` for two reasons. It saves
    * every caller from re-deriving which storage is local and which is remote,

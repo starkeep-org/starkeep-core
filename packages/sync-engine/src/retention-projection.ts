@@ -3,66 +3,74 @@
  *
  * ## Why a projection rather than a live figure
  *
- * The matrix is edited *before* it takes effect. An operator moving
- * `image-large` from `never` to `all` needs to know it will cost 40 GB **while
- * they are deciding**, not after the sync engine has spent a night fetching.
- * The whole value of the row is answering "what happens if I do this", and a
- * UI that only reported current usage would answer a different question.
+ * The matrix is edited *before* it takes effect. An operator raising
+ * `image-large`'s share needs to know it will cost 40 GB **while they are
+ * deciding**, not after the sync engine has spent a night fetching. The whole
+ * value of the row is answering "what happens if I do this", and a UI that only
+ * reported current usage would answer a different question.
  *
  * ## Projected against a census, not a guess
  *
  * Every number below comes from counting what the library actually holds — how
- * many records fall in each class, their real total bytes, and how they
- * distribute over time. Multiplying an average size by a record count would be
- * simpler and would be wrong in the direction that matters: rendition sizes are
- * per-record maxima, so a library of screenshots and a library of ProRAW have
- * wildly different totals for identical counts, and the operator whose estimate
- * was built on the wrong assumption discovers it as a full disk.
+ * many records fall in each class and their real total bytes. Multiplying an
+ * average size by a record count would be simpler and would be wrong in the
+ * direction that matters: rendition sizes are per-record maxima, so a library of
+ * screenshots and a library of ProRAW have wildly different totals for identical
+ * counts, and the operator whose estimate was built on the wrong assumption
+ * discovers it as a full disk.
+ *
+ * ## Why this got much smaller
+ *
+ * It used to project a recency axis: cumulative bytes at each of seven cutoffs,
+ * a union of two windows added together because the census could not say how
+ * much they overlapped, and a documented over-count in the safe direction. All
+ * of that was estimating how much a hand-written date rule would select. There
+ * is no date rule now — a class either gets pulled or it does not, and the
+ * budget decides the rest — so the projection is what a class contains against
+ * what its share allows, with no estimation in between.
  */
 
 import {
-  namespaceTotalFor,
+  budgetBytesFor,
+  budgetLineFor,
+  namespaceRetentionFor,
   parseSizeClass,
   retentionRowFor,
   PLATFORM_NAMESPACE,
   type NodeRetentionPolicy,
-  type SizeClassRetention,
 } from "./residency-policy.js";
 
-/**
- * What the library actually contains for one size class, measured.
- *
- * `bytesWithinDays` is cumulative: the bytes of every record at least as recent
- * as each cutoff. Cumulative rather than bucketed because that is the shape the
- * question takes — "keep the last 90 days" is a prefix, not a bucket — and
- * deriving one from the other at read time invites an off-by-one at exactly the
- * boundary the operator is looking at.
- */
+/** What the library actually contains for one size class, measured. */
 export interface SizeClassCensus {
   readonly sizeClass: string;
   readonly recordCount: number;
   readonly totalBytes: number;
-  /** Cutoff days → cumulative bytes of records at least that recent. */
-  readonly bytesWithinDays: Readonly<Record<number, number>>;
-  /** Bytes of records opened recently, keyed the same way. */
-  readonly bytesOpenedWithinDays?: Readonly<Record<number, number>>;
   /** Bytes pinned on this node, which are kept whatever the row says. */
   readonly pinnedBytes?: number;
 }
 
 export interface RowProjection {
   readonly sizeClass: string;
+  /** The budget line this class is charged to. Several classes may share one. */
+  readonly budgetLineKey: string;
   /** What the rule selects, before the budget is applied. */
   readonly selectedBytes: number;
   /** What will actually be held, after the budget caps it. */
   readonly projectedBytes: number;
+  /**
+   * The line's budget in bytes, resolved from its share of the namespace.
+   *
+   * Derived rather than stored, which is the point: an operator moves a share
+   * or the namespace total and every row's bytes follow, so the numbers in this
+   * table cannot add up to something other than the total.
+   */
   readonly budgetBytes: number;
   /**
-   * True when the rule selects more than the budget allows.
+   * True when the class contains more than its line's budget allows.
    *
    * Worth surfacing rather than silently capping: it means eviction will run
-   * continuously against this row, and the operator's stated intent ("keep the
-   * last year") is not what they will get.
+   * against this line, and the operator should know the class is being held at
+   * its best rather than in full.
    */
   readonly overBudget: boolean;
   /**
@@ -74,9 +82,9 @@ export interface RowProjection {
    */
   readonly pinnedBytes: number;
   /**
-   * True for `on-demand-only`, where the number is a floor rather than a
-   * settled figure: the row holds whatever has been asked for, and grows
-   * toward its budget as the library is browsed.
+   * True when the class is not prefetched, where the number is a floor rather
+   * than a settled figure: the line holds whatever has been asked for, and
+   * grows toward its budget as the library is browsed.
    *
    * Flagged rather than folded into the number because presenting a
    * demand-driven row as a fixed projection is how an operator budgets a disk
@@ -86,27 +94,30 @@ export interface RowProjection {
 }
 
 /**
- * One namespace's roll-up, and the cap that applies across it.
+ * One namespace's roll-up, and the budget the whole of it is divided from.
  *
- * Reported as its own line because an app's total is a *second* thing that can
- * bind, and it binds invisibly from the rows' point of view: every row can be
- * comfortably inside its budget while the app as a whole is over. An operator
- * looking at a table of rows that all say "fine" needs somewhere to see that.
+ * Still its own line in the table, but it now reports a *division* rather than
+ * a second cap. An app's rows used to carry absolute byte counts with a
+ * separate total beside them, and the two could disagree — in the shipped phone
+ * policy they did, by 240 MB. Shares make the rows sum to the total by
+ * construction, so what this line says is "here is the number, and here is what
+ * your library will actually put in it".
  */
 export interface NamespaceProjection {
   readonly namespace: string;
-  /** Null for the platform namespace, which has rows and no total. */
-  readonly totalBudgetBytes: number | null;
-  /** What this namespace's rules select, before any budget. */
+  readonly totalBudgetBytes: number;
+  /** What this namespace's classes contain, before any budget. */
   readonly selectedBytes: number;
-  /** What the rows alone would hold, before the total is applied. */
+  /** What the rows alone would hold. */
   readonly rowProjectedBytes: number;
-  /** What will actually be held, after the total caps the rows. */
+  /** What will actually be held. */
   readonly projectedBytes: number;
   /**
-   * True when the rows together want more than the total allows — meaning the
-   * namespace-wide eviction pass will run against this app continuously, and
-   * raising any single row will not change what it holds.
+   * True when the namespace will hold more than its budget.
+   *
+   * Under shares this can only be pins: the lines sum to the total, so nothing
+   * else can push a namespace past it. That makes the flag *more* informative
+   * than it was — it now names one cause instead of two.
    */
   readonly overTotal: boolean;
 }
@@ -115,129 +126,76 @@ export interface PolicyProjection {
   readonly rows: readonly RowProjection[];
   readonly namespaces: readonly NamespaceProjection[];
   readonly totalProjectedBytes: number;
-  /** Rows whose rule selects more than their budget. */
+  /** Classes containing more than their line's budget. */
   readonly overBudgetClasses: readonly string[];
-  /** Namespaces whose rows together select more than the app's total. */
+  /** Namespaces that will hold more than their budget, i.e. because of pins. */
   readonly overTotalNamespaces: readonly string[];
-}
-
-/**
- * The bytes a single row's rule selects, ignoring its budget.
- *
- * The interpolation question is deliberately not answered by interpolating. If
- * the census has no measurement at the requested cutoff, the **next larger**
- * available cutoff is used, which over-estimates. Over-estimating is the safe
- * direction here: an operator who is told a row costs more than it does buys a
- * bigger disk, while one told it costs less runs out of space and starts
- * evicting things they asked to keep.
- */
-export function selectedBytesFor(row: SizeClassRetention, census: SizeClassCensus): number {
-  switch (row.keep) {
-    case "never":
-      return 0;
-    case "all":
-      return census.totalBytes;
-    case "on-demand-only":
-      // Nothing is fetched *proactively*, so a naive projection would say zero
-      // — and be badly wrong. On-demand caching converges on the working set,
-      // and over time fills the row's budget. The best measured estimate of
-      // that steady state is what has actually been opened recently; with no
-      // such measurement the honest answer is zero, and `demandDriven` on the
-      // projection is what tells the UI to say "grows to the budget as you
-      // browse" rather than presenting the number as a settled figure.
-      return row.openedWithinDays && census.bytesOpenedWithinDays
-        ? Math.min(cumulativeAt(census.bytesOpenedWithinDays, row.openedWithinDays), census.totalBytes)
-        : 0;
-    case "recent-only": {
-      const windowDays = row.recencyWindowDays ?? 0;
-      // A recent-only row with no window keeps nothing by its recency rule —
-      // which is a misconfiguration rather than an intent, and validateRetentionPolicy
-      // is where it gets reported. Here it simply selects nothing.
-      let bytes = windowDays > 0 ? cumulativeAt(census.bytesWithinDays, windowDays) : 0;
-      // The working set. A library you actually browse has a shape that is not
-      // its calendar, so this is a union with the recency window rather than a
-      // separate row — and unions are added because the census cannot say how
-      // much they overlap. That over-counts, in the safe direction.
-      if (row.openedWithinDays && census.bytesOpenedWithinDays) {
-        bytes += cumulativeAt(census.bytesOpenedWithinDays, row.openedWithinDays);
-      }
-      return Math.min(bytes, census.totalBytes);
-    }
-    default:
-      // Unreachable for any policy `validateRetentionPolicy` accepted, which is
-      // exactly why it throws rather than returning a number. Falling off the
-      // end returned `undefined`, which `projectRow` turned into `NaN` and then
-      // propagated silently through `NamespaceProjection.projectedBytes` into
-      // `totalProjectedBytes` — an operator staring at a blank total with no
-      // indication that a typo three levels down caused it. A thrown error names
-      // the rule and the class.
-      throw new Error(
-        `unrecognised keep rule ${JSON.stringify((row as SizeClassRetention).keep)} for "${census.sizeClass}" — validateRetentionPolicy should have refused this policy`,
-      );
-  }
-}
-
-/**
- * Read a cumulative census at a cutoff, rounding *up* to a measured point.
- *
- * Falls back to the largest available measurement when the requested cutoff is
- * beyond everything measured — which is the whole library, and correct.
- */
-function cumulativeAt(measurements: Readonly<Record<number, number>>, cutoffDays: number): number {
-  const points = Object.keys(measurements)
-    .map(Number)
-    .filter((n) => Number.isFinite(n))
-    .sort((a, b) => a - b);
-  if (points.length === 0) return 0;
-  const atOrAbove = points.find((p) => p >= cutoffDays);
-  const chosen = atOrAbove ?? points[points.length - 1]!;
-  return measurements[chosen] ?? 0;
-}
-
-export function projectRow(
-  sizeClass: string,
-  row: SizeClassRetention,
-  census: SizeClassCensus,
-): RowProjection {
-  const selectedBytes = selectedBytesFor(row, census);
-  const pinnedBytes = census.pinnedBytes ?? 0;
-  // Pins win over budgets, so the floor is the pinned bytes even when the
-  // budget is smaller — otherwise the projection would promise a number the
-  // engine has already been told it may not deliver.
-  const projectedBytes = Math.max(Math.min(selectedBytes, row.budgetBytes), pinnedBytes);
-  return {
-    sizeClass,
-    selectedBytes,
-    projectedBytes,
-    budgetBytes: row.budgetBytes,
-    overBudget: selectedBytes > row.budgetBytes,
-    pinnedBytes,
-    demandDriven: row.keep === "on-demand-only",
-  };
 }
 
 /**
  * Project a whole policy against a census.
  *
- * Classes present in the census but absent from the policy fall through
- * `retentionRowFor` — the same resolution the engine applies, so the projection
+ * Classes present in the census but absent from the policy resolve through
+ * `budgetLineFor` — the same resolution the engine applies, so the projection
  * cannot disagree with what actually happens. A projection that quietly ignored
  * unlisted classes would under-report exactly the disk use nobody planned for.
  *
- * The total is summed over **namespaces**, not over rows, so an app whose rows
- * add up to more than its total is reported at its total. Summing the rows
- * would promise disk use that the namespace pass is going to evict back down.
+ * ## Classes sharing a line are capped together, not each
+ *
+ * Every unrecognised rung of a namespace pools onto one budget line, so a
+ * projection that capped each of them at the line's budget would report the
+ * line's capacity several times over — the same over-report that made rung
+ * invention free in the first place. The budget is therefore distributed across
+ * the classes on a line in proportion to what each contains, which is what the
+ * eviction ordering will approximately do to them anyway.
  */
 export function projectPolicy(
   policy: NodeRetentionPolicy,
   census: readonly SizeClassCensus[],
 ): PolicyProjection {
-  const rows = census.map((c) =>
-    projectRow(c.sizeClass, retentionRowFor(policy, parseSizeClass(c.sizeClass)), c),
-  );
+  // Group first: a row's cap depends on what else shares its line.
+  const byLine = new Map<string, SizeClassCensus[]>();
+  for (const entry of census) {
+    const key = budgetLineFor(policy, parseSizeClass(entry.sizeClass)).key;
+    byLine.set(key, [...(byLine.get(key) ?? []), entry]);
+  }
+
+  const rows: RowProjection[] = [];
+  for (const [budgetLineKey, entries] of byLine) {
+    const budgetLine = { ...parsedLine(budgetLineKey) };
+    const row = retentionRowFor(policy, budgetLine);
+    const lineBudget = budgetBytesFor(policy, budgetLine);
+    const lineTotal = entries.reduce((sum, c) => sum + c.totalBytes, 0);
+
+    for (const entry of entries) {
+      const selectedBytes = entry.totalBytes;
+      const pinnedBytes = entry.pinnedBytes ?? 0;
+      // This class's slice of a possibly shared line. One class on the line is
+      // the ordinary case and gets the whole of it; several split it by what
+      // they hold, so the line's projected total is the line's budget rather
+      // than a multiple of it.
+      const budgetBytes =
+        entries.length === 1 || lineTotal <= 0
+          ? lineBudget
+          : Math.floor((lineBudget * selectedBytes) / lineTotal);
+      // Pins win over budgets, so the floor is the pinned bytes even when the
+      // budget is smaller — otherwise the projection would promise a number the
+      // engine has already been told it may not deliver.
+      rows.push({
+        sizeClass: entry.sizeClass,
+        budgetLineKey,
+        selectedBytes,
+        projectedBytes: Math.max(Math.min(selectedBytes, budgetBytes), pinnedBytes),
+        budgetBytes,
+        overBudget: selectedBytes > budgetBytes,
+        pinnedBytes,
+        demandDriven: !row.prefetch,
+      });
+    }
+  }
 
   // A class name from before namespacing has no namespace to group under.
-  // Grouped with the platform, matching where `retentionRowFor` sends it.
+  // Grouped with the platform, matching where `budgetLineFor` sends it.
   const byNamespace = new Map<string, RowProjection[]>();
   for (const row of rows) {
     const namespace = parseSizeClass(row.sizeClass)?.namespace ?? PLATFORM_NAMESPACE;
@@ -246,24 +204,19 @@ export function projectPolicy(
 
   const namespaces: NamespaceProjection[] = [...byNamespace.entries()].map(
     ([namespace, group]) => {
-      const totalBudgetBytes = namespaceTotalFor(policy, namespace);
+      const totalBudgetBytes = namespaceRetentionFor(policy, namespace).budgetBytes;
       const selectedBytes = group.reduce((sum, r) => sum + r.selectedBytes, 0);
       const rowProjectedBytes = group.reduce((sum, r) => sum + r.projectedBytes, 0);
-      // Pins win over the total for the same reason they win over a row: the
-      // engine has already been told it may not drop them, so a projection that
-      // capped below them would promise something that cannot happen.
-      const pinnedBytes = group.reduce((sum, r) => sum + r.pinnedBytes, 0);
-      const projectedBytes =
-        totalBudgetBytes === null
-          ? rowProjectedBytes
-          : Math.max(Math.min(rowProjectedBytes, totalBudgetBytes), pinnedBytes);
       return {
         namespace,
         totalBudgetBytes,
         selectedBytes,
         rowProjectedBytes,
-        projectedBytes,
-        overTotal: totalBudgetBytes !== null && rowProjectedBytes > totalBudgetBytes,
+        // No second cap to apply. The rows are shares of this number, so their
+        // sum cannot exceed it except by pins — which are already in each row's
+        // projection, and must stay there rather than being capped away.
+        projectedBytes: rowProjectedBytes,
+        overTotal: rowProjectedBytes > totalBudgetBytes,
       };
     },
   );
@@ -275,6 +228,21 @@ export function projectPolicy(
     overBudgetClasses: rows.filter((r) => r.overBudget).map((r) => r.sizeClass),
     overTotalNamespaces: namespaces.filter((n) => n.overTotal).map((n) => n.namespace),
   };
+}
+
+/**
+ * A stored line key back into its halves.
+ *
+ * The same first-colon split `parseSizeClass` uses, and for the same reason: a
+ * platform rung is itself `original:image`. A key with no separator cannot name
+ * a namespace, so it goes to the platform's pooled line — where an unresolvable
+ * class has always gone.
+ */
+function parsedLine(key: string): { namespace: string; rung: string; key: string } {
+  const parsed = parseSizeClass(key);
+  return parsed === null
+    ? { namespace: PLATFORM_NAMESPACE, rung: key, key }
+    : { namespace: parsed.namespace, rung: parsed.rung, key };
 }
 
 /**

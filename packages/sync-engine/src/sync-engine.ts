@@ -1694,10 +1694,10 @@ function outboundManifest(item: OutboundItem): FileSyncManifest | null {
  *
  * `recencyAtMs` is left null here because capture time lives in the
  * per-category metadata table, not on the record row, and this function has
- * only the row. A null reads as "unknown", which makes `recent-only` fetch
- * rather than decline — a metadata gap must not silently cost you the bytes.
- * A host that can do better (it has the metadata join) overrides it in its
- * decider.
+ * only the row. Null is the eviction order's "undated", which is a real answer
+ * rather than a guess — inventing a date would be guessing with somebody's
+ * photographs. A host that can do better (it has the metadata join) overrides
+ * it in its decider.
  */
 function candidateForRecord(record: AnyRecord): BlobCandidate | null {
   if (!record.objectStorageKey) return null;

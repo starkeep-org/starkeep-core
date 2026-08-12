@@ -13,6 +13,49 @@
  * legitimate terminal state, not a retry. `"fetch"` that then fails is
  * unchanged: the watermark holds and the next round retries.
  *
+ * ## This module used to predict what the eviction pass would do
+ *
+ * It had four keep rules, a capture-date window and an opened-within window,
+ * and every one of them was an operator-authored *guess* at the answer the
+ * eviction pass computes from real data. That is the wrong division of labour,
+ * and it produced exactly the failure you would expect from it: `recent-only`
+ * read `captured_at` off the record, renditions have no `captured_at`, so on
+ * every rung of every ladder the rule silently behaved as "keep everything,
+ * capped by budget" — for months, with the census agreeing, because the census
+ * computed recency the same way.
+ *
+ * A cache needs an **eviction policy**, not an admission policy. What survives
+ * of admission is the one thing eviction cannot express: whether to *acquire*
+ * these bytes speculatively at all. So a row is now two fields:
+ *
+ *   - {@link SizeClassRetention.prefetch} — pull this class during a sync
+ *     round, or only when something actually asks for it.
+ *   - {@link SizeClassRetention.share} — how much of the namespace's budget
+ *     this class may occupy, relative to its siblings. Zero means none.
+ *
+ * Everything else — which bytes go first, which stay, what "recently useful"
+ * means — is {@link compareEvictionRank}, applied to what the node is actually
+ * holding, at the moment the budget actually binds.
+ *
+ * ## One budget per namespace, divided by share
+ *
+ * There used to be two independent budget levels: an absolute byte count on
+ * every row, *plus* a namespace total checked separately. They failed
+ * independently, which is why there was a second eviction pass over whole
+ * namespaces — and they drifted, because nothing made them agree. The one
+ * shipped policy had photos rows summing to ~14.24 GB against a stated total of
+ * 14 GB.
+ *
+ * Now a namespace has one byte count and rows carry *shares* of it. The row
+ * budgets sum to the total by construction, so a node inside every row is
+ * inside its total, and the namespace pass has nothing left to do. The operator
+ * sets the number they actually care about — "Photos may use 20 GB" — and the
+ * shares say how it is divided.
+ *
+ * Per-class division still earns its place: value density across a ladder
+ * varies by three orders of magnitude, and a single pooled cache would let
+ * three originals evict an entire thumbnail set.
+ *
  * ## The platform never learns what a size class is
  *
  * Policy rows are keyed by opaque class names. `image-medium` means nothing
@@ -41,71 +84,48 @@
  * rung, never the namespace.** An app therefore cannot promote an original into
  * a cheap rung, cannot demote a rendition into the protected tier, and cannot
  * spend another app's budget. The one thing it can still do — invent rung names
- * to escape into a fallback row — is what {@link AppRetention.totalBudgetBytes}
- * bounds.
+ * to escape into a fallback row — is bounded by {@link FALLBACK_RUNG}: every
+ * unrecognised rung of a namespace shares *one* budget line, so inventing a
+ * thousand of them buys one budget rather than a thousand.
  */
-
-/** What a node does with a given size class. There is no residency-class enum. */
-export type KeepRule =
-  /** Keep every record of this class that the library contains. */
-  | "all"
-  /** Keep only what falls in the recency window; decline the rest. */
-  | "recent-only"
-  /** Never fetch proactively; fetch only when something actually asks for it. */
-  | "on-demand-only"
-  /** Never hold this class on this node at all. */
-  | "never";
-
-/**
- * Every legal {@link KeepRule}, as a value rather than only as a type.
- *
- * A policy arrives as JSON, where the union above is a claim and not a check.
- * Nothing validated membership, so `{ keep: "kepp-all" }` passed
- * {@link validateRetentionPolicy} clean, fell through every branch of
- * {@link decideResidency} to the final `return { decision: "fetch" }`, and was
- * labelled `within-recency-window` — a reason that did not happen. The direction
- * of that failure is the safe one for data and completely silent, which is the
- * combination that keeps a typo in a config file for a year.
- */
-export const KEEP_RULES: readonly KeepRule[] = [
-  "all",
-  "recent-only",
-  "on-demand-only",
-  "never",
-];
 
 /** One row of the §6.2 retention table. */
 export interface SizeClassRetention {
-  readonly keep: KeepRule;
   /**
-   * For `recent-only`: how far back to keep, by the record's own recency
-   * signal (capture time where known, else creation). Ignored otherwise.
-   */
-  readonly recencyWindowDays?: number;
-  /**
-   * For `recent-only`: also keep anything opened within this many days,
-   * regardless of how old it is. A library you actually browse has a working
-   * set that is not the same shape as its calendar.
-   */
-  readonly openedWithinDays?: number;
-  /**
-   * Cap on this row, in bytes.
+   * Pull this class as part of an ordinary sync round.
    *
-   * **No row may be zero, except a `never` row, where zero is the only
-   * coherent value.** A zero budget on any other rule makes the class
-   * unreachable offline *and* silently disables the recency rule above it, so
-   * re-opening yesterday's photo re-downloads it. If a node genuinely wants none
-   * of a class, that is `keep: "never"` — which says so.
+   * False is the `on-demand-only` case and it is the whole of what survives of
+   * the old keep-rule enum, because it is the only part of it that a cache's
+   * eviction order cannot express. `image-large` exists so somebody can zoom
+   * into one photograph; fetching every one of them speculatively would spend
+   * the budget on bytes nobody looked at, and no eviction ordering can undo
+   * that because the download has already happened.
    *
-   * Required on every row including `never`, and normalized to zero there by
-   * {@link retentionRowFor}. Leaving it optional for `never` was not the
-   * simplification it looked like: `evictClass` reads this field and refuses to
-   * run on a non-finite one — so the one class an operator had just set to "keep
-   * nothing" became the one class the eviction pass would never touch — and
-   * `projectRow`'s `Math.min(selectedBytes, budgetBytes)` turned the whole
-   * matrix total into `NaN`.
+   * False does **not** mean "never hold this". An explicit request — someone
+   * opening the item — still lands the bytes and still charges them to this
+   * row's share. That is what makes the class a cache of the working set rather
+   * than a permanent round trip to the cloud. Use `share: 0` to hold none.
    */
-  readonly budgetBytes: number;
+  readonly prefetch: boolean;
+  /**
+   * This class's claim on its namespace's budget, relative to its siblings.
+   *
+   * Not bytes. Shares are resolved against
+   * {@link NamespaceRetention.budgetBytes} at the moment a decision is made
+   * ({@link budgetBytesFor}), which is what makes the rows unable to disagree
+   * with the total — the thing two independent absolute budgets could not
+   * promise, and did not deliver.
+   *
+   * The unit is arbitrary and only ratios matter: `{ a: 1, b: 3 }` and
+   * `{ a: 25, b: 75 }` are the same policy. Percentages are the natural way to
+   * write one and nothing depends on them summing to a hundred.
+   *
+   * **Zero is how a node says it wants none of a class.** That reading is
+   * unambiguous here in a way it could not be under the old model, where a zero
+   * budget sat beside a `keep` rule that contradicted it and a whole
+   * normalization step existed to break the tie.
+   */
+  readonly share: number;
 }
 
 /**
@@ -118,6 +138,21 @@ export interface SizeClassRetention {
  * platform's label app id (`STARKEEP_LABEL_APP_ID`).
  */
 export const PLATFORM_NAMESPACE = "starkeep";
+
+/**
+ * The rung standing for "every unrecognised rung of this namespace, together".
+ *
+ * Not a real rung and deliberately not a legal one — a rung comes from a label
+ * value, and `*` is reserved here so a budget line key can never collide with a
+ * class name.
+ *
+ * Pooling is what closes the rung-invention hole structurally. Under absolute
+ * per-row budgets, an app naming a thousand rungs got a thousand fallback
+ * budgets, and a separate namespace-wide total had to be introduced to bound
+ * it. One shared line needs no such backstop: a thousand invented rungs spend
+ * one share between them.
+ */
+export const FALLBACK_RUNG = "*";
 
 /**
  * A size class, resolved into the two halves that mean different things.
@@ -165,29 +200,35 @@ export function isPlatformClass(sizeClass: ResolvedSizeClass): boolean {
   return sizeClass.namespace === PLATFORM_NAMESPACE;
 }
 
-/** One app's namespace: its rungs, and the cap across all of them. */
-export interface AppRetention {
-  /** Rungs this app declares, keyed by the label value. */
+/**
+ * One namespace: its rungs, how the budget divides between them, and how many
+ * bytes there are to divide.
+ *
+ * The platform namespace uses this shape too. It used to be the exception —
+ * rows with absolute budgets and no total — and the exception bought nothing
+ * except a `number | null` that every consumer had to branch on. An operator
+ * asking "how much disk may originals take" deserves one field to set, the same
+ * as they get for an app.
+ */
+export interface NamespaceRetention {
+  /** Rungs this namespace declares, keyed by the label value. */
   readonly rows: Readonly<Record<string, SizeClassRetention>>;
-  /** Applied to a rung with no row — an unknown or invented rung name. */
-  readonly fallback: SizeClassRetention;
   /**
-   * Cap across every rung of this app, enforced *in addition* to the rows.
-   *
-   * This is what makes rung invention safe. Without it, an app that names a
-   * thousand rungs gets a thousand fallback budgets; with it, it still cannot
-   * exceed one number.
+   * The share given to {@link FALLBACK_RUNG} — every rung with no row of its
+   * own, pooled into one budget line.
    */
-  readonly totalBudgetBytes: number;
+  readonly fallback: SizeClassRetention;
+  /** Every byte this namespace may hold, across all of its rungs. */
+  readonly budgetBytes: number;
 }
 
 /**
  * A node's whole retention policy: platform classes, then one namespace per app.
  *
  * Two levels rather than one flat table because the requirement is a budget
- * *per app* and per classification within the app, and a flat table can only
- * express the second. It also puts the one boundary that matters — platform
- * versus app — in the structure rather than in a naming convention.
+ * *per app* and a division within the app, and a flat table can only express
+ * the second. It also puts the one boundary that matters — platform versus app
+ * — in the structure rather than in a naming convention.
  *
  * `Full`/`Library`/`Browse`-style presets may front this in the UI, but they
  * **write** these rows rather than being stored — nothing here records which
@@ -199,94 +240,135 @@ export interface NodeRetentionPolicy {
    * membership is decided by the record having no parent rather than by any
    * label. Keyed `original:<category>`.
    */
-  readonly platform: {
-    readonly rows: Readonly<Record<string, SizeClassRetention>>;
-    /**
-     * Applied to a platform class with no row. Defaults to fetching: a node
-     * that cannot classify something should not silently decline it, because
-     * the failure mode of over-fetching is a full disk and the failure mode of
-     * under-fetching is data that quietly isn't anywhere.
-     */
-    readonly fallback: SizeClassRetention;
-  };
+  readonly platform: NamespaceRetention;
   /** Per-app namespaces, keyed by appId. */
-  readonly apps: Readonly<Record<string, AppRetention>>;
+  readonly apps: Readonly<Record<string, NamespaceRetention>>;
   /**
    * Applied to an app with no entry above — one the operator has never
    * configured, which is the ordinary state right after installing something.
    */
-  readonly appFallback: AppRetention;
+  readonly appFallback: NamespaceRetention;
 }
 
 /**
- * The namespace's whole budget, for the app-total check.
+ * A budget: one namespace's share-line, and the key everything else groups by.
  *
- * The platform namespace has no total: its rows *are* the originals, and a cap
- * above them would be a second way to say the same thing that could disagree
- * with the first. So it returns null and the total check is skipped.
+ * This is the unit the resident set indexes, the eviction pass runs over, and
+ * usage is summed against. It is *not* the size class — several size classes
+ * can map to one line, which is exactly what {@link FALLBACK_RUNG} does — and
+ * conflating the two is what made rung invention free.
  */
-export function namespaceTotalFor(
+export interface BudgetLine {
+  readonly namespace: string;
+  /** A declared rung, or {@link FALLBACK_RUNG} for the pooled remainder. */
+  readonly rung: string;
+  /** `<namespace>:<rung>` — the stored grouping key. */
+  readonly key: string;
+}
+
+export function namespaceRetentionFor(
   policy: NodeRetentionPolicy,
   namespace: string,
-): number | null {
-  if (namespace === PLATFORM_NAMESPACE) return null;
-  return (policy.apps[namespace] ?? policy.appFallback).totalBudgetBytes;
+): NamespaceRetention {
+  if (namespace === PLATFORM_NAMESPACE) return policy.platform;
+  return policy.apps[namespace] ?? policy.appFallback;
 }
 
 /**
- * The row governing one class, through both levels.
+ * Which budget line a class spends from.
  *
- * A class in an unconfigured app's namespace falls to `appFallback.fallback`,
- * not to the platform fallback: an app nobody has budgeted for must not inherit
- * the rule written for originals.
+ * A class the policy names spends from its own line. Everything else — an
+ * unrecognised rung, a ladder respecified on another node, a class name from
+ * before namespacing — spends from its namespace's pooled fallback line.
+ *
+ * A class that will not parse has no namespace to belong to, and guessing one
+ * would charge somebody's budget for it. It goes to the platform's fallback,
+ * which is where an unresolvable class has always gone and is the conservative
+ * choice: the platform namespace is the protected tier.
  */
-export function retentionRowFor(
+export function budgetLineFor(
   policy: NodeRetentionPolicy,
   sizeClass: ResolvedSizeClass | null,
-): SizeClassRetention {
-  return normalizeRow(rawRetentionRowFor(policy, sizeClass));
+): BudgetLine {
+  if (sizeClass === null) return line(PLATFORM_NAMESPACE, FALLBACK_RUNG);
+  const namespace = namespaceRetentionFor(policy, sizeClass.namespace);
+  return namespace.rows[sizeClass.rung] !== undefined
+    ? line(sizeClass.namespace, sizeClass.rung)
+    : line(sizeClass.namespace, FALLBACK_RUNG);
 }
 
-function rawRetentionRowFor(
-  policy: NodeRetentionPolicy,
-  sizeClass: ResolvedSizeClass | null,
-): SizeClassRetention {
-  if (sizeClass === null) return policy.platform.fallback;
-  if (isPlatformClass(sizeClass)) {
-    return policy.platform.rows[sizeClass.rung] ?? policy.platform.fallback;
-  }
-  const app = policy.apps[sizeClass.namespace] ?? policy.appFallback;
-  return app.rows[sizeClass.rung] ?? app.fallback;
+function line(namespace: string, rung: string): BudgetLine {
+  return { namespace, rung, key: `${namespace}:${rung}` };
 }
 
-/**
- * The one interpretation of a row that every consumer sees.
- *
- * Only one rule today: **a `never` row's budget is zero**, whatever the stored
- * value says. "Hold none of this class" and "hold up to 40 GB of it" are
- * contradictory, and something had to break the tie — leaving it to each
- * consumer meant `evictClass` read a stale 40 GB and declined to empty a class
- * the operator had just switched off, while `selectedBytesFor` read the rule and
- * returned zero. Normalizing here means the eviction pass's own guard reads
- * correctly ("Zero is left alone, because zero is a real answer — it is what
- * `keep: \"never\"` means, and evicting everything is the point") rather than
- * being defeated by the field beside it.
- *
- * Placed on the resolution function rather than in each caller because this is
- * the one function `decideResidency`, `evictClass` and `projectPolicy` all pass
- * through, and a rule they can disagree about is a rule the matrix cannot
- * promise.
- */
-function normalizeRow(row: SizeClassRetention): SizeClassRetention {
-  if (row?.keep !== "never" || row.budgetBytes === 0) return row;
-  return { ...row, budgetBytes: 0 };
-}
-
-/** Whether the policy names this exact class, as opposed to falling back to it. */
+/** Whether the policy names this exact class, as opposed to pooling it. */
 export function hasRowFor(policy: NodeRetentionPolicy, sizeClass: ResolvedSizeClass | null): boolean {
   if (sizeClass === null) return false;
-  if (isPlatformClass(sizeClass)) return policy.platform.rows[sizeClass.rung] !== undefined;
-  return policy.apps[sizeClass.namespace]?.rows[sizeClass.rung] !== undefined;
+  return namespaceRetentionFor(policy, sizeClass.namespace).rows[sizeClass.rung] !== undefined;
+}
+
+/** The row governing one budget line. */
+export function retentionRowFor(
+  policy: NodeRetentionPolicy,
+  budgetLine: BudgetLine,
+): SizeClassRetention {
+  const namespace = namespaceRetentionFor(policy, budgetLine.namespace);
+  return budgetLine.rung === FALLBACK_RUNG
+    ? namespace.fallback
+    : namespace.rows[budgetLine.rung] ?? namespace.fallback;
+}
+
+/**
+ * The bytes a budget line may hold: its share of its namespace's budget.
+ *
+ * The denominator is every declared row **plus** the fallback, so the lines of
+ * a namespace sum to exactly its `budgetBytes`. That identity is the whole
+ * point of the change — it is what makes a second, namespace-wide eviction pass
+ * unnecessary rather than merely unlikely to fire.
+ *
+ * A namespace whose shares are all zero holds nothing, which is coherent and is
+ * how "this app gets no disk on this node" is written. It is also the one case
+ * where the denominator is zero, so it is answered before the division rather
+ * than by it.
+ */
+export function budgetBytesFor(policy: NodeRetentionPolicy, budgetLine: BudgetLine): number {
+  const namespace = namespaceRetentionFor(policy, budgetLine.namespace);
+  const row = retentionRowFor(policy, budgetLine);
+  const total = totalShares(namespace);
+  if (total <= 0 || row.share <= 0) return 0;
+  return Math.floor((namespace.budgetBytes * row.share) / total);
+}
+
+function totalShares(namespace: NamespaceRetention): number {
+  let total = shareOf(namespace.fallback);
+  for (const row of Object.values(namespace.rows)) total += shareOf(row);
+  return total;
+}
+
+function shareOf(row: SizeClassRetention | undefined): number {
+  const share = row?.share;
+  return typeof share === "number" && Number.isFinite(share) && share > 0 ? share : 0;
+}
+
+/**
+ * Every budget line a policy defines, so a host can enumerate them without
+ * knowing the shape of the table.
+ *
+ * Includes each namespace's fallback line whether or not anything is currently
+ * pooled into it: a line with a share is a line the eviction pass may have to
+ * run over the moment an unrecognised rung arrives.
+ */
+export function budgetLinesOf(policy: NodeRetentionPolicy): BudgetLine[] {
+  const out: BudgetLine[] = [];
+  const namespaces: Array<[string, NamespaceRetention]> = [
+    [PLATFORM_NAMESPACE, policy.platform],
+    ...Object.entries(policy.apps),
+  ];
+  for (const [namespace, retention] of namespaces) {
+    for (const rung of Object.keys(retention.rows)) out.push(line(namespace, rung));
+    out.push(line(namespace, FALLBACK_RUNG));
+  }
+  return out;
 }
 
 /**
@@ -316,10 +398,62 @@ export interface LocalOverrides {
   /**
    * This node wants these bytes regardless of budget. Pins **win** — otherwise
    * someone pins 200 GB into a small budget and eviction thrashes forever.
-   * They still count against the class's budget, so the overage is visible
+   * They still count against the line's budget, so the overage is visible
    * rather than swallowed.
    */
   readonly pinned: boolean;
+}
+
+/**
+ * Where a blob sits in the order things are given up in.
+ *
+ * The single ordering this system has an opinion about, extracted so the two
+ * places that need it cannot drift: the resident set's `ORDER BY`, which picks
+ * what an eviction pass deletes, and {@link decideResidency}, which admits a
+ * new blob if it would outrank something already held.
+ *
+ * ## Why use beats age
+ *
+ * Never-opened material goes before anything anyone has looked at, then
+ * least-recently-opened, and only then the record's own date. Ordering by date
+ * alone reads as the obvious rule and thrashes on the behaviour people actually
+ * have: browse a 2005 album and each photograph lands, is immediately displaced
+ * by the next, and is fetched again the next time — egress paid twice per photo,
+ * forever. What a person opened is the best available evidence about what this
+ * device should keep, and it is evidence rather than a guess.
+ */
+export interface EvictionRank {
+  /** Epoch ms this blob was last read on this node, or null if never. */
+  readonly lastOpenedAtMs: number | null;
+  /** The record's own date — capture time where known. Null if unknown. */
+  readonly recencyAtMs: number | null;
+}
+
+/**
+ * Negative when `a` should be given up before `b`.
+ *
+ * Mirrors `ORDER BY last_opened_at_ms IS NULL DESC, last_opened_at_ms ASC,
+ * recency_at_ms ASC` exactly, **including SQLite's placement of NULL first in
+ * an ascending sort** — so an undated record ranks below a dated one of any
+ * age. That is the shipped ordering and it is left as it is on purpose: the
+ * thing standing between this pass and a last copy is the durability
+ * predicate, not the sort, and changing a comparison to do a safety job the
+ * comparison cannot actually do would move the guarantee somewhere harder to
+ * see.
+ */
+export function compareEvictionRank(a: EvictionRank, b: EvictionRank): number {
+  const aNever = a.lastOpenedAtMs === null;
+  const bNever = b.lastOpenedAtMs === null;
+  if (aNever !== bNever) return aNever ? -1 : 1;
+  if (!aNever && !bNever && a.lastOpenedAtMs !== b.lastOpenedAtMs) {
+    return a.lastOpenedAtMs! - b.lastOpenedAtMs!;
+  }
+  const aRecency = a.recencyAtMs;
+  const bRecency = b.recencyAtMs;
+  if (aRecency === bRecency) return 0;
+  if (aRecency === null) return -1;
+  if (bRecency === null) return 1;
+  return aRecency - bRecency;
 }
 
 /** Normalized view of the thing whose blob is about to move. */
@@ -344,9 +478,11 @@ export interface BlobCandidate {
    */
   readonly originAppId: string | null;
   /**
-   * The record's own recency signal in epoch ms — capture time where the host
-   * knows it, else creation. Null when unknown, which makes `recent-only`
-   * fetch rather than decline: an unknown date is not evidence of age.
+   * The record's own date in epoch ms — capture time where the host knows it.
+   * Null when unknown.
+   *
+   * An ordering term, not a filter. Nothing declines a blob for being old; this
+   * decides where it sits in the queue if the line is full.
    */
   readonly recencyAtMs: number | null;
   /** Epoch ms this record was last opened on this node, if ever. */
@@ -360,6 +496,15 @@ export interface ResidencyVerdict {
   readonly decision: ResidencyDecision;
   /** The class the host resolved, or null if it could not. */
   readonly sizeClass: ResolvedSizeClass | null;
+  /**
+   * The budget line those bytes are charged to.
+   *
+   * Optional for the same reason {@link ResidencyVerdict.pinned} is:
+   * `SyncEngine.fetchBlob` synthesizes a verdict it never asked the policy for,
+   * and has only a class. Absent means "nobody resolved this", and the host
+   * resolves the class against its own policy when it accounts for the arrival.
+   */
+  readonly budgetLine?: BudgetLine;
   /**
    * Whether this node insists on holding these bytes — the **resolved** pin,
    * covering both of its sources.
@@ -386,16 +531,21 @@ export interface ResidencyVerdict {
   readonly reason:
     | "record-constraint"
     | "pinned"
-    | "keep-all"
-    | "keep-never"
-    | "on-demand-only"
-    | "outside-recency-window"
-    | "within-recency-window"
+    // The line's share is zero — this node holds none of this class.
+    | "class-disabled"
+    // The class is not prefetched. Not a refusal: an explicit request still
+    // lands the bytes, and that is what `prefetch: false` means.
+    | "not-prefetched"
+    | "within-budget"
+    // The line was full, but this blob outranks enough already-held bytes that
+    // the next eviction pass would keep it and drop them. Admitting it is how
+    // a budget ends up holding the *best* of a class rather than whatever
+    // happened to arrive first — see the module note on acquisition order.
+    | "displaces-worse"
+    // Full, and this blob is the thing that would be given up first. Declining
+    // it is not a preference; fetching it would be a download followed
+    // immediately by a delete.
     | "budget-exhausted"
-    // The class's own row had room, but its app has spent its whole namespace
-    // total. Reported distinctly because the fix is a different number: raising
-    // the row does nothing until the total moves.
-    | "namespace-budget-exhausted"
     | "unclassified"
     // Not a decision this module made. `SyncEngine.fetchBlob` answers a direct
     // request and is deliberately not subject to the policy, but the arrival
@@ -404,11 +554,24 @@ export interface ResidencyVerdict {
     | "explicit-request";
 }
 
-/** How many bytes this node currently holds for a class. Supplied by the host. */
-export type ClassUsageLookup = (sizeClass: ResolvedSizeClass | null) => number;
+/** How many bytes this node currently holds against a budget line. */
+export type LineUsageLookup = (budgetLine: BudgetLine) => number;
 
-/** How many bytes this node currently holds across a whole namespace. */
-export type NamespaceUsageLookup = (namespace: string) => number;
+/**
+ * Whether a line holds at least `bytesNeeded` of blobs ranked *worse* than
+ * `rank` — bytes the next eviction pass would give up before it touched this
+ * candidate.
+ *
+ * Supplied by the host because it is a question about the resident set, and
+ * this module is not allowed to know what one is. It is deliberately a
+ * yes/no: the policy asks whether room can be made, and the pass that actually
+ * makes it is the one with the durability evidence.
+ */
+export type DisplacementLookup = (
+  budgetLine: BudgetLine,
+  rank: EvictionRank,
+  bytesNeeded: number,
+) => boolean;
 
 export interface DecideResidencyInputs {
   readonly candidate: BlobCandidate;
@@ -416,10 +579,22 @@ export interface DecideResidencyInputs {
   readonly policy: NodeRetentionPolicy;
   readonly constraints: RecordConstraints;
   readonly overrides: LocalOverrides;
-  readonly usage: ClassUsageLookup;
-  readonly namespaceUsage: NamespaceUsageLookup;
-  /** Injected for testability; defaults to `Date.now()`. */
-  readonly nowMs?: number;
+  readonly usage: LineUsageLookup;
+  readonly displaces: DisplacementLookup;
+  /**
+   * True when something actually asked for these bytes, rather than a sync
+   * round offering them.
+   *
+   * The one input that distinguishes the two triggers, and the reason
+   * admission and read-through are the same rule rather than two: a request
+   * ignores {@link SizeClassRetention.prefetch} — that field is about
+   * speculation, and this is not speculation — and is otherwise judged exactly
+   * as an arrival is, including being declined when it would be the first thing
+   * evicted. Declining there is not stinginess; landing a blob that the next
+   * pass deletes is a download and a delete, and the read is served remotely
+   * either way.
+   */
+  readonly requested?: boolean;
 }
 
 /**
@@ -429,87 +604,61 @@ export interface DecideResidencyInputs {
  * Restrictive wins, and it wins first.
  */
 export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict {
-  const { candidate, sizeClass, policy, constraints, overrides, usage, namespaceUsage } = inputs;
-  const now = inputs.nowMs ?? Date.now();
+  const { candidate, sizeClass, policy, constraints, overrides, usage, displaces } = inputs;
+  const budgetLine = budgetLineFor(policy, sizeClass);
+  const base = { sizeClass, budgetLine, pinned: overrides.pinned } as const;
 
   // 1. Record constraints — carried on the record, honoured identically
   //    everywhere. Nothing below may override.
   if (constraints.deniedHere) {
-    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "record-constraint" };
+    return { ...base, decision: "elide", reason: "record-constraint" };
   }
 
-  // 2. Local pin. Beats every budget and recency rule, and deliberately does
-  //    not beat step 1.
+  // 2. Local pin. Beats every budget rule, and deliberately does not beat
+  //    step 1.
   if (overrides.pinned) {
-    return { decision: "fetch", sizeClass, pinned: overrides.pinned, reason: "pinned" };
+    return { ...base, decision: "fetch", reason: "pinned" };
   }
 
-  // 3. The node's rule for this record's class, then that class's budget.
-  const row = retentionRowFor(policy, sizeClass);
-  const unclassified = !hasRowFor(policy, sizeClass);
-
-  if (row.keep === "never") {
-    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "keep-never" };
+  // 3. The node's rule for this record's line.
+  const row = retentionRowFor(policy, budgetLine);
+  const budgetBytes = budgetBytesFor(policy, budgetLine);
+  if (budgetBytes <= 0) {
+    return { ...base, decision: "elide", reason: "class-disabled" };
   }
-  if (row.keep === "on-demand-only") {
+  if (!row.prefetch && inputs.requested !== true) {
     // Not a failure and not a permanent refusal — an explicit fetch (a user
-    // opening the item) still gets the bytes. It just never happens as part of
-    // a sync round.
-    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "on-demand-only" };
+    // opening the item) reaches the budget check below. It just never happens
+    // as part of a sync round.
+    return { ...base, decision: "elide", reason: "not-prefetched" };
   }
 
-  if (row.keep === "recent-only" && !withinRecencyWindow(candidate, row, now)) {
-    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "outside-recency-window" };
+  // 4. The budget. Checked last so that a class the node has decided to keep is
+  //    only declined for want of room, never for want of interest.
+  if (usage(budgetLine) + candidate.sizeBytes <= budgetBytes) {
+    return {
+      ...base,
+      decision: "fetch",
+      reason: hasRowFor(policy, sizeClass) ? "within-budget" : "unclassified",
+    };
   }
 
-  // Budget. Checked last so that a class the node has decided to keep is only
-  // declined for want of room, never for want of interest.
-  if (usage(sizeClass) + candidate.sizeBytes > row.budgetBytes) {
-    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "budget-exhausted" };
-  }
-
-  // The namespace total, on top of the row. A fetch must fit **both** — the
-  // restrictive one wins, as everywhere else in this function. This is the
-  // check that makes an unrecognised rung cheap instead of free: the fallback
-  // row above it is per-rung, so an app naming a thousand rungs would otherwise
-  // get a thousand budgets.
-  const namespaceTotal = sizeClass === null ? null : namespaceTotalFor(policy, sizeClass.namespace);
-  if (
-    sizeClass !== null &&
-    namespaceTotal !== null &&
-    namespaceUsage(sizeClass.namespace) + candidate.sizeBytes > namespaceTotal
-  ) {
-    return { decision: "elide", sizeClass, pinned: overrides.pinned, reason: "namespace-budget-exhausted" };
-  }
-
-  if (unclassified) {
-    return { decision: "fetch", sizeClass, pinned: overrides.pinned, reason: "unclassified" };
-  }
-  return {
-    decision: "fetch",
-    sizeClass,
-    pinned: overrides.pinned,
-    reason: row.keep === "all" ? "keep-all" : "within-recency-window",
+  // Full — but "full" is a statement about *these particular* bytes, not about
+  // the class. A sync round walks the change log forward, which is oldest
+  // first, so a budget that simply stopped at full would fill a phone with 2005
+  // and decline everything since. Admitting anything that outranks enough of
+  // what is already held is what makes the line converge on the best of the
+  // class regardless of the order things arrived in, and it is the same rule
+  // that decides whether a read-miss lands.
+  const needed = usage(budgetLine) + candidate.sizeBytes - budgetBytes;
+  const rank: EvictionRank = {
+    lastOpenedAtMs: candidate.lastOpenedAtMs,
+    recencyAtMs: candidate.recencyAtMs,
   };
-}
-
-function withinRecencyWindow(
-  candidate: BlobCandidate,
-  row: SizeClassRetention,
-  nowMs: number,
-): boolean {
-  const dayMs = 24 * 60 * 60 * 1000;
-
-  if (row.openedWithinDays !== undefined && candidate.lastOpenedAtMs !== null) {
-    if (nowMs - candidate.lastOpenedAtMs <= row.openedWithinDays * dayMs) return true;
+  if (displaces(budgetLine, rank, needed)) {
+    return { ...base, decision: "fetch", reason: "displaces-worse" };
   }
-
-  // An unknown date is not evidence of age. Declining on missing metadata
-  // would make a metadata gap silently cost you the bytes.
-  if (candidate.recencyAtMs === null) return true;
-
-  if (row.recencyWindowDays === undefined) return true;
-  return nowMs - candidate.recencyAtMs <= row.recencyWindowDays * dayMs;
+  return { ...base, decision: "elide", reason: "budget-exhausted" };
 }
 
 /**
@@ -535,13 +684,10 @@ export function validateRetentionPolicy(policy: NodeRetentionPolicy): string[] {
   }
   if (problems.length > 0) return problems;
 
-  for (const [rung, row] of Object.entries(policy.platform.rows)) {
-    problems.push(...validateRow(`${PLATFORM_NAMESPACE}:${rung}`, row));
-  }
-  problems.push(...validateRow(`${PLATFORM_NAMESPACE} (fallback)`, policy.platform.fallback));
+  problems.push(...validateNamespace(PLATFORM_NAMESPACE, policy.platform));
 
   for (const [appId, app] of Object.entries(policy.apps)) {
-    problems.push(...validateApp(appId, app));
+    problems.push(...validateNamespace(appId, app));
     // An app id that collides with the platform namespace would write rows
     // nothing can ever read: the resolution above sends every platform class to
     // `policy.platform`, so this whole entry would sit there being ignored.
@@ -551,7 +697,7 @@ export function validateRetentionPolicy(policy: NodeRetentionPolicy): string[] {
       );
     }
   }
-  problems.push(...validateApp("(unconfigured apps)", policy.appFallback));
+  problems.push(...validateNamespace("(unconfigured apps)", policy.appFallback));
 
   return problems;
 }
@@ -575,27 +721,48 @@ function isUsableBudget(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-function validateApp(appId: string, app: AppRetention): string[] {
-  if (!isObject(app) || !isObject(app.rows)) return [`${appId}: missing or malformed rows`];
+function validateNamespace(namespace: string, retention: NamespaceRetention): string[] {
+  if (!isObject(retention) || !isObject(retention.rows)) {
+    return [`${namespace}: missing or malformed rows`];
+  }
 
   const problems: string[] = [];
-  for (const [rung, row] of Object.entries(app.rows)) {
-    problems.push(...validateRow(`${appId}:${rung}`, row));
+  for (const [rung, row] of Object.entries(retention.rows)) {
+    problems.push(...validateRow(`${namespace}:${rung}`, row));
+    if (rung === FALLBACK_RUNG) {
+      problems.push(
+        `${namespace}:${FALLBACK_RUNG}: "${FALLBACK_RUNG}" is reserved for the pooled fallback line — a rung cannot be named it`,
+      );
+    }
   }
-  problems.push(...validateRow(`${appId} (fallback)`, app.fallback));
+  problems.push(...validateRow(`${namespace} (fallback)`, retention.fallback));
 
-  // Zero is refused here for the same reason it is refused on a row, and it
-  // matters more: a zero total is a prohibition on every rung the app has,
-  // including ones whose rows say "keep everything". An app that should hold
-  // nothing is expressed by its rows saying so.
+  // Zero is refused for the same reason it is refused on a row's share: a zero
+  // namespace budget is a prohibition on every rung, including ones whose
+  // shares say they matter, and it says so in the one place an operator reading
+  // the rows will not look. A namespace that should hold nothing says so with
+  // its shares.
   //
-  // A *missing* total is refused for a different and sharper reason — see
-  // {@link isUsableBudget}. There is no such thing as an app with no total:
-  // the total is what bounds an app that invents rung names, so an entry
-  // without one is the hole this whole level exists to close.
-  if (!isUsableBudget(app.totalBudgetBytes)) {
+  // A *missing* budget is refused for a sharper reason — see
+  // {@link isUsableBudget}. It is also now the only byte count in the
+  // namespace, so an entry without one has no budget at all rather than merely
+  // an unbounded one.
+  if (!isUsableBudget(retention.budgetBytes)) {
     problems.push(
-      `${appId}: totalBudgetBytes must be > 0 and finite (got ${String(app.totalBudgetBytes)}) — a missing or zero total silently overrides every row in the namespace`,
+      `${namespace}: budgetBytes must be > 0 and finite (got ${String(retention.budgetBytes)}) — it is the only byte count in the namespace, and every row's share is resolved against it`,
+    );
+  }
+
+  // Shares are ratios, so a namespace where every one of them is zero divides
+  // its budget into nothing and holds nothing — an expensive way to write what
+  // `budgetBytes` on its own cannot say, and almost always a table somebody
+  // half-filled in.
+  const anyShare =
+    shareOf(retention.fallback) > 0 ||
+    Object.values(retention.rows).some((row) => shareOf(row) > 0);
+  if (!anyShare) {
+    problems.push(
+      `${namespace}: every share is zero, so none of ${String(retention.budgetBytes)} bytes can be used — give at least one row a share`,
     );
   }
   return problems;
@@ -613,47 +780,19 @@ function validateRow(name: string, row: SizeClassRetention | null | undefined): 
 
   const problems: string[] = [];
 
-  // Membership, before anything reads the rule. An unrecognised value is not a
-  // rule this module has an opinion about — it falls through every branch of
-  // `decideResidency` to "fetch", labelled with a reason that did not happen,
-  // and makes `selectedBytesFor` return `undefined` so the projection is `NaN`.
-  // Refusing here is the whole reason a validator exists on a field that
-  // arrives as JSON from a PUT body.
-  if (!KEEP_RULES.includes(row.keep)) {
+  if (typeof row.prefetch !== "boolean") {
     problems.push(
-      `${name}: keep must be one of ${KEEP_RULES.map((r) => `"${r}"`).join(", ")} (got ${JSON.stringify(row.keep)})`,
-    );
-    // Nothing below can be judged against a rule nobody recognises — a budget
-    // check would name the wrong remedy.
-    return problems;
-  }
-
-  // "never" is the honest way to want none of a class. A zero budget is the
-  // dishonest way on every *other* rule: it reads as a limit and behaves as a
-  // prohibition, and it silently disables the recency rule sitting above it.
-  //
-  // A `never` row still needs the field, which is the part that was missing.
-  // Exempting it entirely let `{ keep: "never" }` validate and then defeat the
-  // two things that act on the row: `evictClass` refuses a non-finite budget, so
-  // the class the operator had just set to "keep nothing" was the one class the
-  // eviction pass would never touch, and `projectRow` returned `NaN` into the
-  // matrix total. The value itself is normalized to zero by `retentionRowFor` —
-  // this asks only that a number be there, so a hand-written config or an app
-  // default cannot omit it into that state.
-  const budgetOk = row.keep === "never"
-    ? typeof row.budgetBytes === "number" &&
-      Number.isFinite(row.budgetBytes) &&
-      row.budgetBytes >= 0
-    : isUsableBudget(row.budgetBytes);
-  if (!budgetOk) {
-    problems.push(
-      row.keep === "never"
-        ? `${name}: budgetBytes must be a finite number >= 0 even for keep="never" (got ${String(row.budgetBytes)}) — it is read by the eviction pass and by the projection, and both misread a missing one`
-        : `${name}: budgetBytes must be > 0 for keep="${row.keep}" (got ${String(row.budgetBytes)}) — use keep:"never" to hold none of a class`,
+      `${name}: prefetch must be true or false (got ${JSON.stringify(row.prefetch)})`,
     );
   }
-  if (row.keep === "recent-only" && row.recencyWindowDays === undefined && row.openedWithinDays === undefined) {
-    problems.push(`${name}: keep="recent-only" needs recencyWindowDays and/or openedWithinDays`);
+  // Negative and non-finite shares are refused rather than clamped. A share is
+  // a ratio and every comparison a NaN takes part in is false, so a clamped one
+  // would silently become "no claim on the budget" — which is a real policy
+  // (`share: 0`) that the operator did not write.
+  if (typeof row.share !== "number" || !Number.isFinite(row.share) || row.share < 0) {
+    problems.push(
+      `${name}: share must be a finite number >= 0 (got ${String(row.share)}) — use 0 to hold none of this class`,
+    );
   }
   return problems;
 }

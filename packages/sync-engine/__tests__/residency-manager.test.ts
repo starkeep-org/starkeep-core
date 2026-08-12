@@ -39,14 +39,14 @@ const MB = 1024 * 1024;
  * hand over an unpinned one.
  */
 function landedAs(sizeClass: ResolvedSizeClass): ResidencyVerdict {
-  return { decision: "fetch", sizeClass, pinned: false, reason: "keep-all" };
+  return { decision: "fetch", sizeClass, pinned: false, reason: "within-budget" };
 }
 
-const row = { keep: "all" as const, budgetBytes: 100 * MB };
+const row = { prefetch: true as const, share: 1 };
 const policy: NodeRetentionPolicy = {
-  platform: { rows: { "original:image": row }, fallback: row },
+  platform: { rows: { "original:image": row }, fallback: row, budgetBytes: 100 * MB },
   apps: {},
-  appFallback: { rows: {}, fallback: row, totalBudgetBytes: 100 * MB },
+  appFallback: { rows: {}, fallback: row, budgetBytes: 100 * MB },
 };
 
 /**

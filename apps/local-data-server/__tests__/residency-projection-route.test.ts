@@ -98,15 +98,14 @@ describe("with a retention policy configured", () => {
       config: {
         retention: {
           platform: {
-            rows: {
-              // Tiny budget against a class that will exceed it, so the
-              // over-budget path is exercised rather than merely present.
-              "original:image": { keep: "all", budgetBytes: 1024 },
-            },
-            fallback: { keep: "never", budgetBytes: 1024 },
+            // Tiny budget against a class that will exceed it, so the
+            // over-budget path is exercised rather than merely present.
+            rows: { "original:image": { prefetch: true, share: 1 } },
+            fallback: { prefetch: false, share: 0 },
+            budgetBytes: 1024,
           },
           apps: {},
-          appFallback: { rows: {}, fallback: { keep: "never", budgetBytes: 1024 }, totalBudgetBytes: 1024 },
+          appFallback: { rows: {}, fallback: { prefetch: false, share: 1 }, budgetBytes: 1024 },
         },
       },
     });

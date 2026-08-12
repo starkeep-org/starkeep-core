@@ -8,12 +8,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
  *
  * ## Why every row shows two numbers
  *
- * "Rule selects" is what the rule asks for; "projected" is what the budget will
- * actually allow. Showing only the second hides that a row is capped — and a
- * capped row means eviction runs against it continuously, so the operator asked
- * to keep the last year and will not get it. Showing only the first would
- * promise disk use that never happens. The gap between them *is* the
- * information.
+ * "In library" is what exists; "projected on disk" is what the share will
+ * actually allow. Showing only the second hides that a class is capped — that
+ * this device is holding the most useful part of it rather than all of it.
+ * Showing only the first would promise disk use that never happens. The gap
+ * between them *is* the information.
  *
  * ## Why the projection comes from the daemon
  *
@@ -23,26 +22,30 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
  * Each edit posts the candidate policy and renders what the daemon says it
  * would mean.
  *
- * ## Why the table has sections
+ * ## Why the table has sections, and why the budget lives in the header
  *
  * A size class belongs to a namespace — the platform's originals, or one app's
- * ladder — and an app has a second budget on top of its rows: a total across
- * every rung it holds. The two fail independently, so a flat list of rows could
- * show every row comfortably inside its budget while the app as a whole is over
- * and being evicted continuously. The section header is where that is visible.
+ * ladder — and **the namespace is where the bytes are**. Each row carries a
+ * *share* of that number rather than a byte count of its own, so the section
+ * header holds the one field an operator actually wants ("Photos may use 20
+ * GB") and the rows say how it divides.
+ *
+ * This used to be the other way around: absolute bytes on every row and a
+ * separate total beside them, checked independently. Two numbers that had to
+ * agree and nothing making them — in the shipped phone policy they disagreed by
+ * 240 MB. Shares cannot: whatever the rows say, they sum to the header.
  */
 
-type KeepRule = "all" | "recent-only" | "on-demand-only" | "never";
-
 interface RetentionRow {
-  keep: KeepRule;
-  budgetBytes: number;
-  recencyWindowDays?: number;
-  openedWithinDays?: number;
+  /** Pull during a sync round, or hold only what someone asks for. */
+  prefetch: boolean;
+  /** Claim on the namespace budget, relative to siblings. 0 holds none. */
+  share: number;
 }
 
 interface RowProjection {
   sizeClass: string;
+  budgetLineKey: string;
   selectedBytes: number;
   projectedBytes: number;
   budgetBytes: number;
@@ -53,7 +56,7 @@ interface RowProjection {
 
 interface NamespaceProjection {
   namespace: string;
-  totalBudgetBytes: number | null;
+  totalBudgetBytes: number;
   selectedBytes: number;
   rowProjectedBytes: number;
   projectedBytes: number;
@@ -74,16 +77,17 @@ interface OverrideRule {
   note?: string;
 }
 
-interface AppRetention {
+interface NamespaceRetention {
   rows: Record<string, RetentionRow>;
+  /** The share given to every rung with no row of its own, pooled. */
   fallback: RetentionRow;
-  totalBudgetBytes: number;
+  budgetBytes: number;
 }
 
 interface Policy {
-  platform: { rows: Record<string, RetentionRow>; fallback: RetentionRow };
-  apps: Record<string, AppRetention>;
-  appFallback: AppRetention;
+  platform: NamespaceRetention;
+  apps: Record<string, NamespaceRetention>;
+  appFallback: NamespaceRetention;
 }
 
 interface ProjectionResponse {
@@ -132,10 +136,16 @@ function formatBytes(bytes: number): string {
   return `${Number.isInteger(value) || value >= 100 || i === 0 ? Math.round(value) : value.toFixed(1)} ${units[i]}`;
 }
 
-const DEFAULT_ROW: RetentionRow = { keep: "all", budgetBytes: 50 * GB };
+/**
+ * An equal claim on the namespace budget. Shares are ratios, so the number is
+ * arbitrary and only matters beside its siblings — every seeded row getting the
+ * same one means "divide it evenly until somebody says otherwise", which is the
+ * honest starting point for a table nobody has looked at.
+ */
+const DEFAULT_ROW: RetentionRow = { prefetch: true, share: 10 };
 
 /**
- * The total given to an app the operator has never budgeted for.
+ * The budget given to an app the operator has never budgeted for.
  *
  * It cannot be unbounded — an unconfigured app would then be the hole every
  * bound in this table is trying to close — and it cannot be zero, which reads
@@ -146,11 +156,13 @@ const DEFAULT_ROW: RetentionRow = { keep: "all", budgetBytes: 50 * GB };
  */
 const DEFAULT_APP_TOTAL = 8 * GB;
 
-const DEFAULT_APP: AppRetention = {
+const DEFAULT_APP: NamespaceRetention = {
   rows: {},
-  fallback: { keep: "recent-only", budgetBytes: 2 * GB, recencyWindowDays: 90 },
-  totalBudgetBytes: DEFAULT_APP_TOTAL,
+  fallback: { prefetch: false, share: 5 },
+  budgetBytes: DEFAULT_APP_TOTAL,
 };
+
+const DEFAULT_PLATFORM_TOTAL = 50 * GB;
 
 /**
  * A starting policy for a node that has never had one, shaped from its own
@@ -159,7 +171,11 @@ const DEFAULT_APP: AppRetention = {
  */
 function seedPolicy(census: CensusRow[]): Policy {
   const policy: Policy = {
-    platform: { rows: {}, fallback: { keep: "all", budgetBytes: 50 * GB } },
+    platform: {
+      rows: {},
+      fallback: { ...DEFAULT_ROW },
+      budgetBytes: DEFAULT_PLATFORM_TOTAL,
+    },
     apps: {},
     appFallback: { ...DEFAULT_APP },
   };
@@ -174,6 +190,16 @@ function seedPolicy(census: CensusRow[]): Policy {
     policy.apps[namespace] = app;
   }
   return policy;
+}
+
+/** A namespace's shares, for showing a row's share as a percentage of the whole. */
+function shareTotal(namespace: NamespaceRetention | undefined): number {
+  if (!namespace) return 0;
+  const rows = Object.values(namespace.rows ?? {});
+  return [namespace.fallback, ...rows].reduce(
+    (sum, row) => sum + (row && row.share > 0 ? row.share : 0),
+    0,
+  );
 }
 
 export function RetentionMatrix() {
@@ -279,15 +305,27 @@ export function RetentionMatrix() {
     [project, rules],
   );
 
-  const updateAppTotal = useCallback(
-    (namespace: string, totalBudgetBytes: number) => {
+  const updateNamespaceBudget = useCallback(
+    (namespace: string, budgetBytes: number) => {
       setPolicy((current) => {
         if (!current) return current;
-        const app = current.apps[namespace] ?? { ...current.appFallback, rows: {} };
-        const next: Policy = {
-          ...current,
-          apps: { ...current.apps, [namespace]: { ...app, totalBudgetBytes } },
-        };
+        // The platform namespace is edited through the same field now. It used
+        // to be the exception — rows with absolute budgets and no total — and
+        // the exception only ever bought a `null` every consumer had to branch
+        // on, plus an operator with no way to say how much disk originals get.
+        const next: Policy =
+          namespace === PLATFORM_NAMESPACE
+            ? { ...current, platform: { ...current.platform, budgetBytes } }
+            : {
+                ...current,
+                apps: {
+                  ...current.apps,
+                  [namespace]: {
+                    ...(current.apps[namespace] ?? { ...current.appFallback, rows: {} }),
+                    budgetBytes,
+                  },
+                },
+              };
         project(next, rules);
         return next;
       });
@@ -416,9 +454,9 @@ export function RetentionMatrix() {
             <tr className="border-b text-left text-muted-foreground">
               <th className="py-2 pr-4 font-medium">Class</th>
               <th className="py-2 pr-4 font-medium text-right">In library</th>
-              <th className="py-2 pr-4 font-medium">Keep</th>
-              <th className="py-2 pr-4 font-medium text-right">Window</th>
-              <th className="py-2 pr-4 font-medium text-right">Budget (GiB)</th>
+              <th className="py-2 pr-4 font-medium">Sync</th>
+              <th className="py-2 pr-4 font-medium text-right">Share</th>
+              <th className="py-2 pr-4 font-medium text-right">Budget</th>
               <th className="py-2 font-medium text-right">Projected on disk</th>
             </tr>
           </thead>
@@ -427,12 +465,16 @@ export function RetentionMatrix() {
               <NamespaceHeader
                 namespace={namespace}
                 projection={byNamespace.get(namespace)}
-                totalBudgetBytes={
-                  (policy?.apps[namespace] ?? policy?.appFallback)?.totalBudgetBytes ??
-                  DEFAULT_APP_TOTAL
+                budgetBytes={
+                  namespace === PLATFORM_NAMESPACE
+                    ? (policy?.platform.budgetBytes ?? DEFAULT_PLATFORM_TOTAL)
+                    : ((policy?.apps[namespace] ?? policy?.appFallback)?.budgetBytes ??
+                      DEFAULT_APP_TOTAL)
                 }
-                configured={policy?.apps[namespace] !== undefined}
-                onTotalChange={(bytes) => updateAppTotal(namespace, bytes)}
+                configured={
+                  namespace === PLATFORM_NAMESPACE || policy?.apps[namespace] !== undefined
+                }
+                onBudgetChange={(bytes) => updateNamespaceBudget(namespace, bytes)}
               />
               {entries.map((c) => {
               const { namespace: ns, rung } = splitClass(c.sizeClass);
@@ -441,6 +483,9 @@ export function RetentionMatrix() {
                   ? policy?.platform.rows[rung]
                   : policy?.apps[ns]?.rows[rung]) ?? DEFAULT_ROW;
               const proj = byClass.get(c.sizeClass);
+              const nsShares = shareTotal(
+                ns === PLATFORM_NAMESPACE ? policy?.platform : policy?.apps[ns],
+              );
               return (
                 <tr key={c.sizeClass} className="border-b last:border-0">
                   <td className="py-2 pr-4 pl-4 font-mono text-xs">{rung}</td>
@@ -449,57 +494,54 @@ export function RetentionMatrix() {
                     <span className="ml-1 text-xs">({c.recordCount.toLocaleString()})</span>
                   </td>
                   <td className="py-2 pr-4">
+                    {/* The one thing left of the old four-value keep rule. The
+                        other three were guesses at what the eviction order does
+                        with better information; this one it cannot make, because
+                        by the time it could the bytes are already downloaded. */}
                     <select
-                      aria-label={`Keep rule for ${c.sizeClass}`}
-                      className="rounded border bg-transparent px-2 py-1 text-xs"
-                      value={row.keep}
-                      onChange={(e) => update(c.sizeClass, { keep: e.target.value as KeepRule })}
+                      aria-label={`Sync rule for ${c.sizeClass}`}
+                      className="rounded border bg-transparent px-2 py-1 text-xs disabled:opacity-30"
+                      disabled={row.share <= 0}
+                      value={row.prefetch ? "prefetch" : "on-demand"}
+                      onChange={(e) =>
+                        update(c.sizeClass, { prefetch: e.target.value === "prefetch" })
+                      }
                     >
-                      <option value="all">everything</option>
-                      <option value="recent-only">recent only</option>
-                      <option value="on-demand-only">on demand</option>
-                      <option value="never">nothing</option>
+                      <option value="prefetch">as it syncs</option>
+                      <option value="on-demand">on demand</option>
                     </select>
                   </td>
                   <td className="py-2 pr-4 text-right">
-                    {/* Only meaningful for recent-only, and a disabled input
-                        says so more clearly than a hidden one — the column
-                        keeps its shape as rules change. */}
+                    {/* A share, not bytes. The namespace's budget is one number
+                        in the header and these divide it, so the column cannot
+                        add up to something other than the total — which is what
+                        absolute per-row budgets beside a separate total did. */}
                     <input
-                      aria-label={`Recency window in days for ${c.sizeClass}`}
-                      type="number"
-                      min={1}
-                      disabled={row.keep !== "recent-only"}
-                      value={row.recencyWindowDays ?? ""}
-                      placeholder="days"
-                      className="w-20 rounded border bg-transparent px-2 py-1 text-right text-xs disabled:opacity-30"
-                      onChange={(e) =>
-                        update(c.sizeClass, {
-                          recencyWindowDays: e.target.value ? Number(e.target.value) : undefined,
-                        })
-                      }
-                    />
-                  </td>
-                  <td className="py-2 pr-4 text-right">
-                    <input
-                      aria-label={`Budget in GiB for ${c.sizeClass}`}
+                      aria-label={`Share for ${c.sizeClass}`}
                       type="number"
                       min={0}
-                      step="0.5"
-                      disabled={row.keep === "never"}
-                      value={row.budgetBytes ? (row.budgetBytes / GB).toString() : ""}
-                      className="w-24 rounded border bg-transparent px-2 py-1 text-right text-xs disabled:opacity-30"
-                      onChange={(e) =>
-                        update(c.sizeClass, { budgetBytes: Number(e.target.value) * GB })
-                      }
+                      step="1"
+                      value={row.share.toString()}
+                      className="w-20 rounded border bg-transparent px-2 py-1 text-right text-xs"
+                      onChange={(e) => update(c.sizeClass, { share: Number(e.target.value) })}
                     />
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      {nsShares > 0 ? `${Math.round((row.share / nsShares) * 100)}%` : "—"}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-4 text-right tabular-nums text-xs text-muted-foreground">
+                    {/* Derived, not editable — the point of the change. What
+                        this row may hold follows from the header's number and
+                        the shares beside it, so there is nothing here that can
+                        disagree with either. */}
+                    {proj ? formatBytes(proj.budgetBytes) : "—"}
                   </td>
                   <td className="py-2 text-right tabular-nums">
                     {proj ? formatBytes(proj.projectedBytes) : "—"}
                     {proj?.overBudget && (
                       <span
                         className="ml-2 text-xs text-amber-600"
-                        title={`The rule selects ${formatBytes(proj.selectedBytes)}, more than the budget allows — this class will be evicted down continuously.`}
+                        title={`The library holds ${formatBytes(proj.selectedBytes)} of this class, more than its share allows — the device will keep the most useful of them and give up the rest.`}
                       >
                         capped
                       </span>
@@ -574,20 +616,27 @@ export function RetentionMatrix() {
 }
 
 /**
- * The section header for one namespace, and — for an app — its total.
+ * The section header for one namespace, and the one number an operator sets.
  *
- * The total gets a row of its own rather than a column on each class because it
- * is a different kind of number: the class budgets say how the app's bytes are
- * divided, and this one says how many there may be at all. An app can be inside
- * every one of its class budgets and over this, which is the case the header
- * exists to make visible.
+ * The budget gets a row of its own rather than a column on each class because
+ * it is a different kind of number: the shares below say how these bytes are
+ * divided, and this says how many there are. That is the field somebody
+ * actually came here to change — "Photos may use 20 GB" — and putting it here
+ * is what lets every row be a ratio.
+ *
+ * The platform namespace gets the same field. It used to be the exception, with
+ * absolute budgets on its rows and no total at all, on the grounds that a cap
+ * above them would be a second way to say the same thing that could disagree.
+ * That was right about the hazard and wrong about the fix: shares remove the
+ * possibility of disagreement, and an operator asking how much disk their
+ * originals may take now has somewhere to answer it.
  */
 function NamespaceHeader({
   namespace,
   projection,
-  totalBudgetBytes,
+  budgetBytes,
   configured,
-  onTotalChange,
+  onBudgetChange,
 }: {
   namespace: string;
   projection: NamespaceProjection | undefined;
@@ -596,9 +645,9 @@ function NamespaceHeader({
    * daemon last said, and it arrives a debounce behind the keystroke. Binding
    * the input to it would make the field fight whoever is typing in it.
    */
-  totalBudgetBytes: number;
+  budgetBytes: number;
   configured: boolean;
-  onTotalChange: (bytes: number) => void;
+  onBudgetChange: (bytes: number) => void;
 }) {
   const isPlatform = namespace === PLATFORM_NAMESPACE;
   return (
@@ -613,7 +662,7 @@ function NamespaceHeader({
           !configured && (
             <span
               className="ml-2 text-xs font-normal text-amber-600"
-              title="This app has no budget of its own yet, so the default for unconfigured apps applies. Set a total to decide it deliberately."
+              title="This app has no budget of its own yet, so the default for unconfigured apps applies. Set a budget to decide it deliberately."
             >
               unconfigured
             </span>
@@ -621,31 +670,28 @@ function NamespaceHeader({
         )}
       </td>
       <td className="py-2 pr-4 text-xs text-muted-foreground" colSpan={2}>
-        {/* The platform namespace has rows and no total: a cap above them would
-            be a second way to say the same thing, and the two could disagree. */}
-        {isPlatform ? "" : "Total for this app"}
+        {isPlatform ? "Disk for originals" : "Disk for this app"}
       </td>
       <td className="py-2 pr-4 text-right">
-        {!isPlatform && (
-          <input
-            aria-label={`Total budget in GiB for ${namespace}`}
-            type="number"
-            min={0}
-            step="0.5"
-            value={totalBudgetBytes ? (totalBudgetBytes / GB).toString() : ""}
-            className="w-24 rounded border bg-transparent px-2 py-1 text-right text-xs"
-            onChange={(e) => onTotalChange(Number(e.target.value) * GB)}
-          />
-        )}
+        <input
+          aria-label={`Budget in GiB for ${namespace}`}
+          type="number"
+          min={0}
+          step="0.5"
+          value={budgetBytes ? (budgetBytes / GB).toString() : ""}
+          className="w-24 rounded border bg-transparent px-2 py-1 text-right text-xs"
+          onChange={(e) => onBudgetChange(Number(e.target.value) * GB)}
+        />
+        <span className="ml-1 text-xs text-muted-foreground">GiB</span>
       </td>
       <td className="py-2 text-right tabular-nums text-xs">
         {projection ? formatBytes(projection.projectedBytes) : "—"}
         {projection?.overTotal && (
           <span
             className="ml-2 text-amber-600"
-            title={`These classes together want ${formatBytes(projection.rowProjectedBytes)}, more than the app's total allows — raising any single class budget will not change what it holds.`}
+            title={`Pinned records bring this to ${formatBytes(projection.rowProjectedBytes)}, past the budget. Pins are kept whatever the budget says — unpin something, or raise it.`}
           >
-            over total
+            over budget (pins)
           </span>
         )}
       </td>

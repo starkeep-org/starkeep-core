@@ -130,7 +130,7 @@ function recordingHooks(decision: ResidencyVerdict["decision"]): ResidencyHooks 
         decision,
         sizeClass: { namespace: APP_ID, rung: UNCLASSIFIED_RUNG, qualified: `${APP_ID}:${UNCLASSIFIED_RUNG}` },
         pinned: false,
-        reason: decision === "fetch" ? "keep-all" : "budget-exhausted",
+        reason: decision === "fetch" ? "within-budget" : "budget-exhausted",
       };
     },
     onLanded: async (candidate) => {

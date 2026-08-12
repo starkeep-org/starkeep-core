@@ -274,6 +274,9 @@ interface StarkeepConfig {
    * everything, which is the right default for a laptop and preserves the
    * pre-residency behaviour exactly.
    *
+   * One budget per namespace, with rows carrying *shares* of it — so the rows
+   * cannot add up to something other than the number the operator set.
+   *
    * Note what is *not* here: there is no residency-class enum. `Full` /
    * `Library` / `Browse`-style presets may front this in the UI, but they write
    * these rows rather than being stored, so nothing downstream can condition on
@@ -2499,10 +2502,10 @@ async function main() {
       // PUT /residency/policy — validate and save.
       //
       // Separate from PATCH /config, which writes whatever it is given. The
-      // policy has rules that are documented as harmful to get wrong — a zero
-      // budget reads as a limit and behaves as a prohibition, and silently
-      // disables the recency rule above it — and `validateRetentionPolicy`
-      // existed while nothing on the write path called it.
+      // policy has rules that are harmful to get wrong — a namespace whose
+      // shares are all zero divides a real budget into nothing, and a missing
+      // budget is not an unbounded one — and `validateRetentionPolicy` existed
+      // while nothing on the write path called it.
       if (path === "/residency/policy" && req.method === "PUT") {
         const body = JSON.parse(await readBody(req)) as {
           retention?: NodeRetentionPolicy;

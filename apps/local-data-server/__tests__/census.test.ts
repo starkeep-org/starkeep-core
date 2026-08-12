@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { buildCensus, ageInDays, CENSUS_CUTOFF_DAYS } from "../census.js";
+import { buildCensus } from "../census.js";
 
 const MB = 1024 * 1024;
 const DAY = 86_400_000;
@@ -22,7 +22,6 @@ const options = {
   originalClassFor: (type: string | null) => ({
     qualified: `starkeep:original:${type ?? "unknown"}`,
   }),
-  nowMs: NOW,
 };
 
 /** Classes are stored fully qualified, so the tests name them that way. */
@@ -229,50 +228,6 @@ describe("grouping by size class", () => {
   });
 });
 
-describe("recency", () => {
-  it("accumulates cumulatively, so a cutoff is a prefix not a bucket", () => {
-    addRecord("recent", { sizeClass: "c", sizeBytes: MB, capturedDaysAgo: 5 });
-    addRecord("older", { sizeClass: "c", sizeBytes: 2 * MB, capturedDaysAgo: 60 });
-    addRecord("ancient", { sizeClass: "c", sizeBytes: 4 * MB, capturedDaysAgo: 500 });
-
-    const c = classOf(buildCensus(db, options), photos("c"))!;
-    expect(c.bytesWithinDays[7]).toBe(MB);
-    expect(c.bytesWithinDays[90]).toBe(3 * MB);
-    expect(c.bytesWithinDays[730]).toBe(7 * MB);
-  });
-
-  // `created_at` holds a serialized HLC. Read as a date it yields a number that
-  // is meaningless *and plausible*, which is the worst kind of wrong — every
-  // record would land in some arbitrary bucket and the matrix would look fine.
-  it("never mistakes the HLC in created_at for a capture date", () => {
-    addRecord("nodate", { sizeClass: "c", sizeBytes: MB });
-    const c = classOf(buildCensus(db, options), photos("c"))!;
-    // Unknown date counts toward every cutoff, including the shortest — the
-    // same rule residency follows, because an unknown date is not evidence of
-    // age and missing metadata must not become deleted bytes.
-    for (const cutoff of CENSUS_CUTOFF_DAYS) {
-      expect(c.bytesWithinDays[cutoff], `cutoff ${cutoff}`).toBe(MB);
-    }
-  });
-
-  it("reads a video's capture time as well as an image's", () => {
-    addRecord("v", { type: "video/mp4", sizeClass: "video-720p", sizeBytes: 10 * MB });
-    db.prepare("INSERT INTO shared_record_video_metadata VALUES (?, ?)").run(
-      "v",
-      new Date(NOW - 3 * DAY).toISOString().replace("T", " ").slice(0, 19),
-    );
-    const c = classOf(buildCensus(db, options), photos("video-720p"))!;
-    expect(c.bytesWithinDays[7]).toBe(10 * MB);
-    expect(c.bytesWithinDays[365]).toBe(10 * MB);
-  });
-
-  it("counts a record exactly at a cutoff as inside it", () => {
-    addRecord("edge", { sizeClass: "c", sizeBytes: MB, capturedDaysAgo: 30 });
-    const c = classOf(buildCensus(db, options), photos("c"))!;
-    expect(c.bytesWithinDays[30]).toBe(MB);
-  });
-});
-
 describe("node-local state", () => {
   function addResidentTable(): void {
     db.exec(`
@@ -292,34 +247,11 @@ describe("node-local state", () => {
     expect(classOf(buildCensus(db, options), photos("image-large"))!.pinnedBytes).toBe(5 * MB);
   });
 
-  it("reports the recently-opened working set", () => {
-    addRecord("a", { sizeClass: "image-large", sizeBytes: 5 * MB });
-    addResidentTable();
-    db.prepare("INSERT INTO resident_blobs VALUES (?, ?, ?, ?, ?)").run(
-      "k1", photos("image-large"), 5 * MB, 0, Date.now() - 2 * DAY,
-    );
-    const c = classOf(buildCensus(db, options), photos("image-large"))!;
-    expect(c.bytesOpenedWithinDays![7]).toBe(5 * MB);
-  });
-
   // The sync engine creates this table lazily. Failing the whole matrix because
   // a node has never synced would be a worse answer than one without pins.
   it("survives a node that has never synced and has no resident set", () => {
     addRecord("a", { sizeClass: "image-large", sizeBytes: 5 * MB });
     const census = buildCensus(db, options);
     expect(classOf(census, photos("image-large"))!.pinnedBytes).toBe(0);
-  });
-});
-
-describe("age", () => {
-  it("is null for an unknown date rather than a large number", () => {
-    // A large number would place the record outside every recency window, which
-    // marks it for eviction — turning missing metadata into deleted bytes.
-    expect(ageInDays(null, NOW)).toBeNull();
-    expect(ageInDays(NaN, NOW)).toBeNull();
-  });
-
-  it("never reports a negative age for a future date", () => {
-    expect(ageInDays(NOW + DAY, NOW)).toBe(0);
   });
 });
