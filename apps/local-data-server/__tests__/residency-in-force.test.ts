@@ -49,14 +49,15 @@ let driveB: InstalledApp;
 /** Keep everything: the baseline the tightened policy is measured against. */
 const keepEverything = {
   platform: {
-    rows: { "original:image": { keep: "all", budgetBytes: 10 * GB } },
-    fallback: { keep: "all", budgetBytes: 10 * GB },
+    rows: { "original:image": { prefetch: true, share: 1 } },
+    fallback: { prefetch: true, share: 1 },
+    budgetBytes: 10 * GB,
   },
   apps: {},
   appFallback: {
     rows: {},
-    fallback: { keep: "all", budgetBytes: GB },
-    totalBudgetBytes: GB,
+    fallback: { prefetch: true, share: 1 },
+    budgetBytes: GB,
   },
 };
 
@@ -64,8 +65,9 @@ const keepEverything = {
 const refuseImages = {
   ...keepEverything,
   platform: {
-    rows: { "original:image": { keep: "never", budgetBytes: 0 } },
-    fallback: { keep: "all", budgetBytes: 10 * GB },
+    rows: { "original:image": { prefetch: true, share: 0 } },
+    fallback: { prefetch: true, share: 1 },
+    budgetBytes: 10 * GB,
   },
 };
 

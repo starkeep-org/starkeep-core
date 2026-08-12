@@ -23,11 +23,12 @@ const GB = 1024 ** 3;
 
 const validPolicy = {
   platform: {
-    rows: { "original:image": { keep: "all", budgetBytes: 10 * GB } },
-    fallback: { keep: "never", budgetBytes: 1024 },
+    rows: { "original:image": { prefetch: true, share: 100 } },
+    fallback: { prefetch: false, share: 1 },
+    budgetBytes: 10 * GB,
   },
   apps: {},
-  appFallback: { rows: {}, fallback: { keep: "never", budgetBytes: 1024 }, totalBudgetBytes: GB },
+  appFallback: { rows: {}, fallback: { prefetch: false, share: 1 }, budgetBytes: GB },
 };
 
 beforeAll(async () => {
@@ -72,13 +73,20 @@ describe("projecting a candidate policy without saving", () => {
 
   it("shows a different projection for a tighter budget", async () => {
     const res = await post({
-      retention: { ...validPolicy, platform: { ...validPolicy.platform, rows: { "original:image": { keep: "all", budgetBytes: 1024 } } } },
+      // The namespace budget is the number an operator moves; the row's share
+      // is unchanged, so its bytes follow the header rather than being set
+      // beside it.
+      retention: { ...validPolicy, platform: { ...validPolicy.platform, budgetBytes: 1024 } },
     });
     const body = (await res.json()) as {
       projection: { rows: Array<{ sizeClass: string; projectedBytes: number; overBudget: boolean }> };
     };
     const row = body.projection.rows.find((r) => r.sizeClass === "starkeep:original:image")!;
-    expect(row.projectedBytes).toBe(1024);
+    // 100 of the 101 shares in the platform namespace — the pooled fallback
+    // holds the other one. Not 1024: a row's budget is its slice of the
+    // namespace, and asserting the whole number here would be asserting that
+    // the fallback line does not exist.
+    expect(row.projectedBytes).toBe(Math.floor((1024 * 100) / 101));
     expect(row.overBudget).toBe(true);
   });
 
@@ -87,7 +95,7 @@ describe("projecting a candidate policy without saving", () => {
   // editing against.
   it("still projects an invalid policy, reporting the problems alongside", async () => {
     const res = await post({
-      retention: { ...validPolicy, platform: { ...validPolicy.platform, rows: { "original:image": { keep: "all", budgetBytes: 0 } } } },
+      retention: { ...validPolicy, platform: { ...validPolicy.platform, budgetBytes: 0 } },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { problems: string[]; projection: unknown };
@@ -101,26 +109,28 @@ describe("projecting a candidate policy without saving", () => {
 });
 
 describe("saving a policy", () => {
-  // These are not style preferences. A zero budget reads as a limit and behaves
-  // as a prohibition, and silently disables the recency rule above it — which
-  // is why validateRetentionPolicy exists, and why it went uncalled on the
-  // write path until now.
-  it("refuses a zero budget rather than saving it with a warning", async () => {
+  // These are not style preferences. A zero namespace budget is a prohibition
+  // on every rung, written in the one place an operator reading the rows will
+  // not look — which is why validateRetentionPolicy exists, and why it went
+  // uncalled on the write path until now.
+  it("refuses a zero namespace budget rather than saving it with a warning", async () => {
     const res = await put({
-      retention: { ...validPolicy, platform: { ...validPolicy.platform, rows: { "original:image": { keep: "all", budgetBytes: 0 } } } },
+      retention: { ...validPolicy, platform: { ...validPolicy.platform, budgetBytes: 0 } },
     });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { problems: string[] };
     expect(body.problems.some((p) => /budgetBytes/.test(p))).toBe(true);
   });
 
-  it("refuses a recency rule with no window", async () => {
+  // A namespace whose shares are all zero divides a real budget into nothing.
+  it("refuses a namespace where nothing claims a share", async () => {
     const res = await put({
       retention: {
         ...validPolicy,
         platform: {
           ...validPolicy.platform,
-          rows: { "original:image": { keep: "recent-only", budgetBytes: GB } },
+          rows: { "original:image": { prefetch: true, share: 0 } },
+          fallback: { prefetch: false, share: 0 },
         },
       },
     });

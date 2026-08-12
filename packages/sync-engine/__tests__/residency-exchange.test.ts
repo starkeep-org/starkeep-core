@@ -117,8 +117,8 @@ async function setup(
 // A class is a namespace and a rung, and these come from the host — so the
 // fixture names one the way a host would rather than passing a bare string.
 const classA = resolveSizeClass("photos", "classA");
-const elide: ResidencyVerdict = { decision: "elide", sizeClass: classA, reason: "keep-never" };
-const fetch: ResidencyVerdict = { decision: "fetch", sizeClass: classA, reason: "keep-all" };
+const elide: ResidencyVerdict = { decision: "elide", sizeClass: classA, reason: "class-disabled" };
+const fetch: ResidencyVerdict = { decision: "fetch", sizeClass: classA, reason: "within-budget" };
 
 describe("eliding a blob", () => {
   it("applies the metadata and skips the bytes", async () => {

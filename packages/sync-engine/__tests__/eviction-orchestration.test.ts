@@ -2,12 +2,11 @@
  * The eviction *pass* — `ResidencyManager.runEviction` and the pieces only it
  * assembles.
  *
- * `eviction.test.ts` next door covers `evictClass` and `evictNamespace` given a
- * request. This file covers the layer that builds those requests, which is where
- * three separate things live that nothing else has an opinion about: the order
- * the two kinds of pass run in, the key-shape check that decides whether a blob
- * can be verified at all, and the departure/reconcile pair that keeps the index
- * agreeing with the disk.
+ * `eviction.test.ts` next door covers `evictLine` given a request. This file
+ * covers the layer that builds those requests, which is where three separate
+ * things live that nothing else has an opinion about: which lines a pass runs
+ * over, the key-shape check that decides whether a blob can be verified at all,
+ * and the departure/reconcile pair that keeps the index agreeing with the disk.
  *
  * The bar throughout is the one `eviction.test.ts` states: every case here that
  * asserts something is *kept* would delete a wanted object if the guard it
@@ -56,13 +55,33 @@ function adapter(labels: Record<string, Label[]> = {}): DatabaseAdapter {
   } as unknown as DatabaseAdapter;
 }
 
-const keepAll: SizeClassRetention = { keep: "all", budgetBytes: 100 * MB };
+const keepAll: SizeClassRetention = { prefetch: true, share: 1 };
+
+/**
+ * A platform namespace where `original:image` gets exactly `budgetBytes`.
+ *
+ * Shares divide one namespace budget across the declared rows *and* the pooled
+ * fallback, so a suite that wants originals capped at a number has to say what
+ * else is claiming a share. Nothing else is, here.
+ */
+const onlyOriginals = (budgetBytes: number) => ({
+  rows: { "original:image": keepAll },
+  fallback: { prefetch: true, share: 0 },
+  budgetBytes,
+});
+
+/** The same, holding none of the class — what `keep: "never"` used to say. */
+const noOriginals = () => ({
+  rows: { "original:image": { prefetch: true, share: 0 } },
+  fallback: keepAll,
+  budgetBytes: 100 * MB,
+});
 
 function policyWith(over: Partial<NodeRetentionPolicy> = {}): NodeRetentionPolicy {
   return {
-    platform: { rows: { "original:image": keepAll }, fallback: keepAll },
+    platform: { rows: { "original:image": keepAll }, fallback: keepAll, budgetBytes: 100 * MB },
     apps: {},
-    appFallback: { rows: {}, fallback: keepAll, totalBudgetBytes: 100 * MB },
+    appFallback: { rows: {}, fallback: keepAll, budgetBytes: 100 * MB },
     ...over,
   };
 }
@@ -103,7 +122,7 @@ function landed(qualified: string): ResidencyVerdict {
       qualified,
     },
     pinned: false,
-    reason: "keep-all",
+    reason: "within-budget",
   };
 }
 
@@ -161,24 +180,29 @@ async function newPeer(): Promise<MockObjectStorageAdapter> {
 // r4 #14 — what runEviction runs, and in what order
 // ---------------------------------------------------------------------------
 
-describe("runEviction's ordering", () => {
+describe("which lines runEviction runs over", () => {
   /**
-   * Classes first, then non-platform namespaces.
+   * There is no ordering left to get wrong, and that is the finding.
    *
-   * Not arbitrary: the namespace pass exists to catch an app that is inside
-   * every one of its rows and still over its total, and running it *second*
-   * means it works against what the class passes have already freed. Reversed,
-   * it would count bytes that were about to go anyway and over-evict by exactly
-   * that much.
+   * This block used to assert "every class, then every non-platform namespace",
+   * because a row carried an absolute byte count and an app carried a separate
+   * total that could be breached while every row was comfortable. The namespace
+   * pass had to run *second* so it worked against what the class passes had
+   * already freed; reversed, it would have counted bytes that were about to go
+   * anyway and over-evicted by exactly that much.
+   *
+   * Rows are shares of one namespace budget now, so the lines of a namespace
+   * sum to it and a node inside every line is inside its namespace. One kind of
+   * pass, no ordering constraint between passes, and one less way to be wrong.
    */
-  it("runs every class before any namespace", async () => {
+  it("runs one pass per budget line and no namespace pass at all", async () => {
     const built = await build({
       policy: policyWith({
         apps: {
           photos: {
             rows: { thumb: keepAll, medium: keepAll },
             fallback: keepAll,
-            totalBudgetBytes: 100 * MB,
+            budgetBytes: 100 * MB,
           },
         },
       }),
@@ -187,69 +211,73 @@ describe("runEviction's ordering", () => {
     await landBlobs(built, { count: 2, size: 100, sizeClass: "photos:thumb", peer, salt: 1 });
     await landBlobs(built, { count: 2, size: 100, sizeClass: "photos:medium", peer, salt: 2 });
 
-    const outcomes = await built.manager.runEviction([{ nodeId: "peer", storage: peer }]);
-    const kinds = outcomes.map((o) => o.scope.kind);
-    expect(kinds).toEqual(["class", "class", "namespace"]);
+    const keys = (await built.manager.runEviction([{ nodeId: "peer", storage: peer }]))
+      .map((o) => o.budgetLine.key)
+      .sort();
+    // Every line the policy declares, plus each namespace's pooled fallback.
+    // No entry names a namespace, because a namespace is no longer a budget.
+    expect(keys).toEqual([
+      "photos:*",
+      "photos:medium",
+      "photos:thumb",
+      "starkeep:*",
+      "starkeep:original:image",
+    ]);
   });
 
-  // A class with no held bytes is not evaluated at all: `usageByClass` is what
-  // the loop iterates, so the work is proportional to what the node holds rather
-  // than to how many rows an operator has written.
-  it("evaluates only classes that hold something", async () => {
+  /**
+   * Lines come from the policy *and* from what is held.
+   *
+   * The policy alone would miss a line whose rows an operator has since deleted
+   * — bytes still on disk, now pooled into a fallback — and the index alone
+   * would stop covering a line the moment it emptied, which is exactly when a
+   * budget reduction wants a pass to run over it.
+   */
+  it("covers a declared line holding nothing, and a held line the policy forgot", async () => {
     const built = await build({
       policy: policyWith({
         platform: {
-          rows: { "original:image": keepAll, "original:video": keepAll, "original:audio": keepAll },
+          rows: { "original:image": keepAll, "original:video": keepAll },
           fallback: keepAll,
+          budgetBytes: 100 * MB,
         },
       }),
     });
     const peer = await newPeer();
     await landBlobs(built, { count: 1, size: 100, sizeClass: "starkeep:original:image", peer });
 
-    const outcomes = await built.manager.runEviction([{ nodeId: "peer", storage: peer }]);
-    expect(outcomes.map((o) => o.scope)).toEqual([
-      { kind: "class", sizeClass: "starkeep:original:image" },
-    ]);
+    const keys = (await built.manager.runEviction([{ nodeId: "peer", storage: peer }]))
+      .map((o) => o.budgetLine.key)
+      .sort();
+    // `original:video` holds nothing and is still swept: a budget reduction is
+    // most likely to be aimed at a line whose bytes are already gone.
+    expect(keys).toContain("starkeep:original:video");
+    expect(keys).toContain("starkeep:original:image");
   });
 
-  /**
-   * The platform namespace is skipped, and it has to be.
-   *
-   * Its rows *are* the originals, and there is no total above them — a cap there
-   * would be a second way to say what the rows already say, free to disagree
-   * with them. `evictNamespace` would return untriggered anyway; skipping it in
-   * the loop means the outcome list an operator reads does not carry a row that
-   * could never do anything.
-   */
-  it("never runs a namespace pass over the platform's own bytes", async () => {
-    const built = await build();
-    const peer = await newPeer();
-    await landBlobs(built, { count: 4, size: 100, sizeClass: "starkeep:original:image", peer });
-
-    const outcomes = await built.manager.runEviction([{ nodeId: "peer", storage: peer }]);
-    expect(outcomes.some((o) => o.scope.kind === "namespace")).toBe(false);
-  });
-
-  it("runs a namespace pass for every app that holds something", async () => {
+  it("sweeps every app's lines, and each only once", async () => {
     const built = await build({
       policy: policyWith({
         apps: {
-          photos: { rows: {}, fallback: keepAll, totalBudgetBytes: 100 * MB },
-          sketcher: { rows: {}, fallback: keepAll, totalBudgetBytes: 100 * MB },
+          photos: { rows: {}, fallback: keepAll, budgetBytes: 100 * MB },
+          sketcher: { rows: {}, fallback: keepAll, budgetBytes: 100 * MB },
         },
       }),
     });
     const peer = await newPeer();
+    // Two invented rungs of one app, which pool onto a single line — so a loop
+    // that keyed off the class rather than the line would run it twice and
+    // report the second pass against bytes the first had already freed.
     await landBlobs(built, { count: 1, size: 100, sizeClass: "photos:thumb", peer, salt: 1 });
+    await landBlobs(built, { count: 1, size: 100, sizeClass: "photos:medium", peer, salt: 4 });
     await landBlobs(built, { count: 1, size: 100, sizeClass: "sketcher:preview", peer, salt: 2 });
-    await landBlobs(built, { count: 1, size: 100, sizeClass: "starkeep:original:image", peer, salt: 3 });
 
-    const namespaces = (await built.manager.runEviction([{ nodeId: "peer", storage: peer }]))
-      .filter((o) => o.scope.kind === "namespace")
-      .map((o) => (o.scope as { namespace: string }).namespace)
-      .sort();
-    expect(namespaces).toEqual(["photos", "sketcher"]);
+    const keys = (await built.manager.runEviction([{ nodeId: "peer", storage: peer }])).map(
+      (o) => o.budgetLine.key,
+    );
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain("photos:*");
+    expect(keys).toContain("sketcher:*");
   });
 });
 
@@ -284,10 +312,7 @@ describe("a key whose shape yields no content hash", () => {
   }> {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 100 } },
-          fallback: keepAll,
-        },
+        platform: onlyOriginals(100),
       }),
     });
     const peer = await newPeer();
@@ -401,10 +426,7 @@ describe("previewReduction against a class held up by pins", () => {
   it("agrees with what the pass then refuses to delete", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 500 } },
-          fallback: keepAll,
-        },
+        platform: onlyOriginals(500),
       }),
     });
     const peer = await newPeer();
@@ -460,7 +482,7 @@ describe("noteDeparture", () => {
     const { built, key } = await oneBlob();
     built.manager.noteDeparture(key);
     const candidates = built.manager.index.evictionCandidates({
-      scope: { kind: "class", sizeClass: "starkeep:original:image" },
+      budgetLineKey: "starkeep:original:image",
       targetBytes: Number.MAX_SAFE_INTEGER,
     });
     expect(candidates).toHaveLength(0);
@@ -528,10 +550,7 @@ describe("the index rebuild", () => {
   it("leaves an unknown key out of the eviction pass entirely", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 1 } },
-          fallback: keepAll,
-        },
+        platform: onlyOriginals(1),
       }),
     });
     const peer = await newPeer();
@@ -571,24 +590,25 @@ describe("the index rebuild", () => {
 // r4 #12 — a class the operator switched off
 // ---------------------------------------------------------------------------
 
-describe('a class whose row says keep: "never"', () => {
+describe("a class whose share is zero", () => {
   /**
-   * N2's consequence at the eviction end.
+   * N2's consequence at the eviction end, and why it is now unrepresentable.
    *
-   * `evictClass` refuses to run against a non-finite budget — correctly, since a
-   * budget that is not a number is not a small budget but no answer at all — and
-   * a `never` row with no `budgetBytes` used to validate. So the one class an
-   * operator had just set to "keep nothing" became the one class the pass would
-   * never touch. Requiring the field and normalizing it to zero is what makes
-   * the guard read correctly instead of being defeated by the field beside it.
+   * The pass refuses to run against a non-finite budget — correctly, since a
+   * budget that is not a number is not a small budget but no answer at all —
+   * and `{ keep: "never" }` with no `budgetBytes` used to validate. So the one
+   * class an operator had just set to "keep nothing" became the one class the
+   * pass would never touch, and a whole normalization step existed to break the
+   * tie between a rule and a budget that contradicted it.
+   *
+   * A share of zero *is* a budget of zero. There is no second field to omit and
+   * no rule beside it to disagree with, so the case can no longer be written.
+   * What still has to hold is the behaviour: zero empties the line.
    */
   it("is emptied rather than exempted", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "never", budgetBytes: 0 } },
-          fallback: keepAll,
-        },
+        platform: noOriginals(),
       }),
     });
     const peer = await newPeer();
@@ -599,16 +619,14 @@ describe('a class whose row says keep: "never"', () => {
     expect(built.manager.usageByClass()["starkeep:original:image"] ?? 0).toBe(0);
   });
 
-  // A stored non-zero budget on a `never` row is normalized away rather than
-  // honoured: "hold none of this class" and "hold up to 40 GB of it" cannot both
-  // be true, and something had to break the tie in one place.
-  it("is emptied even when a stale budget is still written on the row", async () => {
+  // Zero is a real answer and must not be confused with the missing one above:
+  // every comparison against a NaN is false, so the pass would trigger and then
+  // never reach its target, while a real zero triggers and empties the line —
+  // which is the point.
+  it("is emptied all the way rather than down to a water mark", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "never", budgetBytes: 100 * MB } },
-          fallback: keepAll,
-        },
+        platform: noOriginals(),
       }),
     });
     const peer = await newPeer();
@@ -618,15 +636,12 @@ describe('a class whose row says keep: "never"', () => {
     expect(built.manager.usageByClass()["starkeep:original:image"] ?? 0).toBe(0);
   });
 
-  // …and it still will not delete a last copy. `never` is a statement about
-  // this node's disk, not permission to lose the bytes.
+  // …and it still will not delete a last copy. A zero share is a statement
+  // about this node's disk, not permission to lose the bytes.
   it("still refuses anything no peer can confirm", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "never", budgetBytes: 0 } },
-          fallback: keepAll,
-        },
+        platform: noOriginals(),
       }),
     });
     await landBlobs(built, { count: 5, size: 100, sizeClass: "starkeep:original:image" });
@@ -689,10 +704,7 @@ describe("the durability floor", () => {
       sizeClassKeys: {},
       isCloudNode: false,
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 1 } },
-          fallback: keepAll,
-        },
+        platform: onlyOriginals(1),
       }),
       durability: { minimumReplicas: 0 },
     });
@@ -724,10 +736,7 @@ describe("what the pass does when it cannot ask anyone", () => {
   it("deletes nothing and says why", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 100 } },
-          fallback: keepAll,
-        },
+        platform: onlyOriginals(100),
       }),
     });
     const keys = await landBlobs(built, {
@@ -751,10 +760,7 @@ describe("what the pass does when it cannot ask anyone", () => {
   it("reports no refusal when nothing needed proof", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 100 * MB } },
-          fallback: keepAll,
-        },
+        platform: onlyOriginals(100 * MB),
       }),
     });
     await landBlobs(built, { count: 2, size: 100, sizeClass: "starkeep:original:image" });
@@ -775,10 +781,7 @@ describe("what the pass does when it cannot ask anyone", () => {
   it("keeps everything, and reports the shortfall, when every probe fails", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 100 } },
-          fallback: keepAll,
-        },
+        platform: onlyOriginals(100),
       }),
     });
     await landBlobs(built, { count: 5, size: 100, sizeClass: "starkeep:original:image" });
@@ -814,10 +817,7 @@ describe("what the pass does when it cannot ask anyone", () => {
   it("keeps a blob the peer does not have", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 100 } },
-          fallback: keepAll,
-        },
+        platform: onlyOriginals(100),
       }),
     });
     const keys = await landBlobs(built, {
@@ -843,10 +843,7 @@ describe("what the pass does when it cannot ask anyone", () => {
   it("does evict once a peer actually confirms the bytes", async () => {
     const built = await build({
       policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 500 } },
-          fallback: keepAll,
-        },
+        platform: onlyOriginals(500),
       }),
     });
     const peer = await newPeer();
@@ -866,10 +863,7 @@ describe("what the pass does when it cannot ask anyone", () => {
 describe("two engines sharing one manager", () => {
   const budget = 1000;
   const smallClass = policyWith({
-    platform: {
-      rows: { "original:image": { keep: "all", budgetBytes: budget } },
-      fallback: keepAll,
-    },
+    platform: onlyOriginals(budget),
   });
 
   function pending(id: string, sizeBytes: number): BlobCandidate {
@@ -953,7 +947,7 @@ describe("two engines sharing one manager", () => {
     built.manager.reserve(c, await built.manager.decide(c));
     expect(
       built.manager.index.evictionCandidates({
-        scope: { kind: "class", sizeClass: "starkeep:original:image" },
+        budgetLineKey: "starkeep:original:image",
         targetBytes: Number.MAX_SAFE_INTEGER,
       }),
     ).toHaveLength(0);

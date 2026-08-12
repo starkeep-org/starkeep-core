@@ -2,22 +2,20 @@
  * Projecting a retention policy's disk cost (item 34).
  *
  * The matrix is edited *before* it takes effect, so the projection's job is to
- * answer "what happens if I do this" while the operator is deciding. Every
- * rounding decision below leans the same way — **over-estimate** — because an
- * operator told a row costs more than it does buys a bigger disk, while one
- * told it costs less runs out of space and starts evicting things they asked
- * to keep.
+ * answer "what happens if I do this" while the operator is deciding.
+ *
+ * This suite lost most of its cases along with the thing they covered: the
+ * projection used to estimate what a date rule would select, from seven
+ * cumulative cutoffs, rounding up at every step because it could not know how
+ * two windows overlapped. There is no date rule now, so there is nothing to
+ * estimate — a class either gets pulled or it does not, and the share decides
+ * the rest.
  */
 import { describe, it, expect } from "vitest";
-import {
-  projectPolicy,
-  projectRow,
-  selectedBytesFor,
-  formatBytes,
-  type SizeClassCensus,
-} from "../src/retention-projection.js";
+import { projectPolicy, formatBytes, type SizeClassCensus } from "../src/retention-projection.js";
 import {
   validateRetentionPolicy,
+  type NamespaceRetention,
   type NodeRetentionPolicy,
   type SizeClassRetention,
 } from "../src/residency-policy.js";
@@ -25,230 +23,193 @@ import {
 const GB = 1024 ** 3;
 
 const census = (over: Partial<SizeClassCensus> = {}): SizeClassCensus => ({
-  sizeClass: "image-large",
+  sizeClass: "photos:image-large",
   recordCount: 1000,
   totalBytes: 100 * GB,
-  bytesWithinDays: { 30: 10 * GB, 90: 25 * GB, 365: 60 * GB },
   ...over,
 });
 
 const row = (over: Partial<SizeClassRetention> = {}): SizeClassRetention => ({
-  keep: "all",
-  budgetBytes: 1000 * GB,
+  prefetch: true,
+  share: 1,
   ...over,
 });
 
-describe("what a rule selects", () => {
-  it("selects everything for keep: all", () => {
-    expect(selectedBytesFor(row({ keep: "all" }), census())).toBe(100 * GB);
+/**
+ * A policy with one app namespace.
+ *
+ * The fallback takes no share unless a case says otherwise, so the declared
+ * rows divide the whole budget between them and the arithmetic in each test is
+ * about the thing the test is checking.
+ */
+const withApp = (
+  rows: Record<string, SizeClassRetention>,
+  budgetBytes = 100 * GB,
+  fallback: SizeClassRetention = row({ share: 0 }),
+): NodeRetentionPolicy => {
+  const namespace: NamespaceRetention = { rows, fallback, budgetBytes };
+  return {
+    platform: { rows: {}, fallback: row(), budgetBytes: 900 * GB },
+    apps: { photos: namespace },
+    appFallback: { rows: {}, fallback: row(), budgetBytes: 8 * GB },
+  };
+};
+
+describe("a row's budget is its share of the namespace", () => {
+  const policy = withApp({
+    "image-thumb": row({ share: 1 }),
+    "image-large": row({ share: 9 }),
+  });
+  const library = [
+    census({ sizeClass: "photos:image-thumb", totalBytes: 2 * GB }),
+    census({ sizeClass: "photos:image-large", totalBytes: 100 * GB }),
+  ];
+
+  it("divides the namespace budget by share", () => {
+    const projection = projectPolicy(policy, library);
+    const byClass = new Map(projection.rows.map((r) => [r.sizeClass, r]));
+    expect(byClass.get("photos:image-thumb")!.budgetBytes).toBe(10 * GB);
+    expect(byClass.get("photos:image-large")!.budgetBytes).toBe(90 * GB);
   });
 
-  it("selects nothing for keep: never", () => {
-    expect(selectedBytesFor(row({ keep: "never" }), census())).toBe(0);
+  it("holds what the class contains when it fits", () => {
+    const thumb = projectPolicy(policy, library).rows.find(
+      (r) => r.sizeClass === "photos:image-thumb",
+    )!;
+    expect(thumb.projectedBytes).toBe(2 * GB);
+    expect(thumb.overBudget).toBe(false);
   });
 
-  it("selects the measured cumulative bytes for a recency window", () => {
-    expect(selectedBytesFor(row({ keep: "recent-only", recencyWindowDays: 90 }), census())).toBe(
-      25 * GB,
-    );
+  // Worth surfacing rather than silently capping: it means the device holds the
+  // most useful part of the class rather than all of it, which is a different
+  // sentence from "this class fits".
+  it("caps at the budget and flags the class", () => {
+    const large = projectPolicy(policy, library).rows.find(
+      (r) => r.sizeClass === "photos:image-large",
+    )!;
+    expect(large.selectedBytes).toBe(100 * GB);
+    expect(large.projectedBytes).toBe(90 * GB);
+    expect(large.overBudget).toBe(true);
+    expect(projectPolicy(policy, library).overBudgetClasses).toEqual(["photos:image-large"]);
   });
 
-  // Interpolating between measured points would be a guess presented as a
-  // measurement. Rounding up to the next measured cutoff over-estimates, which
-  // is the direction that does not end in a full disk.
-  it("rounds up to the next measured cutoff rather than interpolating", () => {
-    // 60 days is unmeasured; the answer is the 90-day figure, not something
-    // between the 30- and 90-day ones.
-    expect(selectedBytesFor(row({ keep: "recent-only", recencyWindowDays: 60 }), census())).toBe(
-      25 * GB,
-    );
-  });
-
-  it("uses the whole library when the window exceeds everything measured", () => {
-    expect(selectedBytesFor(row({ keep: "recent-only", recencyWindowDays: 9999 }), census())).toBe(
-      60 * GB,
-    );
-  });
-
-  // A library you actually browse has a working set whose shape is not its
-  // calendar — that is the entire reason openedWithinDays exists.
-  it("adds the recently-opened working set to the recency window", () => {
-    const selected = selectedBytesFor(
-      row({ keep: "recent-only", recencyWindowDays: 30, openedWithinDays: 14 }),
-      census({ bytesOpenedWithinDays: { 14: 5 * GB } }),
-    );
-    // Added rather than unioned precisely: the census cannot say how much they
-    // overlap, so this over-counts — again in the safe direction.
-    expect(selected).toBe(15 * GB);
-  });
-
-  it("never selects more than the library holds", () => {
-    const selected = selectedBytesFor(
-      row({ keep: "recent-only", recencyWindowDays: 365, openedWithinDays: 365 }),
-      census({ bytesOpenedWithinDays: { 365: 90 * GB } }),
-    );
-    expect(selected).toBeLessThanOrEqual(100 * GB);
-  });
-
-  // Projecting this as zero would be badly wrong: on-demand caching converges
-  // on the working set and fills the row's budget over time, so an operator
-  // shown "0 B" would size a disk for a row that grows to 50 GB.
-  it("estimates on-demand-only from what has actually been opened", () => {
-    const selected = selectedBytesFor(
-      row({ keep: "on-demand-only", openedWithinDays: 30 }),
-      census({ bytesOpenedWithinDays: { 30: 8 * GB } }),
-    );
-    expect(selected).toBe(8 * GB);
-  });
-
-  it("flags an on-demand row as a floor rather than a settled figure", () => {
-    const p = projectRow("image-large", row({ keep: "on-demand-only" }), census());
-    expect(p.demandDriven).toBe(true);
-    // With nothing measured the honest number is zero — and the flag is what
-    // stops the UI presenting that as "this row is free".
-    expect(p.projectedBytes).toBe(0);
-  });
-
-  it("does not flag the fixed rules as demand-driven", () => {
-    for (const keep of ["all", "never", "recent-only"] as const) {
-      expect(projectRow("c", row({ keep }), census()).demandDriven, keep).toBe(false);
-    }
-  });
-
-  it("selects nothing for a recency rule with no window", () => {
-    // A misconfiguration rather than an intent; validateRetentionPolicy is
-    // where it gets reported, and here it simply selects nothing.
-    expect(selectedBytesFor(row({ keep: "recent-only" }), census())).toBe(0);
-  });
-});
-
-describe("applying the budget", () => {
-  it("caps the projection at the budget", () => {
-    const p = projectRow("image-large", row({ keep: "all", budgetBytes: 40 * GB }), census());
-    expect(p.selectedBytes).toBe(100 * GB);
-    expect(p.projectedBytes).toBe(40 * GB);
-  });
-
-  // Worth surfacing rather than silently capping: it means eviction runs
-  // continuously against this row, and the operator's stated intent is not what
-  // they will get.
-  it("flags a row whose rule wants more than its budget", () => {
-    const p = projectRow("image-large", row({ keep: "all", budgetBytes: 40 * GB }), census());
-    expect(p.overBudget).toBe(true);
-  });
-
-  it("does not flag a row that fits", () => {
-    expect(projectRow("image-large", row({ budgetBytes: 200 * GB }), census()).overBudget).toBe(
-      false,
-    );
+  it("holds nothing for a class whose share is zero", () => {
+    const off = withApp({ "image-thumb": row(), "image-large": row({ share: 0 }) });
+    const large = projectPolicy(off, library).rows.find(
+      (r) => r.sizeClass === "photos:image-large",
+    )!;
+    expect(large.budgetBytes).toBe(0);
+    expect(large.projectedBytes).toBe(0);
   });
 
   // Pins win over budgets, so a row can legitimately exceed its own cap. A
   // projection that reported the budget instead would promise a number the
   // engine has already been told it may not deliver.
   it("holds pinned bytes even past the budget", () => {
-    const p = projectRow(
-      "image-large",
-      row({ keep: "never", budgetBytes: 1 * GB }),
-      census({ pinnedBytes: 12 * GB }),
-    );
-    expect(p.projectedBytes).toBe(12 * GB);
-    expect(p.pinnedBytes).toBe(12 * GB);
+    const off = withApp({ "image-large": row({ share: 0 }) });
+    const projected = projectPolicy(off, [census({ pinnedBytes: 12 * GB })]).rows[0]!;
+    expect(projected.projectedBytes).toBe(12 * GB);
+    expect(projected.pinnedBytes).toBe(12 * GB);
+  });
+});
+
+describe("prefetch shows as a floor rather than a settled figure", () => {
+  // Projecting an unprefetched class at its contents would be badly wrong in
+  // the other direction: nothing is pulled proactively, so the number an
+  // operator should read is "grows toward the budget as you browse".
+  it("flags an unprefetched class as demand-driven", () => {
+    const p = projectPolicy(withApp({ "image-large": row({ prefetch: false }) }), [census()]);
+    expect(p.rows[0]!.demandDriven).toBe(true);
+  });
+
+  it("does not flag a prefetched class", () => {
+    const p = projectPolicy(withApp({ "image-large": row() }), [census()]);
+    expect(p.rows[0]!.demandDriven).toBe(false);
   });
 });
 
 describe("projecting a whole policy", () => {
-  // Rungs live under an app namespace; the row keys are the rungs alone, and
-  // the census names classes fully qualified. Keeping the two straight is the
-  // thing this describe block is really checking.
-  const withApp = (
-    rows: Record<string, SizeClassRetention>,
-    totalBudgetBytes = 1000 * GB,
-  ): NodeRetentionPolicy => ({
-    platform: { rows: {}, fallback: { keep: "never", budgetBytes: 1 * GB } },
-    apps: {
-      photos: { rows, fallback: { keep: "never", budgetBytes: 1 * GB }, totalBudgetBytes },
-    },
-    appFallback: {
-      rows: {},
-      fallback: { keep: "never", budgetBytes: 1 * GB },
-      totalBudgetBytes,
-    },
-  });
-
   const policy = withApp({
-    "image-thumb": { keep: "all", budgetBytes: 5 * GB },
-    "image-large": { keep: "recent-only", recencyWindowDays: 90, budgetBytes: 50 * GB },
+    "image-thumb": row({ share: 1 }),
+    "image-large": row({ share: 9 }),
   });
-
   const library = [
-    census({ sizeClass: "photos:image-thumb", totalBytes: 2 * GB, bytesWithinDays: { 365: 2 * GB } }),
-    census({ sizeClass: "photos:image-large" }),
+    census({ sizeClass: "photos:image-thumb", totalBytes: 2 * GB }),
+    census({ sizeClass: "photos:image-large", totalBytes: 100 * GB }),
   ];
 
   it("totals the rows", () => {
-    const projection = projectPolicy(policy, library);
-    expect(projection.totalProjectedBytes).toBe(2 * GB + 25 * GB);
-  });
-
-  it("names the rows that will not fit", () => {
-    const tight = withApp({
-      "image-thumb": { keep: "all", budgetBytes: 5 * GB },
-      "image-large": { keep: "all", budgetBytes: 1 * GB },
-    });
-    expect(projectPolicy(tight, library).overBudgetClasses).toEqual(["photos:image-large"]);
+    expect(projectPolicy(policy, library).totalProjectedBytes).toBe(2 * GB + 90 * GB);
   });
 
   // A projection that quietly ignored unlisted classes would under-report
   // exactly the disk use nobody planned for.
-  it("applies the fallback to classes the policy does not mention", () => {
-    const withExtra = [...library, census({ sizeClass: "photos:video-720p", totalBytes: 80 * GB })];
-    const projection = projectPolicy(policy, withExtra);
-    const extra = projection.rows.find((r) => r.sizeClass === "photos:video-720p")!;
-    // `never` in the fallback, so nothing — but it appears in the table, which
-    // is the point: the operator can see the class exists and is being dropped.
-    expect(extra.projectedBytes).toBe(0);
-    expect(projection.rows).toHaveLength(3);
+  it("pools classes the policy does not mention onto the fallback line", () => {
+    const withFallback = withApp(
+      { "image-thumb": row({ share: 1 }), "image-large": row({ share: 8 }) },
+      100 * GB,
+      row({ share: 1 }),
+    );
+    const extra = [
+      ...library,
+      census({ sizeClass: "photos:video-720p", totalBytes: 80 * GB }),
+      census({ sizeClass: "photos:video-1080p", totalBytes: 80 * GB }),
+    ];
+    const projection = projectPolicy(withFallback, extra);
+    const pooled = projection.rows.filter((r) => r.budgetLineKey === "photos:*");
+
+    // Both appear in the table, which is the point: the operator can see the
+    // classes exist and how much of them survives.
+    expect(pooled.map((r) => r.sizeClass).sort()).toEqual([
+      "photos:video-1080p",
+      "photos:video-720p",
+    ]);
+    // And they share the line's 10 GB rather than getting 10 GB each — the
+    // over-report that made rung invention free in the first place.
+    expect(pooled.reduce((sum, r) => sum + r.projectedBytes, 0)).toBe(10 * GB);
   });
 
-  // The total is what the app will actually be held to, so the headline figure
-  // has to respect it. Summing the rows would promise disk use that the
-  // namespace eviction pass is going to take straight back.
-  it("caps the total at the app's namespace total rather than summing rows", () => {
-    const capped = withApp(
-      {
-        "image-thumb": { keep: "all", budgetBytes: 5 * GB },
-        "image-large": { keep: "recent-only", recencyWindowDays: 90, budgetBytes: 50 * GB },
-      },
-      10 * GB,
-    );
-    const projection = projectPolicy(capped, library);
-    expect(projection.totalProjectedBytes).toBe(10 * GB);
+  /**
+   * The identity the whole change rests on.
+   *
+   * Rows used to carry absolute byte counts *and* a namespace total was checked
+   * separately, so the two could disagree — in the shipped phone policy they
+   * did, by 240 MB. Shares make the row budgets sum to the namespace budget by
+   * construction, so a projection can never promise disk the namespace pass
+   * would take straight back.
+   */
+  it("never projects a namespace past its budget except by pins", () => {
+    const projection = projectPolicy(policy, library);
+    const photos = projection.namespaces.find((n) => n.namespace === "photos")!;
+    expect(photos.projectedBytes).toBeLessThanOrEqual(photos.totalBudgetBytes);
+    expect(projection.overTotalNamespaces).toEqual([]);
+  });
+
+  it("flags a namespace held past its budget by pins", () => {
+    const off = withApp({ "image-large": row({ share: 0 }) }, 10 * GB);
+    const projection = projectPolicy(off, [census({ pinnedBytes: 40 * GB })]);
     expect(projection.overTotalNamespaces).toEqual(["photos"]);
   });
 
-  // The case an operator cannot see from the rows: each one is comfortably
-  // inside its budget, and the app as a whole is not.
-  it("flags a namespace over its total even when no single row is over", () => {
-    const capped = withApp(
-      {
-        "image-thumb": { keep: "all", budgetBytes: 50 * GB },
-        "image-large": { keep: "recent-only", recencyWindowDays: 90, budgetBytes: 50 * GB },
-      },
-      5 * GB,
-    );
-    const projection = projectPolicy(capped, library);
-    expect(projection.overBudgetClasses).toEqual([]);
-    expect(projection.overTotalNamespaces).toEqual(["photos"]);
-  });
-
-  it("gives the platform namespace no total to be over", () => {
+  // The platform used to be the exception — rows with absolute budgets and no
+  // total — which only ever bought a `number | null` every consumer had to
+  // branch on, and an operator with no way to say how much disk originals get.
+  it("gives the platform namespace a budget like any other", () => {
     const projection = projectPolicy(policy, [
-      census({ sizeClass: "starkeep:original:image", totalBytes: 900 * GB }),
+      census({ sizeClass: "starkeep:original:image", totalBytes: 9000 * GB }),
     ]);
     const platform = projection.namespaces.find((n) => n.namespace === "starkeep")!;
-    expect(platform.totalBudgetBytes).toBeNull();
-    expect(platform.overTotal).toBe(false);
+    expect(platform.totalBudgetBytes).toBe(900 * GB);
+    expect(platform.projectedBytes).toBe(900 * GB);
+  });
+
+  // A class name from before namespacing has no namespace to group under, and
+  // guessing one would charge somebody's budget for it.
+  it("sends an unqualified class to the platform's pooled line", () => {
+    const projection = projectPolicy(policy, [
+      census({ sizeClass: "image-medium", totalBytes: GB }),
+    ]);
+    expect(projection.rows[0]!.budgetLineKey).toBe("starkeep:*");
   });
 });
 
@@ -256,40 +217,39 @@ describe("projecting a whole policy", () => {
  * r4 #11 — the projection never produces `NaN` for a policy the validator
  * accepted.
  *
- * Stated as a property rather than as cases, because the two ways it happened
- * were unrelated to each other and neither was on anybody's list: a `never` row
- * with no `budgetBytes` (N2) reached `Math.min(selected, undefined)`, and an
- * unrecognised `keep` (N3) fell off the end of a switch and returned
- * `undefined`. What they share is only the symptom, and the symptom is silent:
- * one `NaN` three levels down propagates through the namespace subtotal into
- * `totalProjectedBytes`, and an operator sees a blank headline figure with no
- * indication which row caused it.
+ * Stated as a property rather than as cases, because the ways it happened were
+ * unrelated to each other and none was on anybody's list: a `never` row with no
+ * `budgetBytes` reached `Math.min(selected, undefined)`, and an unrecognised
+ * `keep` fell off the end of a switch and returned `undefined`. What they share
+ * is only the symptom, and the symptom is silent: one `NaN` three levels down
+ * propagates through the namespace subtotal into `totalProjectedBytes`, and an
+ * operator sees a blank headline figure with no indication which row caused it.
  *
- * So the property is the assertion, and the pairing with `validateRetentionPolicy`
- * is the point: **anything the validator lets through must project to a number.**
- * Any future rule that breaks that has to break it here.
+ * Both of those specific shapes are now unrepresentable — there is no keep enum
+ * to mistype and no second budget to omit — which is the better kind of fix.
+ * The property is kept because it is the one that survives the next change:
+ * **anything the validator lets through must project to a number.**
  */
 describe("a policy the validator accepted always projects to a number", () => {
   const rules: SizeClassRetention[] = [
-    { keep: "all", budgetBytes: 5 * GB },
-    { keep: "never", budgetBytes: 0 },
-    { keep: "on-demand-only", budgetBytes: 5 * GB },
-    { keep: "on-demand-only", openedWithinDays: 30, budgetBytes: 5 * GB },
-    { keep: "recent-only", recencyWindowDays: 90, budgetBytes: 5 * GB },
-    { keep: "recent-only", openedWithinDays: 7, budgetBytes: 5 * GB },
-    { keep: "recent-only", recencyWindowDays: 3650, openedWithinDays: 30, budgetBytes: 5 * GB },
+    { prefetch: true, share: 1 },
+    { prefetch: false, share: 1 },
+    { prefetch: true, share: 0.5 },
+    { prefetch: true, share: 1000 },
   ];
 
   const libraries: SizeClassCensus[][] = [
     [],
-    [census({ sizeClass: "photos:image-large" })],
+    [census()],
     [
-      census({ sizeClass: "photos:image-large" }),
-      census({ sizeClass: "photos:video-720p", totalBytes: 80 * GB, bytesWithinDays: {} }),
+      census(),
+      census({ sizeClass: "photos:video-720p", totalBytes: 80 * GB }),
       census({ sizeClass: "starkeep:original:image", totalBytes: 900 * GB }),
-      // A class the census measured at zero, and one it measured with no
-      // cutoffs at all — both are ordinary states of a young library.
-      census({ sizeClass: "photos:image-thumb", totalBytes: 0, bytesWithinDays: {} }),
+      // A class the census measured at zero — an ordinary state of a young
+      // library, and the one that divides by it.
+      census({ sizeClass: "photos:image-thumb", totalBytes: 0 }),
+      census({ sizeClass: "photos:invented-a", totalBytes: 0 }),
+      census({ sizeClass: "photos:invented-b", totalBytes: 0 }),
     ],
   ];
 
@@ -302,11 +262,11 @@ describe("a policy the validator accepted always projects to a number", () => {
     (_label, rule) => {
       for (const library of libraries) {
         const policy: NodeRetentionPolicy = {
-          platform: { rows: { "original:image": rule }, fallback: rule },
+          platform: { rows: { "original:image": rule }, fallback: rule, budgetBytes: 100 * GB },
           apps: {
-            photos: { rows: { "image-large": rule }, fallback: rule, totalBudgetBytes: 100 * GB },
+            photos: { rows: { "image-large": rule }, fallback: rule, budgetBytes: 100 * GB },
           },
-          appFallback: { rows: {}, fallback: rule, totalBudgetBytes: 100 * GB },
+          appFallback: { rows: {}, fallback: rule, budgetBytes: 100 * GB },
         };
         // The pairing that makes this a property and not a sample: if the
         // validator would refuse the policy, the projection owes it nothing.
@@ -317,6 +277,7 @@ describe("a policy the validator accepted always projects to a number", () => {
         for (const row of projection.rows) {
           expect(isFiniteNumber(row.projectedBytes)).toBe(true);
           expect(isFiniteNumber(row.selectedBytes)).toBe(true);
+          expect(isFiniteNumber(row.budgetBytes)).toBe(true);
         }
         for (const ns of projection.namespaces) {
           expect(isFiniteNumber(ns.projectedBytes)).toBe(true);
@@ -325,34 +286,19 @@ describe("a policy the validator accepted always projects to a number", () => {
     },
   );
 
-  // The specific shape N2 produced. `{ keep: "never" }` with no budget used to
-  // validate, and `Math.min(0, undefined)` is `NaN`.
-  it("survives a never row whose budget the resolution normalizes", () => {
+  // A namespace where every share is zero divides its budget into nothing, and
+  // the division would be by zero. The validator refuses it, so the projection
+  // owes it nothing — but it must still answer with a number rather than a NaN,
+  // because a candidate policy is projected *before* it is saved.
+  it("answers zero rather than NaN for a namespace with no shares at all", () => {
     const policy: NodeRetentionPolicy = {
-      platform: { rows: {}, fallback: { keep: "never", budgetBytes: 40 * GB } },
+      platform: { rows: {}, fallback: row({ share: 0 }), budgetBytes: 100 * GB },
       apps: {},
-      appFallback: { rows: {}, fallback: { keep: "never", budgetBytes: 0 }, totalBudgetBytes: GB },
+      appFallback: { rows: {}, fallback: row({ share: 0 }), budgetBytes: 100 * GB },
     };
-    expect(validateRetentionPolicy(policy)).toEqual([]);
+    expect(validateRetentionPolicy(policy).length).toBeGreaterThan(0);
     const projection = projectPolicy(policy, [census({ sizeClass: "starkeep:original:image" })]);
     expect(projection.totalProjectedBytes).toBe(0);
-  });
-
-  /**
-   * N3 from the projection's side.
-   *
-   * `selectedBytesFor` throws rather than returning `undefined`, and the
-   * distinction is the whole finding: `undefined` becomes `NaN` two lines later
-   * and travels silently to the headline total, while a throw names the rule and
-   * the class. Unreachable for any policy the validator accepted — which is why
-   * throwing costs nothing and is the right answer when it happens anyway.
-   */
-  it("throws on a rule nobody recognises rather than quietly returning NaN", () => {
-    const typo = { keep: "kepp-all", budgetBytes: GB } as unknown as SizeClassRetention;
-    expect(() => selectedBytesFor(typo, census())).toThrow(/unrecognised keep rule/);
-    // Names both halves an operator needs to find it.
-    expect(() => selectedBytesFor(typo, census())).toThrow(/kepp-all/);
-    expect(() => selectedBytesFor(typo, census())).toThrow(/image-large/);
   });
 });
 

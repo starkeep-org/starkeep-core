@@ -12,10 +12,16 @@
  *     pin, silently inverting the one ordering the policy calls non-negotiable;
  *   - a rule-derived pin reached the decision and not the resident-set row, so
  *     the pass that deletes bytes could not see the rule that kept them (N4);
- *   - `recencyAtMs` was hard-coded null at every construction site, so
- *     `recent-only` was `keep: "all"` with a different reason string (N1).
+ *   - `recencyAtMs` was hard-coded null at every construction site, so the
+ *     recency dimension could never bind at all (N1).
  *
  * All three are invisible from either side of the seam alone.
+ *
+ * N1's dimension is no longer a *policy* axis — a hand-written date cutoff was
+ * a prediction of what the eviction ordering computes anyway, and it has been
+ * deleted. The date it read is still the ordering's last term, so the wiring
+ * this suite covers matters as much as it did; it now shows up as which blob
+ * gets displaced rather than as which one gets declined.
  */
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
@@ -39,28 +45,52 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 type Label = { appId: string; key: string; value: string };
 
-const keepAll: SizeClassRetention = { keep: "all", budgetBytes: 100 * MB };
+const keepAll: SizeClassRetention = { prefetch: true, share: 1 };
+
+/**
+ * A namespace holding one class, sized so that class gets exactly `budgetBytes`.
+ *
+ * Shares divide a namespace budget across its declared rows *and* its pooled
+ * fallback, so a test that wants a class capped at 500 bytes has to say how big
+ * the namespace is and what else is claiming a share of it. Here the fallback
+ * gets nothing, so the one row gets the lot.
+ */
+function onlyClass(rung: string, budgetBytes: number) {
+  return {
+    rows: { [rung]: keepAll },
+    fallback: { prefetch: true, share: 0 },
+    budgetBytes,
+  };
+}
 
 function policyWith(over: Partial<NodeRetentionPolicy> = {}): NodeRetentionPolicy {
   return {
-    platform: { rows: { "original:image": keepAll }, fallback: keepAll },
+    platform: {
+      rows: { "original:image": keepAll },
+      fallback: keepAll,
+      budgetBytes: 100 * MB,
+    },
     apps: {},
-    appFallback: { rows: {}, fallback: keepAll, totalBudgetBytes: 100 * MB },
+    appFallback: { rows: {}, fallback: keepAll, budgetBytes: 100 * MB },
     ...over,
   };
 }
 
 /**
- * Labels and capture times keyed by record id.
+ * Labels, capture times, and record rows keyed by record id.
  *
  * `getMetadataByIds` answers for real here, unlike the classification suite next
- * door: the recency axis is the point of half these cases, and a stub returning
- * an empty map is exactly the state N1 describes — the decider reading null and
- * fetching everything.
+ * door: the ordering terms are the point of half these cases, and a stub
+ * returning an empty map is exactly the state N1 describes — the decider reading
+ * null for every candidate, so every one of them ties.
+ *
+ * `get` answers too, because a derived record reads its *parent's* capture date
+ * and there is no other way to find out what type the parent is.
  */
 function adapter(
   labels: Record<string, Label[]> = {},
   capturedAt: Record<string, string> = {},
+  records: Record<string, { type: string } | null> = {},
 ): DatabaseAdapter {
   return {
     async getLabelsByRecordIds(recordIds: StarkeepId[]) {
@@ -81,12 +111,16 @@ function adapter(
       }
       return out as never;
     },
+    async get(id: StarkeepId) {
+      return (records[id] ?? null) as never;
+    },
   } as unknown as DatabaseAdapter;
 }
 
 interface BuildOptions {
   readonly labels?: Record<string, Label[]>;
   readonly capturedAt?: Record<string, string>;
+  readonly records?: Record<string, { type: string } | null>;
   readonly policy?: NodeRetentionPolicy;
   readonly overrideRules?: readonly OverrideRule[];
   readonly isCloudNode?: boolean;
@@ -95,7 +129,7 @@ interface BuildOptions {
 function build(options: BuildOptions = {}): ResidencyManager {
   return createResidencyManager({
     localDb: new DatabaseSync(":memory:") as never,
-    databaseAdapter: adapter(options.labels, options.capturedAt),
+    databaseAdapter: adapter(options.labels, options.capturedAt, options.records),
     localObjectStorage: new MockObjectStorageAdapter(),
     sizeClassKeys: { photos: "rendition" },
     ...(options.overrideRules ? { overrideRules: options.overrideRules } : {}),
@@ -175,12 +209,7 @@ describe("the local_pins table reaches the decision", () => {
   // A budget one byte short of the candidate, so the *only* thing that can
   // produce a fetch is the pin. Asserting against a policy that would have
   // fetched anyway proves nothing about the wiring.
-  const tight = policyWith({
-    platform: {
-      rows: { "original:image": { keep: "all", budgetBytes: 500 } },
-      fallback: keepAll,
-    },
-  });
+  const tight = policyWith({ platform: onlyClass("original:image", 500) });
 
   it("makes a pinned record fetch past a full budget", async () => {
     const manager = build({ policy: tight });
@@ -263,12 +292,7 @@ describe("starkeep/no-cloud, evaluated against this node's identity", () => {
 // ---------------------------------------------------------------------------
 
 describe("usage is read from the index the manager owns", () => {
-  const smallClass = policyWith({
-    platform: {
-      rows: { "original:image": { keep: "all", budgetBytes: 2500 } },
-      fallback: keepAll,
-    },
-  });
+  const smallClass = policyWith({ platform: onlyClass("original:image", 2500) });
 
   function landed(manager: ResidencyManager, id: string, sizeBytes: number) {
     const c = candidate({ recordId: id, objectStorageKey: `key-${id}`, sizeBytes });
@@ -276,7 +300,7 @@ describe("usage is read from the index the manager owns", () => {
       decision: "fetch",
       sizeClass: { namespace: "starkeep", rung: "original:image", qualified: "starkeep:original:image" },
       pinned: false,
-      reason: "keep-all",
+      reason: "within-budget",
     });
   }
 
@@ -292,17 +316,24 @@ describe("usage is read from the index the manager owns", () => {
     expect(verdict.reason).toBe("budget-exhausted");
   });
 
-  // The namespace total is a second, independent gate, and it is what makes an
-  // invented rung cheap rather than free — the per-rung fallback would otherwise
-  // hand out one budget per name.
-  it("declines on the namespace total even when the rung's own row has room", async () => {
+  /**
+   * What used to need a second, independently-checked namespace total.
+   *
+   * Three rungs the policy has never heard of, each escaping into the app's
+   * fallback. Under per-rung absolute budgets that bought three budgets, which
+   * is exactly why a namespace-wide cap had to exist to bound it. They now share
+   * one pooled line, so the third is declined by the *same* budget check as the
+   * first two rather than by a separate gate with its own failure mode and its
+   * own eviction pass.
+   */
+  it("pools every unrecognised rung of an app onto one budget", async () => {
     const manager = build({
       policy: policyWith({
         apps: {
           photos: {
             rows: {},
-            fallback: { keep: "all", budgetBytes: 100 * MB },
-            totalBudgetBytes: 2500,
+            fallback: { prefetch: true, share: 1 },
+            budgetBytes: 2500,
           },
         },
       }),
@@ -311,6 +342,7 @@ describe("usage is read from the index the manager owns", () => {
         b: [{ appId: "photos", key: "rendition", value: "two" }],
         c: [{ appId: "photos", key: "rendition", value: "three" }],
       },
+      records: { p: { type: "image/jpeg" } },
     });
 
     for (const id of ["a", "b"]) {
@@ -321,9 +353,10 @@ describe("usage is read from the index the manager owns", () => {
     const verdict = await manager.decide(
       candidate({ recordId: "c", sizeBytes: 1000, parentId: "p" }),
     );
-    // Each rung's own row had 100 MB free. Reported distinctly because the
-    // remedy is a different number: raising the row does nothing.
-    expect(verdict.reason).toBe("namespace-budget-exhausted");
+    expect(verdict.reason).toBe("budget-exhausted");
+    // Three different class names, one budget line between them — which is the
+    // property that makes inventing rung names cheap instead of free.
+    expect(verdict.budgetLine?.key).toBe("photos:*");
     expect(manager.usageByNamespace()["photos"]).toBe(2000);
   });
 
@@ -357,12 +390,7 @@ describe("a pin that came from a rule, not from the table", () => {
     const manager = build({
       labels,
       overrideRules: [pinRule],
-      policy: policyWith({
-        platform: {
-          rows: { "original:image": { keep: "all", budgetBytes: 500 } },
-          fallback: keepAll,
-        },
-      }),
+      policy: policyWith({ platform: onlyClass("original:image", 500) }),
     });
     const verdict = await manager.decide(candidate({ sizeBytes: 1000 }));
     expect(verdict.decision).toBe("fetch");
@@ -415,158 +443,163 @@ describe("a pin that came from a rule, not from the table", () => {
 });
 
 // ---------------------------------------------------------------------------
-// r4 #6 — N1: the recency dimension can actually bind
+// r4 #6 — the ordering terms reach the row that the pass sorts on
 // ---------------------------------------------------------------------------
 
-describe("recencyAtMs reaches the decider", () => {
-  const recentOnly = policyWith({
-    platform: {
-      rows: {
-        "original:image": { keep: "recent-only", recencyWindowDays: 30, budgetBytes: 100 * MB },
-      },
-      fallback: keepAll,
-    },
-  });
-
+/**
+ * What N1 became.
+ *
+ * The finding was that `recencyAtMs` was hard-coded null at all three
+ * construction sites, so the policy's recency window excluded nothing, ever.
+ * The window is gone — it was predicting what the eviction order does with
+ * better evidence — but the date it read is that order's last term, and null
+ * still collapses a tier of the sort into a tie. So the wiring is asserted
+ * where it now shows: on the row, and on which blob gets displaced.
+ */
+describe("the dates that place a blob in the eviction order", () => {
   /** A `captured_at` as the column stores it: a SQL timestamp, no zone. */
   function storedTimestamp(msAgo: number): string {
     return new Date(Date.now() - msAgo).toISOString().replace("T", " ").slice(0, 19);
   }
 
+  it("records a capture date on the row the pass sorts on", async () => {
+    const manager = build({ capturedAt: { r1: storedTimestamp(200 * DAY_MS) } });
+    const c = candidate();
+    await manager.noteArrival(c, await manager.decide(c));
+    const stored = manager.index.get(c.objectStorageKey)!.recencyAtMs!;
+    expect(Math.abs(stored - (Date.now() - 200 * DAY_MS))).toBeLessThan(2000);
+  });
+
   /**
-   * The finding, stated as a test: before the manager read capture times,
-   * `recent-only` was `keep: "all"` capped by the budget. Every candidate had
-   * `recencyAtMs: null` at all three construction sites, null means "unknown",
-   * and unknown deliberately fetches — so the window excluded nothing, ever,
-   * while the census read a real capture date and promised an operator a number
-   * the engine could not produce.
+   * The rendition half of the same hole, and the more consequential one.
+   *
+   * A rendition's metadata write is `{ width, height }` — there is no
+   * `captured_at` on one — so every derived record ranked null and the
+   * ordering's last tier was dead across the whole ladder, which is most of the
+   * rows in any library. Reading the parent's date is the fix, and it is read
+   * rather than copied because a denormalized date drifts the moment anything
+   * backfills or corrects EXIF.
    */
-  it("declines a record outside the window", async () => {
+  it("reads a derived record's date from its parent", async () => {
     const manager = build({
-      policy: recentOnly,
-      capturedAt: { r1: storedTimestamp(200 * DAY_MS) },
+      capturedAt: { parent1: storedTimestamp(400 * DAY_MS) },
+      records: { parent1: { type: "image/jpeg" } },
+      labels: { r1: [{ appId: "photos", key: "rendition", value: "image-thumb" }] },
     });
-    const verdict = await manager.decide(candidate());
-    expect(verdict.decision).toBe("elide");
-    expect(verdict.reason).toBe("outside-recency-window");
+    const c = candidate({ parentId: "parent1" });
+    await manager.noteArrival(c, await manager.decide(c));
+    const stored = manager.index.get(c.objectStorageKey)!.recencyAtMs!;
+    expect(Math.abs(stored - (Date.now() - 400 * DAY_MS))).toBeLessThan(2000);
   });
 
-  it("keeps a record inside it", async () => {
+  // The direction that must not change. A parent row that cannot be read leaves
+  // the blob undated rather than treated as ancient — the alternative is a
+  // metadata gap deciding which photographs get deleted.
+  it("leaves a derived record undated when its parent cannot be read", async () => {
     const manager = build({
-      policy: recentOnly,
-      capturedAt: { r1: storedTimestamp(5 * DAY_MS) },
+      labels: { r1: [{ appId: "photos", key: "rendition", value: "image-thumb" }] },
     });
-    expect((await manager.decide(candidate())).reason).toBe("within-recency-window");
+    const c = candidate({ parentId: "missing-parent" });
+    await manager.noteArrival(c, await manager.decide(c));
+    expect(manager.index.get(c.objectStorageKey)!.recencyAtMs).toBeNull();
   });
 
-  // An unknown date is not evidence of age. This is the direction that must not
-  // change: a metadata gap costing the bytes would make "the deriver has not run
-  // yet" indistinguishable from "this is ancient".
-  it("fetches when no capture date has been derived yet", async () => {
-    const manager = build({ policy: recentOnly });
-    expect((await manager.decide(candidate())).decision).toBe("fetch");
-  });
-
-  // The stored value is a bare SQL timestamp and the census reads it with
-  // `strftime('%s', ...)`, which is UTC. `Date.parse` reads a zoneless string as
-  // *local*, so the two would disagree by the operator's offset — up to fourteen
-  // hours, enough to move a record across the edge of a window.
-  it("reads a zoneless timestamp as UTC, the way the census does", async () => {
+  // The stored value is a bare SQL timestamp and SQLite's `strftime('%s', ...)`
+  // reads it as UTC. `Date.parse` reads a zoneless string as *local*, so the two
+  // would disagree by the operator's offset — up to fourteen hours.
+  it("reads a zoneless timestamp as UTC", async () => {
     const daysAgo30 = new Date(Date.now() - 30 * DAY_MS);
     const manager = build({
-      policy: policyWith({
-        platform: {
-          rows: {
-            "original:image": {
-              keep: "recent-only",
-              recencyWindowDays: 3650,
-              budgetBytes: 100 * MB,
-            },
-          },
-          fallback: keepAll,
-        },
-      }),
       capturedAt: { r1: daysAgo30.toISOString().replace("T", " ").slice(0, 19) },
     });
     const c = candidate();
     await manager.noteArrival(c, await manager.decide(c));
     const stored = manager.index.get(c.objectStorageKey)!.recencyAtMs!;
-    // Within a second of the UTC reading, rather than an offset away from it.
     expect(Math.abs(stored - daysAgo30.getTime())).toBeLessThan(1000);
-  });
-
-  // `openedWithinDays` is the second half of the axis: a library you actually
-  // browse has a working set that is not the same shape as its calendar. It
-  // reads the index's own `last_opened_at_ms`, which is the row this manager
-  // maintains.
-  it("keeps an old record that was opened recently", async () => {
-    const manager = build({
-      policy: policyWith({
-        platform: {
-          rows: {
-            "original:image": {
-              keep: "recent-only",
-              recencyWindowDays: 30,
-              openedWithinDays: 7,
-              budgetBytes: 100 * MB,
-            },
-          },
-          fallback: keepAll,
-        },
-      }),
-      capturedAt: { r1: storedTimestamp(200 * DAY_MS) },
-    });
-
-    const c = candidate();
-    expect((await manager.decide(c)).decision).toBe("elide");
-
-    await manager.noteArrival(c, {
-      decision: "fetch",
-      sizeClass: null,
-      pinned: false,
-      reason: "explicit-request",
-    });
-    manager.markOpened("r1", Date.now());
-
-    expect((await manager.decide(c)).decision).toBe("fetch");
   });
 
   // Whatever the caller already knew wins: `MobileNode.fetchBlob` passes
   // `lastOpenedAtMs: Date.now()` because opening a photo *is* the event, and it
   // knows that better than any stored row does.
   it("prefers a date the caller supplied over the one it would have looked up", async () => {
-    const manager = build({
-      policy: recentOnly,
-      capturedAt: { r1: storedTimestamp(200 * DAY_MS) },
-    });
-    const verdict = await manager.decide(
-      candidate({ recencyAtMs: Date.now() - 2 * DAY_MS }),
-    );
-    expect(verdict.decision).toBe("fetch");
+    const supplied = Date.now() - 2 * DAY_MS;
+    const manager = build({ capturedAt: { r1: storedTimestamp(200 * DAY_MS) } });
+    const c = candidate({ recencyAtMs: supplied });
+    await manager.noteArrival(c, await manager.decide(c));
+    expect(manager.index.get(c.objectStorageKey)!.recencyAtMs).toBe(supplied);
   });
 
   // An app-syncable row has no shared-record metadata to read, and asking for it
   // by a null type would be a query against a category that does not exist.
-  it("treats an app-syncable blob's recency as unknown rather than querying for it", async () => {
-    const manager = build({
-      policy: policyWith({
-        apps: {},
-        appFallback: {
-          rows: {},
-          fallback: {
-            keep: "recent-only",
-            recencyWindowDays: 30,
-            budgetBytes: 100 * MB,
-          },
-          totalBudgetBytes: 100 * MB,
-        },
-      }),
-      capturedAt: { r1: storedTimestamp(200 * DAY_MS) },
-    });
-    // Unknown fetches, and the stored capture date for the same id is not
-    // borrowed for a row that has nothing to do with it.
-    expect((await manager.decide(candidate({ appId: "notes", type: null }))).decision).toBe(
-      "fetch",
+  it("treats an app-syncable blob's date as unknown rather than querying for it", async () => {
+    const manager = build({ capturedAt: { r1: storedTimestamp(200 * DAY_MS) } });
+    const c = candidate({ appId: "notes", type: null });
+    await manager.noteArrival(c, await manager.decide(c));
+    // The stored capture date for the same id is not borrowed for a row that
+    // has nothing to do with it.
+    expect(manager.index.get(c.objectStorageKey)!.recencyAtMs).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admission by displacement — the acquisition-order half of the ordering
+// ---------------------------------------------------------------------------
+
+/**
+ * A sync round walks the change log forward, which is oldest first. A budget
+ * that simply stopped at full would therefore fill a device with its oldest
+ * material and decline everything since — which is the problem the old
+ * `recent-only` window was quietly standing in for, expressed as a date cutoff
+ * instead of as an order.
+ *
+ * These go through the manager rather than `decideResidency` because the whole
+ * question is whether the resident set answers it, and a stubbed predicate
+ * would assert nothing about that.
+ */
+describe("a full line still admits something that outranks what is held", () => {
+  const tiny = policyWith({ platform: onlyClass("original:image", 2000) });
+
+  async function land(manager: ResidencyManager, id: string, openedAtMs: number | null) {
+    const c = candidate({ recordId: id, objectStorageKey: `key-${id}`, sizeBytes: 1000 });
+    await manager.noteArrival(c, await manager.decide(c));
+    if (openedAtMs !== null) manager.markOpened(id, openedAtMs);
+  }
+
+  it("admits a blob that beats the worst resident, and declines one that does not", async () => {
+    const manager = build({ policy: tiny });
+    // Two blobs fill the line. One has been opened; one never has, so it is the
+    // first thing the next pass would give up.
+    await land(manager, "opened", Date.now());
+    await land(manager, "never-opened", null);
+
+    // A newcomer that has been opened outranks the never-opened resident.
+    const wanted = await manager.decide(
+      candidate({ recordId: "wanted", objectStorageKey: "key-wanted", sizeBytes: 1000, lastOpenedAtMs: Date.now() }),
     );
+    expect(wanted).toMatchObject({ decision: "fetch", reason: "displaces-worse" });
+
+    // One that has not is a tie with the worst resident, and a tie is not a
+    // reason to spend the transfer: landing it would be a download followed by
+    // a delete.
+    const unwanted = await manager.decide(
+      candidate({ recordId: "unwanted", objectStorageKey: "key-unwanted", sizeBytes: 1000 }),
+    );
+    expect(unwanted).toMatchObject({ decision: "elide", reason: "budget-exhausted" });
+  });
+
+  // A pinned resident is not displaceable, so it cannot make room for anything —
+  // `evictionCandidates` excludes it and the admission check reads the same
+  // query, which is what keeps the two halves from disagreeing.
+  it("does not count pinned bytes as displaceable", async () => {
+    const manager = build({ policy: tiny });
+    await land(manager, "pinned-one", null);
+    await land(manager, "pinned-two", null);
+    manager.setPinned("pinned-one", true);
+    manager.setPinned("pinned-two", true);
+
+    const verdict = await manager.decide(
+      candidate({ recordId: "wanted", objectStorageKey: "key-wanted", sizeBytes: 1000, lastOpenedAtMs: Date.now() }),
+    );
+    expect(verdict).toMatchObject({ decision: "elide", reason: "budget-exhausted" });
   });
 });

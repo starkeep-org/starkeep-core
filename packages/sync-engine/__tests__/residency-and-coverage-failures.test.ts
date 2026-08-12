@@ -176,7 +176,7 @@ function wantEverything(over: Partial<ResidencyHooks> = {}): ResidencyHooks {
       decision: "fetch",
       sizeClass: null,
       pinned: false,
-      reason: "keep-all",
+      reason: "within-budget",
     }),
     ...over,
   };
@@ -238,7 +238,7 @@ describe("a residency hook that throws", () => {
             failNext = false;
             throw new Error("[test] transient decider failure");
           }
-          return { decision: "fetch", sizeClass: null, pinned: false, reason: "keep-all" };
+          return { decision: "fetch", sizeClass: null, pinned: false, reason: "within-budget" };
         },
       }),
     });

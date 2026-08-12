@@ -71,16 +71,19 @@ import {
 } from "kysely";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import {
+  budgetLineFor,
+  budgetLinesOf,
   createSqliteResidentSetIndex,
   decideResidency,
-  evictClass,
-  evictNamespace,
+  evictLine,
   isPlatformClass,
+  parseSizeClass,
   previewBudgetReduction,
   resolveSizeClass,
   validateRetentionPolicy,
   PLATFORM_NAMESPACE,
   type BlobCandidate,
+  type BudgetLine,
   type DurabilityPolicy,
   type EvictionOutcome,
   type NodeRetentionPolicy,
@@ -219,8 +222,20 @@ export interface ResidencyManagerOptions {
 
 export interface ResidencyManager {
   readonly index: ResidentSetIndex;
-  /** The fetch-time decision, ready to hand to `createSyncEngine`. */
-  decide(candidate: BlobCandidate): Promise<ResidencyVerdict>;
+  /**
+   * The fetch-time decision, ready to hand to `createSyncEngine`.
+   *
+   * `requested: true` marks a decision made because something actually asked
+   * for these bytes rather than a sync round offering them. It skips the
+   * prefetch question — which is about speculation, and a request is not
+   * speculation — and is otherwise judged identically, budget included. That is
+   * what makes read-through and admission the same rule rather than two that
+   * can disagree.
+   */
+  decide(
+    candidate: BlobCandidate,
+    options?: { readonly requested?: boolean },
+  ): Promise<ResidencyVerdict>;
   /**
    * Record that a blob landed. Called after a successful transfer, so byte
    * accounting reflects what is actually on disk rather than what was intended.
@@ -266,7 +281,7 @@ export interface ResidencyManager {
   usageByNamespace(): Record<string, number>;
   runEviction(probes: readonly ReplicaProbe[]): Promise<EvictionOutcome[]>;
   previewReduction(
-    sizeClass: string,
+    budgetLineKey: string,
     newBudgetBytes: number,
     probes: readonly ReplicaProbe[],
   ): Promise<ReductionPreview>;
@@ -430,28 +445,15 @@ export function createResidencyManager(
   }
 
   /**
-   * The two dates the policy's recency axis reads, which only the host can
-   * answer.
+   * The two dates that place a blob in the eviction order, which only the host
+   * can answer.
    *
-   * ## Why this had to exist for `recent-only` to mean anything
-   *
-   * `decideResidency` has a whole recency branch, and both fields it reads were
-   * hard-coded `null` at every construction site the sync path uses
-   * (`candidateForRecord`, `candidateForManifest`, `candidateForAppRow`) — the
-   * engine has only the record row, and capture time lives in the per-category
-   * metadata table. Null reads as "unknown", and unknown deliberately means
-   * *fetch* ("an unknown date is not evidence of age"), so the window never
-   * excluded anything: `keep: "recent-only"` was `keep: "all"` capped by the
-   * budget, reporting `budget-exhausted` — a different reason with a different
-   * remedy — once the class filled.
-   *
-   * Worse than merely inert, because the projection did not share the gap.
-   * `census.ts` reads a real `COALESCE(im.captured_at, vm.captured_at)` and
-   * tells the operator that "keep the last 90 days" costs 12 GB, an outcome the
-   * engine could not produce. The census and the manager are required to
-   * classify by the same rule — `resolveClass` and `pickLadderLabel` exist as
-   * shared code precisely so they cannot drift — and the recency axis was the
-   * one place that requirement did not hold.
+   * These used to feed a *policy axis* — `recent-only` with a window in days —
+   * and that axis is gone, because a hand-written date cutoff was a prediction
+   * of what the eviction pass computes anyway. What is left is the pass's own
+   * ordering, and these are its two terms, so they matter as much as they ever
+   * did and in a more direct way: a null here does not fail open, it collapses
+   * a tier of the sort into a tie.
    *
    * Read here rather than pushed down into the engine because it is a host fact
    * in exactly the sense the module header describes: the platform must not
@@ -487,32 +489,69 @@ export function createResidencyManager(
    *
    * Null on every uncertainty — an app-syncable row (no shared-record metadata
    * exists for one), a category with no `captured_at` column, a missing row, an
-   * unparseable value, a table that would not read. That is the fail-open
-   * direction *for data*: unknown makes `recent-only` fetch, and the census
-   * agrees ("an unknown date must not read as 'ancient', or every undated
-   * record falls outside every recency window and is quietly marked for
-   * eviction"). Missing metadata must not become deleted bytes.
+   * unparseable value, a table that would not read. Unknown must not read as
+   * "ancient": under the eviction ordering an undated blob already sorts to the
+   * front, and inventing a date to avoid that would be guessing with somebody's
+   * photographs.
+   *
+   * ## Derived records read their parent's date
+   *
+   * A rendition's metadata write is `{ width, height }` — there is no
+   * `captured_at` on one, and there should not be, because a denormalized copy
+   * drifts the moment anything backfills or corrects EXIF. So a record with a
+   * parent asks the parent, which is where the date authoritatively lives.
+   *
+   * Without this, every rendition ranked null and the ordering's last tier was
+   * dead across the entire ladder — which is most of the rows in any library.
+   * It was previously worse than that: the same gap made `recent-only` behave
+   * as "keep everything" on every rendition class, silently, because the census
+   * computed recency the same way and therefore agreed. That rule is gone; the
+   * ordering it fed is not.
+   *
+   * A parent that cannot be read returns null and the blob sorts as undated.
+   * That is the same direction every other branch here takes, and it is the one
+   * that matters most: the alternative is a metadata gap deciding which
+   * photographs get deleted.
    *
    * Deliberately **not** falling back to the record's `createdAt`. That column
    * holds a serialized HLC, not a date, and reading it as a timestamp yields a
    * number that is meaningless and — worse — plausible.
    */
   async function capturedAtMs(candidate: BlobCandidate): Promise<number | null> {
-    if (candidate.appId !== null || candidate.type === null) return null;
+    if (candidate.appId !== null) return null;
+    if (candidate.parentId !== null) return capturedAtOfRecord(candidate.parentId);
+    return candidate.type === null ? null : capturedAtOf(candidate.recordId, candidate.type);
+  }
+
+  /** The same question about a record we hold only an id for — a parent. */
+  async function capturedAtOfRecord(recordId: string): Promise<number | null> {
+    try {
+      const record = await databaseAdapter.get(recordId as StarkeepId);
+      if (!record?.type) return null;
+      return capturedAtOf(recordId, record.type);
+    } catch (err) {
+      console.warn(
+        `[residency] could not read parent ${recordId} for a capture time; treating it as unknown: ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
+
+  async function capturedAtOf(recordId: string, type: string): Promise<number | null> {
     // Asked of the type system rather than hard-coded to image and video: which
     // categories carry a capture date is the core type table's business, and a
     // category gaining one should start working here without an edit.
-    const category = getCategory(typeCategory(candidate.type));
+    const category = getCategory(typeCategory(type));
     if (!category?.metadataColumns.some((c) => c.name === CAPTURED_AT_COLUMN)) {
       return null;
     }
     try {
-      const recordId = candidate.recordId as StarkeepId;
-      const rows = await databaseAdapter.getMetadataByIds(candidate.type, [recordId]);
-      return parseCapturedAt(rows.get(recordId)?.[CAPTURED_AT_COLUMN]);
+      const id = recordId as StarkeepId;
+      const rows = await databaseAdapter.getMetadataByIds(type, [id]);
+      return parseCapturedAt(rows.get(id)?.[CAPTURED_AT_COLUMN]);
     } catch (err) {
       console.warn(
-        `[residency] could not read capture time for ${candidate.recordId}; treating it as unknown: ${(err as Error).message}`,
+        `[residency] could not read capture time for ${recordId}; treating it as unknown: ${(err as Error).message}`,
       );
       return null;
     }
@@ -550,10 +589,13 @@ export function createResidencyManager(
     return candidate.parentId === null || isPlatformClass(cls);
   }
 
-  async function decide(candidate: BlobCandidate): Promise<ResidencyVerdict> {
+  async function decide(
+    candidate: BlobCandidate,
+    options?: { readonly requested?: boolean },
+  ): Promise<ResidencyVerdict> {
     const { sizeClass, deniedHere, overrides } = await labelInputs(candidate);
-    // The recency axis reads two dates the engine cannot know. Without this the
-    // `recent-only` branch of `decideResidency` could never decline anything —
+    // The ordering terms the engine cannot know. Without them every candidate
+    // ranks identically and the displacement check below can never say yes —
     // see {@link recencyInputs}.
     const enriched: BlobCandidate = { ...candidate, ...(await recencyInputs(candidate)) };
     return decideResidency({
@@ -566,8 +608,10 @@ export function createResidencyManager(
       // restrictive winning is exactly the intent.
       constraints: { deniedHere: deniedHere || overrides.excluded },
       overrides: { pinned: isPinned(candidate.recordId) || overrides.pinned },
-      usage: (cls) => (cls === null ? 0 : index.usageOf(cls.qualified)),
-      namespaceUsage: (namespace) => index.usageOfNamespace(namespace),
+      usage: (budgetLine) => index.usageOf(budgetLine.key),
+      displaces: (budgetLine, rank, bytesNeeded) =>
+        index.displaceableBytes(budgetLine.key, rank, bytesNeeded),
+      requested: options?.requested,
     });
   }
 
@@ -596,6 +640,10 @@ export function createResidencyManager(
         objectStorageKey: candidate.objectStorageKey,
         sizeBytes: candidate.sizeBytes,
         sizeClass: cls.qualified,
+        // Resolved from the policy at arrival, so a class that has gained or
+        // lost a row of its own is charged to the line it belongs to now rather
+        // than the one it landed on last time.
+        budgetLineKey: budgetLineFor(policy, cls).key,
         namespace: cls.namespace,
         // The pin the *decision* resolved, which is the only one that saw both
         // sources. Falling back to the table alone — as this used to do
@@ -638,6 +686,7 @@ export function createResidencyManager(
         objectStorageKey: candidate.objectStorageKey,
         sizeBytes: candidate.sizeBytes,
         sizeClass: cls.qualified,
+        budgetLineKey: (verdict.budgetLine ?? budgetLineFor(policy, cls)).key,
         namespace: cls.namespace,
         pinned: verdict.pinned ?? isPinned(candidate.recordId),
         protectedLocally: false,
@@ -699,6 +748,21 @@ export function createResidencyManager(
       return index.usageByNamespace();
     },
 
+    /**
+     * One pass per budget line, and that is the whole of it.
+     *
+     * There used to be a second sweep over whole namespaces, because an app
+     * could sit inside every one of its rows and still breach a separately
+     * configured total. Rows are shares of one namespace budget now, so the
+     * lines of a namespace sum to it exactly and the second sweep could only
+     * ever find what the first had already dealt with.
+     *
+     * Lines come from the policy **and** from what is actually held. The policy
+     * alone would miss a line an operator has since deleted the rows of — whose
+     * bytes are still on disk and now pooled into a fallback — and the index
+     * alone would miss nothing today but would silently stop covering a line
+     * the moment one emptied and refilled between passes.
+     */
     async runEviction(probes: readonly ReplicaProbe[]): Promise<EvictionOutcome[]> {
       const outcomes: EvictionOutcome[] = [];
       const shared = {
@@ -711,31 +775,26 @@ export function createResidencyManager(
           contentHashOfKey(entry.objectStorageKey),
       };
 
-      // Per class first, so a full video budget evicts video and does not touch
-      // stills. Classes with no held bytes are skipped rather than evaluated.
+      const lines = new Map<string, BudgetLine>();
+      for (const budgetLine of budgetLinesOf(policy)) lines.set(budgetLine.key, budgetLine);
       for (const sizeClass of Object.keys(index.usageByClass())) {
-        outcomes.push(await evictClass({ ...shared, sizeClass }));
+        const budgetLine = budgetLineFor(policy, parseSizeClass(sizeClass));
+        lines.set(budgetLine.key, budgetLine);
       }
 
-      // Then per namespace, because an app can be inside every one of its rows
-      // and still over its total — the per-class passes above would each find
-      // nothing to do and leave the breach standing. Runs second so it works
-      // against what the class passes have already freed rather than
-      // double-counting bytes that are about to go anyway.
-      for (const namespace of Object.keys(index.usageByNamespace())) {
-        if (namespace === PLATFORM_NAMESPACE) continue;
-        outcomes.push(await evictNamespace({ ...shared, namespace }));
+      for (const budgetLine of lines.values()) {
+        outcomes.push(await evictLine({ ...shared, budgetLine }));
       }
       return outcomes;
     },
 
     previewReduction(
-      sizeClass: string,
+      budgetLineKey: string,
       newBudgetBytes: number,
       probes: readonly ReplicaProbe[],
     ): Promise<ReductionPreview> {
       return previewBudgetReduction({
-        sizeClass,
+        budgetLineKey,
         newBudgetBytes,
         index,
         probes,

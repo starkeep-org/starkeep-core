@@ -46,21 +46,26 @@ export {
   isPlatformClass,
   retentionRowFor,
   hasRowFor,
-  namespaceTotalFor,
-  KEEP_RULES,
+  namespaceRetentionFor,
+  budgetLineFor,
+  budgetBytesFor,
+  budgetLinesOf,
+  compareEvictionRank,
   PLATFORM_NAMESPACE,
-  type KeepRule,
+  FALLBACK_RUNG,
   type SizeClassRetention,
-  type AppRetention,
+  type NamespaceRetention,
   type NodeRetentionPolicy,
+  type BudgetLine,
+  type EvictionRank,
   type ResolvedSizeClass,
   type RecordConstraints,
   type LocalOverrides,
   type BlobCandidate,
   type ResidencyDecision,
   type ResidencyVerdict,
-  type ClassUsageLookup,
-  type NamespaceUsageLookup,
+  type LineUsageLookup,
+  type DisplacementLookup,
   type DecideResidencyInputs,
 } from "./residency-policy.js";
 
@@ -70,7 +75,6 @@ export {
   type ResidentArrival,
   type ResidentEntry,
   type ResidentSetIndex,
-  type EvictionScope,
   type EvictionCandidateQuery,
 } from "./resident-set.js";
 
@@ -85,8 +89,7 @@ export {
 } from "./durability.js";
 
 export {
-  evictClass,
-  evictNamespace,
+  evictLine,
   previewBudgetReduction,
   shedLoad,
   SHED_ORDER,
@@ -137,8 +140,6 @@ export {
 
 export {
   projectPolicy,
-  projectRow,
-  selectedBytesFor,
   formatBytes,
   type SizeClassCensus,
   type RowProjection,

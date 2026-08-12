@@ -14,13 +14,16 @@ import { MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSqliteResidentSetIndex, type ResidentEntry, type ResidentSetIndex } from "../src/resident-set.js";
 import { assessDurability, type ReplicaProbe } from "../src/durability.js";
 import {
-  evictClass,
-  evictNamespace,
+  evictLine,
   previewBudgetReduction,
   shedLoad,
   SHED_ORDER,
 } from "../src/eviction.js";
-import type { NodeRetentionPolicy } from "../src/residency-policy.js";
+import {
+  budgetLineFor,
+  parseSizeClass,
+  type NodeRetentionPolicy,
+} from "../src/residency-policy.js";
 
 const bytesFor = (n: number) => Buffer.alloc(n, n % 256);
 const hashOf = (b: Buffer) => createHash("sha256").update(b as unknown as Uint8Array).digest("hex");
@@ -31,6 +34,10 @@ function entry(over: Partial<ResidentEntry> & { objectStorageKey: string; sizeBy
   return {
     recordId: over.recordId ?? over.objectStorageKey,
     sizeClass: CLASS_A,
+    // What a blob *is* and what it is *charged to* are two columns. They match
+    // here for a declared rung; the pooled-fallback suite below is where they
+    // deliberately do not.
+    budgetLineKey: over.sizeClass ?? CLASS_A,
     namespace: "appA",
     pinned: false,
     protectedLocally: false,
@@ -47,28 +54,41 @@ function entry(over: Partial<ResidentEntry> & { objectStorageKey: string; sizeBy
   };
 }
 
+/**
+ * A policy giving `classA` exactly `budgetBytes`.
+ *
+ * Shares divide one namespace budget, so a suite that wants a class capped at a
+ * number has to say what else is claiming a share. `classA` takes it all unless
+ * a case widens the fallback — which is what the pooled-line suite does.
+ */
 const policy = (
   budgetBytes: number,
-  totalBudgetBytes = Number.MAX_SAFE_INTEGER,
+  fallbackShare = 0,
 ): NodeRetentionPolicy => ({
-  platform: { rows: {}, fallback: { keep: "all", budgetBytes } },
+  platform: { rows: {}, fallback: { prefetch: true, share: 1 }, budgetBytes: budgetBytes || 1 },
   apps: {
     appA: {
-      rows: { classA: { keep: "all", budgetBytes } },
-      fallback: { keep: "all", budgetBytes },
-      totalBudgetBytes,
+      rows: { classA: { prefetch: true, share: 1 } },
+      fallback: { prefetch: true, share: fallbackShare },
+      budgetBytes: budgetBytes * (1 + fallbackShare) || 1,
     },
   },
   appFallback: {
     rows: {},
-    fallback: { keep: "all", budgetBytes },
-    totalBudgetBytes,
+    fallback: { prefetch: true, share: 1 },
+    budgetBytes: budgetBytes || 1,
   },
 });
+
+/** The budget line a stored class name resolves to, under a given policy. */
+const lineOf = (p: NodeRetentionPolicy, sizeClass: string) =>
+  budgetLineFor(p, parseSizeClass(sizeClass));
 
 /** Class names are stored fully qualified; the row key is only the rung. */
 const CLASS_A = "appA:classA";
 const CLASS_B = "appA:classB";
+/** Where every rung `appA` has not declared is pooled. */
+const FALLBACK_LINE = "appA:*";
 
 describe("resident-set index", () => {
   let db: DatabaseSync;
@@ -128,7 +148,7 @@ describe("resident-set index", () => {
       index.add(entry({ objectStorageKey: "opened-long-ago", sizeBytes: 10, lastOpenedAtMs: 100 }));
 
       const order = index
-        .evictionCandidates({ scope: { kind: "class", sizeClass: CLASS_A }, targetBytes: 999 })
+        .evictionCandidates({ budgetLineKey: CLASS_A, targetBytes: 999 })
         .map((e) => e.objectStorageKey);
       expect(order).toEqual(["never-opened", "opened-long-ago", "opened-recently"]);
     });
@@ -141,7 +161,7 @@ describe("resident-set index", () => {
       index.add(entry({ objectStorageKey: "ordinary", sizeBytes: 10 }));
 
       const keys = index
-        .evictionCandidates({ scope: { kind: "class", sizeClass: CLASS_A }, targetBytes: 999 })
+        .evictionCandidates({ budgetLineKey: CLASS_A, targetBytes: 999 })
         .map((e) => e.objectStorageKey);
       expect(keys).toEqual(["ordinary"]);
     });
@@ -288,10 +308,11 @@ describe("eviction pass", () => {
   }
 
   function request(seeded: { probes: ReplicaProbe[]; hashes: Map<string, string> }, budget: number) {
+    const p = policy(budget);
     return {
-      sizeClass: CLASS_A,
+      budgetLine: lineOf(p, CLASS_A),
       index,
-      policy: policy(budget),
+      policy: p,
       localStorage,
       probes: seeded.probes,
       durability: { minimumReplicas: 1 },
@@ -302,7 +323,7 @@ describe("eviction pass", () => {
   it("does nothing below the high-water mark", async () => {
     const seeded = await seed(5, 100);
     // 500 held against a 1000 budget — 50%, well under 95%.
-    const outcome = await evictClass(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 1000));
     expect(outcome.triggered).toBe(false);
     expect(outcome.evicted).toHaveLength(0);
   });
@@ -311,7 +332,7 @@ describe("eviction pass", () => {
   it("frees down to the low-water mark once the high one is crossed", async () => {
     const seeded = await seed(10, 100);
     // 1000 held, budget 1000 → 100% ≥ 95%, so evict down to 80% (800).
-    const outcome = await evictClass(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 1000));
     expect(outcome.triggered).toBe(true);
     expect(outcome.bytesAfter).toBeLessThanOrEqual(800);
     // …and not far past it: this is a trim, not a purge.
@@ -328,7 +349,7 @@ describe("eviction pass", () => {
   // send.
   it("deletes the bytes and marks the index row departed", async () => {
     const seeded = await seed(10, 100);
-    const outcome = await evictClass(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 1000));
     expect(outcome.evicted.length).toBeGreaterThan(0);
     for (const e of outcome.evicted) {
       expect(await localStorage.has(e.objectStorageKey)).toBe(false);
@@ -343,7 +364,7 @@ describe("eviction pass", () => {
   it("stops counting departed bytes toward the budget", async () => {
     const seeded = await seed(10, 100);
     const before = index.usageOf(CLASS_A);
-    const outcome = await evictClass(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 1000));
     const freed = outcome.evicted.reduce((n, e) => n + e.sizeBytes, 0);
     expect(freed).toBeGreaterThan(0);
     expect(index.usageOf(CLASS_A)).toBe(before - freed);
@@ -353,7 +374,7 @@ describe("eviction pass", () => {
 
   it("refuses to evict anything not confirmed elsewhere", async () => {
     const seeded = await seed(10, 100, { confirmedElsewhere: false });
-    const outcome = await evictClass(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 1000));
 
     expect(outcome.evicted).toHaveLength(0);
     expect(outcome.kept.every((k) => k.reason === "not-confirmed-elsewhere")).toBe(true);
@@ -365,7 +386,7 @@ describe("eviction pass", () => {
 
   it("refuses when there is no content hash to verify a replica against", async () => {
     const seeded = await seed(10, 100);
-    const outcome = await evictClass({ ...request(seeded, 1000), contentHashOf: () => null });
+    const outcome = await evictLine({ ...request(seeded, 1000), contentHashOf: () => null });
     expect(outcome.evicted).toHaveLength(0);
     expect(outcome.kept[0]!.reason).toBe("not-confirmed-elsewhere");
   });
@@ -381,7 +402,7 @@ describe("eviction pass", () => {
       });
     }
 
-    const outcome = await evictClass(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 1000));
     expect(outcome.evicted).toHaveLength(0);
     expect(outcome.kept.every((k) => k.reason === "last-instantly-readable-copy")).toBe(true);
   });
@@ -396,7 +417,7 @@ describe("eviction pass", () => {
         expectedLatencyHours: 12,
       });
     }
-    const outcome = await evictClass({ ...request(seeded, 1000), keepLastInstantCopy: false });
+    const outcome = await evictLine({ ...request(seeded, 1000), keepLastInstantCopy: false });
     expect(outcome.evicted.length).toBeGreaterThan(0);
   });
 
@@ -409,7 +430,7 @@ describe("eviction pass", () => {
     await peerStorage.delete(badKey);
     await peerStorage.put(badKey, wrong, { checksumSha256: b64Of(wrong) });
 
-    const outcome = await evictClass(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 1000));
     expect(outcome.corruptionSuspected).toContain(badKey);
   });
 
@@ -422,7 +443,7 @@ describe("eviction pass", () => {
       confirmedElsewhere: false,
       requiresDurabilityProof: false,
     });
-    const outcome = await evictClass({ ...request(seeded, 1000), canRederive: true });
+    const outcome = await evictLine({ ...request(seeded, 1000), canRederive: true });
     expect(outcome.evicted.length).toBeGreaterThan(0);
   });
 
@@ -435,14 +456,14 @@ describe("eviction pass", () => {
       confirmedElsewhere: false,
       requiresDurabilityProof: false,
     });
-    const outcome = await evictClass(request(seeded, 1000));
+    const outcome = await evictLine(request(seeded, 1000));
     expect(outcome.evicted).toHaveLength(0);
     expect(outcome.kept.every((k) => k.reason === "not-confirmed-elsewhere")).toBe(true);
     expect(outcome.shortfall).toBe(true);
   });
 });
 
-describe("namespace-total eviction pass", () => {
+describe("the pooled fallback line", () => {
   let db: DatabaseSync;
   let index: ResidentSetIndex;
   let localStorage: MockObjectStorageAdapter;
@@ -455,11 +476,22 @@ describe("namespace-total eviction pass", () => {
   });
 
   /**
-   * Spread `count` blobs of `size` bytes across two rungs of one app, all
-   * confirmed on a peer. Two rungs on purpose: the point of this pass is that
-   * it works across a namespace rather than a class.
+   * What this suite replaced, and why the replacement is smaller.
+   *
+   * There used to be a second eviction pass over whole namespaces, because a
+   * row carried an absolute byte count and an app carried a separate total, and
+   * the two failed independently — an app could sit inside every one of its
+   * rows and still breach its total, and a per-class pass would find nothing to
+   * do. Rows are shares of one namespace budget now, so the lines sum to it
+   * exactly and that case cannot arise.
+   *
+   * What genuinely needed the second pass was rung *invention*: a per-rung
+   * fallback handed out one budget per invented name, and only a namespace-wide
+   * cap bounded it. That is now one pooled line, which the ordinary pass
+   * enforces like any other — so these cases are about several classes sharing
+   * one budget rather than about a second kind of budget.
    */
-  async function seedTwoRungs(count: number, size: number) {
+  async function seedInventedRungs(count: number, size: number) {
     const peerStorage = new MockObjectStorageAdapter();
     await peerStorage.init();
     const hashes = new Map<string, string>();
@@ -475,9 +507,12 @@ describe("namespace-total eviction pass", () => {
           objectStorageKey: key,
           sizeBytes: size,
           lastOpenedAtMs: i,
-          sizeClass: i % 2 === 0 ? CLASS_A : CLASS_B,
-          // Renditions: this pass is about an app's total, and everything in
-          // an app namespace has a parent by construction.
+          // Two rung names the policy has never heard of. Different classes for
+          // reporting, one budget line between them.
+          sizeClass: i % 2 === 0 ? "appA:invented-one" : "appA:invented-two",
+          budgetLineKey: FALLBACK_LINE,
+          // Renditions: everything in an app namespace has a parent by
+          // construction.
           requiresDurabilityProof: false,
         }),
       );
@@ -491,121 +526,90 @@ describe("namespace-total eviction pass", () => {
     };
   }
 
-  it("does nothing while the app is under its total", async () => {
-    const seeded = await seedTwoRungs(5, 100);
-    const outcome = await evictNamespace({
-      ...seeded,
-      namespace: "appA",
-      policy: policy(1_000_000, 1000),
-    });
+  /** `classA` at 1000 bytes, and the fallback line at the same again. */
+  const pooling = policy(1000, 1);
+  const fallbackLine = lineOf(pooling, "appA:anything-undeclared");
+
+  it("does nothing while the pooled line is under budget", async () => {
+    const seeded = await seedInventedRungs(5, 100);
+    const outcome = await evictLine({ ...seeded, budgetLine: fallbackLine, policy: pooling });
     expect(outcome.triggered).toBe(false);
   });
 
-  // The case the whole pass exists for. Every class row is enormous, so a
-  // per-class pass finds nothing to do, and without this the total would stay
-  // breached forever.
-  it("evicts across rungs when the total is breached and no single row is", async () => {
-    const seeded = await seedTwoRungs(10, 100);
-    const perClass = await evictClass({ ...seeded, sizeClass: CLASS_A, policy: policy(1_000_000, 1000) });
-    expect(perClass.triggered).toBe(false);
-
-    const outcome = await evictNamespace({
-      ...seeded,
-      namespace: "appA",
-      policy: policy(1_000_000, 1000),
-    });
+  // The case that used to need the second pass. Ten invented rungs would once
+  // have had ten budgets; here they share one, so the ordinary pass sees the
+  // breach and acts on it.
+  it("evicts across every class on the line when the line is full", async () => {
+    const seeded = await seedInventedRungs(20, 100);
+    const outcome = await evictLine({ ...seeded, budgetLine: fallbackLine, policy: pooling });
     expect(outcome.triggered).toBe(true);
     expect(outcome.bytesAfter).toBeLessThanOrEqual(800);
-    // Both rungs gave something up: the ordering is least-recently-useful
-    // across the namespace, not "pick on the biggest class".
-    const evictedClasses = new Set(outcome.evicted.map((e) => e.sizeClass));
-    expect(evictedClasses.size).toBe(2);
+    // Both class names gave something up: the ordering is least-recently-useful
+    // across the line, not "pick on the biggest class".
+    expect(new Set(outcome.evicted.map((e) => e.sizeClass)).size).toBe(2);
   });
 
-  it("reports the namespace it was working over", async () => {
-    const seeded = await seedTwoRungs(10, 100);
-    const outcome = await evictNamespace({
-      ...seeded,
-      namespace: "appA",
-      policy: policy(1_000_000, 1000),
-    });
-    expect(outcome.scope).toEqual({ kind: "namespace", namespace: "appA" });
+  it("reports the line it was working over", async () => {
+    const seeded = await seedInventedRungs(20, 100);
+    const outcome = await evictLine({ ...seeded, budgetLine: fallbackLine, policy: pooling });
+    expect(outcome.budgetLine.key).toBe(FALLBACK_LINE);
   });
 
-  // The platform namespace has rows and no total, so there is nothing here for
-  // this pass to enforce — and inventing one would be a second way to say what
-  // the rows already say.
-  it("never triggers on the platform namespace", async () => {
-    const seeded = await seedTwoRungs(10, 100);
-    for (let i = 0; i < 10; i++) {
-      index.add(
-        entry({
-          objectStorageKey: `platform-${i}`,
-          sizeBytes: 1_000_000,
-          sizeClass: "starkeep:original:image",
-          namespace: "starkeep",
-        }),
-      );
-    }
-    const outcome = await evictNamespace({
-      ...seeded,
-      namespace: "starkeep",
-      policy: policy(1_000_000, 1000),
-    });
-    expect(outcome.triggered).toBe(false);
-    expect(outcome.evicted).toHaveLength(0);
+  // A declared rung has a line of its own, so a full fallback line must not
+  // reach into it. This is the guarantee the old namespace pass could not make.
+  it("does not touch a declared rung's line", async () => {
+    const seeded = await seedInventedRungs(20, 100);
+    index.add(entry({ objectStorageKey: "declared", sizeBytes: 900 }));
+    await evictLine({ ...seeded, budgetLine: fallbackLine, policy: pooling });
+    expect(index.usageOf(CLASS_A)).toBe(900);
   });
 
-  // `validateRetentionPolicy` refuses a policy whose total is missing, so this
+  // `validateRetentionPolicy` refuses a policy whose budget is missing, so this
   // is the second line rather than the first — but it is the line that matters,
   // because a NaN budget does not read as "small". Every comparison against it
   // is false: the high-water check does not hold, so the pass runs, and the
   // target check does not hold either, so it runs until there is nothing left.
   it("refuses to run at all against a budget that is not a number", async () => {
-    const seeded = await seedTwoRungs(10, 100);
-    const broken = policy(1_000_000);
-    const outcome = await evictNamespace({
-      ...seeded,
-      namespace: "appA",
-      policy: {
-        ...broken,
-        apps: { appA: { ...broken.apps.appA!, totalBudgetBytes: undefined as unknown as number } },
+    const seeded = await seedInventedRungs(20, 100);
+    const broken: NodeRetentionPolicy = {
+      ...pooling,
+      apps: {
+        appA: { ...pooling.apps.appA!, budgetBytes: undefined as unknown as number },
       },
-    });
+    };
+    const outcome = await evictLine({ ...seeded, budgetLine: fallbackLine, policy: broken });
     expect(outcome.triggered).toBe(false);
     expect(outcome.evicted).toHaveLength(0);
-    expect(index.usageOfNamespace("appA")).toBe(1000);
+    expect(index.usageOf(FALLBACK_LINE)).toBe(2000);
   });
 
-  // Zero is not the same case, and must keep working: it is what `keep:"never"`
-  // means, and evicting the whole class is the point.
+  // Zero is not the same case, and must keep working: it is what `share: 0`
+  // means, and evicting the whole line is the point.
   it("still evicts everything against a real zero budget", async () => {
-    const seeded = await seedTwoRungs(10, 100);
-    const outcome = await evictClass({
-      ...seeded,
-      sizeClass: CLASS_A,
-      policy: policy(0),
-    });
+    const seeded = await seedInventedRungs(20, 100);
+    const off: NodeRetentionPolicy = {
+      ...pooling,
+      apps: {
+        appA: { ...pooling.apps.appA!, fallback: { prefetch: true, share: 0 } },
+      },
+    };
+    const outcome = await evictLine({ ...seeded, budgetLine: fallbackLine, policy: off });
     expect(outcome.triggered).toBe(true);
-    expect(index.usageOf(CLASS_A)).toBe(0);
+    expect(index.usageOf(FALLBACK_LINE)).toBe(0);
   });
 
-  // A pin wins over the app total exactly as it wins over a class row: the pass
-  // treats the pinned set as fixed and reports the overage rather than
+  // A pin wins over a pooled budget exactly as it wins over a declared one: the
+  // pass treats the pinned set as fixed and reports the overage rather than
   // swallowing it.
   it("still refuses to drop pinned bytes", async () => {
-    const seeded = await seedTwoRungs(10, 100);
+    const seeded = await seedInventedRungs(20, 100);
     for (const e of index.evictionCandidates({
-      scope: { kind: "namespace", namespace: "appA" },
+      budgetLineKey: FALLBACK_LINE,
       targetBytes: Number.MAX_SAFE_INTEGER,
     })) {
       index.setPinned(e.objectStorageKey, true);
     }
-    const outcome = await evictNamespace({
-      ...seeded,
-      namespace: "appA",
-      policy: policy(1_000_000, 1000),
-    });
+    const outcome = await evictLine({ ...seeded, budgetLine: fallbackLine, policy: pooling });
     expect(outcome.evicted).toHaveLength(0);
     expect(outcome.shortfall).toBe(true);
   });
@@ -661,7 +665,7 @@ describe("budget reduction preview", () => {
   it("reports nothing to do when the class already fits", async () => {
     const s = await seedIndexed(5, 100, true);
     const preview = await previewBudgetReduction({
-      sizeClass: CLASS_A,
+      budgetLineKey: CLASS_A,
       newBudgetBytes: 1000,
       index,
       durability: { minimumReplicas: 1 },
@@ -676,7 +680,7 @@ describe("budget reduction preview", () => {
   it("separates what would go from what is held back, and says how much", async () => {
     const s = await seedIndexed(10, 100, true);
     const preview = await previewBudgetReduction({
-      sizeClass: CLASS_A,
+      budgetLineKey: CLASS_A,
       newBudgetBytes: 500,
       index,
       durability: { minimumReplicas: 1 },
@@ -690,7 +694,7 @@ describe("budget reduction preview", () => {
   it("holds back what is not confirmed elsewhere and reports it separately", async () => {
     const s = await seedIndexed(10, 100, false);
     const preview = await previewBudgetReduction({
-      sizeClass: CLASS_A,
+      budgetLineKey: CLASS_A,
       newBudgetBytes: 500,
       index,
       durability: { minimumReplicas: 1 },
@@ -705,7 +709,7 @@ describe("budget reduction preview", () => {
   it("refuses outright when no peer is available to confirm anything", async () => {
     const s = await seedIndexed(10, 100, false);
     const preview = await previewBudgetReduction({
-      sizeClass: CLASS_A,
+      budgetLineKey: CLASS_A,
       newBudgetBytes: 500,
       index,
       probes: [],
