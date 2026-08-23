@@ -87,6 +87,10 @@ import {
   check is skipped by default — on-device data belongs to the person at the
   keyboard, and a sign-in gate there would break local-first — which
   `allowAnonymousLocal: false` overrides.
+  The documented way to answer it for a cloud app is **`sessionAuth()`**, which
+  wires in this package's own cookie-session verifier. The explicit
+  `verifySession` form stays for an unusual verifier; every app in this
+  codebase wants what `sessionAuth()` returns.
 - **`createRuntimeConfigHandler()`** — returns a Next.js GET handler that
   serves the cloud-config env vars (`STARKEEP_API_GATEWAY_URL`,
   `STARKEEP_USER_POOL_ID`, etc.) as JSON. Mount at any route and add
@@ -106,3 +110,43 @@ Because the mount is shared, the cloud surface inherits whatever the local one
 does — which is exactly how a proxy written for loopback ended up answering the
 internet. `endUserAuth` is the field that forces the two surfaces to be
 considered separately.
+
+## The session layer
+
+A cloud app gets sign-in, sign-out, refresh and an origin gate from this
+package rather than writing them. The division is deliberate: the app owns the
+sign-in *page* — its route, markup, copy and styling — and the platform owns
+everything the page talks to, because cookie names, flags, path scoping, the
+Cognito flow and token verification are properties of the deployment rather
+than of any app. The operational rule is that this package ships no React and
+names no app; a component appearing in it means the boundary has been crossed.
+
+Three entry points:
+
+- **`@starkeep/app-client/edge`** — `createAuthGateMiddleware({ publicPaths,
+  signInPath, basePath })`, mounted from the app's `middleware.ts`. It is
+  deny-by-default: a path the manifest has not declared public is refused, so
+  a route added later is gated until someone says otherwise. Pass
+  `publicPaths` from the manifest itself, never as a second hand-maintained
+  copy — Next inlines statically-referenced `process.env` in the edge runtime
+  at build time, so an env-carried list is `undefined` in exactly the place it
+  matters. Edge-safe: no `node:crypto`, no AWS SDK.
+- **`@starkeep/app-client/auth`** — `createSessionRoutes({ appId })`, mounted
+  at `app/api/session/[[...action]]/route.ts`. It serves `sign-in`,
+  `new-password`, `refresh`, `sign-out`, a `GET` probe, and `GET token` for the
+  one case a cookie cannot serve (a call made directly against the gateway,
+  where a bearer token is required). Also exports `verifyIdToken`,
+  `requireSession` and the cookie helpers.
+- **`sessionAuth()`** from the root entry, for the proxy's `endUserAuth`.
+
+Two cookies, both `HttpOnly; Secure; SameSite=Lax; Path=/apps/<appId>`:
+`sk_session` holds the Cognito refresh token and `sk_token` holds a minted ID
+token, re-minted from `sk_session` as it nears expiry. The browser holds no
+Cognito credential at any point, so an XSS on the page has nothing durable to
+take.
+
+This package does **not** depend on `@aws-sdk/client-cognito-identity-provider`
+and must not grow that dependency. `InitiateAuth` and `RespondToAuthChallenge`
+are unauthenticated operations that need no SigV4, so they are a plain `fetch` —
+which is also what keeps the verifier loadable in the edge runtime that
+OpenNext runs middleware in.

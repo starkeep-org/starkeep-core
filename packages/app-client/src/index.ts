@@ -23,6 +23,7 @@ export {
 } from "./proxy";
 export {
   createNextProxyHandler,
+  sessionAuth,
   type NextProxyOptions,
   type NextProxyParams,
   type ProxyEndUserAuth,
