@@ -29,6 +29,7 @@ import { nodeSqliteDriver } from "../../packages/storage-sqlite/src/node-driver.
 import {
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
+  getAppSyncableNamespace,
   sqliteCompiler as qb,
 } from "../../packages/storage-sqlite/src/index.js";
 import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
@@ -57,6 +58,7 @@ import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import type { NodeRetentionPolicy, OverrideRule } from "../../packages/sync-engine/src/index.js";
 import { createResidencyManager, residencyHooks, originalClassFor } from "../../packages/sync-engine/src/index.js";
 import { buildCensus } from "./census.js";
+import { buildUninstallPreview } from "./uninstall-preview.js";
 import {
   createStarkeepId,
   planLabelWrites,
@@ -3090,6 +3092,18 @@ async function main() {
           }
           throw err;
         }
+        return;
+      }
+
+      // GET /admin/apps/:appId/uninstall-preview — what a DELETE would
+      // destroy. Uninstall drops the app's syncable tables and deletes its
+      // syncable file subtree, so admin-web needs to be able to state the
+      // damage in concrete terms before the operator confirms it.
+      const previewMatch = path.match(/^\/admin\/apps\/([^/]+)\/uninstall-preview$/);
+      if (previewMatch && req.method === "GET") {
+        const targetAppId = decodeURIComponent(previewMatch[1]!);
+        const ns = getAppSyncableNamespace(localDb, targetAppId);
+        json(res, buildUninstallPreview(localDb, targetAppId, ns));
         return;
       }
 

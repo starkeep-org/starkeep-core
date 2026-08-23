@@ -9,6 +9,7 @@ import type { NextRequest, NextResponse } from "next/server";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import {
   eventually,
+  getRequest,
   isAlive,
   jsonRequest,
   makeDataDir,
@@ -17,6 +18,10 @@ import {
 } from "./helpers";
 
 let POST: (req: NextRequest) => Promise<NextResponse>;
+let PREVIEW: (
+  req: NextRequest,
+  ctx: { params: Promise<{ appId: string }> },
+) => Promise<NextResponse>;
 let lds: LocalDataServer;
 let dataDir: string;
 let credsDir: string;
@@ -31,6 +36,7 @@ beforeAll(async () => {
   process.env.STARKEEP_DIR = dataDir;
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = lds.url;
   ({ POST } = await import("../app/api/apps/uninstall/route"));
+  ({ GET: PREVIEW } = await import("../app/api/apps/[appId]/uninstall-preview/route"));
 
   // Install directly on the LDS and lay down the secret file the way the
   // install route would.
@@ -58,6 +64,16 @@ const uninstall = (body: unknown) => POST(jsonRequest("/api/apps/uninstall", bod
 it("rejects a missing appId with 400", async () => {
   const res = await uninstall({});
   expect(res.status).toBe(400);
+});
+
+it("previews what uninstall would destroy before anything is deleted", async () => {
+  const res = await PREVIEW(getRequest("/api/apps/doomed-app/uninstall-preview"), {
+    params: Promise.resolve({ appId: "doomed-app" }),
+  });
+  expect(res.status).toBe(200);
+  const preview = (await res.json()) as { appId: string; installed: boolean };
+  expect(preview.appId).toBe("doomed-app");
+  expect(preview.installed).toBe(true);
 });
 
 it("stops the running daemon, deletes the secret, and removes the registry row", async () => {
@@ -88,4 +104,11 @@ it("returns 502 when the local-data-server is unreachable", async () => {
   await lds.stop();
   const res = await uninstall({ appId: "doomed-app" });
   expect(res.status).toBe(502);
+
+  // The preview is what the confirmation dialog waits on, so it has to fail
+  // loudly rather than resolve to an empty "nothing will be lost".
+  const preview = await PREVIEW(getRequest("/api/apps/doomed-app/uninstall-preview"), {
+    params: Promise.resolve({ appId: "doomed-app" }),
+  });
+  expect(preview.status).toBe(502);
 });

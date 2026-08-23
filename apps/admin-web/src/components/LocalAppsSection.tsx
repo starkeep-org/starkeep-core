@@ -7,15 +7,25 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { localDataServerUrl } from "@/lib/runtime-config";
-import type { DaemonStatus, InstallStep, LocalAppEntry } from "@/lib/app-types";
+import type {
+  DaemonStatus,
+  InstallStep,
+  LocalAppEntry,
+  UninstallPreview,
+} from "@/lib/app-types";
 
 export function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; refresh: () => Promise<void>; }) {
   const [error, setError] = useState<string | null>(null);
   const [pendingConsent, setPendingConsent] = useState<LocalAppEntry | null>(null);
+  // App whose uninstall confirmation is open (null when closed).
+  const [pendingUninstall, setPendingUninstall] = useState<LocalAppEntry | null>(null);
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<Record<string, DaemonStatus>>({});
   // App whose install-step ledger is currently displayed (null when closed).
@@ -158,7 +168,7 @@ export function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | nu
   };
 
   const handleUninstall = async (entry: LocalAppEntry) => {
-    if (!confirm(`Uninstall ${entry.appId}? Records it produced will remain in shared storage.`)) return;
+    setPendingUninstall(null);
     setBusyAppId(entry.appId);
     setError(null);
     try {
@@ -240,7 +250,7 @@ export function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | nu
                     size="sm"
                     variant="outline"
                     className="border-red-200 bg-red-50 text-red-700 hover:bg-red-100 hover:text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300 dark:hover:bg-red-900"
-                    onClick={() => handleUninstall(entry)}
+                    onClick={() => setPendingUninstall(entry)}
                     disabled={busyAppId === entry.appId || running || busy}
                     title={running ? "Stop the app before uninstalling" : undefined}
                   >
@@ -306,6 +316,12 @@ export function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | nu
           onCancel={() => setPendingConsent(null)}
         />
       )}
+
+      <UninstallDialog
+        entry={pendingUninstall}
+        onClose={() => setPendingUninstall(null)}
+        onConfirm={() => { if (pendingUninstall) handleUninstall(pendingUninstall); }}
+      />
 
       <InstallStepsDialog
         appId={stepsOpenFor}
@@ -425,6 +441,183 @@ function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose:
       </DialogContent>
     </Dialog>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall confirmation. Uninstall is not the reversible operation its name
+// suggests: it drops the app's own syncable tables and deletes its syncable
+// files outright, here and on every node this one syncs with. The old
+// window.confirm() said very nearly the opposite ("records will remain in
+// shared storage") — true of the shared records the app touched, badly
+// misleading about the app's own data. So this dialog reads the preview
+// endpoint, names what is actually in there, and makes the operator type the
+// app's id to prove the click was deliberate.
+// ---------------------------------------------------------------------------
+
+function UninstallDialog({
+  entry,
+  onClose,
+  onConfirm,
+}: {
+  entry: LocalAppEntry | null;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const [preview, setPreview] = useState<UninstallPreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [typed, setTyped] = useState("");
+
+  const appId = entry?.appId ?? null;
+  const appName = entry?.manifest.name ?? appId ?? "this app";
+  // The id, not the display name: it is lowercase, has no spaces, and is what
+  // the DELETE actually addresses, so there is nothing to get subtly wrong.
+  const phrase = appId ? `uninstall ${appId}` : "";
+  const armed = phrase !== "" && typed.trim().toLowerCase() === phrase;
+
+  useEffect(() => {
+    if (!appId) return;
+    let cancelled = false;
+    setTyped("");
+    setPreview(null);
+    setPreviewError(null);
+    setLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(`/api/apps/${encodeURIComponent(appId)}/uninstall-preview`);
+        if (!res.ok) {
+          const data = (await res.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(data?.error ?? `uninstall-preview failed: ${res.status}`);
+        }
+        const body = (await res.json()) as UninstallPreview;
+        if (!cancelled) setPreview(body);
+      } catch (err) {
+        if (!cancelled) setPreviewError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [appId]);
+
+  const tables = preview?.tables.filter((t) => t.rowCount > 0) ?? [];
+  const files = preview?.files && preview.files.count > 0 ? preview.files : null;
+  const hasData = tables.length > 0 || files !== null;
+
+  return (
+    <Dialog open={entry !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="text-red-700 dark:text-red-400">
+            Uninstall {appName}?
+          </DialogTitle>
+          <DialogDescription>
+            This permanently deletes the data {appName} keeps for itself, and the deletion syncs
+            to every other node, so there is no copy left to restore from.
+          </DialogDescription>
+        </DialogHeader>
+
+        {loading && (
+          <p className="text-sm text-muted-foreground">Checking what this app is holding…</p>
+        )}
+
+        {previewError && (
+          <Alert variant="destructive">
+            <AlertTitle>Could not read this app&apos;s data</AlertTitle>
+            <AlertDescription>
+              {previewError}. Uninstalling will still delete whatever it holds.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {!loading && !previewError && hasData && (
+          <div className="rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-900 dark:bg-red-950/50">
+            <p className="text-sm font-medium text-red-800 dark:text-red-300">
+              The following will be deleted:
+            </p>
+            <ul className="mt-2 flex list-disc flex-col gap-2 pl-5">
+              {tables.map((t) => (
+                <li key={t.name} className="text-sm">
+                  <span className="font-medium">{t.rowCount.toLocaleString()}</span>
+                  {" "}
+                  <span className="font-mono text-xs">{t.name}</span>
+                  {t.rowCount === 1 ? " record" : " records"}
+                  {t.samples.length > 0 && (
+                    <span className="text-muted-foreground">
+                      , including {t.samples.map((v) => `“${v}”`).join(", ")}
+                      {t.rowCount > t.samples.length && " and others"}
+                    </span>
+                  )}
+                </li>
+              ))}
+              {files && (
+                <li className="text-sm">
+                  <span className="font-medium">{files.count.toLocaleString()}</span>
+                  {files.count === 1 ? " file" : " files"} ({formatBytes(files.totalBytes)})
+                  {files.samples.length > 0 && (
+                    <span className="text-muted-foreground">
+                      , including {files.samples.map((f) => f.name).join(", ")}
+                      {files.count > files.samples.length && " and others"}
+                    </span>
+                  )}
+                </li>
+              )}
+            </ul>
+          </div>
+        )}
+
+        {!loading && !previewError && !hasData && (
+          <p className="text-sm text-muted-foreground">
+            This app is not currently holding any app-specific records or files. Uninstalling it
+            still revokes its access to your shared data and discards its credentials.
+          </p>
+        )}
+
+        <p className="text-sm text-muted-foreground">
+          Your shared records stay behind, so the photos, documents and labels this app wrote
+          into shared storage survive the uninstall and remain visible to other apps.
+        </p>
+
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="uninstall-confirm" className="text-sm">
+            Type <span className="font-mono font-medium text-foreground">{phrase}</span> below to
+            confirm.
+          </label>
+          <Input
+            id="uninstall-confirm"
+            autoComplete="off"
+            autoFocus
+            value={typed}
+            placeholder={phrase}
+            onChange={(e) => setTyped(e.target.value)}
+          />
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button
+            className="bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+            disabled={!armed}
+            onClick={onConfirm}
+          >
+            Uninstall {appName}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 
 function ConsentModal({

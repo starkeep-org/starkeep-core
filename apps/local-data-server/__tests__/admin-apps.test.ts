@@ -114,6 +114,107 @@ describe("install", () => {
   });
 });
 
+describe("uninstall preview", () => {
+  let app: InstalledApp;
+
+  beforeAll(async () => {
+    app = await installApp(server, testAppManifest({ id: "preview-app" }));
+    for (const [id, body] of [
+      ["n1", "Sunset over the bay"],
+      ["n2", "Mum's birthday"],
+      ["n3", "Trip to Kyoto"],
+      ["n4", "Groceries"],
+    ] as const) {
+      const res = await app.fetch("/app-data/db/notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ row: { note_id: id, body } }),
+      });
+      expect(res.ok).toBe(true);
+    }
+    await putAppFile(app, "attachments/small.bin", "x".repeat(10));
+    await putAppFile(app, "attachments/large.bin", "x".repeat(5000));
+  });
+
+  it("counts the app's own rows and samples real values", async () => {
+    const res = await fetch(`${server.url}/admin/apps/preview-app/uninstall-preview`);
+    expect(res.status).toBe(200);
+    const preview = (await res.json()) as {
+      installed: boolean;
+      tables: Array<{ name: string; rowCount: number; samples: string[] }>;
+      files: { count: number; totalBytes: number; samples: Array<{ name: string }> } | null;
+    };
+
+    expect(preview.installed).toBe(true);
+    const notes = preview.tables.find((t) => t.name === "notes");
+    expect(notes).toBeDefined();
+    expect(notes!.rowCount).toBe(4);
+    // Samples are the human-written column, not the opaque primary key, and
+    // are capped so the dialog stays a warning rather than a data dump.
+    expect(notes!.samples).toHaveLength(3);
+    for (const sample of notes!.samples) {
+      expect(["Sunset over the bay", "Mum's birthday", "Trip to Kyoto", "Groceries"]).toContain(
+        sample,
+      );
+    }
+
+    // The reserved file-records table is reported as files, not as a table.
+    expect(preview.tables.some((t) => t.name === "_starkeep_sync_records")).toBe(false);
+    expect(preview.files).not.toBeNull();
+    expect(preview.files!.count).toBe(2);
+    expect(preview.files!.totalBytes).toBe(5010);
+    // Largest first, so the sample names the file worth hesitating over.
+    expect(preview.files!.samples[0]!.name).toBe("large.bin");
+  });
+
+  it("stops counting rows the app already retracted", async () => {
+    const del = await app.fetch("/app-data/db/notes", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ where: { note_id: "n4" } }),
+    });
+    expect(del.ok).toBe(true);
+
+    const res = await fetch(`${server.url}/admin/apps/preview-app/uninstall-preview`);
+    const preview = (await res.json()) as {
+      tables: Array<{ name: string; rowCount: number; samples: string[] }>;
+    };
+    expect(preview.tables.find((t) => t.name === "notes")!.rowCount).toBe(3);
+  });
+
+  it("reports a never-installed app as not installed", async () => {
+    const res = await fetch(`${server.url}/admin/apps/never-was/uninstall-preview`);
+    expect(res.status).toBe(200);
+    const preview = (await res.json()) as {
+      installed: boolean;
+      tables: unknown[];
+      files: unknown;
+    };
+    expect(preview.installed).toBe(false);
+    expect(preview.tables).toEqual([]);
+    expect(preview.files).toBeNull();
+  });
+
+  it("reports no files for an app that never opted into app-specific files", async () => {
+    const manifest = testAppManifest({ id: "no-files-app" }) as {
+      infraRequirements: { appSpecificSyncable: { files: boolean } };
+    };
+    manifest.infraRequirements.appSpecificSyncable.files = false;
+    await installApp(server, manifest as unknown as Record<string, unknown>);
+
+    const res = await fetch(`${server.url}/admin/apps/no-files-app/uninstall-preview`);
+    const preview = (await res.json()) as { files: unknown; tables: Array<{ rowCount: number }> };
+    expect(preview.files).toBeNull();
+    expect(preview.tables.every((t) => t.rowCount === 0)).toBe(true);
+
+    await fetch(`${server.url}/admin/apps/no-files-app`, { method: "DELETE" });
+  });
+
+  afterAll(async () => {
+    await fetch(`${server.url}/admin/apps/preview-app`, { method: "DELETE" });
+  });
+});
+
 describe("uninstall", () => {
   let app: InstalledApp;
   let sharedRecordId: string;

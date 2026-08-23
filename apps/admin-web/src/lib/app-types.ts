@@ -51,3 +51,34 @@ export interface InstallStep {
 export function targetsOf(a: LocalAppEntry): AppTarget[] {
   return a.manifest.targets ?? ["local"];
 }
+
+// ---------------------------------------------------------------------------
+// Uninstall preview. Served by /api/apps/[appId]/uninstall-preview, which
+// proxies the local-data-server. Uninstall drops the app's own syncable
+// tables and deletes its syncable files outright, so the confirmation dialog
+// uses this to say what is in them before the operator agrees to lose it.
+// ---------------------------------------------------------------------------
+
+export interface UninstallPreviewTable {
+  /** Manifest-declared table name, e.g. `image_enriched`. */
+  name: string;
+  /** Live rows; tombstoned ones are already gone and are not counted. */
+  rowCount: number;
+  /** Up to three one-line renderings of real rows. */
+  samples: string[];
+}
+
+export interface UninstallPreviewFiles {
+  count: number;
+  totalBytes: number;
+  samples: Array<{ name: string; sizeBytes: number }>;
+}
+
+export interface UninstallPreview {
+  appId: string;
+  /** False when the app has no syncable namespace registered. */
+  installed: boolean;
+  tables: UninstallPreviewTable[];
+  /** Null when the app never opted into app-specific file storage. */
+  files: UninstallPreviewFiles | null;
+}
