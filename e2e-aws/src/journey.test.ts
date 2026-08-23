@@ -594,6 +594,11 @@ function runTeardownScript(script: string): void {
       // This is what listPhotos() does. Before the fix it hit the gateway
       // directly with only a Cognito token and got 401 "Missing X-Starkeep-App"
       // headers; and the manifest only routed GET to the proxy, so writes 404'd.
+      //
+      // That the calls below succeed WITHOUT a token is the exposure, not a
+      // feature: see the negative test immediately after this one. When the
+      // session layer lands, these calls must carry the session cookie the
+      // browser would send, and the next test's 401 assertion becomes true.
       const proxyBase = `${config.apiGatewayUrl}/apps/photos/api/local-data`;
 
       const listRes = await fetch(`${proxyBase}/data/records?limit=500`);
@@ -609,6 +614,64 @@ function runTeardownScript(script: string): void {
         body: JSON.stringify({ typeId: "image", metadata: { width: 1, height: 1 } }),
       });
       expect(metaRes.status).toBe(200);
+    });
+
+    it("refuses an unauthenticated caller on every app data path", async () => {
+      // The negative case. Every other request this suite makes is
+      // authenticated, and a suite that always signs in can never observe that
+      // authentication is optional — which is precisely how the exposure went
+      // unnoticed for three months (postmortem 2026-08-23, §4).
+      //
+      // This asserts the property the platform actually needs: an anonymous
+      // caller who knows the URL gets nothing. It needs no knowledge of why an
+      // exposure exists or where the check belongs; if any future app ships a
+      // reachable data path with no server-side end-user check, this fails.
+      //
+      // KNOWN TO FAIL TODAY, on purpose. Photos' proxy mount answers
+      // `{ auth: "anonymous" }` (see its route.ts) because the session layer in
+      // plan-cloud-app-auth-and-runtime-2026-08-22 §3 has not been built. The
+      // suite runs with `bail: 1`, so until that lands this step stops the
+      // journey here and the stack is deliberately left up. That is the
+      // intended signal: the cloud journey is not green while a deployed app
+      // serves its library to anyone who asks.
+      const appBase = `${config.apiGatewayUrl}/apps/photos`;
+
+      // Both planes: shared records (the library, plus the CloudFront-signed
+      // rendition URLs a list response embeds inline) and app-private rows.
+      const probes: Array<{ label: string; url: string; init?: RequestInit }> = [
+        { label: "shared records (list)", url: `${appBase}/api/local-data/data/records?limit=1` },
+        { label: "app-data rows", url: `${appBase}/api/local-data/app-data/db/image_enriched` },
+        {
+          label: "shared records (write)",
+          url: `${appBase}/api/local-data/data/records/${syncedRecordId}/metadata`,
+          init: {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ typeId: "image", metadata: { width: 1, height: 1 } }),
+          },
+        },
+      ];
+
+      // No Authorization header, no cookie, no prior state — exactly what an
+      // anonymous client on the internet can send. Every probe runs before any
+      // assertion so a failure report names the whole anonymous surface rather
+      // than only the first path that answered.
+      const statuses: number[] = [];
+      for (const probe of probes) {
+        const res = await fetch(probe.url, probe.init);
+        statuses.push(res.status);
+      }
+      const summary = probes.map((p, i) => `${p.label}: ${statuses[i]}`).join("; ");
+
+      for (const [i, probe] of probes.entries()) {
+        expect(
+          [401, 403],
+          `${probe.label} answered an unauthenticated caller with ${statuses[i]}. ` +
+            `An app's data path must refuse a caller it has not authenticated: the ` +
+            `cloud data plane identifies the APP, not the end user, so if the app does ` +
+            `not check, nothing does. All probes: ${summary}`,
+        ).toContain(statuses[i]!);
+      }
     });
 
     it("drives the real cloud Photos UI end-to-end: sign in, upload, see the photo", async () => {

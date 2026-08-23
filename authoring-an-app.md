@@ -29,14 +29,15 @@ and the data server enforces the rules.
 | Part | Required? | What it's for |
 | --- | --- | --- |
 | `starkeep.manifest.json` | **Required** | Declares identity, install targets, and the file/table access the app needs. |
-| `@starkeep/app-client` | **Required** | Request signing, the local-data proxy, and the runtime-config handler. The only `@starkeep/*` package Photos needs at runtime. |
+| `@starkeep/app-client` | **Required** | Request signing, the signing proxy, and the runtime-config handler. The only `@starkeep/*` package Photos needs at runtime. |
 | `@starkeep/admin-manifest` | Optional | The manifest schema + `validateManifest()` — useful in tests to catch manifest errors before install. |
 | Runtime-config route | **Required** | Tells the browser whether this build is paired with a cloud data server or the local one. |
-| Local-data proxy route | **Required (local target)** | Server-side proxy that signs browser requests with the app's HMAC credential. |
+| Signing proxy route | **Required** | Server-side proxy that signs browser requests with the app's HMAC credential. Serves both surfaces, and carries the end-user decision (§4, §10). |
 | A data client | **Required** | The code that actually calls `/data/records`, `/files/presign`, etc. |
 | `appSpecificSyncable` tables/files | Optional | App-private rows and blobs that sync alongside shared records. |
 | `compute` handlers + `pnpm bundle` | Optional (cloud only) | Lambda handlers and the deployment-zip builder for a cloud install. |
-| Auth gate | Required in cloud | Gates the UI behind Cognito sign-in when talking to a remote data server. |
+| Auth gate | Required in cloud | Gates the *UI* behind Cognito sign-in when talking to a remote data server. Cosmetic — enforcement is §10. |
+| Server-side end-user check | **Required in cloud** | Nothing upstream of your app checks who the end user is. See §10. |
 
 ---
 
@@ -115,7 +116,7 @@ pool ids, S3 bucket/region). A local-only build sees these undefined and falls
 back to the same-origin local proxy; a cloud build populates them from the env
 its compute handler declares (§7).
 
-## 4. Proxy + sign requests to the local data server
+## 4. Proxy + sign requests to the data server
 
 The browser must never hold the app's HMAC secret. Add a server-side proxy route
 that signs and forwards:
@@ -123,7 +124,10 @@ that signs and forwards:
 ```ts
 // app/api/local-data/[...path]/route.ts
 import { createNextProxyHandler } from "@starkeep/app-client";
-const handler = createNextProxyHandler({ appId: "photos" });
+const handler = createNextProxyHandler({
+  appId: "photos",
+  endUserAuth: { auth: "session", verifySession },
+});
 export { handler as GET, handler as POST, handler as PUT, handler as PATCH, handler as DELETE };
 ```
 
@@ -132,6 +136,26 @@ export { handler as GET, handler as POST, handler as PUT, handler as PATCH, hand
 time, mode 0600) and adds `X-Starkeep-App-Id` + signature headers. Same-origin,
 so no CORS. The data-server URL (default `127.0.0.1:9820`) is resolved
 server-side.
+
+**This same mount is your cloud data path.** There is no second route for the
+cloud: the package decides server-side whether to forward to the loopback
+local-data-server or, under `STARKEEP_APP_CLIENT_MODE=cloud`, to the shared API
+Gateway with the secret pulled from SSM. The `local-data` segment in the URL is
+historical and describes only where the route originally pointed.
+
+That is why **`endUserAuth` is required, not optional**. This handler holds
+your app's HMAC credential and will sign whatever reaches it, and on the cloud
+surface nothing upstream is checking who the caller is (§10). Answer it with
+one of:
+
+- `{ auth: "session", verifySession }` — refuse callers with no valid session.
+  The proxy returns `401` before the credential is loaded at all. Local mode is
+  exempt by default, because on-device data belongs to the person at the
+  keyboard and a sign-in gate there would break local-first; pass
+  `allowAnonymousLocal: false` to gate both surfaces.
+- `{ auth: "anonymous", justification }` — sign for anyone. Legitimate only
+  when everything behind the proxy is genuinely public. The justification
+  string is there to be read by a reviewer, so write one you would defend.
 
 ## 5. Write a data client
 
@@ -227,7 +251,13 @@ In the manifest, `infraRequirements.compute`:
     { "name": "api", "handler": "infra/src/resize-handler.handler",
       "memoryMb": 512, "timeoutSeconds": 30, "routes": ["POST /api/resize"] },
     { "name": "static", "handler": "index.handler",
-      "routes": ["GET /", "GET /{proxy+}"], "auth": "public",
+      "routes": [
+        "GET /",
+        "ANY /{proxy+}",
+        { "route": "ANY /api/local-data/{proxy+}", "auth": "jwt" }
+      ],
+      "auth": "public",
+      "publicPaths": ["/", "/_next/static/*", "/starkeep-runtime-config"],
       "env": { "STARKEEP_API_GATEWAY_URL": "", "STARKEEP_USER_POOL_ID": "", ... } }
   ]
 }
@@ -236,6 +266,29 @@ In the manifest, `infraRequirements.compute`:
 Each handler names a Lambda entry point **inside your `dist.zip`**, its routes,
 memory/timeout, `auth` (`"jwt"` default or `"public"`), and the `env` keys the
 platform fills in (these feed `getRuntimeConfig()` from §3).
+
+**`auth: "public"` is wider than it looks, and the manifest makes you say so.**
+It removes the Cognito authorizer from the route, and a handler that owns a
+catch-all *is* the whole app — every server route your bundle mounts, including
+the signing proxy from §4, becomes reachable by anyone on the internet. You
+usually still need it, because a browser navigating to a URL cannot send an
+`Authorization` header and your HTML shell has to be reachable for sign-in to
+render at all. Three things narrow it:
+
+- **`publicPaths`** — required whenever an anonymous route is a catch-all.
+  List the sub-paths the opt-out was actually *for*. The installer checks the
+  list against your real route table and refuses the install if it names a path
+  you do not serve, or one the gateway would route somewhere authenticated.
+  The declaration does not enforce anything; it is what makes the decision
+  reviewable, and the installer prints it at install time.
+- **A per-route `auth` override** — the object form of a route entry. API
+  Gateway prefers a more specific route over `{proxy+}`, so a `"jwt"` route for
+  your data subtree, pointed at the same Lambda, puts the authorizer back in
+  front of it while the document at `/` stays open. Use this when your client
+  can send a bearer token on its XHR; a session cookie is not a bearer token,
+  so this composes with, rather than replaces, the check in §4.
+- **The `endUserAuth` decision on your proxy (§4)** — the origin check, and the
+  one that actually holds. See §10.
 
 Then provide a `pnpm bundle` script — the app-owned half of the install contract.
 The installer invokes it with two env vars and consumes the zip it writes:
@@ -256,6 +309,11 @@ When paired with a remote data server, requests need a Cognito token. Wrap the
 app in an auth gate that checks for a refresh token and shows a sign-in form
 otherwise — see `src/lib/AuthGate.tsx` and `SignInForm.tsx`. For local builds the
 gate is a no-op (`not-required`).
+
+**A client-side gate decides what to render and enforces nothing.** It is a
+usability feature, not a security boundary: an attacker never runs your
+JavaScript. Ship it for the user experience, and do the enforcement in §4 and
+§10.
 
 ### 9. Cross-app labels
 
@@ -348,6 +406,48 @@ Things worth knowing before you design around them:
 > default (unlabelled ⇒ included) but pays a scan proportional to how much you're
 > excluding, forever. Prefer the positive filter and treat coverage as an
 > obligation on the labelling app — but know which way it fails.
+
+## 10. Who authenticates the end user in your app
+
+**You do.** This is the single most important thing to know before you deploy
+an app to the cloud, and until 2026-08-23 it was written down only in a comment
+inside the installer's source.
+
+The platform authenticates *apps*, not people. Every request your server code
+makes to the cloud data server carries an HMAC signature that says "this is
+Photos"; the data server checks that signature, assumes your app's role, and
+serves anything your manifest's grants allow. It does not know or ask which
+person is on the other end of the browser. That was a deliberate decision — a
+gateway-level end-user check is incoherent with per-app credentials, so it was
+removed from the data plane in June 2026 — and it means **the only place an end
+user can be checked is your app's own server code**.
+
+Concretely, in a cloud install:
+
+- The **API Gateway JWT authorizer** is on your routes unless you opted out. It
+  works for XHR-only routes your client can attach a bearer token to (Photos'
+  `POST /api/resize` uses it correctly). It cannot protect a document, because
+  a navigation carries no `Authorization` header, so any app with an HTML shell
+  opts at least that much out (§7).
+- **CloudFront is not a boundary.** The gateway origin stays directly
+  reachable, and `data-roles-and-permissions.md` says so explicitly. An edge
+  check is an optimization that keeps anonymous traffic off your Lambda; it is
+  never enforcement.
+- **`AuthGate` is not a boundary** (§8). It runs in the browser.
+- **Your signing proxy is the boundary** (§4). It is the one place every cloud
+  request passes through and the only place that holds your HMAC credential.
+  `endUserAuth` is where you say whether it checks.
+
+The checklist before a cloud install:
+
+1. Every handler's `auth` and `publicPaths` reflect what you actually intend to
+   be anonymous, and the installer's anonymous-route report at install time
+   matches what you expected.
+2. Your proxy's `endUserAuth` is `{ auth: "session", … }`, or you can defend
+   the `justification` string you wrote instead.
+3. An unauthenticated `curl` against your data path returns `401` or `403`.
+   Do this by hand once; the platform's tier-3 e2e asserts it too, and that
+   assertion is the last line of defense for every app.
 
 ---
 

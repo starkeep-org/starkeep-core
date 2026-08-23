@@ -72,9 +72,21 @@ import {
   the two HMAC headers. Body may be `string | Buffer | Uint8Array | undefined`.
 - **`signedFetch(creds, path, init?): Promise<Response>`** — `fetch` wrapper
   that adds the headers and resolves `path` against `creds.dataServerUrl`.
-- **`createNextProxyHandler({ appId })`** — returns a Next.js route handler.
-  Mount at `app/api/local-data/[...path]/route.ts` and re-export it for every
-  verb to give the browser a same-origin URL with HMAC added server-side.
+- **`createNextProxyHandler({ appId, endUserAuth })`** — returns a Next.js
+  route handler. Mount at `app/api/local-data/[...path]/route.ts` and re-export
+  it for every verb to give the browser a same-origin URL with HMAC added
+  server-side.
+
+  `endUserAuth` is **required**, and is either
+  `{ auth: "session", verifySession }` or
+  `{ auth: "anonymous", justification }`. It is required because this handler
+  holds the app's HMAC credential and will sign whatever reaches it: on the
+  cloud surface nothing upstream checks who the caller is (the data plane
+  authenticates the *app*, and a browser navigation cannot carry a bearer
+  token), so if the app does not check, nobody does. In local mode the session
+  check is skipped by default — on-device data belongs to the person at the
+  keyboard, and a sign-in gate there would break local-first — which
+  `allowAnonymousLocal: false` overrides.
 - **`createRuntimeConfigHandler()`** — returns a Next.js GET handler that
   serves the cloud-config env vars (`STARKEEP_API_GATEWAY_URL`,
   `STARKEEP_USER_POOL_ID`, etc.) as JSON. Mount at any route and add
@@ -82,7 +94,15 @@ import {
 
 ## Cross-target apps
 
-Apps with `targets: ["local", "cloud"]` in their manifest use this package
-only on the local side. The cloud side has a different auth model (Cognito
-+ API Gateway) and a different request path shape. Keep the choice behind a
-single data-source resolver in your client (see Photos's `data-client.ts`).
+Apps with `targets: ["local", "cloud"]` in their manifest use this package on
+**both** sides: the same proxy mount serves both surfaces, and the package
+decides server-side whether to forward to the loopback local-data-server or,
+under `STARKEEP_APP_CLIENT_MODE=cloud`, to the shared API Gateway with the
+HMAC secret fetched from SSM. The browser calls one same-origin path either
+way; keep that behind a single data-source resolver in your client (see
+Photos's `data-client.ts`).
+
+Because the mount is shared, the cloud surface inherits whatever the local one
+does — which is exactly how a proxy written for loopback ended up answering the
+internet. `endUserAuth` is the field that forces the two surfaces to be
+considered separately.

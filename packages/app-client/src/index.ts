@@ -21,7 +21,13 @@ export {
   type ProxyResponse,
   proxyToDataServer,
 } from "./proxy";
-export { createNextProxyHandler, type NextProxyOptions, type NextProxyParams } from "./next";
+export {
+  createNextProxyHandler,
+  type NextProxyOptions,
+  type NextProxyParams,
+  type ProxyEndUserAuth,
+  type MinimalNextRequest,
+} from "./next";
 export {
   type RuntimeConfig,
   getRuntimeConfig,

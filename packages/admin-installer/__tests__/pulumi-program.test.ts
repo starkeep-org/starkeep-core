@@ -140,6 +140,39 @@ describe("auth wiring", () => {
     expect(byKey["GET /apps/photos"].authorizationType).toBeUndefined();
     expect(byKey["GET /apps/photos"].authorizerId).toBeUndefined();
   });
+
+  it("lets a per-route override put the authorizer back in front of a subtree", async () => {
+    // Postmortem 5.4: a handler used to be all-or-nothing, so an app that
+    // needed an anonymously-reachable HTML shell published its data plane too.
+    // API Gateway prefers the more specific route, so a jwt route for the data
+    // subtree on the SAME Lambda re-gates it while the document stays open.
+    await run(
+      manifestWithHandlers([
+        {
+          name: "static",
+          auth: "public",
+          routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
+          publicPaths: ["/", "/_next/static/*"],
+        },
+      ]),
+    );
+    const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
+    expect(byKey["GET /apps/photos"].authorizationType).toBeUndefined();
+    expect(byKey["ANY /apps/photos/{proxy+}"].authorizationType).toBeUndefined();
+    expect(byKey["ANY /apps/photos/api/data/{proxy+}"].authorizationType).toBe("JWT");
+    expect(byKey["ANY /apps/photos/api/data/{proxy+}"].authorizerId).toBe("auth123");
+  });
+
+  it("lets a per-route override open one path on an otherwise gated handler", async () => {
+    await run(
+      manifestWithHandlers([
+        { name: "api", routes: ["POST /api/x", { route: "GET /api/health", auth: "public" }] },
+      ]),
+    );
+    const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
+    expect(byKey["POST /apps/photos/api/x"].authorizationType).toBe("JWT");
+    expect(byKey["GET /apps/photos/api/health"].authorizationType).toBeUndefined();
+  });
 });
 
 describe("lambda wiring", () => {

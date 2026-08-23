@@ -138,13 +138,17 @@ describe("install DDL for the photos manifest", () => {
     expect(s.some((t) => t.includes("GRANT INSERT, UPDATE, DELETE ON shared.records TO starkeep_app_photos"))).toBe(true);
   });
 
-  it("grants the image metadata table read and write", async () => {
+  it("grants a metadata table per declared category, and only those", async () => {
     await installPhotos();
     const s = stmts();
-    expect(s.some((t) => t.includes("GRANT SELECT ON shared.record_image_metadata"))).toBe(true);
-    expect(s.some((t) => t.includes("GRANT INSERT, UPDATE ON shared.record_image_metadata"))).toBe(true);
-    // photos declares only image extensions — no other category may appear
-    expect(s.some((t) => t.includes("record_video_metadata"))).toBe(false);
+    // Photos declares image AND video types (a camera roll is both), so both
+    // metadata tables are granted — and nothing else is.
+    for (const table of ["record_image_metadata", "record_video_metadata"]) {
+      expect(s.some((t) => t.includes(`GRANT SELECT ON shared.${table}`)), table).toBe(true);
+      expect(s.some((t) => t.includes(`GRANT INSERT, UPDATE ON shared.${table}`)), table).toBe(true);
+    }
+    expect(s.some((t) => t.includes("record_audio_metadata"))).toBe(false);
+    expect(s.some((t) => t.includes("record_document_metadata"))).toBe(false);
   });
 
   it("upserts one access_grants row per declared type", async () => {

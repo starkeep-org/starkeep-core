@@ -8,6 +8,7 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import type { AppManifest } from "@starkeep/admin-manifest";
+import { prefixAppRouteKey, resolveHandlerRoutes } from "@starkeep/admin-manifest";
 import type { ComputeContext } from "./compute-stack";
 
 /**
@@ -85,11 +86,13 @@ export function buildPulumiProgram(
         payloadFormatVersion: "2.0",
       });
 
-      const routes = handler.routes.length > 0 ? handler.routes : ["$default"];
+      // Each route carries its own resolved auth: the route-level override if
+      // the manifest gave one, else the handler's `auth`. A handler is
+      // therefore no longer all-or-nothing — a public shell can sit beside a
+      // JWT-gated data subtree on the same Lambda.
+      const routes = resolveHandlerRoutes(handler);
       for (let i = 0; i < routes.length; i++) {
-        const routeKey = routes[i] === "$default"
-          ? `$default`
-          : routes[i]!;
+        const route = routes[i]!;
 
         // Prefix every app route under /apps/<appId>. A route key like
         // "GET /foo" becomes "GET /apps/photos/foo". The root "GET /" must
@@ -101,10 +104,7 @@ export function buildPulumiProgram(
         // for the cloud-data-server (data, files, sync, health). A literal
         // segment matching any of those is rejected below; {proxy+} is fine
         // and is shadowed by the more-specific reserved routes at runtime.
-        const prefixedRouteKey = routeKey === "$default"
-          ? routeKey
-          : routeKey.replace(/^([A-Z]+) \/(.*)$/, (_m, method, rest) =>
-              rest === "" ? `${method} /apps/${ctx.appId}` : `${method} /apps/${ctx.appId}/${rest}`);
+        const prefixedRouteKey = prefixAppRouteKey(ctx.appId, route.declared);
 
         if (prefixedRouteKey !== "$default") {
           const match = prefixedRouteKey.match(/^[A-Z]+ (\/.*)$/);
@@ -114,7 +114,7 @@ export function buildPulumiProgram(
             const firstSeg = path.slice(prefix.length).split("/")[0] ?? "";
             if (RESERVED_SUBPATHS.has(firstSeg)) {
               throw new Error(
-                `App "${ctx.appId}" handler "${handler.name}" declares route "${routes[i]}" ` +
+                `App "${ctx.appId}" handler "${handler.name}" declares route "${route.declared}" ` +
                 `which after prefixing becomes "${prefixedRouteKey}". The sub-paths ` +
                 `/apps/${ctx.appId}/{data,files,sync,health,app-data}/... are reserved for the ` +
                 `cloud-data-server and cannot be claimed by an app handler. ` +
@@ -126,15 +126,15 @@ export function buildPulumiProgram(
           }
         }
 
-        const isPublic = handler.auth === "public";
-        const route = new aws.apigatewayv2.Route(`route-${handler.name}-${i}`, {
+        const isPublic = route.auth === "public";
+        const created = new aws.apigatewayv2.Route(`route-${handler.name}-${i}`, {
           apiId: ctx.apiGatewayId,
           routeKey: prefixedRouteKey,
           target: pulumi.interpolate`integrations/${integration.id}`,
           ...(isPublic ? {} : { authorizerId: ctx.authorizerId, authorizationType: "JWT" }),
         });
 
-        outputs[`routeId:${handler.name}-${i}`] = route.id;
+        outputs[`routeId:${handler.name}-${i}`] = created.id;
       }
 
       outputs[`functionArn:${handler.name}`] = fn.arn;

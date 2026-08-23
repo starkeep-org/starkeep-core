@@ -22,6 +22,8 @@ export type {
   CloudDataServerInstallOutputs,
 } from "./builtin-installs";
 
+export { formatAnonymousRouteReport } from "./anonymous-route-report";
+
 export { roleChain } from "./session";
 export type { AwsCredentials } from "./session";
 
