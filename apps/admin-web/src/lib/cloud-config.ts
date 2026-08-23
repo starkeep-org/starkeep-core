@@ -36,6 +36,7 @@ export interface StarkeepConfig {
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
+  sessionAuthorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
 }

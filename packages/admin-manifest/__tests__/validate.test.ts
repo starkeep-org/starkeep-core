@@ -42,8 +42,13 @@ describe("photos fixture (full real manifest)", () => {
     const api = m.infraRequirements.compute.handlers.find((h) => h.name === "api");
     expect(api?.runtime).toBe("nodejs22.x");
     expect(api?.auth).toBe("jwt");
+    // The shell handler is what a browser navigates to, so it takes the
+    // session authorizer rather than the JWT one (which reads a header a
+    // navigation cannot send) or none at all (which was the exposure).
     const staticHandler = m.infraRequirements.compute.handlers.find((h) => h.name === "static");
-    expect(staticHandler?.auth).toBe("public");
+    expect(staticHandler?.auth).toBe("session");
+    expect(staticHandler?.publicPaths).toContain("/sign-in");
+    expect(staticHandler?.publicPaths).toContain("/api/session/*");
     // Re-parsing the typed output is stable (round-trip)
     expect(appManifestSchema.parse(m)).toEqual(m);
   });
@@ -553,6 +558,79 @@ describe("anonymous routes and publicPaths", () => {
     );
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("requires\nauthentication") || e.includes("requires authentication"))).toBe(true);
+  });
+
+  it("accepts auth \"session\" with the paths sign-in needs", () => {
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({
+          auth: "session",
+          routes: ["GET /", "ANY /{proxy+}"],
+          publicPaths: ["/", "/_next/static/*", "/sign-in", "/api/session/*"],
+        }),
+      ]),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
+  });
+
+  it("refuses auth \"session\" with no publicPaths, because nobody could sign in", () => {
+    // Not a security failure but a total one: the gate would refuse the very
+    // page it redirects to.
+    const result = validateManifest(
+      withHandlers([staticHandler({ auth: "session", routes: ["GET /", "ANY /{proxy+}"] })]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("nobody can sign in"))).toBe(true);
+  });
+
+  it("does not ask a session handler to justify its catch-all", () => {
+    // Under "public" the catch-all is wider than the declaration, so the
+    // manifest has to say what the opt-out was for. Under "session" the
+    // catch-all is gated and the declaration is the reach, so there is nothing
+    // to account for — asking anyway would be asking about a hole that is not
+    // there.
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({ auth: "session", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/"] }),
+      ]),
+    );
+    expect(result.errors.some((e) => e.includes("is a catch-all with auth"))).toBe(false);
+    expect(result.valid).toBe(true);
+  });
+
+  it("does not ask whether a session publicPath is served — the entry is what serves it", () => {
+    // Under "public" a declared path had to already be routed somewhere, or
+    // the declaration described a route that did not exist. Under "session"
+    // the entry *becomes* a route, so asking would be circular: the answer is
+    // yes by construction. Whether the app's own bundle serves that path is a
+    // question the platform cannot answer either way.
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({ auth: "session", routes: ["GET /"], publicPaths: ["/", "/sign-in"] }),
+      ]),
+    );
+    expect(result.errors).toEqual([]);
+  });
+
+  it("refuses a session publicPath that would silently override a gated route", () => {
+    // The derived public route replaces a declared route on the same path, so
+    // an explicit { auth: "jwt" } override sitting under a declared public
+    // path would be quietly discarded — and the manifest would be saying two
+    // opposite things about one path with no indication which one won.
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({
+          auth: "session",
+          routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
+          publicPaths: ["/", "/api/data/*"],
+        }),
+      ]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("Declaring a path public and gating it"))).toBe(
+      true,
+    );
   });
 
   it("rejects a duplicate publicPaths entry", () => {

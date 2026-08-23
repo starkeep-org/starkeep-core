@@ -145,6 +145,8 @@ export interface CloudDataServerInstallOutputs {
   apiGatewayId: string;
   apiGatewayExecutionArn: string;
   authorizerId: string;
+  /** The REQUEST authorizer that reads the session cookie. */
+  sessionAuthorizerId: string;
   functionArn: string;
   region: string;
 }
@@ -376,6 +378,7 @@ export async function installCloudDataServer(
     const apiGatewayUrl = String(outputs.apiGatewayUrl);
     const publicBaseUrl = String(outputs.publicBaseUrl);
     const authorizerId = String(outputs.authorizerId);
+    const sessionAuthorizerId = String(outputs.sessionAuthorizerId);
     const functionArn = String(outputs.functionArn);
     const region = String(outputs.region);
 
@@ -442,6 +445,7 @@ export async function installCloudDataServer(
       apiGatewayId,
       apiGatewayExecutionArn,
       authorizerId,
+      sessionAuthorizerId,
       functionArn,
       region,
     };

@@ -76,6 +76,16 @@ export interface ComputeContext {
    */
   apiGatewayUrl: string;
   authorizerId: string;
+  /**
+   * The platform session authorizer (a REQUEST authorizer reading the session
+   * cookie), for handlers declaring `auth: "session"`.
+   *
+   * Optional because a cloud-data-server stack installed before this existed
+   * does not export one. The Pulumi program refuses rather than falling back
+   * to no authorizer: a silent fallback would deploy the app wide open and
+   * look like a successful install.
+   */
+  sessionAuthorizerId?: string;
   region: string;
   accountId: string;
   pulumiStateBucket: string;

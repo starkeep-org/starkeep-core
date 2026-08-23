@@ -271,6 +271,7 @@ await installApp({
     apiGatewayExecutionArn,
     apiGatewayUrl: config.apiGatewayUrl ?? "",
     authorizerId: config.authorizerId,
+    sessionAuthorizerId: config.sessionAuthorizerId,
     permissionsBoundaryArn,
     foundationalPermissionsBoundaryArn,
     userDataOwnerPermissionsBoundaryArn,

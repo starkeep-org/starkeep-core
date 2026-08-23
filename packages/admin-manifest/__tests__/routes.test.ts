@@ -137,12 +137,19 @@ describe("anonymousRoutes", () => {
     });
 
     expect(anonymousRoutes(manifest)).toEqual([
-      { handlerName: "static", declared: "GET /", routeKey: "GET /apps/photos", catchAll: false },
+      {
+        handlerName: "static",
+        declared: "GET /",
+        routeKey: "GET /apps/photos",
+        catchAll: false,
+        derived: false,
+      },
       {
         handlerName: "static",
         declared: "ANY /{proxy+}",
         routeKey: "ANY /apps/photos/{proxy+}",
         catchAll: true,
+        derived: false,
       },
     ]);
   });
@@ -166,5 +173,132 @@ describe("probePathFor", () => {
     expect(probePathFor("/_next/static/*")).toBe("/_next/static/x");
     expect(probePathFor("/*")).toBe("/x");
     expect(probePathFor("/sign-in")).toBe("/sign-in");
+  });
+});
+
+describe("auth: \"session\" — publicPaths become real routes", () => {
+  /**
+   * The inversion the 2026-08-23 postmortem asks for. Under `public` a
+   * catch-all was wider than the declaration beside it, so `publicPaths` was a
+   * statement of intent that enforced nothing. Under `session` the catch-all
+   * is gated and each entry is emitted as a more-specific unauthenticated
+   * route, so the declaration *is* the reach.
+   */
+  function sessionManifest(publicPaths: string[]) {
+    return appManifestSchema.parse({
+      id: "memo",
+      name: "Memo",
+      version: "0.1.0",
+      tier: "official",
+      infraRequirements: {
+        compute: {
+          enabled: true,
+          handlers: [
+            {
+              name: "static",
+              handler: "index.handler",
+              auth: "session",
+              routes: ["GET /", "ANY /{proxy+}"],
+              publicPaths,
+            },
+          ],
+        },
+      },
+    });
+  }
+
+  const DEFAULTS = ["/", "/_next/static/*", "/starkeep-runtime-config", "/sign-in", "/api/session/*"];
+
+  it("gates the catch-all", () => {
+    const handler = sessionManifest(DEFAULTS).infraRequirements.compute.handlers[0]!;
+    const catchAll = resolveHandlerRoutes(handler).find(
+      (r) => r.path === "/{proxy+}" && !r.derived,
+    );
+    expect(catchAll?.auth).toBe("session");
+  });
+
+  it("emits one unauthenticated route per declared public path", () => {
+    const handler = sessionManifest(DEFAULTS).infraRequirements.compute.handlers[0]!;
+    const derived = resolveHandlerRoutes(handler).filter((r) => r.derived);
+    expect(derived.map((r) => `${r.method} ${r.path}`)).toEqual([
+      "ANY /",
+      "ANY /_next/static/{proxy+}",
+      "ANY /starkeep-runtime-config",
+      "ANY /sign-in",
+      "ANY /api/session/{proxy+}",
+    ]);
+    expect(derived.every((r) => r.auth === "public")).toBe(true);
+  });
+
+  it("replaces a declared route on the same path, whatever its method", () => {
+    // The manifest declares `GET /` and the declaration covers `/`. Left
+    // alongside each other, API Gateway prefers the concrete method, so the
+    // app root would come out gated with a public route beside it that never
+    // matched — the exact opposite of what the manifest says.
+    const handler = sessionManifest(DEFAULTS).infraRequirements.compute.handlers[0]!;
+    const atRoot = resolveHandlerRoutes(handler).filter((r) => r.path === "/");
+    expect(atRoot).toHaveLength(1);
+    expect(atRoot[0]!.auth).toBe("public");
+    expect(atRoot[0]!.derived).toBe(true);
+  });
+
+  it("leaves an undeclared path gated, which is the whole point", () => {
+    const handler = sessionManifest(DEFAULTS).infraRequirements.compute.handlers[0]!;
+    const routes = resolveHandlerRoutes(handler);
+    expect(matchRoute(routes, "GET", "/api/local-data/app-data/db/decks")?.auth).toBe("session");
+    expect(matchRoute(routes, "POST", "/api/local-data/data/records")?.auth).toBe("session");
+    expect(matchRoute(routes, "GET", "/browse")?.auth).toBe("session");
+  });
+
+  it("lets each declared path through", () => {
+    const handler = sessionManifest(DEFAULTS).infraRequirements.compute.handlers[0]!;
+    const routes = resolveHandlerRoutes(handler);
+    for (const [method, path] of [
+      ["GET", "/"],
+      ["GET", "/_next/static/chunks/main.js"],
+      ["GET", "/starkeep-runtime-config"],
+      ["GET", "/sign-in"],
+      ["POST", "/api/session/sign-in"],
+    ] as const) {
+      expect(matchRoute(routes, method, path)?.auth, `${method} ${path}`).toBe("public");
+    }
+  });
+
+  it("reports the derived routes, not the catch-all, as the anonymous surface", () => {
+    const entries = anonymousRoutes(sessionManifest(["/", "/sign-in"]));
+    expect(entries).toEqual([
+      {
+        handlerName: "static",
+        declared: "/",
+        routeKey: "ANY /apps/memo",
+        catchAll: false,
+        derived: true,
+      },
+      {
+        handlerName: "static",
+        declared: "/sign-in",
+        routeKey: "ANY /apps/memo/sign-in",
+        catchAll: false,
+        derived: true,
+      },
+    ]);
+    // Nothing anonymous is a catch-all, so the surface is exact rather than a
+    // lower bound.
+    expect(entries.some((e) => e.catchAll)).toBe(false);
+  });
+
+  it("treats a wildcard public path as a catch-all in the report", () => {
+    // `/api/session/*` really is a subtree, and the report should say so even
+    // though it is bounded by the declaration.
+    const entries = anonymousRoutes(sessionManifest(["/api/session/*"]));
+    expect(entries).toEqual([
+      {
+        handlerName: "static",
+        declared: "/api/session/*",
+        routeKey: "ANY /apps/memo/api/session/{proxy+}",
+        catchAll: true,
+        derived: true,
+      },
+    ]);
   });
 });

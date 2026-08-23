@@ -771,9 +771,11 @@ async function main() {
       ...(residencyManager ? { residency: residencyHooks(residencyManager) } : {}),
       localDb: databaseAdapter.getRawDatabase(),
       cloudUrl: CLOUD_URL,
-      // Outbound auth is per-request HMAC, not bearer JWT (see sync-supervisor.ts
-      // → makeSignerFor). The id token is still used elsewhere for admin-web's
-      // own AWS calls.
+      // Outbound auth is both: the per-request HMAC identifies the app, and
+      // the ID token identifies the person it is syncing for. The broker
+      // requires both. An accessor rather than the value, because engines
+      // outlive the hourly token — see makeSignerFor in sync-supervisor.ts.
+      getIdToken: () => currentIdToken,
       listInstalledApps: () =>
         listAppRegistry(localDb).map((row) => ({
           appId: row.appId,

@@ -1,8 +1,8 @@
 /**
  * buildPulumiProgram under Pulumi's runtime mocks — no cloud, no engine.
  * Asserts the manifest→infrastructure translation: route prefix rewriting,
- * the reserved-subpath hard failure, JWT-vs-public wiring, and the env block
- * every per-app Lambda must carry.
+ * the reserved-subpath hard failure, the three-way auth wiring, and the env
+ * block every per-app Lambda must carry.
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import * as pulumi from "@pulumi/pulumi";
@@ -42,6 +42,7 @@ const ctx: ComputeContext = {
   apiGatewayExecutionArn: "arn:aws:execute-api:us-east-1:111122223333:api123",
   apiGatewayUrl: "https://api.example.com",
   authorizerId: "auth123",
+  sessionAuthorizerId: "session-auth-456",
   region: "us-east-1",
   accountId: "111122223333",
   pulumiStateBucket: "starkeep-pulumi-state",
@@ -172,6 +173,87 @@ describe("auth wiring", () => {
     const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
     expect(byKey["POST /apps/photos/api/x"].authorizationType).toBe("JWT");
     expect(byKey["GET /apps/photos/api/health"].authorizationType).toBeUndefined();
+  });
+});
+
+describe("auth wiring: session", () => {
+  /**
+   * The inversion. Under `public` the catch-all was wider than the declaration
+   * beside it, so `publicPaths` stated an intention and enforced nothing — the
+   * shape behind the 2026-08 exposure. Under `session` the catch-all carries
+   * the platform authorizer and each declared path is emitted as its own more
+   * specific unauthenticated route, so the declaration is the reach.
+   */
+  const sessionHandler = {
+    name: "static",
+    auth: "session" as const,
+    routes: ["GET /", "ANY /{proxy+}"],
+    publicPaths: ["/", "/_next/static/*", "/sign-in", "/api/session/*"],
+  };
+
+  it("puts the session authorizer on the catch-all", async () => {
+    await run(manifestWithHandlers([sessionHandler]));
+    const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
+    expect(byKey["ANY /apps/photos/{proxy+}"].authorizationType).toBe("CUSTOM");
+    expect(byKey["ANY /apps/photos/{proxy+}"].authorizerId).toBe("session-auth-456");
+  });
+
+  it("emits one unauthenticated route per declared public path", async () => {
+    await run(manifestWithHandlers([sessionHandler]));
+    const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
+    for (const key of [
+      "ANY /apps/photos",
+      "ANY /apps/photos/_next/static/{proxy+}",
+      "ANY /apps/photos/sign-in",
+      "ANY /apps/photos/api/session/{proxy+}",
+    ]) {
+      expect(byKey[key], key).toBeDefined();
+      expect(byKey[key].authorizationType, key).toBeUndefined();
+    }
+  });
+
+  it("does not leave the declared GET / gated beside a public route for the same path", async () => {
+    // API Gateway prefers a concrete method over ANY, so `GET /apps/photos`
+    // (gated, inherited from the handler) would beat `ANY /apps/photos`
+    // (public, derived) and the app root would come out behind the gate with a
+    // public route next to it that never matched.
+    await run(manifestWithHandlers([sessionHandler]));
+    const atRoot = routes().filter((r) => r.inputs.routeKey === "GET /apps/photos");
+    expect(atRoot).toEqual([]);
+  });
+
+  it("gates everything the declaration does not name", async () => {
+    await run(manifestWithHandlers([sessionHandler]));
+    const anonymous = routes()
+      .filter((r) => r.inputs.authorizationType === undefined)
+      .map((r) => r.inputs.routeKey);
+    expect(anonymous.sort()).toEqual([
+      "ANY /apps/photos",
+      "ANY /apps/photos/_next/static/{proxy+}",
+      "ANY /apps/photos/api/session/{proxy+}",
+      "ANY /apps/photos/sign-in",
+    ]);
+    // The path whose exposure was the incident is not among them, and is not
+    // reachable through any of them either.
+    expect(anonymous).not.toContain("ANY /apps/photos/api/local-data/{proxy+}");
+  });
+
+  it("refuses to install rather than deploy ungated when the stack has no session authorizer", async () => {
+    // A silent fallback to no authorizer would publish every route to the
+    // internet and look like a successful install — the exact failure mode
+    // this mechanism exists to prevent.
+    const { sessionAuthorizerId, ...withoutAuthorizer } = ctx;
+    void sessionAuthorizerId;
+    await expect(
+      buildPulumiProgram(manifestWithHandlers([sessionHandler]), withoutAuthorizer)(),
+    ).rejects.toThrow(/would publish every route to the internet/);
+  });
+
+  it("leaves a jwt handler on the same app untouched", async () => {
+    await run(manifestWithHandlers([sessionHandler, { name: "api", routes: ["POST /api/resize"] }]));
+    const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
+    expect(byKey["POST /apps/photos/api/resize"].authorizationType).toBe("JWT");
+    expect(byKey["POST /apps/photos/api/resize"].authorizerId).toBe("auth123");
   });
 });
 

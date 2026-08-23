@@ -19,7 +19,7 @@ import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
 import { createEngineRunner, type EngineRunner } from "./engine-runner.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
-import { signRequest } from "../../packages/app-client/src/sign.js";
+import { signRequest, USER_TOKEN_HEADER } from "../../packages/app-client/src/sign.js";
 import { appRegistryRow } from "../../packages/admin-installer/src/local/registry.js";
 
 /**
@@ -87,6 +87,20 @@ export interface SyncSupervisorOptions {
    * record blobs land on the same disk.
    */
   readonly residency?: ResidencyHooks;
+  /**
+   * The current Cognito ID token, read at request time.
+   *
+   * The cloud data plane requires a credential bound to a named end user on
+   * every /apps/{appId}/* call — the HMAC says which app is calling, and this
+   * says a real person is behind it. The supervisor already holds one and
+   * already refuses to run without it (`startOrKickSupervisor` opens with
+   * `if (!idTokenIsLive()) return;`), so attaching it adds no failure mode:
+   * an expired refresh token stops sync today either way.
+   *
+   * An accessor rather than a value, because the token rotates hourly and
+   * engines outlive it by a long way.
+   */
+  readonly getIdToken: () => string | null;
 }
 
 interface EngineEntry {
@@ -229,6 +243,7 @@ export function createSyncSupervisor(
     maxBytes,
     maxItems,
     residency,
+    getIdToken,
   } = options;
 
   const engines = new Map<string, EngineEntry>();
@@ -247,6 +262,11 @@ export function createSyncSupervisor(
   // would keep retrying and the warning was easy to miss. Refusing to start
   // the engine is louder and matches the install invariant: every registered
   // app has an hmac_secret.
+  //
+  // Alongside the signature, every request carries the end user's ID token.
+  // The broker requires both: the HMAC identifies the app, the token
+  // identifies the person the app is acting for, and neither substitutes for
+  // the other.
   function makeSignerFor(
     appId: string,
   ): (method: string, path: string, body: string) => Record<string, string> {
@@ -259,8 +279,13 @@ export function createSyncSupervisor(
         `outbound requests without it.`,
       );
     }
-    return (method: string, path: string, body: string) =>
-      signRequest({ appId, hmacSecret, method, path, body });
+    return (method: string, path: string, body: string) => ({
+      ...signRequest({ appId, hmacSecret, method, path, body }),
+      // Read here, inside the closure, and not at makeSignerFor time. The
+      // token rotates roughly hourly; an engine started once at boot would
+      // otherwise keep presenting the token it was born with.
+      [USER_TOKEN_HEADER]: getIdToken() ?? "",
+    });
   }
 
   function makeEngineEntry(

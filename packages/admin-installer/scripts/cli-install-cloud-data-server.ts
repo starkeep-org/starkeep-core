@@ -66,6 +66,7 @@ interface StarkeepConfig {
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
+  sessionAuthorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
 }
@@ -228,6 +229,7 @@ const updated: StarkeepConfig = {
   apiGatewayId: outputs.apiGatewayId,
   apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
   authorizerId: outputs.authorizerId,
+  sessionAuthorizerId: outputs.sessionAuthorizerId,
   s3Bucket: outputs.bucketName,
   auroraEndpoint: outputs.auroraHostname,
 };

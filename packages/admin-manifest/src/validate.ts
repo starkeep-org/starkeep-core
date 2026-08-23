@@ -1,7 +1,13 @@
 import type { AppManifest } from "./schema.js";
 import { appManifestSchema } from "./schema.js";
 import { isKnownType, typeCategory } from "@starkeep/protocol-primitives";
-import { matchRoute, probePathFor, resolveHandlerRoutes } from "./routes.js";
+import {
+  declaredHandlerRoutes,
+  matchRoute,
+  probePathFor,
+  publicPathRoutePath,
+  resolveHandlerRoutes,
+} from "./routes.js";
 
 export interface ValidationResult {
   valid: boolean;
@@ -132,10 +138,34 @@ export function validateManifest(raw: unknown): ValidationResult {
   // has to be reachable. What it now costs is a `publicPaths` declaration
   // naming the subpaths the opt-out was *for*, checked against the handler's
   // real route table so it cannot name something the handler does not serve.
+  //
+  // `auth: "session"` is the better answer and the one a browser app should
+  // take: the catch-all carries the session authorizer, and each publicPaths
+  // entry is emitted as its own more-specific unauthenticated route. The
+  // "declare what the opt-out was for" rule therefore does not apply — there
+  // is no opt-out on the catch-all to account for — but the entries still have
+  // to name routes the handler serves, or the declaration describes a
+  // deployment that does not exist.
   for (const handler of manifest.infraRequirements.compute.handlers) {
     const routes = resolveHandlerRoutes(handler);
+    // What the manifest actually wrote down, before publicPaths derivation —
+    // needed to tell an author's own `jwt` override from a route this file's
+    // rules just synthesized.
+    const declaredRoutes = declaredHandlerRoutes(handler);
     const anonymous = routes.filter((r) => r.auth === "public");
-    const anonymousCatchAll = anonymous.filter((r) => r.catchAll);
+    // A derived route came from publicPaths itself, so it is not evidence that
+    // the declaration was needed — counting it would make the check circular.
+    const anonymousCatchAll = anonymous.filter((r) => r.catchAll && !r.derived);
+
+    if (handler.auth === "session" && handler.publicPaths.length === 0) {
+      errors.push(
+        `infraRequirements.compute.handlers["${handler.name}"]: auth "session" gates every ` +
+          `route on this handler, including the one that serves the sign-in page. Declare ` +
+          `"publicPaths" with at least the shell and the session routes (e.g. ` +
+          `["/", "/_next/static/*", "/sign-in", "/api/session/*"]), or nobody can sign in.`,
+      );
+      continue;
+    }
 
     if (anonymous.length === 0 && handler.publicPaths.length > 0) {
       errors.push(
@@ -168,6 +198,37 @@ export function validateManifest(raw: unknown): ValidationResult {
         );
       }
       seenPublicPaths.add(publicPath);
+
+      if (handler.auth === "session") {
+        // The two checks below do not apply here, and running them would be
+        // circular: under `session` this very entry becomes a route, so it
+        // would always be found and always be public.
+        //
+        // What can still go wrong is the reverse — an entry that silently
+        // overrides a route the manifest deliberately gated. The derived
+        // public route replaces a declared route on the same path, so a
+        // `{ auth: "jwt" }` override sitting under a declared public path
+        // would be quietly discarded, and the manifest would say two opposite
+        // things about one path.
+        const shadowed = declaredRoutes.find(
+          (r) =>
+            r.path === publicPathRoutePath(publicPath) &&
+            r.auth !== "public" &&
+            // Only an override the author wrote. Replacing a route that merely
+            // inherited the handler's `session` default is the ordinary case —
+            // it is how `GET /` becomes public when `/` is declared.
+            r.authExplicit === true,
+        );
+        if (shadowed) {
+          errors.push(
+            `infraRequirements.compute.handlers["${handler.name}"].publicPaths: "${publicPath}" ` +
+              `covers route "${shadowed.declared}", which the manifest declares as ` +
+              `auth "${shadowed.auth}". Declaring a path public and gating it are contradictory; ` +
+              `remove one.`,
+          );
+        }
+        continue;
+      }
 
       // The declaration is only worth anything if it describes the routes that
       // actually exist. A path served by no route, or by a route that carries

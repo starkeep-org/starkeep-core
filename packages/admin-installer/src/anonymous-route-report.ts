@@ -11,6 +11,13 @@
  *
  * It reports; it does not decide. The refusal lives in `validateManifest`,
  * which requires a `publicPaths` declaration behind any anonymous catch-all.
+ *
+ * Under `auth: "session"` the report changes character. There the catch-all
+ * carries the session authorizer and each `publicPaths` entry is emitted as
+ * its own more-specific unauthenticated route, so what is listed below is the
+ * anonymous surface exactly rather than a lower bound on it — and the
+ * catch-all caveat does not apply, because for those handlers the declaration
+ * *is* the reach.
  */
 
 import { anonymousRoutes, type AppManifest } from "@starkeep/admin-manifest";
@@ -25,9 +32,13 @@ export function formatAnonymousRouteReport(manifest: AppManifest): string | null
   if (entries.length === 0) return null;
 
   const lines: string[] = [];
-  lines.push("Anonymous routes (no Cognito authorizer — reachable by anyone on the internet):");
+  lines.push("Anonymous routes (no authorizer — reachable by anyone on the internet):");
   for (const entry of entries) {
-    const suffix = entry.catchAll ? "   <- catch-all" : "";
+    const marks = [
+      entry.catchAll ? "catch-all" : null,
+      entry.derived ? `from publicPaths "${entry.declared}"` : null,
+    ].filter(Boolean);
+    const suffix = marks.length > 0 ? `   <- ${marks.join(", ")}` : "";
     lines.push(`  ${entry.routeKey}${suffix}   [handler: ${entry.handlerName}]`);
   }
 
@@ -43,7 +54,10 @@ export function formatAnonymousRouteReport(manifest: AppManifest): string | null
     }
   }
 
-  if (entries.some((e) => e.catchAll)) {
+  // A derived route came from a publicPaths entry on a `session` handler, so
+  // it is bounded by the declaration by construction. Only a *declared*
+  // anonymous catch-all is wider than what the manifest names.
+  if (entries.some((e) => e.catchAll && !e.derived)) {
     lines.push("");
     lines.push(
       "  NOTE: a catch-all is wider than its declaration. The gateway will hand an " +

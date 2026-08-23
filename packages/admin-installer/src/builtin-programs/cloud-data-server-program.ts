@@ -12,7 +12,7 @@
  * Stack outputs match the previous SST shape so per-app Pulumi installs can
  * read apiGatewayId and authorizerId to attach their own routes:
  *   auroraHostname, bucketName, apiGatewayUrl, publicBaseUrl, apiGatewayId,
- *   authorizerId, region
+ *   authorizerId, sessionAuthorizerId, region
  *
  * The Lambda's IAM role is NOT a Pulumi resource — Manager mints it as part
  * of the install pipeline (createAppRole + broker-power policy). Pulumi only
@@ -573,6 +573,74 @@ export function buildCloudDataServerProgram(
       name: "cognitoJwt",
     });
 
+    // -----------------------------------------------------------------------
+    // Session authorizer — the gate in front of every browser app
+    // -----------------------------------------------------------------------
+    //
+    // The JWT authorizer above reads a bare token from `Authorization`, which a
+    // browser navigating to a URL cannot send. That is why the first pass at
+    // this design concluded the gateway could not gate a browser app and pushed
+    // enforcement into the app bundle — an app gating itself, which is the
+    // assumption that produced the 2026-08 exposure. A REQUEST authorizer reads
+    // any header, `Cookie` included, so the gateway can do the job after all,
+    // and an app's own middleware stops being the thing that matters.
+    //
+    // Same artifact as the broker, different entry point: it deploys and
+    // versions with the code it guards rather than being a second thing to
+    // remember to rebuild.
+    const sessionAuthLambdaName = `${ctx.stackPrefix}-session-authorizer`;
+
+    const sessionAuthLogGroup = new aws.cloudwatch.LogGroup("session-auth-log-group", {
+      name: `/aws/lambda/${sessionAuthLambdaName}`,
+      retentionInDays: 14,
+      tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
+    });
+
+    const sessionAuthFn = new aws.lambda.Function(
+      "session-authorizer",
+      {
+        name: sessionAuthLambdaName,
+        role: ctx.appRoleArn,
+        runtime: aws.lambda.Runtime.NodeJS22dX,
+        handler: "session-authorizer.handler",
+        code: new pulumi.asset.FileArchive(ctx.distZipPath),
+        sourceCodeHash: ctx.bundleHash,
+        memorySize: 128,
+        // It verifies a signature against a cached JWKS. The only slow path is
+        // the first fetch in a cold container.
+        timeout: 5,
+        environment: {
+          variables: {
+            STARKEEP_USER_POOL_ID: ctx.userPoolId,
+            STARKEEP_USER_POOL_CLIENT_ID: ctx.userPoolClientId,
+          },
+        },
+        tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
+      },
+      { dependsOn: [sessionAuthLogGroup] },
+    );
+
+    new aws.lambda.Permission("session-authorizer-invoke", {
+      action: "lambda:InvokeFunction",
+      function: sessionAuthFn.name,
+      principal: "apigateway.amazonaws.com",
+      sourceArn: pulumi.interpolate`${api.executionArn}/authorizers/*`,
+    });
+
+    const sessionAuthorizer = new aws.apigatewayv2.Authorizer("session-cookie", {
+      apiId: api.id,
+      authorizerType: "REQUEST",
+      authorizerPayloadFormatVersion: "2.0",
+      enableSimpleResponses: true,
+      identitySources: ["$request.header.Cookie"],
+      // Caches the decision per distinct Cookie header, so a signed-in session
+      // costs one authorizer invocation per window rather than one per request
+      // — which matters against an account concurrency limit of ten.
+      authorizerResultTtlInSeconds: 300,
+      authorizerUri: sessionAuthFn.invokeArn,
+      name: "sessionCookie",
+    });
+
     // Lambda integration
     const integration = new aws.apigatewayv2.Integration("api-integration", {
       apiId: api.id,
@@ -1080,6 +1148,9 @@ export function buildCloudDataServerProgram(
       cloudfrontSigningDomain: distribution.domainName,
       cloudfrontSigningPrivateKey: signingKey.privateKeyPem,
       authorizerId: authorizer.id,
+      // Per-app installs read this to attach `auth: "session"` routes. See
+      // ComputeContext.sessionAuthorizerId.
+      sessionAuthorizerId: sessionAuthorizer.id,
       functionArn: fn.arn,
       region: ctx.region,
     };

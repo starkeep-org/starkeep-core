@@ -12,6 +12,7 @@
  * Response: text/event-stream
  *   data:  <stdout/stderr line>
  *   event: done   data: { apiGatewayUrl, apiGatewayId, authorizerId,
+ *                          sessionAuthorizerId,
  *                         bucketName, region, auroraHostname }
  *   event: error  data: { message: string, code?: "EXPIRED_TOKEN" | ... }
  *
@@ -72,6 +73,7 @@ interface StarkeepConfig {
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
+  sessionAuthorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
 }
@@ -175,6 +177,7 @@ export async function POST(req: NextRequest) {
               apiGatewayId: post.apiGatewayId,
               apiGatewayExecutionArn: post.apiGatewayExecutionArn,
               authorizerId: post.authorizerId,
+              sessionAuthorizerId: post.sessionAuthorizerId,
               bucketName: post.s3Bucket,
               auroraHostname: post.auroraEndpoint,
             });

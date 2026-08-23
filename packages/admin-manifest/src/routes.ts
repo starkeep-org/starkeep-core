@@ -16,8 +16,18 @@ import type { AppComputeHandler, AppComputeRoute, AppManifest } from "./schema.j
 
 /** A handler route with its per-route auth override already resolved. */
 export interface ResolvedRoute {
-  /** The route exactly as the manifest declared it, e.g. `ANY /{proxy+}`. */
+  /**
+   * The route exactly as the manifest declared it, e.g. `ANY /{proxy+}` — or,
+   * for a derived route, the `publicPaths` entry it came from. Human-facing:
+   * this is what an error message or a report should name.
+   */
   declared: string;
+  /**
+   * The unprefixed API Gateway route key. Equal to {@link declared} for a
+   * declared route (which is already one) and `${method} ${path}` for a
+   * derived one, where `declared` is a bare path and not a route key at all.
+   */
+  routeKey: string;
   /** HTTP method, or `ANY`. `$default` routes report `ANY`. */
   method: string;
   /**
@@ -27,32 +37,101 @@ export interface ResolvedRoute {
    */
   path: string;
   /** Effective auth: the route's own override, else the handler's default. */
-  auth: "public" | "jwt";
+  auth: RouteAuth;
   /** True for `$default` and for any route whose path ends in `{proxy+}`. */
   catchAll: boolean;
+  /**
+   * True when this route was derived from a `publicPaths` entry rather than
+   * declared in `routes`. Only `session` handlers have any — see
+   * {@link resolveHandlerRoutes}.
+   */
+  derived?: boolean;
+  /**
+   * True when `auth` came from the route's own override rather than the
+   * handler default. The distinction matters where the platform is about to
+   * overrule a route: overruling an inherited default is ordinary, overruling
+   * something the author wrote down is a contradiction worth refusing.
+   */
+  authExplicit?: boolean;
 }
 
+/** @see AppComputeHandler.auth */
+export type RouteAuth = "public" | "jwt" | "session";
+
 /** Normalize one manifest route entry to its string form and auth override. */
-function routeParts(route: AppComputeRoute): { key: string; auth?: "public" | "jwt" } {
+function routeParts(route: AppComputeRoute): { key: string; auth?: RouteAuth } {
   return typeof route === "string" ? { key: route } : { key: route.route, auth: route.auth };
 }
 
 /**
- * Resolve a handler's declared routes, applying each route's `auth` override
- * over the handler-level `auth`. An empty `routes` array means `$default`,
- * matching the Pulumi program's own fallback.
+ * Turn a `publicPaths` entry into the route path that will carry it.
+ * `/x/*` becomes `/x/{proxy+}`; a literal entry stays itself; `/` collapses to
+ * the app root.
+ */
+export function publicPathRoutePath(publicPath: string): string {
+  if (publicPath === "/*") return "/{proxy+}";
+  if (publicPath.endsWith("/*")) return `${publicPath.slice(0, -2)}/{proxy+}`;
+  return publicPath;
+}
+
+/**
+ * Resolve a handler's routes, applying each route's `auth` override over the
+ * handler-level `auth`. An empty `routes` array means `$default`, matching the
+ * Pulumi program's own fallback.
+ *
+ * For a `session` handler this returns more routes than the manifest declared.
+ * Each `publicPaths` entry becomes its own unauthenticated route, more
+ * specific than the gated catch-all, so the gateway's specificity preference
+ * makes the declaration the actual reach. That is the inversion the
+ * 2026-08-23 postmortem asks for: under `public` a catch-all was *wider* than
+ * the declaration beside it, and the declaration was a statement of intent
+ * that enforced nothing.
+ *
+ * A derived route replaces any declared route on the same path, whatever its
+ * method — otherwise the manifest's `GET /` would sit alongside the derived
+ * `ANY /`, and API Gateway prefers the concrete method, so the app root would
+ * come out gated with a public route right next to it that never matched.
  */
 export function resolveHandlerRoutes(handler: AppComputeHandler): ResolvedRoute[] {
+  const declared = declaredHandlerRoutes(handler);
+  if (handler.auth !== "session" || handler.publicPaths.length === 0) return declared;
+
+  const derived: ResolvedRoute[] = handler.publicPaths.map((publicPath) => {
+    const path = publicPathRoutePath(publicPath);
+    return {
+      declared: publicPath,
+      routeKey: `ANY ${path}`,
+      method: "ANY",
+      path,
+      auth: "public" as const,
+      catchAll: /\{proxy\+\}$/.test(path),
+      derived: true,
+    };
+  });
+
+  const derivedPaths = new Set(derived.map((r) => r.path));
+  return [...declared.filter((r) => !derivedPaths.has(r.path)), ...derived];
+}
+
+/**
+ * The routes the manifest literally declared, before any `publicPaths`
+ * derivation. Callers that need to distinguish an author's own `auth`
+ * override from a route the platform synthesized use this; everyone else
+ * wants {@link resolveHandlerRoutes}.
+ */
+export function declaredHandlerRoutes(handler: AppComputeHandler): ResolvedRoute[] {
   const declaredRoutes = handler.routes.length > 0 ? handler.routes : ["$default"];
   return declaredRoutes.map((entry) => {
     const { key, auth } = routeParts(entry);
     if (key === "$default") {
       return {
         declared: key,
+        routeKey: key,
         method: "ANY",
         path: "/{proxy+}",
         auth: auth ?? handler.auth,
         catchAll: true,
+        authExplicit: auth !== undefined,
       };
     }
     const match = key.match(/^([A-Z]+) (\/.*)$/);
@@ -60,10 +139,12 @@ export function resolveHandlerRoutes(handler: AppComputeHandler): ResolvedRoute[
     const path = match?.[2] ?? "/";
     return {
       declared: key,
+      routeKey: key,
       method,
       path,
       auth: auth ?? handler.auth,
       catchAll: /\{proxy\+\}$/.test(path),
+      authExplicit: auth !== undefined,
     };
   });
 }
@@ -119,6 +200,14 @@ function specificity(route: ResolvedRoute, segments: string[]): number[] | null 
   }
   // A non-greedy route must consume the path exactly.
   if (routeSegments.length !== segments.length) return null;
+  // Terminal marker: an exact match outranks a greedy route that reached the
+  // same point. Without it a zero-segment exact match — the app root — scores
+  // as the empty array and loses to `{proxy+}`, which scores [0]. That was
+  // invisible while the only route at the root was `GET /`, because a concrete
+  // method already beat `ANY /{proxy+}` on the method tiebreak; it surfaces
+  // the moment a publicPaths-derived `ANY /` has to win on path specificity
+  // alone.
+  score.push(3);
   return score;
 }
 
@@ -177,11 +266,16 @@ export function isAnonymouslyReachable(
 
 export interface AnonymousRouteEntry {
   handlerName: string;
-  /** Route key as declared in the manifest. */
+  /**
+   * Route key as declared in the manifest, or the `publicPaths` entry it was
+   * derived from.
+   */
   declared: string;
   /** Route key as it will exist on the shared API Gateway. */
   routeKey: string;
   catchAll: boolean;
+  /** True when derived from `publicPaths` rather than declared in `routes`. */
+  derived: boolean;
 }
 
 /**
@@ -189,6 +283,10 @@ export interface AnonymousRouteEntry {
  * every compute handler in the manifest. This is the artifact the install-time
  * report prints and the validator gates on: one place that answers "what can
  * an anonymous caller reach in this app?".
+ *
+ * For a `session` handler these are the derived `publicPaths` routes, and the
+ * answer is exact rather than an upper bound — the catch-all carries the
+ * session authorizer, so nothing outside the declaration is reachable.
  */
 export function anonymousRoutes(manifest: AppManifest): AnonymousRouteEntry[] {
   const entries: AnonymousRouteEntry[] = [];
@@ -198,8 +296,9 @@ export function anonymousRoutes(manifest: AppManifest): AnonymousRouteEntry[] {
       entries.push({
         handlerName: handler.name,
         declared: route.declared,
-        routeKey: prefixAppRouteKey(manifest.id, route.declared),
+        routeKey: prefixAppRouteKey(manifest.id, route.routeKey),
         catchAll: route.catchAll,
+        derived: route.derived === true,
       });
     }
   }
