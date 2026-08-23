@@ -14,6 +14,7 @@ export {
   APP_ID_HEADER,
   APP_SIG_HEADER,
   APP_TS_HEADER,
+  USER_TOKEN_HEADER,
   APP_SIG_MAX_SKEW_MS,
 } from "./sign";
 export {

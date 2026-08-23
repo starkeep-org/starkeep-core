@@ -136,6 +136,8 @@ async function build(options: {
    * *listed*, not a row disappearing out from under a signer.
    */
   readonly installed?: () => Array<{ appId: string }>;
+  /** Defaults to a live token; pass an accessor to observe rotation. */
+  readonly getIdToken?: () => string | null;
 }) {
   const databaseAdapter = new MockDatabaseAdapter();
   const localObjectStorage = new MockObjectStorageAdapter();
@@ -171,6 +173,7 @@ async function build(options: {
     underlyingSyncStateStore: memorySyncState(),
     exchangeIntervalMs: options.exchangeIntervalMs ?? 600_000,
     nudgeDebounceMs: 5,
+    getIdToken: options.getIdToken ?? (() => "id-token-1"),
   });
 }
 
@@ -219,6 +222,7 @@ describe("rescan() with one app it cannot sign for", () => {
         underlyingSyncStateStore: memorySyncState(),
         exchangeIntervalMs: 600_000,
         nudgeDebounceMs: 5,
+        getIdToken: () => "id-token-1",
       });
     })();
     supervisor = supervisorWithoutDrive;
@@ -352,6 +356,121 @@ describe("rescan() dropping an app during its drain", () => {
       await supervisor?.stop();
       supervisor = null;
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 20_000);
+});
+
+describe("the end-user token on outbound sync", () => {
+  /**
+   * The broker requires a credential bound to a named end user on every
+   * data-plane call — the HMAC says which app is calling, this says a real
+   * person is behind it. The supervisor already holds one and already refuses
+   * to run without it, so this is about whether it *sends* it.
+   *
+   * Observed at the wire rather than by reaching into `makeSignerFor`, for the
+   * same reason the cases above are: what matters is the header that arrives,
+   * and a signer asserted in isolation can be correct while nothing calls it.
+   */
+  async function captureHeaders(getIdToken: () => string | null) {
+    const seen: Array<Record<string, string | string[] | undefined>> = [];
+    const server = createServer((req, res) => {
+      seen.push({ ...req.headers });
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "nope" }));
+      req.resume();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    return { seen, port, close: () => new Promise<void>((r) => server.close(() => r())) };
+  }
+
+  it("sends the id token alongside the HMAC headers, not instead of them", async () => {
+    const cap = await captureHeaders(() => "id-token-1");
+    try {
+      supervisor = await build({
+        apps: [{ appId: "aaa-app", hmacSecret: "s1" }],
+        exchangeIntervalMs: 5,
+        cloudUrl: `http://127.0.0.1:${cap.port}`,
+        getIdToken: () => "id-token-1",
+      });
+      supervisor.start();
+      await new Promise((r) => setTimeout(r, 120));
+
+      expect(cap.seen.length, "no request reached the cloud").toBeGreaterThan(0);
+      for (const headers of cap.seen) {
+        expect(headers["x-starkeep-user-token"]).toBe("id-token-1");
+        // Neither substitutes for the other, so both are on every request.
+        expect(headers["x-starkeep-app-id"]).toBeTruthy();
+        expect(headers["x-starkeep-app-sig"]).toBeTruthy();
+        expect(headers["x-starkeep-app-ts"]).toBeTruthy();
+      }
+
+      // The Drive channel is not a special case. It is a full cloud principal
+      // carrying every shared record the user owns, so an exemption there
+      // would be the widest one available.
+      const appIds = new Set(cap.seen.map((h) => h["x-starkeep-app-id"]));
+      expect(appIds).toContain(DRIVE_APP_ID);
+      expect(appIds).toContain("aaa-app");
+    } finally {
+      await supervisor?.stop();
+      supervisor = null;
+      await cap.close();
+    }
+  }, 20_000);
+
+  it("reads the token at request time, so an hourly rotation reaches the wire", async () => {
+    // The failure this guards is silent and slow: a signer that captured the
+    // token when the engine was built would keep presenting the boot-time one,
+    // and sync would start 401ing about an hour after every daemon start.
+    let token = "id-token-1";
+    const cap = await captureHeaders(() => token);
+    try {
+      supervisor = await build({
+        apps: [{ appId: "aaa-app", hmacSecret: "s1" }],
+        exchangeIntervalMs: 5,
+        cloudUrl: `http://127.0.0.1:${cap.port}`,
+        getIdToken: () => token,
+      });
+      supervisor.start();
+      await new Promise((r) => setTimeout(r, 100));
+      const before = cap.seen.length;
+      expect(before).toBeGreaterThan(0);
+
+      token = "id-token-2";
+      await new Promise((r) => setTimeout(r, 150));
+
+      const after = cap.seen.slice(before);
+      expect(after.length, "no request after the rotation").toBeGreaterThan(0);
+      expect(after.every((h) => h["x-starkeep-user-token"] === "id-token-2")).toBe(true);
+    } finally {
+      await supervisor?.stop();
+      supervisor = null;
+      await cap.close();
+    }
+  }, 20_000);
+
+  it("sends an empty header rather than omitting it when there is no token", async () => {
+    // The supervisor is not supposed to run in this state at all
+    // (`startOrKickSupervisor` refuses without a live token), so what matters
+    // is that the broker sees an explicit empty credential and refuses, rather
+    // than a missing header that some future carve-out might read as "exempt".
+    const cap = await captureHeaders(() => null);
+    try {
+      supervisor = await build({
+        apps: [{ appId: "aaa-app", hmacSecret: "s1" }],
+        exchangeIntervalMs: 5,
+        cloudUrl: `http://127.0.0.1:${cap.port}`,
+        getIdToken: () => null,
+      });
+      supervisor.start();
+      await new Promise((r) => setTimeout(r, 120));
+      expect(cap.seen.length).toBeGreaterThan(0);
+      expect(cap.seen[0]!["x-starkeep-user-token"]).toBe("");
+    } finally {
+      await supervisor?.stop();
+      supervisor = null;
+      await cap.close();
     }
   }, 20_000);
 });

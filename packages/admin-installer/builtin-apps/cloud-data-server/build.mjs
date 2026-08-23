@@ -16,6 +16,11 @@
  *   code: new pulumi.asset.FileArchive(distZipPath)
  * so its layout is "files at the zip root" — `api-handler.handler` resolves to
  * api-handler.js's `handler` export.
+ *
+ * The zip carries two entry points. The session authorizer is a second,
+ * much smaller Lambda that shares this artifact rather than getting its own:
+ * it is deployed alongside the broker, versioned with it, and giving it a
+ * separate build would be a second thing to remember to rebuild.
  */
 
 import { execSync } from "node:child_process";
@@ -55,38 +60,24 @@ for (const pkg of WS_PACKAGES) {
 if (existsSync(stagingDir)) rmSync(stagingDir, { recursive: true });
 mkdirSync(stagingDir, { recursive: true });
 
-console.log("Bundling api-handler with esbuild…");
-await build({
-  entryPoints: [join(pkgDir, "src", "api-handler.ts")],
-  bundle: true,
-  platform: "node",
-  target: "node22",
-  format: "esm",
-  outfile: join(stagingDir, "api-handler.js"),
-  external: [],
-  // ESM Lambda needs an explicit .mjs / banner trick or package.json type=module.
-  // Easier path: emit CJS so the .js extension just works under Lambda's require().
-  // (Override format above if you'd rather ship ESM.)
-  banner: { js: "" },
-});
-
-// Lambda's default loader expects CommonJS unless package.json type=module is in the zip,
-// or the file is named .mjs. We emitted .js as ESM above which won't load — switch to CJS.
-console.log("Re-bundling as CommonJS (Lambda's default loader)…");
-await build({
-  entryPoints: [join(pkgDir, "src", "api-handler.ts")],
-  bundle: true,
-  platform: "node",
-  target: "node22",
-  format: "cjs",
-  outfile: join(stagingDir, "api-handler.js"),
-  external: [],
-  allowOverwrite: true,
-});
+// CommonJS, because Lambda's default loader expects it unless the zip carries
+// a package.json with type=module or the file is named .mjs.
+for (const entry of ["api-handler", "session-authorizer"]) {
+  console.log(`Bundling ${entry} with esbuild…`);
+  await build({
+    entryPoints: [join(pkgDir, "src", `${entry}.ts`)],
+    bundle: true,
+    platform: "node",
+    target: "node22",
+    format: "cjs",
+    outfile: join(stagingDir, `${entry}.js`),
+    external: [],
+  });
+}
 
 console.log("Creating dist.zip…");
 if (existsSync(outputZip)) rmSync(outputZip);
-execSync(`zip -j "${outputZip}" api-handler.js`, {
+execSync(`zip -j "${outputZip}" api-handler.js session-authorizer.js`, {
   cwd: stagingDir,
   stdio: "inherit",
 });

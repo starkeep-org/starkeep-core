@@ -10,6 +10,20 @@ export const APP_ID_HEADER = "X-Starkeep-App-Id";
 export const APP_SIG_HEADER = "X-Starkeep-App-Sig";
 export const APP_TS_HEADER = "X-Starkeep-App-Ts";
 
+/**
+ * The end user's Cognito ID token, carried alongside the HMAC on every cloud
+ * data-plane call.
+ *
+ * The two are not alternatives and neither substitutes for the other: the HMAC
+ * says which *app* is calling, and this says which *person* it is calling for.
+ * The broker requires both, with no route carve-out and nothing an app can put
+ * in its own manifest to opt out. A paired mobile device presents an Ed25519
+ * device signature instead — that is not an exemption from the requirement,
+ * it is the other shape of the same one, issued by the platform when the
+ * device was registered against a named Cognito user.
+ */
+export const USER_TOKEN_HEADER = "X-Starkeep-User-Token";
+
 // Freshness window for the signed timestamp. A signature whose X-Starkeep-App-Ts
 // is more than this far from the verifier's clock (in either direction, to
 // tolerate skew) is rejected. Bounds the replay window to ~5 min.

@@ -75,6 +75,8 @@ export interface InstallerConfig {
    */
   apiGatewayExecutionArn: string;
   authorizerId: string;
+  /** See ComputeContext.sessionAuthorizerId — absent on a pre-authorizer stack. */
+  sessionAuthorizerId?: string;
   /**
    * Base URL of the shared HTTP API Gateway (the cloud-data-server's stage
    * URL). Injected into per-app Lambdas as STARKEEP_CLOUD_DATA_BASE so that
@@ -336,6 +338,9 @@ async function installAppInner(
           apiGatewayExecutionArn: config.apiGatewayExecutionArn,
           apiGatewayUrl: config.apiGatewayUrl,
           authorizerId: config.authorizerId,
+          ...(config.sessionAuthorizerId
+            ? { sessionAuthorizerId: config.sessionAuthorizerId }
+            : {}),
           region: config.region,
           accountId: config.accountId,
           pulumiStateBucket: config.pulumiStateBucket,
@@ -417,6 +422,9 @@ async function uninstallAppInner(
         apiGatewayExecutionArn: config.apiGatewayExecutionArn,
         apiGatewayUrl: config.apiGatewayUrl,
         authorizerId: config.authorizerId,
+        ...(config.sessionAuthorizerId
+          ? { sessionAuthorizerId: config.sessionAuthorizerId }
+          : {}),
         region: config.region,
         accountId: config.accountId,
         pulumiStateBucket: config.pulumiStateBucket,

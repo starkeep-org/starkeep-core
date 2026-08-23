@@ -21,6 +21,26 @@ import type { ComputeContext } from "./compute-stack";
  */
 const RESERVED_SUBPATHS = new Set(["data", "files", "sync", "health", "app-data"]);
 
+/**
+ * The session authorizer's id, or a refusal.
+ *
+ * Falling back to no authorizer here would silently deploy the app wide open —
+ * exactly the failure this whole mechanism exists to prevent, and one that
+ * would look like a successful install. A missing id means the CDS stack
+ * predates the authorizer, and the fix is to reinstall it, not to ship an
+ * ungated app.
+ */
+function requireSessionAuthorizer(ctx: ComputeContext): string {
+  if (!ctx.sessionAuthorizerId) {
+    throw new Error(
+      `App "${ctx.appId}" declares auth "session" but the cloud-data-server stack exposes no ` +
+        `sessionAuthorizerId. Reinstall the cloud-data-server so the session authorizer exists; ` +
+        `installing this app without it would publish every route to the internet.`,
+    );
+  }
+  return ctx.sessionAuthorizerId;
+}
+
 export function buildPulumiProgram(
   manifest: AppManifest,
   ctx: ComputeContext,
@@ -104,7 +124,9 @@ export function buildPulumiProgram(
         // for the cloud-data-server (data, files, sync, health). A literal
         // segment matching any of those is rejected below; {proxy+} is fine
         // and is shadowed by the more-specific reserved routes at runtime.
-        const prefixedRouteKey = prefixAppRouteKey(ctx.appId, route.declared);
+        // `routeKey`, not `declared`: a route derived from a publicPaths entry
+        // carries the bare path in `declared` and its real key here.
+        const prefixedRouteKey = prefixAppRouteKey(ctx.appId, route.routeKey);
 
         if (prefixedRouteKey !== "$default") {
           const match = prefixedRouteKey.match(/^[A-Z]+ (\/.*)$/);
@@ -126,12 +148,33 @@ export function buildPulumiProgram(
           }
         }
 
-        const isPublic = route.auth === "public";
+        // Three ways a route can be gated, and the choice is the app's:
+        //
+        //   public  — no authorizer. Under `session` these are the routes
+        //             derived from publicPaths, each more specific than the
+        //             gated catch-all, so the declaration is the reach.
+        //   jwt     — the Cognito JWT authorizer, reading a bearer token from
+        //             `Authorization`. Right for a route the app's own code
+        //             calls; a browser navigation cannot send that header.
+        //   session — the platform's REQUEST authorizer, reading the session
+        //             cookie. The answer for anything a browser navigates to,
+        //             and the reason enforcement can live here rather than in
+        //             an app's own middleware gating itself.
+        const authorization =
+          route.auth === "public"
+            ? {}
+            : route.auth === "session"
+              ? {
+                  authorizerId: requireSessionAuthorizer(ctx),
+                  authorizationType: "CUSTOM",
+                }
+              : { authorizerId: ctx.authorizerId, authorizationType: "JWT" };
+
         const created = new aws.apigatewayv2.Route(`route-${handler.name}-${i}`, {
           apiId: ctx.apiGatewayId,
           routeKey: prefixedRouteKey,
           target: pulumi.interpolate`integrations/${integration.id}`,
-          ...(isPublic ? {} : { authorizerId: ctx.authorizerId, authorizationType: "JWT" }),
+          ...authorization,
         });
 
         outputs[`routeId:${handler.name}-${i}`] = created.id;

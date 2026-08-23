@@ -90,7 +90,7 @@ export const appComputeRouteSchema = z.union([
   z.string().min(1),
   z.object({
     route: z.string().min(1),
-    auth: z.enum(["public", "jwt"]),
+    auth: z.enum(["public", "jwt", "session"]),
   }),
 ]);
 
@@ -122,7 +122,25 @@ export const appComputeHandlerSchema = z.object({
   timeoutSeconds: z.number().int().min(1).max(900).default(30),
   routes: z.array(appComputeRouteSchema).default(["$default"]),
   env: z.record(z.string()).default({}),
-  auth: z.enum(["public", "jwt"]).default("jwt"),
+  /**
+   * How the gateway gates this handler's routes.
+   *
+   *   - `jwt`     — a bearer token in `Authorization`. Right for a route the
+   *                 app's own code calls; wrong for anything a browser
+   *                 navigates to, since a navigation cannot send a header.
+   *   - `session` — the platform's session cookie, checked by a REQUEST
+   *                 authorizer that can read `Cookie` where a JWT authorizer
+   *                 cannot. This is the answer for a browser app.
+   *   - `public`  — no gate at all.
+   *
+   * Under `session` the catch-all is gated and each `publicPaths` entry is
+   * emitted as its own *more-specific* unauthenticated route, so API Gateway's
+   * specificity preference makes the declaration the reach. That inverts the
+   * shape behind the 2026-08 exposure, where a public catch-all was wider than
+   * the declaration sitting beside it and every route an app added was
+   * anonymous until someone noticed.
+   */
+  auth: z.enum(["public", "jwt", "session"]).default("jwt"),
   publicPaths: z.array(publicPathSchema).default([]),
 });
 

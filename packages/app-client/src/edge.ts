@@ -77,9 +77,13 @@ export function createAuthGateMiddleware(opts: AuthGateOptions) {
     const dest = req.headers.get("sec-fetch-dest");
     const isDocument = dest === "document" || (dest === null && req.method === "GET");
     if (isDocument) {
+      // Absolute, resolved against the request: Next parses the Location of a
+      // middleware redirect with `new URL(...)` and throws ERR_INVALID_URL on a
+      // path-only value — which surfaces as a 500 on the auth path, where an
+      // outage and a refusal must not look alike.
       return new Response(null, {
         status: 302,
-        headers: { Location: `${basePath}${opts.signInPath}` },
+        headers: { Location: new URL(`${basePath}${opts.signInPath}`, url).toString() },
       });
     }
     return new Response(JSON.stringify({ error: "Not authenticated" }), {

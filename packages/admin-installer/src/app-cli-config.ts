@@ -40,6 +40,12 @@ export interface StarkeepCliConfig {
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
+  /**
+   * The platform session authorizer, for handlers declaring `auth: "session"`.
+   * Absent in a config written before the authorizer existed; the Pulumi
+   * program refuses such an install rather than shipping the app ungated.
+   */
+  sessionAuthorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
   appParentDirs?: string[];

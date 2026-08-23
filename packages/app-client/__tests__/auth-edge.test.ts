@@ -60,7 +60,9 @@ describe("createAuthGateMiddleware", () => {
 
   it("redirects a document request to the app's own sign-in page", () => {
     const res = gate(req("/apps/memo/decks", { dest: "document" }));
-    expect(res?.headers.get("location")).toBe("/apps/memo/sign-in");
+    // Absolute, because Next parses this with `new URL(...)` and a path-only
+    // value throws — a 500 where a 302 was meant.
+    expect(res?.headers.get("location")).toBe("https://cdn.example.com/apps/memo/sign-in");
   });
 
   it("gives an XHR a 401 rather than an HTML redirect it cannot parse", () => {
@@ -96,6 +98,8 @@ describe("createAuthGateMiddleware", () => {
       signInPath: "/sign-in",
     });
     expect(rootGate(req("/"))).toBeUndefined();
-    expect(rootGate(req("/decks", { dest: "document" }))?.headers.get("location")).toBe("/sign-in");
+    expect(rootGate(req("/decks", { dest: "document" }))?.headers.get("location")).toBe(
+      "https://cdn.example.com/sign-in",
+    );
   });
 });
