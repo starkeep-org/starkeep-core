@@ -3,7 +3,7 @@ import { proxyToDataServer } from "./proxy";
 
 // Narrow shape of NextRequest we depend on — avoids taking a `next` peer
 // dependency just to type the param.
-interface MinimalNextRequest {
+export interface MinimalNextRequest {
   method: string;
   url: string;
   headers: { get(name: string): string | null };
@@ -13,28 +13,111 @@ interface MinimalNextRequest {
 
 export interface NextProxyParams { path?: string[] }
 
+/**
+ * Whether a valid end user must be present before this proxy will sign
+ * anything, expressed as a decision the caller cannot skip.
+ *
+ * This is plan §3's `requireUser`, promoted from an optional flag to a
+ * required field. The promotion is the whole point: an optional security flag
+ * is a flag that stays unset in every app written before the flag existed,
+ * which was every app we had. A required union makes the next app's author
+ * answer the question at scaffold time, and cannot be answered by copying an
+ * app that never faced it.
+ *
+ * The platform will not answer it for them. The cloud data plane authenticates
+ * the *app* (an HMAC signature identifies which app is calling, not which
+ * person), and the gateway's JWT authorizer cannot sit in front of a browser
+ * navigation. End-user identity is therefore the app's business — and this
+ * type is where the app says whether it has taken that business up.
+ */
+export type ProxyEndUserAuth =
+  | {
+      auth: "session";
+      /**
+       * Resolve the caller's session, typically from an HttpOnly cookie. A
+       * falsy result means no valid end user and the proxy answers 401
+       * without ever loading the app's HMAC credential.
+       */
+      verifySession: (req: MinimalNextRequest) => boolean | Promise<boolean>;
+      /**
+       * Skip the check in local mode, where the browser, the data, and the
+       * person are all on one machine and there is no second party to
+       * authenticate against. Defaults to true, because gating on-device data
+       * behind a sign-in would break the local-first guarantee. Set false for
+       * an app that wants the check on both surfaces.
+       */
+      allowAnonymousLocal?: boolean;
+    }
+  | {
+      auth: "anonymous";
+      /**
+       * Why this proxy signs for callers it has not authenticated. Required,
+       * and expected to be a sentence a reviewer can disagree with — "the data
+       * behind this proxy is public", or a pointer to the work that will
+       * close it. An unjustifiable value here is the signal that the answer
+       * should have been "session".
+       */
+      justification: string;
+    };
+
 export interface NextProxyOptions {
   /** App id whose credentials to load. */
   appId: string;
+  /**
+   * Required. See {@link ProxyEndUserAuth} — the proxy holds the app's HMAC
+   * credential and will sign whatever reaches it, so it refuses to be
+   * constructed without an explicit statement of who is allowed to reach it.
+   */
+  endUserAuth: ProxyEndUserAuth;
   /**
    * Override response on missing credentials. Defaults to a 503 JSON body
    * pointing at the admin-web install flow.
    */
   onMissingCredentials?: () => Response;
+  /**
+   * Override the response given to a caller with no valid session. Defaults
+   * to a bare 401 JSON body.
+   */
+  onUnauthenticated?: () => Response;
+}
+
+function isCloudMode(): boolean {
+  return process.env.STARKEEP_APP_CLIENT_MODE === "cloud";
 }
 
 /**
  * Returns a handler usable as the body of a Next.js route segment for every
- * verb (GET/POST/PUT/PATCH/DELETE). Forwards to the local-data-server with the
- * app's HMAC signature. Browser-driven apps mount this at
- * `app/api/local-data/[...path]/route.ts` so the HMAC secret stays
- * server-side.
+ * verb (GET/POST/PUT/PATCH/DELETE). Forwards to the configured data server
+ * with the app's HMAC signature. Browser-driven apps mount this under
+ * `app/api/.../[...path]/route.ts` so the HMAC secret stays server-side.
+ *
+ * The same mount serves both surfaces: in local mode it forwards to the
+ * loopback local-data-server, in cloud mode to the shared API Gateway. That
+ * is why `endUserAuth` is not optional — on the loopback surface there is no
+ * one else to authenticate, and on the cloud surface there is nothing else
+ * doing it.
  */
 export function createNextProxyHandler(opts: NextProxyOptions) {
   return async function handler(
     req: MinimalNextRequest,
     ctx: { params: Promise<NextProxyParams> },
   ): Promise<Response> {
+    // Before anything else, and specifically before the credential load: a
+    // request that fails the end-user check must never cause the app's HMAC
+    // secret to be read, let alone used to sign an upstream call.
+    if (opts.endUserAuth.auth === "session") {
+      const exemptLocal = opts.endUserAuth.allowAnonymousLocal ?? true;
+      if (isCloudMode() || !exemptLocal) {
+        if (!(await opts.endUserAuth.verifySession(req))) {
+          if (opts.onUnauthenticated) return opts.onUnauthenticated();
+          return new Response(JSON.stringify({ error: "Not authenticated" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      }
+    }
+
     const creds = await loadAppCredentials(opts.appId);
     if (!creds) {
       if (opts.onMissingCredentials) return opts.onMissingCredentials();

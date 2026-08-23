@@ -1,6 +1,7 @@
 import type { AppManifest } from "./schema.js";
 import { appManifestSchema } from "./schema.js";
 import { isKnownType, typeCategory } from "@starkeep/protocol-primitives";
+import { matchRoute, probePathFor, resolveHandlerRoutes } from "./routes.js";
 
 export interface ValidationResult {
   valid: boolean;
@@ -118,6 +119,76 @@ export function validateManifest(raw: unknown): ValidationResult {
         .map((k) => `"${k}"`)
         .join(", ")})`,
     );
+  }
+
+  // --- Anonymous routes ------------------------------------------------
+  //
+  // `auth: "public"` removes the Cognito authorizer from a gateway route. On a
+  // catch-all that is the entire app, including whatever server routes the
+  // bundle happens to mount — which is how the signing proxy at
+  // /api/local-data ended up answering the internet (postmortem 2026-08-23,
+  // root causes 3.1 and 3.4). The opt-out is still available, because a
+  // browser navigating to a URL cannot send a bearer token and the HTML shell
+  // has to be reachable. What it now costs is a `publicPaths` declaration
+  // naming the subpaths the opt-out was *for*, checked against the handler's
+  // real route table so it cannot name something the handler does not serve.
+  for (const handler of manifest.infraRequirements.compute.handlers) {
+    const routes = resolveHandlerRoutes(handler);
+    const anonymous = routes.filter((r) => r.auth === "public");
+    const anonymousCatchAll = anonymous.filter((r) => r.catchAll);
+
+    if (anonymous.length === 0 && handler.publicPaths.length > 0) {
+      errors.push(
+        `infraRequirements.compute.handlers["${handler.name}"]: publicPaths is declared but ` +
+          `no route on this handler is anonymous — every route carries the JWT authorizer, ` +
+          `so nothing here is public and the declaration would mislead a reviewer`,
+      );
+      continue;
+    }
+
+    if (anonymousCatchAll.length > 0 && handler.publicPaths.length === 0) {
+      errors.push(
+        `infraRequirements.compute.handlers["${handler.name}"]: route ` +
+          `"${anonymousCatchAll[0]!.declared}" is a catch-all with auth "public", which makes ` +
+          `EVERY path under /apps/${manifest.id}/ reachable without authentication — including ` +
+          `any data proxy, upload route, or admin route the bundle mounts. Declare ` +
+          `"publicPaths" listing the subpaths that are meant to be anonymous (e.g. ` +
+          `["/", "/_next/static/*"]), and give the rest an authenticated route ` +
+          `(a more specific route with auth "jwt" wins over {proxy+} at the gateway) or ` +
+          `enforce the end user in the handler itself.`,
+      );
+    }
+
+    const seenPublicPaths = new Set<string>();
+    for (const publicPath of handler.publicPaths) {
+      if (seenPublicPaths.has(publicPath)) {
+        errors.push(
+          `infraRequirements.compute.handlers["${handler.name}"].publicPaths: duplicate entry ` +
+            `"${publicPath}"`,
+        );
+      }
+      seenPublicPaths.add(publicPath);
+
+      // The declaration is only worth anything if it describes the routes that
+      // actually exist. A path served by no route, or by a route that carries
+      // the authorizer, is an author mistake — most likely a stale entry left
+      // behind after the route table changed.
+      const selected = matchRoute(routes, "GET", probePathFor(publicPath));
+      if (!selected) {
+        errors.push(
+          `infraRequirements.compute.handlers["${handler.name}"].publicPaths: "${publicPath}" is ` +
+            `not served by any route on this handler`,
+        );
+        continue;
+      }
+      if (selected.auth !== "public") {
+        errors.push(
+          `infraRequirements.compute.handlers["${handler.name}"].publicPaths: "${publicPath}" is ` +
+            `declared public but the gateway routes it to "${selected.declared}", which requires ` +
+            `authentication`,
+        );
+      }
+    }
   }
 
   // Writing a label needs only a `read` grant on the record's type (requiring

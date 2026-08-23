@@ -40,8 +40,9 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { appManifestSchema } from "@starkeep/admin-manifest";
+import { validateManifest } from "@starkeep/admin-manifest";
 import { installApp } from "../src/orchestrator";
+import { formatAnonymousRouteReport } from "../src/anonymous-route-report";
 import { exitOnInstallFailure } from "../src/cli-exit";
 import {
   regionFromUserPoolId,
@@ -182,7 +183,17 @@ try {
 }
 const manifestPath = resolve(appDir, "starkeep.manifest.json");
 const rawManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-const manifest = appManifestSchema.parse(rawManifest);
+// Full validation, not a bare schema parse: the cross-field rules are where
+// the "an anonymous catch-all must declare its publicPaths" gate lives, and a
+// cloud install is the only place that gate matters.
+const validation = validateManifest(rawManifest);
+for (const warning of validation.warnings) console.warn(`Warning: ${warning}`);
+if (!validation.manifest) {
+  console.error(`Error: ${manifestPath} is not a valid app manifest:`);
+  for (const error of validation.errors) console.error(`  - ${error}`);
+  process.exit(1);
+}
+const manifest = validation.manifest;
 
 console.log(`\nStarkeep ${appId} cloud install`);
 console.log(`  Region : ${region}`);
@@ -190,6 +201,16 @@ console.log(`  Stage  : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log(`  App dir: ${appDir}`);
 console.log("");
+
+// Print the anonymous surface before doing any work, so it is visible whether
+// or not the install goes on to succeed. `validateManifest` has already
+// refused an undeclared anonymous catch-all, so anything printed here is
+// something the manifest author declared on purpose.
+const anonymousReport = formatAnonymousRouteReport(manifest);
+if (anonymousReport) {
+  console.log(anonymousReport);
+  console.log("");
+}
 
 // Patch handler env with live platform config. Handlers declare the keys they
 // want by listing them (placeholder-empty) in the manifest; the installer fills

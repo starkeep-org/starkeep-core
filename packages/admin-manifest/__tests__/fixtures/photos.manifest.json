@@ -2,6 +2,7 @@
   "id": "photos",
   "name": "Photos",
   "version": "0.1.0",
+  "description": "Browse, organize, and caption your photo library.",
   "tier": "official",
   "targets": ["local", "cloud"],
   "localRun": {
@@ -12,10 +13,39 @@
   "infraRequirements": {
     "fileAccess": [
       {
-        "types": ["image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/heif", "image/avif", "image/bmp", "image/tiff"],
+        "types": ["image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/heif", "image/avif", "image/bmp", "image/tiff", "image/dng", "image/cr2", "image/cr3", "image/nef", "image/arw", "image/raf", "image/orf", "image/rw2"],
         "access": "readwrite",
         "metadataWrite": true,
-        "rationale": "Photos app stores raster images and writes EXIF/dimensions extracted from uploaded image files into the image metadata table."
+        "rationale": "Photos app stores raster images and writes EXIF/dimensions extracted from uploaded image files into the image metadata table. Camera raw types are included because a ProRAW or NEF file is a photo the user expects to see; without them those files fall to other/other, which is ungrantable, and the app cannot see them at all."
+      },
+      {
+        "types": ["video/mp4", "video/mov", "video/m4v", "video/avi", "video/mkv", "video/webm", "video/mpeg", "video/wmv", "video/flv"],
+        "access": "readwrite",
+        "metadataWrite": true,
+        "rationale": "A phone camera roll is photos and clips together, and a library that showed only half of it would not be a library. Photos writes duration, dimensions, codec and capture time extracted from the container into the video metadata table, and stores derived posters and transcodes as child records."
+      }
+    ],
+    "labelKeys": [
+      {
+        "key": "rendition",
+        "sizeClass": true,
+        "description": "Which rung of the derived size ladder this record is (image-thumb, image-medium, video-720p, ...). Single-valued and written through the set-valued endpoint, so a respec replaces the rung rather than leaving two. Its presence is what marks a record as derived rather than something the user added, so other image apps can filter renditions out of a library view; its value is an implementation detail of Photos' ladder and consumers should ask for a pixel size instead."
+      },
+      {
+        "key": "crop",
+        "description": "This image is a user-made crop of its parent record."
+      },
+      {
+        "key": "faces",
+        "description": "A person the user has named in this photo. Multi-valued: one row per named person, so ?label=photos/faces&labelValue=Alice finds every photo of Alice. Written only when on-device face recognition is enabled AND the user opts in to publishing; unnamed clusters are never published."
+      },
+      {
+        "key": "live-photo",
+        "description": "This record is the motion half of its parent's Live Photo — a short clip belonging to the still it is a child of, not an item in its own right. The value says how the pairing was decided: 'identifier' when both files carried Apple's shared content identifier (authoritative), 'filename' when it was inferred from matching names in the same folder (circumstantial). Other apps should render the parent still and treat this child as a detail of it; a grid that listed it separately would show every Live Photo twice."
+      },
+      {
+        "key": "face-count",
+        "description": "How many faces on-device detection found in this photo, as a small integer. Absent (never zero) when there are none, so ?label=photos/face-count means 'has at least one face'."
       }
     ],
     "appSpecificSyncable": {
@@ -49,8 +79,9 @@
           "handler": "index.handler",
           "memoryMb": 256,
           "timeoutSeconds": 10,
-          "routes": ["GET /", "GET /{proxy+}"],
+          "routes": ["GET /", "ANY /{proxy+}"],
           "auth": "public",
+          "publicPaths": ["/", "/_next/static/*", "/starkeep-runtime-config"],
           "env": {
             "STARKEEP_API_GATEWAY_URL": "",
             "STARKEEP_USER_POOL_ID": "",

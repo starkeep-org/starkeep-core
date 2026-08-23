@@ -69,6 +69,47 @@ export const sharedResourceRequirementSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
+/**
+ * One route on a compute handler, in either of two forms.
+ *
+ * The bare string (`"ANY /{proxy+}"`) takes the handler's own `auth`. The
+ * object form adds a per-route `auth` override, which exists so a handler can
+ * be **partly** anonymous: API Gateway v2 prefers a more specific route over
+ * `{proxy+}`, so a `jwt` route for `ANY /api/data/{proxy+}` on the same Lambda
+ * puts the authorizer back in front of that subtree while the document at `/`
+ * stays reachable without a bearer token.
+ *
+ * That granularity is the point. Before it existed the only control was
+ * `auth: "public"` on a whole handler, and a handler that owns a catch-all is
+ * the whole app — so every app that needed an anonymously-reachable HTML shell
+ * (which is every browser app, since a navigation cannot send an
+ * `Authorization` header) also published its data plane to the internet. See
+ * the 2026-08-23 postmortem, root cause 3.1.
+ */
+export const appComputeRouteSchema = z.union([
+  z.string().min(1),
+  z.object({
+    route: z.string().min(1),
+    auth: z.enum(["public", "jwt"]),
+  }),
+]);
+
+/**
+ * A path under the handler that is *intended* to be reachable without
+ * authentication, e.g. `/`, `/_next/static/*`, `/sign-in`.
+ *
+ * Required whenever a handler leaves a catch-all route anonymous. A catch-all
+ * publishes far more than the author is usually thinking about, so the
+ * manifest has to say out loud which subpaths that was for; the installer
+ * checks the list against the handler's real route table and prints it at
+ * install time. The declaration does not change what the gateway enforces —
+ * it is the artifact that makes the decision reviewable, and the thing a
+ * reviewer can diff.
+ */
+const publicPathSchema = z
+  .string()
+  .regex(/^\/[^\s]*$/, { message: "publicPaths entries must be absolute paths starting with /" });
+
 // `handler` is the Lambda entry point inside the app's `dist.zip` (e.g.
 // `index.handler` or `infra/src/resize-handler.handler`). The app's
 // `pnpm bundle` script is responsible for producing a zip whose contents
@@ -79,9 +120,10 @@ export const appComputeHandlerSchema = z.object({
   runtime: z.enum(["nodejs22.x"]).default("nodejs22.x"),
   memoryMb: z.number().int().min(128).max(10240).default(256),
   timeoutSeconds: z.number().int().min(1).max(900).default(30),
-  routes: z.array(z.string()).default(["$default"]),
+  routes: z.array(appComputeRouteSchema).default(["$default"]),
   env: z.record(z.string()).default({}),
   auth: z.enum(["public", "jwt"]).default("jwt"),
+  publicPaths: z.array(publicPathSchema).default([]),
 });
 
 const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);
@@ -209,6 +251,7 @@ export type AppTarget = z.infer<typeof appTargetSchema>;
 export type FileAccess = z.infer<typeof fileAccessSchema>;
 export type LabelKey = z.infer<typeof labelKeySchema>;
 export type SharedResourceRequirement = z.infer<typeof sharedResourceRequirementSchema>;
+export type AppComputeRoute = z.infer<typeof appComputeRouteSchema>;
 export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;
 export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;
 export type SyncableTable = z.infer<typeof syncableTableSchema>;

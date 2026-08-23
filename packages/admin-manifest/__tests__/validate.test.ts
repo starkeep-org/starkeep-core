@@ -50,7 +50,9 @@ describe("photos fixture (full real manifest)", () => {
 
   it("derives implied categories from declared extensions", () => {
     const result = validateManifest(photosRaw);
-    expect(result.impliedCategories).toEqual(["image"]);
+    // Photos grants both raster images and the clips a camera roll mixes in
+    // with them, so the manifest implies two categories, not one.
+    expect(result.impliedCategories.sort()).toEqual(["image", "video"]);
   });
 
   it("warns that metadataWrite is redundant with readwrite (but stays valid)", () => {
@@ -471,5 +473,104 @@ describe("labelKeys", () => {
     );
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("no fileAccess grants"))).toBe(true);
+  });
+});
+
+describe("anonymous routes and publicPaths", () => {
+  function withHandlers(handlers: Record<string, unknown>[]): Record<string, unknown> {
+    return minimal({ infraRequirements: { compute: { enabled: true, handlers } } });
+  }
+
+  const staticHandler = (over: Record<string, unknown> = {}) => ({
+    name: "static",
+    handler: "index.handler",
+    ...over,
+  });
+
+  it("refuses an anonymous catch-all with no publicPaths declaration", () => {
+    // The exact shape both shipped apps carried: `auth: "public"` on a handler
+    // that owns `ANY /{proxy+}`, which publishes the app's whole server surface
+    // — data proxy included — to the internet. See the 2026-08-23 postmortem.
+    const result = validateManifest(
+      withHandlers([staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"] })]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("is a catch-all with auth \"public\""))).toBe(true);
+  });
+
+  it("accepts the same catch-all once the intended public subpaths are declared", () => {
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({
+          auth: "public",
+          routes: ["GET /", "ANY /{proxy+}"],
+          publicPaths: ["/", "/_next/static/*"],
+        }),
+      ]),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
+  });
+
+  it("does not require a declaration for a public route that is not a catch-all", () => {
+    // A named public route is already its own declaration — the manifest says
+    // exactly which path it opened.
+    const result = validateManifest(
+      withHandlers([staticHandler({ routes: [{ route: "GET /health", auth: "public" }] })]),
+    );
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects publicPaths on a handler where nothing is anonymous", () => {
+    const result = validateManifest(
+      withHandlers([staticHandler({ routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/"] })]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("no route on this handler is anonymous"))).toBe(true);
+  });
+
+  it("rejects a publicPath the handler does not serve", () => {
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({ auth: "public", routes: ["GET /"], publicPaths: ["/", "/sign-in"] }),
+      ]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("not served by any route"))).toBe(true);
+  });
+
+  it("rejects a publicPath the gateway would route to an authenticated route", () => {
+    // A stale entry left behind after the data subtree was put back behind the
+    // authorizer: the declaration would tell a reviewer the opposite of the truth.
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({
+          auth: "public",
+          routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
+          publicPaths: ["/", "/api/data/*"],
+        }),
+      ]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("requires\nauthentication") || e.includes("requires authentication"))).toBe(true);
+  });
+
+  it("rejects a duplicate publicPaths entry", () => {
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/", "/"] }),
+      ]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("duplicate entry"))).toBe(true);
+  });
+
+  it("rejects a relative publicPaths entry at the schema level", () => {
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["_next/static/*"] }),
+      ]),
+    );
+    expect(result.valid).toBe(false);
   });
 });
