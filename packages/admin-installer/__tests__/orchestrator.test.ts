@@ -53,6 +53,7 @@ vi.mock("../src/iam", async (importOriginal) => {
   return {
     ...real,
     createAppRole: vi.fn(async () => "arn:fake"),
+    createAppExecRole: vi.fn(async () => "arn:fake-exec"),
     attachTempInstallInfraPolicy: vi.fn(async () => {}),
     detachTempInstallInfraPolicy: vi.fn(async () => {}),
     attachTempUninstallInfraPolicy: vi.fn(async () => {}),
@@ -60,6 +61,7 @@ vi.mock("../src/iam", async (importOriginal) => {
     attachTempInstallDdlPolicy: vi.fn(async () => {}),
     detachTempInstallDdlPolicy: vi.fn(async () => {}),
     deleteAppRoleWithPolicies: vi.fn(async () => {}),
+    deleteAppExecRoleWithPolicies: vi.fn(async () => {}),
   };
 });
 
@@ -182,6 +184,7 @@ function doneSteps(operation: string): string[] {
 const INSTALL_STEPS_WITH_COMPUTE = [
   "put_app_creds_parameter",
   "create_iam_role",
+  "create_iam_exec_role",
   "attach_temp_install_ddl_policy",
   "run_dsql_ddl",
   "detach_temp_install_ddl_policy",
@@ -278,7 +281,10 @@ describe("install", () => {
     ).rejects.toThrow("S3 hiccup");
     const failed = ledger.find((e) => e.status === "failed");
     expect(failed).toMatchObject({ step: "put_s3_keep_file", error: "S3 hiccup" });
-    expect(doneSteps("install")).toEqual(INSTALL_STEPS_WITH_COMPUTE.slice(0, 5));
+    // Everything up to but not including the step that threw.
+    expect(doneSteps("install")).toEqual(
+      INSTALL_STEPS_WITH_COMPUTE.slice(0, INSTALL_STEPS_WITH_COMPUTE.indexOf("put_s3_keep_file")),
+    );
 
     // Re-drive: previously completed steps are skipped, the rest run.
     await installApp({
@@ -395,6 +401,8 @@ describe("install", () => {
       registryCredentials,
     });
     expect(doneSteps("install")).toEqual([
+      // No create_iam_exec_role: this manifest has no compute, so there is no
+      // Lambda for an exec role to be the identity of.
       "put_app_creds_parameter",
       "create_iam_role",
       "attach_temp_install_ddl_policy",
@@ -490,6 +498,7 @@ describe("uninstall", () => {
       "detach_temp_install_ddl_policy",
       "delete_app_registry",
       "delete_iam_role",
+      "delete_iam_exec_role",
       "delete_app_creds_parameter",
     ]);
     expect(fakeRegistry.deleteAppRegistryEntry).toHaveBeenCalledWith("photos");
@@ -510,6 +519,6 @@ describe("uninstall", () => {
       registryCredentials,
     });
     // Uninstall ran fully even though install's ledger was complete.
-    expect(doneSteps("uninstall")).toHaveLength(11);
+    expect(doneSteps("uninstall")).toHaveLength(12);
   });
 });

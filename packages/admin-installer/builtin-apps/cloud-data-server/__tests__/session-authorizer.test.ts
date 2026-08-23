@@ -6,8 +6,14 @@
  * throws is a 500, and on the auth path a 500 is indistinguishable from an
  * outage: the operator sees the site down, not a rejected caller.
  */
+import type { webcrypto } from "node:crypto";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { handler, readCookie, resetKeySetCache } from "../src/session-authorizer.js";
+
+// This package compiles against the ES2022 lib, so the WebCrypto types the
+// `crypto` global hands back live under node:crypto rather than in the DOM lib.
+type CryptoKey = webcrypto.CryptoKey;
+type JsonWebKey = webcrypto.JsonWebKey;
 
 const REGION = "us-east-2";
 const POOL = "us-east-2_TESTPOOL";

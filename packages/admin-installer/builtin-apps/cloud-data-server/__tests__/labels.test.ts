@@ -12,6 +12,7 @@ import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { S3Client, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { signRequest } from "@starkeep/app-client";
+import { installUserTokenFixture } from "./user-token.js";
 import { serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
 import { fakeDsqlWithGrants, recordRow, type FakeDsql } from "./fake-dsql.js";
@@ -61,6 +62,14 @@ beforeEach(() => {
   });
 });
 
+// Every route below sits behind the broker's end-user gate, so each request
+// carries a valid ID token alongside its HMAC. The gate itself is examined in
+// handler-auth.test.ts; here it is setup.
+let userToken = "";
+beforeAll(async () => {
+  ({ token: userToken } = await installUserTokenFixture());
+});
+
 function signedEvent(args: {
   appId: string;
   method: string;
@@ -80,7 +89,7 @@ function signedEvent(args: {
   return {
     rawPath: `/apps/${args.appId}${args.subPath}`,
     requestContext: { http: { method: args.method } },
-    headers,
+    headers: { ...headers, "X-Starkeep-User-Token": userToken },
     ...(bodyStr !== undefined ? { body: bodyStr } : {}),
     ...(args.query ? { queryStringParameters: args.query } : {}),
   };

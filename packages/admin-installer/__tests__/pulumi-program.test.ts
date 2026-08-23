@@ -38,6 +38,7 @@ const ctx: ComputeContext = {
   stackPrefix: "starkeep",
   appId: "photos",
   appRoleArn: "arn:aws:iam::111122223333:role/starkeep-app-photos-role",
+  appExecRoleArn: "arn:aws:iam::111122223333:role/starkeep-app-photos-exec-role",
   apiGatewayId: "api123",
   apiGatewayExecutionArn: "arn:aws:execute-api:us-east-1:111122223333:api123",
   apiGatewayUrl: "https://api.example.com",
@@ -257,13 +258,47 @@ describe("auth wiring: session", () => {
   });
 });
 
+describe("the execution identity", () => {
+  /**
+   * An app's handlers run as an identity that cannot reach user data.
+   *
+   * Until this split, each handler ran as the app's *data* role — which holds
+   * s3:GetObject on shared/<category>/* and dsql:DbConnect — so app code could
+   * read every record row of every type and fetch any blob in a granted
+   * category directly. The manifest was not binding on the app that wrote it,
+   * and no control in @starkeep/app-client or at the broker could reach that.
+   * Only which role the Lambda runs as could.
+   */
+  function lambdas(): CreatedResource[] {
+    return created.filter((r) => r.type === "aws:lambda/function:Function");
+  }
+
+  it("runs every handler as the exec role, never the data role", async () => {
+    await run(
+      manifestWithHandlers([
+        { name: "static", routes: ["GET /"], auth: "public" },
+        { name: "api", routes: ["POST /api/resize"] },
+      ]),
+    );
+    expect(lambdas()).toHaveLength(2);
+    for (const fn of lambdas()) {
+      expect(fn.inputs.role, fn.name).toBe(
+        "arn:aws:iam::111122223333:role/starkeep-app-photos-exec-role",
+      );
+      expect(fn.inputs.role, fn.name).not.toBe(
+        "arn:aws:iam::111122223333:role/starkeep-app-photos-role",
+      );
+    }
+  });
+});
+
 describe("lambda wiring", () => {
-  it("builds the function from the artifacts bundle under the app role", async () => {
+  it("builds the function from the artifacts bundle under the exec role", async () => {
     await run(manifestWithHandlers([{ name: "api", memoryMb: 512, timeoutSeconds: 30 }]));
     const fn = created.find((r) => r.type === "aws:lambda/function:Function");
     expect(fn).toBeDefined();
     expect(fn!.inputs.name).toBe("starkeep-app-photos-api");
-    expect(fn!.inputs.role).toBe(ctx.appRoleArn);
+    expect(fn!.inputs.role).toBe(ctx.appExecRoleArn);
     expect(fn!.inputs.s3Bucket).toBe("starkeep-artifacts");
     expect(fn!.inputs.s3Key).toBe("apps/photos/latest/dist.zip");
     expect(fn!.inputs.sourceCodeHash).toBe("abc123hash");

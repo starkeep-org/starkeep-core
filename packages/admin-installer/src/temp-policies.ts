@@ -764,6 +764,88 @@ export function buildTempInstallCloudDataServerPolicy(
  * that may not know it at policy-build time. `*` is fine here because the
  * resource path itself is fully scoped (`/${stackPrefix}/app-creds/${appId}`).
  */
+/**
+ * What an app's *execution* identity needs, as distinct from what its data
+ * identity holds.
+ *
+ * These four are everything a Lambda running an app's own code requires: write
+ * its logs, read the one SSM parameter holding its HMAC credential, decrypt
+ * that parameter, and invoke its own sibling functions. Nothing here touches
+ * user data — reaching data goes through the broker, over HMAC, with the
+ * broker checking grants per type.
+ *
+ * Shared by {@link buildRuntimePolicy} (the data role, which needs them too
+ * because the broker assumes into it) and {@link buildAppExecPolicy}. Written
+ * once rather than twice: two copies of a permission list drift, and the
+ * direction they drift in is always additive.
+ */
+export function appExecStatements(stackPrefix: string, appId: string): object[] {
+  return [
+    {
+      Sid: "AppInvokeOwnLambdas",
+      Effect: "Allow",
+      Action: "lambda:InvokeFunction",
+      Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-${appId}-*`,
+    },
+    {
+      Sid: "AppLogWrites",
+      Effect: "Allow",
+      Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+      Resource: `arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-${appId}-*`,
+    },
+    {
+      // Per-app HMAC credential lookup. Each role can fetch only its own
+      // parameter; cross-app reads are denied. @starkeep/app-client uses this
+      // in cloud mode to load the secret it signs every outbound /apps/*
+      // request with (see app-client/src/credentials.ts).
+      //
+      // Singular GetParameter scoped to one name, so there is no enumeration
+      // and no second app's secret to find — which is what already closes
+      // cross-app impersonation, independently of the role split.
+      Sid: "AppReadOwnCredsParameter",
+      Effect: "Allow",
+      Action: "ssm:GetParameter",
+      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/${appId}`,
+    },
+    {
+      // SecureString — decrypt via the SSM service key. Scoped by the
+      // kms:ViaService condition so the role can only decrypt SSM-bound
+      // ciphertexts, not arbitrary KMS data keys.
+      Sid: "AppReadOwnCredsParameterKmsDecrypt",
+      Effect: "Allow",
+      Action: "kms:Decrypt",
+      Resource: "*",
+      Condition: {
+        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+      },
+    },
+  ];
+}
+
+/**
+ * The policy for an app's Lambda execution role — {@link appExecStatements}
+ * and nothing else.
+ *
+ * The point of the separation is what is *absent*: no `s3:*`, no `dsql:*`, no
+ * `sts:AssumeRole`. Until this existed, each handler ran as the app's data
+ * role, which holds `s3:GetObject` on `shared/<category>/*` and
+ * `dsql:DbConnect` — so app code could read every record row of every type and
+ * fetch any blob in a granted category directly, bypassing the broker, the
+ * HMAC scheme and every grant check the broker performs. The manifest was not
+ * binding on the app that wrote it, and no control placed in
+ * `@starkeep/app-client` or at the broker could reach that.
+ *
+ * The data role keeps its powers. Only the *execution* identity changes, so
+ * the wide grants remain but only the broker can use them, and the broker
+ * checks per type.
+ */
+export function buildAppExecPolicy(stackPrefix: string, appId: string): string {
+  return JSON.stringify({
+    Version: "2012-10-17",
+    Statement: appExecStatements(stackPrefix, appId),
+  });
+}
+
 export function buildRuntimePolicy(
   stackPrefix: string,
   appId: string,
@@ -807,40 +889,7 @@ export function buildRuntimePolicy(
       Action: "dsql:DbConnect",
       Resource: "*",
     },
-    {
-      Sid: "AppInvokeOwnLambdas",
-      Effect: "Allow",
-      Action: "lambda:InvokeFunction",
-      Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-${appId}-*`,
-    },
-    {
-      Sid: "AppLogWrites",
-      Effect: "Allow",
-      Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
-      Resource: `arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-${appId}-*`,
-    },
-    {
-      // Per-app HMAC credential lookup. Each role can fetch only its own
-      // parameter; cross-app reads are denied. @starkeep/app-client uses this
-      // in cloud mode to load the secret it signs every outbound /apps/*
-      // request with (see app-client/src/credentials.ts).
-      Sid: "AppReadOwnCredsParameter",
-      Effect: "Allow",
-      Action: "ssm:GetParameter",
-      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/${appId}`,
-    },
-    {
-      // SecureString — decrypt via the SSM service key. Scoped by the
-      // kms:ViaService condition so the role can only decrypt SSM-bound
-      // ciphertexts, not arbitrary KMS data keys.
-      Sid: "AppReadOwnCredsParameterKmsDecrypt",
-      Effect: "Allow",
-      Action: "kms:Decrypt",
-      Resource: "*",
-      Condition: {
-        StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
-      },
-    },
+    ...appExecStatements(stackPrefix, appId),
   ];
 
   // The inventory report is read by the availability reconcile, which runs as

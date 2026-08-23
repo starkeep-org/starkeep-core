@@ -56,11 +56,21 @@ export interface ComputeContext {
   stackPrefix: string;
   appId: string;
   /**
-   * Per-app role ARN. The Pulumi program passes this as the Lambda exec
-   * role; the role itself is created and tagged by Manager before this
-   * context is built.
+   * Per-app **data** role ARN. Created and tagged by Manager before this
+   * context is built. It holds the app's S3 and DSQL grants and is what the
+   * broker assumes into on the app's behalf.
+   *
+   * This is deliberately not what the app's Lambdas run as — see
+   * {@link appExecRoleArn}. It used to be, which made the manifest
+   * non-binding on the app that wrote it.
    */
   appRoleArn: string;
+  /**
+   * Per-app **execution** role ARN — what the app's Lambdas actually run as.
+   * Logs, its own HMAC credential, its own sibling functions, and nothing
+   * else: no S3, no DSQL, no `sts:AssumeRole`.
+   */
+  appExecRoleArn: string;
   apiGatewayId: string;
   /**
    * Execution ARN of the shared API Gateway, used as the source-arn on

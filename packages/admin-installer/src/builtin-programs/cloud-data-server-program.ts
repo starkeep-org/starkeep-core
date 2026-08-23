@@ -404,6 +404,12 @@ export function buildCloudDataServerProgram(
             STACK_PREFIX: ctx.stackPrefix,
             STARKEEP_APP_ID: "cloud-data-server",
             STARKEEP_STACK_PREFIX: ctx.stackPrefix,
+            // The broker requires an end-user credential on every data-plane
+            // call and verifies the ID token against this pool's JWKS. With
+            // these unset it cannot verify anyone, and it refuses rather than
+            // admitting — so a missing value here is an outage, not a hole.
+            STARKEEP_USER_POOL_ID: ctx.userPoolId,
+            STARKEEP_USER_POOL_CLIENT_ID: ctx.userPoolClientId,
             // Part B: SSM SecureString holding { keyPairId, domain, privateKey }
             // for signing shared-file CloudFront URLs. Name only — the Lambda
             // reads and caches the value once per warm container.
