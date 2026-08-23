@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
   createNextProxyHandler,
   clearAppCredentialsCache,
+  sessionAuth,
   type MinimalNextRequest,
 } from "../src/index.js";
 
@@ -144,5 +145,35 @@ describe("endUserAuth: anonymous", () => {
 
     expect(res.status).toBe(200);
     expect(proxyMock.proxyToDataServer).toHaveBeenCalledOnce();
+  });
+});
+
+describe("sessionAuth()", () => {
+  it("refuses an unauthenticated cloud request with 401 and never signs", async () => {
+    // The zero-argument form is the one apps are told to use, so the property
+    // the explicit form is tested for above has to hold for it too — and it is
+    // the form whose verifier the app did not write and cannot inspect.
+    process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
+    process.env.STARKEEP_CLOUD_DATA_BASE = "https://gateway.example.com";
+    const handler = createNextProxyHandler({ appId: "testapp", endUserAuth: sessionAuth() });
+
+    const res = await handler(request(), ctx);
+
+    expect(res.status).toBe(401);
+    expect(proxyMock.proxyToDataServer).not.toHaveBeenCalled();
+  });
+
+  it("leaves local mode open by default", async () => {
+    const handler = createNextProxyHandler({ appId: "testapp", endUserAuth: sessionAuth() });
+    expect((await handler(request(), ctx)).status).toBe(200);
+  });
+
+  it("gates local mode when the app opts in", async () => {
+    const handler = createNextProxyHandler({
+      appId: "testapp",
+      endUserAuth: sessionAuth({ allowAnonymousLocal: false }),
+    });
+    expect((await handler(request(), ctx)).status).toBe(401);
+    expect(proxyMock.proxyToDataServer).not.toHaveBeenCalled();
   });
 });

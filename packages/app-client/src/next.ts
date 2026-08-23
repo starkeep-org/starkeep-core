@@ -172,3 +172,27 @@ async function readBody(req: MinimalNextRequest): Promise<Buffer | string> {
   const ab = await req.arrayBuffer();
   return Buffer.from(ab);
 }
+
+/**
+ * The documented answer to {@link ProxyEndUserAuth} for a cloud app: wire in
+ * the package's own cookie-session verifier.
+ *
+ * An app should not be assembling this itself. The explicit
+ * `{ auth: "session", verifySession }` form stays for an unusual verifier, but
+ * "unusual" is the operative word — every app in this codebase wants exactly
+ * what this returns.
+ */
+export function sessionAuth(opts?: { allowAnonymousLocal?: boolean }): ProxyEndUserAuth {
+  return {
+    auth: "session",
+    // Imported lazily so a local-only app that never calls this does not pull
+    // the verifier — and its `fetch`-to-Cognito path — into its bundle.
+    verifySession: async (req) => {
+      const { requireSession } = await import("./auth/session.js");
+      return (await requireSession(req)) !== null;
+    },
+    ...(opts?.allowAnonymousLocal === undefined
+      ? {}
+      : { allowAnonymousLocal: opts.allowAnonymousLocal }),
+  };
+}

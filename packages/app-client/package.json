@@ -1,6 +1,6 @@
 {
   "name": "@starkeep/app-client",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -16,6 +16,16 @@
       "types": "./dist/load-env-auto.d.ts",
       "import": "./dist/load-env-auto.js",
       "require": "./dist/load-env-auto.cjs"
+    },
+    "./auth": {
+      "types": "./dist/auth/index.d.ts",
+      "import": "./dist/auth/index.js",
+      "require": "./dist/auth/index.cjs"
+    },
+    "./edge": {
+      "types": "./dist/edge.d.ts",
+      "import": "./dist/edge.js",
+      "require": "./dist/edge.cjs"
     }
   },
   "files": [
