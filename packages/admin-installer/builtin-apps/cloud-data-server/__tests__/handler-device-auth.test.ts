@@ -148,6 +148,31 @@ describe("a registered device", () => {
     // Past the gate, into pg connect against a host that does not resolve.
     expect(res.statusCode).toBe(500);
   });
+
+  it("needs no X-Starkeep-User-Token, because the device key already is one", async () => {
+    // Every HMAC-signed data-plane call must carry an end-user token, and this
+    // one carries none — which reads as an exemption unless it is said out
+    // loud that it is not. A device key is issued by the platform at pairing
+    // time against a named Cognito user (`scriptRegistered`'s `userId`), so
+    // the signature already names the person. Same requirement, other shape.
+    const device = makeDevice();
+    scriptRegistered("dev-no-usertoken", device.publicKeySpki, "starkeep-drive", "cognito-user-1");
+    const headers = device.sign("starkeep-drive", "POST", "/sync/exchange", "{}");
+    headers["X-Starkeep-Device-Id"] = "dev-no-usertoken";
+    expect(headers["X-Starkeep-User-Token"]).toBeUndefined();
+
+    const res = await handler(
+      makeEvent({
+        method: "POST",
+        path: "/apps/starkeep-drive/sync/exchange",
+        headers,
+        body: "{}",
+      }),
+      context,
+    );
+    expect(res.statusCode).not.toBe(401);
+    expect(res.statusCode).toBe(500);
+  });
 });
 
 describe("a device that should be refused", () => {

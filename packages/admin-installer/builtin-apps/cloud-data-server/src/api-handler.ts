@@ -101,6 +101,7 @@ import type { Filter, DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/st
 import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
 import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
+import { userPoolConfig, verifyUserToken } from "./verify-user-token.js";
 import {
   loadAccessGrants,
   loadDeclaredLabelKeys,
@@ -1777,6 +1778,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!(await loadAppHmacSecret(appId))) {
         return clientErr(`Unknown app: ${appId}`, 401);
       }
+      // No end-user token is required on this branch, and that is not an
+      // oversight or a carve-out. A registered device key IS an end-user
+      // credential: admin-web writes it against a named Cognito userId at
+      // pairing time (see CachedDeviceKey.userId), so the signature already
+      // names the person. The requirement below is the same requirement in the
+      // other of its two shapes.
     } else {
       const hmacSecret = await loadAppHmacSecret(appId);
       if (!hmacSecret) {
@@ -1792,6 +1799,44 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       );
       if (!hmacCheck.ok) {
         return clientErr(hmacCheck.message, hmacCheck.status);
+      }
+
+      // The HMAC says which app is calling. This says a real person is behind
+      // it.
+      //
+      // The 2026-06-11 decision that "the data plane identifies the app, not
+      // the end user" was right about *authorization* — the app's grants still
+      // decide what it may touch, and nothing here changes that — and was read
+      // as licence to check nothing about the user at all. So nothing verified
+      // that an app was conducting the business it was handed, and an
+      // unauthenticated browser could drive an app's credential straight
+      // through this gate.
+      //
+      // There is no exemption. Every caller already holds one of the two
+      // shapes: cloud app compute mints an ID token from the session cookie,
+      // the local sync supervisor already refuses to run without a live one,
+      // and a paired device presents the signature handled above. Nothing an
+      // app puts in its own manifest opts out.
+      //
+      // /health is not a data path, so it stays reachable — a liveness check
+      // that requires a signed-in user cannot tell "down" from "signed out".
+      if (!(method === "GET" && subPath === "/health")) {
+        const userToken = normalizedHeaders["x-starkeep-user-token"];
+        if (!userToken) {
+          return clientErr("Missing X-Starkeep-User-Token", 401);
+        }
+        const poolCfg = userPoolConfig();
+        if (!poolCfg) {
+          // Refusing beats admitting: a deployment with no pool configured
+          // cannot verify anyone, and treating that as "allow" would turn a
+          // misconfiguration into an open data plane.
+          console.error("[api-handler] no user pool configured — cannot verify end user");
+          return clientErr("End-user verification unavailable", 503);
+        }
+        const claims = await verifyUserToken(userToken, poolCfg);
+        if (!claims) {
+          return clientErr("Invalid or expired end-user token", 401);
+        }
       }
     }
 

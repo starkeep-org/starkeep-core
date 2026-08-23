@@ -60,7 +60,13 @@ export function buildPulumiProgram(
 
       const fn = new aws.lambda.Function(`fn-${handler.name}`, {
         name: fnName,
-        role: ctx.appRoleArn,
+        // The exec role, not the data role. Running an app's own code as the
+        // role that holds its S3 and DSQL grants let that code read every
+        // record row of every type and fetch any blob in a granted category
+        // directly — bypassing the broker, the HMAC scheme and every grant
+        // check the broker performs. No control in @starkeep/app-client or at
+        // the broker could reach that; only this line could.
+        role: ctx.appExecRoleArn,
         runtime: aws.lambda.Runtime.NodeJS22dX,
         handler: handler.handler,
         s3Bucket: ctx.artifactsBucket,

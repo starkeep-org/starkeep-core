@@ -16,6 +16,7 @@ import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/clie
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { signRequest } from "@starkeep/app-client";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
+import { installUserTokenFixture, mintTestUserToken } from "./user-token.js";
 
 const ssmMock = mockClient(SSMClient);
 const stsMock = mockClient(STSClient);
@@ -34,8 +35,11 @@ beforeAll(async () => {
   process.env.AWS_REGION = "us-east-1";
   // Expected 500s log "Handler error:" — keep test output readable.
   vi.spyOn(console, "error").mockImplementation(() => {});
+  ({ token: userToken } = await installUserTokenFixture());
   ({ handler } = await import("../src/api-handler.js"));
 });
+
+let userToken = "";
 
 beforeEach(() => {
   ssmMock.reset();
@@ -65,11 +69,19 @@ function makeEvent(args: {
   headers?: Record<string, string>;
   body?: string;
   isBase64Encoded?: boolean;
+  /** `null` to send none; a string to send a specific one. */
+  userToken?: string | null;
 }): APIGatewayEvent {
   return {
     rawPath: args.path,
     requestContext: { http: { method: args.method } },
-    headers: args.headers ?? {},
+    // A valid end-user token unless the case is explicitly about its absence.
+    // Every data-plane call needs one; the cases below that omit it pass
+    // `userToken: null`.
+    headers: {
+      ...(args.userToken === null ? {} : { "X-Starkeep-User-Token": args.userToken ?? userToken }),
+      ...(args.headers ?? {}),
+    },
     ...(args.body !== undefined ? { body: args.body } : {}),
     ...(args.isBase64Encoded !== undefined ? { isBase64Encoded: args.isBase64Encoded } : {}),
   };
@@ -239,5 +251,159 @@ describe("warm-instance caches", () => {
     expect((await handler(event, context)).statusCode).toBe(500);
     expect((await handler(event, context)).statusCode).toBe(500);
     expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(1);
+  });
+});
+
+describe("the end-user gate", () => {
+  /**
+   * The HMAC says which app is calling. This says a real person is behind it.
+   *
+   * The 2026-06-11 decision that the data plane identifies the app and not the
+   * end user was right about authorization — the app's grants still decide
+   * what it may touch — and was read as licence to check nothing about the
+   * user at all. So an unauthenticated browser could drive an app's credential
+   * straight through this gate, which is what the 2026-08 exposure was.
+   *
+   * "Gate passed" is a 500 from pg connect, as everywhere else in this file.
+   */
+  const DATA_PATHS = ["/data/records", "/files/x", "/sync/exchange", "/app-data/db/decks"];
+
+  function signedFor(appId: string, subPath: string, method = "GET") {
+    return signRequest({ appId, hmacSecret: `secret-${appId}`, method, path: subPath });
+  }
+
+  it("refuses an HMAC-valid request carrying no user token", async () => {
+    scriptSecret("app-nouser", "secret-app-nouser");
+    scriptAssumeRole();
+    const res = await handler(
+      makeEvent({
+        method: "GET",
+        path: "/apps/app-nouser/data/records",
+        headers: signedFor("app-nouser", "/data/records"),
+        userToken: null,
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(401);
+    expect(errorOf(res)).toContain("Missing X-Starkeep-User-Token");
+    // A caller with no end user must not reach a role assumption.
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
+  });
+
+  it("refuses on every data path, with no route carve-out", async () => {
+    // The property is "no exemptions", so it is asserted over the whole
+    // reserved surface rather than on one representative path.
+    for (const subPath of DATA_PATHS) {
+      const appId = `app-nc-${subPath.replace(/\W/g, "")}`;
+      scriptSecret(appId, `secret-${appId}`);
+      scriptAssumeRole();
+      const res = await handler(
+        makeEvent({
+          method: "GET",
+          path: `/apps/${appId}${subPath}`,
+          headers: signedFor(appId, subPath),
+          userToken: null,
+        }),
+        context,
+      );
+      expect(res.statusCode, subPath).toBe(401);
+    }
+  });
+
+  it("admits an HMAC-valid request carrying a good one", async () => {
+    scriptSecret("app-gooduser", "secret-app-gooduser");
+    scriptAssumeRole();
+    const res = await handler(
+      makeEvent({
+        method: "GET",
+        path: "/apps/app-gooduser/data/records",
+        headers: signedFor("app-gooduser", "/data/records"),
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(500);
+  });
+
+  it("refuses an expired token", async () => {
+    scriptSecret("app-expired", "secret-app-expired");
+    scriptAssumeRole();
+    const expired = await mintTestUserToken({ exp: Math.floor(Date.now() / 1000) - 1 });
+    const res = await handler(
+      makeEvent({
+        method: "GET",
+        path: "/apps/app-expired/data/records",
+        headers: signedFor("app-expired", "/data/records"),
+        userToken: expired,
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(401);
+    expect(errorOf(res)).toContain("Invalid or expired end-user token");
+  });
+
+  it("refuses a token minted for a different pool client", async () => {
+    scriptSecret("app-wrongaud", "secret-app-wrongaud");
+    scriptAssumeRole();
+    const foreign = await mintTestUserToken({ aud: "some-other-app-client" });
+    const res = await handler(
+      makeEvent({
+        method: "GET",
+        path: "/apps/app-wrongaud/data/records",
+        headers: signedFor("app-wrongaud", "/data/records"),
+        userToken: foreign,
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("refuses an access token where an id token is required", async () => {
+    scriptSecret("app-accesstok", "secret-app-accesstok");
+    scriptAssumeRole();
+    const access = await mintTestUserToken({ token_use: "access" });
+    const res = await handler(
+      makeEvent({
+        method: "GET",
+        path: "/apps/app-accesstok/data/records",
+        headers: signedFor("app-accesstok", "/data/records"),
+        userToken: access,
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("refuses garbage rather than throwing a 500 that looks like an outage", async () => {
+    scriptSecret("app-garbage", "secret-app-garbage");
+    scriptAssumeRole();
+    for (const junk of ["not-a-jwt", "a.b", "...", ""]) {
+      const res = await handler(
+        makeEvent({
+          method: "GET",
+          path: "/apps/app-garbage/data/records",
+          headers: signedFor("app-garbage", "/data/records"),
+          userToken: junk === "" ? null : junk,
+        }),
+        context,
+      );
+      expect(res.statusCode, junk).toBe(401);
+    }
+  });
+
+  it("leaves the per-app liveness check reachable", async () => {
+    // A liveness check that requires a signed-in user cannot tell "down" from
+    // "signed out", which is the one thing it exists to answer.
+    scriptSecret("app-health", "secret-app-health");
+    scriptAssumeRole();
+    const res = await handler(
+      makeEvent({
+        method: "GET",
+        path: "/apps/app-health/health",
+        headers: signedFor("app-health", "/health"),
+        userToken: null,
+      }),
+      context,
+    );
+    expect(res.statusCode).not.toBe(401);
   });
 });

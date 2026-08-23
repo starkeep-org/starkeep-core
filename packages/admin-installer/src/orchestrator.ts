@@ -29,6 +29,8 @@ import type { AppManifest } from "@starkeep/admin-manifest";
 import { roleChain, type AwsCredentials } from "./session";
 import {
   createAppRole,
+  createAppExecRole,
+  appExecRoleName,
   attachTempInstallInfraPolicy,
   detachTempInstallInfraPolicy,
   attachTempUninstallInfraPolicy,
@@ -36,6 +38,7 @@ import {
   attachTempInstallDdlPolicy,
   detachTempInstallDdlPolicy,
   deleteAppRoleWithPolicies,
+  deleteAppExecRoleWithPolicies,
   assertCloudInstallableAppId,
   assertNotReservedAppId,
 } from "./iam";
@@ -188,6 +191,9 @@ async function installAppInner(
   const managerCreds = await roleChain([config.managerRoleArn]);
 
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
+  // What the app's Lambdas actually run as. The data role above is what the
+  // broker assumes into on their behalf — see createAppExecRole.
+  const appExecRoleArn = `arn:aws:iam::${config.accountId}:role/${appExecRoleName(config.stackPrefix, appId)}`;
 
   // SSM provisioning step: mirror the local HMAC secret to a SecureString at
   // /${stackPrefix}/app-creds/${appId}. The cloud-data-server verifier reads
@@ -235,6 +241,28 @@ async function installAppInner(
       managerCreds,
     });
   });
+
+  // The app's Lambda execution identity, separate from the data role above.
+  // Handlers run as this: logs, their own HMAC credential, their own sibling
+  // functions — no S3, no DSQL, no sts:AssumeRole. The data role keeps its
+  // powers, but only the broker can reach them now.
+  //
+  // Only for an app that has compute. An app with `compute.enabled: false`
+  // (Starkeep Drive today) has no Lambda to run, and a role that can read its
+  // HMAC credential existing for nothing to use is surface with no purpose.
+  if (ir.compute.enabled) {
+    await runStep(registry, appId, "install", "create_iam_exec_role", done, async () => {
+      await createAppExecRole({
+        stackPrefix: config.stackPrefix,
+        appId,
+        accountId: config.accountId,
+        permissionsBoundaryArn: config.permissionsBoundaryArn,
+        foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
+        userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
+        managerCreds,
+      });
+    });
+  }
 
   await runStep(registry, appId, "install", "attach_temp_install_ddl_policy", done, () =>
     attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
@@ -334,6 +362,7 @@ async function installAppInner(
           stackPrefix: config.stackPrefix,
           appId,
           appRoleArn,
+          appExecRoleArn,
           apiGatewayId: config.apiGatewayId,
           apiGatewayExecutionArn: config.apiGatewayExecutionArn,
           apiGatewayUrl: config.apiGatewayUrl,
@@ -396,6 +425,9 @@ async function uninstallAppInner(
 
   const managerCreds = await roleChain([config.managerRoleArn]);
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
+  // What the app's Lambdas actually run as. The data role above is what the
+  // broker assumes into on their behalf — see createAppExecRole.
+  const appExecRoleArn = `arn:aws:iam::${config.accountId}:role/${appExecRoleName(config.stackPrefix, appId)}`;
 
   if (ir.compute.enabled) {
     await runStep(registry, appId, "uninstall", "attach_temp_uninstall_infra_policy", done, () =>
@@ -418,6 +450,7 @@ async function uninstallAppInner(
         stackPrefix: config.stackPrefix,
         appId,
         appRoleArn,
+        appExecRoleArn,
         apiGatewayId: config.apiGatewayId,
         apiGatewayExecutionArn: config.apiGatewayExecutionArn,
         apiGatewayUrl: config.apiGatewayUrl,
@@ -481,6 +514,14 @@ async function uninstallAppInner(
     // The app role carries inline policies (runtime, broker-power); DeleteRole
     // fails with DeleteConflict unless they're removed first.
     deleteAppRoleWithPolicies(config.stackPrefix, appId, managerCreds),
+  );
+
+  // Unconditional, unlike the create side. An app can be uninstalled after its
+  // manifest changed, and `deleteAppExecRoleWithPolicies` tolerates a role that
+  // was never created — which is also what makes it safe for an app installed
+  // before the split existed.
+  await runStep(registry, appId, "uninstall", "delete_iam_exec_role", done, () =>
+    deleteAppExecRoleWithPolicies(config.stackPrefix, appId, managerCreds),
   );
 
   await runStep(registry, appId, "uninstall", "delete_app_creds_parameter", done, () =>

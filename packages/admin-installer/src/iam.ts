@@ -23,6 +23,7 @@ import {
   buildTempInstallCloudDataServerPolicy,
   buildTempInstallDdlPolicy,
   USER_DATA_OWNER_APP_ID,
+  buildAppExecPolicy,
 } from "./temp-policies";
 import type { FileAccess } from "@starkeep/admin-manifest";
 import { APP_GRANTABLE_CATEGORIES, typeCategory } from "@starkeep/protocol-primitives";
@@ -353,6 +354,93 @@ export async function detachTempInstallDdlPolicy(
   );
 }
 
+/**
+ * Mint (or update) an app's Lambda **execution** role.
+ *
+ * Distinct from the data role in exactly one way that matters: it can write
+ * logs, read its own HMAC credential, and invoke its own siblings, and it can
+ * do nothing else. No S3, no DSQL, no `sts:AssumeRole` — so app code that
+ * wants user data has to ask the broker for it, over HMAC, and be told no per
+ * type.
+ *
+ * Two limits worth stating rather than leaving implied. Blast radius is
+ * unchanged: the data role's grants are not narrowed, so a broker defect still
+ * exposes everything rather than only the declared types — narrowing them
+ * needs per-type views or a per-app schema projection, since DSQL has no RLS.
+ * And the local surface is untouched and unfixable: a local app runs as the
+ * user and can open the SQLite file directly. The manifest is binding in the
+ * cloud and advisory locally.
+ */
+export async function createAppExecRole(input: {
+  stackPrefix: string;
+  appId: string;
+  accountId: string;
+  permissionsBoundaryArn: string;
+  foundationalPermissionsBoundaryArn: string;
+  userDataOwnerPermissionsBoundaryArn: string;
+  managerCreds: AwsCredentials;
+}): Promise<string> {
+  const { stackPrefix, appId, accountId, managerCreds } = input;
+  const iam = makeIamClient(managerCreds);
+  const roleName = appExecRoleName(stackPrefix, appId);
+
+  const boundaryArn =
+    appId === FOUNDATIONAL_APP_ID
+      ? input.foundationalPermissionsBoundaryArn
+      : appId === USER_DATA_OWNER_APP_ID
+        ? input.userDataOwnerPermissionsBoundaryArn
+        : input.permissionsBoundaryArn;
+
+  // Lambda and nothing else. Stated as the whole principal list rather than as
+  // an absence, because the property wanted is "nothing else can assume this".
+  const assumeRolePolicy = JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Principal: { Service: "lambda.amazonaws.com" },
+        Action: "sts:AssumeRole",
+      },
+    ],
+  });
+
+  try {
+    await iam.send(
+      new CreateRoleCommand({
+        RoleName: roleName,
+        AssumeRolePolicyDocument: assumeRolePolicy,
+        PermissionsBoundary: boundaryArn,
+        Tags: [
+          { Key: "starkeep:appId", Value: appId },
+          { Key: "starkeep:managed", Value: "true" },
+        ],
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof EntityAlreadyExistsException)) throw err;
+    await iam.send(
+      new UpdateAssumeRolePolicyCommand({
+        RoleName: roleName,
+        PolicyDocument: assumeRolePolicy,
+      }),
+    );
+  }
+
+  await iam.send(
+    new PutRolePolicyCommand({
+      RoleName: roleName,
+      PolicyName: "exec",
+      PolicyDocument: buildAppExecPolicy(stackPrefix, appId),
+    }),
+  );
+
+  return `arn:aws:iam::${accountId}:role/${roleName}`;
+}
+
+export function appExecRoleName(stackPrefix: string, appId: string): string {
+  return `${stackPrefix}-app-${appId}-exec-role`;
+}
+
 export async function deleteAppRole(
   stackPrefix: string,
   appId: string,
@@ -362,6 +450,34 @@ export async function deleteAppRole(
   await iam.send(
     new DeleteRoleCommand({ RoleName: `${stackPrefix}-app-${appId}-role` }),
   );
+}
+
+/**
+ * Delete an app's exec role and its inline policy. Mirrors
+ * {@link deleteAppRoleWithPolicies}; an uninstall that removed the data role
+ * and left this one behind would leave a role able to read the app's HMAC
+ * credential after the app was gone.
+ */
+export async function deleteAppExecRoleWithPolicies(
+  stackPrefix: string,
+  appId: string,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const iam = makeIamClient(managerCreds);
+  const roleName = appExecRoleName(stackPrefix, appId);
+  try {
+    const { PolicyNames = [] } = await iam.send(
+      new ListRolePoliciesCommand({ RoleName: roleName }),
+    );
+    for (const policyName of PolicyNames) {
+      await iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyName }));
+    }
+    await iam.send(new DeleteRoleCommand({ RoleName: roleName }));
+  } catch (err) {
+    // An app installed before the role split has no exec role to delete, and
+    // an uninstall must not fail on its absence.
+    if ((err as { name?: string }).name !== "NoSuchEntityException") throw err;
+  }
 }
 
 /**
@@ -472,32 +588,51 @@ export async function detachTempInstallCloudDataServerPolicy(
  * regardless.
  */
 /**
- * Build the standard per-app role trust policy. Up to three trusted
- * principals:
- *   1. lambda.amazonaws.com — so the per-app Lambda(s) can assume the role
- *      as their exec identity.
- *   2. Manager role — so install/uninstall orchestration can assume the role
+ * Build the standard per-app **data** role trust policy. Trusted principals:
+ *   1. Manager role — so install/uninstall orchestration can assume the role
  *      for data-plane setup (S3 .keep marker, sync attribution).
- *   3. Cloud-data-server role — so the CDS broker can single-hop assume per-app
+ *   2. Cloud-data-server role — so the CDS broker can single-hop assume per-app
  *      roles for runtime data brokering (replaces the older Lambda→Manager→app
  *      double-hop; see G9a).
+ *   3. lambda.amazonaws.com — for the cloud-data-server's own role only.
  *
- * `includeCloudDataServerPrincipal` controls whether (3) is emitted. It must
+ * `lambda.amazonaws.com` used to be a third principal, so an app's own
+ * handlers ran as this role. That made the manifest non-binding on the app
+ * that wrote it: the role holds `s3:GetObject` on `shared/<category>/*` and
+ * `dsql:DbConnect`, so app code could read every record row of every type and
+ * fetch any blob in a granted category directly — bypassing the broker, the
+ * HMAC scheme, and every grant check the broker performs. App handlers now run
+ * as `${stackPrefix}-app-<appId>-exec-role` instead (see createAppExecRole),
+ * and this role is reachable only by the principals below.
+ *
+ * The cloud-data-server keeps the Lambda principal, and that is not an
+ * exception to the rule so much as the rule pointing the other way: the broker
+ * *is* the thing the grants exist for. Its Lambda has to run as the identity
+ * that holds them, and there is no app code inside it to confine — it is the
+ * confinement.
+ *
+ * `includeCloudDataServerPrincipal` controls whether (2) is emitted. It must
  * be false when minting the cloud-data-server role itself (the role does not
  * yet exist, and AWS rejects Principal AWS ARNs that don't resolve). For
- * every other app it should be true.
+ * every other app it should be true — so the same flag, inverted, is what says
+ * "this is the broker" for the Lambda principal above.
  */
 export function buildAppRoleTrustPolicy(
   stackPrefix: string,
   accountId: string,
   includeCloudDataServerPrincipal: boolean,
 ): string {
+  const isCloudDataServer = !includeCloudDataServerPrincipal;
   const statements: object[] = [
-    {
-      Effect: "Allow",
-      Principal: { Service: "lambda.amazonaws.com" },
-      Action: "sts:AssumeRole",
-    },
+    ...(isCloudDataServer
+      ? [
+          {
+            Effect: "Allow",
+            Principal: { Service: "lambda.amazonaws.com" },
+            Action: "sts:AssumeRole",
+          },
+        ]
+      : []),
     {
       Effect: "Allow",
       Principal: {
