@@ -153,6 +153,12 @@ export function buildCloudDataServerProgram(
       tags: {
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",
+        // Every other resource in this stack carries its stack prefix in its
+        // own name, so teardown can select by name. A DSQL cluster's identifier
+        // is assigned by AWS, so this tag is the only thing that says which
+        // deployment the cluster belongs to — and without it teardown for one
+        // prefix cannot tell its own cluster from another deployment's.
+        "starkeep:stackPrefix": ctx.stackPrefix,
       },
     }, {
       /**
@@ -594,7 +600,14 @@ export function buildCloudDataServerProgram(
     // Same artifact as the broker, different entry point: it deploys and
     // versions with the code it guards rather than being a second thing to
     // remember to rebuild.
-    const sessionAuthLambdaName = `${ctx.stackPrefix}-session-authorizer`;
+    // Named under the same `${stackPrefix}-app-cloud-data-server-*` prefix as
+    // the broker, because that prefix is not a readability convention: it is
+    // the resource pattern in the install temp policy, in the foundational
+    // permissions boundary, and in the role's own log-write grant — and it is
+    // what teardown sweeps. A name outside it cannot be created, could not
+    // write a log line if it were, and would survive the teardown that is
+    // supposed to remove it.
+    const sessionAuthLambdaName = `${ctx.stackPrefix}-app-cloud-data-server-session-authorizer`;
 
     const sessionAuthLogGroup = new aws.cloudwatch.LogGroup("session-auth-log-group", {
       name: `/aws/lambda/${sessionAuthLambdaName}`,
@@ -792,8 +805,14 @@ export function buildCloudDataServerProgram(
   var dest = request.headers["sec-fetch-dest"];
   if (!dest || dest.value !== "document") return request;
 
-  var cookie = request.headers.cookie ? request.headers.cookie.value : "";
-  if (cookie.indexOf("sk_session=") !== -1) return request;
+  // request.cookies, not request.headers.cookie. CloudFront Functions parse the
+  // Cookie header into this object and do not surface it in headers, so reading
+  // the header finds nothing — for everyone, always — and every document
+  // navigation redirects to sign-in whether or not the viewer has a session.
+  // That makes the app unreachable in a browser rather than merely
+  // unoptimized, which is the opposite of what a "not a gate" redirect is for.
+  var cookies = request.cookies;
+  if (cookies && cookies["sk_session"] && cookies["sk_session"].value) return request;
 
   var signIn = "/apps/" + appId + "/sign-in";
   if (uri === signIn) return request;

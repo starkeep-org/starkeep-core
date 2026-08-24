@@ -541,6 +541,10 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const lambdaArn = `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-${id}-api`;
       const logGroupArn = `arn:aws:logs:${region}:${accountId}:log-group:/aws/lambda/${stackPrefix}-app-${id}-api`;
       const appRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${id}-role`;
+      // The Lambda execution identity, which is deliberately *not* the app's
+      // data role — that split is what stops app code reaching user data
+      // directly, and install-infra may pass only this one to Lambda.
+      const appExecRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${id}-exec-role`;
       return [
         // Pulumi state I/O — read/write the per-app stack file plus the
         // shared .pulumi/ metadata.
@@ -628,13 +632,13 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         // but modeled so the call ledger matches reality.
         { action: "sts:GetCallerIdentity", resource: "*", why: "pulumi-aws issues this on provider init to learn the calling account/region." },
 
-        // iam:PassRole — required so Pulumi can attach the per-app role to
+        // iam:PassRole — required so Pulumi can attach the app's *exec* role to
         // the new Lambda. Condition key must be set for the simulator.
         {
           action: "iam:PassRole",
-          resource: appRoleArn,
+          resource: appExecRoleArn,
           contextVariables: { "iam:PassedToService": "lambda.amazonaws.com" },
-          why: "Pulumi's lambda.Function passes the app role as the Lambda execution role.",
+          why: "Pulumi's lambda.Function passes the app exec role as the Lambda execution role.",
         },
       ];
     },
