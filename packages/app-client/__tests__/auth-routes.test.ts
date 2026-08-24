@@ -216,6 +216,56 @@ describe("cross-origin", () => {
     );
     expect(res.status).toBe(200);
   });
+
+  it("allows the deployment's own browser-facing origin, which is not the request's", async () => {
+    // The case a live browser found and no unit test could: behind CloudFront,
+    // `Origin` is the distribution the person is on while `req.url` is the
+    // origin server the gateway forwarded to. Comparing only those two refuses
+    // every real sign-in while letting every Origin-less caller through.
+    const saved = process.env.STARKEEP_API_GATEWAY_URL;
+    process.env.STARKEEP_API_GATEWAY_URL = "https://cdn.example.net";
+    try {
+      const res = await routes.POST(
+        req({ body: { email: "a@example.com", password: "pw" }, origin: "https://cdn.example.net" }),
+        ctx("sign-in"),
+      );
+      expect(res.status).toBe(200);
+    } finally {
+      if (saved === undefined) delete process.env.STARKEEP_API_GATEWAY_URL;
+      else process.env.STARKEEP_API_GATEWAY_URL = saved;
+    }
+  });
+
+  it("still refuses a foreign origin when a public base is configured", async () => {
+    const saved = process.env.STARKEEP_API_GATEWAY_URL;
+    process.env.STARKEEP_API_GATEWAY_URL = "https://cdn.example.net";
+    try {
+      const res = await routes.POST(
+        req({ body: { email: "a@example.com", password: "pw" }, origin: "https://evil.example.com" }),
+        ctx("sign-in"),
+      );
+      expect(res.status).toBe(403);
+      expect(cognitoCalls).toEqual([]);
+    } finally {
+      if (saved === undefined) delete process.env.STARKEEP_API_GATEWAY_URL;
+      else process.env.STARKEEP_API_GATEWAY_URL = saved;
+    }
+  });
+
+  it("grants no exemption when the configured public base is malformed", async () => {
+    const saved = process.env.STARKEEP_API_GATEWAY_URL;
+    process.env.STARKEEP_API_GATEWAY_URL = "not a url";
+    try {
+      const res = await routes.POST(
+        req({ body: { email: "a@example.com", password: "pw" }, origin: "https://evil.example.com" }),
+        ctx("sign-in"),
+      );
+      expect(res.status).toBe(403);
+    } finally {
+      if (saved === undefined) delete process.env.STARKEEP_API_GATEWAY_URL;
+      else process.env.STARKEEP_API_GATEWAY_URL = saved;
+    }
+  });
 });
 
 describe("POST refresh", () => {

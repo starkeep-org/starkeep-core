@@ -1,4 +1,4 @@
-import { signRequest } from "./sign";
+import { signRequest, USER_TOKEN_HEADER } from "./sign";
 import type { AppCredentials } from "./credentials";
 
 export interface ProxyRequest {
@@ -8,6 +8,15 @@ export interface ProxyRequest {
   headers: Record<string, string | undefined>;
   /** Pre-read raw body bytes (or undefined for GET/HEAD). */
   body?: Buffer | string;
+  /**
+   * The end user's Cognito ID token, forwarded alongside the signature.
+   *
+   * The HMAC says which app is calling; the cloud data plane also requires a
+   * credential bound to a named person, with no route carve-out. This proxy is
+   * that person's app acting on their behalf, so it presents both. Omitted on
+   * the local surface, where the data server asks for no end user.
+   */
+  userToken?: string;
 }
 
 export interface ProxyResponse {
@@ -38,6 +47,7 @@ export async function proxyToDataServer(
     path: req.path,
     body,
   });
+  if (req.userToken) fwdHeaders[USER_TOKEN_HEADER] = req.userToken;
   const ct = req.headers["content-type"];
   if (ct) fwdHeaders["Content-Type"] = ct;
 
