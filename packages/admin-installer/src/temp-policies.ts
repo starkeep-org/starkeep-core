@@ -24,6 +24,19 @@ export const USER_DATA_OWNER_APP_ID = "starkeep-drive";
 const INVENTORY_PREFIX = "_starkeep/inventory/";
 
 /**
+ * The Lambda execution role an app's compute runs as — deliberately *not* the
+ * app's data role, which holds the S3 and DSQL grants the broker mediates.
+ *
+ * Defined here rather than in iam.ts because the install-time PassRole grant
+ * below has to name the same role the installer actually creates, and a second
+ * copy of the string is how that grant came to name the wrong role. Re-exported
+ * from iam.ts, which is where the rest of the installer imports it.
+ */
+export function appExecRoleName(stackPrefix: string, appId: string): string {
+  return `${stackPrefix}-app-${appId}-exec-role`;
+}
+
+/**
  * Temp policy for the install-ddl-role. Single statement granting
  * dsql:DbConnectAdmin, used for both install and uninstall DDL.
  * Attached to ${stackPrefix}-install-ddl-role (not the app role).
@@ -212,13 +225,18 @@ export function buildTempInstallInfraPolicy(
         ],
       },
       {
-        // Pulumi's lambda.Function CreateFunction passes the per-app role as
-        // the Lambda exec role; install-infra is the principal making the
-        // call, so iam:PassRole is evaluated against this temp policy.
+        // Pulumi's lambda.Function CreateFunction passes the app's *exec* role
+        // as the Lambda execution role; install-infra is the principal making
+        // the call, so iam:PassRole is evaluated against this temp policy.
+        //
+        // The exec role and not the data role, and the narrowness is the point:
+        // splitting the two is what stops app code reading user data directly,
+        // and a PassRole that still named the data role would let an install
+        // hand it straight back to a Lambda.
         Sid: "TempInstallInfraPassRoleAppToLambda",
         Effect: "Allow",
         Action: "iam:PassRole",
-        Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${appId}-role`,
+        Resource: `arn:aws:iam::${accountId}:role/${appExecRoleName(stackPrefix, appId)}`,
         Condition: {
           StringEquals: { "iam:PassedToService": "lambda.amazonaws.com" },
         },
@@ -674,7 +692,8 @@ export function buildTempInstallCloudDataServerPolicy(
         // Platform-owned CloudFront distribution + URL-signing key material
         // (Part A/B of the CloudFront plan). The CDS Pulumi program creates a
         // distribution, an S3-origin Origin Access Control, a shared-files
-        // cache policy, and an RSA public key + key group; it also *reads* the
+        // cache policy, an RSA public key + key group, and the
+        // signed-out-redirect viewer-request function; it also *reads* the
         // AWS-managed cache/origin-request policies by name (CachingOptimized,
         // CachingDisabled, AllViewerExceptHostHeader) via getCachePolicy /
         // getOriginRequestPolicy, which issue List*/Get* calls. CloudFront is
@@ -727,6 +746,18 @@ export function buildTempInstallCloudDataServerPolicy(
           "cloudfront:UpdateKeyGroup",
           "cloudfront:DeleteKeyGroup",
           "cloudfront:ListKeyGroups",
+          // The signed-out-redirect viewer-request function on the default
+          // behavior. PublishFunction is separate from CreateFunction and the
+          // resource sets publish: true; DescribeFunction returns the ETag that
+          // update and delete both require; GetFunction and ListFunctions are
+          // Pulumi refresh reads.
+          "cloudfront:CreateFunction",
+          "cloudfront:DescribeFunction",
+          "cloudfront:GetFunction",
+          "cloudfront:UpdateFunction",
+          "cloudfront:PublishFunction",
+          "cloudfront:DeleteFunction",
+          "cloudfront:ListFunctions",
         ],
         Resource: "*",
       },

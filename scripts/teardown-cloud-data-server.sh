@@ -276,7 +276,7 @@ echo ""
 echo "  Stack prefix : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
 echo "  API Gateway  : $GATEWAY_NAME"
 echo "  Lambdas      : ${CDS_LAMBDA_PREFIX}*"
-echo "  DSQL cluster : (tagged starkeep:appId=cloud-data-server)$([[ "$FORCE" == "true" ]] && echo "  [--force: will disable deletion protection]")"
+echo "  DSQL cluster : (tagged starkeep:stackPrefix=${STACK_PREFIX})$([[ "$FORCE" == "true" ]] && echo "  [--force: will disable deletion protection]")"
 echo "  CloudFront   : distribution + OAC + cache policy + public key + key group (Part B)"
 echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
@@ -373,11 +373,20 @@ fi
 
 # ── Step 4: DSQL cluster ──────────────────────────────────────────────────────
 
-step "Deleting DSQL cluster (tagged starkeep:appId=cloud-data-server)"
-CLUSTER_IDS=$(python3 - "$REGION" << 'PYEOF'
+# A DSQL cluster's identifier is assigned by AWS, so unlike every other resource
+# here it cannot be selected by a prefixed name — the `starkeep:stackPrefix` tag
+# is the only thing that says which deployment a cluster belongs to. Clusters
+# created before that tag existed carry only `starkeep:appId=cloud-data-server`,
+# which every deployment's cluster carries, so an untagged cluster cannot be
+# attributed to this prefix and is never deleted on that basis alone. The one
+# exception is a cluster with deletion protection off: the program sets
+# protection from `!ephemeral`, so an unprotected cluster is a disposable e2e
+# one by construction and no real deployment has one.
+step "Deleting DSQL cluster (tagged starkeep:stackPrefix=${STACK_PREFIX})"
+CLUSTERS=$(python3 - "$REGION" "$STACK_PREFIX" << 'PYEOF'
 import subprocess, json, sys
 
-region = sys.argv[1]
+region, prefix = sys.argv[1], sys.argv[2]
 r = subprocess.run(
     ["aws", "dsql", "list-clusters", "--region", region, "--output", "json"],
     capture_output=True, text=True,
@@ -398,22 +407,54 @@ for cluster in json.loads(r.stdout).get("clusters", []):
     if tr.returncode != 0:
         continue
     tags = json.loads(tr.stdout).get("tags", {})
-    if tags.get("starkeep:appId") == "cloud-data-server":
-        print(cid)
+    if tags.get("starkeep:appId") != "cloud-data-server":
+        continue
+    owner = tags.get("starkeep:stackPrefix")
+    if owner == prefix:
+        print(f"mine {cid} -")
+    elif owner:
+        print(f"other {cid} {owner}")
+    else:
+        print(f"untagged {cid} -")
 PYEOF
 )
 
-if [[ -z "$CLUSTER_IDS" ]]; then
+if [[ -z "$CLUSTERS" ]]; then
   skip
 else
-  for CID in $CLUSTER_IDS; do
+  while read -r STATE CID OWNER; do
+    [[ -z "$CID" ]] && continue
+
+    if [[ "$STATE" == "other" ]]; then
+      echo "  Skipping $CID — it belongs to deployment '$OWNER', not '$STACK_PREFIX'."
+      continue
+    fi
+
+    # Read once: it decides both whether an untagged cluster is attributable
+    # and whether a deletable one needs its protection lifted first.
+    PROTECTED=$(aws dsql get-cluster --identifier "$CID" --region "$REGION" \
+      --query 'deletionProtectionEnabled' --output text 2>/dev/null || echo "unknown")
+
+    if [[ "$STATE" == "untagged" ]]; then
+      # No stackPrefix tag: predates the tag, so which deployment it belongs to
+      # is unknown. Deletable only on the protection evidence described above.
+      if [[ "$PROTECTED" != "False" && "$PROTECTED" != "false" ]]; then
+        echo "  WARN: $CID carries no starkeep:stackPrefix tag, so it cannot be attributed"
+        echo "        to '$STACK_PREFIX' and may belong to another deployment. Leaving it intact."
+        echo "        If it IS this deployment's, tag it and re-run:"
+        echo "          aws dsql tag-resource --resource-arn arn:aws:dsql:${REGION}:<account>:cluster/${CID} \\"
+        echo "            --tags 'starkeep:stackPrefix=${STACK_PREFIX}' --region ${REGION}"
+        continue
+      fi
+      echo "  $CID has no stackPrefix tag but deletion protection is off — treating it as a"
+      echo "  disposable e2e cluster (a real deployment's cluster is always protected)."
+    fi
+
     # Real user clusters enable deletion protection by design, which makes
     # delete-cluster fail. Removing the CDS stack is the whole point of this
     # script, so it can lift that protection — but never silently: only with
     # --force, or an explicit interactive y/N. Without consent the cluster is
     # left intact and we say exactly how to remove it.
-    PROTECTED=$(aws dsql get-cluster --identifier "$CID" --region "$REGION" \
-      --query 'deletionProtectionEnabled' --output text 2>/dev/null || echo "unknown")
     if [[ "$PROTECTED" == "True" || "$PROTECTED" == "true" ]]; then
       DO_DISABLE=false
       if [[ "$FORCE" == "true" ]]; then
@@ -445,14 +486,15 @@ else
       echo "  WARN: could not delete $CID — leaving it. Reason:"
       sed 's/^/    /' /tmp/dsql-del-err
     fi
-  done
+  done <<< "$CLUSTERS"
   rm -f /tmp/dsql-del-err
 fi
 
 # ── Step 4b: CloudFront (Part B: shared-file signed URLs) ─────────────────────
 # The platform CloudFront distribution and its URL-signing material: the
 # distribution itself, the S3-origin OAC, the custom shared-files cache policy,
-# and the RSA public key + key group. Deleting a distribution requires
+# the RSA public key + key group, and the signed-out-redirect viewer-request
+# function. Deleting a distribution requires
 # disable → wait-until-Deployed → delete, which is slow (~5–15 min). This whole
 # step is best-effort: any failure is logged and skipped so a hiccup never
 # aborts the wider teardown (these resources are idle/cheap and can be cleaned
@@ -471,6 +513,7 @@ PUBKEY_COMMENT = f"{prefix} shared-file signing key"
 KEYGROUP_COMMENT = f"{prefix} shared-file signers"
 OAC_NAME = f"{prefix}-files-oac"
 CACHE_NAME = f"{prefix}-shared-files-cache"
+REDIRECT_FN_NAME = f"{prefix}-signed-out-redirect"
 
 
 def cf(*args):
@@ -486,8 +529,12 @@ def delete_with_etag(kind, list_cmd, list_key, match, id_of, get_cmd, delete_cmd
     """Generic list→match→get-ETag→delete for the ETag-guarded CF resources
     (key group, public key, OAC, cache policy). `match(item)` picks ours and
     `id_of(item)` extracts its id (the list-item shapes differ: some wrap the
-    resource, some are flat). Best-effort — a still-referenced or absent
-    resource just warns/skips."""
+    resource, some are flat). Best-effort — an absent resource just skips.
+
+    Retried, because "in use" here means "the distribution above has not
+    finished going away yet", which resolves on its own within a minute or two.
+    A single attempt leaks every one of these, and they are what makes the next
+    install of the same prefix fail."""
     try:
         data = cf(list_cmd)
         items = (data.get(list_key) or {}).get("Items", []) or []
@@ -496,11 +543,20 @@ def delete_with_etag(kind, list_cmd, list_key, match, id_of, get_cmd, delete_cmd
             print(f"  {kind}: not found, skipping.")
             return
         rid = id_of(found)
-        got = cf(get_cmd, "--id", rid)
-        cf(delete_cmd, "--id", rid, "--if-match", got["ETag"])
-        print(f"  {kind}: deleted {rid}.")
     except Exception as e:  # noqa: BLE001 — best-effort teardown
-        print(f"  WARN {kind} cleanup: {e}")
+        print(f"  WARN {kind} lookup: {e}")
+        return
+    for attempt in range(6):
+        try:
+            got = cf(get_cmd, "--id", rid)
+            cf(delete_cmd, "--id", rid, "--if-match", got["ETag"])
+            print(f"  {kind}: deleted {rid}.")
+            return
+        except Exception as e:  # noqa: BLE001 — best-effort teardown
+            if attempt == 5:
+                print(f"  WARN {kind} cleanup after 6 tries: {e}")
+                return
+            time.sleep(20)
 
 
 # ---- Distribution: find by comment → disable → wait Deployed → delete --------
@@ -523,23 +579,43 @@ try:
             print("  Disabling distribution…")
             cf("update-distribution", "--id", dist_id, "--if-match", etag,
                "--distribution-config", f"file://{path}")
-        deployed = False
+        # Wait for BOTH: the deployment to settle *and* the config to actually
+        # read as disabled. Polling Status alone is not enough — CloudFront
+        # returns to "Deployed" while the disable is still taking effect, and a
+        # delete issued in that window fails with DistributionNotDisabled.
+        ready = False
         deadline = time.time() + 25 * 60
         while time.time() < deadline:
             gd = cf("get-distribution", "--id", dist_id)
             status = gd["Distribution"]["Status"]
+            enabled = gd["Distribution"]["DistributionConfig"]["Enabled"]
             etag = gd["ETag"]
-            if status == "Deployed":
-                deployed = True
+            if status == "Deployed" and not enabled:
+                ready = True
                 break
-            print(f"  …status={status}; waiting 30s")
+            print(f"  …status={status} enabled={enabled}; waiting 30s")
             time.sleep(30)
-        if not deployed:
-            print("  Distribution did not reach Deployed in 25m; leave for manual cleanup.")
+        if not ready:
+            print("  Distribution did not settle as disabled in 25m; leave for manual cleanup.")
         else:
-            print("  Deleting distribution…")
-            cf("delete-distribution", "--id", dist_id, "--if-match", etag)
-            print("  Distribution deleted.")
+            # And retry anyway. The observed failure (2026-08-24) had status
+            # Deployed and the disable applied, and AWS still refused once; a
+            # minute later the identical call succeeded. Everything downstream —
+            # key group, public key, OAC, cache policy, the viewer-request
+            # function — is undeletable while the distribution exists, so giving
+            # up here leaks the entire CloudFront chain and the *next* install
+            # of this prefix fails on duplicate names.
+            for attempt in range(6):
+                try:
+                    gd = cf("get-distribution", "--id", dist_id)
+                    cf("delete-distribution", "--id", dist_id, "--if-match", gd["ETag"])
+                    print("  Distribution deleted.")
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if attempt == 5:
+                        raise
+                    print(f"  delete refused ({str(e).strip()[:80]}…); retrying in 30s")
+                    time.sleep(30)
 except Exception as e:  # noqa: BLE001
     print(f"  WARN distribution cleanup: {e}")
 
@@ -569,6 +645,31 @@ delete_with_etag(
     lambda it: it["CachePolicy"]["Id"],
     "get-cache-policy", "delete-cache-policy",
 )
+
+# ---- The signed-out-redirect viewer-request function -------------------------
+# Addressed by name rather than id, so it needs its own block rather than
+# delete_with_etag. Leaving it behind is not a harmless leak: CloudFront
+# function names are account-global and CreateFunction refuses a duplicate, so
+# an orphan here breaks the NEXT install of this same prefix. Deletable only
+# once the distribution above no longer references it.
+for attempt in range(6):
+    try:
+        got = cf("describe-function", "--name", REDIRECT_FN_NAME)
+    except Exception:  # noqa: BLE001 — absent is success
+        print(f"  Function: {REDIRECT_FN_NAME} not found, skipping.")
+        break
+    try:
+        cf("delete-function", "--name", REDIRECT_FN_NAME, "--if-match", got["ETag"])
+        print(f"  Function: deleted {REDIRECT_FN_NAME}.")
+        break
+    except Exception as e:  # noqa: BLE001 — best-effort teardown
+        # FunctionInUse until the distribution that references it is really
+        # gone. Names are account-global and CreateFunction refuses a
+        # duplicate, so an orphan here breaks the next install of this prefix.
+        if attempt == 5:
+            print(f"  WARN function cleanup ({REDIRECT_FN_NAME}) after 6 tries: {e}")
+            break
+        time.sleep(20)
 PYEOF
 
 step "Deleting CloudFront signing SecureString: /${STACK_PREFIX}/app-creds/_cloudfront-signing"

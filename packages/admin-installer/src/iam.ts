@@ -24,6 +24,7 @@ import {
   buildTempInstallDdlPolicy,
   USER_DATA_OWNER_APP_ID,
   buildAppExecPolicy,
+  appExecRoleName,
 } from "./temp-policies";
 import type { FileAccess } from "@starkeep/admin-manifest";
 import { APP_GRANTABLE_CATEGORIES, typeCategory } from "@starkeep/protocol-primitives";
@@ -95,7 +96,7 @@ const FOUNDATIONAL_APP_ID = "cloud-data-server";
  * who may read the inventory prefix) and re-exported here, which is where the
  * rest of the installer has always looked for it.
  */
-export { USER_DATA_OWNER_APP_ID } from "./temp-policies";
+export { USER_DATA_OWNER_APP_ID, appExecRoleName } from "./temp-policies";
 
 /**
  * The local-data-server's built-in file-watcher identity. This is a
@@ -437,9 +438,7 @@ export async function createAppExecRole(input: {
   return `arn:aws:iam::${accountId}:role/${roleName}`;
 }
 
-export function appExecRoleName(stackPrefix: string, appId: string): string {
-  return `${stackPrefix}-app-${appId}-exec-role`;
-}
+
 
 export async function deleteAppRole(
   stackPrefix: string,

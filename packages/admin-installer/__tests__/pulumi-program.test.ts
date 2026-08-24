@@ -10,6 +10,7 @@ import { buildPulumiProgram } from "../src/pulumi-program";
 import type { ComputeContext } from "../src/compute-stack";
 import type { AppManifest, AppComputeHandler } from "@starkeep/admin-manifest";
 import { appManifestSchema } from "@starkeep/admin-manifest";
+import { buildTempInstallInfraPolicy } from "../src/temp-policies";
 
 interface CreatedResource {
   type: string;
@@ -289,6 +290,31 @@ describe("the execution identity", () => {
         "arn:aws:iam::111122223333:role/starkeep-app-photos-role",
       );
     }
+  });
+
+  it("install-infra may pass exactly the role the program hands to Lambda", async () => {
+    // Two halves of one decision that live in different files: the program
+    // chooses the role, the temp policy authorizes passing it. When the split
+    // landed, only the first half moved — CreateFunction then failed with
+    // `iam:PassRole ... exec-role because no identity-based policy allows`,
+    // and no unit test noticed because neither half is wrong on its own.
+    await run(manifestWithHandlers([{ name: "api", routes: ["POST /api/resize"] }]));
+    const passed = [...new Set(lambdas().map((fn) => fn.inputs.role as string))];
+    expect(passed).toHaveLength(1);
+
+    const policy = JSON.parse(
+      buildTempInstallInfraPolicy(ctx.stackPrefix, ctx.appId, "111122223333", "us-east-1"),
+    ) as { Statement: Array<{ Effect: string; Action?: string | string[]; Resource?: string | string[] }> };
+    const toArray = (x: string | string[] | undefined): string[] =>
+      x === undefined ? [] : Array.isArray(x) ? x : [x];
+    const passable = policy.Statement.filter(
+      (st) => st.Effect === "Allow" && toArray(st.Action).includes("iam:PassRole"),
+    ).flatMap((st) => toArray(st.Resource));
+
+    expect(passable).toContain(passed[0]);
+    // And only that one: a PassRole still naming the data role would let an
+    // install hand back the identity the split exists to take away.
+    expect(passable).not.toContain(ctx.appRoleArn);
   });
 });
 

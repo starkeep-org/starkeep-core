@@ -26,6 +26,14 @@ interface CfHeader {
 interface CfRequest {
   uri: string;
   headers: Record<string, CfHeader>;
+  /**
+   * CloudFront parses the Cookie header into this object and does **not**
+   * surface it in `headers`. Modelling that faithfully is the point: this
+   * harness previously put the cookie in `headers.cookie`, the function read it
+   * from there, and eleven green tests agreed with the code about a shape
+   * neither of them shared with CloudFront.
+   */
+  cookies: Record<string, CfHeader>;
 }
 interface CfResponse {
   statusCode?: number;
@@ -48,11 +56,18 @@ function loadDeployedFunction(): (event: { request: CfRequest }) => CfRequest | 
 
 const handler = loadDeployedFunction();
 
-function req(uri: string, opts: { dest?: string; cookie?: string } = {}): CfRequest {
+function req(
+  uri: string,
+  opts: { dest?: string; session?: string; cookieHeader?: string } = {},
+): CfRequest {
   const headers: Record<string, CfHeader> = {};
   if (opts.dest) headers["sec-fetch-dest"] = { value: opts.dest };
-  if (opts.cookie) headers.cookie = { value: opts.cookie };
-  return { uri, headers };
+  // Only for the regression test below, which asserts that a Cookie *header*
+  // is not what the function consults. Real CloudFront never sends one.
+  if (opts.cookieHeader) headers.cookie = { value: opts.cookieHeader };
+  const cookies: Record<string, CfHeader> = {};
+  if (opts.session) cookies["sk_session"] = { value: opts.session };
+  return { uri, headers, cookies };
 }
 
 function isRedirect(result: CfRequest | CfResponse): result is CfResponse {
@@ -79,8 +94,17 @@ describe("redirects", () => {
 });
 
 describe("passes through", () => {
+  it("a Cookie header is not what it consults — CloudFront never sends one", () => {
+    // The bug this file missed, pinned so it cannot come back. A viewer-request
+    // function receives cookies only in `request.cookies`; reading
+    // `headers.cookie` finds nothing for everyone, so every document navigation
+    // redirects and a signed-in person can never load the app at all.
+    const r = req("/apps/memo/browse", { dest: "document", cookieHeader: "sk_session=abc" });
+    expect(isRedirect(handler({ request: r }))).toBe(true);
+  });
+
   it("a viewer who already has a session cookie", () => {
-    const r = req("/apps/memo/browse", { dest: "document", cookie: "sk_session=abc" });
+    const r = req("/apps/memo/browse", { dest: "document", session: "abc" });
     expect(handler({ request: r })).toBe(r);
   });
 
