@@ -118,6 +118,29 @@ export function createNextProxyHandler(opts: NextProxyOptions) {
       }
     }
 
+    // Having established there is a person here, carry the proof of it
+    // upstream. The cloud data plane requires a credential bound to a named
+    // end user on every call, and this proxy is the app's compute acting for
+    // that user — so it presents the token the platform minted for them
+    // alongside the signature that says which app is asking.
+    //
+    // `mintIdToken` rather than a bare cookie read: the token is good for about
+    // an hour and the session outlives it, so a request arriving with a
+    // near-expired one is served with a fresh token and the browser is told to
+    // keep it. A cookie read alone would forward a token the broker is about to
+    // start refusing, and the failure would arrive an hour into a session with
+    // nothing in the request to explain it.
+    let userToken: string | undefined;
+    let refreshedTokenCookie: string | undefined;
+    if (isCloudMode()) {
+      const { mintIdToken } = await import("./auth/session.js");
+      const minted = await mintIdToken(req, opts.appId);
+      if (minted) {
+        userToken = minted.token;
+        refreshedTokenCookie = minted.setCookie;
+      }
+    }
+
     const creds = await loadAppCredentials(opts.appId);
     if (!creds) {
       if (opts.onMissingCredentials) return opts.onMissingCredentials();
@@ -149,11 +172,14 @@ export function createNextProxyHandler(opts: NextProxyOptions) {
       path,
       headers: headersRecord,
       body,
+      userToken,
     });
 
+    const responseHeaders = new Headers(upstream.headers);
+    if (refreshedTokenCookie) responseHeaders.append("Set-Cookie", refreshedTokenCookie);
     return new Response(upstream.body, {
       status: upstream.status,
-      headers: new Headers(upstream.headers),
+      headers: responseHeaders,
     });
   };
 }

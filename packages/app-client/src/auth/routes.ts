@@ -49,11 +49,38 @@ function json(body: unknown, status = 200, cookies: string[] = []): Response {
 function crossOrigin(req: MinimalNextRequest): boolean {
   const origin = req.headers.get("origin");
   if (!origin) return false;
+  let sent: string;
   try {
-    return new URL(origin).origin !== new URL(req.url).origin;
+    sent = new URL(origin).origin;
   } catch {
     return true;
   }
+  try {
+    if (sent === new URL(req.url).origin) return false;
+  } catch {
+    return true;
+  }
+
+  // Behind the platform's CloudFront distribution, the request the Lambda sees
+  // is not the request the browser made: CloudFront forwards every viewer
+  // header except Host, so `Origin` names the domain the person is on while
+  // `req.url` names the origin server. Comparing only those two refuses every
+  // real browser sign-in and lets curl through — the exact inverse of what a
+  // CSRF check is for, and invisible to any caller that sends no Origin.
+  //
+  // STARKEEP_API_GATEWAY_URL is the browser-facing base the platform injects at
+  // install time (the distribution, falling back to the raw gateway). It is the
+  // one value that knows what "same origin" means for this deployment; the app
+  // cannot infer it from the request.
+  const publicBase = process.env.STARKEEP_API_GATEWAY_URL;
+  if (publicBase) {
+    try {
+      if (sent === new URL(publicBase).origin) return false;
+    } catch {
+      // A malformed configured base grants no exemption.
+    }
+  }
+  return true;
 }
 
 async function readJsonBody(req: MinimalNextRequest): Promise<Record<string, unknown>> {
