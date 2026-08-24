@@ -66,3 +66,14 @@ export {
   listInstallSteps,
 } from "./local/registry";
 export type { RegisteredApp, InstallStepRow } from "./local/registry";
+
+// The cloud registry — the authoritative list of apps installed against a
+// stack. Exported so the tier-3 suite can ask what is deployed instead of
+// naming apps it happens to know about; see e2e-aws/src/journey.test.ts.
+export { createDsqlRegistry } from "./registry";
+export type { InstalledApp, Registry, RegistryOptions } from "./registry";
+
+// The install-time anonymous-surface probe, exported for the same reason: the
+// e2e asserts the deployed reality with the code the installer uses.
+export { probeAnonymousSurface, formatProbeReport } from "./post-install-probe";
+export type { ProbeReport, ProbeResult } from "./post-install-probe";

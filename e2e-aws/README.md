@@ -34,31 +34,17 @@ pnpm exec playwright install chromium
    registry* secret (what the supervisor signs with), not the drifted creds
    file, so the cloud verifier can't be left on a stale key.
 9. Static handler, 10. the cloud-served `/api/local-data` proxy (list + a write
-   verb — the browser-facing data path, HMAC-signed server-side from SSM),
-   10a. the **negative** case — the same paths with no token, no cookie, and no
-   prior state must answer `401`/`403` (see the note below),
+   verb — the browser-facing data path, HMAC-signed server-side from SSM, driven
+   with a session cookie obtained through the app's own sign-in route),
+   10a. the **negative** case — every app in the cloud registry, probed on both
+   its broker mount and its proxy mount with no token, no cookie and no prior
+   state, must answer `401`/`403`,
+   10b. one URL that answers `200` with a session cookie and `401` without it,
    11. a full **browser** journey in real Chromium (Cognito sign-in → upload a
    photo through the live file input → see it in the grid), exercising the whole
    presign → S3 PUT → `POST /data/records` → metadata-write path end-to-end,
    12. `/api/resize`, 13. caption via `/app-data` — exercise the app's cloud routes.
 14. Uninstall photos; assert the app plane is gone but shared records survive.
-
-## Step 10a is expected to fail today
-
-Step 10a asserts that an anonymous caller gets nothing from a deployed app's
-data paths. It fails right now, on purpose. Photos' signing proxy declares
-`endUserAuth: { auth: "anonymous" }` because the session layer in
-`plan-cloud-app-auth-and-runtime-2026-08-22` §3 has not been built, so the
-proxy signs for whoever asks; the postmortem
-`postmortem-unauthenticated-cloud-apps-2026-08-23.md` (§5.1) asks for this
-assertion to exist regardless, because the reason the exposure survived three
-months of review is that every test in this suite signs in first.
-
-Because the suite runs with `bail: 1`, the run stops at step 10a and — like any
-failed run — leaves the cloud resources up rather than tearing them down. To
-exercise the later steps in the meantime, run vitest with `-t` to select them,
-or comment the step out locally; do not delete it. When the session layer lands
-it should go green with no change to the assertion.
 
 ## Environment contract (`src/env.ts`)
 

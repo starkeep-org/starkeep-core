@@ -43,6 +43,7 @@ import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { validateManifest } from "@starkeep/admin-manifest";
 import { installApp } from "../src/orchestrator";
 import { formatAnonymousRouteReport } from "../src/anonymous-route-report";
+import { formatProbeReport, probeAnonymousSurface } from "../src/post-install-probe";
 import { exitOnInstallFailure } from "../src/cli-exit";
 import {
   regionFromUserPoolId,
@@ -281,9 +282,37 @@ await installApp({
   },
 }).catch(exitOnInstallFailure);
 
+const browserBaseForProbe = config.publicBaseUrl ?? config.apiGatewayUrl;
+
+// Ask the deployment what is actually anonymous, rather than trusting what the
+// manifest declares. The two can disagree, and the August exposure is what that
+// disagreement looks like — it would have been caught here on the day it was
+// created.
+if (browserBaseForProbe) {
+  const probeReport = await probeAnonymousSurface(manifest, browserBaseForProbe);
+  console.log("");
+  console.log(formatProbeReport(probeReport));
+  for (const r of probeReport.unreachablePublicPaths) {
+    console.warn(`  WARNING: ${r.url} is declared public but answered ${r.status}.`);
+  }
+  if (probeReport.exposed) {
+    console.error(
+      `\n${appId} is installed but EXPOSED. Take it down before doing anything else:\n` +
+        `  pnpm --filter @starkeep/admin-installer cli:uninstall-app -- --app ${appId}`,
+    );
+    process.exit(1);
+  }
+} else {
+  console.warn(
+    "\nSkipping the post-install probe: no publicBaseUrl or apiGatewayUrl in config, " +
+      "so there is no live URL to ask.",
+  );
+}
+
 console.log(`\nInstall complete. ${appId} app available at:`);
 // Surface the browser-facing origin (CloudFront distribution) so the app is
 // loaded same-origin with the shared image bytes it fetches; fall back to the
 // raw gateway URL for pre-CloudFront configs.
-const browserBase = config.publicBaseUrl ?? config.apiGatewayUrl;
-console.log(`  ${browserBase ?? ""}${browserBase ? `/apps/${appId}/` : "(publicBaseUrl/apiGatewayUrl not in config)"}`);
+console.log(
+  `  ${browserBaseForProbe ?? ""}${browserBaseForProbe ? `/apps/${appId}/` : "(publicBaseUrl/apiGatewayUrl not in config)"}`,
+);
