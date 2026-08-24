@@ -32,7 +32,10 @@ import {
   type LdsApp,
 } from "@starkeep/e2e";
 import { signedFetch, type AppCredentials } from "@starkeep/app-client";
-import { cloudDataServerBundleSha256Base64 } from "@starkeep/admin-installer";
+import {
+  cloudDataServerBundleSha256Base64,
+  createDsqlRegistry,
+} from "@starkeep/admin-installer";
 import {
   LambdaClient,
   GetFunctionConfigurationCommand,
@@ -88,6 +91,48 @@ function cloudApp(local: AppCredentials): LdsApp {
     dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(local.appId)}`,
   };
   return { ...creds, fetch: (path, init) => signedFetch(creds, path, init) };
+}
+
+/**
+ * Sign in through an app's own session route and return the `Cookie` header a
+ * browser would send afterwards.
+ *
+ * This is deliberately the same round trip the browser makes: a POST to the
+ * app's `/api/session/sign-in`, which runs the Cognito flow server-side and
+ * hands back `sk_session` (the refresh token) and `sk_token` (a minted ID
+ * token) as HttpOnly cookies. The suite holds neither credential itself, which
+ * is the property under test — the page cannot read them either.
+ *
+ * `/api/session/*` is a declared public path, so this request needs no prior
+ * authentication; everything the session gates is reached with what it returns.
+ */
+async function signInToApp(appId: string): Promise<string> {
+  const res = await fetch(
+    `${config.apiGatewayUrl}/apps/${encodeURIComponent(appId)}/api/session/sign-in`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: admin.email, password: admin.password }),
+    },
+  );
+  const body = await res.text();
+  expect(res.status, `sign-in to ${appId} answered ${res.status}: ${body}`).toBe(200);
+
+  const cookies = res.headers.getSetCookie();
+  const jar = cookiesToHeader(cookies);
+  expect(jar, `sign-in to ${appId} set no session cookie: ${cookies.join(" | ")}`).toContain(
+    "sk_session=",
+  );
+  expect(jar).toContain("sk_token=");
+  return jar;
+}
+
+/** `Set-Cookie` response headers → the `Cookie` request header they produce. */
+function cookiesToHeader(setCookies: string[]): string {
+  return setCookies
+    .map((c) => c.split(";")[0]!.trim())
+    .filter((pair) => pair.includes("="))
+    .join("; ");
 }
 
 /**
@@ -587,21 +632,24 @@ function runTeardownScript(script: string): void {
       // The seam that broke on cloud reinstall: the browser never signs; it
       // calls the app's OWN same-origin proxy (/api/local-data/...), served by
       // the cloud Next.js Lambda, which loads the photos HMAC secret from SSM
-      // and forwards a *signed* request to the broker. The `static` handler is
-      // public, so we can drive that proxy exactly as the browser does — no
-      // Bearer token — and it must reach the HMAC-gated data plane.
+      // and forwards a *signed* request to the broker.
       //
       // This is what listPhotos() does. Before the fix it hit the gateway
       // directly with only a Cognito token and got 401 "Missing X-Starkeep-App"
       // headers; and the manifest only routed GET to the proxy, so writes 404'd.
       //
-      // That the calls below succeed WITHOUT a token is the exposure, not a
-      // feature: see the negative test immediately after this one. When the
-      // session layer lands, these calls must carry the session cookie the
-      // browser would send, and the next test's 401 assertion becomes true.
+      // The requests below carry a session cookie because that is now the only
+      // way through: the gateway's session authorizer refuses the catch-all,
+      // and the proxy refuses a caller it has not authenticated. Until the
+      // session layer landed these same calls succeeded with no credential of
+      // any kind, which was the exposure — the negative test immediately after
+      // this one is what holds that closed.
+      const cookie = await signInToApp("photos");
       const proxyBase = `${config.apiGatewayUrl}/apps/photos/api/local-data`;
 
-      const listRes = await fetch(`${proxyBase}/data/records?limit=500`);
+      const listRes = await fetch(`${proxyBase}/data/records?limit=500`, {
+        headers: { cookie },
+      });
       expect(listRes.status).toBe(200);
       const { records } = (await listRes.json()) as { records: Array<{ id: string }> };
       expect(records.some((r) => r.id === syncedRecordId)).toBe(true);
@@ -610,7 +658,7 @@ function runTeardownScript(script: string): void {
       // (the catch-all must be ANY, or every POST 404s at the gateway).
       const metaRes = await fetch(`${proxyBase}/data/records/${syncedRecordId}/metadata`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", cookie },
         body: JSON.stringify({ typeId: "image", metadata: { width: 1, height: 1 } }),
       });
       expect(metaRes.status).toBe(200);
@@ -627,30 +675,66 @@ function runTeardownScript(script: string): void {
       // exposure exists or where the check belongs; if any future app ships a
       // reachable data path with no server-side end-user check, this fails.
       //
-      // KNOWN TO FAIL TODAY, on purpose. Photos' proxy mount answers
-      // `{ auth: "anonymous" }` (see its route.ts) because the session layer in
-      // plan-cloud-app-auth-and-runtime-2026-08-22 §3 has not been built. The
-      // suite runs with `bail: 1`, so until that lands this step stops the
-      // journey here and the stack is deliberately left up. That is the
-      // intended signal: the cloud journey is not green while a deployed app
-      // serves its library to anyone who asks.
-      const appBase = `${config.apiGatewayUrl}/apps/photos`;
+      // It names no app. The list comes from the cloud registry — the same
+      // rows the installer writes — so an app installed by a future step of
+      // this journey, or by a future version of the platform, is covered the
+      // day it is installed rather than the day someone remembers to add it
+      // here. Naming Photos is what a check like this must not do: the
+      // exposure propagated to Memo precisely because the second app was never
+      // re-examined.
+      const registry = createDsqlRegistry({
+        hostname: config.auroraEndpoint!,
+        region: REGION,
+        stackPrefix: STACK_PREFIX,
+        credentials: session.awsCredentials,
+      });
+      let installed: Awaited<ReturnType<typeof registry.listInstalledApps>>;
+      try {
+        installed = await registry.listInstalledApps();
+      } finally {
+        await registry.close();
+      }
+      expect(installed.length, "the cloud registry lists no installed apps").toBeGreaterThan(0);
 
-      // Both planes: shared records (the library, plus the CloudFront-signed
-      // rendition URLs a list response embeds inline) and app-private rows.
-      const probes: Array<{ label: string; url: string; init?: RequestInit }> = [
-        { label: "shared records (list)", url: `${appBase}/api/local-data/data/records?limit=1` },
-        { label: "app-data rows", url: `${appBase}/api/local-data/app-data/db/image_enriched` },
-        {
-          label: "shared records (write)",
+      // Two mounts per app, and they fail for different reasons if they fail.
+      //
+      //   /{data,app-data,files,sync}/*  — the broker's own routes. Refusal
+      //     here is the HMAC gate plus the end-user gate the broker applies to
+      //     every data-plane call.
+      //   /api/local-data/*             — the convention for an app's own
+      //     signing proxy, the mount that was open in August. Under
+      //     `auth: "session"` an undeclared path is refused at the gateway
+      //     before the app's bundle is reached, so an app that has no such
+      //     route refuses it for that reason instead; either way the answer an
+      //     anonymous caller gets is nothing.
+      const mounts = [
+        { label: "shared records (list)", path: "/data/records?limit=1" },
+        { label: "app-data rows", path: "/app-data/db/probe" },
+        { label: "file bytes", path: "/files/probe" },
+        { label: "sync exchange", path: "/sync/exchange" },
+        { label: "proxy: shared records (list)", path: "/api/local-data/data/records?limit=1" },
+        { label: "proxy: app-data rows", path: "/api/local-data/app-data/db/probe" },
+      ];
+
+      const probes: Array<{ label: string; url: string; init?: RequestInit }> = [];
+      for (const app of installed) {
+        const appBase = `${config.apiGatewayUrl}/apps/${encodeURIComponent(app.appId)}`;
+        for (const mount of mounts) {
+          probes.push({ label: `${app.appId} ${mount.label}`, url: `${appBase}${mount.path}` });
+        }
+        // A write verb too: a mount that refuses reads and accepts writes is
+        // still an exposure, and the catch-all must be ANY for the write to
+        // reach the app at all.
+        probes.push({
+          label: `${app.appId} proxy: shared records (write)`,
           url: `${appBase}/api/local-data/data/records/${syncedRecordId}/metadata`,
           init: {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ typeId: "image", metadata: { width: 1, height: 1 } }),
           },
-        },
-      ];
+        });
+      }
 
       // No Authorization header, no cookie, no prior state — exactly what an
       // anonymous client on the internet can send. Every probe runs before any
@@ -672,6 +756,38 @@ function runTeardownScript(script: string): void {
             `not check, nothing does. All probes: ${summary}`,
         ).toContain(statuses[i]!);
       }
+    });
+
+    it("a session cookie is the whole difference between 200 and 401", async () => {
+      // The positive and negative steps above each hold one end of this, but
+      // neither one watches the same URL change its answer. This does: one
+      // path, three requests, and the only thing that varies is whether the
+      // caller holds a session.
+      const url = `${config.apiGatewayUrl}/apps/photos/api/local-data/data/records?limit=1`;
+
+      const anonymous = await fetch(url);
+      expect(anonymous.status).toBe(401);
+
+      const cookie = await signInToApp("photos");
+      const authenticated = await fetch(url, { headers: { cookie } });
+      expect(authenticated.status).toBe(200);
+
+      // Sign-out clears the browser's copy of both cookies. It does not revoke
+      // the refresh token — that is AdminUserGlobalSignOut, an operator action
+      // rather than something a page can trigger — so what is asserted here is
+      // what sign-out actually promises: the browser is told to drop them, and
+      // a request carrying what is left is refused.
+      const out = await fetch(`${config.apiGatewayUrl}/apps/photos/api/session/sign-out`, {
+        method: "POST",
+        headers: { cookie },
+      });
+      expect(out.status).toBe(200);
+      const cleared = out.headers.getSetCookie();
+      expect(cleared.filter((c) => /^sk_(session|token)=;/.test(c))).toHaveLength(2);
+      for (const c of cleared) expect(c).toContain("Max-Age=0");
+
+      const afterSignOut = await fetch(url, { headers: { cookie: cookiesToHeader(cleared) } });
+      expect(afterSignOut.status).toBe(401);
     });
 
     it("drives the real cloud Photos UI end-to-end: sign in, upload, see the photo", async () => {

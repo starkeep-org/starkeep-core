@@ -752,6 +752,64 @@ export function buildCloudDataServerProgram(
       .getOriginRequestPolicyOutput({ name: "Managed-AllViewerExceptHostHeader" })
       .apply((p) => p.id!);
 
+    // -----------------------------------------------------------------------
+    // Viewer-request redirect for signed-out document loads
+    // -----------------------------------------------------------------------
+    //
+    // AN OPTIMIZATION, NOT A SECURITY BOUNDARY — the same caveat as the
+    // distribution it hangs off. It enforces nothing: the API Gateway origin
+    // stays directly reachable, and anyone who wants to skip this can. What it
+    // buys is that a crawler, a scanner, or a signed-out person clicking a
+    // bookmark does not spend a Lambda invocation to be told to sign in. On an
+    // account with a concurrency limit of ten, that is the difference between
+    // a slow page and five 503s.
+    //
+    // The exclusions below are correctness requirements, not preferences.
+    const signedOutRedirect = new aws.cloudfront.Function("signed-out-redirect", {
+      name: `${ctx.stackPrefix}-signed-out-redirect`,
+      runtime: "cloudfront-js-2.0",
+      comment: "Sends anonymous document loads to the app's sign-in page. Not a gate.",
+      publish: true,
+      code: `function handler(event) {
+  var request = event.request;
+  var uri = request.uri;
+
+  // Only /apps/<appId>/... is an app surface. Anything else — the broker's own
+  // routes, shared file bytes — is not something to redirect.
+  var m = uri.match(/^\\/apps\\/([^/]+)(\\/.*)?$/);
+  if (!m) return request;
+  var appId = m[1];
+  var rest = m[2] || "/";
+
+  // The reserved data plane. A paired mobile device signs these and holds no
+  // cookie, so redirecting them would break device sync outright.
+  if (/^\\/(data|files|sync|app-data|health)(\\/|$)/.test(rest)) return request;
+  // Sign-in needs the pool ids before it can render.
+  if (rest === "/starkeep-runtime-config") return request;
+
+  // Only a navigation. An expired XHR must get the origin's 401, not an HTML
+  // sign-in page it will try to parse as JSON.
+  var dest = request.headers["sec-fetch-dest"];
+  if (!dest || dest.value !== "document") return request;
+
+  var cookie = request.headers.cookie ? request.headers.cookie.value : "";
+  if (cookie.indexOf("sk_session=") !== -1) return request;
+
+  var signIn = "/apps/" + appId + "/sign-in";
+  if (uri === signIn) return request;
+
+  return {
+    statusCode: 302,
+    statusDescription: "Found",
+    headers: {
+      location: { value: signIn },
+      // Per-viewer answer that depends on a cookie — never a shared cache entry.
+      "cache-control": { value: "no-store" },
+    },
+  };
+}`,
+    });
+
     // API Gateway execute-api origin domain (apiEndpoint minus the scheme).
     const gatewayOriginDomain = api.apiEndpoint.apply((ep) =>
       ep.replace(/^https?:\/\//, ""),
@@ -899,6 +957,12 @@ export function buildCloudDataServerProgram(
           cachePolicyId: cachingDisabledId,
           originRequestPolicyId: allViewerExceptHostId,
           compress: true,
+          // Default behavior only. Never on /apps/*/_next/static/*, which
+          // forwards no cookies — the function would see every request as
+          // signed out — and must keep its cache.
+          functionAssociations: [
+            { eventType: "viewer-request", functionArn: signedOutRedirect.arn },
+          ],
         },
         restrictions: {
           geoRestriction: { restrictionType: "none" },

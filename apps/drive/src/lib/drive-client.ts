@@ -10,9 +10,8 @@
  * per-app access path as any installed app.
  */
 
-import { createHmac } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { dataDbPath } from "@starkeep/app-client";
+import { dataDbPath, signRequest } from "@starkeep/app-client";
 import {
   DummyDriver,
   Kysely,
@@ -67,22 +66,26 @@ function readDriveSecret(): string | null {
 }
 
 /**
- * Build the signed headers for a GET to the local-data-server as Drive. The
- * HMAC binds method + path + a timestamp (empty body for GET), matching the LDS
- * `validateAppHmac` / `@starkeep/app-client`'s `signRequest`. `path` may carry
- * a query string; the signature is over the pathname only (query stripped),
- * which is what the LDS canonicalizes too.
+ * Build the signed headers for a GET to the local-data-server as Drive.
+ *
+ * `signRequest` from `@starkeep/app-client`, not a local `createHmac`. This
+ * used to hand-roll the input string and the three header names, which agreed
+ * with the package by luck and by review rather than by construction — and an
+ * app that reimplements the platform's mechanics instead of calling them is
+ * the shape that produced the August exposure, in first-party code.
+ *
+ * `path` may carry a query string; `signRequest` canonicalizes it the way the
+ * LDS verifier does — pathname only, percent-decoded. The hand-rolled version
+ * stripped the query but did not decode, so an encoded path would have signed
+ * something the verifier never computes.
  */
 function signedDriveGetHeaders(secret: string, path: string): Record<string, string> {
-  const ts = Date.now();
-  const pathname = path.split("?")[0]!;
-  const input = `${DRIVE_APP_ID}:GET:${pathname}:${ts}:`;
-  const sig = createHmac("sha256", secret).update(input).digest("hex");
-  return {
-    "X-Starkeep-App-Id": DRIVE_APP_ID,
-    "X-Starkeep-App-Sig": sig,
-    "X-Starkeep-App-Ts": String(ts),
-  };
+  return signRequest({
+    appId: DRIVE_APP_ID,
+    hmacSecret: secret,
+    method: "GET",
+    path,
+  });
 }
 
 export class DriveNotInstalledError extends Error {

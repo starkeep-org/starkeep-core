@@ -530,6 +530,20 @@ function drivePackageDir(): string {
  * Load and validate the Starkeep Drive manifest. Parsing through
  * `appManifestSchema` fills the schema defaults (compute disabled, no
  * app-specific syncable tables) so `installApp` sees a fully-shaped manifest.
+ *
+ * Drive's `"compute": { "enabled": false }` is load-bearing and is the ONLY
+ * reason it looks exempt from the app-authentication work. It is a full cloud
+ * principal — the always-on Drive sync channel ships every shared record the
+ * user owns to `/apps/starkeep-drive/*` — and it holds `fileAccessAll` and the
+ * User-Data-Owner boundary. It simply has no Lambda, so it has no anonymous
+ * surface for anyone to reach.
+ *
+ * If Drive ever gains compute it becomes structurally identical to Photos and
+ * Memo, and worse: an unauthenticated Drive leaks everything the user owns
+ * rather than one library. That manifest change is an event requiring the
+ * reachability pass in `review-reachability-pass.md`, not a routine edit.
+ * `__tests__/drive-manifest.test.ts` fails the day the flag flips, so this is
+ * not left to whoever happens to read the JSON.
  */
 function loadDriveManifest() {
   const path = join(drivePackageDir(), "manifest.json");
