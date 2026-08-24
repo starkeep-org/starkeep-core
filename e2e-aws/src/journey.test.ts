@@ -31,7 +31,7 @@ import {
   solidPng,
   type LdsApp,
 } from "@starkeep/e2e";
-import { signedFetch, type AppCredentials } from "@starkeep/app-client";
+import { signedFetch, USER_TOKEN_HEADER, type AppCredentials } from "@starkeep/app-client";
 import {
   cloudDataServerBundleSha256Base64,
   createDsqlRegistry,
@@ -83,14 +83,33 @@ const photoBytes = solidPng(
   16 + (randomBytes(1)[0] % 48), // 16–63 px; still tiny, still a valid PNG
 );
 
-/** HMAC-signed fetch against the real broker: `${apiGatewayUrl}/apps/{appId}`. */
+/**
+ * HMAC-signed fetch against the real broker: `${apiGatewayUrl}/apps/{appId}`.
+ *
+ * The HMAC alone is no longer enough, and that is the point of the change it
+ * reflects: the broker requires a credential bound to a named end user on every
+ * data-plane call, with no route carve-out and nothing an app can declare to opt
+ * out. Standing in for an app's server-side compute, this helper presents what
+ * that compute presents — the signature saying which app is calling, and the
+ * admin's ID token saying which person it is calling for.
+ *
+ * Read from `session` at call time rather than captured, because the token is
+ * minted in step 2 and this helper is defined before it.
+ */
 function cloudApp(local: AppCredentials): LdsApp {
   const creds: AppCredentials = {
     appId: local.appId,
     hmacSecret: local.hmacSecret,
     dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(local.appId)}`,
   };
-  return { ...creds, fetch: (path, init) => signedFetch(creds, path, init) };
+  return {
+    ...creds,
+    fetch: (path, init) =>
+      signedFetch(creds, path, {
+        ...init,
+        headers: { ...(init?.headers ?? {}), [USER_TOKEN_HEADER]: session.idToken },
+      }),
+  };
 }
 
 /**
@@ -623,9 +642,29 @@ function runTeardownScript(script: string): void {
     });
 
     it("photos cloud static handler serves", async () => {
-      const res = await fetch(`${config.apiGatewayUrl}/apps/photos/`);
+      // The app root, spelled the way the platform can actually register it.
+      // `/` is declared public and becomes `ANY /apps/photos`; the manifest's
+      // reach is real here rather than aspirational.
+      const res = await fetch(`${config.apiGatewayUrl}/apps/photos`);
       expect(res.status).toBe(200);
       expect(await res.text()).toContain("<");
+    });
+
+    it("the app root's trailing-slash spelling is gated, and that is a platform limit", async () => {
+      // Asserted rather than left as a surprise. API Gateway v2 refuses a route
+      // key with an empty path segment, so `ANY /apps/photos/` cannot exist
+      // beside `ANY /apps/photos` — the same limit that makes the manifest's
+      // `GET /` collapse to the bare prefix. The trailing-slash spelling
+      // therefore falls to the gated catch-all.
+      //
+      // It fails closed, which is why it is acceptable: an anonymous caller
+      // gets 401 rather than the shell. Through CloudFront, which is how the
+      // app is actually reached, a browser navigation to either spelling is
+      // redirected to sign-in and a signed-in one is let through — so no user
+      // meets this. It is pinned here so that if the routing ever changes, the
+      // change is deliberate and visible rather than silent.
+      const withSlash = await fetch(`${config.apiGatewayUrl}/apps/photos/`);
+      expect(withSlash.status).toBe(401);
     });
 
     it("photos data plane works through the cloud-served /api/local-data proxy", async () => {
@@ -707,20 +746,47 @@ function runTeardownScript(script: string): void {
       //     before the app's bundle is reached, so an app that has no such
       //     route refuses it for that reason instead; either way the answer an
       //     anonymous caller gets is nothing.
+      // The two mounts differ in what "nothing" is allowed to look like, and
+      // the difference is not cosmetic.
+      //
+      // The broker's routes exist for every installed app, so a refusal there
+      // has to be a refusal: a 404 would mean the reserved data plane had
+      // stopped being routed, which is a fault worth failing on.
+      //
+      // The proxy mount is a convention, not a guarantee. An app with no
+      // compute — Starkeep Drive — has no such route for the gateway to reach,
+      // so it answers 404. That is the same outcome for the caller (nothing)
+      // arrived at one step earlier, and refusing to accept it would force
+      // every app to own a route it does not want in order to reject callers
+      // on it.
+      const REFUSED = [401, 403];
+      const REFUSED_OR_ABSENT = [401, 403, 404];
       const mounts = [
-        { label: "shared records (list)", path: "/data/records?limit=1" },
-        { label: "app-data rows", path: "/app-data/db/probe" },
-        { label: "file bytes", path: "/files/probe" },
-        { label: "sync exchange", path: "/sync/exchange" },
-        { label: "proxy: shared records (list)", path: "/api/local-data/data/records?limit=1" },
-        { label: "proxy: app-data rows", path: "/api/local-data/app-data/db/probe" },
+        { label: "shared records (list)", path: "/data/records?limit=1", allow: REFUSED },
+        { label: "app-data rows", path: "/app-data/db/probe", allow: REFUSED },
+        { label: "file bytes", path: "/files/probe", allow: REFUSED },
+        { label: "sync exchange", path: "/sync/exchange", allow: REFUSED },
+        {
+          label: "proxy: shared records (list)",
+          path: "/api/local-data/data/records?limit=1",
+          allow: REFUSED_OR_ABSENT,
+        },
+        {
+          label: "proxy: app-data rows",
+          path: "/api/local-data/app-data/db/probe",
+          allow: REFUSED_OR_ABSENT,
+        },
       ];
 
-      const probes: Array<{ label: string; url: string; init?: RequestInit }> = [];
+      const probes: Array<{ label: string; url: string; allow: number[]; init?: RequestInit }> = [];
       for (const app of installed) {
         const appBase = `${config.apiGatewayUrl}/apps/${encodeURIComponent(app.appId)}`;
         for (const mount of mounts) {
-          probes.push({ label: `${app.appId} ${mount.label}`, url: `${appBase}${mount.path}` });
+          probes.push({
+            label: `${app.appId} ${mount.label}`,
+            url: `${appBase}${mount.path}`,
+            allow: mount.allow,
+          });
         }
         // A write verb too: a mount that refuses reads and accepts writes is
         // still an exposure, and the catch-all must be ANY for the write to
@@ -728,6 +794,7 @@ function runTeardownScript(script: string): void {
         probes.push({
           label: `${app.appId} proxy: shared records (write)`,
           url: `${appBase}/api/local-data/data/records/${syncedRecordId}/metadata`,
+          allow: REFUSED_OR_ABSENT,
           init: {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -749,24 +816,86 @@ function runTeardownScript(script: string): void {
 
       for (const [i, probe] of probes.entries()) {
         expect(
-          [401, 403],
+          probe.allow,
           `${probe.label} answered an unauthenticated caller with ${statuses[i]}. ` +
             `An app's data path must refuse a caller it has not authenticated: the ` +
             `cloud data plane identifies the APP, not the end user, so if the app does ` +
             `not check, nothing does. All probes: ${summary}`,
         ).toContain(statuses[i]!);
       }
+
+      // Whatever else is true, no probe may have been *answered*. Stated
+      // separately because the per-mount lists above are the place a future
+      // edit would widen, and widening one of them to admit a 200 should not
+      // be something a single careless line can do.
+      for (const [i, probe] of probes.entries()) {
+        expect(statuses[i], `${probe.label} served an anonymous caller`).not.toBe(200);
+      }
     });
 
-    it("a session cookie is the whole difference between 200 and 401", async () => {
+    it("a valid app signature is not enough: the broker demands an end user too", async () => {
+      // The counterpart to `cloudApp` attaching a token. Everything the broker
+      // needs to know which *app* is calling is present and correct here — a
+      // live HMAC secret, a fresh signature over the real path and body — and
+      // the answer is still 401, because nothing says which *person* the app is
+      // acting for.
+      //
+      // This is the assertion that keeps the positive path honest. Without it,
+      // a future change that dropped the end-user requirement would leave every
+      // other step in this suite green: they all carry a token, so none of them
+      // can observe that carrying one is required.
+      const signedNoUser = await signedFetch(
+        {
+          appId: photos.appId,
+          hmacSecret: photos.hmacSecret,
+          dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(photos.appId)}`,
+        },
+        "/data/records?limit=1",
+      );
+      expect(signedNoUser.status).toBe(401);
+      expect(await signedNoUser.text()).toContain("X-Starkeep-User-Token");
+
+      // And a token that is not a token does not satisfy it either — the gate
+      // verifies against the pool's JWKS rather than checking the header is
+      // present.
+      const garbageToken = await signedFetch(
+        {
+          appId: photos.appId,
+          hmacSecret: photos.hmacSecret,
+          dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(photos.appId)}`,
+        },
+        "/data/records?limit=1",
+        { headers: { [USER_TOKEN_HEADER]: "not.a.token" } },
+      );
+      expect(garbageToken.status).toBe(401);
+    });
+
+    it("a session cookie is the whole difference between served and refused", async () => {
       // The positive and negative steps above each hold one end of this, but
       // neither one watches the same URL change its answer. This does: one
       // path, three requests, and the only thing that varies is whether the
       // caller holds a session.
+      //
+      // Refusal has two spellings here and both are correct, because they say
+      // different things about where the request died:
+      //
+      //   401 — no `Cookie` header at all. That is the authorizer's declared
+      //         identity source, and API Gateway short-circuits a request that
+      //         omits it without ever invoking the authorizer.
+      //   403 — a `Cookie` header arrived and the authorizer denied it. The
+      //         signed-out case lands here rather than on 401: clearing a
+      //         cookie sets it empty rather than removing the header, so the
+      //         request still carries an identity source, and it is the
+      //         authorizer that refuses it.
+      //
+      // Asserted as "refused" rather than pinned to one code, since which of
+      // the two applies is a property of how the caller cleared its state, not
+      // of whether the platform let it in.
+      const REFUSED = [401, 403];
       const url = `${config.apiGatewayUrl}/apps/photos/api/local-data/data/records?limit=1`;
 
       const anonymous = await fetch(url);
-      expect(anonymous.status).toBe(401);
+      expect(REFUSED).toContain(anonymous.status);
 
       const cookie = await signInToApp("photos");
       const authenticated = await fetch(url, { headers: { cookie } });
@@ -787,7 +916,8 @@ function runTeardownScript(script: string): void {
       for (const c of cleared) expect(c).toContain("Max-Age=0");
 
       const afterSignOut = await fetch(url, { headers: { cookie: cookiesToHeader(cleared) } });
-      expect(afterSignOut.status).toBe(401);
+      expect(REFUSED).toContain(afterSignOut.status);
+      expect(afterSignOut.status, "a signed-out caller was served").not.toBe(200);
     });
 
     it("drives the real cloud Photos UI end-to-end: sign in, upload, see the photo", async () => {
@@ -822,19 +952,86 @@ function runTeardownScript(script: string): void {
       await writeFile(uploadPath, uploadBytes);
 
       const browser = await chromium.launch();
+      // Declared out here so the catch below can reach it; filled in as soon as
+      // the page exists.
+      let problemReport: () => string = () => "";
       try {
         const page = await browser.newPage();
-        await page.goto(appUrl, { waitUntil: "domcontentloaded" });
 
-        // AuthGate (FORCE_REMOTE) gates the app behind Cognito sign-in. Drive
-        // the real SignInForm with the permanent-password admin user; on
-        // success the app reloads authenticated and the toolbar renders. In
-        // this cloud journey the app runs FORCE_REMOTE (Cognito-gated), so the
-        // upload control is labelled "Upload Photo" — it reads "Add Photo" only
-        // in the local, non-remote build (see photos app.tsx).
-        await page.locator('input[type="email"]').fill(admin.email);
-        await page.locator('input[type="password"]').fill(admin.password);
-        await page.getByRole("button", { name: "Sign in" }).click();
+        // A browser failure in a cloud journey is the hardest kind to diagnose
+        // after the fact: the page is gone, the stack may be torn down, and all
+        // that survives is a locator timeout. Collect what the browser saw so a
+        // failure below can say it out loud.
+        const pageProblems: string[] = [];
+        page.on("console", (m) => {
+          if (m.type() === "error") pageProblems.push(`console: ${m.text().slice(0, 200)}`);
+        });
+        page.on("pageerror", (e) => pageProblems.push(`pageerror: ${String(e).slice(0, 200)}`));
+        page.on("requestfailed", (r) =>
+          pageProblems.push(`requestfailed: ${r.failure()?.errorText ?? "?"} ${r.url().slice(0, 120)}`),
+        );
+        page.on("response", (r) => {
+          if (r.status() >= 400) pageProblems.push(`${r.status()} ${r.url().slice(0, 120)}`);
+        });
+        problemReport = (): string =>
+          pageProblems.length
+            ? `\nWhat the browser saw:\n  ${[...new Set(pageProblems)].join("\n  ")}`
+            : "\nThe browser reported no console errors and no failed requests.";
+
+        // `load`, not `domcontentloaded`. The sign-in form is server-rendered,
+        // so its fields exist in the initial HTML and can be filled before
+        // React has hydrated — and that desync is permanent, not a race that
+        // settles: React attaches with its own empty state, the DOM keeps the
+        // typed text, and the submit button stays disabled forever because it
+        // enables on state. Re-filling does not recover it. Measured against
+        // this deployment, `load` and `networkidle` both hydrate reliably
+        // before the first fill and `domcontentloaded` reliably does not.
+        await page.goto(appUrl, { waitUntil: "load" });
+
+        // The gateway sends a signed-out document request to the app's own
+        // sign-in page, so this lands on /sign-in and drives the real form with
+        // the permanent-password admin user. On success the app reloads
+        // authenticated and the toolbar renders. In this cloud journey the app
+        // runs FORCE_REMOTE (Cognito-gated), so the upload control is labelled
+        // "Upload Photo" — it reads "Add Photo" only in the local, non-remote
+        // build (see photos app.tsx).
+        //
+        // Filled in a loop, because the session layer changed when these
+        // fields exist. They used to be rendered by AuthGate *after*
+        // hydration, so a locator could not resolve one until React was live
+        // and a fill was necessarily seen. The sign-in page is server-rendered
+        // now: the inputs are in the initial HTML, and a fill that lands before
+        // hydration sets the DOM value while React's state stays empty — which
+        // leaves the submit button disabled, since it enables on that state.
+        // The failure mode is a 30s click timeout on a page that looks correct
+        // in a screenshot.
+        const email = page.locator('input[type="email"]');
+        const password = page.locator('input[type="password"]');
+        const signIn = page.getByRole("button", { name: "Sign in" });
+        //
+        // Filled once and then waited on. Re-filling is not a recovery: if the
+        // first fill landed before hydration, every later one lands on a React
+        // that has already decided the field is empty.
+        await email.fill(admin.email);
+        await password.fill(admin.password);
+        const deadline = Date.now() + 30_000;
+        let interactive = false;
+        while (Date.now() < deadline) {
+          if (await signIn.isEnabled()) {
+            interactive = true;
+            break;
+          }
+          await page.waitForTimeout(200);
+        }
+        if (!interactive) {
+          throw new Error(
+            "sign-in form never became interactive: the submit button stayed disabled " +
+              `for 30s after filling both fields. Landed on ${page.url()}; ` +
+              `email field holds ${JSON.stringify(await email.inputValue())}.` +
+              problemReport(),
+          );
+        }
+        await signIn.click();
         await page
           .getByRole("button", { name: "Upload Photo" })
           .waitFor({ state: "visible", timeout: 120_000 });
@@ -853,6 +1050,15 @@ function runTeardownScript(script: string): void {
           records: Array<{ original_filename: string | null }>;
         };
         expect(records.some((r) => r.original_filename === uploadName)).toBe(true);
+      } catch (err) {
+        // Any failure in here — a locator timeout, a failed assertion — gets
+        // what the browser saw attached. Diagnostics wired to one specific
+        // failure are diagnostics that are absent for every other one, which is
+        // how a thumbnail that never rendered presented as a bare 120s timeout
+        // with nothing to say whether the upload had even reached the network.
+        throw new Error(`${err instanceof Error ? err.message : String(err)}${problemReport()}`, {
+          cause: err,
+        });
       } finally {
         await browser.close();
       }
@@ -971,7 +1177,13 @@ function runTeardownScript(script: string): void {
       // SPA entry point via CloudFront → gateway origin (default no-cache
       // behavior; AllViewerExceptHostHeader forwards viewer headers, strips
       // Host so the HTTP API accepts it). Retry through any propagation 5xx.
-      const spa = await fetchWhenReady(`${base}/apps/photos/`);
+      //
+      // The app root without its trailing slash, which is the spelling the
+      // platform can register as a public route — see the trailing-slash step
+      // above. This step is about the distribution and its edge cache, so it
+      // asks for the shell the way an anonymous caller can actually get it
+      // rather than re-testing the gate.
+      const spa = await fetchWhenReady(`${base}/apps/photos`);
       expect(spa.status).toBe(200);
       const html = await spa.text();
       expect(html).toContain("<");
@@ -1058,11 +1270,21 @@ function runTeardownScript(script: string): void {
       const appsProbe = await fetch(
         `${base}/apps/photos/syncable/does-not-exist-${Date.now()}.bin`,
       );
-      const probeBody = await appsProbe.text();
-      expect(probeBody).toContain("<"); // gateway/SPA HTML, not an S3 object
+      // Identified by `apigw-requestid`, which only API Gateway sets. This used
+      // to look for "<" in the body on the reasoning that the gateway answers
+      // HTML — true when every app path was public, and no longer: the session
+      // authorizer answers this one with API Gateway's own JSON 401. The header
+      // says what the body only implied, and says it whatever the status.
+      expect(
+        appsProbe.headers.get("apigw-requestid"),
+        "an apps/* path must reach the gateway origin, never the S3 files origin",
+      ).toBeTruthy();
       expect((appsProbe.headers.get("content-type") ?? "").toLowerCase()).not.toContain(
         "octet-stream",
       );
+      // And whatever it answers, it is not the object: no app-private bytes are
+      // reachable through the distribution.
+      expect(appsProbe.status).not.toBe(200);
     });
 
     it("uninstalls photos: app plane gone, shared records persist", async () => {
