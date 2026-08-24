@@ -1798,6 +1798,18 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         hmacSecret,
       );
       if (!hmacCheck.ok) {
+        // Say which call was refused, and over what. A bare 401 on the auth
+        // path is the same shape whether the secret drifted, the path the
+        // client signed differs from the one the gateway delivered, or the
+        // body was re-serialized in between — and telling those apart from
+        // outside costs an afternoon. Everything here is already known to the
+        // caller; the secret and the signature are not logged.
+        console.warn(
+          `[auth] app HMAC rejected: ${hmacCheck.message} `
+          + `appId=${appId} method=${method} subPath=${subPath} `
+          + `bodyBytes=${bodyBytes.length} `
+          + `tsSkewMs=${Date.now() - Number(normalizedHeaders["x-starkeep-app-ts"])}`,
+        );
         return clientErr(hmacCheck.message, hmacCheck.status);
       }
 
