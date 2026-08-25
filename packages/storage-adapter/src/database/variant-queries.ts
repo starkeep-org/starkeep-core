@@ -91,11 +91,15 @@ export async function loadVariantCandidatesForPage(
   // parent too, and serving someone's crop when they asked for a 400 px tile
   // is the bug that reading `parent_id` alone always had.
   const labelsByChild = await db.getLabelsByRecordIds(children.records.map((c) => c.id));
-  const candidates = children.records.filter((c) =>
-    (labelsByChild.get(c.id) ?? []).some(
+  const labelValueByChild = new Map<StarkeepId, string>();
+  const candidates = children.records.filter((c) => {
+    const label = (labelsByChild.get(c.id) ?? []).find(
       (l) => !l.deletedAt && l.appId === variantLabel.appId && l.key === variantLabel.key,
-    ),
-  );
+    );
+    if (!label) return false;
+    labelValueByChild.set(c.id, label.value);
+    return true;
+  });
   if (candidates.length === 0) return out;
 
   // Dimensions live in the per-category metadata table, one read per category.
@@ -126,6 +130,7 @@ export async function loadVariantCandidatesForPage(
       id: c.id,
       objectStorageKey: c.objectStorageKey,
       type: c.type,
+      labelValue: labelValueByChild.get(c.id)!,
       width: dims.width,
       height: dims.height,
     });

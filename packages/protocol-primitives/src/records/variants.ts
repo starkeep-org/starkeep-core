@@ -31,6 +31,8 @@ export interface VariantCandidate {
   readonly objectStorageKey: string;
   /** Canonical Starkeep type of the *variant*, which may differ from its parent's. */
   readonly type: string;
+  /** Value of the label that made this child a candidate. */
+  readonly labelValue: string;
   /** From the per-category metadata table. Null when not (yet) extracted. */
   readonly width: number | null;
   readonly height: number | null;

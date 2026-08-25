@@ -20,6 +20,7 @@ function variant(id: string, width: number, height: number): VariantCandidate {
     id: createStarkeepId(id),
     objectStorageKey: `shared/image/aa/${id}`,
     type: "image/avif",
+    labelValue: "test-rendition",
     width,
     height,
   };
