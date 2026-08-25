@@ -52,6 +52,7 @@ import {
 } from "../../packages/protocol-primitives/src/access/grants.js";
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
+import { INTENT_TAG_KEY, LADDER_TAG_KEY, LADDER_TAG_COMPLETE } from "../../packages/protocol-primitives/src/storage/retrieval-intent.js";
 import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import type { NodeRetentionPolicy, OverrideRule } from "../../packages/sync-engine/src/index.js";
@@ -2360,6 +2361,87 @@ async function main() {
         return;
       }
 
+      // POST /data/records/:id/archive-gate
+      //
+      // Body: { ladderComplete: boolean }. The app asserts its derived ladder
+      // is complete; this applies the platform's own floors and tags the object
+      // only if both agree. Idempotent, so it is safe to call after every
+      // derivation pass.
+      //
+      // ## Why this exists here and not only in the cloud
+      //
+      // It was a cloud-only route, and every local derivation logged a 404
+      // against it. That was tolerable while the cloud did the deriving. It is
+      // not any more: the node that completes a ladder is the one that asserts
+      // the gate, and derivation is moving to the machine that holds the bytes.
+      // Without this route the archive transition is simply unreachable for a
+      // locally-derived library.
+      //
+      // ## The two ways this differs from the cloud's copy
+      //
+      // `starkeep/no-cloud` is not a refusal here. That label is a constraint
+      // about *cloud* storage, and a laptop holding such a record is the
+      // intended outcome rather than a violation — the same reasoning the
+      // residency manager is constructed with (`isCloudNode: false`).
+      //
+      // Tagging a filesystem is inert, because a filesystem has no lifecycle
+      // rules. It is still written rather than skipped: the assertion is a
+      // durable fact about the record that survives a restart, the local store
+      // may be S3-backed, and a node that cannot record the claim cannot ever
+      // hand it on.
+      const archiveGateMatch = path.match(/^\/data\/records\/([^/]+)\/archive-gate$/);
+      if (archiveGateMatch && req.method === "POST") {
+        const record = await sdk.data.get(createStarkeepId(decodeURIComponent(archiveGateMatch[1]!)));
+        if (!record || record.deletedAt) {
+          res.writeHead(404);
+          json(res, { error: "Record not found" });
+          return;
+        }
+        // Write access, not read: this changes how the object is stored, and an
+        // app that may only read a record has no business deciding it can be
+        // slow to read for everyone else.
+        if (!appCanWrite(localDb, appId!, record.type)) {
+          res.writeHead(403);
+          json(res, { error: "Forbidden" });
+          return;
+        }
+        if (!record.objectStorageKey) {
+          res.writeHead(404);
+          json(res, { error: "Record has no attached file" });
+          return;
+        }
+
+        const gateBody = JSON.parse((await readBody(req)) || "{}") as { ladderComplete?: boolean };
+        const refusals: string[] = [];
+        if (gateBody.ladderComplete !== true) {
+          refusals.push(
+            "the caller did not assert ladderComplete — an original whose derived " +
+              "ladder is incomplete is still the only readable form of the record",
+          );
+        }
+        if (record.sizeBytes <= ARCHIVE_MIN_OBJECT_BYTES) {
+          refusals.push(
+            `object is ${record.sizeBytes} bytes, at or below the ${ARCHIVE_MIN_OBJECT_BYTES}-byte ` +
+              "floor: Deep Archive's per-object overhead and minimum duration make archiving it " +
+              "both dearer and slower than leaving it",
+          );
+        }
+        if (refusals.length > 0) {
+          json(res, { archived: false, tagged: false, refusals });
+          return;
+        }
+
+        await localAdapter.setTags(record.objectStorageKey, {
+          [INTENT_TAG_KEY]: "archive",
+          [LADDER_TAG_KEY]: LADDER_TAG_COMPLETE,
+        });
+        // Tagged, not transitioned. Where a lifecycle rule exists it performs
+        // the transition after the hold period, which buys a week to catch a
+        // derivation bug before the input is behind a 48-hour thaw.
+        json(res, { archived: false, tagged: true, refusals: [] });
+        return;
+      }
+
       // GET /data/records/:id/file-url — time-limited URL for file access
       const fileUrlMatch = path.match(/^\/data\/records\/([^/]+)\/file-url$/);
       if (fileUrlMatch && req.method === "GET") {
@@ -2447,7 +2529,22 @@ async function main() {
         const headers: Record<string, string | number> = {
           "Content-Type": parsed.mimeType,
           "Accept-Ranges": "bytes",
-          "Cache-Control": "private, no-store",
+          // Cached, and `immutable` is a statement of fact rather than
+          // optimism: object keys are content-addressed — a `shared/` key is
+          // verified to equal the SHA of its bytes — so what is behind a key
+          // genuinely cannot change, and a respecified rendition is a new
+          // record with a new key rather than an overwrite.
+          //
+          // `private` because these are one person's photos and no shared cache
+          // has any business holding them. The bytes are on this machine's disk
+          // already, which is where the server is reading them from, so a
+          // browser cache copy grants nothing the holder did not have.
+          //
+          // The max-age is the token's own remaining life, so a response is
+          // never cached past the point its URL stops working. Within a bucket
+          // the first request sees the largest remaining life and it is that
+          // response the browser stores, which is exactly right.
+          "Cache-Control": `private, max-age=${cacheSecondsFor(parsed.expires)}, immutable`,
         };
         if (parsedRange) {
           const end = parsedRange.end ?? facts.sizeBytes - 1;
@@ -3264,31 +3361,82 @@ function isPeerGoneError(err: unknown): boolean {
   );
 }
 
+/**
+ * The smallest object worth archiving.
+ *
+ * Deep Archive charges per-object overhead and a minimum storage duration, so
+ * below this the transition costs more than it saves and adds a 48-hour thaw to
+ * a file that was cheap to keep hot. Kept identical to the cloud handler's
+ * floor deliberately: a record that one node considers archivable and the other
+ * does not is a record whose storage class depends on which node saw it last.
+ */
+const ARCHIVE_MIN_OBJECT_BYTES = 1024 * 1024;
+
 function json(res: import("node:http").ServerResponse, body: unknown) {
   if (!res.headersSent) res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
 }
 
-/** Encode storage key + mime + expiry into a URL-safe signed token. */
 /**
  * How long an inline variant URL stays valid. Long, deliberately — see the
  * call site.
  */
 const VARIANT_URL_TTL_SECONDS = 6 * 60 * 60;
 
+/**
+ * The granularity a read token's expiry is rounded up to.
+ *
+ * This is what makes the browser cache work at all, and it is worth stating why
+ * `Cache-Control` alone did not. The HTTP cache keys on the *full* URL, query
+ * string and path included. A token baking `now + ttl` into its payload
+ * produces a different URL for the same key on every call, so a page load asks
+ * for hundreds of URLs it has never seen, misses on all of them, and
+ * re-downloads the whole visible grid however generous the max-age.
+ *
+ * Quantising the expiry to a bucket boundary makes every request for a given
+ * key within the same bucket produce a byte-identical URL, so the second load
+ * is served from disk. The cost is that a token's effective lifetime varies
+ * within the bucket — which is what a bucket is.
+ *
+ * An hour, matching the default TTL callers ask for.
+ */
+const TOKEN_EXPIRY_BUCKET_SECONDS = 60 * 60;
+
+/**
+ * Encode storage key + mime + expiry into a URL-safe signed token.
+ *
+ * Read tokens are quantised so the URL is stable; upload tokens are not. An
+ * upload token is used once and should stay unique, and there is no cache for a
+ * stable one to help.
+ */
 function createFileToken(key: string, mimeType: string, expiresIn: number): string {
-  const expires = Math.floor(Date.now() / 1000) + expiresIn;
+  const expires = quantisedExpiry(expiresIn);
   const payload = `r|${key}|${mimeType}|${expires}`;
   const sig = createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
   return `${Buffer.from(payload).toString("base64url")}.${sig}`;
 }
 
+/** A token's remaining life, floored at zero. */
+function cacheSecondsFor(expires: number): number {
+  return Math.max(0, Math.floor(expires - Date.now() / 1000));
+}
+
+function quantisedExpiry(expiresIn: number): number {
+  const at = Date.now() / 1000 + expiresIn;
+  // Rounded *up*, so the quantisation never shortens a caller's requested
+  // lifetime — a token that expired early would turn a cache hit into a broken
+  // image rather than a slow one.
+  return Math.ceil(at / TOKEN_EXPIRY_BUCKET_SECONDS) * TOKEN_EXPIRY_BUCKET_SECONDS;
+}
+
 /** Verify and decode a file token. Returns null if invalid or expired. */
-function verifyFileToken(token: string): { key: string; mimeType: string } | null {
+function verifyFileToken(
+  token: string,
+): { key: string; mimeType: string; expires: number } | null {
   const parsed = decodeSignedToken(token);
   if (!parsed) return null;
   if (parsed.scope !== "r") return null;
-  return { key: parsed.key, mimeType: parsed.mimeType };
+  return { key: parsed.key, mimeType: parsed.mimeType, expires: parsed.expires };
 }
 
 /** Same shape as createFileToken but scoped to a single PUT upload. */
@@ -3308,7 +3456,7 @@ function verifyUploadToken(token: string): { key: string; mimeType: string } | n
 
 function decodeSignedToken(
   token: string,
-): { scope: string; key: string; mimeType: string } | null {
+): { scope: string; key: string; mimeType: string; expires: number } | null {
   const dotIdx = token.indexOf(".");
   if (dotIdx === -1) return null;
   const payloadB64 = token.slice(0, dotIdx);
@@ -3322,12 +3470,12 @@ function decodeSignedToken(
   if (parts.length === 3) {
     const expires = parseInt(parts[2]!, 10);
     if (Date.now() / 1000 > expires) return null;
-    return { scope: "r", key: parts[0]!, mimeType: parts[1]! };
+    return { scope: "r", key: parts[0]!, mimeType: parts[1]!, expires };
   }
   if (parts.length !== 4) return null;
   const expires = parseInt(parts[3]!, 10);
   if (Date.now() / 1000 > expires) return null;
-  return { scope: parts[0]!, key: parts[1]!, mimeType: parts[2]! };
+  return { scope: parts[0]!, key: parts[1]!, mimeType: parts[2]!, expires };
 }
 
 main().catch((err) => {
