@@ -42,7 +42,38 @@ export async function loadVariantsForPage(
   targets: readonly number[],
 ): Promise<Map<StarkeepId, Record<string, ResolvedVariant>>> {
   const out = new Map<StarkeepId, Record<string, ResolvedVariant>>();
-  if (records.length === 0 || targets.length === 0) return out;
+  if (targets.length === 0) return out;
+
+  for (const [parentId, list] of await loadVariantCandidatesForPage(db, records, variantLabel)) {
+    const resolved = resolveVariants(list, targets);
+    if (Object.keys(resolved).length > 0) out.set(parentId, resolved);
+  }
+  return out;
+}
+
+/**
+ * The same gathering, without the narrowing: every derived child of the page,
+ * with its dimensions.
+ *
+ * This answers one app-agnostic question — *what derived children does this
+ * record have, and how big is each one?* — and it is the set
+ * {@link loadVariantsForPage} computes internally before choosing among it, so
+ * exposing it costs nothing and names no class.
+ *
+ * It exists because narrowing to a pixel target throws away the two things a
+ * caller most often needs next. A client handed only the rung that answered its
+ * request cannot tell a rung that is *missing* from one that the ladder never
+ * had for this record, and cannot see the smaller rung it could paint while it
+ * waits. Both are questions about the ladder, so both belong to whichever app
+ * owns one — and that app can only answer them if it can see the whole set.
+ */
+export async function loadVariantCandidatesForPage(
+  db: DatabaseAdapter,
+  records: readonly { id: StarkeepId }[],
+  variantLabel: { appId: string; key: string },
+): Promise<Map<StarkeepId, VariantCandidate[]>> {
+  const out = new Map<StarkeepId, VariantCandidate[]>();
+  if (records.length === 0) return out;
 
   // Every live child of the page in one query. Deliberately not filtered by
   // the label in SQL: a record's children are few, and there is no combined
@@ -86,12 +117,11 @@ export async function loadVariantsForPage(
     }
   }
 
-  const byParent = new Map<StarkeepId, VariantCandidate[]>();
   for (const c of candidates) {
     if (!c.parentId) continue;
     const dims = dimsById.get(c.id) ?? { width: null, height: null };
-    let list = byParent.get(c.parentId);
-    if (!list) byParent.set(c.parentId, (list = []));
+    let list = out.get(c.parentId);
+    if (!list) out.set(c.parentId, (list = []));
     list.push({
       id: c.id,
       objectStorageKey: c.objectStorageKey,
@@ -99,11 +129,6 @@ export async function loadVariantsForPage(
       width: dims.width,
       height: dims.height,
     });
-  }
-
-  for (const [parentId, list] of byParent) {
-    const resolved = resolveVariants(list, targets);
-    if (Object.keys(resolved).length > 0) out.set(parentId, resolved);
   }
   return out;
 }
