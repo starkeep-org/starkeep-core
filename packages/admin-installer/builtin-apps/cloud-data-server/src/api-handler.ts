@@ -98,7 +98,11 @@ import type {
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
 import type { Filter, DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
+import {
+  sha256HexToBase64,
+  loadVariantsForPage,
+  loadVariantCandidatesForPage,
+} from "@starkeep/storage-adapter";
 import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
 import { userPoolConfig, verifyUserToken } from "./verify-user-token.js";
@@ -892,6 +896,7 @@ function recordToResponse(
   labels?: RecordLabel[],
   variants?: Record<string, ResolvedVariant & { url?: string }>,
   availability?: RecordAvailability,
+  variantCandidates?: Array<ResolvedVariant & { url?: string }>,
 ) {
   return {
     id: record.id,
@@ -946,6 +951,22 @@ function recordToResponse(
               },
             ]),
           ),
+        }
+      : {}),
+    // The unnarrowed form, ascending by long edge: every derived child the
+    // record has. What a caller asked for decides which of the two shapes it
+    // gets; they are never both present.
+    ...(variantCandidates !== undefined
+      ? {
+          variant_candidates: variantCandidates.map((v) => ({
+            id: v.id,
+            type: v.type,
+            object_storage_key: v.objectStorageKey,
+            width: v.width,
+            height: v.height,
+            long_edge: v.longEdge,
+            ...(v.url ? { url: v.url } : {}),
+          })),
         }
       : {}),
   };
@@ -1196,6 +1217,60 @@ async function signVariantsForPage(
       withUrls[target] = url === undefined ? variant : { ...variant, url };
     }
     out.set(recordId, withUrls);
+  }
+  return out;
+}
+
+/**
+ * The unnarrowed form: sign every derived child of the page.
+ *
+ * More signatures than {@link signVariantsForPage} does — a 500-record page of
+ * fully-derived photos is up to 2,500 rather than at most 1,000 — and worth
+ * noting rather than solving now. The hop is in-region, and the signatures are
+ * microseconds. If it ever does matter, the fix needs no new design: return the
+ * candidates unsigned and let the app server mint URLs for the one or two rungs
+ * it actually chose, through the existing batch endpoint.
+ *
+ * Candidates with no stored dimensions are dropped rather than sent with nulls.
+ * They cannot be ordered, so there is nothing a caller could do with one, and
+ * resolution excludes them for the same reason.
+ */
+async function signCandidatesForPage(
+  appId: string,
+  grants: AccessGrants,
+  byRecord: Map<StarkeepId, VariantCandidate[]>,
+): Promise<Map<StarkeepId, Array<ResolvedVariant & { url?: string }>>> {
+  const out = new Map<StarkeepId, Array<ResolvedVariant & { url?: string }>>();
+  const urlByKey = new Map<string, string>();
+  for (const [recordId, candidates] of byRecord) {
+    const signed: Array<ResolvedVariant & { url?: string }> = [];
+    for (const candidate of candidates) {
+      if (!candidate.width || !candidate.height) continue;
+      let url = urlByKey.get(candidate.objectStorageKey);
+      if (url === undefined) {
+        const result = await signSharedCloudFrontUrl(
+          appId,
+          candidate.objectStorageKey,
+          grants,
+          VARIANT_URL_TTL_SECONDS,
+        );
+        if (result.ok) {
+          url = result.url;
+          urlByKey.set(candidate.objectStorageKey, url);
+        }
+      }
+      signed.push({
+        id: candidate.id,
+        objectStorageKey: candidate.objectStorageKey,
+        type: candidate.type,
+        width: candidate.width,
+        height: candidate.height,
+        longEdge: Math.max(candidate.width, candidate.height),
+        ...(url === undefined ? {} : { url }),
+      });
+    }
+    signed.sort((a, b) => a.longEdge - b.longEdge);
+    out.set(recordId, signed);
   }
   return out;
 }
@@ -2011,11 +2086,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       let variantLabel: { appId: string; key: string } | undefined;
       let variantTargets: number[] = [];
       if (variantParam !== undefined || variantLongEdgeParam !== undefined) {
-        if (variantParam === undefined || variantLongEdgeParam === undefined) {
-          // Either alone is meaningless, and answering it as though it were
-          // valid would silently return no variants — which reads as "this
-          // record has none" rather than "you asked wrongly".
-          return clientErr("variant and variantLongEdge must be given together", 400);
+        if (variantParam === undefined) {
+          // A pixel size with nothing to resolve it against is meaningless, and
+          // answering it as though it were valid would silently return no
+          // variants — which reads as "this record has none" rather than "you
+          // asked wrongly".
+          return clientErr("variantLongEdge requires variant", 400);
         }
         const ref = parseLabelRef(variantParam);
         if (!ref) {
@@ -2024,10 +2100,18 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             400,
           );
         }
-        const parsed = parseVariantLongEdges(variantLongEdgeParam);
-        if (!parsed.ok) return clientErr(parsed.message, 400);
         variantLabel = { appId: ref.appId, key: ref.key };
-        variantTargets = parsed.targets;
+        // `variant` on its own asks the unnarrowed question: every derived
+        // child, with its dimensions. Strictly more primitive than resolution,
+        // and already computed internally on the way to it. An app that owns a
+        // ladder needs it, because narrowing to a pixel target throws away
+        // whether the rung it did not get is missing or was never going to
+        // exist, and what smaller rung it could show meanwhile.
+        if (variantLongEdgeParam !== undefined) {
+          const parsed = parseVariantLongEdges(variantLongEdgeParam);
+          if (!parsed.ok) return clientErr(parsed.message, 400);
+          variantTargets = parsed.targets;
+        }
       }
 
       // Per-type read enforcement. An explicit ?type= must be in the caller's
@@ -2098,13 +2182,22 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const labelsById = includeLabels
           ? await loadLabelsForPage(db, labelled, labelApps)
           : null;
-        const variantsById = variantLabel
-          ? await signVariantsForPage(
-              appId,
-              grants,
-              await loadVariantsForPage(db, labelled, variantLabel, variantTargets),
-            )
-          : null;
+        const variantsById =
+          variantLabel && variantTargets.length > 0
+            ? await signVariantsForPage(
+                appId,
+                grants,
+                await loadVariantsForPage(db, labelled, variantLabel, variantTargets),
+              )
+            : null;
+        const candidatesById =
+          variantLabel && variantTargets.length === 0
+            ? await signCandidatesForPage(
+                appId,
+                grants,
+                await loadVariantCandidatesForPage(db, labelled, variantLabel),
+              )
+            : null;
         const availabilityById = await loadAvailabilityForPage(db, labelled);
         return ok({
           records: labelled.map((r) =>
@@ -2114,6 +2207,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               labelsById ? labelsById.get(r.id) ?? [] : undefined,
               variantsById ? variantsById.get(r.id) ?? {} : undefined,
               availabilityById.get(r.id) ?? DEFAULT_AVAILABILITY,
+              candidatesById ? candidatesById.get(r.id) ?? [] : undefined,
             ),
           ),
           hasMore: found.hasMore,
@@ -2148,13 +2242,22 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const records = hasMore ? result.records.slice(0, limit) : result.records;
       const metadataById = includeMetadata ? await loadMetadataForPage(db, grants, records) : null;
       const labelsById = includeLabels ? await loadLabelsForPage(db, records, labelApps) : null;
-      const variantsById = variantLabel
-        ? await signVariantsForPage(
-            appId,
-            grants,
-            await loadVariantsForPage(db, records, variantLabel, variantTargets),
-          )
-        : null;
+      const variantsById =
+        variantLabel && variantTargets.length > 0
+          ? await signVariantsForPage(
+              appId,
+              grants,
+              await loadVariantsForPage(db, records, variantLabel, variantTargets),
+            )
+          : null;
+      const candidatesById =
+        variantLabel && variantTargets.length === 0
+          ? await signCandidatesForPage(
+              appId,
+              grants,
+              await loadVariantCandidatesForPage(db, records, variantLabel),
+            )
+          : null;
       const availabilityById = await loadAvailabilityForPage(db, records);
       return ok({
         records: records.map((r) =>
@@ -2164,6 +2267,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             labelsById ? labelsById.get(r.id) ?? [] : undefined,
             variantsById ? variantsById.get(r.id) ?? {} : undefined,
             availabilityById.get(r.id) ?? DEFAULT_AVAILABILITY,
+            candidatesById ? candidatesById.get(r.id) ?? [] : undefined,
           ),
         ),
         hasMore,

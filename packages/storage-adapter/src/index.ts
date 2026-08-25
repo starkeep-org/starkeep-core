@@ -30,7 +30,10 @@ export {
 
 export { rowToLabel, labelToRow, type LabelRow } from "./database/label-row.js";
 
-export { loadVariantsForPage } from "./database/variant-queries.js";
+export {
+  loadVariantsForPage,
+  loadVariantCandidatesForPage,
+} from "./database/variant-queries.js";
 
 export {
   buildLabelUpsert,

@@ -1842,13 +1842,13 @@ describe("GET /data/records variant resolution", () => {
     expect(res.statusCode).toBe(200);
   });
 
-  // Either parameter alone is meaningless. Answering it as though it were
-  // valid returns no variants, which reads as "this record has none" rather
-  // than "you asked wrongly".
-  it("rejects variant without variantLongEdge", async () => {
+  // `variant` alone asks a different question rather than an incomplete one:
+  // every derived child of the record, with its dimensions. That is what an app
+  // owning a ladder needs, because narrowing to a pixel target hides whether a
+  // rung is missing or was never going to exist for this record.
+  it("accepts a variant label with no pixel size, and answers with candidates", async () => {
     const res = await request({ variant: "photos/rendition" });
-    expect(res.statusCode).toBe(400);
-    expect(String(bodyOf(res)["error"])).toMatch(/must be given together/);
+    expect(res.statusCode).toBe(200);
   });
 
   it("rejects variantLongEdge without variant", async () => {

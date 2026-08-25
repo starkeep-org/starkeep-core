@@ -53,7 +53,7 @@ import {
 import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { INTENT_TAG_KEY, LADDER_TAG_KEY, LADDER_TAG_COMPLETE } from "../../packages/protocol-primitives/src/storage/retrieval-intent.js";
-import { sha256HexToBase64, loadVariantsForPage } from "@starkeep/storage-adapter";
+import { sha256HexToBase64, loadVariantsForPage, loadVariantCandidatesForPage } from "@starkeep/storage-adapter";
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import type { NodeRetentionPolicy, OverrideRule } from "../../packages/sync-engine/src/index.js";
 import { createResidencyManager, residencyHooks, originalClassFor } from "../../packages/sync-engine/src/index.js";
@@ -1426,19 +1426,31 @@ async function main() {
 
         // `variant=<appId>/<key>&variantLongEdge=400,1280` — resolve, per
         // record, which derived child best answers each requested pixel size.
-        // Generic over child records, a label key and the width/height
-        // columns, so this server never learns what a size class is.
+        //
+        // `variant=<appId>/<key>` **alone** answers the unnarrowed question
+        // instead: every derived child of the record, with its dimensions. That
+        // is a strictly more primitive question than resolution and this server
+        // already computes the set internally before choosing among it, so it
+        // names no class either. An app that owns a ladder needs it, because
+        // narrowing to a pixel target throws away the two things it most often
+        // wants next — whether the rung it did not get is missing or was never
+        // going to exist, and what smaller rung it could show meanwhile.
+        //
+        // Both forms are generic over child records, a label key and the
+        // width/height columns, so this server never learns what a size class
+        // is.
         const variantParam = url.searchParams.get("variant");
         const variantLongEdgeParam = url.searchParams.get("variantLongEdge");
         let variantLabel: { appId: string; key: string } | undefined;
         let variantTargets: number[] = [];
         if (variantParam !== null || variantLongEdgeParam !== null) {
-          if (variantParam === null || variantLongEdgeParam === null) {
-            // Either alone is meaningless, and answering it as though it were
-            // valid would return no variants — which reads as "this record has
-            // none" rather than "you asked wrongly".
+          if (variantParam === null) {
+            // A pixel size with nothing to resolve it against is meaningless,
+            // and answering it as though it were valid would return no variants
+            // — which reads as "this record has none" rather than "you asked
+            // wrongly".
             res.writeHead(400);
-            json(res, { error: "variant and variantLongEdge must be given together" });
+            json(res, { error: "variantLongEdge requires variant" });
             return;
           }
           const vref = parseLabelRef(variantParam);
@@ -1450,14 +1462,16 @@ async function main() {
             });
             return;
           }
-          const parsed = parseVariantLongEdges(variantLongEdgeParam);
-          if (!parsed.ok) {
-            res.writeHead(400);
-            json(res, { error: parsed.message });
-            return;
-          }
           variantLabel = { appId: vref.appId, key: vref.key };
-          variantTargets = parsed.targets;
+          if (variantLongEdgeParam !== null) {
+            const parsed = parseVariantLongEdges(variantLongEdgeParam);
+            if (!parsed.ok) {
+              res.writeHead(400);
+              json(res, { error: parsed.message });
+              return;
+            }
+            variantTargets = parsed.targets;
+          }
         }
 
         // Per-type read enforcement, pushed into the query rather than applied
@@ -1647,9 +1661,14 @@ async function main() {
         // label key and the width/height columns, so this server never learns
         // what any particular size class is — the same resolver the cloud
         // broker uses, in @starkeep/protocol-primitives.
-        const variantsById = variantLabel
-          ? await loadVariantsForPage(databaseAdapter, readable, variantLabel, variantTargets)
-          : null;
+        const variantsById =
+          variantLabel && variantTargets.length > 0
+            ? await loadVariantsForPage(databaseAdapter, readable, variantLabel, variantTargets)
+            : null;
+        const candidatesById =
+          variantLabel && variantTargets.length === 0
+            ? await loadVariantCandidatesForPage(databaseAdapter, readable, variantLabel)
+            : null;
 
         // Label hydration: one batched primary-key-prefix seek for the whole
         // page, the same shape `include=metadata` uses.
@@ -1744,6 +1763,30 @@ async function main() {
                       },
                     ]),
                   ),
+                }
+              : {}),
+            // The unnarrowed form. Candidates with no stored dimensions are
+            // dropped rather than sent with nulls: they cannot be ordered, so
+            // there is nothing a caller could do with one, and resolution
+            // excludes them for the same reason.
+            ...(candidatesById
+              ? {
+                  variant_candidates: (candidatesById.get(r.id) ?? [])
+                    .filter((v) => (v.width ?? 0) > 0 && (v.height ?? 0) > 0)
+                    .map((v) => ({
+                      id: v.id,
+                      type: v.type,
+                      object_storage_key: v.objectStorageKey,
+                      width: v.width,
+                      height: v.height,
+                      long_edge: Math.max(v.width!, v.height!),
+                      url: `http://127.0.0.1:${PORT}/data/files/${createFileToken(
+                        v.objectStorageKey,
+                        v.type,
+                        VARIANT_URL_TTL_SECONDS,
+                      )}`,
+                    }))
+                    .sort((a, b) => a.long_edge - b.long_edge),
                 }
               : {}),
           })),
