@@ -2457,7 +2457,16 @@ async function main() {
           headers["Content-Length"] = facts.sizeBytes;
         }
         res.writeHead(parsedRange ? 206 : 200, headers);
-        await pipeline(Readable.fromWeb(stream as never), res);
+        try {
+          await pipeline(Readable.fromWeb(stream as never), res);
+        } catch (err) {
+          // A viewer that scrolls a tile out of view, or a <video> element that
+          // seeks, aborts the request mid-body. `pipeline` reports that as an
+          // error, but nothing went wrong here: the bytes the peer wanted are
+          // the bytes it got. Anything else still propagates.
+          if (!isPeerGoneError(err)) throw err;
+          console.debug("File stream aborted by peer:", parsed.key);
+        }
         return;
       }
 
@@ -3165,9 +3174,28 @@ async function main() {
       json(res, { error: "Not found" });
     } catch (err) {
       console.error("Request error:", err);
+      // Once the status line is out there is no response left to write. Calling
+      // writeHead here throws ERR_HTTP_HEADERS_SENT from an async handler, which
+      // Node 24 treats as an unhandled rejection and exits on — so a client
+      // hanging up mid-download used to take the whole server with it. Drop the
+      // connection instead; the peer learns the body is incomplete from the
+      // truncated Content-Length.
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       res.writeHead(500);
       json(res, { error: err instanceof Error ? err.message : "Internal error" });
     }
+  });
+
+  // Last line of defence. Every known path into this handler is now guarded,
+  // but the failure mode it protects against — one bad rejection anywhere in an
+  // async handler terminating a server the operator's whole library is served
+  // from — is severe enough to be worth catching generically as well. Degrade,
+  // do not exit.
+  process.on("unhandledRejection", (reason) => {
+    console.error("Unhandled rejection (surviving):", reason);
   });
 
   server.listen(PORT, LISTEN_HOST, () => {
@@ -3218,6 +3246,22 @@ async function readBody(req: import("node:http").IncomingMessage): Promise<strin
 
 async function readBodyBuffer(req: import("node:http").IncomingMessage): Promise<Buffer> {
   return readBodyBufferRaw(req as CachedReq);
+}
+
+/**
+ * True for the errors a peer produces by going away mid-body: an aborted fetch,
+ * a tile scrolled out of view, a <video> that seeks and re-requests. `pipeline`
+ * surfaces these as rejections indistinguishable in shape from a real failure,
+ * so they have to be recognised by code.
+ */
+function isPeerGoneError(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return (
+    code === "ERR_STREAM_PREMATURE_CLOSE" ||
+    code === "ECONNRESET" ||
+    code === "EPIPE" ||
+    code === "ERR_STREAM_DESTROYED"
+  );
 }
 
 function json(res: import("node:http").ServerResponse, body: unknown) {
