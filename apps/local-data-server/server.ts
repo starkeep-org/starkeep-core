@@ -1679,6 +1679,17 @@ async function main() {
           variantLabel && variantTargets.length === 0
             ? await loadVariantCandidatesForPage(databaseAdapter, readable, variantLabel)
             : null;
+        const candidateAvailability = new Map<string, boolean>();
+        if (candidatesById) {
+          await Promise.all(
+            [...candidatesById.values()].flat().map(async (candidate) => {
+              candidateAvailability.set(
+                candidate.id,
+                await localAdapter.has(candidate.objectStorageKey),
+              );
+            }),
+          );
+        }
 
         // Label hydration: one batched primary-key-prefix seek for the whole
         // page, the same shape `include=metadata` uses.
@@ -1786,15 +1797,21 @@ async function main() {
                     .map((v) => ({
                       id: v.id,
                       type: v.type,
+                      label_value: v.labelValue,
                       object_storage_key: v.objectStorageKey,
                       width: v.width,
                       height: v.height,
                       long_edge: Math.max(v.width!, v.height!),
-                      url: `http://127.0.0.1:${PORT}/data/files/${createFileToken(
-                        v.objectStorageKey,
-                        v.type,
-                        VARIANT_URL_TTL_SECONDS,
-                      )}`,
+                      available_here: candidateAvailability.get(v.id) ?? false,
+                      ...(candidateAvailability.get(v.id)
+                        ? {
+                            url: `http://127.0.0.1:${PORT}/data/files/${createFileToken(
+                              v.objectStorageKey,
+                              v.type,
+                              VARIANT_URL_TTL_SECONDS,
+                            )}`,
+                          }
+                        : {}),
                     }))
                     .sort((a, b) => a.long_edge - b.long_edge),
                 }

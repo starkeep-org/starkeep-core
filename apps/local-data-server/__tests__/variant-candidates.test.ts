@@ -28,6 +28,8 @@ interface Candidate {
   width: number;
   height: number;
   long_edge: number;
+  label_value: string;
+  available_here: boolean;
   url?: string;
 }
 
@@ -102,6 +104,8 @@ describe("asking for the whole set", () => {
       expect(candidate.width).toBeGreaterThan(0);
       expect(candidate.height).toBeGreaterThan(0);
       expect(candidate.url).toBeTypeOf("string");
+      expect(candidate.label_value).toBeTypeOf("string");
+      expect(candidate.available_here).toBe(true);
     }
   }, 30_000);
 

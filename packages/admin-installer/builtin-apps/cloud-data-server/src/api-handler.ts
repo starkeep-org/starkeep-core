@@ -896,7 +896,7 @@ function recordToResponse(
   labels?: RecordLabel[],
   variants?: Record<string, ResolvedVariant & { url?: string }>,
   availability?: RecordAvailability,
-  variantCandidates?: Array<ResolvedVariant & { url?: string }>,
+  variantCandidates?: Array<ResolvedVariant & { labelValue: string; url?: string }>,
 ) {
   return {
     id: record.id,
@@ -961,10 +961,12 @@ function recordToResponse(
           variant_candidates: variantCandidates.map((v) => ({
             id: v.id,
             type: v.type,
+            label_value: v.labelValue,
             object_storage_key: v.objectStorageKey,
             width: v.width,
             height: v.height,
             long_edge: v.longEdge,
+            available_here: false,
             ...(v.url ? { url: v.url } : {}),
           })),
         }
@@ -1239,11 +1241,11 @@ async function signCandidatesForPage(
   appId: string,
   grants: AccessGrants,
   byRecord: Map<StarkeepId, VariantCandidate[]>,
-): Promise<Map<StarkeepId, Array<ResolvedVariant & { url?: string }>>> {
-  const out = new Map<StarkeepId, Array<ResolvedVariant & { url?: string }>>();
+): Promise<Map<StarkeepId, Array<ResolvedVariant & { labelValue: string; url?: string }>>> {
+  const out = new Map<StarkeepId, Array<ResolvedVariant & { labelValue: string; url?: string }>>();
   const urlByKey = new Map<string, string>();
   for (const [recordId, candidates] of byRecord) {
-    const signed: Array<ResolvedVariant & { url?: string }> = [];
+    const signed: Array<ResolvedVariant & { labelValue: string; url?: string }> = [];
     for (const candidate of candidates) {
       if (!candidate.width || !candidate.height) continue;
       let url = urlByKey.get(candidate.objectStorageKey);
@@ -1263,6 +1265,7 @@ async function signCandidatesForPage(
         id: candidate.id,
         objectStorageKey: candidate.objectStorageKey,
         type: candidate.type,
+        labelValue: candidate.labelValue,
         width: candidate.width,
         height: candidate.height,
         longEdge: Math.max(candidate.width, candidate.height),

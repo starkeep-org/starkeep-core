@@ -13,7 +13,7 @@ import {
   type CreateDataRecordInput,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
-import { loadVariantsForPage } from "@starkeep/storage-adapter";
+import { loadVariantCandidatesForPage, loadVariantsForPage } from "@starkeep/storage-adapter";
 import { SqliteDatabaseAdapter } from "../src/adapter.js";
 import { nodeSqliteDriver } from "../src/node-driver.js";
 
@@ -77,6 +77,15 @@ describe("loadVariantsForPage", () => {
     const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400, 2000]);
     expect(out.get(parent)!["400"]!.id).toBe(small);
     expect(out.get(parent)!["2000"]!.id).toBe(large);
+  });
+
+  it("carries the label value that typed each unnarrowed candidate", async () => {
+    const parent = await addRecord();
+    const child = await addVariant(parent, 1280, 720, "video-720p");
+    const out = await loadVariantCandidatesForPage(adapter, [{ id: parent }], RENDITION);
+    expect(out.get(parent)).toEqual([
+      expect.objectContaining({ id: child, labelValue: "video-720p" }),
+    ]);
   });
 
   it("keeps each record's variants to itself", async () => {
