@@ -74,6 +74,13 @@ export function buildPulumiProgram(
         ...(ctx.bundleHash ? { sourceCodeHash: ctx.bundleHash } : {}),
         memorySize: handler.memoryMb,
         timeout: handler.timeoutSeconds,
+        // Reserved rather than shared when the manifest says so. This both
+        // caps the handler — a client fanning out cannot take the whole
+        // account pool — and guarantees it that many slots, so a burst
+        // elsewhere cannot starve it either.
+        ...(handler.reservedConcurrency === undefined
+          ? {}
+          : { reservedConcurrentExecutions: handler.reservedConcurrency }),
         environment: {
           variables: {
             STARKEEP_APP_ID: ctx.appId,
