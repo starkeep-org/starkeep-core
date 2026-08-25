@@ -321,6 +321,16 @@ interface StarkeepConfig {
   s3Region?: string;
   auroraEndpoint?: string;
   apiGatewayUrl?: string;
+  /**
+   * How many Lambda invocations the cloud account can have in flight at once.
+   *
+   * Nothing on this node enforces it. It lives here because this is where the
+   * operator's cloud settings live, and the installer reads it from here to
+   * hand to app compute — a client that fans out on the user's behalf needs the
+   * real ceiling to size that fan-out against, and the unraised default of ten
+   * is low enough that guessing produces 503s which read as app bugs.
+   */
+  lambdaConcurrency?: number;
 }
 
 // Detects the unique-violation from the (original_filename, content_hash)

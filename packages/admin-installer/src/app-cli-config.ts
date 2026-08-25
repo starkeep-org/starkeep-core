@@ -49,6 +49,19 @@ export interface StarkeepCliConfig {
   s3Bucket?: string;
   auroraEndpoint?: string;
   appParentDirs?: string[];
+  /**
+   * How many Lambda invocations this account can have in flight at once.
+   *
+   * Not something the installer enforces — it is the number a *client* needs in
+   * order to size its own fan-out. The pool is small and shared, one cloud page
+   * load already issues a dozen or so invocations, and going over the ceiling
+   * produces 503s that read as app bugs rather than as capacity. An app that
+   * fans out on the user's behalf should scale that fan-out to this rather than
+   * to a literal somebody guessed once.
+   *
+   * Defaults to 10, which is the unraised account limit.
+   */
+  lambdaConcurrency?: number;
 }
 
 export const starkeepConfigPath = configPath;

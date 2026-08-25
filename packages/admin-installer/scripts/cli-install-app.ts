@@ -228,6 +228,10 @@ const platformEnv: Record<string, string> = {
   STARKEEP_USER_POOL_ID: config.userPoolId,
   STARKEEP_USER_POOL_CLIENT_ID: config.userPoolClientId,
   STARKEEP_IDENTITY_POOL_ID: config.identityPoolId,
+  // The account's invocation ceiling, so an app that fans out on a user's
+  // behalf can size that fan-out against the real number rather than a literal
+  // somebody guessed once. Ten is the unraised account limit.
+  STARKEEP_LAMBDA_CONCURRENCY: String(config.lambdaConcurrency ?? 10),
 };
 for (const handler of manifest.infraRequirements.compute.handlers) {
   for (const key of Object.keys(handler.env)) {

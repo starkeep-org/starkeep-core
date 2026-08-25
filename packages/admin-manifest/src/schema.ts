@@ -120,6 +120,19 @@ export const appComputeHandlerSchema = z.object({
   runtime: z.enum(["nodejs22.x"]).default("nodejs22.x"),
   memoryMb: z.number().int().min(128).max(10240).default(256),
   timeoutSeconds: z.number().int().min(1).max(900).default(30),
+  /**
+   * Invocation slots this handler may hold, carved out of the account's pool.
+   *
+   * Declared rather than left to chance because the pool is small and shared:
+   * a burst on one handler starves every other one in the account, and the
+   * symptom is 503s that read as app bugs rather than as capacity. An app that
+   * has a handler capable of bursting — anything a client may fan out to —
+   * should say what share of the pool it is allowed to take.
+   *
+   * Omitted means unreserved, which is the right default for a handler that is
+   * only ever driven by page loads.
+   */
+  reservedConcurrency: z.number().int().min(1).max(1000).optional(),
   routes: z.array(appComputeRouteSchema).default(["$default"]),
   env: z.record(z.string()).default({}),
   /**
