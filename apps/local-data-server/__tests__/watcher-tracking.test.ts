@@ -25,7 +25,14 @@ import { createFileWatchManager, type FileWatchManager } from "../watcher.js";
 // real SDK's content addressing) so findExistingByHash dedup behaves faithfully.
 function makeDeps() {
   let seq = 0;
-  const records: { id: string; content_hash: string; deletedAt: string | null }[] = [];
+  const records: {
+    id: string;
+    content_hash: string;
+    objectStorageKey: string;
+    mimeType: string | null;
+    deletedAt: string | null;
+  }[] = [];
+  const objects = new Set<string>();
   const databaseAdapter = {
     async query(q: { filters?: { field: string; value: unknown }[]; limit?: number }) {
       const hashFilter = q.filters?.find((f) => f.field === "content_hash");
@@ -40,14 +47,33 @@ function makeDeps() {
       async putWithLocalFile(_meta: unknown, filePath: string) {
         const content_hash = createHash("sha256").update(await readFile(filePath)).digest("hex");
         const id = `rec-${++seq}`;
-        records.push({ id, content_hash, deletedAt: null });
+        const objectStorageKey = `shared/file/${content_hash}`;
+        records.push({ id, content_hash, objectStorageKey, mimeType: null, deletedAt: null });
+        objects.add(objectStorageKey);
         return { id };
+      },
+      async get(id: string) {
+        return records.find((record) => record.id === id) ?? null;
       },
       async delete() {},
     },
   };
+  const objectStorageAdapter = {
+    async has(key: string) {
+      return objects.has(key);
+    },
+    async putSymlink(key: string) {
+      objects.add(key);
+    },
+  };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return { sdk: sdk as any, databaseAdapter: databaseAdapter as any, records };
+  return {
+    sdk: sdk as any,
+    databaseAdapter: databaseAdapter as any,
+    objectStorageAdapter: objectStorageAdapter as any,
+    records,
+    objects,
+  };
 }
 
 function status(mgr: FileWatchManager, watchId: string) {
@@ -61,8 +87,14 @@ describe("watch_files tracking table", () => {
     await writeFile(join(dir, "one.txt"), "content-one");
     await writeFile(join(dir, "two.txt"), "content-two");
     const db = new DatabaseSync(":memory:");
-    const { sdk, databaseAdapter } = makeDeps();
-    const mgr = createFileWatchManager({ sdk, db, databaseAdapter, appId: "app" });
+    const { sdk, databaseAdapter, objectStorageAdapter } = makeDeps();
+    const mgr = createFileWatchManager({
+      sdk,
+      db,
+      databaseAdapter,
+      objectStorageAdapter,
+      appId: "app",
+    });
 
     await mgr.startWatch({ id: "w1", directoryPath: dir, recursive: false });
 
@@ -80,26 +112,33 @@ describe("watch_files tracking table", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("reloads tracking after a restart so unchanged files are not re-ingested", async () => {
+  it("reloads tracking and restores missing local objects without duplicating records", async () => {
     const dir = await mkdtemp(join(tmpdir(), "wtrack-"));
     await writeFile(join(dir, "a.txt"), "aaa");
     await writeFile(join(dir, "b.txt"), "bbb");
     const db = new DatabaseSync(":memory:");
-    const { sdk, databaseAdapter, records } = makeDeps();
+    const { sdk, databaseAdapter, objectStorageAdapter, records, objects } = makeDeps();
 
-    const mgr1 = createFileWatchManager({ sdk, db, databaseAdapter, appId: "app" });
+    const mgr1 = createFileWatchManager({ sdk, db, databaseAdapter, objectStorageAdapter, appId: "app" });
     await mgr1.startWatch({ id: "w1", directoryPath: dir, recursive: false });
     expect(records).toHaveLength(2);
     await mgr1.shutdown();
+
+    // A fresh local install can preserve the record database and watch table
+    // while replacing the object directory. The watched source files are still
+    // the authoritative local bytes, so the restart must restore their object
+    // links instead of trusting the tracking row alone.
+    objects.clear();
 
     // Restart against the same persisted db: nothing changed on disk, so the
     // delta scan should recognize both files as already-synced and create no
     // new records. A broken tracking table (rows unmatchable by watch_id) would
     // force a full re-ingest.
-    const mgr2 = createFileWatchManager({ sdk, db, databaseAdapter, appId: "app" });
+    const mgr2 = createFileWatchManager({ sdk, db, databaseAdapter, objectStorageAdapter, appId: "app" });
     await mgr2.startWatch({ id: "w1", directoryPath: dir, recursive: false });
     expect(status(mgr2, "w1")).toEqual({ synced: 2, total: 2 });
     expect(records).toHaveLength(2); // no duplicate ingests
+    expect(objects.size).toBe(2);
 
     await mgr2.shutdown();
     await rm(dir, { recursive: true, force: true });
@@ -113,9 +152,9 @@ describe("watch_files tracking table", () => {
     const dir = await mkdtemp(join(tmpdir(), "wtrack-"));
     await writeFile(join(dir, "target.txt"), "unchanged-bytes");
     const db = new DatabaseSync(":memory:");
-    const { sdk, databaseAdapter, records } = makeDeps();
+    const { sdk, databaseAdapter, objectStorageAdapter, records } = makeDeps();
 
-    const mgr1 = createFileWatchManager({ sdk, db, databaseAdapter, appId: "app" });
+    const mgr1 = createFileWatchManager({ sdk, db, databaseAdapter, objectStorageAdapter, appId: "app" });
     await mgr1.startWatch({ id: "w1", directoryPath: dir, recursive: false });
     expect(status(mgr1, "w1")).toEqual({ synced: 1, total: 1 });
     await mgr1.shutdown();
@@ -124,7 +163,7 @@ describe("watch_files tracking table", () => {
     const future = new Date(Date.now() + 30_000);
     await utimes(join(dir, "target.txt"), future, future);
 
-    const mgr2 = createFileWatchManager({ sdk, db, databaseAdapter, appId: "app" });
+    const mgr2 = createFileWatchManager({ sdk, db, databaseAdapter, objectStorageAdapter, appId: "app" });
     await mgr2.startWatch({ id: "w1", directoryPath: dir, recursive: false });
 
     expect(status(mgr2, "w1")).toEqual({ synced: 1, total: 1 });

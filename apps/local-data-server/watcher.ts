@@ -11,12 +11,13 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join, relative, extname, basename } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
+import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import { createStarkeepId, defaultTypeForExtension } from "@starkeep/protocol-primitives";
 import { sqliteCompiler as qb } from "@starkeep/storage-sqlite";
 
@@ -131,9 +132,10 @@ export function createFileWatchManager(opts: {
   sdk: StarkeepSdk;
   db: RawDatabase;
   databaseAdapter: DatabaseAdapter;
+  objectStorageAdapter: ObjectStorageAdapter;
   appId: string;
 }): FileWatchManager {
-  const { sdk, db, databaseAdapter, appId } = opts;
+  const { sdk, db, databaseAdapter, objectStorageAdapter, appId } = opts;
   const watches = new Map<string, ActiveWatch>();
 
   // Create the private watch_files table if it doesn't exist.
@@ -164,6 +166,25 @@ export function createFileWatchManager(opts: {
     });
     const record = result.records.find((r) => !r.deletedAt);
     return record ? record.id : null;
+  }
+
+  /**
+   * Restore the watched file as this record's local object when its database
+   * row survived but the local object store did not.
+   */
+  async function ensureLocalObject(recordId: string, filePath: string): Promise<boolean> {
+    const record = await sdk.data.get(createStarkeepId(recordId));
+    if (!record?.objectStorageKey) return false;
+    if (await objectStorageAdapter.has(record.objectStorageKey)) return true;
+
+    const options = { contentType: record.mimeType ?? undefined };
+    if (objectStorageAdapter.putSymlink) {
+      await objectStorageAdapter.putSymlink(record.objectStorageKey, filePath, options);
+    } else {
+      await objectStorageAdapter.put(record.objectStorageKey, await readFile(filePath), options);
+    }
+    console.log(`Restored watched object: ${filePath}`);
+    return true;
   }
 
   function loadTrackingRecords(watchId: string): Map<string, WatchFileInfo> {
@@ -270,7 +291,13 @@ export function createFileWatchManager(opts: {
 
       // Check if already tracked
       const existing = active.files.get(filePath);
-      if (existing?.status === "synced" && existing.mtime === fileStat.mtimeMs) return;
+      if (
+        existing?.status === "synced" &&
+        existing.mtime === fileStat.mtimeMs &&
+        (await ensureLocalObject(existing.dataRecordId, filePath))
+      ) {
+        return;
+      }
 
       // Mark pending immediately so duplicate FS events skip this file while it's in-flight
       active.files.set(filePath, { filePath, relativePath, contentHash: "", dataRecordId: "", mtime: 0, status: "pending" });
@@ -285,21 +312,31 @@ export function createFileWatchManager(opts: {
       // the "pending" placeholder set above, permanently dropping syncedFiles
       // below totalFiles (the "7/8, never synced" symptom).
       if (existing && existing.contentHash === contentHash) {
-        active.files.set(filePath, { ...existing, mtime: fileStat.mtimeMs, status: "synced" });
-        upsertTrackingRecord(
-          active.config.id,
-          filePath,
-          existing.relativePath,
-          existing.contentHash,
-          existing.dataRecordId,
-          fileStat.mtimeMs,
-          fileStat.size,
-        );
-        return;
+        const restored = await ensureLocalObject(existing.dataRecordId, filePath);
+        if (!restored) {
+          deleteTrackingRecord(filePath);
+          active.files.delete(filePath);
+        } else {
+          active.files.set(filePath, { ...existing, mtime: fileStat.mtimeMs, status: "synced" });
+          upsertTrackingRecord(
+            active.config.id,
+            filePath,
+            existing.relativePath,
+            existing.contentHash,
+            existing.dataRecordId,
+            fileStat.mtimeMs,
+            fileStat.size,
+          );
+          return;
+        }
       }
 
       // Dedup: check if another record already has this content
       let dataRecordId = await findExistingByHash(contentHash);
+
+      if (dataRecordId && !(await ensureLocalObject(dataRecordId, filePath))) {
+        dataRecordId = null;
+      }
 
       if (!dataRecordId) {
         // The watcher has only a filename, so it picks a default Starkeep type
