@@ -65,6 +65,7 @@ import {
   parseLabelRef,
   labelValueSetKey,
   parseVariantLongEdges,
+  parseRecordIdFilter,
 } from "@starkeep/protocol-primitives";
 import type { RecordLabel, DataRecord } from "@starkeep/protocol-primitives";
 import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
@@ -1393,6 +1394,14 @@ async function main() {
         const labelApps = url.searchParams.get("labelApps");
         const labelFilter = url.searchParams.get("label");
         const labelValue = url.searchParams.get("labelValue");
+        const idsParam = url.searchParams.get("ids");
+        const parsedIds = idsParam === null ? null : parseRecordIdFilter(idsParam);
+        if (parsedIds && !parsedIds.ok) {
+          res.writeHead(400);
+          json(res, { error: parsedIds.message });
+          return;
+        }
+        const requestedIds = parsedIds?.ids;
 
         const grants = appGrants(localDb, appId!);
 
@@ -1524,6 +1533,7 @@ async function main() {
           filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
         }
         if (parentFilter) filters.push(parentFilter);
+        if (requestedIds) filters.push({ field: "id", operator: "in", value: requestedIds });
 
         // Two ways to select a page. The reverse-label query is its own
         // access path with its own order and its own cursor; everything after
@@ -1590,13 +1600,13 @@ async function main() {
         } else {
           const result = await databaseAdapter.query({
             filters,
-            limit,
-            cursor,
+            limit: requestedIds?.length ?? limit,
+            cursor: requestedIds ? undefined : cursor,
             ...(excludeLabel ? { excludeLabel } : {}),
           });
           readable = result.records;
-          pageHasMore = result.hasMore;
-          pageCursor = result.nextCursor;
+          pageHasMore = requestedIds ? false : result.hasMore;
+          pageCursor = requestedIds ? null : result.nextCursor;
         }
 
         // When enrichment is requested, batch-read per-category metadata for the
@@ -1781,6 +1791,10 @@ async function main() {
                           v.type,
                           VARIANT_URL_TTL_SECONDS,
                         )}`,
+                        url_lifetime: {
+                          kind: "expires",
+                          expires_at: new Date(Date.now() + VARIANT_URL_TTL_SECONDS * 1000).toISOString(),
+                        },
                       },
                     ]),
                   ),
@@ -1810,6 +1824,10 @@ async function main() {
                               v.type,
                               VARIANT_URL_TTL_SECONDS,
                             )}`,
+                            url_lifetime: {
+                              kind: "expires",
+                              expires_at: new Date(Date.now() + VARIANT_URL_TTL_SECONDS * 1000).toISOString(),
+                            },
                           }
                         : {}),
                     }))

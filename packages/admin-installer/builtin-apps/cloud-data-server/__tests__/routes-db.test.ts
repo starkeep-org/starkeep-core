@@ -1253,6 +1253,44 @@ describe("/app-data routes", () => {
 describe("GET /data/records filters", () => {
   const grants = [{ type_id: "image/jpeg", access: "readwrite" }];
 
+  it("pushes a deduplicated ids filter into the authorized record query", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
+      recordRow({ id: "a", type: "image/jpeg" }),
+      recordRow({ id: "b", type: "image/jpeg" }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { ids: "b,a,b" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const sql = db.calls(RECORDS_SELECT)[0]!;
+    expect(sql.text).toContain('"id" in');
+    expect(sql.values).toEqual(expect.arrayContaining(["a", "b"]));
+    expect(bodyOf(res)).toMatchObject({ hasMore: false, nextCursor: null });
+  });
+
+  it("rejects an oversized ids filter before querying records", async () => {
+    const db = fakeDsqlWithGrants(grants);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { ids: Array.from({ length: 101 }, (_, index) => `id-${index}`).join(",") },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(db.calls(RECORDS_SELECT)).toHaveLength(0);
+  });
+
   it("pushes parentId into the query rather than filtering after it", async () => {
     const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
       recordRow({ id: "child-1", type: "image/jpeg", parent_id: "parent-1" }),

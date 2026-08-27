@@ -148,6 +148,31 @@ describe("list", () => {
     expect(jpgs.every((r) => r.type === "image/jpeg")).toBe(true);
   });
 
+  it("returns a deterministic bounded set selected by ids", async () => {
+    const first = await createRecordWithBytes(app, { fileName: "ids-a.jpg" });
+    const second = await createRecordWithBytes(app, { fileName: "ids-b.jpg" });
+    await createRecordWithBytes(app, { fileName: "ids-unrequested.jpg" });
+    const raw = `${second.record.id},${first.record.id},${second.record.id}`;
+    const res = await app.fetch(`/data/records?ids=${encodeURIComponent(raw)}&include=metadata`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      records: Array<{ id: string; metadata?: unknown }>;
+      hasMore: boolean;
+      nextCursor: string | null;
+    };
+    expect(body.records.map((record) => record.id)).toEqual(
+      [first.record.id, second.record.id].sort(),
+    );
+    expect(body.records.every((record) => "metadata" in record)).toBe(true);
+    expect(body).toMatchObject({ hasMore: false, nextCursor: null });
+  });
+
+  it("rejects an oversized ids filter", async () => {
+    const ids = Array.from({ length: 101 }, (_, index) => `id-${index}`).join(",");
+    const res = await app.fetch(`/data/records?ids=${encodeURIComponent(ids)}`);
+    expect(res.status).toBe(400);
+  });
+
   it("embeds per-category metadata only when include=metadata is requested", async () => {
     const { record } = await createRecordWithBytes(app, { fileName: "with-dims.jpg" });
     // Write image dimensions into the shared image metadata table.
