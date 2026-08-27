@@ -880,6 +880,7 @@ async function main() {
     sdk,
     db: databaseAdapter.getRawDatabase(),
     databaseAdapter,
+    objectStorageAdapter: localAdapter,
     appId: watcherAppId,
   });
 
