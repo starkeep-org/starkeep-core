@@ -66,6 +66,7 @@ import {
   planLabelRetractions,
   labelValueSetKey,
   parseLabelRef,
+  parseRecordIdFilter,
 } from "@starkeep/protocol-primitives";
 import type {
   DataRecord,
@@ -948,6 +949,14 @@ function recordToResponse(
                 height: v.height,
                 long_edge: v.longEdge,
                 ...(v.url ? { url: v.url } : {}),
+                ...(v.url
+                  ? {
+                      url_lifetime: {
+                        kind: "expires" as const,
+                        expires_at: new Date(Date.now() + VARIANT_URL_TTL_SECONDS * 1000).toISOString(),
+                      },
+                    }
+                  : {}),
               },
             ]),
           ),
@@ -968,6 +977,14 @@ function recordToResponse(
             long_edge: v.longEdge,
             available_here: false,
             ...(v.url ? { url: v.url } : {}),
+            ...(v.url
+              ? {
+                  url_lifetime: {
+                    kind: "expires" as const,
+                    expires_at: new Date(Date.now() + VARIANT_URL_TTL_SECONDS * 1000).toISOString(),
+                  },
+                }
+              : {}),
           })),
         }
       : {}),
@@ -2041,6 +2058,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const labelApps = query["labelApps"];
       const labelFilter = query["label"];
       const labelValue = query["labelValue"];
+      const parsedIds = query["ids"] === undefined ? null : parseRecordIdFilter(query["ids"]);
+      if (parsedIds && !parsedIds.ok) return clientErr(parsedIds.message, 400);
+      const requestedIds = parsedIds?.ids;
 
       if (labelValue !== undefined && labelFilter === undefined) {
         return clientErr("labelValue requires label", 400);
@@ -2233,15 +2253,16 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
       }
       if (parentFilter) filters.push(parentFilter);
+      if (requestedIds) filters.push({ field: "id", operator: "in", value: requestedIds });
 
       const result = await db.query({
         type,
         filters,
-        limit: limit + 1,
-        cursor,
+        limit: requestedIds?.length ?? limit + 1,
+        cursor: requestedIds ? undefined : cursor,
         ...(excludeLabel ? { excludeLabel } : {}),
       });
-      const hasMore = result.records.length > limit;
+      const hasMore = requestedIds ? false : result.records.length > limit;
       const records = hasMore ? result.records.slice(0, limit) : result.records;
       const metadataById = includeMetadata ? await loadMetadataForPage(db, grants, records) : null;
       const labelsById = includeLabels ? await loadLabelsForPage(db, records, labelApps) : null;

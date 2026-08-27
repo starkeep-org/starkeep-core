@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { createHLCClock } from "../src/hlc/clock.js";
 import { createDataRecord } from "../src/records/builders.js";
+import { MAX_RECORD_ID_FILTER, parseRecordIdFilter } from "../src/records/id-filter.js";
 
 describe("createDataRecord", () => {
   const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
@@ -42,6 +43,21 @@ describe("createDataRecord", () => {
     const r1 = createDataRecord(baseInput, clock);
     const r2 = createDataRecord(baseInput, clock);
     expect(r1.id).not.toBe(r2.id);
+  });
+});
+
+describe("parseRecordIdFilter", () => {
+  it("deduplicates and sorts IDs", () => {
+    expect(parseRecordIdFilter("b,a,b")).toEqual({ ok: true, ids: ["a", "b"] });
+  });
+
+  it("rejects malformed and oversized filters", () => {
+    expect(parseRecordIdFilter("a,,b")).toMatchObject({ ok: false });
+    expect(
+      parseRecordIdFilter(
+        Array.from({ length: MAX_RECORD_ID_FILTER + 1 }, (_, index) => `id-${index}`).join(","),
+      ),
+    ).toMatchObject({ ok: false });
   });
 });
 

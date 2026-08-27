@@ -104,6 +104,8 @@ describe("asking for the whole set", () => {
       expect(candidate.width).toBeGreaterThan(0);
       expect(candidate.height).toBeGreaterThan(0);
       expect(candidate.url).toBeTypeOf("string");
+      expect((candidate as unknown as { url_lifetime: { kind: string; expires_at: string } }).url_lifetime)
+        .toMatchObject({ kind: "expires" });
       expect(candidate.label_value).toBeTypeOf("string");
       expect(candidate.available_here).toBe(true);
     }

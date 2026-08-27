@@ -38,3 +38,8 @@ export {
   type VariantCandidate,
   type ResolvedVariant,
 } from "./variants.js";
+export {
+  parseRecordIdFilter,
+  MAX_RECORD_ID_FILTER,
+  type ParsedRecordIdFilter,
+} from "./id-filter.js";
