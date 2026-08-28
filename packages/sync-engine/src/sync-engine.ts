@@ -1121,17 +1121,43 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // fine and were then discarded on arrival is the same event as a failed
         // upload — the hole is still a hole — and only `haltedAuthors` says so,
         // because every local signal reports a clean round.
-        if (push && !outboundHasMore) {
+        // A floor that survives the round **advances to what this round
+        // actually shipped**, because a fixed mark cannot repair a hole bigger
+        // than one round.
+        //
+        // The floor is the bound the scan takes (`min(peerWatermarks, floor)`),
+        // so leaving it where it is makes every round select the same rows from
+        // the same starting point, cut them at the same budget, and ship the
+        // same prefix forever. `outboundHasMore` never goes false, the retirement
+        // below never fires, and the repair never gets past its first roundful —
+        // the exact failure the inbound floor's comment describes and solves by
+        // being a cursor. This is that same fix on the outbound side.
+        //
+        // `shippedHighWater` is the right mark rather than what the scan
+        // selected: it is computed from what left the building, so a shipment
+        // cut short is never credited with the part that never shipped. An
+        // author with nothing in it shipped nothing this round and its floor
+        // must not move.
+        if (push) {
           const floors = await loadRepairFloors();
-          const retained: Watermarks = {};
+          const next: Watermarks = {};
           for (const [nodeId, floor] of Object.entries(floors)) {
+            // Truncated or halted: the hole may still be below what shipped, so
+            // neither advance nor retire. Same reasoning as the retirement gate.
             if (truncatedByFailure.has(nodeId) || haltedByPeer.has(nodeId)) {
-              retained[nodeId] = floor;
+              next[nodeId] = floor;
+              continue;
             }
+            // Drained, and nothing was left behind: the repair is done.
+            if (!outboundHasMore) continue;
+            const shipped = shippedHighWater[nodeId];
+            next[nodeId] = shipped !== undefined && compareHLC(shipped, floor) > 0
+              ? shipped
+              : floor;
           }
-          if (Object.keys(floors).length !== Object.keys(retained).length) {
+          if (!sameWatermarks(floors, next)) {
             progressed = true;
-            await syncState.setRepairFloors(retained);
+            await syncState.setRepairFloors(next);
           }
         }
 
