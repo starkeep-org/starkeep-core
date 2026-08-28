@@ -322,10 +322,10 @@ console.log(`\nInstall complete. ${appId} app available at:`);
 // trailing-slash spelling cannot be registered beside it — API Gateway v2
 // rejects a route key with an empty path segment, which is the same limit that
 // makes the manifest's `GET /` collapse to the bare prefix (pulumi-program.ts).
-// So `/apps/<appId>/` falls to the gated catch-all: a browser navigating there
-// is redirected to sign-in and a signed-in one is let through, but an anonymous
-// non-document request gets 401 rather than the shell. Printing the spelling
-// that behaves the same everywhere avoids handing the operator the other one.
+// The `signed-out-redirect` CloudFront function rewrites `/apps/<appId>/` back
+// to this spelling, so both reach the app through the distribution, but a
+// deployment with no distribution has only the gateway and only one of them
+// works. Printing the spelling that behaves the same everywhere costs nothing.
 console.log(
   `  ${browserBaseForProbe ?? ""}${browserBaseForProbe ? `/apps/${appId}` : "(publicBaseUrl/apiGatewayUrl not in config)"}`,
 );

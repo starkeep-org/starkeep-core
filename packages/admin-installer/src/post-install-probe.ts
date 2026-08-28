@@ -9,13 +9,17 @@
  * would have been caught here on the day it was created; instead it ran for
  * seven weeks with an install log that said nothing.
  *
- * Two questions, and the second is the one that matters:
+ * Three questions, and the second is the one that matters:
  *
  *   1. Does each declared public path actually answer? A declared path that
  *      401s is a broken app — most often a sign-in page nobody can reach.
  *   2. Does anything under the app's data mount answer? A 200 there means the
  *      install just published user data to the internet, and the install
  *      fails.
+ *   3. Does each declared public path answer in its trailing-slash spelling
+ *      too? A path has two spellings and the route table holds one, so a URL
+ *      a person can plausibly type reaches a different route than the one the
+ *      manifest declared.
  *
  * A 401 or a 403 is the pass condition for (2). Anything else — including a
  * 404, which usually means the route was never created — is reported but not
@@ -35,6 +39,11 @@ export interface ProbeReport {
   exposed: boolean;
   dataPaths: ProbeResult[];
   publicPaths: ProbeResult[];
+  /**
+   * The trailing-slash spelling of each declared public path, in the same
+   * order as `publicPaths`.
+   */
+  trailingSlashPaths: ProbeResult[];
   unreachablePublicPaths: ProbeResult[];
 }
 
@@ -77,8 +86,19 @@ export async function probeAnonymousSurface(
   for (const handler of manifest.infraRequirements.compute.handlers) {
     for (const entry of handler.publicPaths) declared.add(probePathFor(entry));
   }
+  const paths = [...declared];
   const publicPaths = await Promise.all(
-    [...declared].map((p) => probe(`${root}${p === "/" ? "" : p}`, fetchImpl)),
+    paths.map((p) => probe(`${root}${p === "/" ? "" : p}`, fetchImpl)),
+  );
+  // The second spelling of the same path. A declared public path becomes one
+  // route key with no trailing slash — API Gateway v2 refuses a key holding an
+  // empty path segment, and it does not match `/x/` against the key `/x`
+  // either — so the trailing-slash form falls through to the session-gated
+  // `{proxy+}` and answers 401 to a caller the manifest declared anonymous.
+  // Only a probe finds that: the route table and the manifest agree with each
+  // other, and both disagree with the deployment.
+  const trailingSlashPaths = await Promise.all(
+    paths.map((p) => probe(`${root}${p === "/" ? "/" : `${p}/`}`, fetchImpl)),
   );
 
   return {
@@ -86,8 +106,27 @@ export async function probeAnonymousSurface(
     dataPaths,
     // A declared-public path that refuses is a broken app: most often a
     // sign-in page the gate will redirect to and then refuse.
-    unreachablePublicPaths: publicPaths.filter((r) => isRefusal(r.status)),
+    //
+    // The app root's trailing-slash form is warned about beside them, because
+    // the platform now promises that spelling: the `signed-out-redirect`
+    // CloudFront function canonicalizes it, admin-web's "Open" link builds it,
+    // and every bookmark of a visited app root carries it. A refusal there
+    // means that canonicalization is gone.
+    //
+    // Deeper trailing-slash forms are reported without a warning. The
+    // canonicalization deliberately stops at the root — an app that sets
+    // Next's `trailingSlash` redirects `/x` to `/x/`, and stripping it here
+    // would fight that redirect in a loop — so a refusal on `/sign-in/` is the
+    // documented shape of the deployment rather than a regression. A browser
+    // navigating there still reaches sign-in, because the same CloudFront
+    // function redirects a document load holding no `sk_token` before the
+    // gateway ever sees it.
+    unreachablePublicPaths: [
+      ...publicPaths.filter((r) => isRefusal(r.status)),
+      ...trailingSlashPaths.filter((r, i) => paths[i] === "/" && isRefusal(r.status)),
+    ],
     publicPaths,
+    trailingSlashPaths,
   };
 }
 
@@ -102,6 +141,25 @@ export function formatProbeReport(report: ProbeReport): string {
     const verdict = r.status === null ? `unreachable (${r.error})` : String(r.status);
     const mark = isRefusal(r.status) ? "  <- declared public but refused" : "";
     lines.push(`  ${r.url} -> ${verdict}${mark}`);
+  }
+  const warned = new Set(report.unreachablePublicPaths.map((r) => r.url));
+  for (const r of report.trailingSlashPaths) {
+    const verdict = r.status === null ? `unreachable (${r.error})` : String(r.status);
+    const mark = !isRefusal(r.status)
+      ? ""
+      : warned.has(r.url)
+        ? "  <- declared public but refused"
+        : "  <- refused in this spelling only";
+    lines.push(`  ${r.url} -> ${verdict}${mark}`);
+  }
+  if (report.trailingSlashPaths.some((r) => isRefusal(r.status) && !warned.has(r.url))) {
+    lines.push("");
+    lines.push(
+      "  A path marked \"refused in this spelling only\" answers without the trailing\n" +
+        "  slash. The route table holds one spelling per path and the gateway refuses\n" +
+        "  to register the other, so only the app root is canonicalized in front of it.\n" +
+        "  A browser navigating to one of these still reaches sign-in.",
+    );
   }
   if (report.exposed) {
     lines.push("");
