@@ -51,8 +51,8 @@ function fetchReturning(rules: [RegExp, number][]): typeof fetch {
 
 const HEALTHY: [RegExp, number][] = [
   [/\/(data|files|sync|app-data)\//, 401],
-  [/\/sign-in$/, 200],
-  [/\/apps\/memo$/, 200],
+  [/\/sign-in\/?$/, 200],
+  [/\/apps\/memo\/?$/, 200],
 ];
 
 describe("a correctly gated install", () => {
@@ -177,6 +177,69 @@ describe("declared public paths that do not answer", () => {
     expect(report.publicPaths.map((r) => new URL(r.url).pathname)).toEqual([
       "/apps/memo/_next/static/x",
     ]);
+  });
+});
+
+describe("the trailing-slash spelling of a declared public path", () => {
+  /**
+   * A declared public path becomes one route key with no trailing slash, and
+   * API Gateway v2 will not register the other spelling — it rejects a key
+   * holding an empty path segment. The gateway does not treat the two as one
+   * route either, so `/x/` falls through to the session-gated `{proxy+}` and
+   * refuses a caller the manifest declared anonymous. The manifest and the
+   * route table agree with each other and both disagree with the deployment,
+   * which is exactly the disagreement only a live request can find.
+   */
+  it("is asked about beside the bare one", async () => {
+    const report = await probeAnonymousSurface(
+      manifest(["/", "/sign-in"]),
+      "https://cdn.example.com",
+      fetchReturning([[/./, 200]]),
+    );
+    expect(report.trailingSlashPaths.map((r) => new URL(r.url).pathname)).toEqual([
+      "/apps/memo/",
+      "/apps/memo/sign-in/",
+    ]);
+  });
+
+  it("warns when the app root refuses in it, which is the spelling every link uses", async () => {
+    // admin-web's "Open" link builds `/apps/<appId>/`, and so does every
+    // bookmark of a visited app root. The CloudFront function canonicalizes it
+    // back; a refusal here means that canonicalization is gone.
+    const report = await probeAnonymousSurface(
+      manifest(["/", "/sign-in"]),
+      "https://cdn.example.com",
+      fetchReturning([[/\/apps\/memo\/$/, 403], [/./, 200]]),
+    );
+    expect(report.unreachablePublicPaths.map((r) => new URL(r.url).pathname)).toEqual([
+      "/apps/memo/",
+    ]);
+    expect(formatProbeReport(report)).toContain("/apps/memo/ -> 403  <- declared public but refused");
+  });
+
+  it("reports a deeper one without warning, because only the root is canonicalized", async () => {
+    // Next's `trailingSlash: true` redirects /x to /x/, so stripping the slash
+    // in front of the gateway would fight that redirect and loop. A browser
+    // navigating to `/sign-in/` still reaches sign-in, because the CloudFront
+    // function redirects a document load holding no `sk_token` first.
+    const report = await probeAnonymousSurface(
+      manifest(["/", "/sign-in"]),
+      "https://cdn.example.com",
+      fetchReturning([[/\/sign-in\/$/, 401], [/./, 200]]),
+    );
+    expect(report.unreachablePublicPaths).toEqual([]);
+    const text = formatProbeReport(report);
+    expect(text).toContain("/apps/memo/sign-in/ -> 401  <- refused in this spelling only");
+    expect(text).toContain("answers without the trailing");
+  });
+
+  it("does not make an install fail — a refusal is not an exposure", async () => {
+    const report = await probeAnonymousSurface(
+      manifest(["/", "/sign-in"]),
+      "https://cdn.example.com",
+      fetchReturning([[/\/(data|files|sync|app-data)\//, 401], [/\/$/, 403], [/./, 200]]),
+    );
+    expect(report.exposed).toBe(false);
   });
 });
 

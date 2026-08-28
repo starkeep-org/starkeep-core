@@ -782,6 +782,20 @@ export function buildCloudDataServerProgram(
     // one records a way the deployment answered `{"message":"Forbidden"}` to a
     // path the manifest declared public.
     //
+    // Viewer-request is the only stage available for any of this, so a refusal
+    // that reaches the origin cannot be softened here. CloudFront does not
+    // invoke a viewer-response function when the origin answers 400 or above
+    // ("Restrictions on all edge functions" — HTTP status codes), which is
+    // every status worth rewriting. Turning the gateway's refusal into a
+    // sign-in page at the response stage therefore needs Lambda@Edge on origin
+    // response, and distribution-wide `customErrorResponses` is not a
+    // substitute: it cannot read the path or `sec-fetch-dest`, so it would
+    // hand a paired device an HTML page in place of its 401 and break the
+    // shared-file signed URLs' 403 as well. What recovers a refusal that got
+    // through is the app's own fetch layer, which retries once against
+    // /api/session/refresh and sends the browser to sign-in when the session
+    // is genuinely spent (photos/src/lib/data-client.ts).
+    //
     // The exclusions below are correctness requirements, not preferences.
     const signedOutRedirect = new aws.cloudfront.Function("signed-out-redirect", {
       name: `${ctx.stackPrefix}-signed-out-redirect`,
