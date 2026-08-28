@@ -2,6 +2,7 @@ import type {
   StarkeepId,
   HLCTimestamp,
   AnyRecord,
+  MetadataRow,
   RecordLabel,
 } from "@starkeep/protocol-primitives";
 import type {
@@ -260,11 +261,36 @@ export interface FileRecordRow {
 
 export type Watermarks = Record<string /* nodeId */, HLCTimestamp>;
 
+/**
+ * A shared record on the wire: the row, plus the sender's per-category metadata
+ * for it.
+ *
+ * The metadata is a **passenger**, not a second entity. It has no clock of its
+ * own and no stream of its own; it ships with the record and is applied with
+ * it. See `metadata-sync.ts` in `@starkeep/storage-adapter` for why that is
+ * sound — the short version is that the columns are derived from bytes that
+ * cannot change, so two nodes can hold different *amounts* of truth about a
+ * record but never conflicting truth.
+ *
+ * Optional in both directions, and the absence means "no information" rather
+ * than "no metadata". A peer on an older build sends no field and applies none,
+ * which is exactly the behaviour it has today: `sanitizeExchangeRequest` passes
+ * record elements through unvalidated so the extra field survives its parsing,
+ * and `recordToRow` whitelists columns so its `put` ignores it rather than
+ * failing on an unknown one.
+ *
+ * Null columns are stripped before sending, so a node that knows only a
+ * ThumbHash cannot erase a peer's dimensions.
+ */
+export type SyncRecordItem = AnyRecord & {
+  readonly metadata?: Readonly<MetadataRow>;
+};
+
 export interface SyncExchangeRequest {
   /** Caller's view of what it has seen per nodeId. */
   readonly watermarks: Watermarks;
   /** Records the caller believes the peer hasn't seen yet. */
-  readonly records?: AnyRecord[];
+  readonly records?: SyncRecordItem[];
   /**
    * Cross-app record labels the caller believes the peer hasn't seen. Shared
    * data, so they ride the **Drive channel** with records under
@@ -322,7 +348,7 @@ export interface SyncExchangeRequest {
 
 export interface SyncExchangeResponse {
   /** Records the caller hasn't seen (`updated_at > callerWatermarks[nodeId]`). */
-  readonly records: AnyRecord[];
+  readonly records: SyncRecordItem[];
   /** Labels the caller hasn't seen, by the same per-nodeId delta rule. */
   readonly labels: RecordLabel[];
   /** Same delta logic per app schema. */

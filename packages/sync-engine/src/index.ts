@@ -19,6 +19,7 @@ export type {
   FileRecordRow,
   Watermarks,
   SyncExchangeRequest,
+  SyncRecordItem,
   SyncExchangeResponse,
   ExchangeResult,
   ExchangeOptions,

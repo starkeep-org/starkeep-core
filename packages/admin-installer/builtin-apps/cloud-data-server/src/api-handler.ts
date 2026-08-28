@@ -1261,10 +1261,25 @@ async function signCandidatesForPage(
 ): Promise<Map<StarkeepId, Array<ResolvedVariant & { labelValue: string; url?: string }>>> {
   const out = new Map<StarkeepId, Array<ResolvedVariant & { labelValue: string; url?: string }>>();
   const urlByKey = new Map<string, string>();
+  // Dropping a dimensionless candidate is indistinguishable, from the client's
+  // side, from the record having no renditions at all — which is what sent
+  // Photos into a derivation loop against a ladder that was already complete.
+  // Counting the drops does not change the answer, but it makes the next
+  // instance of this readable from CloudWatch rather than only from a
+  // hand-written data-plane probe.
+  let dropped = 0;
   for (const [recordId, candidates] of byRecord) {
     const signed: Array<ResolvedVariant & { labelValue: string; url?: string }> = [];
     for (const candidate of candidates) {
-      if (!candidate.width || !candidate.height) continue;
+      if (!candidate.width || !candidate.height) {
+        dropped += 1;
+        console.warn(
+          `[variants] dropping candidate ${candidate.id} of record ${recordId}: no stored dimensions ` +
+            `(type=${candidate.type} label=${candidate.labelValue}). ` +
+            `The record will report ${candidates.length === 1 ? "no renditions at all" : "an incomplete ladder"}.`,
+        );
+        continue;
+      }
       let url = urlByKey.get(candidate.objectStorageKey);
       if (url === undefined) {
         const result = await signSharedCloudFrontUrl(
@@ -1291,6 +1306,11 @@ async function signCandidatesForPage(
     }
     signed.sort((a, b) => a.longEdge - b.longEdge);
     out.set(recordId, signed);
+  }
+  if (dropped > 0) {
+    console.warn(
+      `[variants] dropped ${dropped} dimensionless candidate(s) across ${byRecord.size} record(s)`,
+    );
   }
   return out;
 }
@@ -2512,6 +2532,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         sizeBytes?: number;
         parentId?: string;
         labels?: Array<{ key: string; value?: string }>;
+        metadata?: Record<string, unknown>;
       };
       if (!body.type) return clientErr("type is required", 400);
       if (!isKnownType(body.type)) return clientErr(`Unknown type id: ${body.type}`, 400);
@@ -2528,6 +2549,42 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (typeof body.sizeBytes !== "number" || !Number.isFinite(body.sizeBytes) || body.sizeBytes < 0) {
         return clientErr("sizeBytes is required and must be a non-negative number", 400);
       }
+      // Optional inline metadata, checked **before** anything is written so a
+      // rejected payload leaves no record behind.
+      //
+      // Same grant and same column rules as POST /data/records/:id/metadata,
+      // deliberately: an app that may not write image metadata through one door
+      // may not write it through the other. The field closes the window in
+      // which a record is visible to sync without its metadata; it does not
+      // widen who may write it.
+      //
+      // The layering rule is unchanged. The platform declares *which* columns a
+      // category has and validates against that declaration; it does not
+      // extract, and must not learn how. Extraction stays with an app holding a
+      // `metadataWrite` grant and a decoder for the format.
+      const inlineMetadata = body.metadata;
+      if (inlineMetadata !== undefined) {
+        if (
+          typeof inlineMetadata !== "object" ||
+          inlineMetadata === null ||
+          Array.isArray(inlineMetadata)
+        ) {
+          return clientErr("metadata must be an object", 400);
+        }
+        const metadataCategory = typeCategory(body.type);
+        if (!canWriteCategory(grants, metadataCategory)) return clientErr("Forbidden", 403);
+        if (metadataCategory === "other") {
+          return clientErr(`Category "other" has no metadata table`, 400);
+        }
+        const allowed = new Set(
+          getCategory(metadataCategory)!.metadataColumns.map((c) => c.name),
+        );
+        const unknownKeys = Object.keys(inlineMetadata).filter((k) => !allowed.has(k));
+        if (unknownKeys.length > 0) {
+          return clientErr(`Unknown metadata columns: ${unknownKeys.join(", ")}`, 400);
+        }
+      }
+
       const contentHash = body.contentHash;
       const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
       const sizeBytes = body.sizeBytes;
@@ -2597,6 +2654,16 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           parentId: (body.parentId as DataRecord["parentId"]) ?? null,
         };
         await db.put(fresh);
+        // In the same OCC unit as the record row, so a sync scan never sees
+        // the record without its metadata. Only on the created path: a dedup
+        // hit is somebody else's record and rewriting its derived columns
+        // would be a surprise, exactly as re-labelling it would be.
+        if (inlineMetadata) {
+          await db.putMetadata(typeCategory(fresh.type), {
+            recordId: fresh.id,
+            ...inlineMetadata,
+          });
+        }
         return { record: fresh, created: true };
       });
 
@@ -2631,7 +2698,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         await db.upsertLabels(plan.writes.map((w) => ({ ...w, appId, hlc: labelHlc })));
       }
 
-      return ok({ record: recordToResponse(record) }, created ? 201 : 200);
+      // `deduped` mirrors the local-data-server's field so one client code
+      // path can tell the two cases apart against either backend. The 201/200
+      // split says the same thing, but only a caller that reads status codes
+      // rather than bodies can see it.
+      return ok(
+        { record: recordToResponse(record), ...(created ? {} : { deduped: true }) },
+        created ? 201 : 200,
+      );
     }
 
     // POST /apps/{appId}/data/files?type=<typeId>
@@ -2829,7 +2903,33 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (unknownKeys.length > 0) {
         return clientErr(`Unknown metadata columns: ${unknownKeys.join(", ")}`, 400);
       }
-      await db.putMetadata(category, { recordId, ...metadata });
+      // The write and the record's clock bump are one OCC unit: the bump is a
+      // read-modify-write, so a retry has to re-read the row rather than replay
+      // a stale one.
+      //
+      // The bump is what makes this write visible to sync at all. Metadata
+      // rides the record row over the wire and the outbound scan is a delta
+      // scan over `updated_at`, so without it an app that registers a record
+      // and derives its dimensions a moment later ships the record in whatever
+      // round falls between the two and no later round ever offers it again.
+      //
+      // `version` deliberately stays put — it counts revisions of the record,
+      // and a derived fact arriving is not a new revision of anything.
+      //
+      // Ordered after the metadata write so a failure retries the half that
+      // matters: a lost metadata write is repaired by the next write, while a
+      // lost bump leaves nothing that knows the record is owed.
+      //
+      // The sync apply path does **not** come through here. It writes metadata
+      // through the adapter directly, because bumping on apply would make every
+      // applied row a fresh change to ship back and two nodes would trade the
+      // same record forever.
+      await withOccRetry("POST /data/records/:id/metadata", async () => {
+        await db.putMetadata(category, { recordId, ...metadata });
+        const existing = await db.get(recordId);
+        if (!existing) return;
+        await db.put({ ...existing, updatedAt: clock.now() });
+      });
       return ok({ ok: true });
     }
 

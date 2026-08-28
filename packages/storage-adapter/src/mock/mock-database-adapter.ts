@@ -217,13 +217,28 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
+  /**
+   * Upsert the columns `row` names and leave every other column alone —
+   * matching the `ON CONFLICT DO UPDATE SET <supplied columns>` both SQL
+   * adapters compile.
+   *
+   * This used to replace the whole row, which made the mock the only backend
+   * where writing one column erased the rest. The metadata a sync round carries
+   * is deliberately partial (null columns are stripped before sending), so a
+   * mock that replaced would have reported the merge working while the real
+   * backends did something else.
+   */
   async putMetadata(typeId: string, row: MetadataRow): Promise<void> {
     let typeTable = this.metadata.get(typeId);
     if (!typeTable) {
       typeTable = new Map();
       this.metadata.set(typeId, typeTable);
     }
-    typeTable.set(row.recordId, structuredClone(row));
+    const existing = typeTable.get(row.recordId);
+    typeTable.set(
+      row.recordId,
+      existing ? { ...existing, ...structuredClone(row) } : structuredClone(row),
+    );
   }
 
   async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {

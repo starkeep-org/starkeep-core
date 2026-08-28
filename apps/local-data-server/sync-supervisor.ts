@@ -106,6 +106,8 @@ export interface SyncSupervisorOptions {
 interface EngineEntry {
   readonly appId: string;
   readonly engine: SyncEngine;
+  /** This channel's persisted sync positions — watermarks and repair floors. */
+  readonly syncState: SyncStateStore;
   /** Idle tick timer — fires every exchangeIntervalMs unless nudged earlier. */
   tickTimer: NodeJS.Timeout | null;
   /** Local-write nudge timer — debounces local-change-recorded into one exchange. */
@@ -291,6 +293,7 @@ export function createSyncSupervisor(
   function makeEngineEntry(
     appId: string,
     engine: SyncEngine,
+    syncState: SyncStateStore,
     baseUrl: string,
   ): void {
     // Each engine emits pull-side events (local-data-synced) on its own
@@ -304,6 +307,7 @@ export function createSyncSupervisor(
     const entry: EngineEntry = {
       appId,
       engine,
+      syncState,
       tickTimer: null,
       nudgeTimer: null,
       unsubscribeForwarding,
@@ -355,7 +359,7 @@ export function createSyncSupervisor(
       ...(residency ? { residency } : {}),
       // No appSyncableSource: the Drive channel never carries app-specific rows.
     });
-    makeEngineEntry(DRIVE_APP_ID, engine, baseUrl);
+    makeEngineEntry(DRIVE_APP_ID, engine, syncState, baseUrl);
   }
 
   function startEngineFor(appId: string): void {
@@ -402,7 +406,7 @@ export function createSyncSupervisor(
       },
     });
 
-    makeEngineEntry(appId, engine, perAppBaseUrl);
+    makeEngineEntry(appId, engine, syncState, perAppBaseUrl);
   }
 
   function stopEngineFor(appId: string): void {
