@@ -777,11 +777,16 @@ export function buildCloudDataServerProgram(
     // account with a concurrency limit of ten, that is the difference between
     // a slow page and five 503s.
     //
+    // It also canonicalizes the app root, which the route table cannot express
+    // in both of its spellings. See the two comments in the source below; each
+    // one records a way the deployment answered `{"message":"Forbidden"}` to a
+    // path the manifest declared public.
+    //
     // The exclusions below are correctness requirements, not preferences.
     const signedOutRedirect = new aws.cloudfront.Function("signed-out-redirect", {
       name: `${ctx.stackPrefix}-signed-out-redirect`,
       runtime: "cloudfront-js-2.0",
-      comment: "Sends anonymous document loads to the app's sign-in page. Not a gate.",
+      comment: "Sends sessionless document loads to the app's sign-in page. Not a gate.",
       publish: true,
       code: `function handler(event) {
   var request = event.request;
@@ -793,6 +798,22 @@ export function buildCloudDataServerProgram(
   if (!m) return request;
   var appId = m[1];
   var rest = m[2] || "/";
+
+  // Canonicalize the app root. The manifest declares "/" public and that
+  // becomes the route key "ANY /apps/<appId>" with no trailing slash, because
+  // API Gateway v2 refuses "ANY /apps/<appId>/" outright — "Part of the given
+  // route key path is empty". The gateway does not treat the two spellings as
+  // one route either, so "/apps/<appId>/" falls through to the session-gated
+  // "ANY /apps/<appId>/{proxy+}" and a root the manifest declared public
+  // answers 403 to a typed URL, to a bookmark, and to admin-web's own "Open"
+  // link. Rewriting rather than redirecting keeps the query string without
+  // rebuilding it and costs no extra round trip. Only the root is
+  // canonicalized: an app that sets Next's trailingSlash would redirect
+  // /x -> /x/ while this redirected back, so deeper paths are left alone.
+  if (rest === "/" && uri !== "/apps/" + appId) {
+    uri = "/apps/" + appId;
+    request.uri = uri;
+  }
 
   // The reserved data plane. A paired mobile device signs these and holds no
   // cookie, so redirecting them would break device sync outright.
@@ -811,8 +832,20 @@ export function buildCloudDataServerProgram(
   // navigation redirects to sign-in whether or not the viewer has a session.
   // That makes the app unreachable in a browser rather than merely
   // unoptimized, which is the opposite of what a "not a gate" redirect is for.
+  //
+  // sk_token, not sk_session: the credential the gateway authorizer actually
+  // verifies. The two have very different lifetimes — sk_session carries the
+  // Cognito refresh token and lasts weeks, sk_token carries a minted ID token
+  // and lasts about an hour — so passing a request through on sk_session puts
+  // every signed-in browser into a dead end an hour after its last load. The
+  // authorizer finds no sk_token, and API Gateway answers
+  // {"message":"Forbidden"} with no way back, because /api/session/refresh
+  // recovers exactly this state but only runs once the app shell has loaded,
+  // and the shell never loads on a gated path. Redirecting instead lands the
+  // browser on the public sign-in page, which reaches the refresh route and
+  // mints a fresh sk_token from sk_session without asking for a password.
   var cookies = request.cookies;
-  if (cookies && cookies["sk_session"] && cookies["sk_session"].value) return request;
+  if (cookies && cookies["sk_token"] && cookies["sk_token"].value) return request;
 
   var signIn = "/apps/" + appId + "/sign-in";
   if (uri === signIn) return request;

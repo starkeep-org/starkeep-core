@@ -157,6 +157,14 @@ export function declaredHandlerRoutes(handler: AppComputeHandler): ResolvedRoute
  * Gateway v2 rejects a route key containing an empty path segment
  * ("BadRequestException: Part of the given route key path is empty").
  * `$default` passes through unprefixed — it is not a path.
+ *
+ * The collapse leaves the app root with two spellings and only one route. The
+ * gateway does not match `/apps/<appId>/` against the bare key, so that form
+ * falls through to the session-gated `{proxy+}` and a root declared public
+ * answers 403. Nothing here can fix it — the route key the fix would need is
+ * the one the gateway refuses — so the trailing slash is canonicalized away in
+ * front of the gateway, by the `signed-out-redirect` CloudFront function in
+ * `cloud-data-server-program.ts`.
  */
 export function prefixAppRouteKey(appId: string, routeKey: string): string {
   if (routeKey === "$default") return routeKey;
