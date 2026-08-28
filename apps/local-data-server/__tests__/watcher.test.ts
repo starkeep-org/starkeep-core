@@ -88,6 +88,25 @@ describe("initial scan", () => {
     expect(names).not.toContain("big.bin");
   });
 
+  it("ingests a photo with no metadata row at all", async () => {
+    // The layering rule, held in place by a test because the easiest way to
+    // make a watcher-ingested photo work everywhere is to teach the watcher to
+    // read EXIF — and that is exactly the move the architecture forbids.
+    //
+    // The watcher has a type guessed from a filename extension, a filename, and
+    // a path. It holds no decoder for any format, so it must not write derived
+    // columns; registering a file is not understanding it. A watcher-ingested
+    // photo stays dimensionless until a Photos node derives from it and
+    // backfills, which is the intended division of labour.
+    const records = await listRecords(drive);
+    const aRecord = records.find((r) => r.original_filename === "a.jpg")!;
+    expect(aRecord).toBeDefined();
+
+    const res = await drive.fetch(`/data/records/${aRecord.id}/metadata/image`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { metadata: unknown }).metadata).toBeNull();
+  });
+
   it("rejects a duplicate watch for the same directory", async () => {
     const res = await fetch(`${server.url}/watches`, {
       method: "POST",

@@ -274,6 +274,21 @@ describe("SqliteDatabaseAdapter", () => {
       expect(row!["captured_at"]).toBe("2024-01-01T10:00:00");
     });
 
+    it("upserts only the columns it is given", async () => {
+      // The semantics the metadata ride-along depends on: a sync round carries
+      // a deliberately partial row (null columns are stripped before sending),
+      // so a second write naming one column must not erase the first.
+      const record = createDataRecord(baseInput({ type: "image" }), clock);
+      await adapter.put(record);
+      await adapter.putMetadata("image", { recordId: record.id, width: 1920, height: 1080 });
+      await adapter.putMetadata("image", { recordId: record.id, thumb_hash: "TH" });
+
+      const row = (await adapter.getMetadata("image", record.id))!;
+      expect(row["width"]).toBe(1920);
+      expect(row["height"]).toBe(1080);
+      expect(row["thumb_hash"]).toBe("TH");
+    });
+
     it("deleteMetadata removes the row", async () => {
       const record = createDataRecord(baseInput({ type: "image" }), clock);
       await adapter.put(record);

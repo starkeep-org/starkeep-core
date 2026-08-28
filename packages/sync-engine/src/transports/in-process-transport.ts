@@ -1,10 +1,12 @@
 import {
   compareHLC,
-  type AnyRecord,
   type HLCClock,
   type RecordLabel,
 } from "@starkeep/protocol-primitives";
 import {
+  applyRecordMetadata,
+  deleteRecordMetadata,
+  loadMetadataForRecords,
   mergeDigestBuckets,
   scopeDigestBuckets,
   DEFAULT_BUCKET_PREFIX_LENGTH,
@@ -20,6 +22,7 @@ import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   ScanCapableApplier,
+  SyncRecordItem,
   Watermarks,
 } from "../types.js";
 import { SHARED_DIGEST_SCOPE } from "../types.js";
@@ -40,7 +43,7 @@ const FILE_RECORDS_TABLE = "_starkeep_sync_records";
 
 /** One row eligible to ship back, tagged with which stream it came from. */
 type OutboundRow =
-  | { kind: "record"; record: AnyRecord }
+  | { kind: "record"; record: SyncRecordItem }
   | { kind: "label"; label: RecordLabel }
   | { kind: "appRow"; entry: AppSyncableRowEntry };
 
@@ -174,14 +177,41 @@ export function createInProcessSyncTransport(
       //    per author in HLC order, unlike the requester's inbound loop. Same
       //    argument, same dependency: safe only while the halt rule is a throw.)
       if (syncSharedRecords) {
-        for (const snapshot of request.records ?? []) {
-          if (haltedNodes.has(snapshot.updatedAt.nodeId)) continue;
+        for (const item of request.records ?? []) {
+          if (haltedNodes.has(item.updatedAt.nodeId)) continue;
+          // The metadata passenger comes off before the row is written; see
+          // `SyncRecordItem`.
+          const { metadata: incomingMetadata, ...snapshot } = item;
           const current = await databaseAdapter.get(snapshot.id);
-          if (current && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0) {
-            continue;
+          const rowAlreadyApplied =
+            current !== null && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
+          if (!rowAlreadyApplied) {
+            clock.receive(snapshot.updatedAt);
+            await databaseAdapter.put(snapshot);
           }
-          clock.receive(snapshot.updatedAt);
-          await databaseAdapter.put(snapshot);
+          // **Outside** the LWW guard: an equal or older record row can still
+          // carry columns this side lacks, and the record's clock does not move
+          // when metadata is written, so a stale-looking row says nothing about
+          // its metadata. A tombstone cascades instead, matching what a local
+          // delete already does.
+          if (snapshot.deletedAt) {
+            await deleteRecordMetadata(databaseAdapter, snapshot);
+          } else if (incomingMetadata) {
+            // `detectOwedBack: false` — a responder never answers "I hold
+            // columns you did not name" by moving the record's clock. Doing so
+            // would re-author the row, and this side's coverage report is
+            // computed from row authorship: re-authoring the last row it held
+            // from some author erases that author from the report, and the
+            // requester then re-ships that author's whole history every round.
+            //
+            // Nothing is lost by declining. The scan below runs after this
+            // apply, so a row this side holds above the requester's watermark
+            // ships back merged in this very response — and a row that is not
+            // above it is one the requester has already received.
+            await applyRecordMetadata(databaseAdapter, snapshot, incomingMetadata, {
+              detectOwedBack: false,
+            });
+          }
         }
       } else if ((request.records?.length ?? 0) > 0) {
         // Per-app channel received shared records — a channel-split violation
@@ -306,13 +336,33 @@ export function createInProcessSyncTransport(
         : cutRound(candidates, computeCeilings(truncations), { maxBytes, maxItems: limit });
       const hasMore = cut.hasMore;
 
-      const records: AnyRecord[] = [];
+      let records: SyncRecordItem[] = [];
       const labels: RecordLabel[] = [];
       const appSyncableRows: AppSyncableRowEntry[] = [];
       for (const item of cut.taken) {
         if (item.value.kind === "record") records.push(item.value.record);
         else if (item.value.kind === "label") labels.push(item.value.label);
         else appSyncableRows.push(item.value.entry);
+      }
+
+      // Each shipping record's metadata row rides with it, read once for the
+      // whole page rather than per record. A read failure is not allowed to
+      // fail the exchange: the record rows are what must move, and metadata
+      // that missed this round rides the next one.
+      if (records.length > 0) {
+        try {
+          const metadataById = await loadMetadataForRecords(databaseAdapter, records);
+          if (metadataById.size > 0) {
+            records = records.map((record) => {
+              const metadata = metadataById.get(record.id);
+              return metadata ? { ...record, metadata } : record;
+            });
+          }
+        } catch (err) {
+          console.warn(
+            `[sync] in-process transport metadata read failed: ${(err as Error).message}`,
+          );
+        }
       }
 
       // 5. Coverage watermarks over this channel's full post-apply state

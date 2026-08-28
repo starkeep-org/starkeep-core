@@ -93,6 +93,7 @@ import type {
   SyncEngine,
   SyncEngineOptions,
   SyncOptions,
+  SyncRecordItem,
   SyncResult,
   VerifyResult,
   Watermarks,
@@ -101,10 +102,13 @@ import { SHARED_DIGEST_SCOPE } from "./types.js";
 import { createChangeNotifier } from "./change-notifier.js";
 import { createFileSyncEngine } from "./file-sync-engine.js";
 import {
+  applyRecordMetadata,
   applyRepairFloors,
   bucketsPeerIsMissing,
+  deleteRecordMetadata,
   digestIsScoped,
   foldDigestScopes,
+  loadMetadataForRecords,
   mergeDigestBuckets,
   raiseInboundFloors,
   repairFloorsFor,
@@ -648,9 +652,38 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         );
       }
 
+      // Attach each shipping record's metadata row, read once for the whole
+      // shipment rather than per record.
+      //
+      // Read here, after the cut and after the transfers, rather than at scan
+      // time: only the records that actually ship need a row, and a round whose
+      // uploads failed part-way would otherwise have paid for metadata it is
+      // not sending. A read failure is not allowed to fail the round — the
+      // record row is the thing that must move, and metadata that missed this
+      // round rides the next one.
+      let outboundItems: SyncRecordItem[] = outboundRecords;
+      if (outboundRecords.length > 0) {
+        try {
+          const metadataById = await loadMetadataForRecords(
+            localDatabaseAdapter,
+            outboundRecords,
+          );
+          if (metadataById.size > 0) {
+            outboundItems = outboundRecords.map((record) => {
+              const metadata = metadataById.get(record.id);
+              return metadata ? { ...record, metadata } : record;
+            });
+          }
+        } catch (err) {
+          console.warn(
+            `[sync] outbound metadata read failed: ${(err as Error).message}`,
+          );
+        }
+      }
+
       const response = await transport.exchange({
         watermarks: advertisedWatermarks,
-        records: outboundRecords.length > 0 ? outboundRecords : undefined,
+        records: outboundItems.length > 0 ? outboundItems : undefined,
         labels: outboundLabels.length > 0 ? outboundLabels : undefined,
         appSyncableRows: outboundAppRows.length > 0 ? outboundAppRows : undefined,
         limit: maxItems,
@@ -856,20 +889,66 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         let contiguous = true;
         for (const item of items) {
           if (item.kind === "record") {
-            const snapshot = item.record;
+            // The passenger comes off before the row goes to `put`. Splitting
+            // here rather than letting the adapter ignore an unknown field
+            // keeps the two writes visibly separate — one is a snapshot under
+            // LWW, the other is a column merge that deliberately is not.
+            const { metadata: incomingMetadata, ...snapshot } = item.record;
             const current = await localDatabaseAdapter.get(snapshot.id);
-            const metadataAlreadyApplied =
+            const rowAlreadyApplied =
               current !== null &&
               compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
 
-            if (!metadataAlreadyApplied) {
+            if (!rowAlreadyApplied) {
               clock.receive(snapshot.updatedAt);
               await localDatabaseAdapter.put(snapshot);
             }
 
+            // **Outside** the LWW guard, deliberately. An equal or older record
+            // row can still carry columns this node lacks — which is the common
+            // case, not the corner one, while peers converge onto this wire
+            // format — and the record's clock does not move when metadata is
+            // written, so a stale-looking row is no evidence about its
+            // metadata.
+            //
+            // A tombstone cascades instead: `SdkDataOperations.delete` drops
+            // the metadata row, and a synced delete has to do the same or the
+            // record's dimensions outlive it on every peer but the one it was
+            // deleted on.
+            if (snapshot.deletedAt) {
+              await deleteRecordMetadata(localDatabaseAdapter, snapshot);
+            } else if (incomingMetadata) {
+              const owedBack = await applyRecordMetadata(
+                localDatabaseAdapter,
+                snapshot,
+                incomingMetadata,
+                // Only worth asking when we already held the record: one we
+                // have never seen cannot have a metadata row to preserve.
+                { detectOwedBack: current !== null },
+              );
+              // The peer is behind on this record and has no way to find out.
+              // A metadata write reaches sync only through the record's clock,
+              // so two nodes each writing a different column each bump the same
+              // record and one of those bumps loses the row's LWW — leaving the
+              // loser holding the better row with nothing to say so. Moving our
+              // clock re-ships the merged row.
+              //
+              // Not the unconditional bump the design rules out: this fires
+              // only while the snapshot names a strict subset of what we hold,
+              // and the reply to it names the union, against which the same
+              // test is false on both sides. See `applyRecordMetadata`.
+              if (owedBack) {
+                const merged = rowAlreadyApplied ? current! : snapshot;
+                await localDatabaseAdapter.put({
+                  ...merged,
+                  updatedAt: clock.now(),
+                });
+              }
+            }
+
             // Always attempt blob pull when the record needs one. The
-            // "metadata already applied" branch covers the case where a
-            // prior round landed the row but failed the blob pull (Staged
+            // "row already applied" branch covers the case where a prior
+            // round landed the row but failed the blob pull (Staged
             // residency) — without this, the watermark would advance past
             // the failed blob in round 2 and the record would be stuck.
             const manifest = manifestForRecord(snapshot);
@@ -879,7 +958,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               snapshot.id,
             );
             if (outcome === "failed") {
-              // Metadata applied (or already was), but blob fetch failed.
+              // Row applied (or already was), but blob fetch failed.
               // Don't advance own watermark past this item — next round the
               // responder still ships it (because our advertised watermarks
               // haven't moved past it) and we'll retry the blob.
@@ -888,10 +967,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               continue;
             }
 
-            // Only fire the change notifier when metadata was newly applied
-            // this round. A blob-retry on already-applied metadata isn't a
+            // Only fire the change notifier when the row was newly applied
+            // this round. A blob-retry on an already-applied row isn't a
             // user-visible "data change."
-            if (!metadataAlreadyApplied) appliedIds.push(snapshot.id);
+            if (!rowAlreadyApplied) appliedIds.push(snapshot.id);
             if (contiguous) ownSafeAdvance.set(nodeId, snapshot.updatedAt);
           } else if (item.kind === "label") {
             const incoming = item.label;
@@ -1700,7 +1779,7 @@ type OutboundItem =
   | { kind: "appRow"; entry: AppSyncableRowEntry };
 
 type InboundItem =
-  | { kind: "record"; record: AnyRecord }
+  | { kind: "record"; record: SyncRecordItem }
   | { kind: "label"; label: RecordLabel }
   | { kind: "appRow"; entry: AppSyncableRowEntry };
 
@@ -1751,7 +1830,7 @@ function groupOutboundByNodeId(
 }
 
 function groupInboundByNodeId(
-  records: readonly AnyRecord[],
+  records: readonly SyncRecordItem[],
   labels: readonly RecordLabel[],
   appRows: readonly AppSyncableRowEntry[],
 ): Map<string, InboundItem[]> {

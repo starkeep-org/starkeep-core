@@ -137,6 +137,12 @@ const RECORDS_INSERT = /insert into "shared"\."records"/;
 const RECORDS_NODE_WATERMARKS =
   /select "node_id", max\("updated_at"\).*from "shared"\."records" group by "node_id"/;
 const VALID_HASH = "b".repeat(64);
+/** Matches `recordRow`'s stamp, so a seeded label deserializes like a real one. */
+const TEST_HLC_FOR_LABELS = serializeHLC({
+  wallTime: Date.UTC(2026, 0, 1),
+  counter: 0,
+  nodeId: "test",
+});
 
 describe("grants parity on records routes", () => {
   it("403s an explicit ?type= outside the readable set without querying records", async () => {
@@ -285,6 +291,111 @@ describe("record registration", () => {
     const inserts = db.calls(RECORDS_INSERT);
     expect(inserts).toHaveLength(1);
     expect(inserts[0]!.values).toContain(VALID_HASH);
+  });
+
+  // ---- Inline metadata at create ----
+  //
+  // The field closes the window in which a record is visible to a sync scan
+  // without its metadata. What is tested here is that it does not, in closing
+  // it, widen who may write derived columns: the same `metadataWrite` grant and
+  // the same per-category column list gate both doors.
+  it("writes metadata supplied on create, in the same OCC unit as the record", async () => {
+    const db = fakeDsqlWithGrants(grants)
+      .on(RECORDS_INSERT, [])
+      .on(/insert into "shared"\."record_image_metadata"/, []);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const res = await handler(
+      signedEvent({
+        appId: "photos",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+          metadata: { width: 4032, height: 3024 },
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(201);
+    const writes = db.calls(/insert into "shared"\."record_image_metadata"/);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.values).toContain(4032);
+  });
+
+  it("refuses inline metadata from an app that may not write the category", async () => {
+    // Read-only on images, so it may register nothing at all here — the point
+    // is that a caller reaching this route with a metadata body meets the same
+    // category gate the metadata route applies.
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "nometa",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+          metadata: { width: 1 },
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
+  });
+
+  it("rejects inline metadata columns the category does not declare", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_INSERT, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "photos",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+          metadata: { width: 4032, bogus_column: 1 },
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(String(bodyOf(res)["error"])).toMatch(/bogus_column/);
+    // Checked before anything is written, so a rejected payload leaves no
+    // record behind for the caller's retry to dedup against.
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
+  });
+
+  it('rejects inline metadata on "other", which has no metadata table', async () => {
+    const db = fakeDsqlWithGrants();
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "starkeep-drive",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "other/other",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+          metadata: { anything: 1 },
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(String(bodyOf(res)["error"])).toMatch(/no metadata table/);
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
   });
 
   it("writes labels supplied on create, without a second request", async () => {
@@ -500,10 +611,12 @@ describe("metadata routes", () => {
   });
 
   it("writes valid metadata into the derived category's table", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
-      /insert into "shared"\."record_image_metadata"/,
-      [],
-    );
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
+      .on(/insert into "shared"\."record_image_metadata"/, [])
+      .on(/from "shared"\."records" where "id" =/, [
+        recordRow({ id: "r1", type: "image/jpeg", version: 3 }),
+      ])
+      .on(/insert into "shared"\."records"/, []);
     setDbFactory(db);
     const res = await handler(
       signedEvent({
@@ -518,6 +631,38 @@ describe("metadata routes", () => {
     const writes = db.calls(/insert into "shared"\."record_image_metadata"/);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.values).toEqual(["r1", 100, 50]);
+  });
+
+  it("moves the record's clock on a metadata write, without touching version", async () => {
+    const before = recordRow({ id: "r1", type: "image/jpeg", version: 3 });
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
+      .on(/insert into "shared"\."record_image_metadata"/, [])
+      .on(/from "shared"\."records" where "id" =/, [before])
+      .on(/insert into "shared"\."records"/, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "md3b",
+        method: "POST",
+        subPath: "/data/records/r1/metadata",
+        body: { typeId: "image/jpeg", metadata: { width: 100 } },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+
+    // The bump is the only thing that makes a metadata write visible to sync:
+    // metadata rides the record row, and the outbound scan is a delta scan over
+    // `updated_at`. Without this the write is invisible to every peer forever.
+    const puts = db.calls(/insert into "shared"\."records"/);
+    expect(puts).toHaveLength(1);
+    const values = puts[0]!.values as unknown[];
+    const updatedAt = values[3] as string;
+    expect(typeof updatedAt).toBe("string");
+    expect(updatedAt > (before["updated_at"] as string)).toBe(true);
+    // `version` counts revisions of the record. A derived fact arriving is not
+    // one, so it must stay where it was.
+    expect(values).toContain(3);
   });
 
   it('400s metadata writes to "other" even for all-access Drive', async () => {
@@ -1907,6 +2052,61 @@ describe("GET /data/records variant resolution", () => {
       const res = await request({ variant: "photos/rendition", variantLongEdge: bad });
       expect(res.statusCode, bad).toBe(400);
     }
+  });
+
+  // The behaviour this whole metadata-over-sync change exists to restore.
+  //
+  // A rendition derived on a laptop reaches the cloud through sync. Before its
+  // dimensions travelled with it, the cloud held the child record and no
+  // metadata row, `signCandidatesForPage` dropped the dimensionless candidate,
+  // and the record reported *no renditions at all* — indistinguishable from
+  // "nothing has been derived yet", which is what sent Photos into a
+  // derivation loop against a complete ladder.
+  it("reports a synced rendition with dimensions as a candidate", async () => {
+    const labelRow = {
+      record_id: "child-1",
+      app_id: "photos",
+      key: "rendition",
+      value: "medium",
+      record_type: "image/jpeg",
+      created_at: TEST_HLC_FOR_LABELS,
+      updated_at: TEST_HLC_FOR_LABELS,
+      node_id: "test",
+      deleted_at: null,
+    };
+    const db = fakeDsqlWithGrants(grants)
+      // More specific than RECORDS_SELECT and registered first, since routes
+      // match in registration order: this is the child lookup, not the page.
+      .on(/from "shared"\."records" where "parent_id" in/, [
+        recordRow({ id: "child-1", type: "image/jpeg", parent_id: "rec-1" }),
+      ])
+      .on(RECORDS_SELECT, [recordRow({ id: "rec-1", type: "image/jpeg" })])
+      .on(/from "shared"\."record_labels" where "record_id" in/, [labelRow])
+      .on(IMAGE_META_SELECT, [{ record_id: "child-1", width: 1280, height: 960 }]);
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { variant: "photos/rendition" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res) as {
+      records: Array<{ variant_candidates?: Array<Record<string, unknown>> }>;
+    };
+    const candidates = body.records[0]!.variant_candidates!;
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      id: "child-1",
+      label_value: "medium",
+      width: 1280,
+      height: 960,
+      long_edge: 1280,
+    });
   });
 
   it("caps how many sizes one request may ask for", async () => {

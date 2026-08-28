@@ -90,7 +90,19 @@ export interface DataOperations {
   delete(recordId: StarkeepId): Promise<void>;
   query(params: { type?: string; filters?: import("@starkeep/storage-adapter").Filter[] }): Promise<DataRecord[]>;
 
-  /** Write (insert-or-replace) a per-type metadata row. */
+  /**
+   * Write a per-type metadata row, upserting the columns it names and leaving
+   * the rest alone, then **bump the record's `updatedAt`**.
+   *
+   * The bump is what makes the write visible to sync at all: metadata rides the
+   * record row over the wire, and the outbound scan is a delta scan over
+   * `updated_at`. `version` is untouched — a derived fact arriving is not a new
+   * revision of the record.
+   *
+   * The sync apply path must not use this. It writes through the database
+   * adapter directly, because bumping on apply would make every applied row a
+   * fresh change to ship back.
+   */
   putMetadata(typeId: string, row: MetadataRow): Promise<void>;
   /** Read a per-type metadata row by recordId. */
   getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null>;

@@ -1862,6 +1862,7 @@ async function main() {
           sizeBytes,
           parentId,
           labels,
+          metadata,
         } = JSON.parse(body) as {
           type?: string;
           fileName?: string;
@@ -1871,6 +1872,7 @@ async function main() {
           sizeBytes?: number;
           parentId?: StarkeepId;
           labels?: Array<{ key: string; value?: string }>;
+          metadata?: Record<string, unknown>;
         };
         if (!type) {
           res.writeHead(400);
@@ -1903,6 +1905,54 @@ async function main() {
             detail: `app "${appId}" has no readwrite grant on type "${type}"`,
           });
           return;
+        }
+
+        // Optional inline metadata, checked **before** anything is written so a
+        // rejected payload leaves no record behind.
+        //
+        // Same grant and same column rules as POST /data/records/:id/metadata,
+        // deliberately: an app that may not write image metadata through one
+        // door may not write it through the other. The field closes the window
+        // in which a record is visible to sync without its metadata; it does
+        // not widen who may write it.
+        //
+        // The layering rule is unchanged. The platform declares *which* columns
+        // a category has and validates against that declaration; it does not
+        // extract, and must not learn how. Extraction stays with an app holding
+        // a `metadataWrite` grant and a decoder for the format — which is why
+        // the folder watcher, which has only a filename, still sends nothing
+        // here.
+        if (metadata !== undefined) {
+          if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+            res.writeHead(400);
+            json(res, { error: "metadata must be an object" });
+            return;
+          }
+          const metadataCategory = typeCategory(type);
+          if (!appCanWriteMetadataCategory(localDb, appId!, metadataCategory)) {
+            res.writeHead(403);
+            json(res, {
+              error: "AccessDenied",
+              detail: `app "${appId}" has no metadataWrite grant on category "${metadataCategory}"`,
+            });
+            return;
+          }
+          if (metadataCategory === "other") {
+            res.writeHead(400);
+            json(res, {
+              error: `Category "other" has no metadata table — only mapped categories support metadata`,
+            });
+            return;
+          }
+          const allowed = new Set(
+            getCategory(metadataCategory)!.metadataColumns.map((c) => c.name),
+          );
+          const unknownKeys = Object.keys(metadata).filter((k) => !allowed.has(k));
+          if (unknownKeys.length > 0) {
+            res.writeHead(400);
+            json(res, { error: `Unknown metadata columns: ${unknownKeys.join(", ")}` });
+            return;
+          }
         }
 
         // Render a record into the API response shape. Used for both the
@@ -1953,7 +2003,16 @@ async function main() {
         }
 
         let record;
-        const baseInput = { type, originAppId: appId!, parentId: parentId ?? null };
+        const baseInput = {
+          type,
+          originAppId: appId!,
+          parentId: parentId ?? null,
+          // Written by the SDK in the same call as the record row, so the
+          // record is never visible to a sync scan without it. Not atomic —
+          // see `DataPutInput.metadata` — but the window is a pair of adjacent
+          // adapter calls rather than a pair of HTTP requests.
+          ...(metadata ? { metadata } : {}),
+        };
         if (contentHash) {
           if (!/^[a-f0-9]{64}$/.test(contentHash)) {
             res.writeHead(400);
@@ -3062,6 +3121,9 @@ async function main() {
           json(res, { error: `Unknown metadata columns: ${unknownKeys.join(", ")}` });
           return;
         }
+        // Through the SDK rather than the adapter, deliberately: the SDK also
+        // moves the record's `updated_at`, which is the only thing that makes
+        // this write visible to sync. See `DataOperations.putMetadata`.
         await sdk.data.putMetadata(category, { recordId: createStarkeepId(recordId), ...metadata });
         json(res, { ok: true });
         return;

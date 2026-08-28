@@ -307,6 +307,30 @@ export async function createStarkeepSdk(
       async putMetadata(typeId: string, row: MetadataRow) {
         if (metadataCategory(typeId) === "other") return;
         await databaseAdapter.putMetadata(typeId, row);
+
+        // Move the record's clock, because metadata now rides the record over
+        // sync and the outbound scan is a delta scan over exactly this column.
+        // Without this a metadata write is invisible to sync forever: an app
+        // that registers a record and derives its dimensions a moment later
+        // ships the record in whatever round falls between the two, and no
+        // later round ever offers it again.
+        //
+        // `version` deliberately stays put. It counts revisions of the record,
+        // and a derived fact arriving is not a new revision of anything.
+        //
+        // Ordered after the metadata write so a failure retries the half that
+        // matters: a lost metadata write is repaired by the next write, while a
+        // lost bump leaves nothing that knows the record is owed.
+        //
+        // **The sync apply path must not come through here.** It writes
+        // metadata through the adapter directly, and bumping there would make
+        // every applied row a fresh change to ship back — two nodes trading one
+        // record forever.
+        const existing = await databaseAdapter.get(row.recordId);
+        if (!existing) return;
+        const touched: DataRecord = { ...existing, updatedAt: clock.now() };
+        await databaseAdapter.put(touched);
+        logChange(touched);
       },
 
       async getMetadata(typeId, recordId) {

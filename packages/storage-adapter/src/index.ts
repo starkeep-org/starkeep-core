@@ -36,6 +36,13 @@ export {
 } from "./database/variant-queries.js";
 
 export {
+  loadMetadataForRecords,
+  applyRecordMetadata,
+  deleteRecordMetadata,
+  type MetadataSubject,
+} from "./database/metadata-sync.js";
+
+export {
   buildLabelUpsert,
   buildLabelSnapshotUpsert,
   buildLabelRetraction,
