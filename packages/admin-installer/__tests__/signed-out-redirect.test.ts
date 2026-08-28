@@ -8,7 +8,10 @@
  * ten, that is the difference between a slow page and five 503s.
  *
  * The exclusions are the part worth testing, because each one is a way to
- * break something real rather than a preference. The function source is
+ * break something real rather than a preference. So is the pair of cases where
+ * the function answers for the route table: which cookie decides a redirect,
+ * and which spelling of the app root reaches the public route. The function
+ * source is
  * extracted from the Pulumi program and evaluated here, so what runs in these
  * assertions is the string that gets deployed — a hand-copied duplicate would
  * pass while the deployed one was broken.
@@ -58,7 +61,7 @@ const handler = loadDeployedFunction();
 
 function req(
   uri: string,
-  opts: { dest?: string; session?: string; cookieHeader?: string } = {},
+  opts: { dest?: string; session?: string; token?: string; cookieHeader?: string } = {},
 ): CfRequest {
   const headers: Record<string, CfHeader> = {};
   if (opts.dest) headers["sec-fetch-dest"] = { value: opts.dest };
@@ -66,7 +69,11 @@ function req(
   // is not what the function consults. Real CloudFront never sends one.
   if (opts.cookieHeader) headers.cookie = { value: opts.cookieHeader };
   const cookies: Record<string, CfHeader> = {};
+  // The two cookies are set independently on purpose: `sk_session` outlives
+  // `sk_token` by weeks, so "session but no token" is the state every
+  // signed-in browser reaches about an hour after its last page load.
   if (opts.session) cookies["sk_session"] = { value: opts.session };
+  if (opts.token) cookies["sk_token"] = { value: opts.token };
   return { uri, headers, cookies };
 }
 
@@ -87,6 +94,18 @@ describe("redirects", () => {
     expect((res as CfResponse).headers!.location.value).toBe("/apps/photos/sign-in");
   });
 
+  it("a viewer holding only the long-lived session cookie", () => {
+    // The dead end this replaced. `sk_session` lasts weeks and `sk_token`
+    // about an hour, so every signed-in browser reaches this state; passing it
+    // through handed it the gateway authorizer's `{"message":"Forbidden"}`,
+    // with the one route that could have recovered it — /api/session/refresh —
+    // reachable only from an app shell that never loaded.
+    const r = req("/apps/photos/browse", { dest: "document", session: "refresh-token" });
+    const res = handler({ request: r });
+    expect(isRedirect(res)).toBe(true);
+    expect((res as CfResponse).headers!.location.value).toBe("/apps/photos/sign-in");
+  });
+
   it("with no-store, because the answer depends on a cookie", () => {
     const res = handler({ request: req("/apps/memo/browse", { dest: "document" }) });
     expect((res as CfResponse).headers!["cache-control"].value).toBe("no-store");
@@ -99,12 +118,12 @@ describe("passes through", () => {
     // function receives cookies only in `request.cookies`; reading
     // `headers.cookie` finds nothing for everyone, so every document navigation
     // redirects and a signed-in person can never load the app at all.
-    const r = req("/apps/memo/browse", { dest: "document", cookieHeader: "sk_session=abc" });
+    const r = req("/apps/memo/browse", { dest: "document", cookieHeader: "sk_token=abc" });
     expect(isRedirect(handler({ request: r }))).toBe(true);
   });
 
-  it("a viewer who already has a session cookie", () => {
-    const r = req("/apps/memo/browse", { dest: "document", session: "abc" });
+  it("a viewer holding the token the gateway authorizer verifies", () => {
+    const r = req("/apps/memo/browse", { dest: "document", token: "abc" });
     expect(handler({ request: r })).toBe(r);
   });
 
@@ -150,6 +169,50 @@ describe("passes through", () => {
     // what should happen.
     const r = req("/apps/memo/_next/static/chunks/main.js", { dest: "script" });
     expect(handler({ request: r })).toBe(r);
+  });
+});
+
+describe("the app root, which the route table can spell only one way", () => {
+  // `publicPaths: ["/"]` becomes `ANY /apps/<appId>`: API Gateway v2 refuses a
+  // route key with a trailing slash ("Part of the given route key path is
+  // empty"), and it does not treat `/apps/<appId>/` as a match for the bare
+  // key either. The trailing-slash form therefore fell through to the
+  // session-gated `ANY /apps/<appId>/{proxy+}`, so the app root the manifest
+  // declared public answered 403 — including to admin-web's own "Open" link,
+  // which builds exactly that URL.
+  it("rewrites the trailing-slash form to the key the gateway carries", () => {
+    const r = req("/apps/photos/", { dest: "document", token: "abc" });
+    expect(handler({ request: r })).toBe(r);
+    expect(r.uri).toBe("/apps/photos");
+  });
+
+  it("rewrites it for a request that is not a navigation at all", () => {
+    // The gateway route is chosen by path, so the canonicalization cannot
+    // depend on `sec-fetch-dest`. An anonymous XHR to the declared-public root
+    // must reach the public route too.
+    const r = req("/apps/photos/");
+    expect(handler({ request: r })).toBe(r);
+    expect(r.uri).toBe("/apps/photos");
+  });
+
+  it("leaves the bare form alone", () => {
+    const r = req("/apps/photos", { dest: "document", token: "abc" });
+    expect(handler({ request: r })).toBe(r);
+    expect(r.uri).toBe("/apps/photos");
+  });
+
+  it("redirects the trailing-slash form to sign-in when there is no token", () => {
+    const res = handler({ request: req("/apps/photos/", { dest: "document" }) });
+    expect((res as CfResponse).headers!.location.value).toBe("/apps/photos/sign-in");
+  });
+
+  it("canonicalizes nothing deeper, where an app may own the trailing slash", () => {
+    // Next's `trailingSlash: true` redirects /x to /x/. Stripping it here
+    // would fight that redirect and loop, and it buys nothing: every deeper
+    // path already resolves to the same gated `{proxy+}` route either way.
+    const r = req("/apps/photos/albums/", { dest: "document", token: "abc" });
+    expect(handler({ request: r })).toBe(r);
+    expect(r.uri).toBe("/apps/photos/albums/");
   });
 });
 
