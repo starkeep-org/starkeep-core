@@ -12,11 +12,22 @@ STARKEEP_AWS_TESTS=1 pnpm test:aws          # from repo root (turbo) or this dir
 Without `STARKEEP_AWS_TESTS=1` the single test file reports a skipped suite and
 makes no AWS calls. `pnpm test` (the default unit suite) never runs it.
 
-The browser step (real Chromium) needs the Playwright browser installed once:
+The browser steps (real Chromium) need the Playwright browser installed once:
 
 ```bash
 pnpm exec playwright install chromium
 ```
+
+The rendition steps boot the Photos app out of the sibling `starkeep-apps`
+checkout, so its dependencies must be installed (`pnpm install` there). The
+suite builds Photos' derivation worker itself — `pnpm dev` would have, and this
+suite starts Next directly so it can capture the log and kill the process group.
+
+**Stop any Photos dev server of your own first.** Next allows one dev server per
+app directory, so a `pnpm dev` left running in `starkeep-apps/photos` would take
+the rendition step down. The suite checks `.next/dev/lock` before its first AWS
+call and refuses to start, rather than failing fifteen minutes and one Pulumi
+stack later.
 
 ## What it does (`src/journey.test.ts`, ordered steps)
 
@@ -40,11 +51,22 @@ pnpm exec playwright install chromium
    its broker mount and its proxy mount with no token, no cookie and no prior
    state, must answer `401`/`403`,
    10b. one URL that answers `200` with a session cookie and `401` without it,
-   11. a full **browser** journey in real Chromium (Cognito sign-in → upload a
+   11. the **rendition ladder**, in three steps: boot the real Photos app locally
+   against this run's data server and have it derive a full ladder for an
+   original larger than the ladder's top rung (11a); sync, and assert every rung
+   reached the cloud carrying its `photos/rendition` label *and* non-null
+   width/height, that the broker resolves one variant candidate per rung, and
+   that one rung's bytes round-trip through the cloud `file-url` (11b); then load
+   the cloud grid in a real browser, upload nothing, and assert a tile's `src`
+   settles on a synced rung's object key rather than on the original's (11c).
+   Step 11b is the assertion the 2026-08-27 rendition-invisibility bug fails: a
+   rung arriving without dimensions is dropped as an unorderable candidate and
+   the record reports having no renditions at all.
+   12. a full **browser** journey in real Chromium (Cognito sign-in → upload a
    photo through the live file input → see it in the grid), exercising the whole
    presign → S3 PUT → `POST /data/records` → metadata-write path end-to-end,
-   12. `/api/resize`, 13. caption via `/app-data` — exercise the app's cloud routes.
-14. Uninstall photos; assert the app plane is gone but shared records survive.
+   13. `/api/resize`, 14. caption via `/app-data` — exercise the app's cloud routes.
+15. Uninstall photos; assert the app plane is gone but shared records survive.
 
 ## Environment contract (`src/env.ts`)
 
@@ -76,9 +98,12 @@ unlocks only the disposable test stack.
 
 ## Cost / time / lifecycle
 
-- **~26 min per full run.** First run is dominated by the cloud-data-server
-  Pulumi up (DSQL cluster provisioning); the photos install/uninstall add a
-  Pulumi up + destroy each.
+- **~26 min per full run**, measured before the rendition steps landed. Those
+  add a `next dev` first compile of the Photos app, one full ladder off a source
+  above the ladder's top rung, and a second real-Chromium session — several
+  minutes, not seconds. First run is dominated by the cloud-data-server Pulumi up
+  (DSQL cluster provisioning); the photos install/uninstall add a Pulumi up +
+  destroy each.
 - **A passing run tears the whole stack down by default** (`STARKEEP_AWS_TEARDOWN=all`)
   so nothing stale is left behind. To iterate against a warm stack, run with
   `STARKEEP_AWS_TEARDOWN=none`: bootstrap + cloud-data-server + Drive then
@@ -101,6 +126,16 @@ unlocks only the disposable test stack.
 - **Two auth models.** The broker's data/sync/app-data planes are HMAC-signed
   (app identity); an app's *own* routes (e.g. photos `/api/resize`) sit behind
   the gateway's Cognito JWT authorizer (user identity, `Authorization: Bearer`).
+- **A locally-run app needs `dataServerUrl` in its creds file.** `cli-install-app`
+  mirrors the registry secret into `app-creds/<appId>.json` but leaves the URL
+  unset, and `@starkeep/app-client` then falls back to the production port 9820.
+  admin-web writes the URL at local install; this suite has no admin-web, so the
+  rendition step writes the file itself before booting Photos.
+- **Photos' ladder and label spelling are read from the app, not copied.** See
+  `src/photos-contract.ts`: the suite already spent a run discovering that
+  `photos/thumbnail` had become `photos/rendition`, and a copied ladder would
+  fail the same way but silently. `vitest.config.ts` widens Vite's
+  `server.fs.allow` so the load is permitted.
 - **`/sync/now` needs an app signature** — it is not one of the LDS's
   loopback-exempt paths.
 - **IAM propagation can exceed a couple of minutes** after attaching a temp

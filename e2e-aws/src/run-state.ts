@@ -15,8 +15,8 @@
  *     kept-up cloud stack (its outputs; the password of a Cognito user that
  *     still exists), so they must survive between runs.
  *   - **Per-run local node state** — the registry `data.db`, `auth.json`,
- *     `cloud-credentials.json`, `objects/`, `app-creds/`. These must be FRESH
- *     every run; see `resetLocalNodeState`.
+ *     `cloud-credentials.json`, `objects/`, `app-creds/`, `app-local/`. These
+ *     must be FRESH every run; see `resetLocalNodeState`.
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -98,6 +98,13 @@ export function writeConfig(paths: RunPaths, config: TestStackConfig): void {
  *     the handoff — defeating the boot step's whole point, which is that the
  *     handoff is what starts sync. The later `shipped > 0` then passes for the
  *     wrong reason.
+ *
+ *   - **Stale app-local state.** `app-local/<appId>/` holds what an app knows
+ *     about *this node* rather than about the library: Photos keeps its sweep
+ *     cursor and its per-record derivation verdicts there. Record ids are new
+ *     every run, so a cursor left behind points into a library that no longer
+ *     exists and the sweep resumes past the record the run is about to create.
+ *     The platform never creates or cleans this tree, so the runner must.
  */
 export function resetLocalNodeState(paths: RunPaths): void {
   const perRun = [
@@ -109,6 +116,7 @@ export function resetLocalNodeState(paths: RunPaths): void {
     "cloud-config.json",
     "objects",
     "app-creds",
+    "app-local",
   ];
   for (const entry of perRun) {
     rmSync(join(paths.dataDir, entry), { recursive: true, force: true });

@@ -18,7 +18,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chromium } from "@playwright/test";
+import { chromium, type Page } from "@playwright/test";
 import {
   startLocalDataServer,
   type LocalDataServer,
@@ -29,7 +29,9 @@ import {
   createRecordWithBytes,
   eventually,
   solidPng,
+  startNextDev,
   type LdsApp,
+  type NextDevServer,
 } from "@starkeep/e2e";
 import { signedFetch, USER_TOKEN_HEADER, type AppCredentials } from "@starkeep/app-client";
 import {
@@ -41,6 +43,7 @@ import {
   GetFunctionConfigurationCommand,
 } from "@aws-sdk/client-lambda";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
+import { photosContract, type PhotosContract } from "./photos-contract.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
 import { signInAdmin, runInstallCli, type AdminSession } from "./installers.js";
@@ -67,6 +70,23 @@ let lds: LocalDataServer | undefined;
 let drive: LdsApp;
 let photos: LdsApp;
 let syncedRecordId: string;
+/**
+ * The Photos app itself, running locally against this run's data server. Booted
+ * by the rendition-ladder step and stopped as soon as its ladder has synced, so
+ * no later step runs against a background sweeper.
+ */
+let photosLocal: NextDevServer | undefined;
+/** Photos' ladder and label spelling, read from the sibling checkout. */
+let contract: PhotosContract;
+/** The original whose ladder the rendition steps derive, sync and read back. */
+let ladderRecordId: string;
+let ladderSourceName: string;
+/** The rungs that apply to it, as Photos' own ladder answers the question. */
+let ladderClasses: string[];
+/** Its object key, so a tile serving the original is distinguishable from a rung. */
+let ladderOriginalKey: string;
+/** Size class → the object key the rung arrived in the cloud under. */
+const syncedRungKeys = new Map<string, string>();
 // The photo the real browser uploads through the cloud-served UI: its bytes
 // enter the cloud via browser→proxy→broker→S3, never touching the local data
 // server. Captured here so the later cloud→local sync step can assert the
@@ -199,6 +219,179 @@ async function fetchWhenReady(
   return res;
 }
 
+/**
+ * Refuse to start when the operator is already running Photos.
+ *
+ * Next 16 allows one dev server per app directory and holds the claim in
+ * `.next/dev/lock`; a second one exits immediately with "Another next dev server
+ * is already running". The rendition step boots Photos out of the operator's own
+ * checkout, so a dev server left running from ordinary development takes that
+ * step down — fifteen minutes and one Pulumi-provisioned cloud stack into the
+ * run, which is the most expensive possible moment to learn it.
+ *
+ * Checked here instead, before the first AWS call. The lock outlives a crashed
+ * server, so the pid is probed rather than trusted: signal 0 delivers nothing and
+ * only reports whether the process exists.
+ */
+function assertNoPhotosDevServer(): void {
+  const lockPath = join(STARKEEP_APPS_DIR, "photos", ".next", "dev", "lock");
+  if (!existsSync(lockPath)) return;
+  let lock: { pid?: number; appUrl?: string };
+  try {
+    lock = JSON.parse(readFileSync(lockPath, "utf-8")) as { pid?: number; appUrl?: string };
+  } catch {
+    return; // Unreadable or half-written: no claim this can act on.
+  }
+  if (!lock.pid) return;
+  try {
+    process.kill(lock.pid, 0);
+  } catch {
+    return; // Stale lock from a server that is gone.
+  }
+  throw new Error(
+    `A Photos dev server is already running (pid ${lock.pid}${
+      lock.appUrl ? `, ${lock.appUrl}` : ""
+    }). Next allows one per app directory, and this journey boots Photos out of ` +
+      `that same directory to derive a rendition ladder. Stop it (kill ${lock.pid}) ` +
+      "and re-run.",
+  );
+}
+
+/** A rendition child as the rendition steps read it back. */
+interface RungRecord {
+  id: string;
+  parent_id: string | null;
+  original_filename: string | null;
+  object_storage_key: string | null;
+  metadata?: { width?: number | null; height?: number | null } | null;
+  labels?: Array<{ app_id: string; key: string; value: string | null; label: string }>;
+}
+
+/**
+ * A record's `photos/rendition` children, with their labels and their
+ * dimensions, from whichever data plane is asked.
+ *
+ * `parentId` + `label` is one indexed lookup, and it is the same query Photos
+ * itself issues to decide what is left to derive — so the assertions read the
+ * library the way the app does rather than through a shape invented for a test.
+ */
+async function renditionChildren(app: LdsApp, parentId: string): Promise<RungRecord[]> {
+  const res = await app.fetch(
+    `/data/records?parentId=${encodeURIComponent(parentId)}` +
+      `&label=${encodeURIComponent(contract.renditionLabelRef)}` +
+      `&include=labels,metadata&limit=50`,
+  );
+  if (!res.ok) {
+    throw new Error(`rendition children of ${parentId} → ${res.status} ${await res.text()}`);
+  }
+  return ((await res.json()) as { records: RungRecord[] }).records;
+}
+
+/** Which rung of the ladder a child is — the `photos/rendition` label's value. */
+function renditionClassOf(rung: RungRecord): string {
+  return (rung.labels ?? []).find((l) => l.label === contract.renditionLabelRef)?.value ?? "";
+}
+
+/** A record's bytes, through the data plane's own file-url. */
+async function readRecordBytes(app: LdsApp, recordId: string): Promise<Buffer> {
+  const urlRes = await app.fetch(`/data/records/${recordId}/file-url`);
+  if (!urlRes.ok) {
+    throw new Error(`file-url for ${recordId} → ${urlRes.status} ${await urlRes.text()}`);
+  }
+  const { url } = (await urlRes.json()) as { url: string };
+  const blob = await fetch(url);
+  if (!blob.ok) throw new Error(`bytes for ${recordId} → ${blob.status}`);
+  return Buffer.from(await blob.arrayBuffer());
+}
+
+/**
+ * Collect what a headless page saw, and return a reader for it.
+ *
+ * A browser failure in a cloud journey is the hardest kind to diagnose after the
+ * fact: the page is gone, the stack may be torn down, and all that survives is a
+ * locator timeout. Diagnostics wired to one specific failure are diagnostics
+ * that are absent for every other one, which is how a thumbnail that never
+ * rendered presented as a bare 120s timeout with nothing to say whether the
+ * upload had even reached the network.
+ */
+function watchPageProblems(page: Page): () => string {
+  const problems: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "error") problems.push(`console: ${m.text().slice(0, 200)}`);
+  });
+  page.on("pageerror", (e) => problems.push(`pageerror: ${String(e).slice(0, 200)}`));
+  page.on("requestfailed", (r) =>
+    problems.push(`requestfailed: ${r.failure()?.errorText ?? "?"} ${r.url().slice(0, 120)}`),
+  );
+  page.on("response", (r) => {
+    if (r.status() >= 400) problems.push(`${r.status()} ${r.url().slice(0, 120)}`);
+  });
+  return (): string =>
+    problems.length
+      ? `\nWhat the browser saw:\n  ${[...new Set(problems)].join("\n  ")}`
+      : "\nThe browser reported no console errors and no failed requests.";
+}
+
+/**
+ * Load a cloud-served app in a real browser, sign in through Cognito, and wait
+ * for the signed-in toolbar.
+ *
+ * Shared by both browser steps, so the hydration handling below is written once.
+ *
+ * `load`, not `domcontentloaded`. The sign-in form is server-rendered, so its
+ * fields exist in the initial HTML and can be filled before React has hydrated —
+ * and that desync is permanent, not a race that settles: React attaches with its
+ * own empty state, the DOM keeps the typed text, and the submit button stays
+ * disabled forever because it enables on state. Re-filling does not recover it.
+ * Measured against this deployment, `load` and `networkidle` both hydrate
+ * reliably before the first fill and `domcontentloaded` reliably does not.
+ *
+ * The gateway sends a signed-out document request to the app's own sign-in page,
+ * so this lands on /sign-in and drives the real form with the permanent-password
+ * admin user. On success the app reloads authenticated and the toolbar renders.
+ * In this cloud journey the app runs FORCE_REMOTE (Cognito-gated), so the upload
+ * control is labelled "Upload Photo" — it reads "Add Photo" only in the local,
+ * non-remote build (see photos app.tsx).
+ */
+async function signInWithBrowser(
+  page: Page,
+  appUrl: string,
+  problemReport: () => string,
+): Promise<void> {
+  await page.goto(appUrl, { waitUntil: "load" });
+
+  const email = page.locator('input[type="email"]');
+  const password = page.locator('input[type="password"]');
+  const signIn = page.getByRole("button", { name: "Sign in" });
+  // Filled once and then waited on. Re-filling is not a recovery: if the first
+  // fill landed before hydration, every later one lands on a React that has
+  // already decided the field is empty. The failure mode is a 30s click timeout
+  // on a page that looks correct in a screenshot.
+  await email.fill(admin.email);
+  await password.fill(admin.password);
+  const deadline = Date.now() + 30_000;
+  let interactive = false;
+  while (Date.now() < deadline) {
+    if (await signIn.isEnabled()) {
+      interactive = true;
+      break;
+    }
+    await page.waitForTimeout(200);
+  }
+  if (!interactive) {
+    throw new Error(
+      "sign-in form never became interactive: the submit button stayed disabled " +
+        `for 30s after filling both fields. Landed on ${page.url()}; ` +
+        `email field holds ${JSON.stringify(await email.inputValue())}.` +
+        problemReport(),
+    );
+  }
+  await signIn.click();
+  await page
+    .getByRole("button", { name: "Upload Photo" })
+    .waitFor({ state: "visible", timeout: 120_000 });
+}
+
 function runTeardownScript(script: string): void {
   const result = spawnSync(
     "bash",
@@ -233,10 +426,14 @@ function runTeardownScript(script: string): void {
     // the two failure modes this prevents (stale schema; stale auth.json
     // starting sync before the /auth/tokens handoff does).
     beforeAll(() => {
+      assertNoPhotosDevServer();
       resetLocalNodeState(paths);
     });
 
     afterAll(async () => {
+      // Normally already stopped by the ladder-sync step; this covers a run that
+      // failed between booting it and getting there.
+      await photosLocal?.stop();
       await lds?.stop();
       if (anyFailed) {
         console.log(
@@ -920,6 +1117,224 @@ function runTeardownScript(script: string): void {
       expect(afterSignOut.status, "a signed-out caller was served").not.toBe(200);
     });
 
+    it("derives a full rendition ladder locally, through the real Photos app", async () => {
+      // The half of the rendition path nothing else in this suite reaches. Every
+      // other photo in this journey is a flat record created by a test helper: no
+      // children, no `photos/rendition` labels, no dimensions — the three
+      // properties whose absence caused the 2026-08-27 rendition-invisibility
+      // bug. Here the shipping app derives its own ladder, on this machine, from
+      // an original this suite put in front of it.
+      contract = await photosContract();
+      const top = contract.stillLadder[contract.stillLadder.length - 1]!;
+      // Above the top rung, so every rung applies and what is under test is the
+      // whole ladder rather than whichever prefix a small fixture reaches.
+      const sourceLongEdge = top.maxLongEdge + 200;
+      // Unique per run for the same reason the ship step's photo is: the cloud
+      // is kept up between runs and dedupes by content hash.
+      ladderSourceName = `e2e-ladder-${Date.now()}.png`;
+
+      // What admin-web writes at local install, and what this suite has no
+      // admin-web to write. `cli-install-app` mirrors the registry secret into
+      // this same file (see reconcileLocalCredsFile) but leaves `dataServerUrl`
+      // unset, and @starkeep/app-client then falls back to the production port
+      // 9820 — a daemon this run does not own and must never touch.
+      const credsPath = join(paths.dataDir, "app-creds", "photos.json");
+      mkdirSync(dirname(credsPath), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        credsPath,
+        JSON.stringify(
+          { appId: photos.appId, hmacSecret: photos.hmacSecret, dataServerUrl: lds!.url },
+          null,
+          2,
+        ),
+        { mode: 0o600 },
+      );
+
+      // The derivation worker is a separately bundled `worker_threads` entry
+      // point reached only by absolute path, and the manifest's `pnpm dev` builds
+      // it before starting Next. Booting Next directly — which is what gives this
+      // suite log capture and a killable process group — means building it here.
+      const photosDir = join(STARKEEP_APPS_DIR, "photos");
+      const built = spawnSync("pnpm", ["derive:build-worker"], {
+        cwd: photosDir,
+        stdio: "inherit",
+        env: { ...process.env },
+      });
+      if (built.status !== 0) {
+        throw new Error(`pnpm derive:build-worker exited with code ${built.status}`);
+      }
+
+      // Booting the real app is what starts `instrumentation.register`, and with
+      // it the ingest watch and the boot sweep — the derivation worker and the
+      // sweep controller, running as they do on an operator's machine rather
+      // than as a fixture. NODE_ENV is set explicitly because vitest sets it to
+      // `test`, which Next warns about and overrides anyway.
+      photosLocal = await startNextDev({
+        appDir: photosDir,
+        env: {
+          STARKEEP_DIR: paths.dataDir,
+          STARKEEP_LOCAL_DATA_SERVER_URL: lds!.url,
+          NODE_ENV: "development",
+        },
+        // A cold `next dev` compile of this app is the slowest thing in the
+        // step, and it is paid once per run on a machine that is also running a
+        // Pulumi-provisioned cloud stack.
+        startTimeoutMs: 5 * 60 * 1000,
+      });
+
+      const { record } = await createRecordWithBytes(photos, {
+        bytes: solidPng([...randomBytes(3)] as [number, number, number], sourceLongEdge),
+        fileName: ladderSourceName,
+      });
+      ladderRecordId = record.id;
+      ladderOriginalKey = record.object_storage_key as string;
+      expect(ladderOriginalKey, "the original must have landed in object storage").toBeTruthy();
+
+      // Omitting `targetLongEdge` asks for the whole applicable ladder, which is
+      // what a bulk sweep wants. Driven explicitly rather than waited for: the
+      // boot sweep reaches this record on its own, but *when* is a timing
+      // question and the ladder is not. Both paths run `derive-and-publish`, and
+      // a rung published twice dedupes on its content hash, so the two cannot
+      // race into two children for one rung.
+      const resize = await fetch(`${photosLocal.url}/api/resize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetId: ladderRecordId }),
+        // Five rungs off a source above the ladder's top: minutes, not seconds.
+        signal: AbortSignal.timeout(10 * 60 * 1000),
+      });
+      const resizeBody = await resize.text();
+      expect(resize.status, `local /api/resize answered ${resize.status}: ${resizeBody}`).toBe(200);
+
+      // Asserted on the resulting ladder rather than on what this call published,
+      // because the sweep may have published a rung first and a `published: []`
+      // response would then be correct rather than a failure.
+      ladderClasses = contract.applicableStillClasses(sourceLongEdge).map((spec) => spec.sizeClass);
+      const rungs = await eventually(
+        async () => {
+          const found = await renditionChildren(photos, ladderRecordId);
+          if (found.length < ladderClasses.length) {
+            throw new Error(
+              `${found.length} of ${ladderClasses.length} rungs published so far ` +
+                `(${found.map(renditionClassOf).join(", ") || "none"})`,
+            );
+          }
+          return found;
+        },
+        { timeoutMs: 5 * 60 * 1000, intervalMs: 2_000 },
+      );
+      // One child per applicable rung and nothing more. Two callers derive this
+      // record at once — the boot sweep and the call above — and the property
+      // keeping that from producing two children per rung is content-hash dedup
+      // on identical bytes, which nothing else in this suite exercises.
+      expect(rungs).toHaveLength(ladderClasses.length);
+
+      const byClass = new Map(rungs.map((rung) => [renditionClassOf(rung), rung]));
+      expect([...byClass.keys()].sort()).toEqual([...ladderClasses].sort());
+      for (const [sizeClass, rung] of byClass) {
+        // Dimensions are the property the cloud drops a candidate for. They ride
+        // the record's create call precisely so no sync round can see the rung
+        // without them; asserting them here is what makes the cloud assertion in
+        // the next step meaningful rather than vacuous.
+        expect(rung.metadata?.width ?? 0, `${sizeClass} has no width`).toBeGreaterThan(0);
+        expect(rung.metadata?.height ?? 0, `${sizeClass} has no height`).toBeGreaterThan(0);
+        expect(rung.parent_id).toBe(ladderRecordId);
+        expect(rung.original_filename).toBe(
+          contract.renditionFileName(ladderSourceName, sizeClass),
+        );
+      }
+    });
+
+    it("syncs the ladder up: every rung reaches the cloud with its label and its dimensions", async () => {
+      // The join this suite never crossed. Each layer below is covered on its
+      // own — the worker builds a ladder against a fake data plane, two local
+      // data servers exchange rendition dimensions against a fake cloud — and
+      // the failure of 2026-08-27 lived in none of them. It lived here, where a
+      // rung that arrived without dimensions was dropped as an unorderable
+      // candidate and the original reported having no renditions at all.
+      const cloudPhotos = cloudApp(photos);
+      const expected = ladderClasses.length;
+      const localChildren = await renditionChildren(photos, ladderRecordId);
+      expect(localChildren, "the local ladder must still be intact").toHaveLength(expected);
+
+      const arrived = await eventually(
+        async () => {
+          const sync = await drive.fetch("/sync/now", { method: "POST" });
+          expect(sync.status).toBe(200);
+          const res = await cloudPhotos.fetch(
+            `/data/records?parentId=${encodeURIComponent(ladderRecordId)}` +
+              `&label=${encodeURIComponent(contract.renditionLabelRef)}` +
+              `&include=labels,metadata&limit=50`,
+          );
+          expect(res.status).toBe(200);
+          const { records } = (await res.json()) as { records: RungRecord[] };
+          if (records.length < expected) {
+            throw new Error(`${records.length} of ${expected} rungs have reached the cloud`);
+          }
+          return records;
+        },
+        { timeoutMs: 10 * 60 * 1000, intervalMs: 5_000 },
+      );
+      expect(arrived).toHaveLength(expected);
+
+      for (const rung of arrived) {
+        const sizeClass = renditionClassOf(rung);
+        expect(sizeClass, `a synced rung carries no ${contract.renditionLabelRef} value`).toBeTruthy();
+        expect(rung.metadata?.width ?? 0, `${sizeClass} arrived with no width`).toBeGreaterThan(0);
+        expect(rung.metadata?.height ?? 0, `${sizeClass} arrived with no height`).toBeGreaterThan(0);
+        syncedRungKeys.set(sizeClass, rung.object_storage_key as string);
+      }
+      expect([...syncedRungKeys.keys()].sort()).toEqual([...ladderClasses].sort());
+
+      // The assertion the 2026-08-27 failure would fail. `variant=<label>` with
+      // no `variantLongEdge` asks the unnarrowed question — every derived child
+      // of this record — and the broker silently drops any candidate with no
+      // stored dimensions, so a record whose rungs all arrived dimensionless
+      // answers with an empty list that reads as "nothing derived yet". This is
+      // also the exact query the Photos client issues to paint a tile.
+      const resolvedRes = await cloudPhotos.fetch(
+        `/data/records?ids=${encodeURIComponent(ladderRecordId)}` +
+          `&include=metadata&variant=${encodeURIComponent(contract.renditionLabelRef)}`,
+      );
+      expect(resolvedRes.status).toBe(200);
+      const { records: parents } = (await resolvedRes.json()) as {
+        records: Array<{ id: string; variant_candidates?: Array<{ id: string; long_edge: number }> }>;
+      };
+      const parent = parents.find((r) => r.id === ladderRecordId);
+      expect(parent, "the original must be readable in the cloud").toBeDefined();
+      expect(
+        parent!.variant_candidates?.length ?? 0,
+        "the broker resolved fewer candidates than the rungs that arrived — a rung " +
+          "reaching the cloud without dimensions is dropped here and nowhere else",
+      ).toBe(expected);
+
+      // The bytes shipped too, not just the row. Every other byte round-trip in
+      // this suite fetches an original; this is the only one that fetches a
+      // rendition, through the same CloudFront-signed file-url a client uses.
+      // The bottom rung, chosen by name rather than by iteration order so a
+      // failure names the same rung on every run.
+      const [sizeClass, cloudKey] = [...syncedRungKeys.entries()].sort(([a], [b]) =>
+        a.localeCompare(b),
+      )[0]!;
+      const rung = localChildren.find((r) => renditionClassOf(r) === sizeClass)!;
+      expect(rung.object_storage_key, "content-addressed keys must match across nodes").toBe(
+        cloudKey,
+      );
+      const localBytes = await readRecordBytes(photos, rung.id);
+      const cloudBytes = await readRecordBytes(cloudPhotos, rung.id);
+      expect(
+        cloudBytes.equals(localBytes),
+        `${sizeClass} differs between the cloud (${cloudBytes.byteLength} bytes) and ` +
+          `this node (${localBytes.byteLength} bytes)`,
+      ).toBe(true);
+
+      // Stopped here rather than in afterAll: everything after this step reads a
+      // library that must stop changing, and a background sweeper deriving the
+      // browser's upload mid-assertion is a hard failure to read.
+      await photosLocal?.stop();
+      photosLocal = undefined;
+    });
+
     it("drives the real cloud Photos UI end-to-end: sign in, upload, see the photo", async () => {
       // True browser e2e of the cloud-served app: a real Chromium loads the SPA,
       // signs in through Cognito, and uploads a photo through the live file
@@ -957,84 +1372,8 @@ function runTeardownScript(script: string): void {
       let problemReport: () => string = () => "";
       try {
         const page = await browser.newPage();
-
-        // A browser failure in a cloud journey is the hardest kind to diagnose
-        // after the fact: the page is gone, the stack may be torn down, and all
-        // that survives is a locator timeout. Collect what the browser saw so a
-        // failure below can say it out loud.
-        const pageProblems: string[] = [];
-        page.on("console", (m) => {
-          if (m.type() === "error") pageProblems.push(`console: ${m.text().slice(0, 200)}`);
-        });
-        page.on("pageerror", (e) => pageProblems.push(`pageerror: ${String(e).slice(0, 200)}`));
-        page.on("requestfailed", (r) =>
-          pageProblems.push(`requestfailed: ${r.failure()?.errorText ?? "?"} ${r.url().slice(0, 120)}`),
-        );
-        page.on("response", (r) => {
-          if (r.status() >= 400) pageProblems.push(`${r.status()} ${r.url().slice(0, 120)}`);
-        });
-        problemReport = (): string =>
-          pageProblems.length
-            ? `\nWhat the browser saw:\n  ${[...new Set(pageProblems)].join("\n  ")}`
-            : "\nThe browser reported no console errors and no failed requests.";
-
-        // `load`, not `domcontentloaded`. The sign-in form is server-rendered,
-        // so its fields exist in the initial HTML and can be filled before
-        // React has hydrated — and that desync is permanent, not a race that
-        // settles: React attaches with its own empty state, the DOM keeps the
-        // typed text, and the submit button stays disabled forever because it
-        // enables on state. Re-filling does not recover it. Measured against
-        // this deployment, `load` and `networkidle` both hydrate reliably
-        // before the first fill and `domcontentloaded` reliably does not.
-        await page.goto(appUrl, { waitUntil: "load" });
-
-        // The gateway sends a signed-out document request to the app's own
-        // sign-in page, so this lands on /sign-in and drives the real form with
-        // the permanent-password admin user. On success the app reloads
-        // authenticated and the toolbar renders. In this cloud journey the app
-        // runs FORCE_REMOTE (Cognito-gated), so the upload control is labelled
-        // "Upload Photo" — it reads "Add Photo" only in the local, non-remote
-        // build (see photos app.tsx).
-        //
-        // Filled in a loop, because the session layer changed when these
-        // fields exist. They used to be rendered by AuthGate *after*
-        // hydration, so a locator could not resolve one until React was live
-        // and a fill was necessarily seen. The sign-in page is server-rendered
-        // now: the inputs are in the initial HTML, and a fill that lands before
-        // hydration sets the DOM value while React's state stays empty — which
-        // leaves the submit button disabled, since it enables on that state.
-        // The failure mode is a 30s click timeout on a page that looks correct
-        // in a screenshot.
-        const email = page.locator('input[type="email"]');
-        const password = page.locator('input[type="password"]');
-        const signIn = page.getByRole("button", { name: "Sign in" });
-        //
-        // Filled once and then waited on. Re-filling is not a recovery: if the
-        // first fill landed before hydration, every later one lands on a React
-        // that has already decided the field is empty.
-        await email.fill(admin.email);
-        await password.fill(admin.password);
-        const deadline = Date.now() + 30_000;
-        let interactive = false;
-        while (Date.now() < deadline) {
-          if (await signIn.isEnabled()) {
-            interactive = true;
-            break;
-          }
-          await page.waitForTimeout(200);
-        }
-        if (!interactive) {
-          throw new Error(
-            "sign-in form never became interactive: the submit button stayed disabled " +
-              `for 30s after filling both fields. Landed on ${page.url()}; ` +
-              `email field holds ${JSON.stringify(await email.inputValue())}.` +
-              problemReport(),
-          );
-        }
-        await signIn.click();
-        await page
-          .getByRole("button", { name: "Upload Photo" })
-          .waitFor({ state: "visible", timeout: 120_000 });
+        problemReport = watchPageProblems(page);
+        await signInWithBrowser(page, appUrl, problemReport);
 
         // Upload through the live file input and wait for the thumbnail to render.
         await page.locator('input[type="file"]').first().setInputFiles(uploadPath);
@@ -1052,10 +1391,72 @@ function runTeardownScript(script: string): void {
         expect(records.some((r) => r.original_filename === uploadName)).toBe(true);
       } catch (err) {
         // Any failure in here — a locator timeout, a failed assertion — gets
-        // what the browser saw attached. Diagnostics wired to one specific
-        // failure are diagnostics that are absent for every other one, which is
-        // how a thumbnail that never rendered presented as a bare 120s timeout
-        // with nothing to say whether the upload had even reached the network.
+        // what the browser saw attached; see watchPageProblems for why.
+        throw new Error(`${err instanceof Error ? err.message : String(err)}${problemReport()}`, {
+          cause: err,
+        });
+      } finally {
+        await browser.close();
+      }
+    });
+
+    it("the cloud grid paints a synced rendition, not the original", async () => {
+      // The consumption half, and the one the previous browser step cannot
+      // reach: that step watches a photo the browser itself just uploaded, so it
+      // proves the upload path renders something and would pass while every tile
+      // served a full-size original.
+      //
+      // This one uploads nothing. It loads the grid over a library synced down
+      // from the cloud and reads what a tile actually resolved to. The trap is
+      // real rather than theoretical: the source is well under the grid's
+      // direct-serve ceiling, so a record whose renditions never resolved paints
+      // the original and looks correct to a human and to an alt-text locator.
+      expect(syncedRungKeys.size, "the ladder steps must have run first").toBeGreaterThan(0);
+      const appUrl = `${config.publicBaseUrl}/apps/photos/`;
+      // A CloudFront signed URL's path is the object key itself — the signature
+      // rides the query string — so what a tile resolved to is readable straight
+      // off its `src`.
+      const rungPaths = new Set([...syncedRungKeys.values()].map((key) => `/${key}`));
+
+      const browser = await chromium.launch();
+      let problemReport: () => string = () => "";
+      try {
+        const page = await browser.newPage();
+        problemReport = watchPageProblems(page);
+        await signInWithBrowser(page, appUrl, problemReport);
+
+        // The grid groups by day and shows the newest day first, and this photo
+        // carries no EXIF capture time, so it files under today alongside the
+        // browser upload — on screen, and therefore asked for.
+        const tile = page.getByAltText(ladderSourceName).first();
+        await tile.waitFor({ state: "visible", timeout: 120_000 });
+
+        // Polled rather than read once. A tile paints its ThumbHash, then the
+        // record's own bytes if they are small enough, and swaps to a rendition
+        // when resolution answers — so the first `src` is legitimately the
+        // original. What is under test is where it settles.
+        const settled = await eventually(
+          async () => {
+            const src = (await tile.getAttribute("src")) ?? "";
+            const path = src.startsWith("http") ? new URL(src).pathname : src;
+            if (!rungPaths.has(path)) {
+              throw new Error(
+                `the tile is serving ${path || "(no src)"}, which is ` +
+                  (path === `/${ladderOriginalKey}`
+                    ? "the ORIGINAL — the cloud resolved no rendition for this record"
+                    : "not one of the rungs this run synced up"),
+              );
+            }
+            return path;
+          },
+          { timeoutMs: 90_000, intervalMs: 1_000 },
+        );
+
+        // Said the other way round as well, because "is a rung" and "is not the
+        // original" fail differently: the first catches a tile resolving to some
+        // other record's bytes, the second catches the fallback path.
+        expect(settled).not.toBe(`/${ladderOriginalKey}`);
+      } catch (err) {
         throw new Error(`${err instanceof Error ? err.message : String(err)}${problemReport()}`, {
           cause: err,
         });
