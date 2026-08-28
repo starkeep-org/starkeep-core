@@ -987,6 +987,35 @@ describe("repair floor retirement", () => {
     expect(await syncState.getRepairFloors()).toEqual({});
   });
 
+  it("advances the floor so a repair wider than one round still finishes", async () => {
+    // The floor is the bound the scan takes, so a floor that never moves makes
+    // every round select the same rows from the same place, cut them at the
+    // same budget, and ship the same prefix forever. Nothing retires it,
+    // because retirement waits on a drain that cannot happen.
+    //
+    // Six records against a two-item budget: the repair needs three rounds, so
+    // it is exactly the case a fixed mark cannot express.
+    const { local, cloud } = await twoSides();
+    for (let i = 0; i < 6; i += 1) await seedAuthored(local, "aaa", 10 + i);
+
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxItems: 2 });
+    await engine.sync();
+
+    // Arm a repair spanning the author's whole history, the widest a floor gets.
+    await syncState.setRepairFloors({ aaa: { wallTime: 0, counter: 0, nodeId: "aaa" } });
+
+    const result = await engine.sync({ maxRounds: 20 });
+
+    expect(result.complete, "the repair drained").toBe(true);
+    expect(result.stalled).toBe(false);
+    expect(await syncState.getRepairFloors(), "the floor retired once drained").toEqual({});
+    // One pass over the range, not one pass per round. Six rows at two per
+    // round is three shipping rounds; a fixed mark would have re-shipped the
+    // same two rows for all twenty.
+    expect(result.shipped).toBeLessThanOrEqual(8);
+  });
+
   it("retires only the authors whose shipment was not truncated", { timeout: 30_000 }, async () => {
     // Retirement is per author because failure is. One device's failed upload
     // must not discard a repair armed for another's.
