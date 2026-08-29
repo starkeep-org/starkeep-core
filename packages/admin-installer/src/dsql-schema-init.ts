@@ -415,6 +415,26 @@ export async function initializeSharedSchema(
     // If DSQL rejects NULLS NOT DISTINCT, install fails loudly here and we
     // fall back to a sentinel-value scheme (see plan-cloud-auth-foundational
     // -fixes-2026-06-11.md).
+    //
+    // `createDataRecord` content-addresses a record's id from these same
+    // columns so two nodes producing one file produce one row rather than
+    // colliding here. Change this index and `identifiers/content-id.ts` has to
+    // change with it.
+    //
+    // **This index and the SQLite one do not agree, and that is a bug.**
+    // `NULLS NOT DISTINCT` is needed for `deleted_at` — without it Postgres
+    // treats a NULL as distinct and the index never fires for live rows at all
+    // — but it applies to every indexed column, so it also makes two live rows
+    // with a NULL `original_filename` and equal bytes collide here. SQLite gets
+    // its tombstone behaviour from a partial index instead and excludes NULL
+    // filenames outright, stating the intent as "the rule requires both
+    // filename and content to match".
+    //
+    // So a nameless duplicate is legal on a node and illegal in the cloud, and
+    // the id rule follows the local reading — which leaves that one class of
+    // record able to wedge sync on the way up. Latent today because nothing
+    // ships a nameless record. See
+    // `~/projects/starkeep/sync-duplicate-derivation-wedge-2026-08-29.md`.
     await ensureIndex(
       db,
       "shared",
