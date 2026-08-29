@@ -268,6 +268,12 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       // the two failure modes this prevents (stale schema; stale auth.json
       // starting sync before the /auth/tokens handoff does).
       beforeAll(async () => {
+        // A throw in here skips every test, so no `afterEach` fires and
+        // `anyFailed` would stay false — and afterAll would tear the stack down
+        // on a run that tested nothing. The suite promises that a failed run
+        // leaves the cloud up for debugging; a run that failed before it
+        // started is still a failed run.
+        anyFailed = true;
         // The profile describes an app that is actually there, and is actually
         // that app. Checked here because everything downstream trusts it: the
         // install CLI resolves the app by scanning for this id, so a profile
@@ -295,6 +301,9 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // stack to discover any later.
         await app.preflight?.();
         resetLocalNodeState(paths);
+        // Everything above succeeded, so the run is back to being judged by its
+        // tests.
+        anyFailed = false;
       });
 
       afterAll(async () => {

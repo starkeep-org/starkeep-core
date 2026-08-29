@@ -81,6 +81,12 @@ export interface JourneyApp {
    * Steps that assert things about *this app* rather than about the platform.
    * Registered after the platform steps that set up the state they read, and
    * before uninstall. An app with nothing to add omits this.
+   *
+   * Called inside the journey's `describe`, so it may register `afterAll` and
+   * friends as well as `it`. Anything a step starts — a dev server, a watcher —
+   * must be stopped in such a hook rather than on the last step's success path:
+   * a step that fails midway would otherwise leak the process into the next
+   * run, and the next run would refuse to start.
    */
   extraSteps?(ctx: JourneyContext): void;
 }
