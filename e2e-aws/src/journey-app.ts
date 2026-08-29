@@ -81,13 +81,14 @@ export interface JourneyApp {
    * Steps that assert things about *this app* rather than about the platform.
    * An app with nothing to add omits this.
    *
-   * Registered after the platform has an installed, reachable, session-gated
-   * app to work with, and before any platform step writes to the library. That
-   * position matters for an app that runs itself locally and derives: a
-   * rendition derived in the cloud and the same one derived on a node are
-   * identical bytes under an identical name, and applying one onto the other
-   * violates `UNIQUE(original_filename, content_hash)` and stops that app's
-   * sync entirely.
+   * Registered after every platform step that sets up state they might read,
+   * and before uninstall takes the app plane down.
+   *
+   * That places an app's local derivation after the platform has already made
+   * the app's cloud compute derive, so both produce the same bytes under the
+   * same name on two different nodes. That case used to stop an app's sync
+   * outright; content-addressed record ids removed it, and running the two
+   * derivations into each other is how this suite keeps proving so.
    *
    * Called inside the journey's `describe`, so it may register `afterAll` and
    * friends as well as `it`. Anything a step starts — a dev server, a watcher —

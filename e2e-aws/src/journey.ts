@@ -1001,29 +1001,6 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(afterSignOut.status, "a signed-out caller was served").not.toBe(200);
       });
 
-      // The app's own assertions, registered against the same live stack.
-      //
-      // Placed HERE — after the data plane and the session gate, before
-      // anything that writes to the library — rather than at the end, and the
-      // position is load bearing.
-      //
-      // An app's own steps are the ones likely to run the real application
-      // locally, and a real application derives. Everything below this line
-      // either adds records (the browser upload) or makes the app's *cloud*
-      // compute derive (its JWT-gated route). Renditions are deterministic, so
-      // a cloud-derived child and a locally-derived one are the same bytes
-      // under the same name — and applying the cloud's copy onto a node that
-      // derived its own violates `UNIQUE(original_filename, content_hash)`,
-      // which kills every subsequent Drive exchange round. Nothing ships after
-      // that, and the supervisor reports 200 while it happens.
-      //
-      // Running the app's steps first keeps the two derivations apart, which is
-      // the order the journey had before the platform half was extracted. See
-      // the note in the plan doc: the collision itself is a real defect in the
-      // applier, not something this ordering fixes — it only stops this suite
-      // from being the thing that trips it.
-      app.extraSteps?.(ctx);
-
       // The browser steps run only for an app that says it has a UI worth
       // driving. An app without one still gets every other platform assertion;
       // what it cannot get is the S3-CORS-on-a-presigned-PUT coverage, which
@@ -1336,6 +1313,26 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // reachable through the distribution.
         expect(appsProbe.status).not.toBe(200);
       });
+
+      // The app's own assertions, registered against the same live stack. They
+      // come after every platform step that sets up state they might read, and
+      // before uninstall takes the app plane down.
+      //
+      // This position is deliberate, and it is deliberately the *awkward* one.
+      // The platform steps above make the app's cloud compute derive (its
+      // JWT-gated route, driven once per origin); an app's own steps are the
+      // ones that run the real application locally, where it derives again.
+      // Renditions are deterministic, so those two derivations produce the same
+      // bytes under the same name on two different nodes — which is exactly the
+      // case that used to violate `UNIQUE(original_filename, content_hash)` on
+      // apply and stop the app's sync entirely.
+      //
+      // Content-addressed record ids removed that failure: both nodes now mint
+      // the same id and the rows merge under LWW. Ordering the journey so the
+      // two derivations *do* meet is what turns this suite into a live proof of
+      // that, at the tier where it actually cost a run to discover. Do not
+      // reorder these to keep them apart — the meeting is the point.
+      app.extraSteps?.(ctx);
 
       it(`uninstalls ${app.appId}: app plane gone, shared records persist`, async () => {
         await runInstallCli("cli-uninstall-app", [app.appId], paths, session);

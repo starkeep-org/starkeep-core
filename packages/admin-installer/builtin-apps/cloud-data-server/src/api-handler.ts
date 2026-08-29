@@ -36,7 +36,7 @@ import pg from "pg";
 import { AuroraDsqlDatabaseAdapter, postgresCompiler } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import {
-  generateId,
+  createDataRecord,
   createHLCClock,
   serializeHLC,
   deserializeHLC,
@@ -2636,23 +2636,23 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const existing = dup.records[0];
         if (existing) return { record: existing, created: false };
 
-        const now = clock.now();
-        const fresh: DataRecord = {
-          id: generateId(),
-          kind: "data",
-          type: body.type!,
-          originAppId: appId,
-          createdAt: now,
-          updatedAt: now,
-          deletedAt: null,
-          version: 1,
-          contentHash,
-          objectStorageKey,
-          mimeType: body.contentType ?? null,
-          sizeBytes,
-          originalFilename: body.fileName ?? null,
-          parentId: (body.parentId as DataRecord["parentId"]) ?? null,
-        };
+        // Built through the shared builder rather than assembled here, because
+        // the id is content-addressed and the whole point of that is that this
+        // node and every other node agree on it. A second literal minting its
+        // own id is exactly how the two would drift.
+        const fresh: DataRecord = createDataRecord(
+          {
+            type: body.type!,
+            originAppId: appId,
+            contentHash,
+            objectStorageKey,
+            mimeType: body.contentType ?? null,
+            sizeBytes,
+            originalFilename: body.fileName ?? null,
+            parentId: (body.parentId as DataRecord["parentId"]) ?? null,
+          },
+          clock,
+        );
         await db.put(fresh);
         // In the same OCC unit as the record row, so a sync scan never sees
         // the record without its metadata. Only on the created path: a dedup
