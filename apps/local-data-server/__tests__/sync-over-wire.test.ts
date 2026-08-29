@@ -227,6 +227,73 @@ describe("shared records across the wire", () => {
   });
 });
 
+describe("two nodes producing the same file", () => {
+  /**
+   * The regression test for the sync wedge of 2026-08-29.
+   *
+   * `shared_records` enforces `UNIQUE(original_filename, content_hash)` over
+   * live rows. Before record ids were content-addressed, two nodes that
+   * produced the same file each minted their own ULID, and applying the second
+   * one raised that constraint out of the exchange loop — which stopped **all**
+   * sync for the app, in both directions, permanently, while `/sync/now` went
+   * on answering 200.
+   *
+   * This is not a contrived state. Deriving on each device rather than shipping
+   * derived bytes is the design, so two devices sweeping one library both
+   * derive the same rendition; two devices importing one SD card both ingest
+   * the same photo. Either way the second copy to arrive is the one that used
+   * to break everything.
+   *
+   * Found by a tier-3 cloud journey, which is an expensive place to find it.
+   * That is why it is asserted here.
+   */
+  it("converge on one record instead of wedging the exchange", { timeout: 30_000 }, async () => {
+    const bytes = "same-bytes-on-both-nodes";
+    const fileName = "collision.jpg";
+
+    // Independently, with no sync in between — the race the bug needs.
+    const { record: onA } = await createRecordWithBytes(driveA, { bytes, fileName });
+    const { record: onB } = await createRecordWithBytes(driveB, { bytes, fileName });
+
+    // Same file, same id, without either node having heard of the other. This
+    // is the property the whole fix rests on; everything below is what it buys.
+    expect(onB.id).toBe(onA.id);
+
+    // The exchange completes. Before the fix this threw and `converge` never
+    // finished, because no round could get past the colliding row.
+    await converge();
+
+    // One record, not two, and it is that one.
+    const seenByA = (await listRecords(driveA)).filter((r) => r.original_filename === fileName);
+    const seenByB = (await listRecords(driveB)).filter((r) => r.original_filename === fileName);
+    expect(seenByA).toHaveLength(1);
+    expect(seenByB).toHaveLength(1);
+    expect(seenByA[0]!.id).toBe(onA.id);
+    expect(seenByB[0]!.id).toBe(onA.id);
+
+    // And it is a real record on both sides, not a row that merged into a
+    // broken state: the bytes are resident and readable from each node's own
+    // object store.
+    expect(await fetchBytes(driveA, onA.id)).toBe(bytes);
+    expect(await fetchBytes(driveB, onA.id)).toBe(bytes);
+  });
+
+  it("keeps sync working afterwards, which is what the wedge took away", { timeout: 30_000 }, async () => {
+    // The collision's cost was never the one record — it was that every later
+    // round died at the same place. A record created after the collision has to
+    // still cross the wire.
+    const { record } = await createRecordWithBytes(driveA, {
+      bytes: "after-the-collision",
+      fileName: "after-collision.jpg",
+    });
+    await converge();
+
+    const arrived = (await listRecords(driveB)).find((r) => r.id === record.id);
+    expect(arrived).toBeDefined();
+    expect(await fetchBytes(driveB, record.id)).toBe("after-the-collision");
+  });
+});
+
 describe("app-specific rows across the wire", () => {
   const manifest = testAppManifest();
   let appA: InstalledApp;
