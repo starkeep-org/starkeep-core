@@ -112,6 +112,16 @@ export interface JourneyContext {
   cloudDrive(): LdsApp;
   /** The local data server's base URL. */
   ldsUrl(): string;
+  /**
+   * Everything the local data server has written to stdout/stderr this run.
+   *
+   * Exists because the sync supervisor swallows a per-engine exchange failure
+   * into a logged `lastError` and still answers `/sync/now` with 200 and
+   * `shipped: 0`. A step that waits for rows to arrive therefore cannot tell
+   * "nothing to ship" from "every round threw" out of the HTTP response, and
+   * fails as a bare timeout. Dump this when that wait runs out.
+   */
+  ldsLogs(): string;
   /** This run's STARKEEP_DIR, shared by the CLIs and the local data server. */
   dataDir(): string;
   /** Sign in through the app's own session route; returns the `Cookie` header. */

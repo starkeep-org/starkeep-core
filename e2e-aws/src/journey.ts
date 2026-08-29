@@ -117,6 +117,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
     drive: () => drive,
     cloudDrive: () => cloudApp(drive),
     ldsUrl: () => lds!.url,
+    ldsLogs: () => lds?.logs() ?? "",
     dataDir: () => paths.dataDir,
     signInToApp: (appId) => signInToApp(appId),
   };
