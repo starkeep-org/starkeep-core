@@ -79,8 +79,15 @@ export interface JourneyApp {
   preflight?(): void | Promise<void>;
   /**
    * Steps that assert things about *this app* rather than about the platform.
-   * Registered after the platform steps that set up the state they read, and
-   * before uninstall. An app with nothing to add omits this.
+   * An app with nothing to add omits this.
+   *
+   * Registered after the platform has an installed, reachable, session-gated
+   * app to work with, and before any platform step writes to the library. That
+   * position matters for an app that runs itself locally and derives: a
+   * rendition derived in the cloud and the same one derived on a node are
+   * identical bytes under an identical name, and applying one onto the other
+   * violates `UNIQUE(original_filename, content_hash)` and stops that app's
+   * sync entirely.
    *
    * Called inside the journey's `describe`, so it may register `afterAll` and
    * friends as well as `it`. Anything a step starts — a dev server, a watcher —
