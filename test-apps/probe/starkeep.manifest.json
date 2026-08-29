@@ -1,0 +1,103 @@
+{
+  "id": "probe",
+  "name": "Probe",
+  "version": "0.1.0",
+  "description": "Platform test fixture: the smallest app that exercises every surface the platform offers an app.",
+  "tier": "official",
+  "targets": [
+    "local",
+    "cloud"
+  ],
+  "localRun": {
+    "command": "node",
+    "args": [
+      "run-local.mjs"
+    ],
+    "portFlag": "--port"
+  },
+  "infraRequirements": {
+    "fileAccess": [
+      {
+        "types": [
+          "image/png",
+          "image/jpeg"
+        ],
+        "access": "readwrite",
+        "metadataWrite": true,
+        "rationale": "The fixture creates, reads and derives raster images so the platform's shared-record, blob and metadata paths all have a caller. PNG and JPEG only: the fixture asserts platform behavior, and a wider grant would test the grant list rather than the platform."
+      }
+    ],
+    "labelKeys": [
+      {
+        "key": "variant",
+        "sizeClass": true,
+        "description": "Which rung of the fixture's derived size ladder this record is. Present so the platform's size-class namespacing, residency classification and variant-candidate resolution have a declared key to work against."
+      },
+      {
+        "key": "flag",
+        "description": "A valueless label. Exercises the presence half of the reverse label index."
+      },
+      {
+        "key": "tag",
+        "description": "A valued label. Exercises the exact-value seek half of the reverse label index."
+      }
+    ],
+    "appSpecificSyncable": {
+      "files": true,
+      "tables": [
+        {
+          "name": "probe_notes",
+          "columns": [
+            {
+              "name": "record_id",
+              "type": "text",
+              "primaryKey": true,
+              "notNull": true
+            },
+            {
+              "name": "note",
+              "type": "text"
+            }
+          ]
+        }
+      ]
+    },
+    "compute": {
+      "enabled": true,
+      "handlers": [
+        {
+          "name": "api",
+          "handler": "api-handler.handler",
+          "memoryMb": 256,
+          "timeoutSeconds": 30,
+          "routes": [
+            "POST /api/echo"
+          ]
+        },
+        {
+          "name": "static",
+          "handler": "static-handler.handler",
+          "memoryMb": 256,
+          "timeoutSeconds": 10,
+          "routes": [
+            "GET /",
+            "ANY /{proxy+}"
+          ],
+          "auth": "session",
+          "publicPaths": [
+            "/",
+            "/_next/static/*",
+            "/sign-in",
+            "/api/session/*"
+          ],
+          "env": {
+            "STARKEEP_API_GATEWAY_URL": "",
+            "STARKEEP_USER_POOL_ID": "",
+            "STARKEEP_USER_POOL_CLIENT_ID": "",
+            "STARKEEP_IDENTITY_POOL_ID": ""
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@starkeep/probe-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Platform test fixture app: the smallest conforming Starkeep app, installable locally and in the cloud.",
+  "scripts": {
+    "build:local": "node build.mjs --local",
+    "bundle": "node build.mjs --cloud",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@starkeep/app-client": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

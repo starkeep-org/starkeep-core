@@ -6,7 +6,7 @@ export {
   startAppDaemonViaAdmin,
   stopAppDaemonViaAdmin,
   eventually,
-  DEFAULT_APPS_DIR,
+  CORE_FIXTURE_APPS_DIR,
   type PlatformStack,
   type PlatformStackOptions,
   type NextDevServer,

@@ -5,13 +5,17 @@
  * @starkeep/testkit) against a throwaway STARKEEP_DIR, plus `next dev`
  * instances of admin-web and drive on ephemeral ports, all wired together
  * through the same env vars production uses (STARKEEP_DIR,
- * STARKEEP_LOCAL_DATA_SERVER_URL). Installed apps (photos) are
- * not booted here — installing them through the real admin-web API and
- * starting them through the real daemon route *is* test coverage, so specs do
- * that themselves via the helpers below.
+ * STARKEEP_LOCAL_DATA_SERVER_URL). Installed apps are not booted here —
+ * installing them through the real admin-web API and starting them through the
+ * real daemon route *is* test coverage, so specs do that themselves via the
+ * helpers below.
  *
- * This module is the harness starkeep-apps/photos consumes for its own e2e
- * (sibling-checkout layout): everything exported from @starkeep/e2e.
+ * The harness names no app. `appParentDirs` is required rather than defaulted,
+ * because a default is how a platform harness acquires an opinion about which
+ * apps exist: core's own suites point it at the Probe fixture in `test-apps/`,
+ * and an app's suite points it at its own checkout. This module is the harness
+ * app repositories consume for their e2e — everything exported from
+ * `@starkeep/e2e`.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -22,8 +26,11 @@ import { fileURLToPath } from "node:url";
 import { getFreePort, startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-/** Sibling checkout holding installable apps (photos). */
-export const DEFAULT_APPS_DIR = resolve(REPO_ROOT, "..", "starkeep-apps");
+/**
+ * Core's own fixture apps. The parent dir core's suites scan — it holds Probe,
+ * the conforming app the platform tests itself against.
+ */
+export const CORE_FIXTURE_APPS_DIR = resolve(REPO_ROOT, "test-apps");
 
 // ---------------------------------------------------------------------------
 // next dev child processes
@@ -121,8 +128,12 @@ export async function startNextDev(options: {
 // ---------------------------------------------------------------------------
 
 export interface PlatformStackOptions {
-  /** Parent dirs scanned for installable apps. Default: the sibling starkeep-apps checkout. */
-  appParentDirs?: string[];
+  /**
+   * Parent dirs scanned for installable apps. Required: the harness has no
+   * business deciding which apps a deployment has, and a default here would
+   * make every caller inherit whichever one it picked.
+   */
+  appParentDirs: string[];
   /** Boot the Drive UI (default true). */
   drive?: boolean;
 }
@@ -143,9 +154,14 @@ export interface PlatformStack {
   stop(): Promise<void>;
 }
 
-export async function startPlatformStack(
-  options: PlatformStackOptions = {},
-): Promise<PlatformStack> {
+export async function startPlatformStack(options: PlatformStackOptions): Promise<PlatformStack> {
+  if (!options.appParentDirs?.length) {
+    throw new Error(
+      "startPlatformStack needs appParentDirs: name the parent dir holding the " +
+        "apps under test (core's suites pass CORE_FIXTURE_APPS_DIR; an app's own " +
+        "suite passes its checkout).",
+    );
+  }
   const lds = await startLocalDataServer();
 
   // admin-web gets its own STARKEEP_DIR, isolated from the LDS's, so tests
@@ -158,7 +174,7 @@ export async function startPlatformStack(
   const adminDataDir = await mkdtemp(join(tmpdir(), "starkeep-e2e-admin-"));
   await writeFile(
     join(adminDataDir, "config.json"),
-    JSON.stringify({ appParentDirs: options.appParentDirs ?? [DEFAULT_APPS_DIR] }, null, 2),
+    JSON.stringify({ appParentDirs: options.appParentDirs }, null, 2),
   );
 
   // admin-web resolves its workspace daemons' ports from the same env vars the
@@ -253,7 +269,7 @@ async function killRecordedDaemons(dataDir: string): Promise<void> {
 // ---------------------------------------------------------------------------
 // App lifecycle through the real admin-web API. The UI specs drive these
 // flows through the browser; these helpers exist for setup/teardown and for
-// starkeep-apps e2e suites that test app functionality, not install UX.
+// app-repository e2e suites that test app functionality, not install UX.
 // ---------------------------------------------------------------------------
 
 async function adminPost(adminUrl: string, path: string, body: unknown): Promise<Response> {

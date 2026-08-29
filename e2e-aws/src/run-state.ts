@@ -27,14 +27,23 @@ import { randomBytes } from "node:crypto";
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export interface RunPaths {
-  /** e2e-aws/.run/<prefix> — also the STARKEEP_DIR for spawned CLIs and the LDS. */
+  /** <baseDir>/.run/<prefix> — also the STARKEEP_DIR for spawned CLIs and the LDS. */
   dataDir: string;
   configPath: string;
   adminPath: string;
 }
 
-export function runPaths(stackPrefix: string): RunPaths {
-  const dataDir = join(PACKAGE_ROOT, ".run", stackPrefix);
+/**
+ * Where a run keeps its state.
+ *
+ * `baseDir` defaults to this package, which is right for core's own run. A
+ * journey driven from another repository must pass its own directory: the dir
+ * holds that run's Cognito admin password and its registry database, and
+ * writing those into a checkout the caller does not own would put one
+ * repository's cloud credentials inside another's working tree.
+ */
+export function runPaths(stackPrefix: string, baseDir: string = PACKAGE_ROOT): RunPaths {
+  const dataDir = join(baseDir, ".run", stackPrefix);
   return {
     dataDir,
     configPath: join(dataDir, "config.json"),

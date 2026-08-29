@@ -8,6 +8,15 @@
  *   STARKEEP_AWS_REGION             region for a from-scratch bootstrap
  *                                   (default "us-east-2"; an existing stack's
  *                                   own region always wins via its pool ID)
+ *   STARKEEP_AWS_APP_DIR            the app to run the journey against, as an
+ *                                   absolute or repo-relative path to its
+ *                                   source directory. Unset selects the Probe
+ *                                   fixture in `test-apps/`, which is what core
+ *                                   ships and needs no other checkout. A path
+ *                                   that holds no manifest fails the run rather
+ *                                   than skipping it — asking for an app and
+ *                                   silently getting a different one is the
+ *                                   failure this option exists to prevent.
  *   STARKEEP_AWS_TEARDOWN           what to tear down after a SUCCESSFUL run:
  *                                   "all" (default) → teardown-bootstrap.sh,
  *                                   "apps" → teardown-cloud-data-server.sh,
@@ -40,3 +49,13 @@ export type TeardownMode = "all" | "apps" | "none";
  */
 export const TEARDOWN: TeardownMode =
   (process.env.STARKEEP_AWS_TEARDOWN as TeardownMode | undefined) ?? "all";
+
+/**
+ * The app directory the journey runs against, or undefined for core's fixture.
+ *
+ * Configured rather than detected. A suite that probed for a sibling checkout
+ * would run different coverage on two machines and say so nowhere; naming the
+ * app makes the choice deliberate, reproducible and visible in the command that
+ * started the run.
+ */
+export const APP_DIR = process.env.STARKEEP_AWS_APP_DIR;

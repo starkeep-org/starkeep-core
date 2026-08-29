@@ -3,5 +3,6 @@ packages:
   - "packages/admin-installer/builtin-apps/*"
   - "examples/*"
   - "apps/*"
+  - "test-apps/*"
   - "e2e"
   - "e2e-aws"

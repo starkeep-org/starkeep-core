@@ -722,7 +722,7 @@ function OverrideRules({
       <div>
         <h3 className="text-sm font-medium">Per-record rules</h3>
         <p className="text-xs text-muted-foreground">
-          Exceptions by label, applied to whatever a record carries now — so photos added later are
+          Exceptions by label, applied to whatever a record carries now — so records added later are
           covered too. Excluding always wins over pinning.
         </p>
       </div>
@@ -781,7 +781,7 @@ function OverrideRules({
       <button
         type="button"
         className="rounded border px-3 py-1.5 text-xs"
-        onClick={() => onChange([...rules, { appId: "photos", key: "", effect: "pin" }])}
+        onClick={() => onChange([...rules, { appId: "", key: "", effect: "pin" }])}
       >
         Add rule
       </button>
