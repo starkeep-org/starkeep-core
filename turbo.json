@@ -26,6 +26,7 @@
       "cache": false,
       "passThroughEnv": [
         "STARKEEP_AWS_TESTS",
+        "STARKEEP_AWS_APP_DIR",
         "STARKEEP_AWS_STACK_PREFIX",
         "STARKEEP_AWS_REGION",
         "STARKEEP_AWS_TEARDOWN",
