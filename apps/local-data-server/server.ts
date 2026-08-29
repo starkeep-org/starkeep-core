@@ -895,7 +895,25 @@ async function main() {
   const server = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Starkeep-App-Id, X-Starkeep-App-Sig, X-Starkeep-App-Ts");
+    // The `x-amz-*` entries are the upload headers this server's own presign
+    // route invites. It returns `checksumSha256` deliberately, "for parity with
+    // the cloud broker so one client code path works against either backend" —
+    // and a client that takes that parity at its word sends the header back on
+    // the PUT. Omitting it here refused the preflight, so every browser-side
+    // upload against a local node failed as an opaque `TypeError: Failed to
+    // fetch` with nothing in it to say a header was the reason.
+    //
+    // This grants no authority: the upload route is authorized by the signed
+    // token in its URL, and `Allow-Headers` only decides which headers a
+    // browser will let a page attach. `storageClass` and `tagging` are listed
+    // too, because a client written against the cloud contract sends all three
+    // and the whole point of the parity is that it should not have to know
+    // which backend answered.
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, X-Starkeep-App-Id, X-Starkeep-App-Sig, X-Starkeep-App-Ts, " +
+        "x-amz-checksum-sha256, x-amz-storage-class, x-amz-tagging",
+    );
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
