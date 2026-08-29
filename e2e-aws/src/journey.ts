@@ -267,6 +267,27 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       // the two failure modes this prevents (stale schema; stale auth.json
       // starting sync before the /auth/tokens handoff does).
       beforeAll(async () => {
+        // The profile describes an app that is actually there, and is actually
+        // that app. Checked here because everything downstream trusts it: the
+        // install CLI resolves the app by scanning for this id, so a profile
+        // naming the wrong directory fails as "no app with manifest id X",
+        // fifteen minutes and one Pulumi-provisioned stack into the run. One
+        // stat and one JSON parse buy that back.
+        const manifestPath = join(app.appDir, "starkeep.manifest.json");
+        if (!existsSync(manifestPath)) {
+          throw new Error(
+            `${app.appId}'s profile points at ${app.appDir}, which holds no ` +
+              "starkeep.manifest.json. appDir must be the app's own source directory.",
+          );
+        }
+        const declaredId = (JSON.parse(readFileSync(manifestPath, "utf-8")) as { id?: string }).id;
+        if (declaredId !== app.appId) {
+          throw new Error(
+            `${app.appDir} declares id "${declaredId}", but the profile calls it ` +
+              `"${app.appId}". The install CLI resolves the app by the manifest id.`,
+          );
+        }
+
         // The app's own refusal to start, before the first AWS call. A machine
         // state that would take the run down — a dev server already holding the
         // app's directory, say — costs fifteen minutes and one Pulumi-provisioned
@@ -314,7 +335,13 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           foundationalPermissionsBoundaryArn: outputs.appFoundationalPermissionsBoundaryArn,
           userDataOwnerPermissionsBoundaryArn: outputs.userDataOwnerPermissionsBoundaryArn,
           pulumiStateBucket: outputs.pulumiStateBucketName,
-          appParentDirs: [app.appDir],
+          // The app's PARENT, not the app. `resolveAppDir` scans each entry's
+          // children for a manifest whose id matches, so naming the app's own
+          // directory would have it look inside the app for a nested copy of
+          // itself and find nothing. Derived rather than configured: the parent
+          // of an app's directory is a directory that contains that app, by
+          // construction, so there is nothing here for a caller to get wrong.
+          appParentDirs: [dirname(app.appDir)],
         };
         writeConfig(paths, config);
       });
