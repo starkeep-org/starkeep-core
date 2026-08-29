@@ -87,6 +87,14 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
     // records. Tombstoned rows (deleted_at IS NOT NULL) are excluded so a
     // re-upload after delete is allowed. Records with NULL filename are not
     // constrained — the rule requires both filename and content to match.
+    //
+    // **This predicate is also the id rule.** `createDataRecord`
+    // content-addresses a record's id from exactly these columns, and only for
+    // rows this index covers, so that two nodes producing one file produce one
+    // row instead of colliding here. The two are the same decision written in
+    // two languages: widen or narrow this index and
+    // `identifiers/content-id.ts` has to move with it, or the class of record
+    // that stops matching gets the sync wedge back.
     qb.schema
       .createIndex("uq_shared_records_filename_hash")
       .ifNotExists()
