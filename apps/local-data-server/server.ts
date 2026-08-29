@@ -23,7 +23,7 @@ import {
   listInstallSteps,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
-import { canonicalSignedPath, signRequest, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
+import { canonicalSignedPath, signRequest, USER_TOKEN_HEADER, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
 import { nodeSqliteDriver } from "../../packages/storage-sqlite/src/node-driver.js";
 import {
@@ -1254,16 +1254,35 @@ async function main() {
           json(res, { error: `No hmac_secret in local registry for app '${appId}' — re-run its local install` });
           return;
         }
+        // The cloud data plane wants both halves of the credential: the HMAC
+        // says which app is calling, the ID token says a real person is behind
+        // it, and neither substitutes for the other (see the cloud's
+        // api-handler → "Missing X-Starkeep-User-Token"). Refuse here rather
+        // than forward a request that can only come back 401, so the Drive UI
+        // says "not signed in" instead of quoting a header name at the user.
+        if (!idTokenIsLive()) {
+          res.writeHead(503);
+          json(res, { error: "Not signed in to the cloud — sign in to see the cloud view" });
+          return;
+        }
         const subPath = path.slice("/cloud".length); // "/data/types" | "/data/records"
         // Sign over the cloud sub-path (everything after /apps/{appId}), since
         // the cloud verifier strips that prefix before checking the signature.
         // The query string is excluded from the signed message (canonicalSignedPath).
-        const signedHeaders = signRequest({
-          appId: appId!,
-          hmacSecret,
-          method: "GET",
-          path: subPath,
-        });
+        //
+        // Both headers, exactly as sync-supervisor.ts → makeSignerFor builds
+        // them. This block long carried only the signature, so every call to a
+        // cloud that has required an end-user credential since the June auth
+        // work came back 401 and Drive showed every record as local-only.
+        const signedHeaders = {
+          ...signRequest({
+            appId: appId!,
+            hmacSecret,
+            method: "GET",
+            path: subPath,
+          }),
+          [USER_TOKEN_HEADER]: currentIdToken!,
+        };
         const cloudUrl = `${CLOUD_URL.replace(/\/+$/, "")}/apps/${encodeURIComponent(appId!)}${subPath}${url.search}`;
         try {
           const cloudRes = await fetch(cloudUrl, { headers: signedHeaders });
