@@ -76,17 +76,16 @@ export interface DataOperations {
     },
   ): Promise<DataRecord>;
   get(recordId: StarkeepId): Promise<DataRecord | null>;
-  /**
-   * Update tracked record metadata (parentId, originalFilename, mimeType). All
-   * data-bearing fields are derived from the underlying file; to change them,
-   * upload a new file via `putWithFile`. The metadata row, if any, is updated
-   * separately by `putMetadata` — this call does not touch it, and the two are
-   * not atomic with each other.
-   */
-  update(
-    recordId: StarkeepId,
-    patch: Partial<Pick<DataRecord, "originalFilename" | "parentId">>,
-  ): Promise<DataRecord>;
+  // No `update`. The two fields one ever patched — `originalFilename` and
+  // `parentId` — are identity now: `createDataRecord` content-addresses a
+  // record's id from `(parent_id, original_filename, content_hash)`, so writing
+  // either one in place leaves a row whose id no longer names its own content.
+  // The next node to produce that same file mints the id the row should have
+  // had, the uniqueness index refuses it, and the app's sync wedges — the
+  // failure `identifiers/content-id.ts` exists to remove. Renaming a record
+  // would have to re-key it, which is a delete plus a create and takes the
+  // record's labels, children and history with it. See
+  // `~/projects/starkeep/sync-duplicate-derivation-wedge-2026-08-29.md`.
   delete(recordId: StarkeepId): Promise<void>;
   query(params: { type?: string; filters?: import("@starkeep/storage-adapter").Filter[] }): Promise<DataRecord[]>;
 

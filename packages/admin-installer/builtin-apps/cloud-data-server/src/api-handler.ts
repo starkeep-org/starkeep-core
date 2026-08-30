@@ -2603,35 +2603,43 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // `created` distinguishes a fresh insert (201) from returning an existing
       // duplicate (200).
       const { record, created } = await withOccRetry("POST /data/records", async () => {
-        // Record-level dedup: **one object key, at most one live record.**
-        //
-        // Keys are content-addressed, so two registrations of the same bytes
-        // name the same object. Letting both create records would mean the
-        // object has two referents — and then deleting either record has to
-        // decide whether the bytes may go, which is a refcount the reaper
-        // cannot compute cheaply and must never get wrong. Collapsing here is
-        // what unblocks it: after this, a key has exactly one record, so
-        // "delete the record, delete the object" is sound.
-        //
-        // Scoped by parent, because the parent edge is part of what the record
-        // *is*: the same bytes may legitimately be both a standalone photo and
-        // a rendition of something else, and those are different records that
-        // happen to share storage. Within one parent (or within the top level),
-        // a byte-identical registration is the same thing arriving twice.
+        // Record-level dedup on the uniqueness key,
+        // `(parent_id, original_filename, content_hash)` — the columns
+        // `uq_records_parent_filename_hash` names and the columns
+        // `createDataRecord` hashes into the id. All three state one rule, and
+        // a registration check that states a different one is how they drift.
         //
         // Idempotent rather than an error. The second arrival is usually a
         // retry, a re-import, or two concurrent derivations of one original —
         // none of which is a mistake the caller can act on, and all of which
-        // want the existing record back.
+        // want the existing record back. A check keyed on less than the key
+        // hands back a record that is not the caller's: keyed without the
+        // filename, registering a second copy of one file under a new name
+        // answers with the first copy and calls it a duplicate.
+        //
+        // This check used to read `(parent_id, content_hash)` and justify
+        // itself as **one object key, at most one live record**, so that
+        // "delete the record, delete the object" needed no refcount. The
+        // invariant does not exist and cannot be created here. Object keys are
+        // `shared/<category>/<shard>/<hash>`, naming bytes and nothing else, so
+        // two copies of one file under two names share an object — which is
+        // what allowing file copies means. A reaper needs a real refcount over
+        // `content_hash`, and enforcing a fragment of the invariant here only
+        // bought the wrong answer above.
+        //
+        // Null parent and null filename are matched as values rather than
+        // skipped, matching how both indexes read a missing value: SQLite
+        // through `COALESCE`, DSQL through `NULLS NOT DISTINCT`.
         const dupFilters: Filter[] = [
           { field: "contentHash", operator: "eq", value: contentHash },
           { field: "deletedAt", operator: "isNull" },
-        ];
-        dupFilters.push(
           body.parentId
             ? { field: "parentId", operator: "eq", value: body.parentId }
             : { field: "parentId", operator: "isNull" },
-        );
+          body.fileName
+            ? { field: "originalFilename", operator: "eq", value: body.fileName }
+            : { field: "originalFilename", operator: "isNull" },
+        ];
         const dup = await db.query({ filters: dupFilters, limit: 1 });
         const existing = dup.records[0];
         if (existing) return { record: existing, created: false };

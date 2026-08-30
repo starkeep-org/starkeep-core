@@ -43,12 +43,16 @@ function makeClock(nodeId: string): HLCClock {
 
 // objectStorageKey "" = metadata-only record; blob transfer paths are
 // covered by the S3/S4 suites.
+// Distinct bytes per record, because record ids are content-addressed: two
+// nameless records over one hash are one record by construction, and a test
+// that wants several has to give them several files.
+let recordSeq = 0;
 function makeRecord(clock: HLCClock) {
   return createDataRecord(
     {
       type: "@test/doc",
       originAppId: "test",
-      contentHash: "sha256:x",
+      contentHash: `sha256:x${recordSeq++}`,
       objectStorageKey: "",
       sizeBytes: 0,
     },

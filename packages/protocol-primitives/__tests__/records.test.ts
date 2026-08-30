@@ -39,10 +39,17 @@ describe("createDataRecord", () => {
     expect(record.createdAt).toEqual(record.updatedAt);
   });
 
-  it("generates unique IDs for each record", () => {
-    const r1 = createDataRecord(baseInput, clock);
-    const r2 = createDataRecord(baseInput, clock);
-    expect(r1.id).not.toBe(r2.id);
+  it("gives one id to one file, and different ids to different files", () => {
+    // Ids are content-addressed, so "unique per call" is exactly what this must
+    // not be: two calls describing one file are one record, which is what lets
+    // two nodes produce it independently without colliding. Uniqueness is over
+    // files rather than over calls. See `identifiers/content-id.ts`.
+    expect(createDataRecord(baseInput, clock).id).toBe(
+      createDataRecord(baseInput, clock).id,
+    );
+    expect(
+      createDataRecord({ ...baseInput, originalFilename: "sunrise.jpg" }, clock).id,
+    ).not.toBe(createDataRecord(baseInput, clock).id);
   });
 });
 

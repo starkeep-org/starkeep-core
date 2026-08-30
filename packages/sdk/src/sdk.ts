@@ -258,23 +258,6 @@ export async function createStarkeepSdk(
         return record;
       },
 
-      async update(recordId, patch) {
-        const existing = await databaseAdapter.get(recordId);
-        if (!existing) {
-          throw new Error(`No data record found with id ${recordId}`);
-        }
-        const updated: DataRecord = {
-          ...existing,
-          originalFilename: patch.originalFilename ?? existing.originalFilename,
-          parentId: patch.parentId ?? existing.parentId,
-          version: existing.version + 1,
-          updatedAt: clock.now(),
-        };
-        await databaseAdapter.put(updated);
-        logChange(updated);
-        return updated;
-      },
-
       async delete(recordId) {
         const existing = await databaseAdapter.get(recordId);
         if (!existing) return;

@@ -447,12 +447,16 @@ describe("record registration", () => {
   // the server sets from the authenticated subject, so there is no request
   // that can express the attack. Nothing to test.
 
-  // Item 20. The reaper is blocked without this: keys are content-addressed,
-  // so two registrations of the same bytes name the same object — and if both
-  // create records, deleting either has to decide whether the bytes may go.
-  // That is a refcount the reaper cannot compute cheaply and must never get
-  // wrong. One key, one record makes "delete the record, delete the object"
-  // sound.
+  // Item 20. Registration dedups on the uniqueness key,
+  // `(parent_id, original_filename, content_hash)` — the columns the DSQL index
+  // names and the columns the record's id is hashed from. The three say one
+  // thing, and a registration check saying anything else is how they drift.
+  //
+  // This check once read `(parent_id, content_hash)` and justified itself as
+  // "one object key, one record", so the reaper would need no refcount. That
+  // invariant does not exist: an object key names bytes and nothing else, so
+  // two copies of one file under two names share an object whatever this check
+  // does. See `~/projects/starkeep/sync-duplicate-derivation-wedge-2026-08-29.md`.
   it("dedups a byte-identical top-level record, not just a derived child", async () => {
     const db = fakeDsqlWithGrants(grants, [], [
       recordRow({ id: "already-here", type: "image/jpeg", content_hash: VALID_HASH }),
@@ -532,6 +536,138 @@ describe("record registration", () => {
     expect(res.statusCode).toBe(200); // existing record, not 201
     const { record } = bodyOf(res) as { record: Record<string, unknown> };
     expect(record["id"]).toBe("existing-thumb");
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
+  });
+
+  // Copies are a real thing: the same bytes stored twice under two names are
+  // two records the user asked for, and the uniqueness key keeps them apart. A
+  // check that ignored the filename would answer the second registration with
+  // the first copy's record and call it a duplicate — the wrong record, under a
+  // name the caller never used.
+  //
+  // Asserted on the lookup rather than on the response, because the fake
+  // answers the dedup route with whatever rows the test handed it and does not
+  // evaluate predicates. What the query *asks for* is the only thing it can
+  // prove, and it is the thing that changed.
+  it("asks for the filename too, so two copies under different names stay apart", async () => {
+    const db = fakeDsqlWithGrants(grants, [], []).on(RECORDS_INSERT, []);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const res = await handler(
+      signedEvent({
+        appId: "reg11",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+          fileName: "sunset-copy.jpg",
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(201);
+
+    const dedupCall = db.calls(/from "shared"\."records" where "content_hash" =/)[0]!;
+    expect(dedupCall.text).toContain('"original_filename" =');
+    expect(dedupCall.values).toContain("sunset-copy.jpg");
+  });
+
+  // The same rule one level down, and the one the ladder depends on: two rungs
+  // of one original are different renditions under different names, even in the
+  // case where they encode to identical bytes.
+  it("keeps parent and filename in the same lookup for a derived child", async () => {
+    const db = fakeDsqlWithGrants(grants, [], []).on(RECORDS_INSERT, []);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).resolves({});
+    await handler(
+      signedEvent({
+        appId: "reg12",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+          parentId: "parent-1",
+          fileName: "image-thumb_sunset.jpg",
+        },
+      }),
+      context,
+    );
+
+    // All three columns of the uniqueness key, in one query.
+    const dedupCall = db.calls(/from "shared"\."records" where "content_hash" =/)[0]!;
+    expect(dedupCall.text).toContain('"parent_id" =');
+    expect(dedupCall.text).toContain('"original_filename" =');
+    expect(dedupCall.values).toEqual(
+      expect.arrayContaining([VALID_HASH, "parent-1", "image-thumb_sunset.jpg"]),
+    );
+  });
+
+  // A missing filename is matched as a value rather than skipped, the way both
+  // indexes read one — SQLite through COALESCE, DSQL through NULLS NOT
+  // DISTINCT. Skipping it would make a nameless registration dedup against any
+  // record holding those bytes under any name.
+  it("asks for a null filename rather than dropping the predicate", async () => {
+    const db = fakeDsqlWithGrants(grants, [], []).on(RECORDS_INSERT, []);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).resolves({});
+    await handler(
+      signedEvent({
+        appId: "reg13",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+        },
+      }),
+      context,
+    );
+
+    const dedupCall = db.calls(/from "shared"\."records" where "content_hash" =/)[0]!;
+    expect(dedupCall.text).toContain('"original_filename" is null');
+  });
+
+  it("dedups a rendition arriving twice under its own name", async () => {
+    // The convergent case the key exists for: two derivations of one rung
+    // agree on the parent, the name and the bytes, so the second is the first
+    // arriving again.
+    const db = fakeDsqlWithGrants(grants, [], [
+      recordRow({
+        id: "existing-rung",
+        type: "image/jpeg",
+        content_hash: VALID_HASH,
+        parent_id: "parent-1",
+        original_filename: "image-thumb_sunset.jpg",
+      }),
+    ]);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const res = await handler(
+      signedEvent({
+        appId: "reg14",
+        method: "POST",
+        subPath: "/data/records",
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+          parentId: "parent-1",
+          fileName: "image-thumb_sunset.jpg",
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect((bodyOf(res)["record"] as { id: string }).id).toBe("existing-rung");
     expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
   });
 });

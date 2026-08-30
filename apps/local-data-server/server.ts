@@ -334,15 +334,19 @@ interface StarkeepConfig {
   lambdaConcurrency?: number;
 }
 
-// Detects the unique-violation from the (original_filename, content_hash)
-// index in storage-sqlite bootstrap and mirrored in DSQL. SQLite surfaces
-// "UNIQUE constraint failed: ..." and Postgres surfaces SQLSTATE 23505;
-// matching the index name covers both without a driver dep.
+// Detects the unique-violation from the
+// (parent_id, original_filename, content_hash) index in storage-sqlite
+// bootstrap and mirrored in DSQL. Postgres surfaces SQLSTATE 23505 naming the
+// index, and SQLite names the index too now that the index is on expressions —
+// "UNIQUE constraint failed: index 'uq_shared_records_parent_filename_hash'"
+// rather than the column list it reports for a plain one. So matching the index
+// name covers both without a driver dep, which the comment here claimed before
+// the expressions made it true.
 function isDuplicateFileError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return (
-    message.includes("uq_shared_records_filename_hash") ||
-    message.includes("uq_records_filename_hash")
+    message.includes("uq_shared_records_parent_filename_hash") ||
+    message.includes("uq_records_parent_filename_hash")
   );
 }
 
@@ -2017,16 +2021,47 @@ async function main() {
           path: r.objectStorageKey ? await localAdapter.resolvePath(r.objectStorageKey) : null,
         });
 
-        // Duplicate check: (filename, content) is unique among live records.
-        // Same bytes under the same filename → return the existing record
-        // with deduped:true, matching the response shape this endpoint already
-        // uses. Enforced at the DB layer too — this pre-check turns the
-        // would-be unique-violation into an idempotent success.
-        const dedupFilename = fileName ?? null;
-        if (contentHash && dedupFilename && /^[a-f0-9]{64}$/.test(contentHash)) {
+        // Duplicate check: (parent, filename, content) is unique among live
+        // records. Same bytes under the same filename and the same parent →
+        // return the existing record with deduped:true, matching the response
+        // shape this endpoint already uses. Enforced at the DB layer too — this
+        // pre-check turns the would-be unique-violation into an idempotent
+        // success.
+        //
+        // The three fields are exactly the uniqueness key and exactly the id
+        // rule in `identifiers/content-id.ts`, and the agreement is the point.
+        // A check keyed on less than the index dedups records the store
+        // considers distinct, and the caller is told `deduped: true` about a
+        // row that is not its own: two originals sharing a filename each derive
+        // a rendition of the same name, and the second one silently receives
+        // the first one's record. A check keyed on more than the index leaves
+        // registrations to fail at the index instead of succeeding here.
+        //
+        // Null parent and null filename are matched as values rather than
+        // skipped, so a top-level record is deduped by the same rule as a
+        // derived one instead of leaning on the index alone.
+        //
+        // One rule, not two. A second check on `(parent_id, content_hash)`
+        // stood here, collapsing two names for one derived file under one
+        // parent, and it is gone rather than kept: it asserted "one object key,
+        // at most one live record", which this system does not have and cannot
+        // be given here. Object keys are `shared/<category>/<shard>/<hash>` —
+        // no parent, no filename — so two copies of one file under two names
+        // already share an object, which is what allowing file copies *means*.
+        // A rule enforcing that invariant among children only preserves a
+        // fragment of a guarantee nothing can rely on, and pays for the
+        // fragment with the same wrong answer this check was just fixed to stop
+        // giving: a caller registering `md_x.jpg` handed back `sm_x.jpg` and
+        // told it was a duplicate.
+        if (contentHash && /^[a-f0-9]{64}$/.test(contentHash)) {
           const dup = await databaseAdapter.query({
             filters: [
-              { field: "originalFilename", operator: "eq", value: dedupFilename },
+              parentId
+                ? { field: "parentId", operator: "eq", value: parentId }
+                : { field: "parentId", operator: "isNull" },
+              fileName
+                ? { field: "originalFilename", operator: "eq", value: fileName }
+                : { field: "originalFilename", operator: "isNull" },
               { field: "contentHash", operator: "eq", value: contentHash },
               { field: "deletedAt", operator: "isNull" },
             ],
@@ -2070,27 +2105,6 @@ async function main() {
                 "Blob not found at the content-addressed key. PUT it via a presigned URL first.",
             });
             return;
-          }
-          // Dedup derived children (thumbnails) by (parentId, contentHash).
-          // A byte-identical child of the same parent is a duplicate — e.g.
-          // two concurrent /api/resize calls for one original. We key on
-          // contentHash too so distinct crops of the same source (same parent,
-          // different bytes) are NOT collapsed. Idempotent: return the
-          // existing record instead of registering a second row.
-          if (parentId) {
-            const dup = await databaseAdapter.query({
-              filters: [
-                { field: "parentId", operator: "eq", value: parentId },
-                { field: "contentHash", operator: "eq", value: contentHash },
-                { field: "deletedAt", operator: "isNull" },
-              ],
-              limit: 1,
-            });
-            const existing = dup.records[0];
-            if (existing) {
-              json(res, { record: await renderRecord(existing), deduped: true });
-              return;
-            }
           }
           try {
             record = await sdk.data.putWithExistingBlob(

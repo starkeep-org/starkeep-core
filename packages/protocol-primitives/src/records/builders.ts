@@ -1,6 +1,5 @@
 import type { StarkeepId } from "../identifiers/types.js";
 import type { HLCClock } from "../hlc/types.js";
-import { generateId } from "../identifiers/ulid.js";
 import { contentAddressedId } from "../identifiers/content-id.js";
 import { type DataRecord } from "./types.js";
 
@@ -20,19 +19,16 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
   const now = clock.now();
   const originalFilename = input.originalFilename ?? null;
   return {
-    // Content-addressed whenever the record falls under
-    // `UNIQUE(original_filename, content_hash)`, so two nodes that produce the
-    // same file produce the same row and sync merges them instead of hitting
-    // the index. The filename check is that constraint's own partial predicate,
-    // not a separate rule: a record with no filename is not constrained, so
-    // nothing needs it to converge. See `identifiers/content-id.ts`.
+    // Content-addressed from exactly the columns the uniqueness constraint
+    // names, so two nodes that produce the same file produce the same row and
+    // sync merges them instead of hitting the index. Unconditional: every
+    // shared record falls under the constraint, including a nameless one, which
+    // both indexes cover by treating a missing filename as a value rather than
+    // as an unknown. See `identifiers/content-id.ts`.
     //
     // Every writer of a data record goes through here for exactly this reason —
     // two sites minting ids by different rules is the failure this prevents.
-    id:
-      originalFilename === null
-        ? generateId()
-        : contentAddressedId(originalFilename, input.contentHash),
+    id: contentAddressedId(input.parentId ?? null, originalFilename, input.contentHash),
     kind: "data",
     type: input.type,
     createdAt: now,
