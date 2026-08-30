@@ -899,51 +899,78 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               current !== null &&
               compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
 
-            if (!rowAlreadyApplied) {
-              clock.receive(snapshot.updatedAt);
-              await localDatabaseAdapter.put(snapshot);
-            }
-
-            // **Outside** the LWW guard, deliberately. An equal or older record
-            // row can still carry columns this node lacks — which is the common
-            // case, not the corner one, while peers converge onto this wire
-            // format — and the record's clock does not move when metadata is
-            // written, so a stale-looking row is no evidence about its
-            // metadata.
+            // Everything that writes this record is inside one guard, and a
+            // failure inside it takes the record out of the round rather than
+            // the round out of the exchange.
             //
-            // A tombstone cascades instead: `SdkDataOperations.delete` drops
-            // the metadata row, and a synced delete has to do the same or the
-            // record's dimensions outlive it on every peer but the one it was
-            // deleted on.
-            if (snapshot.deletedAt) {
-              await deleteRecordMetadata(localDatabaseAdapter, snapshot);
-            } else if (incomingMetadata) {
-              const owedBack = await applyRecordMetadata(
-                localDatabaseAdapter,
-                snapshot,
-                incomingMetadata,
-                // Only worth asking when we already held the record: one we
-                // have never seen cannot have a metadata row to preserve.
-                { detectOwedBack: current !== null },
-              );
-              // The peer is behind on this record and has no way to find out.
-              // A metadata write reaches sync only through the record's clock,
-              // so two nodes each writing a different column each bump the same
-              // record and one of those bumps loses the row's LWW — leaving the
-              // loser holding the better row with nothing to say so. Moving our
-              // clock re-ships the merged row.
-              //
-              // Not the unconditional bump the design rules out: this fires
-              // only while the snapshot names a strict subset of what we hold,
-              // and the reply to it names the union, against which the same
-              // test is false on both sides. See `applyRecordMetadata`.
-              if (owedBack) {
-                const merged = rowAlreadyApplied ? current! : snapshot;
-                await localDatabaseAdapter.put({
-                  ...merged,
-                  updatedAt: clock.now(),
-                });
+            // This is what `inboundBrokeFor` says it collects — "a blob that
+            // would not download, a row that would not apply" — and until now
+            // only the blob half was true. An unguarded throw here escapes
+            // `exchange()`, so no watermark advances, no other author's items
+            // are processed, the peer re-ships the same row next round and the
+            // failure repeats until someone reads a log: one row stops all sync
+            // for the app, in both directions, permanently.
+            //
+            // No cause is enumerated deliberately. The known one — two nodes
+            // minting different ids for one file — is gone, and the point of
+            // this guard is that the next unknown one costs a record instead of
+            // an app. Holding the watermark is what makes the loss temporary:
+            // the peer keeps offering the row, so a fix landing later applies
+            // it without anyone re-driving anything.
+            try {
+              if (!rowAlreadyApplied) {
+                clock.receive(snapshot.updatedAt);
+                await localDatabaseAdapter.put(snapshot);
               }
+
+              // **Outside** the LWW guard, deliberately. An equal or older record
+              // row can still carry columns this node lacks — which is the common
+              // case, not the corner one, while peers converge onto this wire
+              // format — and the record's clock does not move when metadata is
+              // written, so a stale-looking row is no evidence about its
+              // metadata.
+              //
+              // A tombstone cascades instead: `SdkDataOperations.delete` drops
+              // the metadata row, and a synced delete has to do the same or the
+              // record's dimensions outlive it on every peer but the one it was
+              // deleted on.
+              if (snapshot.deletedAt) {
+                await deleteRecordMetadata(localDatabaseAdapter, snapshot);
+              } else if (incomingMetadata) {
+                const owedBack = await applyRecordMetadata(
+                  localDatabaseAdapter,
+                  snapshot,
+                  incomingMetadata,
+                  // Only worth asking when we already held the record: one we
+                  // have never seen cannot have a metadata row to preserve.
+                  { detectOwedBack: current !== null },
+                );
+                // The peer is behind on this record and has no way to find out.
+                // A metadata write reaches sync only through the record's clock,
+                // so two nodes each writing a different column each bump the same
+                // record and one of those bumps loses the row's LWW — leaving the
+                // loser holding the better row with nothing to say so. Moving our
+                // clock re-ships the merged row.
+                //
+                // Not the unconditional bump the design rules out: this fires
+                // only while the snapshot names a strict subset of what we hold,
+                // and the reply to it names the union, against which the same
+                // test is false on both sides. See `applyRecordMetadata`.
+                if (owedBack) {
+                  const merged = rowAlreadyApplied ? current! : snapshot;
+                  await localDatabaseAdapter.put({
+                    ...merged,
+                    updatedAt: clock.now(),
+                  });
+                }
+              }
+            } catch (err) {
+              console.warn(
+                `[sync] record ${snapshot.id} from ${nodeId} would not apply: ${(err as Error).message}`,
+              );
+              contiguous = false;
+              inboundBrokeFor.add(nodeId);
+              continue;
             }
 
             // Always attempt blob pull when the record needs one. The
