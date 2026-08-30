@@ -239,7 +239,12 @@ describe("an inbound write that fails holds the author's watermark", () => {
       syncSharedRecords: true,
     });
 
-    await expect(breakingEngine.exchange()).rejects.toThrow("[test] disk is full");
+    // The round completes. A row that will not apply costs that row, not the
+    // exchange: an escaping throw stops every author's items behind it and the
+    // app's sync in both directions, and repeats every round, because the
+    // watermark never moves to let anything else through.
+    const result = await breakingEngine.exchange();
+    expect(result.applied).toBe(0);
     expect(await syncState.getWatermarks()).toEqual({});
     expect(await local.db.get(id)).toBeNull();
 
@@ -257,6 +262,46 @@ describe("an inbound write that fails holds the author's watermark", () => {
     await healthy.sync();
 
     expect(await local.db.get(id)).not.toBeNull();
+  });
+
+  it("applies the rest of the round around the row it could not store", async () => {
+    const { local, cloud } = await twoSides();
+    const blocked = await seedRecord(cloud);
+    const behind = await seedRecord(cloud);
+
+    // The cost of the wedge was never the one record. The throw left
+    // `exchange()` before any other author's items were processed, so
+    // everything queued behind the bad row stopped moving too — which is how
+    // one unappliable record became "no sync for this app, in either
+    // direction". Failing the first `put` and nothing after it is that shape:
+    // the record behind it has to land in the same round.
+    const syncState = createMemorySyncStateStore();
+    const transport = createInProcessSyncTransport({
+      databaseAdapter: cloud.db,
+      clock: cloud.clock,
+      objectStorage: cloud.storage,
+      syncSharedRecords: true,
+    });
+    const engine = createSyncEngine({
+      localDatabaseAdapter: failingMethod(local.db, "put", {
+        message: "[test] disk is full",
+        failFor: 1,
+      }),
+      localObjectStorage: local.storage,
+      remoteObjectStorage: cloud.storage,
+      transport,
+      clock: local.clock,
+      syncState,
+      syncSharedRecords: true,
+    });
+
+    await engine.exchange();
+
+    expect(await local.db.get(blocked)).toBeNull();
+    expect(await local.db.get(behind)).not.toBeNull();
+    // And the author's watermark stays behind the row that failed, so the
+    // peer keeps offering it rather than considering it delivered.
+    expect(await syncState.getWatermarks()).toEqual({});
   });
 
   it("does not advance past a label it could not store", async () => {
