@@ -83,30 +83,58 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
       .ifNotExists()
       .on("shared_records")
       .columns(["content_hash", "parent_id", "deleted_at"]),
-    // Duplicate-file prevention: (filename + bytes) is unique among live
-    // records. Tombstoned rows (deleted_at IS NOT NULL) are excluded so a
-    // re-upload after delete is allowed. Records with NULL filename are not
-    // constrained — the rule requires both filename and content to match.
-    //
-    // **This predicate is also the id rule.** `createDataRecord`
-    // content-addresses a record's id from exactly these columns, and only for
-    // rows this index covers, so that two nodes producing one file produce one
-    // row instead of colliding here. The two are the same decision written in
-    // two languages: widen or narrow this index and
-    // `identifiers/content-id.ts` has to move with it, or the class of record
-    // that stops matching gets the sync wedge back.
-    qb.schema
-      .createIndex("uq_shared_records_filename_hash")
-      .ifNotExists()
-      .unique()
-      .on("shared_records")
-      .columns(["original_filename", "content_hash"])
-      .where(sql.ref("deleted_at"), "is", null)
-      .where(sql.ref("original_filename"), "is not", null),
   ];
   for (const index of sharedRecordsIndexes) {
     db.exec(index.compile().sql);
   }
+
+  // Duplicate-file prevention: (parent + filename + bytes) is unique among live
+  // records. Tombstoned rows (deleted_at IS NOT NULL) are excluded so a
+  // re-upload after delete is allowed.
+  //
+  // **This predicate is also the id rule.** `createDataRecord`
+  // content-addresses a record's id from exactly these columns, so that two
+  // nodes producing one file produce one row instead of colliding here. The two
+  // are the same decision written in two languages: widen or narrow this index
+  // and `identifiers/content-id.ts` has to move with it, or the class of record
+  // that stops matching gets the sync wedge back. The DSQL index in
+  // `admin-installer/src/dsql-schema-init.ts` is the third place, and says the
+  // same thing.
+  //
+  // `parent_id` is in the key because the store cannot represent a shared
+  // child: `parent_id` is one scalar column, so two originals whose derived
+  // files are byte-identical under one name do not come to share a rendition —
+  // the second registration overwrites the first record's parentage. Without
+  // parentage in the key that overwrite is silent, and it needs no sync and no
+  // carelessness to happen. See
+  // `~/projects/starkeep/sync-duplicate-derivation-wedge-2026-08-29.md`.
+  //
+  // Both nullable columns are wrapped in `COALESCE`, which is why this is an
+  // expression index rather than a column list. SQLite follows the standard and
+  // treats NULL as distinct from NULL in a unique index, so naming `parent_id`
+  // directly would silently stop constraining every top-level record — the
+  // exact rows the constraint was originally written for. Coalescing to the
+  // empty string makes a missing value equal to itself, which is what DSQL's
+  // `NULLS NOT DISTINCT` does there and what `content-id.ts` does when it
+  // hashes.
+  //
+  // Nothing drops the `uq_shared_records_filename_hash` this replaces: the
+  // schema is fresh-start (see the note at the top of this file), so an
+  // existing `data.db` is removed rather than migrated. A database carrying the
+  // superseded index would keep enforcing the narrower rule and reject exactly
+  // the derived children this key exists to separate.
+  db.exec(
+    qb.schema
+      .createIndex("uq_shared_records_parent_filename_hash")
+      .ifNotExists()
+      .unique()
+      .on("shared_records")
+      .expression(
+        sql`COALESCE(parent_id, ''), COALESCE(original_filename, ''), content_hash`,
+      )
+      .where(sql.ref("deleted_at"), "is", null)
+      .compile().sql,
+  );
 
   db.exec(
     qb.schema

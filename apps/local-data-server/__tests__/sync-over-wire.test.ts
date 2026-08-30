@@ -292,6 +292,109 @@ describe("two nodes producing the same file", () => {
     expect(arrived).toBeDefined();
     expect(await fetchBytes(driveB, record.id)).toBe("after-the-collision");
   });
+
+  /**
+   * The other half of the same decision, and the reason `parent_id` is in the
+   * key rather than only the filename and the bytes.
+   *
+   * Two copies of one photo under different names are two legal records. A
+   * derived file is named after its *parent's filename*, and nothing makes a
+   * filename unique, so two parents can hand their renditions one name; strip
+   * EXIF on the way — which every derivation does — and the derived bytes are
+   * identical too. Keyed on filename and bytes alone, those two renditions are
+   * one record, and `parent_id` is a single scalar column, so the second one
+   * registered does not join the first: it takes the first original's rendition
+   * away, on one node, with no sync involved and nothing reported.
+   */
+  it("keeps two originals' identical renditions apart", { timeout: 30_000 }, async () => {
+    const originalBytes = "one-photo-two-copies";
+    const derivedBytes = "one-rendition-either-way";
+    const derivedName = "thumb_copy.jpg";
+
+    const { record: copyOne } = await createRecordWithBytes(driveA, {
+      bytes: originalBytes,
+      fileName: "copy-one.jpg",
+    });
+    const { record: copyTwo } = await createRecordWithBytes(driveA, {
+      bytes: originalBytes,
+      fileName: "copy-two.jpg",
+    });
+    expect(copyTwo.id).not.toBe(copyOne.id);
+
+    const { record: fromOne } = await createRecordWithBytes(driveA, {
+      bytes: derivedBytes,
+      fileName: derivedName,
+      parentId: copyOne.id,
+    });
+    const { record: fromTwo } = await createRecordWithBytes(driveA, {
+      bytes: derivedBytes,
+      fileName: derivedName,
+      parentId: copyTwo.id,
+    });
+
+    // Two records, each still under the original it came from. Keyed without
+    // the parent these are one id, and the second registration overwrites the
+    // first row's `parent_id` — so this assertion is the whole point.
+    expect(fromTwo.id).not.toBe(fromOne.id);
+    expect(fromOne.parent_id).toBe(copyOne.id);
+    expect(fromTwo.parent_id).toBe(copyTwo.id);
+
+    // Each original still has its own rendition and only its own.
+    for (const [parent, child] of [
+      [copyOne, fromOne],
+      [copyTwo, fromTwo],
+    ] as const) {
+      const children = await listRecords(driveA, `?parentId=${encodeURIComponent(parent.id)}`);
+      expect(children.map((r) => r.id)).toEqual([child.id]);
+    }
+
+    // And both survive the wire intact rather than merging on the way.
+    await converge();
+    for (const [parent, child] of [
+      [copyOne, fromOne],
+      [copyTwo, fromTwo],
+    ] as const) {
+      const children = await listRecords(driveB, `?parentId=${encodeURIComponent(parent.id)}`);
+      expect(children.map((r) => r.id)).toEqual([child.id]);
+      expect(await fetchBytes(driveB, child.id)).toBe(derivedBytes);
+    }
+  });
+
+  /**
+   * Parentage narrows the key, so it has to be checked that it does not narrow
+   * away the convergence the key exists for. Two nodes deriving one rendition
+   * from one parent is the production shape — deriving on each device rather
+   * than shipping derived bytes is the design — and the child ids agree only
+   * because the parent id does.
+   */
+  it("still converges when two nodes derive one rendition from one parent", { timeout: 30_000 }, async () => {
+    const { record: parent } = await createRecordWithBytes(driveA, {
+      bytes: "the-shared-original",
+      fileName: "shared-original.jpg",
+    });
+    await converge();
+
+    const derived = "the-same-rendition";
+    const derivedName = "thumb_shared-original.jpg";
+    const { record: onA } = await createRecordWithBytes(driveA, {
+      bytes: derived,
+      fileName: derivedName,
+      parentId: parent.id,
+    });
+    const { record: onB } = await createRecordWithBytes(driveB, {
+      bytes: derived,
+      fileName: derivedName,
+      parentId: parent.id,
+    });
+    expect(onB.id).toBe(onA.id);
+
+    await converge();
+    for (const node of [driveA, driveB]) {
+      const children = await listRecords(node, `?parentId=${encodeURIComponent(parent.id)}`);
+      expect(children.map((r) => r.id)).toEqual([onA.id]);
+      expect(await fetchBytes(node, onA.id)).toBe(derived);
+    }
+  });
 });
 
 describe("app-specific rows across the wire", () => {

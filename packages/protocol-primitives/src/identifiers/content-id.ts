@@ -3,10 +3,10 @@
  *
  * ## Why these exist
  *
- * `shared_records` enforces `UNIQUE(original_filename, content_hash)` over live
- * rows, and it is replicated multi-master. Those two facts cannot both hold
- * while rows are keyed on a surrogate each node mints independently: two nodes
- * that produce the same file — two devices importing one SD card, or two nodes
+ * `shared_records` enforces a natural-key uniqueness constraint over live rows,
+ * and it is replicated multi-master. Those two facts cannot both hold while
+ * rows are keyed on a surrogate each node mints independently: two nodes that
+ * produce the same file — two devices importing one SD card, or two nodes
  * deriving the same rendition from a shared original — each mint their own
  * ULID, and whichever row arrives second is refused by the index. That refusal
  * escapes the exchange loop and stops the app's sync entirely.
@@ -20,16 +20,43 @@
  *
  * ## What goes into the id
  *
- * Exactly the columns the constraint names, and nothing else. Adding anything
- * the index does not cover would let two rows the index considers the same
- * receive different ids, which is the bug this removes; leaving anything out
- * would merge rows the index considers distinct, which is data loss.
+ * Exactly the columns the constraint names — `(parent_id, original_filename,
+ * content_hash)` — and nothing else. Adding anything the index does not cover
+ * would let two rows the index considers the same receive different ids, which
+ * is the bug this removes; leaving anything out would merge rows the index
+ * considers distinct, which is data loss.
  *
- * A record with no filename is not covered by the constraint at all — the index
- * is partial, `WHERE original_filename IS NOT NULL` — so it keeps a ULID. That
- * is a property of the row rather than a judgement an app makes about its own
- * data, which matters: an app that had to classify its own writes would
- * eventually classify one wrong, and the symptom would be a silent sync stall.
+ * **`parent_id` is in the key because the store cannot represent a shared
+ * child.** `parent_id` is one scalar column on the child row, so two records
+ * that derive byte-identical output under one name do not come to share a
+ * child — the second write silently overwrites the first record's parentage and
+ * the first original loses its derived file. Naming discipline does not avoid
+ * this: Photos names a rendition after its parent's *filename*, and two
+ * distinct originals are allowed to carry one filename, so two imports of one
+ * photo differing only in stripped EXIF already produce byte-identical
+ * renditions under one name.
+ *
+ * Parentage is safe to put in an identity because `parent_id` means "derived
+ * from" rather than "contained in". Derivation is a fact about how bytes came
+ * to exist and cannot legitimately change, so no reparent path is being closed.
+ *
+ * A record with no filename is content-addressed too. The two indexes treat a
+ * missing filename as a value rather than as an unknown — SQLite through
+ * `COALESCE`, DSQL through `NULLS NOT DISTINCT` — so nameless rows fall under
+ * the constraint and have to converge like any other.
+ *
+ * ## Why a null parent takes the shorter form
+ *
+ * A top-level record hashes `(filename, hash)` and a child hashes
+ * `(parent, filename, hash)`. The shorter form is not a case to tolerate: it
+ * keeps every top-level id that predates `parent_id` joining the key, so no
+ * shipped row re-mints and no upgrade collides with itself. Children may
+ * re-mint safely, because registration dedups on `(parent_id, content_hash)`
+ * and returns the existing row before any insert is attempted.
+ *
+ * The two forms cannot collide. A separator-joined top-level input carries
+ * exactly one NUL and a child input carries exactly two, and none of the three
+ * fields can contain one.
  *
  * ## Shape
  *
@@ -67,10 +94,11 @@ export const CONTENT_ID_PREFIX = "Z";
 const HASH_CHARS = 25;
 
 /**
- * Separator between the two inputs.
+ * Separator between the inputs.
  *
- * NUL, because neither a filename nor a hex digest can contain one — so
- * `("ab", "c")` and `("a", "bc")` cannot hash to the same id.
+ * NUL, because none of a record id, a filename or a hex digest can contain one
+ * — so `("ab", "c")` and `("a", "bc")` cannot hash to the same id, and a
+ * two-field input can never read as a three-field one.
  */
 const SEPARATOR = "\u0000";
 
@@ -92,15 +120,24 @@ function encodeCrockford(bytes: Uint8Array, chars: number): string {
 }
 
 /**
- * The id of the record holding these bytes under this name, on any node.
+ * The id of the record holding these bytes under this name and this parent, on
+ * any node.
+ *
+ * A child id is only agreed between nodes when the parent id is agreed. That
+ * holds for every record: rows predating this scheme carry one id because sync
+ * gave both nodes the same row, and rows minted under it are content-addressed
+ * all the way up.
  */
 export function contentAddressedId(
-  originalFilename: string,
+  parentId: string | null,
+  originalFilename: string | null,
   contentHash: string,
 ): StarkeepId {
-  const digest = sha256(
-    new TextEncoder().encode(`${originalFilename}${SEPARATOR}${contentHash}`),
-  );
+  const fields =
+    parentId === null
+      ? [originalFilename ?? "", contentHash]
+      : [parentId, originalFilename ?? "", contentHash];
+  const digest = sha256(new TextEncoder().encode(fields.join(SEPARATOR)));
   return createStarkeepId(CONTENT_ID_PREFIX + encodeCrockford(digest, HASH_CHARS));
 }
 
@@ -108,8 +145,8 @@ export function contentAddressedId(
  * Whether this id names its own content.
  *
  * Answers "would two nodes have agreed on this id", which is what a caller
- * reasoning about convergence wants to know. Records predating this scheme, and
- * records with no filename, answer false.
+ * reasoning about convergence wants to know. Records predating this scheme
+ * answer false.
  */
 export function isContentAddressedId(id: string): boolean {
   return id.length === 26 && id.startsWith(CONTENT_ID_PREFIX);

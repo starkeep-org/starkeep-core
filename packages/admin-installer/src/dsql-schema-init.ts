@@ -401,16 +401,13 @@ export async function initializeSharedSchema(
       .raw(`GRANT INSERT, UPDATE, DELETE ON shared.app_syncable_namespaces TO "${installer}"`)
       .execute(db);
 
-    // Duplicate-file prevention: (filename + bytes) is unique among live
-    // records. DSQL doesn't support partial indexes (no `WHERE` on CREATE
+    // Duplicate-file prevention: (parent + filename + bytes) is unique among
+    // live records. DSQL doesn't support partial indexes (no `WHERE` on CREATE
     // INDEX), so we include `deleted_at` in the key and use NULLS NOT
     // DISTINCT (PG 15+) so two live rows with NULL deleted_at collide.
     // Tombstoned rows carry distinct HLC stamps in deleted_at so they don't
-    // block re-upload after delete. NULL original_filename rows still don't
-    // collide because the filename is part of the key and NULLS NOT DISTINCT
-    // applies to the whole tuple, not per-column — but a NULL filename also
-    // means "not a user-uploaded file" so dedup is moot for those.
-    // DSQL requires CREATE INDEX ASYNC for secondary indexes.
+    // block re-upload after delete. DSQL requires CREATE INDEX ASYNC for
+    // secondary indexes.
     //
     // If DSQL rejects NULLS NOT DISTINCT, install fails loudly here and we
     // fall back to a sentinel-value scheme (see plan-cloud-auth-foundational
@@ -419,28 +416,29 @@ export async function initializeSharedSchema(
     // `createDataRecord` content-addresses a record's id from these same
     // columns so two nodes producing one file produce one row rather than
     // colliding here. Change this index and `identifiers/content-id.ts` has to
-    // change with it.
+    // change with it, along with the SQLite index in
+    // `storage-sqlite/src/schema/bootstrap.ts`. The three say one thing.
     //
-    // **This index and the SQLite one do not agree, and that is a bug.**
-    // `NULLS NOT DISTINCT` is needed for `deleted_at` — without it Postgres
-    // treats a NULL as distinct and the index never fires for live rows at all
-    // — but it applies to every indexed column, so it also makes two live rows
-    // with a NULL `original_filename` and equal bytes collide here. SQLite gets
-    // its tombstone behaviour from a partial index instead and excludes NULL
-    // filenames outright, stating the intent as "the rule requires both
-    // filename and content to match".
+    // `NULLS NOT DISTINCT` now carries all three nullable columns rather than
+    // being tolerated for `deleted_at` alone: a missing parent and a missing
+    // filename are values here, which is what makes two nameless rows holding
+    // identical bytes one record instead of one row per node. SQLite reaches
+    // the same rule through `COALESCE`, because a partial index there cannot
+    // make NULL equal itself.
     //
-    // So a nameless duplicate is legal on a node and illegal in the cloud, and
-    // the id rule follows the local reading — which leaves that one class of
-    // record able to wedge sync on the way up. Latent today because nothing
-    // ships a nameless record. See
-    // `~/projects/starkeep/sync-duplicate-derivation-wedge-2026-08-29.md`.
+    // The predecessor index keyed `(original_filename, content_hash,
+    // deleted_at)` and is dropped rather than left beside this one, because a
+    // surviving copy would keep enforcing the narrower rule and reject exactly
+    // the derived children this key exists to separate.
+    await sql
+      .raw(`DROP INDEX IF EXISTS shared.uq_records_filename_hash`)
+      .execute(db);
     await ensureIndex(
       db,
       "shared",
-      "uq_records_filename_hash",
-      `CREATE UNIQUE INDEX ASYNC uq_records_filename_hash
-         ON shared.records (original_filename, content_hash, deleted_at)
+      "uq_records_parent_filename_hash",
+      `CREATE UNIQUE INDEX ASYNC uq_records_parent_filename_hash
+         ON shared.records (parent_id, original_filename, content_hash, deleted_at)
          NULLS NOT DISTINCT`,
     );
 
