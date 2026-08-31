@@ -279,7 +279,6 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       );
     }
 
-    await this.confirm(key);
   }
 
   async put(key: string, data: Uint8Array, options?: PutOptions): Promise<void> {
@@ -309,36 +308,28 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}${await s3ErrorDetail(s3Res)}`);
     }
 
-    await this.confirm(key);
   }
 
-  /**
-   * Tell the server the blob has landed so it can eagerly flip matching
-   * PendingFileDownload records to Synced. Best-effort: the server's lazy
-   * reconcile on pull is the correctness-critical path, so a failed confirm
-   * is a warning, not an error — the blob is durably in S3 either way.
-   */
-  private async confirm(key: string): Promise<void> {
-    try {
-      const confirmBody = JSON.stringify({ key });
-      const confirmRes = await this.fetchImpl(`${this.apiBase()}/files/confirm`, {
-        method: "POST",
-        headers: this.headers("POST", "/files/confirm", confirmBody, {
-          "Content-Type": "application/json",
-        }),
-        body: confirmBody,
-      });
-      if (!confirmRes.ok) {
-        console.warn(
-          `[http-object-storage] confirm ${key} returned ${confirmRes.status} — relying on lazy reconcile`,
-        );
-      }
-    } catch (err) {
-      console.warn(
-        `[http-object-storage] confirm ${key} failed: ${(err as Error).message} — relying on lazy reconcile`,
-      );
-    }
-  }
+  // There is no confirm step, and the absence is deliberate.
+  //
+  // A `POST /files/confirm` used to follow every upload, to tell the server the
+  // blob had landed so it could eagerly flip pending download records. Nothing
+  // implemented either half. No server has ever served the route — not the
+  // cloud data server, not the local one — and the record type the call existed
+  // to update appears nowhere in this codebase. Only the testkit's fake cloud
+  // answered it, which is why a green suite sat on top of a call that 404'd on
+  // every real upload and logged a warning per blob.
+  //
+  // The cost was not only noise. Each call was a signed HTTP round trip per
+  // object, on the mobile uplink where round trips are the binding constraint,
+  // in exchange for nothing.
+  //
+  // Availability does not depend on it. The cloud records archive and restore
+  // state from S3 events and a daily inventory reconcile, and a record with no
+  // availability row reads as available — so a freshly uploaded blob is
+  // readable the moment the PUT returns. A server that later wants an eager
+  // signal should add the route and the call together, with the record type
+  // that gives it a purpose.
 
   async get(key: string): Promise<GetResult | null> {
     // Request a presigned S3 GET URL from the server to bypass API Gateway response limits.
@@ -454,7 +445,6 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}${await s3ErrorDetail(s3Res)}`);
     }
 
-    await this.confirm(key);
   }
 
   /**

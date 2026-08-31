@@ -24,7 +24,7 @@ interface Sent {
  * content-addressed key: it derives the checksum from the key itself, so the
  * uploader has no say in what it is allowed to write there.
  */
-function fakeCloud(options: { presign?: Record<string, unknown>; confirmStatus?: number } = {}) {
+function fakeCloud(options: { presign?: Record<string, unknown> } = {}) {
   const calls: Array<{ url: string; method: string; body: unknown }> = [];
   const fetchImpl = (async (url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
@@ -46,9 +46,10 @@ function fakeCloud(options: { presign?: Record<string, unknown>; confirmStatus?:
         { status: 200 },
       );
     }
-    if (url.endsWith("/files/confirm")) {
-      return new Response("", { status: options.confirmStatus ?? 200 });
-    }
+    // No `/files/confirm` branch. An unknown route throws below, which is what
+    // makes the "never calls a confirm endpoint" test bite: a reintroduced call
+    // fails loudly here instead of being quietly answered by a fake no real
+    // server matches.
     throw new Error(`unexpected request: ${method} ${url}`);
   }) as unknown as typeof globalThis.fetch;
   return { fetchImpl, calls };
@@ -78,15 +79,19 @@ beforeEach(() => {
 });
 
 describe("uploading from a file URI", () => {
-  it("presigns, sends the file, and confirms", async () => {
+  it("presigns and sends the file, and asks the server nothing else", async () => {
     const cloud = fakeCloud();
     const adapter = adapterWith(uploadFile, cloud);
 
     await adapter.putFromFileUri!(KEY, URI, { contentType: "video/mp4", sizeBytes: 24_498_741 });
 
+    // Exactly one call. A `POST /files/confirm` used to follow every upload and
+    // no server ever implemented it, so each transfer spent a signed round trip
+    // to be told 404 and warn about it. The assertion is the whole call list
+    // rather than "presign was called", because the defect was an *extra* call
+    // and a positive assertion cannot see one.
     expect(cloud.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
       "POST https://api.example/apps/starkeep-drive/files/presign",
-      "POST https://api.example/apps/starkeep-drive/files/confirm",
     ]);
     expect(cloud.calls[0]!.body).toEqual({ key: KEY, contentType: "video/mp4" });
     expect(sent).toEqual([
@@ -171,18 +176,15 @@ describe("failures", () => {
     expect(sent).toEqual([]);
   });
 
-  // The cloud data server has no `/files/confirm` route today, so this is the
-  // live behaviour and not a hypothetical: every upload logs this warning. The
-  // blob is durably in S3 either way and the server reconciles lazily on pull,
-  // which is why a failed confirm must not fail the transfer.
-  it("warns but succeeds when confirm 404s", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const cloud = fakeCloud({ confirmStatus: 404 });
-      await expect(adapterWith(uploadFile, cloud).putFromFileUri!(KEY, URI)).resolves.toBeUndefined();
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("confirm"));
-    } finally {
-      warn.mockRestore();
-    }
+  // The route never existed on any real server — only the testkit's fake cloud
+  // answered it — so a 404 was the live behaviour on every upload and the
+  // adapter warned once per blob. Nothing consumed the result: the record type
+  // it claimed to flip appears nowhere, and the cloud tracks availability from
+  // S3 events instead. Pinned as an absence because a call that costs a round
+  // trip and buys nothing is easy to reintroduce.
+  it("never calls a confirm endpoint", async () => {
+    const cloud = fakeCloud();
+    await adapterWith(uploadFile, cloud).putFromFileUri!(KEY, URI);
+    expect(cloud.calls.some((c) => c.url.endsWith("/files/confirm"))).toBe(false);
   });
 });

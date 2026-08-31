@@ -442,10 +442,11 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       return;
     }
 
-    if (rest === "/files/confirm" && req.method === "POST") {
-      sendJson(res, 200, { ok: true });
-      return;
-    }
+    // No `/files/confirm`, deliberately. This fake used to answer it and no real
+    // server ever has, so the suite was green while every real upload took a
+    // 404. A fake more capable than the thing it stands in for hides exactly
+    // the bug it should catch, so an unknown route falls through to the 404
+    // below — the same answer the cloud data server gives.
 
     // Read endpoints the LDS `/cloud/data/*` proxy targets. Mirror the real
     // cloud-data-server (api-handler.ts) response shape so a Drive client
