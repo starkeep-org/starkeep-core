@@ -380,15 +380,15 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="max-w-7xl">
+    <div className="min-h-full bg-surface p-6">
       {appsError && (
-        <Alert variant="destructive" className="mb-6">
+        <Alert variant="destructive" className="mb-6 max-w-7xl">
           <AlertTitle>Error</AlertTitle>
           <AlertDescription>{appsError}</AlertDescription>
         </Alert>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+      <div className="grid max-w-7xl grid-cols-1 xl:grid-cols-2 gap-6 items-start">
         {/* ── LOCAL ── */}
         <div className="flex flex-col gap-4">
           <h2 className="text-lg font-medium">Local</h2>
@@ -465,24 +465,25 @@ export default function DashboardPage() {
           />
         </div>
 
-        {/* ── CLOUD ── */}
+        {/* ── CLOUD ──
+            Until a deployment exists there is nothing to report and exactly one
+            thing to do, so the column carries the deploy button alone. Once the
+            cloud is up the button retires into the Data Server card's menu,
+            where managing a deployment sits on the deployment it manages. */}
         <div className="flex flex-col gap-4">
-          <div className="flex flex-col items-start gap-2">
-            <h2 className="text-lg font-medium">Cloud</h2>
-
-            {/* Setting up and managing the deployment are both occasional
-                actions, so both wear the light green. */}
-            <Button asChild size="sm" className={ACTION_OCCASIONAL}>
-              <Link href="/cloud-setup">
-                {cloudDeployed ? "Manage deployment →" : "Set up cloud →"}
-              </Link>
-            </Button>
-          </div>
+          <h2 className="text-lg font-medium">Cloud</h2>
 
           {cloudConfig === undefined ? (
             <div className="w-76 max-w-full rounded-xl p-4 flex flex-col gap-2 ring-1 ring-foreground/10">
               <Skeleton className="h-4 w-32" />
               <Skeleton className="h-4 w-48" />
+            </div>
+          ) : !cloudDeployed ? (
+            <div>
+              {/* Deploying is an occasional action, so it wears light green. */}
+              <Button asChild size="sm" className={ACTION_OCCASIONAL}>
+                <Link href="/cloud-setup">Deploy Starkeep Cloud</Link>
+              </Button>
             </div>
           ) : (
             <>

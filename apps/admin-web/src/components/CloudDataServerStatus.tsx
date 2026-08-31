@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AppCard, type AppCardAction } from "@/components/AppCard";
@@ -8,33 +8,22 @@ import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
 import { StatusBadge } from "./StatusBadge";
 import type { CloudConfig, CognitoSession } from "../lib/cloud-config";
 
-type OnlineState =
+export type CloudHealth =
   | { status: "checking" }
   | { status: "no-config" }
   | { status: "online" }
   | { status: "offline"; reason: string };
 
-interface Props {
-  cloudConfig: CloudConfig | null;
-  cognitoSession: CognitoSession | null;
-  /** Bump to retrigger the online check. */
-  refreshKey?: number;
-  /** When provided, the card offers Sign in / Sign out. */
-  onSignIn?: () => void;
-  onSignOut?: () => void;
-  /** Takes the card's primary slot when given (e.g. the wizard's Redeploy). */
-  children?: ReactNode;
-}
-
-export function CloudDataServerStatus({
-  cloudConfig,
-  cognitoSession,
+/**
+ * Polls the cloud data server's liveness route. The dashboard card and the
+ * setup wizard's deploy step both report reachability, in two shapes that share
+ * nothing but this probe.
+ */
+export function useCloudDataServerHealth(
+  cloudConfig: CloudConfig | null,
   refreshKey = 0,
-  onSignIn,
-  onSignOut,
-  children,
-}: Props) {
-  const [state, setState] = useState<OnlineState>({ status: "checking" });
+): CloudHealth {
+  const [state, setState] = useState<CloudHealth>({ status: "checking" });
 
   useEffect(() => {
     let cancelled = false;
@@ -69,11 +58,35 @@ export function CloudDataServerStatus({
     return () => { cancelled = true; };
   }, [cloudConfig, refreshKey]);
 
-  const online: boolean | null =
-    state.status === "checking" ? null
-    : state.status === "online" ? true
-    : state.status === "no-config" ? null
-    : false;
+  return state;
+}
+
+/** Maps the probe onto the tri-state `StatusBadge` reads. */
+export function healthToOnline(health: CloudHealth): boolean | null {
+  return health.status === "checking" || health.status === "no-config"
+    ? null
+    : health.status === "online";
+}
+
+interface Props {
+  cloudConfig: CloudConfig | null;
+  cognitoSession: CognitoSession | null;
+  /** Bump to retrigger the online check. */
+  refreshKey?: number;
+  /** When provided, the card offers Sign in / Sign out. */
+  onSignIn?: () => void;
+  onSignOut?: () => void;
+}
+
+export function CloudDataServerStatus({
+  cloudConfig,
+  cognitoSession,
+  refreshKey = 0,
+  onSignIn,
+  onSignOut,
+}: Props) {
+  const state = useCloudDataServerHealth(cloudConfig, refreshKey);
+  const online = healthToOnline(state);
 
   const configured = !!cloudConfig?.apiGatewayUrl;
   const signedIn = !!cognitoSession?.refreshToken;
@@ -93,15 +106,14 @@ export function CloudDataServerStatus({
     </Button>
   );
 
-  // A caller-supplied action outranks the rest of the primary slot, so Sign in
-  // falls back to the menu rather than disappearing.
-  const primary = children ?? (
-    !configured ? undefined : signedIn ? viewCostsButton : signInButton
-  );
+  const primary = !configured ? undefined : signedIn ? viewCostsButton : signInButton;
 
+  // The dashboard drops its "Manage deployment" button once the cloud is up,
+  // because the wizard from then on acts on this deployment — so the way back
+  // into it hangs off the card that reports the deployment's state.
   const actions: AppCardAction[] = [];
-  if (configured && !signedIn && children && onSignIn) {
-    actions.push({ label: "Sign in", onSelect: onSignIn });
+  if (configured) {
+    actions.push({ label: "Manage deployment…", href: "/cloud-setup" });
   }
   if (configured && signedIn && onSignOut) {
     actions.push({ label: "Sign out", onSelect: onSignOut, destructive: true });

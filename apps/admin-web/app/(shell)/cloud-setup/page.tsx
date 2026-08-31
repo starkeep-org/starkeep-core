@@ -6,7 +6,7 @@ import { CloudSetupWizard } from "../../../src/components/CloudSetupWizard";
 
 export default function CloudSetupPage() {
   return (
-    <div className="max-w-4xl">
+    <div className="p-6 max-w-4xl">
       <Link href="/" className="text-sm text-muted-foreground hover:text-foreground">
         ← Dashboard
       </Link>

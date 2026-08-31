@@ -60,8 +60,10 @@ function ShellGate({ children }: { children: ReactNode }) {
         <AppDiscovery />
       </header>
 
-      {/* The ground is a shade off the card color, so cards read as cards. */}
-      <main className="flex-1 overflow-y-auto bg-surface p-6">
+      {/* Each page brings its own ground and padding. The dashboard lays cards
+          on the off-white surface so they read as cards; the detail pages carry
+          prose and forms, which read as a document on the page background. */}
+      <main className="flex-1 overflow-y-auto">
         {children}
       </main>
     </div>

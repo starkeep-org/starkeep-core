@@ -18,7 +18,7 @@ export default function StoragePage() {
   const [outputOpen, setOutputOpen] = useState(false);
 
   return (
-    <div className="max-w-5xl">
+    <div className="p-6 max-w-5xl">
       <Link href="/" className="text-sm text-muted-foreground hover:text-foreground">
         ← Dashboard
       </Link>

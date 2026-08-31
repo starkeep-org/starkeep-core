@@ -16,7 +16,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { CommandOutput } from "./CommandOutput";
-import { CloudDataServerStatus } from "./CloudDataServerStatus";
+import { useCloudDataServerHealth, healthToOnline } from "./CloudDataServerStatus";
+import { StatusBadge } from "./StatusBadge";
 import { cn } from "@/lib/utils";
 import {
   generateBootstrapTemplate,
@@ -484,7 +485,7 @@ function Step2Outputs({
       </div>
 
       <div className="flex justify-between">
-        <Button variant="ghost" onClick={onBack}>Back</Button>
+        <Button variant="ghost" onClick={onBack}>Back to previous step</Button>
         <Button
           onClick={() => onContinue({ userPoolId, userPoolClientId, identityPoolId })}
           disabled={!isValid}
@@ -596,7 +597,7 @@ function Step3CreateUser({
       )}
 
       <div className="flex justify-between">
-        <Button variant="ghost" onClick={onBack}>Back</Button>
+        <Button variant="ghost" onClick={onBack}>Back to previous step</Button>
         <Button onClick={onContinue}>User Created — Continue</Button>
       </div>
     </div>
@@ -767,7 +768,7 @@ function Step4SignIn({
           </div>
         </div>
         <div className="flex justify-between">
-          <Button variant="ghost" onClick={() => setSession(null)} disabled={loading}>Back</Button>
+          <Button variant="ghost" onClick={() => setSession(null)} disabled={loading}>Back to sign in</Button>
           <Button
             onClick={handleSetNewPassword}
             disabled={signInDisabled || !newPassword || newPassword.length < 8}
@@ -822,7 +823,7 @@ function Step4SignIn({
         </div>
       </div>
       <div className="flex justify-between">
-        <Button variant="ghost" onClick={onBack} disabled={loading}>Back</Button>
+        <Button variant="ghost" onClick={onBack} disabled={loading}>Back to previous step</Button>
         <Button onClick={handleSignIn} disabled={signInDisabled || !email || !password}>
           {loading && <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
           Sign in
@@ -848,8 +849,6 @@ function Step5Deploy({
   refreshCredentials,
   cloudConfig,
   refreshCloudConfig,
-  signInRefreshToken,
-  signInUserEmail,
   onSuccess,
   onBack,
   onTokenExpired,
@@ -866,8 +865,6 @@ function Step5Deploy({
   refreshCredentials: () => Promise<STSCredentials | null>;
   cloudConfig: CloudConfig | null;
   refreshCloudConfig: () => Promise<void>;
-  signInRefreshToken: string;
-  signInUserEmail: string | null;
   onSuccess: (result: DeployOutputs) => void;
   onBack: () => void;
   /** Called when the installer reports EXPIRED_TOKEN — wizard sends the user back to Step 4. */
@@ -1078,10 +1075,6 @@ function Step5Deploy({
     return () => { aborted = true; };
   }
 
-  const sessionForStatus = signInRefreshToken
-    ? { refreshToken: signInRefreshToken, userEmail: signInUserEmail ?? undefined }
-    : null;
-
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-col gap-2">
@@ -1105,16 +1098,12 @@ function Step5Deploy({
       )}
 
       {showStatusCard && (
-        <CloudDataServerStatus
+        <DeploymentSummary
           cloudConfig={cloudConfig}
-          cognitoSession={sessionForStatus}
           refreshKey={statusRefreshKey}
-        >
-          <Button size="sm" variant="outline" onClick={handleInstall} disabled={installing}>
-            {installing && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-            Redeploy
-          </Button>
-        </CloudDataServerStatus>
+          installing={installing}
+          onRedeploy={handleInstall}
+        />
       )}
 
       {status === "success" && deployResult && (
@@ -1140,8 +1129,52 @@ function Step5Deploy({
       )}
 
       <div className="flex justify-start">
-        <Button variant="ghost" onClick={onBack} disabled={installing}>Back</Button>
+        <Button variant="ghost" onClick={onBack} disabled={installing}>Back to previous step</Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * What the deploy step shows once a deployment exists: whether the cloud
+ * answers, which deployment it is, and the one action still on offer. The
+ * dashboard's Data Server card reports the same reachability alongside sign-in
+ * state and costs, and borrowing that card here made the last step of the
+ * wizard read as a second copy of the dashboard.
+ */
+function DeploymentSummary({
+  cloudConfig,
+  refreshKey,
+  installing,
+  onRedeploy,
+}: {
+  cloudConfig: CloudConfig | null;
+  refreshKey: number;
+  installing: boolean;
+  onRedeploy: () => void;
+}) {
+  const health = useCloudDataServerHealth(cloudConfig, refreshKey);
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h3 className="font-medium">Starkeep cloud</h3>
+          <StatusBadge online={healthToOnline(health)} />
+        </div>
+        <Button size="sm" variant="outline" onClick={onRedeploy} disabled={installing}>
+          {installing && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+          Redeploy
+        </Button>
+      </div>
+      {cloudConfig?.apiGatewayUrl && (
+        <p className="text-xs text-muted-foreground break-all">{cloudConfig.apiGatewayUrl}</p>
+      )}
+      {health.status === "offline" && (
+        <p className="text-xs text-muted-foreground">
+          Could not reach the cloud data server: {health.reason}
+        </p>
+      )}
     </div>
   );
 }
@@ -1435,8 +1468,6 @@ export function CloudSetupWizard({ onComplete }: Props) {
             }}
             cloudConfig={cloudConfig}
             refreshCloudConfig={refreshCloudConfig}
-            signInRefreshToken={signInResult.refreshToken}
-            signInUserEmail={extractEmailFromIdToken(signInResult.idToken)}
             onSuccess={handleComplete}
             onBack={() => handleNavigate(4)}
             onTokenExpired={() => handleNavigate(4)}
