@@ -480,8 +480,9 @@ export default function DashboardPage() {
             </div>
           ) : !cloudDeployed ? (
             <div>
-              {/* Deploying is an occasional action, so it wears light green. */}
-              <Button asChild size="sm" className={ACTION_OCCASIONAL}>
+              {/* With no deployment yet, deploying is what brings the cloud up,
+                  so it wears the dark green of a start action. */}
+              <Button asChild size="sm" className={ACTION_START}>
                 <Link href="/cloud-setup">Deploy Starkeep Cloud</Link>
               </Button>
             </div>
