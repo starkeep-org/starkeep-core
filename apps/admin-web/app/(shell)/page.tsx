@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
+import Link from "next/link";
 import {
   Dialog,
   DialogContent,
@@ -31,14 +32,15 @@ import {
   type CloudConfig,
   type CognitoSession,
 } from "../../src/lib/cloud-config";
-import { CommandOutputModal } from "../../src/components/CommandOutputModal";
+import { AppCard } from "../../src/components/AppCard";
 import { CloudDataServerStatus } from "../../src/components/CloudDataServerStatus";
 import { StatusBadge } from "../../src/components/StatusBadge";
-import { AppDiscovery } from "../../src/components/AppDiscovery";
+import { APPS_CHANGED_EVENT } from "../../src/components/AppDiscovery";
 import { LocalDriveSection } from "../../src/components/LocalDriveSection";
 import { LocalAppsSection } from "../../src/components/LocalAppsSection";
 import { CloudAppsSection } from "../../src/components/CloudAppsSection";
 import { PairedDevicesSection } from "../../src/components/PairedDevicesSection";
+import { LocalFoldersModal, type Watch } from "../../src/components/LocalFoldersModal";
 import { targetsOf, type LocalAppEntry } from "../../src/lib/app-types";
 import {
   initiateAuth,
@@ -54,18 +56,7 @@ import {
   type ServiceCost,
 } from "../../src/lib/cost-usage-report";
 import { localDataServerUrl } from "../../src/lib/runtime-config";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface Watch {
-  id: string;
-  directoryPath: string;
-  state: string;
-  totalFiles: number;
-  syncedFiles: number;
-}
+import { ACTION_OCCASIONAL, ACTION_START } from "../../src/lib/action-colors";
 
 // ---------------------------------------------------------------------------
 // Dashboard
@@ -115,21 +106,8 @@ export default function DashboardPage() {
   // Daemon start/stop loading
   const [daemonLoading, setDaemonLoading] = useState<Record<string, boolean>>({});
 
-  // Command output modal
-  const [outputModal, setOutputModal] = useState<{
-    commandId: string;
-    title: string;
-    credentials?: STSCredentials & { region: string };
-  } | null>(null);
-  const [outputOpen, setOutputOpen] = useState(false);
-
-  // Confirm modal
-  const [confirmModal, setConfirmModal] = useState<{
-    commandId: string;
-    title: string;
-    message: string;
-    requiresCreds: boolean;
-  } | null>(null);
+  // Watch management modal
+  const [foldersOpen, setFoldersOpen] = useState(false);
 
   // Sign-in modal
   const [signInOpen, setSignInOpen] = useState(false);
@@ -197,34 +175,6 @@ export default function DashboardPage() {
     }
   }
 
-  async function runStream(commandId: string, title: string, requiresCreds: boolean) {
-    let credentials: (STSCredentials & { region: string }) | undefined;
-    if (requiresCreds) {
-      const cfg = await readCloudConfig();
-      if (!cfg) return;
-      const session = await readCognitoSession();
-      if (!session?.refreshToken) return;
-      let stored = await readCloudCredentials();
-      if (!stored) {
-        try {
-          const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-          stored = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
-          await writeCloudCredentials(stored);
-          await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
-        } catch {
-          return;
-        }
-      }
-      credentials = { ...stored, region: cfg.region };
-    }
-    setOutputModal({ commandId, title, credentials });
-    setOutputOpen(true);
-  }
-
-  function openConfirm(commandId: string, title: string, message: string, requiresCreds: boolean) {
-    setConfirmModal({ commandId, title, message, requiresCreds });
-  }
-
   // Fetch local server data
   useEffect(() => {
     setLocalOnline(null);
@@ -270,8 +220,25 @@ export default function DashboardPage() {
   // Initial app-list fetch (also re-run by bumpAll via refreshApps).
   useEffect(() => { refreshApps(); }, [refreshApps]);
 
+  // The Discover apps button lives in the shell header, outside this tree, so
+  // it announces a changed directory list on `window` rather than calling back.
+  useEffect(() => {
+    const onChanged = () => { refreshApps(); };
+    window.addEventListener(APPS_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(APPS_CHANGED_EVENT, onChanged);
+  }, [refreshApps]);
+
   const localApps = apps === null ? null : apps.filter((a) => targetsOf(a).includes("local"));
   const cloudApps = apps === null ? null : apps.filter((a) => targetsOf(a).includes("cloud"));
+
+  // Watch totals, summed across folders from the same per-watch counters the
+  // folder list shows.
+  const watchCount = watches?.length ?? 0;
+  const syncedFiles = watches?.reduce((n, w) => n + w.syncedFiles, 0) ?? 0;
+  const totalFiles = watches?.reduce((n, w) => n + w.totalFiles, 0) ?? 0;
+
+  // Deployed once the cloud data server install has written its gateway URL.
+  const cloudDeployed = !!cloudConfig?.apiGatewayUrl;
 
   // Fetch costs
   useEffect(() => {
@@ -414,180 +381,171 @@ export default function DashboardPage() {
 
   return (
     <div className="max-w-7xl">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold">Dashboard</h1>
-      </div>
-
-      <div className="mb-6 flex flex-col gap-3">
-        <AppDiscovery onSaved={refreshApps} />
-        {appsError && (
-          <Alert variant="destructive">
-            <AlertTitle>Error</AlertTitle>
-            <AlertDescription>{appsError}</AlertDescription>
-          </Alert>
-        )}
-      </div>
+      {appsError && (
+        <Alert variant="destructive" className="mb-6">
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{appsError}</AlertDescription>
+        </Alert>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
         {/* ── LOCAL ── */}
         <div className="flex flex-col gap-4">
           <h2 className="text-lg font-medium">Local</h2>
 
-          <div className="rounded-lg border p-4 flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <h3 className="font-medium">Data Server</h3>
-                <Badge variant="secondary" className="text-xs">Built-in</Badge>
-                <StatusBadge online={localOnline} />
-              </div>
-              {localOnline === true && (
-                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
-                  disabled={!!daemonLoading["local-data-server"]}
-                  onClick={() => stopDaemon("local-data-server")}
-                >
-                  {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-                  Stop
-                </Button>
-              )}
-              {localOnline === false && (
-                <Button size="sm" className="bg-blue-600 text-white hover:bg-blue-700"
-                  disabled={!!daemonLoading["local-data-server"]}
-                  onClick={() => startDaemon("local-data-server")}
-                >
-                  {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-                  Start
-                </Button>
-              )}
-            </div>
-
-            {localOnline === false && (
-              <Alert className="border-0 px-0">
-                <AlertTitle>Data server not running</AlertTitle>
-                <AlertDescription>The local data server must be running for local features to work.</AlertDescription>
-              </Alert>
-            )}
-
-            {localOnline === true && (
-              <div className="flex flex-col gap-3">
-                <p className="text-xs font-medium text-muted-foreground">Watches</p>
-
-                {watches && watches.length > 0 ? (
-                  <div className="flex flex-col gap-1.5">
-                    {watches.map((w) => (
-                      <div key={w.id} className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
-                          <span className="text-sm truncate flex-1">{w.directoryPath}</span>
-                          <Badge variant="outline" className="text-xs shrink-0">{w.state}</Badge>
-                          <span className="text-xs text-muted-foreground shrink-0">{w.syncedFiles}/{w.totalFiles}</span>
-                        </div>
-                        <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive shrink-0"
-                          onClick={() => handleRemoveWatch(w.id)}
-                        >
-                          Remove
-                        </Button>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <span className="text-sm text-muted-foreground">No watches configured</span>
-                )}
-
-                <div className="flex gap-2">
-                  <Input
-                    placeholder="/path/to/directory or ~/Photos"
-                    className="text-sm h-8"
-                    value={watchPath}
-                    onChange={(e) => { setWatchPath(e.currentTarget.value); setWatchError(null); setWatchSuccess(null); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") handleAddWatch(); }}
-                  />
-                  <Button size="sm" onClick={handleAddWatch} disabled={watchSubmitting || !watchPath.trim()}>
-                    {watchSubmitting && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-                    Add
-                  </Button>
-                </div>
-                {watchError && <p className="text-xs text-destructive">{watchError}</p>}
-                {watchSuccess && <p className="text-xs text-green-600 dark:text-green-400">{watchSuccess}</p>}
-              </div>
-            )}
-          </div>
-
-          <LocalDriveSection />
-
-          <LocalAppsSection apps={localApps} refresh={refreshApps} />
-
-          <div className="flex justify-end">
-            <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
-              onClick={() => openConfirm("reset-local-data", "Clear local data", "This will permanently delete all local object files, the SQLite database, and watch configs.", false)}
-            >
-              Clear local data
-            </Button>
-          </div>
+          <LocalAppsSection
+            apps={localApps}
+            refresh={refreshApps}
+            leading={
+              <>
+                <AppCard
+                  name="Data Server"
+                  badges={
+                    <>
+                      <Badge variant="secondary" className="text-xs">Built-in</Badge>
+                      <StatusBadge online={localOnline} />
+                    </>
+                  }
+                  description={
+                    localOnline === false ? (
+                      "The local data server must be running for local features to work."
+                    ) : localOnline === true ? (
+                      // The folder list itself lives in the modal — the card reports
+                      // only how much is watched, so its height stays fixed.
+                      <>
+                        <span className="block">Indexes and syncs local files.</span>
+                        {watches === null ? (
+                          <Skeleton className="h-4 w-40" />
+                        ) : watchCount === 0 ? (
+                          "No folders are watched yet."
+                        ) : (
+                          `${watchCount} ${watchCount === 1 ? "folder" : "folders"} · ${syncedFiles}/${totalFiles} files`
+                        )}
+                      </>
+                    ) : undefined
+                  }
+                  actions={
+                    localOnline === true
+                      ? [
+                          { label: "Storage…", href: "/storage" },
+                          {
+                            label: "Stop",
+                            onSelect: () => stopDaemon("local-data-server"),
+                            disabled: !!daemonLoading["local-data-server"],
+                            destructive: true,
+                          },
+                        ]
+                      : []
+                  }
+                  primary={
+                    localOnline === true ? (
+                      <Button
+                        size="sm"
+                        className={ACTION_OCCASIONAL}
+                        onClick={() => setFoldersOpen(true)}
+                      >
+                        {watchCount === 0 ? "Add Local Folder" : "Manage Local Folders"}
+                      </Button>
+                    ) : localOnline === false ? (
+                      <Button
+                        size="sm"
+                        className={ACTION_START}
+                        disabled={!!daemonLoading["local-data-server"]}
+                        onClick={() => startDaemon("local-data-server")}
+                      >
+                        {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                        Start Data Server
+                      </Button>
+                    ) : undefined
+                  }
+                />
+                <LocalDriveSection />
+              </>
+            }
+          />
         </div>
 
         {/* ── CLOUD ── */}
         <div className="flex flex-col gap-4">
-          <h2 className="text-lg font-medium">Cloud</h2>
+          <div className="flex flex-col items-start gap-2">
+            <h2 className="text-lg font-medium">Cloud</h2>
+
+            {/* Setting up and managing the deployment are both occasional
+                actions, so both wear the light green. */}
+            <Button asChild size="sm" className={ACTION_OCCASIONAL}>
+              <Link href="/cloud-setup">
+                {cloudDeployed ? "Manage deployment →" : "Set up cloud →"}
+              </Link>
+            </Button>
+          </div>
 
           {cloudConfig === undefined ? (
-            <div className="rounded-lg border p-4 flex flex-col gap-2">
+            <div className="w-76 max-w-full rounded-xl p-4 flex flex-col gap-2 ring-1 ring-foreground/10">
               <Skeleton className="h-4 w-32" />
               <Skeleton className="h-4 w-48" />
             </div>
           ) : (
             <>
-              <CloudDataServerStatus
-                cloudConfig={cloudConfig}
-                cognitoSession={cognitoSession}
-                refreshKey={refreshKey}
-                onSignIn={openSignIn}
-                onSignOut={handleSignOut}
+              <CloudAppsSection
+                apps={cloudApps}
+                leading={
+                  <CloudDataServerStatus
+                    cloudConfig={cloudConfig}
+                    cognitoSession={cognitoSession}
+                    refreshKey={refreshKey}
+                    onSignIn={openSignIn}
+                    onSignOut={handleSignOut}
+                  />
+                }
               />
-
-              <CloudAppsSection apps={cloudApps} />
 
               <PairedDevicesSection />
 
-              <div className="rounded-lg border p-4">
-                <h3 className="font-medium mb-3">Costs</h3>
-                {costs === "loading" ? (
-                  <div className="flex flex-col gap-2">
-                    <Skeleton className="h-4 w-full" />
-                    <Skeleton className="h-4 w-3/4" />
-                  </div>
-                ) : costs === "not-signed-in" ? (
-                  <p className="text-sm text-muted-foreground">Sign in to view cost data.</p>
-                ) : costs === "error" ? (
-                  <p className="text-sm text-muted-foreground">Could not load cost data.</p>
-                ) : costs === "no-data" ? (
-                  <p className="text-sm text-muted-foreground">Cost report configured — data arrives within 24 hours.</p>
-                ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Service</TableHead>
-                        <TableHead className="text-right">Month-to-date</TableHead>
-                        <TableHead className="text-right">Projected</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {costs.map((row) => {
-                        const proj = costProjection?.find((p) => p.service === row.service);
-                        return (
-                          <TableRow key={row.service}>
-                            <TableCell>{row.service}</TableCell>
-                            <TableCell className="text-right">${row.amount.toFixed(2)}</TableCell>
-                            <TableCell className="text-right text-muted-foreground">${(proj?.amount ?? 0).toFixed(2)}</TableCell>
-                          </TableRow>
-                        );
-                      })}
-                      <TableRow className="font-medium">
-                        <TableCell>Total</TableCell>
-                        <TableCell className="text-right">${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
-                        <TableCell className="text-right text-muted-foreground">${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
-                      </TableRow>
-                    </TableBody>
-                  </Table>
-                )}
+              {/* The cloud Data Server card's View Costs button targets this. */}
+              <div id="costs" className="flex flex-col gap-2 scroll-mt-4">
+                <h3 className="font-medium">Costs</h3>
+
+                <div className="rounded-lg border p-4">
+                  {costs === "loading" ? (
+                    <div className="flex flex-col gap-2">
+                      <Skeleton className="h-4 w-full" />
+                      <Skeleton className="h-4 w-3/4" />
+                    </div>
+                  ) : costs === "not-signed-in" ? (
+                    <p className="text-sm text-muted-foreground">Sign in to view cost data.</p>
+                  ) : costs === "error" ? (
+                    <p className="text-sm text-muted-foreground">Could not load cost data.</p>
+                  ) : costs === "no-data" ? (
+                    <p className="text-sm text-muted-foreground">Cost report configured — data arrives within 24 hours.</p>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Service</TableHead>
+                          <TableHead className="text-right">Month-to-date</TableHead>
+                          <TableHead className="text-right">Projected</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {costs.map((row) => {
+                          const proj = costProjection?.find((p) => p.service === row.service);
+                          return (
+                            <TableRow key={row.service}>
+                              <TableCell>{row.service}</TableCell>
+                              <TableCell className="text-right">${row.amount.toFixed(2)}</TableCell>
+                              <TableCell className="text-right text-muted-foreground">${(proj?.amount ?? 0).toFixed(2)}</TableCell>
+                            </TableRow>
+                          );
+                        })}
+                        <TableRow className="font-medium">
+                          <TableCell>Total</TableCell>
+                          <TableCell className="text-right">${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
+                          <TableCell className="text-right text-muted-foreground">${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  )}
+                </div>
               </div>
             </>
           )}
@@ -645,36 +603,22 @@ export default function DashboardPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Command output modal */}
-      <CommandOutputModal
-        opened={outputOpen}
-        onClose={() => { setOutputOpen(false); setOutputModal(null); }}
-        commandId={outputModal?.commandId ?? null}
-        credentials={outputModal?.credentials}
-        title={outputModal?.title ?? ""}
+      {/* Local folders */}
+      <LocalFoldersModal
+        open={foldersOpen}
+        onOpenChange={(open) => {
+          setFoldersOpen(open);
+          if (!open) { setWatchError(null); setWatchSuccess(null); }
+        }}
+        watches={watches}
+        path={watchPath}
+        onPathChange={(v) => { setWatchPath(v); setWatchError(null); setWatchSuccess(null); }}
+        onAdd={handleAddWatch}
+        onRemove={handleRemoveWatch}
+        submitting={watchSubmitting}
+        error={watchError}
+        success={watchSuccess}
       />
-
-      {/* Confirm dialog */}
-      <Dialog open={confirmModal !== null} onOpenChange={(open) => { if (!open) setConfirmModal(null); }}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>{confirmModal?.title ?? ""}</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">{confirmModal?.message}</p>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setConfirmModal(null)}>Cancel</Button>
-            <Button variant="destructive"
-              onClick={() => {
-                const m = confirmModal;
-                setConfirmModal(null);
-                if (m) runStream(m.commandId, m.title, m.requiresCreds);
-              }}
-            >
-              Confirm
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

@@ -115,7 +115,7 @@ export function CloudDataServerInstallModal({ opened, onClose, credentials, onSu
 
   return (
     <Dialog open={opened} onOpenChange={(open) => { if (!open && status !== "running") onClose(); }}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Install cloud-data-server</DialogTitle>
         </DialogHeader>

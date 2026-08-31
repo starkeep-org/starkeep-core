@@ -4,14 +4,44 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { ACTION_START } from "@/lib/action-colors";
 
 // ---------------------------------------------------------------------------
-// App parent directories editor — the "Discover apps" button that expands into
-// a panel for managing the parent directories scanned for apps.
+// App parent directories editor — the "Discover apps" button in the shell
+// header, which opens a modal for managing the directories scanned for apps.
+//
+// The button lives in the shell header, away from the dashboard state it
+// affects, so saving announces itself on `window` instead of calling back
+// through props. The dashboard listens and re-scans.
 // ---------------------------------------------------------------------------
 
-export function AppDiscovery({ onSaved }: { onSaved: () => void }) {
+/** Fired after the scanned-directory list changes. */
+export const APPS_CHANGED_EVENT = "starkeep:app-dirs-changed";
+
+export function AppDiscovery() {
   const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <Button size="sm" className={ACTION_START} onClick={() => setOpen(true)}>
+        Discover apps
+      </Button>
+      <AppDiscoveryModal open={open} onOpenChange={setOpen} />
+    </>
+  );
+}
+
+function AppDiscoveryModal({ open, onOpenChange }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const [dirs, setDirs] = useState<string[] | null>(null);
   const [newDir, setNewDir] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +59,8 @@ export function AppDiscovery({ onSaved }: { onSaved: () => void }) {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  // Reload on every open, so a directory added in another tab shows up.
+  useEffect(() => { if (open) load(); }, [open, load]);
 
   const save = useCallback(async (next: string[]) => {
     setSaving(true);
@@ -42,13 +73,13 @@ export function AppDiscovery({ onSaved }: { onSaved: () => void }) {
       });
       if (!res.ok) throw new Error(`config save failed: ${res.status}`);
       setDirs(next);
-      onSaved();
+      window.dispatchEvent(new Event(APPS_CHANGED_EVENT));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
-  }, [onSaved]);
+  }, []);
 
   const add = () => {
     const d = newDir.trim();
@@ -59,60 +90,65 @@ export function AppDiscovery({ onSaved }: { onSaved: () => void }) {
 
   const remove = (d: string) => save((dirs ?? []).filter((x) => x !== d));
 
-  if (!open) {
-    return (
-      <Button variant="outline" size="sm" className="w-fit" onClick={() => setOpen(true)}>
-        Discover apps
-      </Button>
-    );
-  }
-
   return (
-    <div className="rounded-lg border p-5 flex flex-col gap-3">
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="text-base font-semibold">App discovery</h2>
-        <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>Hide</Button>
-      </div>
-      <p className="text-sm text-muted-foreground">
-        Parent directories scanned for apps (each subdir with a{" "}
-        <code className="text-xs">starkeep.manifest.json</code>).
-        Parent app directories should be added as siblings to starkeep-core.
-      </p>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>App discovery</DialogTitle>
+          <DialogDescription>
+            Parent directories scanned for apps — each subdirectory holding a{" "}
+            <code className="text-xs">starkeep.manifest.json</code> counts as an app.
+            Add parent directories as siblings to starkeep-core.
+          </DialogDescription>
+        </DialogHeader>
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
+        {error && (
+          <Alert variant="destructive">
+            <AlertTitle>Error</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
 
-      {dirs === null ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : dirs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No directories — no apps will be discovered.</p>
-      ) : (
-        <ul className="flex flex-col gap-1">
-          {dirs.map((d) => (
-            <li key={d} className="flex items-center justify-between gap-2 text-sm">
-              <code className="text-xs break-all">{d}</code>
-              <Button variant="outline" size="sm" onClick={() => remove(d)} disabled={saving}>
-                Remove
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
+        {dirs === null ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : dirs.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No directories — no apps will be discovered.</p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {dirs.map((d) => (
+              <li
+                key={d}
+                className="flex items-center justify-between gap-2 rounded-md border p-2"
+              >
+                <code className="min-w-0 flex-1 truncate text-xs">{d}</code>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="shrink-0 text-destructive hover:text-destructive"
+                  onClick={() => remove(d)}
+                  disabled={saving}
+                >
+                  Remove
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
 
-      <div className="flex gap-2">
-        <Input
-          placeholder="/path/to/app-parent-dir  (or ~/...)"
-          value={newDir}
-          onChange={(e) => setNewDir(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") add(); }}
-          disabled={saving}
-        />
-        <Button onClick={add} disabled={saving || newDir.trim().length === 0}>Add</Button>
-      </div>
-    </div>
+        <div className="flex gap-2">
+          <Input
+            placeholder="/path/to/app-parent-dir  (or ~/...)"
+            className="h-8 text-sm"
+            value={newDir}
+            onChange={(e) => setNewDir(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+            disabled={saving}
+          />
+          <Button size="sm" onClick={add} disabled={saving || newDir.trim().length === 0}>
+            Add directory
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

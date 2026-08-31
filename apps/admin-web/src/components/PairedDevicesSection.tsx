@@ -33,9 +33,16 @@
  */
 
 import { useState } from "react";
+import { ChevronDownIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   readCloudConfig,
   readCognitoSession,
@@ -145,15 +152,19 @@ export function PairedDevicesSection() {
   const busy = status.kind === "working";
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h3 className="text-sm font-semibold">Paired devices</h3>
-        <p className="text-muted-foreground text-sm">
-          A phone signs its sync requests with a key only it holds. Pairing publishes the public
-          half so the cloud will accept them — open Starkeep on the handset and copy the two values
-          from its Sync section.
-        </p>
-      </div>
+    <Collapsible className="rounded-lg border p-4">
+      <CollapsibleTrigger className="group flex w-full items-center gap-2 text-left">
+        <h3 className="font-medium">Pair with mobile app</h3>
+        <Badge variant="outline" className="text-xs">Experimental</Badge>
+        <ChevronDownIcon className="ml-auto size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+      </CollapsibleTrigger>
+
+      <CollapsibleContent className="space-y-4 pt-4">
+      <p className="text-muted-foreground text-sm">
+        A phone signs its sync requests with a key only it holds. Pairing publishes the public
+        half so the cloud will accept them — open Starkeep on the handset and copy the two values
+        from its Sync section.
+      </p>
 
       <div className="space-y-2">
         <Input
@@ -215,6 +226,7 @@ export function PairedDevicesSection() {
           <AlertDescription>{status.message}</AlertDescription>
         </Alert>
       ) : null}
-    </div>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }

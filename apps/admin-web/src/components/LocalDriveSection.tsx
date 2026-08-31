@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { AppCard, type AppCardAction } from "@/components/AppCard";
 import { getRuntimeConfig, RUNTIME_CONFIG_DEFAULTS } from "@/lib/runtime-config";
+import { ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 
 // ---------------------------------------------------------------------------
 // Starkeep Drive — built-in app installed with the core. Not manifest-discovered;
@@ -65,47 +67,49 @@ export function LocalDriveSection() {
   const running = online === true;
   const busy = pending !== null;
 
+  const actions: AppCardAction[] = running
+    ? [{
+        label: pending === "stop" ? "Stopping…" : "Stop",
+        onSelect: () => transition("stop"),
+        disabled: busy,
+      }]
+    : [];
+
   return (
-    <div className="rounded-md border p-3 flex flex-col gap-2">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <span className="font-medium">Starkeep Drive</span>
+    <AppCard
+      name="Starkeep Drive"
+      description="File browser and shared-data UI, installed with the core."
+      actions={actions}
+      badges={
+        <>
           <Badge variant="secondary" className="text-xs">Built-in</Badge>
           {running && (
-            <a href={driveUrl} target="_blank" rel="noopener noreferrer" title={`Open ${driveUrl}`}>
-              <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 hover:bg-blue-200 dark:hover:bg-blue-800 cursor-pointer">
-                Running ↗
-              </Badge>
-            </a>
+            <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+              Running
+            </Badge>
           )}
-        </div>
-        <div className="flex gap-2 items-center">
-          {online === false && (
-            <Button size="sm" variant="outline" onClick={() => transition("start")} disabled={busy}>
-              {pending === "start" && (
-                <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              )}
-              {pending === "start" ? "Starting…" : "Start"}
-            </Button>
-          )}
-          {running && (
-            <Button size="sm" variant="outline" onClick={() => transition("stop")} disabled={busy}>
-              {pending === "stop" && (
-                <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              )}
-              {pending === "stop" ? "Stopping…" : "Stop"}
-            </Button>
-          )}
-          {running && (
-            <Button asChild size="sm" className="bg-blue-600 text-white hover:bg-blue-700">
-              <a href={driveUrl} target="_blank" rel="noopener noreferrer">Open ↗</a>
-            </Button>
-          )}
-        </div>
-      </div>
-      <p className="text-sm text-muted-foreground">
-        File browser and shared-data UI, installed with the core.
-      </p>
-    </div>
+          {online === false && <Badge variant="outline" className="text-xs">Stopped</Badge>}
+        </>
+      }
+      primary={
+        running ? (
+          <Button asChild size="sm" className={ACTION_OPEN}>
+            <a href={driveUrl} target="_blank" rel="noopener noreferrer">Open Drive ↗</a>
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            className={ACTION_START}
+            onClick={() => transition("start")}
+            disabled={busy}
+          >
+            {pending === "start" && (
+              <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            )}
+            {pending === "start" ? "Starting Drive…" : "Start Drive"}
+          </Button>
+        )
+      }
+    />
   );
 }
