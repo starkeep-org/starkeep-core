@@ -20,12 +20,6 @@ However, there are some significant known limitations, making Starkeep probably 
 - Starkeep does not yet support non-default Lambda concurrency limits (i.e. beyond the new account default limit of 10). This is because increasing that limit requires making a request to Amazon and could complicate the setup, which we wanted to keep as simple as possible. We'll sort this out soon.
 - The apps - essentially Drive (built-in) and Photos (installable) - are mostly bare bones proof-of-concept level and lack the features you'd likely need to use these apps as real replacements for, say, your current Photos app. We'll get there!
 
-## Changelog
-
-### 2026-07-29
-
-- **Cross-app labels.** Apps can now make attributed, set-valued assertions about shared records they only hold a read grant on — `alpha/ocr-available` or `photos/faces=Alice` — stored in their own table and queryable by any app that can read the record's type. Labels carry the asserting app's identity, so two apps disagreeing about the same photo is representable rather than a conflict, and they sync between local and cloud over Drive's channel alongside the records themselves. See the labels discussion in [`system-design.md`](system-design.md).
-
 ## Overview
 
 The Starkeep Core repo includes four built-in system apps:
@@ -74,32 +68,31 @@ The admin app is meant to be opened from the same machine (`http://localhost:300
 
 ### 3. Start the local data-server
 
-The data-server is the on-device hub for all data operations: every app on the machine shares its database, type registry, and (later) sync connection. From the admin **Dashboard**, start the **local-data-server** daemon. It listens on port **9820**.
+The data-server is the on-device hub for all data operations: every app on the machine shares its database, type registry, and (later) sync connection. In the **Local** column of the admin console, find the **Data Server** card and click **Start Data Server**. The data-server listens on port **9820**.
 
 The data-server creates `~/.starkeep/` on first boot (SQLite db, object store, config with a generated `nodeId`). Set `STARKEEP_DIR` to relocate it.
 
-### 4. Add files via a watched folder
+### 4. Add files from a local folder
 
-The local data server can watch a directory and index files dropped into it. 
+A local folder is a directory on this machine the data server indexes and keeps current. Every file under a local folder becomes a record other apps can see, and the data server picks up additions and changes as they happen.
 
-Create a folder, drop a few files into it (any mix of images and other types). Then add the folder location under Watches in the Local Data Server section of the Admin app.
+Create a folder and drop a few files into it (any mix of images and other types). On the **Data Server** card, click **Add Local Folder** — the button reads **Manage Local Folders** once at least one folder exists. Enter the path in the **Local folders** dialog and click **Add folder**. The card then summarizes progress as a folder count and a file count, for example `1 folder · 12/12 files`.
 
 ### 5. Start the Drive app and confirm the files landed
 
-Drive is the built-in, general-purpose storage app that can see and sync every file type. From the admin **Dashboard**, start and then open **Drive**. The files you dropped into the watched folder should appear as records, confirming the data-server indexed them. 
+Drive is the built-in, general-purpose storage app and can see and sync every file type. On the **Starkeep Drive** card, click **Start Drive**, then click **Open Drive ↗**. The files you dropped into the local folder appear as records, confirming the data-server indexed them.
 
 ### 6. Install the Photos app locally
 
-Apps are discovered from directories you register with the admin panel. `starkeep-apps/`  is seeded by default.
+Apps are discovered from parent directories you register with the admin console. Each subdirectory holding a `starkeep.manifest.json` counts as an app. `starkeep-apps/` is registered by default.
 
-1. Open the **Dashboard** in admin-web.
-2. If Photos isn't listed, make sure you have a local checkout of the `starkeep-apps` repo. Use the **App discovery** card to add the parent directory that contains it (e.g. the absolute path to `starkeep-apps/`).
-3. Run `pnpm install` in the `starkeep-apps` checkout — installed apps run out of their source checkout, so their dependencies must be installed before the app can start.
-4. Click **Install** on the Photos card. Admin reads and validates the app's `starkeep.manifest.json`, prompts you to approve the file-type grants it requests, and registers the app with the data-server.
+1. If Photos isn't listed, make sure you have a local checkout of the `starkeep-apps` repo. Click **Discover apps** in the header and add the absolute path to `starkeep-apps/` in the **App discovery** dialog.
+2. Run `pnpm install` in the `starkeep-apps` checkout — installed apps run out of their source checkout, so their dependencies must be installed before the app can start.
+3. Click **Install Photos** on the Photos card. Admin reads and validates the app's `starkeep.manifest.json`, prompts you to approve the file-type grants it requests, and registers the app with the data-server.
 
 ### 7. Start the Photos app
 
-From the **Dashboard**, start Photos and then open it by clicking the link. For now, the photos app is an example app primarily meant to showcase Starkeep's system functionality.
+On the Photos card, click **Start Photos**, then click **Open Photos ↗**. For now, the photos app is an example app primarily meant to showcase Starkeep's system functionality.
 
 ---
 
@@ -107,7 +100,7 @@ From the **Dashboard**, start Photos and then open it by clicking the link. For 
 
 The cloud path provisions a data plane in **your own AWS account** and turns on sync, so the same data is available across machines. Local install is not a prerequisite for cloud, but it's the easiest way to confirm the apps work before adding AWS.
 
-The admin panel's **Cloud Setup Wizard** drives this whole sequence.
+The admin console's **Cloud Setup Wizard** drives steps 1 through 5. Reach the wizard from the **Deploy Starkeep Cloud** button under the **Cloud** heading, and afterwards from **Manage deployment…** in the cloud **Data Server** card's menu. Step 6 happens back on the console, in the **Cloud** column.
 
 ### 1. Deploy the bootstrap stack
 
@@ -125,7 +118,7 @@ This is the account you'll use to sign in to your Starkeep.
 
 You'll need to update the temp password.
 
-### 5. Install the Starkeep Cloud Data Server
+### 5. Deploy Starkeep cloud
 
 The cloud data server enables cloud backup and sync, and is the only service in the cloud that touches shared data — every app request runs under the calling app's assumed identity.
 
@@ -133,11 +126,9 @@ With the Cloud Data Server installed, sync starts working automatically. Open th
 
 ### 6. Install the Photos example app to the cloud
 
-The Photos cloud app is a simple proof of concept. Install, then sign in to see your photos in the cloud.
+The Photos cloud app is a simple proof of concept. On the Photos card in the **Cloud** column, click **Install Photos in cloud**, then click **Open Photos ↗** and sign in to see your photos in the cloud. The card is only populated once the `starkeep-apps` checkout is registered, as described in Part A step 6.
 
-Note: you need to checkout the sister repo `starkeep-apps` to get the Photos
-
-### 5. Sync
+### 7. Sync
 
 Once cloud config and Cognito credentials are present, the local data-server syncs automatically in the background — pulling remote changes on an interval and pushing local changes shortly after they occur. Shared records (your photos) flow over Drive's channel and show up on any other device signed into the same account, even one running a different app that holds an image grant. No manual trigger is needed.
 
@@ -173,7 +164,7 @@ A companion breadth-first evaluation against the OWASP ASVS 5.0 standard — eve
 starkeep-core/
   apps/
     admin-web/           Admin panel — the command center for setup, install, and status
-    local-data-server/   On-device data broker (HTTP); embeds the SDK, runs sync + file watches
+    local-data-server/   On-device data broker (HTTP); embeds the SDK, runs sync + watches local folders
     drive/               Starkeep Drive UI — the built-in User-Data-Owner app
   packages/              SDK, storage adapters, sync engine, access control, installer, bootstrap, …
     admin-installer/builtin-apps/
