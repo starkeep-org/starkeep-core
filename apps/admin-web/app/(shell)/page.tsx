@@ -505,6 +505,11 @@ export default function DashboardPage() {
               {/* The cloud Data Server card's View Costs button targets this. */}
               <div id="costs" className="flex flex-col gap-2 scroll-mt-4">
                 <h3 className="font-medium">Costs</h3>
+                {/* The report bills the whole AWS account, not the stack, so a
+                    number here can come from something Starkeep never created. */}
+                <p className="text-xs text-muted-foreground">
+                  Includes both Starkeep and non-Starkeep service costs.
+                </p>
 
                 <div className="rounded-lg border p-4">
                   {costs === "loading" ? (
