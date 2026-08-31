@@ -41,6 +41,7 @@ import { LocalAppsSection } from "../../src/components/LocalAppsSection";
 import { CloudAppsSection } from "../../src/components/CloudAppsSection";
 import { PairedDevicesSection } from "../../src/components/PairedDevicesSection";
 import { LocalFoldersModal, type Watch } from "../../src/components/LocalFoldersModal";
+import { CommandOutputModal } from "../../src/components/CommandOutputModal";
 import { targetsOf, type LocalAppEntry } from "../../src/lib/app-types";
 import {
   initiateAuth,
@@ -108,6 +109,12 @@ export default function DashboardPage() {
 
   // Watch management modal
   const [foldersOpen, setFoldersOpen] = useState(false);
+
+  // Clearing local data. Only reachable while the data server is stopped: the
+  // reset script deletes the object files, the SQLite database, and the watch
+  // configs out from under a running server.
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [clearOutputOpen, setClearOutputOpen] = useState(false);
 
   // Sign-in modal
   const [signInOpen, setSignInOpen] = useState(false);
@@ -435,7 +442,15 @@ export default function DashboardPage() {
                             destructive: true,
                           },
                         ]
-                      : []
+                      : localOnline === false
+                        ? [
+                            {
+                              label: "Clear local data…",
+                              onSelect: () => setClearConfirmOpen(true),
+                              destructive: true,
+                            },
+                          ]
+                        : []
                   }
                   primary={
                     localOnline === true ? (
@@ -609,6 +624,36 @@ export default function DashboardPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Clear local data — the one destructive action in the console, offered
+          only from the stopped Data Server card's menu. */}
+      <Dialog open={clearConfirmOpen} onOpenChange={setClearConfirmOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Clear local data</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            This will permanently delete all local object files, the SQLite database, and
+            watch configs on this machine. Cloud data is untouched.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setClearConfirmOpen(false)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={() => { setClearConfirmOpen(false); setClearOutputOpen(true); }}
+            >
+              Confirm
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <CommandOutputModal
+        opened={clearOutputOpen}
+        onClose={() => { setClearOutputOpen(false); bumpAll(); }}
+        commandId={clearOutputOpen ? "reset-local-data" : null}
+        title="Clear local data"
+      />
 
       {/* Local folders */}
       <LocalFoldersModal
