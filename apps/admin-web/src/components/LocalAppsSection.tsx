@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -10,10 +10,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
+import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 import { localDataServerUrl } from "@/lib/runtime-config";
 import type { DaemonStatus, InstallStep, LocalAppEntry } from "@/lib/app-types";
 
-export function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | null; refresh: () => Promise<void>; }) {
+export function LocalAppsSection({ apps, refresh, leading }: {
+  apps: LocalAppEntry[] | null;
+  refresh: () => Promise<void>;
+  /** Cards rendered ahead of the discovered apps — the built-in Drive. */
+  leading?: ReactNode;
+}) {
   const [error, setError] = useState<string | null>(null);
   const [pendingConsent, setPendingConsent] = useState<LocalAppEntry | null>(null);
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
@@ -193,111 +200,126 @@ export function LocalAppsSection({ apps, refresh }: { apps: LocalAppEntry[] | nu
         <p className="text-sm text-muted-foreground">No local apps found.</p>
       )}
 
-      {apps?.map((entry) => {
-        const installed = entry.status === "active";
-        const status = runStatus[entry.appId];
-        const want = pending[entry.appId];
-        const running = status?.running === true;
-        const port = status?.port;
-        const busy = !!want;
-        return (
-          <div key={entry.appId} className="rounded-md border p-3 flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <span className="font-medium">{entry.manifest.name ?? entry.appId}</span>
-                <span className="text-xs text-muted-foreground">v{entry.manifest.version ?? "?"}</span>
-                {installed && (
-                  <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-                    Installed
-                  </Badge>
-                )}
-                {installed && running && port && (
-                  <a
-                    href={`http://localhost:${port}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={`Open http://localhost:${port}`}
-                  >
-                    <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 hover:bg-blue-200 dark:hover:bg-blue-800 cursor-pointer">
-                      Running :{port} ↗
+      <AppCardGrid>
+        {leading}
+        {apps?.map((entry) => {
+          const name = entry.manifest.name ?? entry.appId;
+          const installed = entry.status === "active";
+          const status = runStatus[entry.appId];
+          const want = pending[entry.appId];
+          const running = status?.running === true;
+          const port = status?.port;
+          const busy = !!want;
+          const installBusy = busyAppId === entry.appId;
+
+          // One primary button per state: install what is not installed, start
+          // what is stopped, open what is running. Everything else — stopping,
+          // uninstalling, reading the install ledger — sits in the menu.
+          const actions: AppCardAction[] = [];
+          if (installed && running) {
+            actions.push({
+              label: want === "stop" ? "Stopping…" : "Stop",
+              onSelect: () => handleStop(entry.appId),
+              disabled: busy,
+            });
+          }
+          if (installed) {
+            actions.push({
+              label: "Install steps…",
+              onSelect: () => setStepsOpenFor(entry.appId),
+            });
+            actions.push({
+              label: installBusy ? "Uninstalling…" : "Uninstall",
+              onSelect: () => handleUninstall(entry),
+              disabled: installBusy || running || busy,
+              destructive: true,
+              title: running ? "Stop the app before uninstalling" : undefined,
+            });
+          }
+
+          return (
+            <AppCard
+              key={entry.appId}
+              name={name}
+              version={entry.manifest.version ?? "?"}
+              description={entry.manifest.description}
+              actions={actions}
+              badges={
+                <>
+                  {installed && (
+                    <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                      Installed
                     </Badge>
-                  </a>
-                )}
-                {installed && !running && want === "start" && (
-                  <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
-                    Starting…
-                  </Badge>
-                )}
-                {installed && running && want === "stop" && (
-                  <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
-                    Stopping…
-                  </Badge>
-                )}
-              </div>
-              <div className="flex gap-2 items-center">
-                {installed && (
+                  )}
+                  {installed && running && port && (
+                    <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+                      Running :{port}
+                    </Badge>
+                  )}
+                  {installed && !running && want === "start" && (
+                    <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                      Starting…
+                    </Badge>
+                  )}
+                  {installed && running && want === "stop" && (
+                    <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                      Stopping…
+                    </Badge>
+                  )}
+                  {!installed && (
+                    <Badge variant="outline" className="text-xs">Not installed</Badge>
+                  )}
+                </>
+              }
+              primary={
+                !installed ? (
+                  <span className="block" title={localOnline ? undefined : "Start the local data server before installing"}>
+                    <Button
+                      size="sm"
+                      className={ACTION_OCCASIONAL}
+                      onClick={() => setPendingConsent(entry)}
+                      disabled={installBusy || !localOnline}
+                    >
+                      {installBusy ? `Installing ${name}…` : `Install ${name}`}
+                    </Button>
+                  </span>
+                ) : running ? (
+                  // A running app without a reported port has no address to
+                  // open, so the button stays in place and explains itself
+                  // rather than disappearing.
+                  port ? (
+                    <Button asChild size="sm" className={ACTION_OPEN}>
+                      <a href={`http://localhost:${port}`} target="_blank" rel="noopener noreferrer">
+                        Open {name} ↗
+                      </a>
+                    </Button>
+                  ) : (
+                    // The title sits on the wrapper because a disabled button
+                    // swallows the hover that would raise the tooltip.
+                    <span className="block" title="No port found. Stop and restart to fix">
+                      <Button size="sm" className={ACTION_OPEN} disabled>
+                        Open {name} ↗
+                      </Button>
+                    </span>
+                  )
+                ) : (
                   <Button
                     size="sm"
-                    variant="outline"
-                    className="border-red-200 bg-red-50 text-red-700 hover:bg-red-100 hover:text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300 dark:hover:bg-red-900"
-                    onClick={() => handleUninstall(entry)}
-                    disabled={busyAppId === entry.appId || running || busy}
-                    title={running ? "Stop the app before uninstalling" : undefined}
-                  >
-                    {busyAppId === entry.appId ? "Uninstalling…" : "Uninstall"}
-                  </Button>
-                )}
-                {installed && !running && (
-                  <Button
-                    size="sm"
-                    className="bg-blue-600 text-white hover:bg-blue-700"
+                    className={ACTION_START}
                     onClick={() => handleStart(entry.appId)}
                     disabled={busy}
                   >
                     {want === "start" && (
                       <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
                     )}
-                    {want === "start" ? "Starting…" : "Start"}
+                    {want === "start" ? `Starting ${name}…` : `Start ${name}`}
                   </Button>
-                )}
-                {installed && running && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => handleStop(entry.appId)}
-                    disabled={busy}
-                  >
-                    {want === "stop" && (
-                      <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                    )}
-                    {want === "stop" ? "Stopping…" : "Stop"}
-                  </Button>
-                )}
-                {!installed && (
-                  <Button
-                    size="sm"
-                    onClick={() => setPendingConsent(entry)}
-                    disabled={busyAppId === entry.appId || !localOnline}
-                    title={localOnline ? undefined : "Start the local data server before installing"}
-                  >
-                    {busyAppId === entry.appId ? "Installing…" : "Install"}
-                  </Button>
-                )}
-                {installed && running && port && (
-                  <Button asChild size="sm" className="bg-blue-600 text-white hover:bg-blue-700">
-                    <a href={`http://localhost:${port}`} target="_blank" rel="noopener noreferrer">
-                      Open ↗
-                    </a>
-                  </Button>
-                )}
-              </div>
-            </div>
-            {entry.manifest.description && (
-              <p className="text-sm text-muted-foreground">{entry.manifest.description}</p>
-            )}
-          </div>
-        );
-      })}
+                )
+              }
+            />
+          );
+        })}
+      </AppCardGrid>
 
       {pendingConsent && (
         <ConsentModal
@@ -354,7 +376,7 @@ function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose:
 
   return (
     <Dialog open={opened} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Install steps for {appId ?? "app"}</DialogTitle>
         </DialogHeader>

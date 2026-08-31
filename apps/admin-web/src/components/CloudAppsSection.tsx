@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -18,9 +18,15 @@ import {
   writeCognitoSession,
 } from "@/lib/cloud-config";
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
+import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
+import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
 import type { LocalAppEntry } from "@/lib/app-types";
 
-export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
+export function CloudAppsSection({ apps, leading }: {
+  apps: LocalAppEntry[] | null;
+  /** Cards rendered ahead of the discovered apps — the built-in Data Server. */
+  leading?: ReactNode;
+}) {
   const [browserBaseUrl, setBrowserBaseUrl] = useState<string | null>(null);
   // null = config not yet read; false = no usable cloud setup (missing config
   // or region), which gates installs. The cloud Data Server card above surfaces
@@ -126,59 +132,74 @@ export function CloudAppsSection({ apps }: { apps: LocalAppEntry[] | null }) {
         <p className="text-sm text-muted-foreground">No cloud apps found.</p>
       )}
 
-      {apps?.map((entry) => {
-        const name = entry.manifest.name ?? entry.appId;
-        // Cloud install is generic: any app discovered with a "cloud" target is
-        // installable via the per-appId route, which drives the app's own
-        // `bundle` script. No hardcoded installer registry.
-        const endpoint = `/api/apps/${entry.appId}/cloud-install`;
-        const url = browserBaseUrl ? `${browserBaseUrl}/apps/${entry.appId}/` : null;
-        // `installedIds === null` means the registry hasn't been read yet
-        // (user not signed in, cloud not set up, or the read errored). In
-        // that case render no "Installed" badge rather than guessing.
-        const installed = installedIds !== null && installedIds.has(entry.appId);
-        return (
-          <div key={entry.appId} className="rounded-md border p-3 flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <span className="font-medium">{name}</span>
-                <span className="text-xs text-muted-foreground">v{entry.manifest.version ?? "?"}</span>
-                {installed && (
+      <AppCardGrid>
+        {leading}
+        {apps?.map((entry) => {
+          const name = entry.manifest.name ?? entry.appId;
+          // Cloud install is generic: any app discovered with a "cloud" target is
+          // installable via the per-appId route, which drives the app's own
+          // `bundle` script. No hardcoded installer registry.
+          const endpoint = `/api/apps/${entry.appId}/cloud-install`;
+          const url = browserBaseUrl ? `${browserBaseUrl}/apps/${entry.appId}/` : null;
+          // `installedIds === null` means the registry hasn't been read yet
+          // (user not signed in, cloud not set up, or the read errored). In
+          // that case render no "Installed" badge rather than guessing.
+          const installed = installedIds !== null && installedIds.has(entry.appId);
+
+          // An installed app opens; anything else deploys. Redeploy is the
+          // secondary action once a deployment already exists.
+          const actions: AppCardAction[] = [];
+          if (installed) {
+            actions.push({
+              label: `Redeploy ${name}`,
+              onSelect: () => handleInstall(entry.appId, name, endpoint),
+              disabled: !cloudReady,
+              title: cloudReady ? undefined : "Set up cloud before installing apps",
+            });
+          }
+
+          return (
+            <AppCard
+              key={entry.appId}
+              name={name}
+              version={entry.manifest.version ?? "?"}
+              description={entry.manifest.description}
+              actions={actions}
+              badges={
+                installed ? (
                   <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
                     Installed
                   </Badge>
-                )}
-              </div>
-              <div className="flex gap-2 items-center">
-                <Button
-                  variant="link"
-                  size="sm"
-                  onClick={() => handleInstall(entry.appId, name, endpoint)}
-                  disabled={!cloudReady}
-                  title={cloudReady ? undefined : "Set up cloud before installing apps"}
-                >
-                  {installed ? "Redeploy" : "Install in cloud"}
-                </Button>
-                {url && (
-                  <Button asChild size="sm">
+                ) : (
+                  <Badge variant="outline" className="text-xs">Not installed</Badge>
+                )
+              }
+              primary={
+                installed && url ? (
+                  <Button asChild size="sm" className={ACTION_OPEN}>
                     <a href={url} target="_blank" rel="noopener noreferrer" title={url}>
-                      Open ↗
+                      Open {name} ↗
                     </a>
                   </Button>
-                )}
-              </div>
-            </div>
-            {entry.manifest.description && (
-              <p className="text-sm text-muted-foreground">{entry.manifest.description}</p>
-            )}
-            {url && (
-              <p className="text-xs text-muted-foreground break-all">
-                URL: <a href={url} target="_blank" rel="noopener noreferrer" className="underline">{url}</a>
-              </p>
-            )}
-          </div>
-        );
-      })}
+                ) : (
+                  // The title sits on the wrapper because a disabled button
+                  // swallows the hover that would raise the tooltip.
+                  <span className="block" title={cloudReady ? undefined : "Set up cloud before installing apps"}>
+                    <Button
+                      size="sm"
+                      className={ACTION_OCCASIONAL}
+                      onClick={() => handleInstall(entry.appId, name, endpoint)}
+                      disabled={!cloudReady}
+                    >
+                      Install {name} in cloud
+                    </Button>
+                  </span>
+                )
+              }
+            />
+          );
+        })}
+      </AppCardGrid>
 
       <CloudAppInstallModal
         opened={installing !== null}
@@ -292,7 +313,7 @@ function CloudAppInstallModal({
 
   return (
     <Dialog open={opened} onOpenChange={(open) => { if (!open && status !== "running") onClose(); }}>
-      <DialogContent className="max-w-4xl">
+      <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>Install {appName ?? "app"} in cloud</DialogTitle>
         </DialogHeader>

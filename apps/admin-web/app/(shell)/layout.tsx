@@ -2,49 +2,15 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
-import { cn } from "@/lib/utils";
+import { AppDiscovery } from "../../src/components/AppDiscovery";
 import {
   readCloudConfig,
   readCognitoSession,
   writeCloudCredentials,
 } from "../../src/lib/cloud-config";
 import { startCredentialRefreshTimer } from "../../src/lib/cognito-auth";
-
-const NAV_ITEMS = [
-  { href: "/", label: "Dashboard" },
-  { href: "/storage", label: "Storage" },
-  { href: "/settings", label: "Cloud Setup" },
-];
-
-function AppNavbar() {
-  const pathname = usePathname();
-
-  return (
-    <nav className="flex flex-col gap-1 p-3">
-      {NAV_ITEMS.map(({ href, label }) => {
-        const active = pathname === href;
-        return (
-          <Link
-            key={href}
-            href={href}
-            className={cn(
-              "rounded-md px-3 py-2 text-sm font-medium transition-colors",
-              active
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-            )}
-          >
-            {label}
-          </Link>
-        );
-      })}
-    </nav>
-  );
-}
 
 function ShellGate({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
@@ -86,26 +52,18 @@ function ShellGate({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-screen flex-col">
       {/* Header */}
-      <header className="flex h-14 items-center border-b px-4 shrink-0">
-        <div className="flex items-center gap-2">
+      <header className="flex h-14 items-center justify-between border-b px-6 shrink-0">
+        <Link href="/" className="flex items-center gap-2">
           <span className="font-semibold">Starkeep Admin</span>
           <Badge variant="secondary" className="text-xs">Web</Badge>
-        </div>
+        </Link>
+        <AppDiscovery />
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        <aside className="w-52 shrink-0 border-r overflow-y-auto">
-          <AppNavbar />
-        </aside>
-
-        <Separator orientation="vertical" className="h-full" />
-
-        {/* Main content */}
-        <main className="flex-1 overflow-y-auto p-6">
-          {children}
-        </main>
-      </div>
+      {/* The ground is a shade off the card color, so cards read as cards. */}
+      <main className="flex-1 overflow-y-auto bg-surface p-6">
+        {children}
+      </main>
     </div>
   );
 }
