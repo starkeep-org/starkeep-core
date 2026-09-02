@@ -670,22 +670,6 @@ function makeAdapters(appId: string, creds: CachedCreds) {
   return { db, storage, clientFactory, auroraEndpoint, region };
 }
 
-// Seed the cloud HLC clock from the highest cloud-stamped timestamp visible
-// to this request's app role. Serialized HLCs sort lexically because the
-// wall-time and counter components are zero-padded hex (see serializeHLC).
-// Records with no cloud-stamped row return ZERO state; the wall clock will
-// dominate going forward.
-//
-// Fragile invariant: the seed query is filtered by the caller's per-extension
-// read grants (rows the assumed app role can SELECT). HLC correctness under
-// LWW relies on "rows this request can affect" ⊆ "rows the seed reads". Today
-// the only cloud-side write path is DELETE /data/records/{id} (tombstone),
-// and an app can only delete rows of types it has write grants on — which
-// implies it can also read them, so the set inclusion holds. If a future
-// cloud write path is added that touches rows the caller cannot also SELECT
-// (e.g. an admin endpoint, a cross-type cleanup pass, a sharing-token op),
-// this seed will underestimate the true cloud max and let the new write
-// mint a stamp lower than an existing cloud stamp on the same record.
 // Per-Lambda-instance nodeId. The HLC clock requires nodeId to be unique
 // per replica — using a literal "cloud" let two warm Lambda containers mint
 // timestamps with the same (wallTime, counter, nodeId), violating ordering.
@@ -696,7 +680,69 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 // any cloud replica's max stamp, regardless of which instance wrote it.
 const CLOUD_NODE_ID = `cloud-${process.env.AWS_LAMBDA_LOG_STREAM_NAME ?? randomUUID()}`;
 
-async function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
+/**
+ * The container's one clock, built on first use and reused for its lifetime.
+ *
+ * **One instance per node id, and the memo is what makes that true.** An HLC's
+ * guarantee — that one author's timestamps are a total order with no duplicates
+ * — holds only while a single instance issues them, and `CLOUD_NODE_ID` is
+ * stable for the life of an execution environment. Building a clock per request
+ * meant every invocation in a warm container minted stamps under that one
+ * identity from a fresh instance, which is two clocks under one author however
+ * many milliseconds apart they run.
+ *
+ * The DB seed does not rescue that, because it reads `shared.records` alone. A
+ * request that writes only labels (`shared.record_labels`) or only app-syncable
+ * rows advances no record, so the next request seeds from a timestamp older
+ * than what its predecessor already emitted and can re-mint a value already on
+ * a row. A duplicated timestamp is the one thing a coverage watermark cannot
+ * represent: it names an HLC, so the second row carrying it is unreachable.
+ *
+ * Seeding once per container is therefore both cheaper and stronger — after the
+ * seed the instance maintains monotonicity itself, across every table, with no
+ * dependence on which tables the seed query happens to cover.
+ *
+ * The promise is memoized rather than the resolved clock so that concurrent
+ * callers share one instance. Lambda serves one invocation per environment at a
+ * time, so this is belt-and-braces, but "two clocks because two callers raced
+ * the memo" is precisely the bug being removed and should not be reachable by
+ * construction. A failed seed is not cached — the next request retries rather
+ * than inheriting a rejected promise forever.
+ */
+let cloudClockPromise: Promise<HLCClock> | null = null;
+
+function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
+  if (!cloudClockPromise) {
+    cloudClockPromise = seedCloudClock(client).catch((err: unknown) => {
+      cloudClockPromise = null;
+      throw err;
+    });
+  }
+  return cloudClockPromise;
+}
+
+// Seed the cloud HLC clock from the highest cloud-stamped timestamp visible
+// to the app role of the request that builds it. Serialized HLCs sort lexically
+// because the wall-time and counter components are zero-padded hex (see
+// serializeHLC). Records with no cloud-stamped row return ZERO state; the wall
+// clock will dominate going forward.
+//
+// The seed runs once per container, not once per request — see the note on
+// makeCloudClock for why one instance per node id is the property that matters.
+// That narrows what the seed is responsible for. It corrects a cold start whose
+// wall clock sits behind stamps already on rows; after it, the single instance
+// keeps its own output monotonic across every table without consulting the
+// database again.
+//
+// What remains fragile is which rows that one seed can see. The query is
+// filtered by the seeding caller's per-extension read grants (rows the assumed
+// app role can SELECT), so an underestimate is possible when the first request
+// in a container has narrower grants than a later one. It is bounded: an
+// underestimate only bites when the container's wall clock is *also* behind the
+// existing stamps, because Date.now() otherwise dominates immediately. Widening
+// the seed beyond shared.records would not remove that bound, which is why it
+// is not worth the extra queries.
+async function seedCloudClock(client: DatabaseClient): Promise<HLCClock> {
   const seedQuery = postgresCompiler
     .selectFrom("shared.records")
     .select("updated_at")
