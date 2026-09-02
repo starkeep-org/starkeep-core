@@ -12,7 +12,7 @@ import {
   DEFAULT_BUCKET_PREFIX_LENGTH,
   type DigestBucket,
 } from "../database/digest-queries.js";
-import type { SincePage } from "../database/since-queries.js";
+import { trimToHlcBoundary, type SincePage } from "../database/since-queries.js";
 import type {
   Query,
   QueryResult,
@@ -519,6 +519,14 @@ function isOwed(hlc: HLCTimestamp, peerWatermarks: Record<string, HLCTimestamp>)
  * Authors that are cut short are reported in `truncated` with the last row
  * actually returned, which is what lets the caller cut a shipment that stays a
  * contiguous prefix across every stream. See `sync-engine/src/round-cut.ts`.
+ *
+ * The share is trimmed back to an HLC boundary first, for the reason
+ * `trimToHlcBoundary` gives: a ceiling names a timestamp, so a slice landing
+ * inside a run of rows sharing one HLC cannot be reported as a ceiling without
+ * stranding the rest of that run forever. Where the SQL path has to widen its
+ * read to get past a run longer than the share, this one already holds the
+ * whole bucket and simply takes the run entire — the same outcome, reached
+ * without the extra queries.
  */
 function pageByNode<T>(
   items: T[],
@@ -545,9 +553,22 @@ function pageByNode<T>(
   let hasMore = false;
   for (const nodeId of nodeIds) {
     const bucket = byNode.get(nodeId)!.sort((a, b) => compareHLC(hlcOf(a), hlcOf(b)));
-    const kept = bucket.slice(0, share);
-    for (const item of kept) rows.push(structuredClone(item));
+    let kept = bucket.slice(0, share);
     if (bucket.length > share) {
+      kept = trimToHlcBoundary(kept, hlcOf(bucket[share]!), hlcOf);
+      if (kept.length === 0) {
+        // The whole share is one timestamp. Take the run to its end rather than
+        // report a ceiling that would split it — the alternative is an author
+        // that can never advance.
+        let end = share;
+        while (end < bucket.length && compareHLC(hlcOf(bucket[end]!), hlcOf(bucket[0]!)) === 0) {
+          end += 1;
+        }
+        kept = bucket.slice(0, end);
+      }
+    }
+    for (const item of kept) rows.push(structuredClone(item));
+    if (kept.length < bucket.length) {
       truncated[nodeId] = hlcOf(kept[kept.length - 1]!);
       hasMore = true;
     }

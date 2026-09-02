@@ -412,6 +412,56 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
   },
 
   {
+    // A ceiling names an HLC, and one author's HLC can cover many rows — a
+    // batch of labels is stamped with a single `clock.now()`. Report a ceiling
+    // inside such a run and the peer lifts its watermark to that exact value,
+    // after which `selectUnseen`, which asks for strictly more, can never offer
+    // the rest of the run again. Silent and permanent.
+    name: "never reports a ceiling that splits one timestamp",
+    async run(h) {
+      // Four rows at wall time 5, then one above it. Any limit that binds
+      // inside the run of four must not name 5 as the ceiling.
+      for (const id of ["r1", "r2", "r3", "r4"]) {
+        await h.applier.apply(insertEntry(h, id, hlc(5)));
+      }
+      await h.applier.apply(insertEntry(h, "r5", hlc(9)));
+
+      for (const limit of [1, 2, 3, 4]) {
+        const page = await h.applier.scanSince(h.appId, h.table, {}, limit);
+        const mark = page.truncated[AUTHOR];
+        if (mark == null) continue; // complete enumeration imposes no ceiling
+        if (mark.wallTime === 5) {
+          fail(
+            `limit ${limit} named 5 as a ceiling, but 5 covers four rows and ` +
+              `only ${page.rows.length} were returned — the rest become unreachable`,
+          );
+        }
+      }
+    },
+  },
+
+  {
+    // The companion to the case above: refusing to split the run must not turn
+    // into refusing to move. An author whose next timestamp is wider than the
+    // whole budget still has to drain, so the scan overruns rather than
+    // returning a page that can never grow.
+    name: "still advances when one timestamp is wider than the limit",
+    async run(h) {
+      for (const id of ["r1", "r2", "r3", "r4"]) {
+        await h.applier.apply(insertEntry(h, id, hlc(5)));
+      }
+      const page = await h.applier.scanSince(h.appId, h.table, {}, 2);
+      if (page.rows.length === 0) {
+        fail("a limit smaller than the run returned nothing, so the author can never advance");
+      }
+      const mark = page.truncated[AUTHOR];
+      if (mark !== undefined && mark !== null && mark.wallTime === 5) {
+        fail("the whole run was the author's history, so it is complete, not capped at 5");
+      }
+    },
+  },
+
+  {
     name: "claims no ceiling when it enumerated everything",
     async run(h) {
       await seed(h, ["r1", "r2"]);

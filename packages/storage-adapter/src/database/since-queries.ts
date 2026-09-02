@@ -114,8 +114,16 @@ export function planNodeScans(
  *
  * `updated_at` is a serialized HLC — fixed-width hex wall time, then counter,
  * then nodeId — so lexicographic order is HLC order and a plain string
- * comparison is a correct range bound. Within one author it is also unique, so
- * no tiebreaker column is needed.
+ * comparison is a correct range bound.
+ *
+ * It is **not** unique within one author, which is the trap. A record carries
+ * its own tick, but a batch of labels is stamped with a *single* `clock.now()`
+ * shared by every row in it (`sdk.setLabels` and its siblings, up to 3,000 rows
+ * per chunk), so a run of rows comparing exactly equal is the normal case here
+ * rather than a collision. Ordering is therefore stable but the position within
+ * a run is not, and nothing may treat "the last row I read" as a point the
+ * author's history can be divided at. {@link collectSince} is what enforces
+ * that.
  */
 export function buildScanSinceForNode(
   k: Kysely<SinceDb>,
@@ -146,11 +154,45 @@ export function buildScanSinceForNode(
  * - absent entry → this stream enumerated that author completely; no ceiling.
  * - `HLCTimestamp` → complete only up to and including that row.
  * - `null` → the author was not read at all; nothing is safe to ship for it.
+ *
+ * "Complete up to and including that row" is a claim about a *timestamp*, not
+ * about a row, because that is the only unit the receiver's watermark can
+ * address. See {@link trimToHlcBoundary}.
  */
 export interface SincePage<TRow> {
   readonly rows: TRow[];
   readonly hasMore: boolean;
   readonly truncated: Record<string, HLCTimestamp | null>;
+}
+
+/**
+ * Cut a truncated page back to a point that is safe to name as a ceiling.
+ *
+ * A scan stops after N rows, but a ceiling names an HLC, and one author's HLC
+ * can cover many rows. Report the last row read as the ceiling when the row
+ * after it carries the *same* HLC and the claim is false in the way that loses
+ * data permanently: the peer applies the rows it got, lifts its watermark to
+ * that HLC, and `selectUnseen` asks for strictly more forever after. The rows
+ * on the far side of the split are not deferred, they are unreachable.
+ *
+ * So this drops every trailing row sharing an HLC with `nextHlc` — the first
+ * row the scan did *not* return — leaving a page whose last row ends a complete
+ * run. Dropping them costs nothing: the peer's watermark never advances past
+ * them, so the next round selects them again from the top.
+ *
+ * An empty result means the whole page is one timestamp and the caller has not
+ * read all of it yet. There is no safe ceiling to report in that case and no
+ * amount of trimming produces one — the caller has to widen its read until the
+ * run ends, or the author never advances.
+ */
+export function trimToHlcBoundary<TRow>(
+  kept: readonly TRow[],
+  nextHlc: HLCTimestamp,
+  hlcOf: (row: TRow) => HLCTimestamp,
+): TRow[] {
+  let end = kept.length;
+  while (end > 0 && compareHLC(hlcOf(kept[end - 1]!), nextHlc) === 0) end -= 1;
+  return kept.slice(0, end);
 }
 
 /**
@@ -173,6 +215,22 @@ export interface SincePage<TRow> {
  *
  * Rows left behind are not an error and not a cursor: the peer's watermark has
  * not advanced past them, so the next round selects them again from the top.
+ *
+ * ## The share is a hint, the HLC boundary is not
+ *
+ * An author's slice can land in the middle of a run of rows sharing one HLC,
+ * and a ceiling naming that HLC would be a false claim — see
+ * {@link trimToHlcBoundary}. The page is therefore trimmed back to the end of
+ * the previous run before its ceiling is reported.
+ *
+ * When trimming empties the page the entire slice was one timestamp, and no
+ * ceiling can be named without reading further. Trimming again would return
+ * nothing on every subsequent round too, so that author would never advance.
+ * The read widens instead, doubling until the run ends, and the author's page
+ * overruns its share by however much that costs. This is the same trade
+ * `cutRound` makes when it ships an oversized first group: a timestamp bigger
+ * than the budget has to move anyway, because the alternative is a channel that
+ * stalls on it permanently.
  */
 export async function collectSince<TRow>(
   scans: readonly NodeScan[],
@@ -197,14 +255,21 @@ export async function collectSince<TRow>(
   const rows: TRow[] = [];
   let hasMore = false;
   for (const scan of scans) {
-    const page = await runScan(scan, share);
-    if (page.length > share) {
-      const kept = page.slice(0, share);
+    // Widens only when the slice turns out to be one indivisible timestamp,
+    // which is why the common path still issues exactly one query per author.
+    for (let window = share; ; window *= 2) {
+      const page = await runScan(scan, window);
+      if (page.length <= window) {
+        // Enumerated completely — no ceiling, and nothing owed for this author.
+        rows.push(...page);
+        break;
+      }
+      const kept = trimToHlcBoundary(page.slice(0, window), hlcOf(page[window]!), hlcOf);
+      if (kept.length === 0) continue;
       rows.push(...kept);
       truncated[scan.nodeId] = hlcOf(kept[kept.length - 1]!);
       hasMore = true;
-    } else {
-      rows.push(...page);
+      break;
     }
   }
   return { rows, hasMore, truncated };

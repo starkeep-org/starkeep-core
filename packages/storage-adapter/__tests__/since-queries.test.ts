@@ -184,3 +184,70 @@ describe("collectSince — the budget is split per author", () => {
     expect(page).toEqual({ rows: [], hasMore: false, truncated: {} });
   });
 });
+
+/**
+ * A ceiling names an HLC and one author's HLC covers many rows — `setLabels`
+ * stamps a whole batch with a single `clock.now()`. Report a ceiling from
+ * inside such a run and the peer lifts its watermark to that value, after which
+ * `selectUnseen` asks for strictly more and the rest of the run is unreachable.
+ *
+ * `round-cut.ts` refuses to split a timestamp among the candidates it is given.
+ * These cover the half it cannot see: rows that never became candidates because
+ * the scan stopped inside the run.
+ */
+describe("collectSince — a scan never stops inside one author's timestamp", () => {
+  const soloScan: NodeScan[] = [{ nodeId: "A", since: null }];
+
+  /** A source over a fixed HLC sequence, recording each window it was asked for. */
+  function source(wallTimes: readonly number[]) {
+    const asked: number[] = [];
+    const rows = wallTimes.map((t) => rowAt(t, "A"));
+    return {
+      asked,
+      run: async (_scan: NodeScan, remaining: number) => {
+        asked.push(remaining);
+        return rows.slice(0, remaining + 1);
+      },
+    };
+  }
+
+  it("trims back to the end of the previous run when the share lands mid-run", async () => {
+    // Share 3 stops between the second and third row stamped 5. Naming 5 as the
+    // ceiling would strand the third one, so the ceiling backs off to 1.
+    const s = source([1, 5, 5, 5, 9]);
+    const page = await collectSince(soloScan, 3, s.run, (r) => r.hlc);
+    expect(page.rows).toEqual([rowAt(1, "A")]);
+    expect(page.truncated["A"]).toEqual(hlc(1, "A"));
+    expect(page.hasMore).toBe(true);
+  });
+
+  it("widens the read when the whole share is one timestamp", async () => {
+    // Trimming would empty the page, and an empty page every round is an author
+    // that never advances. The read doubles until the run ends and ships it
+    // whole, overrunning the share — the same trade `cutRound` makes for an
+    // oversized first group.
+    const s = source([5, 5, 5, 5, 9]);
+    const page = await collectSince(soloScan, 2, s.run, (r) => r.hlc);
+    expect(page.rows).toEqual(Array(4).fill(rowAt(5, "A")));
+    expect(page.truncated["A"]).toEqual(hlc(5, "A"));
+    expect(page.hasMore).toBe(true);
+    expect(s.asked).toEqual([2, 4]);
+  });
+
+  it("reports no ceiling when widening reaches the end of the author", async () => {
+    const s = source([5, 5, 5]);
+    const page = await collectSince(soloScan, 2, s.run, (r) => r.hlc);
+    expect(page.rows).toHaveLength(3);
+    expect(page.truncated).toEqual({});
+    expect(page.hasMore).toBe(false);
+  });
+
+  it("still issues exactly one query when the share falls on a boundary", async () => {
+    // The widening is a rare correction, not the common path. Every row here
+    // carries its own timestamp, so nothing needs trimming.
+    const s = source([1, 2, 3, 4, 5]);
+    const page = await collectSince(soloScan, 3, s.run, (r) => r.hlc);
+    expect(s.asked).toEqual([3]);
+    expect(page.truncated["A"]).toEqual(hlc(3, "A"));
+  });
+});
