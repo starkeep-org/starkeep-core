@@ -178,3 +178,61 @@ describe("cutRound", () => {
     }
   });
 });
+
+/**
+ * The receiver's watermark is one HLC per author meaning "everything at or
+ * below this is applied", and the next round asks for strictly more. So a
+ * timestamp is the smallest thing a shipment can be cut at: ship half of one
+ * and the other half becomes unnameable forever.
+ *
+ * This is the unit-level pin for the failure found on a handset — two rendition
+ * records whose `photos/rendition` label carried the same HLC as the record and
+ * was cut away behind it.
+ */
+describe("cutRound treats one author's timestamp as indivisible", () => {
+  /** Two items sharing one author's timestamp, as a record and its label do. */
+  const pair = (nodeId: string, wallTime: number, bytes = 0): RoundItem<string>[] => [
+    { value: `${nodeId}@${wallTime}:record`, hlc: at(nodeId, wallTime), bytes },
+    { value: `${nodeId}@${wallTime}:label`, hlc: at(nodeId, wallTime), bytes: 0 },
+  ];
+
+  it("holds a whole timestamp back rather than shipping part of it", () => {
+    // An item budget of 3 lands mid-pair. Taking the third item would advance
+    // the peer past a timestamp whose fourth item was never sent.
+    const result = cutRound(
+      [...pair("a", 10), ...pair("a", 20)],
+      new Map(),
+      budget(3),
+    );
+    expect(taken(result)).toEqual(["a@10:record", "a@10:label"]);
+    expect(result.hasMore).toBe(true);
+  });
+
+  it("does the same when the byte budget is what runs out", () => {
+    const result = cutRound(
+      [...pair("a", 10, 100), ...pair("a", 20, 900)],
+      new Map(),
+      budget(10, 500),
+    );
+    expect(taken(result)).toEqual(["a@10:record", "a@10:label"]);
+    expect(result.hasMore).toBe(true);
+  });
+
+  it("still ships an oversized first timestamp, so a channel cannot stall", () => {
+    // The first-item rule, widened to the first timestamp: refusing this would
+    // not make rounds smaller, it would mean this pair never moves.
+    const result = cutRound(pair("a", 10, 5_000), new Map(), budget(1, 10));
+    expect(taken(result)).toEqual(["a@10:record", "a@10:label"]);
+  });
+
+  it("does not group equal wall times belonging to different authors", () => {
+    // Watermarks are per author, so `b`'s row at the same instant is not part
+    // of `a`'s timestamp and may be cut away from it freely.
+    const result = cutRound(
+      [...pair("a", 10), item("b", 10)],
+      new Map(),
+      budget(2),
+    );
+    expect(taken(result)).toEqual(["a@10:record", "a@10:label"]);
+  });
+});
