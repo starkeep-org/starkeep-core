@@ -97,7 +97,24 @@ export async function createNodeClock(options: {
           if (flushTimer) return;
           flushTimer = setTimeout(() => {
             flushTimer = null;
-            if (pending) void syncStateStore.setHlcClockState(pending);
+            const flushing = pending;
+            // Cleared before the write, so `close()` can tell "never persisted"
+            // from "already on disk" and does not rewrite state the timer has
+            // handled. A failure below restores it rather than dropping it.
+            pending = null;
+            if (flushing) {
+              syncStateStore.setHlcClockState(flushing).catch((err: unknown) => {
+                // Not fatal — the clock keeps issuing timestamps and the next
+                // tick schedules another attempt. Silence is the problem: a
+                // clock that has quietly stopped persisting looks exactly like
+                // one that is up to date, right up until a restart resumes
+                // behind what this node already emitted.
+                if (pending === null) pending = flushing;
+                console.warn(
+                  `[sdk] could not persist HLC clock state: ${(err as Error).message}`,
+                );
+              });
+            }
           }, 5000);
         }
       : undefined,
@@ -109,7 +126,11 @@ export async function createNodeClock(options: {
         clearTimeout(flushTimer);
         flushTimer = null;
       }
-      if (pending && syncStateStore) await syncStateStore.setHlcClockState(pending);
+      if (pending && syncStateStore) {
+        const flushing = pending;
+        pending = null;
+        await syncStateStore.setHlcClockState(flushing);
+      }
     },
   };
 }
