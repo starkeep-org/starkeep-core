@@ -169,6 +169,15 @@ function withinCeiling(
  * write paths do. That is a narrower guarantee than this one: it orders two
  * specific rows, where this holds for any set of items sharing a timestamp
  * whatever produced them.
+ *
+ * ## This is only half of the rule
+ *
+ * The cut can only refuse to split a timestamp among the items it was *given*.
+ * The scans decide what it is given, and a scan that stops after N rows can stop
+ * inside a run of them just as easily — handing over part of a timestamp and
+ * reporting a ceiling at it, which is the same loss arriving one layer earlier.
+ * `collectSince` (`storage-adapter/src/database/since-queries.ts`) is where that
+ * half lives. Neither is sufficient alone.
  */
 export function cutRound<T>(
   items: readonly RoundItem<T>[],
