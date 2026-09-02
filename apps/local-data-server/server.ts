@@ -3517,10 +3517,14 @@ async function main() {
     server.close();
     if (supervisor) await supervisor.stop();
     await watchManager.shutdown();
-    await sdk.close();
-    // The SDK closes only a clock it built itself, and this one was handed to
-    // it, so the debounced write-back is this process's to flush.
+    // Before `sdk.close()`, not after. The SDK closes only a clock it built
+    // itself, so flushing this one is this process's job — and the flush writes
+    // through `syncStateStore`, which holds the same raw SQLite handle that
+    // `sdk.close()` closes. Draining it afterwards throws on a closed database,
+    // which loses the clock state *and* skips the `process.exit(0)` below,
+    // leaving SIGTERM unable to stop the daemon.
     await nodeClock.close();
+    await sdk.close();
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);
