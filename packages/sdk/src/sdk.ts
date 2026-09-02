@@ -8,6 +8,7 @@ import {
   isValidLabelKey,
   LABEL_VALUES_PER_KEY_MAX,
   type DataRecord,
+  type HLCClock,
   type MetadataRow,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
@@ -23,6 +24,7 @@ async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
 import { createUnifiedIndex } from "@starkeep/query-orchestrator";
 import { createChangeNotifier } from "@starkeep/sync-engine";
 import { createSharedSpaceApi } from "@starkeep/shared-space-api";
+import type { SyncStateStore } from "@starkeep/sync-engine";
 import type {
   StarkeepSdk,
   StarkeepSdkOptions,
@@ -43,6 +45,75 @@ function metadataCategory(typeOrCategory: string): string {
   return typeCategory(typeOrCategory);
 }
 
+/**
+ * The node's one HLC clock, seeded from persisted state and debounce-persisted
+ * on tick, so a restart resumes causally after anything already emitted.
+ *
+ * ## Exactly one of these per node id, and it is not a style preference
+ *
+ * An HLC's guarantee — that one author's timestamps are a total order with no
+ * duplicates — holds only while a single clock instance issues them. Two
+ * instances sharing a node id break it in both directions at once: called in
+ * the same millisecond each returns counter 0, so two different rows carry the
+ * *identical* timestamp, and once they drift the later write can carry the
+ * *lower* one.
+ *
+ * The sync watermark is what turns that into data loss. A peer advances one
+ * HLC per author meaning "everything at or below this is applied" and then asks
+ * for strictly more, so a duplicated timestamp is a row the protocol has no way
+ * to name a second time. The local-data-server had exactly this: its own
+ * unpersisted clock stamped label writes while the SDK's stamped the records
+ * they belonged to, and a handset was found holding two rendition records whose
+ * labels had been dropped this way — 23% of that node's rendition labels
+ * carried an HLC at or below their own record's.
+ *
+ * So callers that need a clock alongside an SDK must build it with this and
+ * hand the same instance to {@link createStarkeepSdk} as `options.clock`,
+ * rather than constructing a second one with the same node id. A caller that
+ * does so owns {@link NodeClock.close}, because the SDK only closes a clock it
+ * built itself.
+ */
+export interface NodeClock {
+  readonly clock: HLCClock;
+  /** Cancel the debounce and persist whatever it was still holding. */
+  close(): Promise<void>;
+}
+
+export async function createNodeClock(options: {
+  readonly nodeId: string;
+  readonly syncStateStore?: SyncStateStore | undefined;
+}): Promise<NodeClock> {
+  const { nodeId, syncStateStore } = options;
+  const initialState = (await syncStateStore?.getHlcClockState()) ?? undefined;
+  let pending: { wallTime: number; counter: number } | null = null;
+  let flushTimer: NodeJS.Timeout | null = null;
+  const clock = createHLCClock({
+    nodeId,
+    wallClockFunction: Date.now,
+    initialState,
+    onTick: syncStateStore
+      ? (state) => {
+          pending = state;
+          if (flushTimer) return;
+          flushTimer = setTimeout(() => {
+            flushTimer = null;
+            if (pending) void syncStateStore.setHlcClockState(pending);
+          }, 5000);
+        }
+      : undefined,
+  });
+  return {
+    clock,
+    async close() {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (pending && syncStateStore) await syncStateStore.setHlcClockState(pending);
+    },
+  };
+}
+
 export async function createStarkeepSdk(
   options: StarkeepSdkOptions,
 ): Promise<StarkeepSdk> {
@@ -56,34 +127,11 @@ export async function createStarkeepSdk(
   await databaseAdapter.init();
   await objectStorageAdapter.init();
 
-  // Seed the clock from persisted state and debounce write-back on tick,
-  // so a restart resumes with an HLC causally after anything we emitted.
-  // The clock state is global (one clock per node) — the supervisor's
-  // per-app cursors live alongside it in the same store but are owned
-  // elsewhere.
-  const initialHlcState =
-    (await syncStateStore?.getHlcClockState()) ?? undefined;
-  let pendingClockState: { wallTime: number; counter: number } | null = null;
-  let clockFlushTimer: NodeJS.Timeout | null = null;
-  const clock =
-    options.clock ??
-    createHLCClock({
-      nodeId,
-      wallClockFunction: Date.now,
-      initialState: initialHlcState,
-      onTick: syncStateStore
-        ? (state) => {
-            pendingClockState = state;
-            if (clockFlushTimer) return;
-            clockFlushTimer = setTimeout(() => {
-              clockFlushTimer = null;
-              if (pendingClockState) {
-                void syncStateStore.setHlcClockState(pendingClockState);
-              }
-            }, 5000);
-          }
-        : undefined,
-    });
+  // Only built when the caller did not supply one. A caller that did owns the
+  // flush on shutdown, which is why this stays null in that case rather than
+  // closing a clock this SDK does not own.
+  const ownClock = options.clock ? null : await createNodeClock({ nodeId, syncStateStore });
+  const clock = options.clock ?? ownClock!.clock;
 
   // One shared change notifier. Writes emit `local-change-recorded`; the
   // supervisor's per-app sync engines forward their own pull/conflict events
@@ -498,13 +546,7 @@ export async function createStarkeepSdk(
     clock,
 
     async close() {
-      if (clockFlushTimer) {
-        clearTimeout(clockFlushTimer);
-        clockFlushTimer = null;
-      }
-      if (pendingClockState && syncStateStore) {
-        await syncStateStore.setHlcClockState(pendingClockState);
-      }
+      await ownClock?.close();
       await databaseAdapter.close();
       await objectStorageAdapter.close();
     },

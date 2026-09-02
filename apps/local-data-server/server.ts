@@ -36,7 +36,7 @@ import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import type { Filter } from "../../packages/storage-adapter/src/database/types.js";
-import { createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
+import { createNodeClock, createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore, createChangeNotifier, projectPolicy, validateRetentionPolicy, validateOverrideRules } from "../../packages/sync-engine/src/index.js";
 import { setHashFactory } from "@starkeep/storage-adapter";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
@@ -50,7 +50,7 @@ import {
   canWriteMetadataCategory,
   type AccessGrants,
 } from "../../packages/protocol-primitives/src/access/grants.js";
-import { createHLCClock, serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
+import { serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { INTENT_TAG_KEY, LADDER_TAG_KEY, LADDER_TAG_COMPLETE } from "../../packages/protocol-primitives/src/storage/retrieval-intent.js";
 import { sha256HexToBase64, loadVariantsForPage, loadVariantCandidatesForPage } from "@starkeep/storage-adapter";
@@ -657,8 +657,6 @@ async function main() {
   // installer (POST /admin/apps/install). No startup-time auto-discovery —
   // apps appear only after going through install.
 
-  const clock = createHLCClock({ nodeId: NODE_ID, wallClockFunction: Date.now });
-
   // Pre-init so we can hand the raw SQLite handle to the sync state store,
   // which shares the records DB file.
   await databaseAdapter.init();
@@ -669,6 +667,17 @@ async function main() {
   const syncStateStore = CLOUD_URL
     ? createSqliteSyncStateStore({ db: databaseAdapter.getRawDatabase() })
     : undefined;
+
+  // **One clock per node id, shared with the SDK below rather than a second
+  // instance beside it.** This process used to build its own here and let the
+  // SDK build another from the same `NODE_ID`, so route handlers stamped label
+  // writes from one clock while the records those labels belonged to were
+  // stamped from the other. Two clocks under one author identity destroy the
+  // property the sync watermark depends on — see `createNodeClock`, which also
+  // records what that cost on a real handset. It is built after the state
+  // store because it seeds from it; nothing above needs a clock.
+  const nodeClock = await createNodeClock({ nodeId: NODE_ID, syncStateStore });
+  const clock = nodeClock.clock;
 
   // Direct sqlite handle for app-identity / grant lookups. The records-layer
   // adapter operates on the same DB; we use raw access for the shared_*
@@ -756,6 +765,8 @@ async function main() {
     syncStateStore,
     changeNotifier,
     getAppSpecific: appSpecificFactory,
+    // The same instance the route handlers and the app-specific factory use.
+    clock,
   });
 
   const sseClients = new Set<import("node:http").ServerResponse>();
@@ -3507,6 +3518,9 @@ async function main() {
     if (supervisor) await supervisor.stop();
     await watchManager.shutdown();
     await sdk.close();
+    // The SDK closes only a clock it built itself, and this one was handed to
+    // it, so the debounced write-back is this process's to flush.
+    await nodeClock.close();
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);

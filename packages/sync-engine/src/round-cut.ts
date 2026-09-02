@@ -144,6 +144,31 @@ function withinCeiling(
  * The first item is always taken, however large. Refusing a 400 MB video because
  * it exceeds the budget would not make rounds smaller, it would stall that
  * channel permanently.
+ *
+ * ## One HLC is indivisible
+ *
+ * The cut moves in whole timestamps, never in items. The receiver's watermark is
+ * a single HLC per author meaning "everything at or below this is applied", and
+ * the next round selects **strictly greater** than it (`selectUnseen`). So an
+ * author's timestamp is atomic by construction: ship half the items carrying it
+ * and the peer advances its watermark to that very value, after which no round
+ * can ever offer the other half again. Silent and permanent, and the receiver
+ * cannot detect it — the watermark it holds is exactly the watermark it would
+ * hold had the shipment been complete.
+ *
+ * This is not hypothetical. A record and its labels are written by one request
+ * against one clock, and a batch of labels is written with a *single*
+ * `clock.now()` shared by every row in it, so equal timestamps across items are
+ * the normal case rather than a collision. A handset was found holding two
+ * rendition records whose `photos/rendition` label had been cut away this way;
+ * with the label gone the records stopped being renditions to every reader —
+ * they escaped the grid's rendition filter and became unclassifiable to
+ * residency.
+ *
+ * Producers should still keep a label's HLC strictly above its record's, and the
+ * write paths do. That is a narrower guarantee than this one: it orders two
+ * specific rows, where this holds for any set of items sharing a timestamp
+ * whatever produced them.
  */
 export function cutRound<T>(
   items: readonly RoundItem<T>[],
@@ -161,16 +186,29 @@ export function cutRound<T>(
   const taken: RoundItem<T>[] = [];
   let bytes = 0;
   let heldByBudget = false;
-  for (const item of eligible) {
+  // Whole timestamps, not items. `compareHLC` orders by wall time, then
+  // counter, then node id, so a run of items comparing equal is exactly one
+  // author's one timestamp — which is the unit the watermark can address.
+  for (let start = 0; start < eligible.length; ) {
+    let end = start + 1;
+    while (end < eligible.length && compareHLC(eligible[start]!.hlc, eligible[end]!.hlc) === 0) {
+      end += 1;
+    }
+    const group = eligible.slice(start, end);
+    const groupBytes = group.reduce((n, item) => n + item.bytes, 0);
+    // The first group goes whatever it costs, for the same reason the first
+    // item used to: a timestamp larger than the whole budget would otherwise
+    // stall the channel forever rather than making rounds smaller.
     const overBudget =
       taken.length > 0 &&
-      (taken.length >= budget.maxItems || bytes + item.bytes > budget.maxBytes);
+      (taken.length + group.length > budget.maxItems || bytes + groupBytes > budget.maxBytes);
     if (overBudget) {
       heldByBudget = true;
       break;
     }
-    taken.push(item);
-    bytes += item.bytes;
+    taken.push(...group);
+    bytes += groupBytes;
+    start = end;
   }
 
   // A ceiling exists only because some stream returned fewer rows than it had,
