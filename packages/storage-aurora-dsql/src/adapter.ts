@@ -42,6 +42,7 @@ import {
   type SincePage,
   buildTombstoneLabelsForRecord,
   groupLabelsByRecordId,
+  nextCursorFrom,
   paginateFindByLabel,
   paginateLabelScan,
   rowToLabel,
@@ -59,7 +60,7 @@ import {
   columnsToMetadataRow,
   type PostgresRow,
 } from "./serialization.js";
-import { buildPostgresQuery, compiler } from "./query-builder.js";
+import { buildPostgresCountQuery, buildPostgresQuery, compiler } from "./query-builder.js";
 import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
 import { sql, type CompiledQuery } from "kysely";
 
@@ -275,7 +276,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private async queryRaw(query: Query): Promise<QueryResult> {
     const { text, values } = buildPostgresQuery(query);
     const result = await this.getClient().query(text, values);
-    const rows = result.rows as unknown as PostgresRow[];
+    const rows = result.rows as unknown as (PostgresRow & Record<string, unknown>)[];
 
     const limit = query.limit;
     const hasMore = limit ? rows.length > limit : false;
@@ -283,9 +284,22 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
     return {
       records: resultRows.map(rowToRecord),
-      nextCursor: hasMore ? resultRows[resultRows.length - 1].id : null,
+      // Cut from the row itself, ordering values and all — see `nextCursorFrom`.
+      nextCursor: hasMore ? nextCursorFrom(query, resultRows[resultRows.length - 1]) : null,
       hasMore,
     };
+  }
+
+  async countRecords(query: Query): Promise<number> {
+    return withOccRetry("countRecords", async () => {
+      const { text, values } = buildPostgresCountQuery(query);
+      const result = await this.getClient().query(text, values);
+      const total = (result.rows[0] as { total?: string | number } | undefined)?.total;
+      // `count(*)` comes back as a bigint, which `pg` hands over as a string
+      // rather than risk a lossy number. Parsed here so every adapter answers
+      // the same type.
+      return typeof total === "string" ? Number.parseInt(total, 10) : (total ?? 0);
+    });
   }
 
   // The whole BEGIN…COMMIT is one retry unit: DSQL reports an OCC conflict at

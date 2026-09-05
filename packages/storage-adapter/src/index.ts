@@ -28,6 +28,29 @@ export {
   type LabelScanCursor,
 } from "./database/label-cursor.js";
 
+export {
+  encodeQueryCursor,
+  decodeQueryCursor,
+  orderSignature,
+  compareOrderKey,
+  type QueryCursor,
+  type QueryCursorKey,
+  type QueryCursorValue,
+  type OrderKey,
+} from "./database/query-cursor.js";
+
+export {
+  buildRecordSelect,
+  buildRecordCount,
+  cursorKeysFrom,
+  nextCursorFrom,
+  orderingFor,
+  orderValueAlias,
+  isVirtualOrderField,
+  type RecordDb,
+  type RecordDialect,
+} from "./database/record-queries.js";
+
 export { rowToLabel, labelToRow, type LabelRow } from "./database/label-row.js";
 
 export {

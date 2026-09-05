@@ -30,6 +30,7 @@
  */
 
 import type { StarkeepId } from "@starkeep/protocol-primitives";
+import { decodeBase64Url, encodeBase64Url } from "./base64url.js";
 
 export interface LabelCursor {
   /** `""` for a bare flag; never null — see the note above. */
@@ -38,16 +39,16 @@ export interface LabelCursor {
 }
 
 export function encodeLabelCursor(cursor: LabelCursor): string {
-  return Buffer.from(JSON.stringify([cursor.value, cursor.recordId]), "utf8").toString(
-    "base64url",
-  );
+  return encodeBase64Url(JSON.stringify([cursor.value, cursor.recordId]));
 }
 
 /** Returns `null` for a malformed token rather than throwing: a caller that
  *  hand-edits an opaque cursor gets the first page, not a 500. */
 export function decodeLabelCursor(token: string): LabelCursor | null {
   try {
-    const parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8")) as unknown;
+    const json = decodeBase64Url(token);
+    if (json === null) return null;
+    const parsed = JSON.parse(json) as unknown;
     if (!Array.isArray(parsed) || parsed.length !== 2) return null;
     const [value, recordId] = parsed as [unknown, unknown];
     if (typeof value !== "string") return null;
@@ -79,14 +80,14 @@ export interface LabelScanCursor {
 }
 
 export function encodeLabelScanCursor(c: LabelScanCursor): string {
-  return Buffer.from(JSON.stringify([c.recordId, c.appId, c.key, c.value]), "utf8").toString(
-    "base64url",
-  );
+  return encodeBase64Url(JSON.stringify([c.recordId, c.appId, c.key, c.value]));
 }
 
 export function decodeLabelScanCursor(token: string): LabelScanCursor | null {
   try {
-    const parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8")) as unknown;
+    const json = decodeBase64Url(token);
+    if (json === null) return null;
+    const parsed = JSON.parse(json) as unknown;
     if (!Array.isArray(parsed) || parsed.length !== 4) return null;
     const [recordId, appId, key, value] = parsed as [unknown, unknown, unknown, unknown];
     if (

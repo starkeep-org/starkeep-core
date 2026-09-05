@@ -5,7 +5,7 @@ import type {
   RecordLabel,
   StarkeepId,
 } from "@starkeep/protocol-primitives";
-import { compareHLC, serializeHLC } from "@starkeep/protocol-primitives";
+import { compareHLC, serializeHLC, typeCategory } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "../database/adapter.js";
 import {
   mergeDigestBuckets,
@@ -13,6 +13,13 @@ import {
   type DigestBucket,
 } from "../database/digest-queries.js";
 import { trimToHlcBoundary, type SincePage } from "../database/since-queries.js";
+import {
+  compareOrderKey,
+  decodeQueryCursor,
+  encodeQueryCursor,
+  type QueryCursorKey,
+} from "../database/query-cursor.js";
+import { orderingFor } from "../database/record-queries.js";
 import type {
   Query,
   QueryResult,
@@ -169,31 +176,122 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
         });
       }
     }
-    if (query.sort) {
-      records.sort((a, b) => {
-        for (const sortField of query.sort!) {
-          const aValue = (a as unknown as Record<string, unknown>)[sortField.field] as string | number;
-          const bValue = (b as unknown as Record<string, unknown>)[sortField.field] as string | number;
-          if (aValue < bValue) return sortField.direction === "asc" ? -1 : 1;
-          if (aValue > bValue) return sortField.direction === "asc" ? 1 : -1;
+    // The label anti-join, which this mock used to ignore entirely.
+    //
+    // Ignoring it made every test written against this adapter blind to the one
+    // thing the filter exists for: a rendition is a child record, and a phone
+    // holding a five-rung ladder per photograph has six records where a grid
+    // must show one. A mock that answers a question the real adapters answer
+    // differently is worse than one that refuses to answer it.
+    if (query.excludeLabel) {
+      const { appId, key } = query.excludeLabel;
+      const excluded = new Set<string>();
+      for (const label of this.labels.values()) {
+        // The tombstone check is not optional — a retracted rendition label
+        // means the record is no longer a rendition, and treating the dead row
+        // as live would permanently hide it from the grid.
+        if (label.appId === appId && label.key === key && !label.deletedAt) {
+          excluded.add(label.recordId);
         }
-        return 0;
-      });
+      }
+      records = records.filter((record) => !excluded.has(record.id));
     }
 
+    // The same ordering the SQL adapters compile, spelled as a comparator:
+    // every key null-normalized to sort nulls last, then the record id as the
+    // total tiebreaker. Restating it here rather than sharing it would let the
+    // in-memory adapter answer a different order from the real ones, which is
+    // exactly the kind of divergence a mock exists to avoid.
+    const ordering = orderingFor(query);
+    records.sort((a, b) => {
+      for (let i = 0; i < ordering.keys.length; i += 1) {
+        const key = ordering.keys[i];
+        const decided = compareOrderKey(
+          this.orderKeyFor(a, key.field),
+          this.orderKeyFor(b, key.field),
+          key.direction,
+        );
+        if (decided !== 0) return decided;
+      }
+      if (a.id === b.id) return 0;
+      const ascending = a.id < b.id ? -1 : 1;
+      return ordering.idDirection === "desc" ? -ascending : ascending;
+    });
+
     const limit = query.limit ?? records.length;
-    const cursorIndex = query.cursor
-      ? records.findIndex((record) => record.id === query.cursor) + 1
-      : 0;
+    // The cursor names a row, and the row's position in the sorted list is
+    // where the next page starts. Locating it by id is equivalent to the SQL
+    // keyset predicate and needs none of its machinery, because the whole
+    // ordered set is in hand here.
+    const cursorId = ordering.bareId
+      ? query.cursor
+      : query.cursor
+        ? decodeQueryCursor(query.cursor, ordering.signature)?.id
+        : undefined;
+    const found = cursorId ? records.findIndex((record) => record.id === cursorId) : -1;
+    // A cursor naming a row this query no longer returns — deleted, or filtered
+    // out since it was handed over — starts from the beginning rather than from
+    // an arbitrary place, which is what the SQL side's rejected-token path does.
+    const cursorIndex = found === -1 ? 0 : found + 1;
 
     const sliced = records.slice(cursorIndex, cursorIndex + limit);
     const hasMore = cursorIndex + limit < records.length;
+    const last = sliced[sliced.length - 1];
 
     return {
       records: sliced.map((record) => structuredClone(record)),
-      nextCursor: hasMore ? sliced[sliced.length - 1].id : null,
+      nextCursor:
+        hasMore && last
+          ? ordering.bareId
+            ? last.id
+            : encodeQueryCursor({
+                order: ordering.signature,
+                keys: ordering.keys.map((key) => this.orderKeyFor(last, key.field)),
+                id: last.id,
+              })
+          : null,
       hasMore,
     };
+  }
+
+  async countRecords(query: Query): Promise<number> {
+    // Through `query` itself, with paging turned off, so the count cannot
+    // disagree with the rows about what "matches" means.
+    const { sort, limit, cursor, ...rest } = query;
+    void sort;
+    void limit;
+    void cursor;
+    const page = await this.query(rest);
+    return page.records.length;
+  }
+
+  /**
+   * One ordering key's value for a record, null-normalized.
+   *
+   * Three shapes, because the fields a caller can order by have three:
+   * `capturedAt` lives in the per-category metadata rather than on the record,
+   * an HLC column is an object that has to be serialized before it compares,
+   * and everything else is already a scalar.
+   */
+  private orderKeyFor(record: DataRecord, field: string): QueryCursorKey {
+    if (field === "capturedAt") {
+      const category = typeCategory(record.type);
+      const row = this.metadata.get(category)?.get(record.id);
+      const value = row?.["captured_at"];
+      const usable = typeof value === "string" || typeof value === "number" ? value : null;
+      return { isNull: usable === null, value: usable };
+    }
+    const raw = (record as unknown as Record<string, unknown>)[field];
+    if (raw && typeof raw === "object" && "wallTime" in raw) {
+      // `createdAt` and `updatedAt` are HLC objects here and strings in the
+      // database. Serializing is what makes the mock order them the way a real
+      // adapter does, instead of comparing two objects and calling every pair
+      // equal — which is what it used to do.
+      return { isNull: false, value: serializeHLC(raw as HLCTimestamp) };
+    }
+    const usable =
+      typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean" ? raw : null;
+    return { isNull: usable === null, value: usable };
   }
 
   async batch(operations: BatchOperation[]): Promise<void> {
