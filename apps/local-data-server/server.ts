@@ -2485,6 +2485,63 @@ async function main() {
           }
         }
 
+        // POST /app-data/file-urls — batch of playback URLs for app-private
+        // files. Body: { subKeys: string[], expiresIn? }. Per-subKey semantics
+        // match GET /app-data/files/<subKey>, except that a subKey with no live
+        // index row is omitted from the response instead of failing the batch,
+        // which mirrors /data/records/file-urls on the shared plane.
+        //
+        // Exists because the per-file shape costs one request per file, and a
+        // client that needs N of them at once — a study screen prefetching the
+        // next few cards' audio, a gallery opening — spends N round trips to
+        // learn N URLs. In the cloud each of those is a Lambda invocation on
+        // the app's proxy *and* one here, so a six-file prefetch demands twelve
+        // concurrent slots. That is what silently dropped memo's study audio.
+        //
+        // A subKey the app may not address (files not enabled, wrong prefix)
+        // still fails the whole request: "this file does not exist" is a
+        // per-item outcome, but "you may not ask that" is a caller error and
+        // hiding it inside a partial result would make it unfindable.
+        if (path === "/app-data/file-urls" && req.method === "POST") {
+          try {
+            const body = JSON.parse(await readBody(req)) as {
+              subKeys?: unknown;
+              expiresIn?: unknown;
+            };
+            if (
+              !Array.isArray(body.subKeys) ||
+              body.subKeys.length === 0 ||
+              !body.subKeys.every((k) => typeof k === "string" && k.length > 0)
+            ) {
+              res.writeHead(400);
+              json(res, { error: "subKeys must be a non-empty array of strings" });
+              return;
+            }
+            if (body.subKeys.length > 200) {
+              res.writeHead(400);
+              json(res, { error: "subKeys must contain at most 200 entries" });
+              return;
+            }
+            const expiresIn =
+              typeof body.expiresIn === "number" &&
+              Number.isFinite(body.expiresIn) &&
+              body.expiresIn > 0
+                ? body.expiresIn
+                : 3600;
+            const urls: Record<string, string> = {};
+            for (const subKey of new Set(body.subKeys as string[])) {
+              const fileUrl = await view.fileUrl(subKey, { expiresIn });
+              if (fileUrl) urls[subKey] = fileUrl;
+            }
+            json(res, { urls, expiresIn });
+            return;
+          } catch (err) {
+            res.writeHead(400);
+            json(res, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+        }
+
         const fileMatch = path.match(/^\/app-data\/files\/(.+)$/);
         if (fileMatch) {
           const subKey = decodeURIComponent(fileMatch[1]!);
