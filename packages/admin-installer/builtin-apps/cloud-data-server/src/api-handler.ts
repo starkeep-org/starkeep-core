@@ -3447,6 +3447,61 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         }
       }
 
+      // POST /app-data/file-urls — batch of playback URLs for app-private
+      // files. Body: { subKeys: string[], expiresIn? }. Per-subKey semantics
+      // match GET /app-data/files/<subKey>, except that a subKey with no live
+      // index row is omitted from the response instead of failing the batch,
+      // which mirrors /data/records/file-urls on the shared plane.
+      //
+      // Exists because the per-file shape costs one request per file, and this
+      // account's Lambda concurrency ceiling is small enough that a client
+      // prefetching a handful of files saturates it: each browser request holds
+      // a slot on the app's own proxy function while it waits on a slot here,
+      // so a six-file prefetch demands twelve. Throttles and multi-second
+      // queueing followed, and memo's study audio went silent on scattered
+      // cards with every layer of the data intact.
+      //
+      // A subKey the app may not address (files not enabled, wrong prefix)
+      // still fails the whole request: "this file does not exist" is a per-item
+      // outcome, but "you may not ask that" is a caller error and hiding it
+      // inside a partial result would make it unfindable.
+      if (subPath === "/app-data/file-urls" && method === "POST") {
+        try {
+          const raw = event.isBase64Encoded && event.body
+            ? Buffer.from(event.body, "base64").toString("utf8")
+            : (event.body ?? "{}");
+          const body = JSON.parse(raw) as { subKeys?: unknown; expiresIn?: unknown };
+          if (
+            !Array.isArray(body.subKeys) ||
+            body.subKeys.length === 0 ||
+            !body.subKeys.every((k) => typeof k === "string" && k.length > 0)
+          ) {
+            return clientErr("subKeys must be a non-empty array of strings", 400);
+          }
+          if (body.subKeys.length > 200) {
+            return clientErr("subKeys must contain at most 200 entries", 400);
+          }
+          const requested =
+            typeof body.expiresIn === "number" &&
+            Number.isFinite(body.expiresIn) &&
+            body.expiresIn > 0
+              ? body.expiresIn
+              : 3600;
+          const expiresIn = clampPresignExpiresIn(requested);
+          const urls: Record<string, string> = {};
+          for (const subKey of new Set(body.subKeys as string[])) {
+            const stat = await view.statFile(subKey);
+            if (!stat) continue;
+            urls[subKey] = await storage.getSignedUrl(appSyncableObjectKey(appId, subKey), {
+              expiresIn,
+            });
+          }
+          return ok({ urls, expiresIn });
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+      }
+
       const fileMatch = subPath.match(/^\/app-data\/files\/(.+)$/);
       if (fileMatch) {
         const subKey = decodeURIComponent(fileMatch[1]!);

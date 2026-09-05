@@ -178,6 +178,43 @@ describe("per-app file namespace", () => {
     await appA.fetch("/app-data/files/cover", { method: "DELETE" });
   });
 
+  it("batches playback URLs, omitting subKeys with no index row", async () => {
+    // One request for N files. The per-file GET costs a round trip each, and
+    // in the cloud a Lambda slot on the calling app's proxy plus one on the
+    // data server — which is what exhausted the concurrency ceiling and left
+    // memo's study cards silent.
+    await putAppFile(appA, "clips/one.bin", "clip-one");
+    await putAppFile(appA, "clips/two.bin", "clip-two");
+
+    const res = await appA.fetch("/app-data/file-urls", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subKeys: ["clips/one.bin", "clips/two.bin", "clips/absent.bin"] }),
+    });
+    expect(res.status).toBe(200);
+    const { urls } = (await res.json()) as { urls: Record<string, string> };
+
+    // The absent key is dropped rather than failing the batch.
+    expect(Object.keys(urls).sort()).toEqual(["clips/one.bin", "clips/two.bin"]);
+
+    const bytes = await fetch(urls["clips/one.bin"]!);
+    expect(Buffer.from(await bytes.arrayBuffer()).toString()).toBe("clip-one");
+
+    await appA.fetch("/app-data/files/clips/one.bin", { method: "DELETE" });
+    await appA.fetch("/app-data/files/clips/two.bin", { method: "DELETE" });
+  });
+
+  it("400s a malformed subKeys list", async () => {
+    for (const subKeys of [[], ["ok", 7], "clips/one.bin"]) {
+      const res = await appA.fetch("/app-data/file-urls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subKeys }),
+      });
+      expect(res.status).toBe(400);
+    }
+  });
+
   it("files plane refused for an app that declared files:false", async () => {
     // The presign route gates on filesEnabled before minting an upload token.
     const res = await appB.fetch("/app-data/files/presign", {

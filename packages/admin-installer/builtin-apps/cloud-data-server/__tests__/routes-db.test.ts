@@ -1523,6 +1523,96 @@ describe("/app-data routes", () => {
     );
     expect(gone.statusCode).toBe(404);
   });
+
+  // ---- Batch playback URLs ----
+  //
+  // The per-file GET above costs one request per file. A client that needs
+  // several at once spends a Lambda slot per file on its own proxy while it
+  // waits for one here, which is what exhausted the concurrency ceiling and
+  // silently dropped memo's study audio.
+  describe("POST /app-data/file-urls", () => {
+    const backRow = { ...fileRow, id: "apps/appdata1/syncable/back" };
+    /** Index rows keyed by the id the applier binds into the select. */
+    const rowsById = (present: Record<string, unknown>[]) => (q: { values: unknown[] }) => {
+      const wanted = q.values.find((v) => typeof v === "string" && String(v).startsWith("apps/"));
+      return present.filter((r) => r["id"] === wanted);
+    };
+
+    it("resolves several subKeys in one request", async () => {
+      const db = fakeDsqlWithGrants()
+        .on(NS_SELECT, [filesNamespace])
+        .on(FILE_RECORDS_SELECT, rowsById([fileRow, backRow]));
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({
+          appId: "appdata1",
+          method: "POST",
+          subPath: "/app-data/file-urls",
+          body: { subKeys: ["cover", "back"] },
+        }),
+        context,
+      );
+      expect(res.statusCode).toBe(200);
+      const urls = bodyOf(res)["urls"] as Record<string, string>;
+      expect(Object.keys(urls).sort()).toEqual(["back", "cover"]);
+      expect(typeof urls["cover"]).toBe("string");
+    });
+
+    it("omits a subKey with no index row instead of failing the batch", async () => {
+      const db = fakeDsqlWithGrants()
+        .on(NS_SELECT, [filesNamespace])
+        .on(FILE_RECORDS_SELECT, rowsById([fileRow]));
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({
+          appId: "appdata1",
+          method: "POST",
+          subPath: "/app-data/file-urls",
+          body: { subKeys: ["cover", "missing"] },
+        }),
+        context,
+      );
+      // 200 with a short result, not the 404 the single-file route returns:
+      // one absent clip must not cost the caller the rest of the batch.
+      expect(res.statusCode).toBe(200);
+      expect(Object.keys(bodyOf(res)["urls"] as object)).toEqual(["cover"]);
+    });
+
+    it("400s on a malformed or oversized subKeys list", async () => {
+      const cases: unknown[] = [[], ["ok", 7], "cover", Array.from({ length: 201 }, (_, i) => `k${i}`)];
+      for (const subKeys of cases) {
+        setDbFactory(fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]));
+        const res = await handler(
+          signedEvent({
+            appId: "appdata1",
+            method: "POST",
+            subPath: "/app-data/file-urls",
+            body: { subKeys },
+          }),
+          context,
+        );
+        expect(res.statusCode).toBe(400);
+      }
+    });
+
+    it("refuses the batch when the app did not enable files", async () => {
+      // "This file does not exist" is a per-item outcome, but "you may not ask"
+      // is a caller error — it must not hide inside a partial result.
+      const noFiles = { ...filesNamespace, files_enabled: false };
+      setDbFactory(fakeDsqlWithGrants().on(NS_SELECT, [noFiles]));
+      const res = await handler(
+        signedEvent({
+          appId: "appdata1",
+          method: "POST",
+          subPath: "/app-data/file-urls",
+          body: { subKeys: ["cover"] },
+        }),
+        context,
+      );
+      expect(res.statusCode).toBe(400);
+      expect(bodyOf(res)["error"]).toMatch(/did not opt in to syncable files/);
+    });
+  });
 });
 
 // ---- parentId / notLabel filters (media plan item 3) ----
