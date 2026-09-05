@@ -199,6 +199,25 @@ export interface SyncSupervisor {
 }
 
 /**
+ * Whether a failed exchange means "this app has no cloud half yet" rather than
+ * "something is wrong".
+ *
+ * A per-app channel starts as soon as the app is installed LOCALLY, while its
+ * cloud half only exists after a cloud install, so the gap between the two is
+ * expected and lasts as long as the operator takes. The cloud data server
+ * names the condition exactly — 401 with `Unknown app: <id>` — and a SyncError
+ * stack per tick for it reads as an authentication failure and buries the
+ * errors that are real.
+ *
+ * Both halves of the match are required, and the app id is interpolated rather
+ * than matched loosely, so no other 401 and no other app's absence can take
+ * this branch. Everything else still logs in full.
+ */
+export function awaitingCloudInstall(message: string, appId: string): boolean {
+  return message.includes("401") && message.includes(`Unknown app: ${appId}`);
+}
+
+/**
  * Per-app namespace store: list() returns only this app's namespace (or
  * nothing if the app has no syncable namespace registered). `get()` honors
  * lookups for any appId because the applier may need to apply incoming rows
@@ -482,9 +501,23 @@ export function createSyncSupervisor(
       entry.lastError = null;
       entry.backoffMs = exchangeIntervalMs;
     } catch (err) {
-      entry.lastError = (err as Error).message;
+      const message = (err as Error).message;
+      const repeated = entry.lastError === message;
+      entry.lastError = message;
       entry.backoffMs = Math.min(entry.backoffMs * 2, 5 * 60 * 1000);
-      console.error(`[sync] exchange failed for app=${entry.appId}:`, err);
+      if (awaitingCloudInstall(message, entry.appId)) {
+        // Say it once per run of the condition. The backoff above already
+        // spaces the retries out; what made this noisy was a stack per tick.
+        if (!repeated) {
+          console.warn(
+            `[sync] app=${entry.appId} has no cloud half yet — the data server `
+            + `does not know it. Install it in the cloud to start syncing; `
+            + `retrying meanwhile with backoff.`,
+          );
+        }
+      } else {
+        console.error(`[sync] exchange failed for app=${entry.appId}:`, err);
+      }
     }
   }
 
