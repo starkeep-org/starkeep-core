@@ -34,6 +34,19 @@ export interface DatabaseAdapter {
    */
   delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void>;
   query(query: Query): Promise<QueryResult>;
+  /**
+   * How many records match, without paging through them to find out.
+   *
+   * `sort`, `limit` and `cursor` are ignored: none of them changes how many
+   * rows match, and a count of "the rest of the page" is not a thing anybody
+   * wants.
+   *
+   * Exists because the alternative is what the phone was doing — paging the
+   * whole library five hundred rows at a time to put one number on screen,
+   * through the very cursor whose correctness the count is supposed to be
+   * independent of.
+   */
+  countRecords(query: Query): Promise<number>;
 
   /**
    * Per-nodeId MAX(updated_at) over every stored row (tombstones included) —

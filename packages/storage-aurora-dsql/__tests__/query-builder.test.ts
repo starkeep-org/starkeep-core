@@ -26,7 +26,13 @@ describe("buildPostgresQuery (compile-only, no database)", () => {
     const { text, values } = buildPostgresQuery(query);
     expect(text).toContain('"origin_app_id" = $1');
     expect(text).toContain('"size_bytes" > $2');
-    expect(text).toContain('order by "updated_at" desc');
+    // The ordering is normalized rather than passed through: a leading null
+    // flag, because SQLite and Postgres disagree about where nulls sort, and a
+    // trailing `id`, because a keyset cursor has to name exactly one row. See
+    // `record-queries.ts`.
+    expect(text).toContain(
+      'order by ("updated_at" is null) asc, "updated_at" desc, "id" desc',
+    );
     expect(values).toEqual(["photos", 100]);
   });
 

@@ -1,4 +1,5 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
+import { nextCursorFrom } from "@starkeep/storage-adapter";
 import type {
   DataRecord,
   HLCTimestamp,
@@ -51,7 +52,7 @@ import {
 } from "@starkeep/storage-adapter";
 import { sql as kSql } from "kysely";
 import { recordToRow, rowToRecord, type SqliteRow } from "./serialization.js";
-import { buildSelectQuery, compiler as qb } from "./query-builder.js";
+import { buildCountQuery, buildSelectQuery, compiler as qb } from "./query-builder.js";
 import { initializeLocalSchema } from "./schema/bootstrap.js";
 
 export interface SqliteDatabaseAdapterOptions {
@@ -307,7 +308,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
 
   async query(query: Query): Promise<QueryResult> {
     const { sql, params } = buildSelectQuery(query);
-    const rows = this.allRows<SqliteRow>(sql, ...params);
+    const rows = this.allRows<SqliteRow & Record<string, unknown>>(sql, ...params);
 
     const limit = query.limit;
     const hasMore = limit ? rows.length > limit : false;
@@ -315,9 +316,18 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
 
     return {
       records: resultRows.map(rowToRecord),
-      nextCursor: hasMore ? resultRows[resultRows.length - 1].id : null,
+      // Cut from the row itself, ordering values and all — see `nextCursorFrom`.
+      // The page carries those values back under reserved aliases precisely so
+      // this does not have to recompute what the database ordered on.
+      nextCursor: hasMore ? nextCursorFrom(query, resultRows[resultRows.length - 1]) : null,
       hasMore,
     };
+  }
+
+  async countRecords(query: Query): Promise<number> {
+    const { sql, params } = buildCountQuery(query);
+    const row = this.getRow<{ total: number }>(sql, ...params);
+    return row?.total ?? 0;
   }
 
   async batch(operations: BatchOperation[]): Promise<void> {
