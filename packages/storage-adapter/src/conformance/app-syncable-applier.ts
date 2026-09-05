@@ -419,8 +419,10 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
     // the rest of the run again. Silent and permanent.
     name: "never reports a ceiling that splits one timestamp",
     async run(h) {
-      // Four rows at wall time 5, then one above it. Any limit that binds
-      // inside the run of four must not name 5 as the ceiling.
+      // Four rows at wall time 5, then one above it. A limit that binds inside
+      // the run of four may still name 5 as its ceiling, but only by widening
+      // its read until it holds every row at 5 — naming 5 while holding fewer
+      // is the split this case exists to catch.
       for (const id of ["r1", "r2", "r3", "r4"]) {
         await h.applier.apply(insertEntry(h, id, hlc(5)));
       }
@@ -430,10 +432,12 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
         const page = await h.applier.scanSince(h.appId, h.table, {}, limit);
         const mark = page.truncated[AUTHOR];
         if (mark == null) continue; // complete enumeration imposes no ceiling
-        if (mark.wallTime === 5) {
+        if (mark.wallTime !== 5) continue; // a lower ceiling splits nothing here
+        const atCeiling = page.rows.filter((e) => e.timestamp.wallTime === 5).length;
+        if (atCeiling !== 4) {
           fail(
-            `limit ${limit} named 5 as a ceiling, but 5 covers four rows and ` +
-              `only ${page.rows.length} were returned — the rest become unreachable`,
+            `limit ${limit} named 5 as a ceiling but returned ${atCeiling} of the ` +
+              `four rows at 5 — the rest become unreachable`,
           );
         }
       }
