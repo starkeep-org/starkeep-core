@@ -81,10 +81,13 @@ export interface ProbeReport {
   unreachablePublicPaths: ProbeResult[];
   /**
    * The cold-start measurement, or null when the manifest declares no public
-   * path to measure against. Reported but never fatal: it warns until every
-   * app has migrated to the platform entry (`@starkeep/app-client/lambda`),
-   * because failing installs of apps that have not yet migrated would be a
-   * poor trade.
+   * path to measure against.
+   *
+   * The report only measures and grades. What a caller does with each level is
+   * the caller's: `cli-install-app` warns at `"warn"` and fails the install at
+   * `"fail"`, which it could only do once every app built its entry with
+   * `@starkeep/app-client/lambda` — failing installs of apps that had not yet
+   * migrated would have been a poor trade.
    */
   coldStart: ColdStartResult | null;
 }
