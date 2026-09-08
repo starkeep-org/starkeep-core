@@ -330,8 +330,9 @@ finishes evaluating, which is to say during INIT. Write your entry as an `.mjs`
 file so top-level `await` is available.
 
 The installer measures this. The post-install probe times the first request to a
-declared public path against that handler's `timeoutSeconds` and warns when it
-consumes more than half of it.
+declared public path against that handler's `timeoutSeconds`. It warns when
+that request consumes more than half of the timeout and fails the install when
+it consumes more than four fifths.
 
 #### The web adapter, if your app serves a browser
 

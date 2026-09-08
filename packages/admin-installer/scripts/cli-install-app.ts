@@ -299,10 +299,10 @@ if (browserBaseForProbe) {
   for (const r of probeReport.unreachablePublicPaths) {
     console.warn(`  WARNING: ${r.url} is declared public but answered ${r.status}.`);
   }
-  // Warn-only for now. The check is here so the regression is visible the day
-  // it ships rather than weeks later in a latency investigation; it becomes
-  // fatal once every app builds its entry with @starkeep/app-client/lambda.
-  if (probeReport.coldStart && probeReport.coldStart.level !== "ok") {
+  // Half the timeout is a warning: the deployment works, and the number is
+  // here so a regression is visible the day it ships rather than weeks later
+  // in a latency investigation.
+  if (probeReport.coldStart?.level === "warn") {
     console.warn(
       `  WARNING: the "${probeReport.coldStart.handlerName}" handler's first request took ` +
         `${(probeReport.coldStart.elapsedMs / 1000).toFixed(1)}s of its ` +
@@ -313,6 +313,26 @@ if (browserBaseForProbe) {
     console.error(
       `\n${appId} is installed but EXPOSED. Take it down before doing anything else:\n` +
         `  pnpm --filter @starkeep/admin-installer cli:uninstall-app -- --app ${appId}`,
+    );
+    process.exit(1);
+  }
+  // Four fifths of the timeout fails the install. Warn-only until every app
+  // built its entry with @starkeep/app-client/lambda; Probe, Photos and Memo
+  // all do, so a number this high now means a new app put its module graph
+  // inside the handler rather than at module scope, and the next cold start on
+  // a slower container is the one that times out.
+  //
+  // Checked after the exposure verdict so the takedown instruction stays the
+  // last thing an operator reads when both fire.
+  if (probeReport.coldStart?.level === "fail") {
+    console.error(
+      `\n${appId} is installed but its "${probeReport.coldStart.handlerName}" handler spent ` +
+        `${(probeReport.coldStart.elapsedMs / 1000).toFixed(1)}s of its ` +
+        `${probeReport.coldStart.timeoutMs / 1000}s timeout on the first request.\n` +
+        `Load the app's module graph at module scope — build the entry with ` +
+        `createLambdaEntry or createWebAppHandler from @starkeep/app-client, whose ` +
+        `\`upstream\` takes a promise so a top-level \`await\` is the only way to ` +
+        `satisfy it. See authoring-an-app.md §7.`,
     );
     process.exit(1);
   }
