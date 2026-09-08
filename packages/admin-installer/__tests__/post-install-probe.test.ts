@@ -255,3 +255,123 @@ describe("formatProbeReport", () => {
     expect(text).toContain("/apps/memo/data/records -> 401");
   });
 });
+
+describe("the cold-start measurement", () => {
+  /** A clock that advances by `ms` on the first reading pair only. */
+  function clockAdvancing(ms: number): () => number {
+    let calls = 0;
+    return () => (calls++ === 0 ? 0 : ms);
+  }
+
+  function timedManifest(timeoutSeconds: number): AppManifest {
+    return appManifestSchema.parse({
+      id: "memo",
+      name: "Memo",
+      version: "0.1.0",
+      tier: "official",
+      infraRequirements: {
+        compute: {
+          enabled: true,
+          handlers: [
+            {
+              name: "static",
+              handler: "index.handler",
+              auth: "session",
+              timeoutSeconds,
+              routes: ["GET /", "ANY /{proxy+}"],
+              publicPaths: ["/", "/sign-in"],
+            },
+          ],
+        },
+      },
+    });
+  }
+
+  it("times the app root against the handler that declares it", async () => {
+    const report = await probeAnonymousSurface(
+      timedManifest(10),
+      "https://cdn.example.com",
+      fetchReturning(HEALTHY),
+      { clock: clockAdvancing(400) },
+    );
+    expect(report.coldStart).toMatchObject({
+      handlerName: "static",
+      url: "https://cdn.example.com/apps/memo",
+      elapsedMs: 400,
+      timeoutMs: 10_000,
+      level: "ok",
+    });
+  });
+
+  it("warns above half the timeout", async () => {
+    const report = await probeAnonymousSurface(
+      timedManifest(10),
+      "https://cdn.example.com",
+      fetchReturning(HEALTHY),
+      { clock: clockAdvancing(6_000) },
+    );
+    expect(report.coldStart?.level).toBe("warn");
+    expect(formatProbeReport(report)).toContain("60% of");
+    expect(formatProbeReport(report)).toContain("during INIT");
+  });
+
+  it("marks the shape Memo shipped as a failure", async () => {
+    // 8.0 s against a 10 s timeout: the observed maximum on the day the lazy
+    // import shipped, and one slow container away from a 502.
+    const report = await probeAnonymousSurface(
+      timedManifest(10),
+      "https://cdn.example.com",
+      fetchReturning(HEALTHY),
+      { clock: clockAdvancing(8_000) },
+    );
+    expect(report.coldStart?.level).toBe("fail");
+  });
+
+  it("never fails the install on its own, whatever it measured", async () => {
+    const report = await probeAnonymousSurface(
+      timedManifest(10),
+      "https://cdn.example.com",
+      fetchReturning(HEALTHY),
+      { clock: clockAdvancing(9_900) },
+    );
+    // `exposed` is the only fatal signal, and a slow cold start is not it.
+    expect(report.exposed).toBe(false);
+  });
+
+  it("reports nothing for an app with no anonymous surface", async () => {
+    const jwtOnly = appManifestSchema.parse({
+      id: "memo",
+      name: "Memo",
+      version: "0.1.0",
+      tier: "official",
+      infraRequirements: {
+        compute: {
+          enabled: true,
+          handlers: [{ name: "api", handler: "api.handler", routes: ["POST /api/echo"] }],
+        },
+      },
+    });
+    const report = await probeAnonymousSurface(
+      jwtOnly,
+      "https://cdn.example.com",
+      fetchReturning(HEALTHY),
+    );
+    expect(report.coldStart).toBeNull();
+  });
+
+  it("stays quiet when the request never completed", async () => {
+    const failing = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    const report = await probeAnonymousSurface(
+      timedManifest(10),
+      "https://cdn.example.com",
+      failing,
+      { clock: clockAdvancing(9_000) },
+    );
+    // No answer is no evidence about where the module graph loads; the
+    // reachability checks are what report an app that cannot serve at all.
+    expect(report.coldStart?.level).toBe("ok");
+    expect(report.coldStart?.error).toContain("ECONNREFUSED");
+  });
+});

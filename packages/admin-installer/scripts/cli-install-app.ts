@@ -299,6 +299,16 @@ if (browserBaseForProbe) {
   for (const r of probeReport.unreachablePublicPaths) {
     console.warn(`  WARNING: ${r.url} is declared public but answered ${r.status}.`);
   }
+  // Warn-only for now. The check is here so the regression is visible the day
+  // it ships rather than weeks later in a latency investigation; it becomes
+  // fatal once every app builds its entry with @starkeep/app-client/lambda.
+  if (probeReport.coldStart && probeReport.coldStart.level !== "ok") {
+    console.warn(
+      `  WARNING: the "${probeReport.coldStart.handlerName}" handler's first request took ` +
+        `${(probeReport.coldStart.elapsedMs / 1000).toFixed(1)}s of its ` +
+        `${probeReport.coldStart.timeoutMs / 1000}s timeout.`,
+    );
+  }
   if (probeReport.exposed) {
     console.error(
       `\n${appId} is installed but EXPOSED. Take it down before doing anything else:\n` +
