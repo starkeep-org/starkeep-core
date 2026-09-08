@@ -49,24 +49,53 @@ if (!cloud) {
   if (existsSync(staging)) rmSync(staging, { recursive: true });
   mkdirSync(staging, { recursive: true });
 
-  // CommonJS: Lambda's default loader expects it unless the zip carries a
-  // package.json with type=module. The manifest's handler strings
-  // (`static-handler.handler`, `api-handler.handler`) resolve against the zip
-  // root, so the outputs are named to match.
+  // ESM, emitted as `.mjs`: the entry uses top-level `await` so the app's
+  // module graph loads during Lambda's INIT phase, and top-level await does not
+  // exist in CommonJS. Lambda's Node runtime resolves the manifest's handler
+  // strings (`static-handler.handler`, `api-handler.handler`) against `.mjs`
+  // as readily as `.js`, so the outputs are named to match and nothing about
+  // the manifest changes.
+  const esbuildCommon = {
+    bundle: true,
+    platform: "node",
+    target: "node22",
+    format: "esm",
+    // esbuild emits `import` for these under ESM; Node resolves them natively.
+    external: ["node:*"],
+    banner: {
+      // The bundle pulls in CJS dependencies that expect `require`.
+      js: "import { createRequire as __cr } from 'node:module';\nconst require = __cr(import.meta.url);",
+    },
+  };
   for (const entry of ["static-handler", "api-handler"]) {
     await build({
+      ...esbuildCommon,
       entryPoints: [join(pkgDir, "src", `${entry}.ts`)],
-      bundle: true,
-      platform: "node",
-      target: "node22",
-      format: "cjs",
-      outfile: join(staging, `${entry}.js`),
-      external: [],
+      outfile: join(staging, `${entry}.mjs`),
     });
   }
+
+  // Stage the shell's script as a file on disk, so the platform's web adapter
+  // answers it the way it answers any app's static assets. The manifest's
+  // `staticAssetPaths` is what tells the adapter it may, and the schema refuses
+  // an entry `publicPaths` does not already declare.
+  const writeAssets = join(staging, ".write-assets.mjs");
+  await build({
+    ...esbuildCommon,
+    entryPoints: [join(pkgDir, "src", "write-assets.ts")],
+    outfile: writeAssets,
+  });
+  execSync(`node "${writeAssets}" "${join(staging, "assets")}"`, { stdio: "inherit" });
+  rmSync(writeAssets);
+
   mkdirSync(dirname(out), { recursive: true });
   if (existsSync(out)) rmSync(out);
-  execSync(`zip -j "${out}" static-handler.js api-handler.js`, { cwd: staging, stdio: "inherit" });
+  // -r, not -j: the assets directory has to keep its shape inside the zip,
+  // because the adapter resolves paths under it.
+  execSync(`zip -rq "${out}" static-handler.mjs api-handler.mjs assets`, {
+    cwd: staging,
+    stdio: "inherit",
+  });
   rmSync(staging, { recursive: true });
   console.log(`Built: ${out}`);
 }

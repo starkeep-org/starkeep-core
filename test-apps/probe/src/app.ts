@@ -10,10 +10,11 @@
  *
  * Written against web `Request`/`Response` so one implementation serves both
  * surfaces the platform runs an app on: `serve.mjs` adapts it to `node:http`
- * for a local install, and `static-handler.ts` adapts it to an API Gateway v2
- * Lambda event for a cloud install. The suites therefore exercise the same app
- * code on both tiers, and a divergence between the two surfaces is the
- * platform's, not the fixture's.
+ * for a local install, and in the cloud the platform's own web adapter
+ * (`@starkeep/app-client/web`, wired up in `static-handler.ts`) adapts it to an
+ * API Gateway v2 Lambda event. The suites therefore exercise the same app code
+ * on both tiers, and a divergence between the two surfaces is the platform's,
+ * not the fixture's.
  *
  * Everything session- and signing-related comes from `@starkeep/app-client`
  * rather than being reimplemented here. That is the point: an app author is
@@ -24,6 +25,7 @@
 
 import { createSessionRoutes } from "@starkeep/app-client/auth";
 import { createNextProxyHandler, sessionAuth } from "@starkeep/app-client";
+import { ASSET_NAME, assetScript } from "./assets.js";
 
 /** The app id, fixed to match `starkeep.manifest.json`. */
 export const APP_ID = "probe";
@@ -49,14 +51,6 @@ const sessionRoutes = createSessionRoutes({ appId: APP_ID });
 // browser, the data and the person are all on one machine, which is the
 // local-first guarantee the platform makes.
 const proxy = createNextProxyHandler({ appId: APP_ID, endUserAuth: sessionAuth() });
-
-/**
- * A content-hashed asset path, so the platform's `/apps/*\/_next/static/*`
- * CloudFront behavior has something immutable to cache. The `_next/static`
- * spelling is the platform's cache-behavior convention rather than a Next.js
- * artifact — Probe uses no framework at all.
- */
-const ASSET_NAME = "probe.5f3a9c21.js";
 
 function html(body: string, status = 200): Response {
   return new Response(body, {
@@ -120,98 +114,6 @@ function shellPage(base: string, cloud: boolean): string {
 }
 
 /**
- * The shell's script, served as the immutable asset.
- *
- * Uploading is the one flow that differs by surface, and the difference is not
- * cosmetic. In the cloud the presigned URL points at S3 and the browser PUTs to
- * it directly — which is the only place anything exercises S3's CORS
- * configuration on a real presigned PUT. Locally the presign endpoint hands
- * back a loopback URL on the data server's own origin, which a page served from
- * the app's origin cannot PUT to, so the upload goes through the app's own
- * server instead. Both paths end in the same `POST /data/records`.
- */
-function assetScript(): string {
-  return `(() => {
-const { base, cloud } = window.__PROBE__;
-const api = base + "/api/local-data";
-const statusEl = document.getElementById("status");
-const grid = document.getElementById("grid");
-
-async function sha256Hex(buf) {
-  const digest = await crypto.subtle.digest("SHA-256", buf);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-async function render() {
-  const res = await fetch(api + "/data/records?limit=200&include=metadata");
-  if (!res.ok) { statusEl.textContent = "Data server GET /data/records → " + res.status; return; }
-  const { records } = await res.json();
-  grid.replaceChildren();
-  for (const r of records) {
-    if (!r.original_filename) continue;
-    const img = document.createElement("img");
-    img.alt = r.original_filename;
-    img.width = 64;
-    const u = await fetch(api + "/data/records/" + r.id + "/file-url");
-    if (u.ok) img.src = (await u.json()).url;
-    grid.appendChild(img);
-  }
-}
-
-async function upload(file) {
-  const buf = await file.arrayBuffer();
-  const contentHash = await sha256Hex(buf);
-  const type = file.type === "image/jpeg" ? "image/jpeg" : "image/png";
-  const key = "shared/image/" + contentHash.slice(0, 2) + "/" + contentHash;
-
-  if (cloud) {
-    const p = await fetch(api + "/files/presign", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key, contentType: type, intent: "instant" }),
-    });
-    if (!p.ok) { statusEl.textContent = "presign → " + p.status; return; }
-    const presign = await p.json();
-    const headers = { "Content-Type": type };
-    // Mandatory when present: they are inside the signature, so dropping one
-    // fails the PUT rather than storing something unverified.
-    if (presign.checksumSha256) headers["x-amz-checksum-sha256"] = presign.checksumSha256;
-    if (presign.storageClass) headers["x-amz-storage-class"] = presign.storageClass;
-    if (presign.tagging && Object.keys(presign.tagging).length) {
-      headers["x-amz-tagging"] = Object.entries(presign.tagging)
-        .map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v)).join("&");
-    }
-    const put = await fetch(presign.url, { method: "PUT", headers, body: buf });
-    if (!put.ok) { statusEl.textContent = "S3 PUT → " + put.status; return; }
-  } else {
-    const up = await fetch(base + "/api/upload?type=" + encodeURIComponent(type), {
-      method: "PUT", headers: { "Content-Type": type }, body: buf,
-    });
-    if (!up.ok) { statusEl.textContent = "upload → " + up.status; return; }
-  }
-
-  const reg = await fetch(api + "/data/records", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      type, contentType: type, contentHash, sizeBytes: buf.byteLength, fileName: file.name,
-    }),
-  });
-  if (!reg.ok) { statusEl.textContent = "register → " + reg.status; return; }
-  const body = await reg.json();
-  statusEl.textContent = body.deduped
-    ? file.name + " is already in your library"
-    : "Uploaded " + file.name;
-  await render();
-}
-
-document.getElementById("file").addEventListener("change", (e) => {
-  const file = e.target.files[0];
-  if (file) upload(file);
-});
-render();
-})();`;
-}
-
-/**
  * Serve one request.
  *
  * `path` is the app-relative path with the platform's mount prefix already
@@ -224,6 +126,12 @@ export async function handleRequest(req: Request, path: string): Promise<Respons
   // The immutable asset. Cached hard on purpose: the platform's CloudFront
   // behavior for this path is CachingOptimized, and an edge hit on it is what
   // the tier-3 suite asserts.
+  //
+  // This branch answers the local surface. In the cloud the bundle stages the
+  // same bytes to disk and the web adapter serves them ahead of this handler,
+  // which is what makes Probe a test of the adapter's static path rather than
+  // only of its payload encoding. Both answers come from `assetScript()`, so
+  // the two surfaces cannot drift.
   if (path === `/_next/static/${ASSET_NAME}`) {
     return new Response(assetScript(), {
       headers: {

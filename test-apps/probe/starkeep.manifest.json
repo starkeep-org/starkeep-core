@@ -90,6 +90,9 @@
             "/sign-in",
             "/api/session/*"
           ],
+          "staticAssetPaths": [
+            "/_next/static/*"
+          ],
           "env": {
             "STARKEEP_API_GATEWAY_URL": "",
             "STARKEEP_USER_POOL_ID": "",
