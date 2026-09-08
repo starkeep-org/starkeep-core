@@ -75,5 +75,12 @@ export type { InstalledApp, Registry, RegistryOptions } from "./registry";
 
 // The install-time anonymous-surface probe, exported for the same reason: the
 // e2e asserts the deployed reality with the code the installer uses.
-export { probeAnonymousSurface, formatProbeReport } from "./post-install-probe";
+export {
+  probeAnonymousSurface,
+  formatProbeReport,
+  COLD_START_WARN_RATIO,
+  COLD_START_FAIL_RATIO,
+  type ColdStartResult,
+  type ProbeOptions,
+} from "./post-install-probe";
 export type { ProbeReport, ProbeResult } from "./post-install-probe";

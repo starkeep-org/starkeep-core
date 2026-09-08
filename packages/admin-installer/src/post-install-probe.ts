@@ -25,7 +25,41 @@
  * 404, which usually means the route was never created — is reported but not
  * fatal, because it is not evidence of exposure.
  */
-import { probePathFor, type AppManifest } from "@starkeep/admin-manifest";
+import { probePathFor, type AppComputeHandler, type AppManifest } from "@starkeep/admin-manifest";
+
+/**
+ * How long the first request to a freshly deployed handler took, against the
+ * timeout that request had to finish inside.
+ *
+ * This probe already fires against a guaranteed-cold deployment, which is
+ * exactly the condition worth measuring, so timing it costs nothing extra. The
+ * defect it looks for is a handler that loads its module graph inside the
+ * request rather than during INIT: the cost then lands in the billed,
+ * timeout-bounded invocation while `Init Duration` still reads healthy, so
+ * nothing in CloudWatch says the handler is one slow cold start from a 502.
+ * Memo shipped that defect and would have read 8.0 s against a 10 s timeout on
+ * the day it shipped.
+ *
+ * Measured rather than inspected. A static check for `import()` outside module
+ * scope was considered and rejected — legitimate lazy imports exist, so it
+ * would report false positives while a measurement reports the number that
+ * actually matters.
+ */
+export interface ColdStartResult {
+  handlerName: string;
+  url: string;
+  status: number | null;
+  elapsedMs: number;
+  timeoutMs: number;
+  /** Fraction of the handler's own timeout the first request consumed. */
+  ratio: number;
+  level: "ok" | "warn" | "fail";
+  error?: string;
+}
+
+/** Half the timeout is a warning; four fifths is what should fail an install. */
+export const COLD_START_WARN_RATIO = 0.5;
+export const COLD_START_FAIL_RATIO = 0.8;
 
 export interface ProbeResult {
   url: string;
@@ -45,6 +79,14 @@ export interface ProbeReport {
    */
   trailingSlashPaths: ProbeResult[];
   unreachablePublicPaths: ProbeResult[];
+  /**
+   * The cold-start measurement, or null when the manifest declares no public
+   * path to measure against. Reported but never fatal: it warns until every
+   * app has migrated to the platform entry (`@starkeep/app-client/lambda`),
+   * because failing installs of apps that have not yet migrated would be a
+   * poor trade.
+   */
+  coldStart: ColdStartResult | null;
 }
 
 /** Paths under an app's mount that the broker owns and no app may claim. */
@@ -71,12 +113,88 @@ function isRefusal(status: number | null): boolean {
   return status === 401 || status === 403;
 }
 
+/**
+ * The handler and path to time the cold start against: the one a browser
+ * navigates to.
+ *
+ * Prefers the handler that declares the app root, because that is the request
+ * whose latency a person actually experiences and the one whose module graph
+ * is the whole framework. Falls back to the first handler declaring anything
+ * public, and returns null for an app with no anonymous surface — there is no
+ * request such an app can be asked to answer without credentials.
+ */
+function coldStartTarget(
+  manifest: AppManifest,
+): { handler: AppComputeHandler; path: string } | null {
+  const handlers = manifest.infraRequirements.compute.handlers.filter(
+    (h) => h.publicPaths.length > 0,
+  );
+  const atRoot = handlers.find((h) => h.publicPaths.includes("/"));
+  if (atRoot) return { handler: atRoot, path: "/" };
+  const first = handlers[0];
+  if (!first) return null;
+  return { handler: first, path: probePathFor(first.publicPaths[0]!) };
+}
+
+async function measureColdStart(
+  manifest: AppManifest,
+  root: string,
+  fetchImpl: typeof fetch,
+  clock: () => number,
+): Promise<ColdStartResult | null> {
+  const target = coldStartTarget(manifest);
+  if (!target) return null;
+
+  const url = `${root}${target.path === "/" ? "" : target.path}`;
+  const started = clock();
+  const result = await probe(url, fetchImpl);
+  const elapsedMs = Math.round(clock() - started);
+  const timeoutMs = target.handler.timeoutSeconds * 1000;
+  const ratio = elapsedMs / timeoutMs;
+  return {
+    handlerName: target.handler.name,
+    url,
+    status: result.status,
+    elapsedMs,
+    timeoutMs,
+    ratio,
+    // A request that never completed says nothing about INIT placement — the
+    // reachability checks below are what report that.
+    level:
+      result.status === null
+        ? "ok"
+        : ratio >= COLD_START_FAIL_RATIO
+          ? "fail"
+          : ratio >= COLD_START_WARN_RATIO
+            ? "warn"
+            : "ok",
+    ...(result.error ? { error: result.error } : {}),
+  };
+}
+
+export interface ProbeOptions {
+  /** Injectable wall clock, so the cold-start measurement is testable. */
+  clock?: () => number;
+}
+
 export async function probeAnonymousSurface(
   manifest: AppManifest,
   baseUrl: string,
   fetchImpl: typeof fetch = fetch,
+  opts: ProbeOptions = {},
 ): Promise<ProbeReport> {
   const root = `${baseUrl.replace(/\/+$/, "")}/apps/${manifest.id}`;
+
+  // First, and alone. The deployment is cold exactly once, and the volley
+  // below would both race for that container and start several more, so a
+  // measurement taken inside it would be timing whichever container answered
+  // rather than the one that had to initialize.
+  const coldStart = await measureColdStart(
+    manifest,
+    root,
+    fetchImpl,
+    opts.clock ?? (() => performance.now()),
+  );
 
   const dataPaths = await Promise.all(
     DATA_MOUNT_PROBES.map((p) => probe(`${root}${p}`, fetchImpl)),
@@ -127,6 +245,7 @@ export async function probeAnonymousSurface(
     ],
     publicPaths,
     trailingSlashPaths,
+    coldStart,
   };
 }
 
@@ -160,6 +279,28 @@ export function formatProbeReport(report: ProbeReport): string {
         "  to register the other, so only the app root is canonicalized in front of it.\n" +
         "  A browser navigating to one of these still reaches sign-in.",
     );
+  }
+  const cold = report.coldStart;
+  if (cold) {
+    lines.push("");
+    lines.push(
+      `  Cold start: ${cold.url} answered in ${(cold.elapsedMs / 1000).toFixed(1)}s ` +
+        `(${Math.round(cold.ratio * 100)}% of the "${cold.handlerName}" handler's ` +
+        `${cold.timeoutMs / 1000}s timeout).`,
+    );
+    if (cold.level !== "ok") {
+      lines.push("");
+      lines.push(
+        `  WARNING: the first request to a cold container spent ${Math.round(cold.ratio * 100)}% of\n` +
+          `           the handler's timeout. That is the signature of a handler loading its\n` +
+          `           module graph inside the request instead of during INIT, where the CPU is\n` +
+          `           faster, the time is not billed, and the budget is separate. Init Duration\n` +
+          `           will read healthy while the cost sits in every cold request.\n` +
+          `           Build the entry with \`createLambdaEntry\` from @starkeep/app-client/lambda,\n` +
+          `           which takes an already-started import and awaits it at module scope.\n` +
+          `           This is a warning today and becomes fatal once every app has migrated.`,
+      );
+    }
   }
   if (report.exposed) {
     lines.push("");
