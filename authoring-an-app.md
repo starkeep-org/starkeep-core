@@ -303,6 +303,87 @@ See `infra/build-bundle.ts` for the contract and a full OpenNext + sharp example
 Knowledge of your framework, native deps, and asset layout lives entirely in this
 script — the platform only ever sees a `dist.zip`.
 
+**Your handler must load its module graph during Lambda's INIT phase.** INIT
+runs at elevated CPU, is not billed, and has a budget separate from the
+invocation timeout. A handler that defers the load into the first request pays
+for the same work in the billed, timeout-bounded invocation instead. The
+telemetry hides the trade: `Init Duration` still reads healthy, because the
+entry module itself loaded quickly, and the seconds sit inside the request where
+nothing labels them. Memo shipped that defect, reported `Init Duration` of
+120–171 ms with 7766–8015 ms in the handler, and touched its ten-second timeout
+before anyone looked.
+
+Get the guarantee from the platform rather than by remembering it:
+
+```js
+import { createLambdaEntry } from "@starkeep/app-client/lambda";
+
+export const handler = await createLambdaEntry({
+  upstream: import("./app/index.mjs"),
+});
+```
+
+`upstream` takes a **promise, not a thunk**. A thunk can be called at any time,
+so a thunk-shaped API would permit exactly the defect above; a promise handed to
+a top-level `await` has already started and must settle before the entry module
+finishes evaluating, which is to say during INIT. Write your entry as an `.mjs`
+file so top-level `await` is available.
+
+The installer measures this. The post-install probe times the first request to a
+declared public path against that handler's `timeoutSeconds` and warns when it
+consumes more than half of it.
+
+#### The web adapter, if your app serves a browser
+
+Everything a browser-facing shell needs in front of its framework is the same
+for every app, so the platform provides it:
+
+```js
+import { createWebAppHandler } from "@starkeep/app-client/web";
+import manifest from "./starkeep.manifest.json" with { type: "json" };
+
+const shell = manifest.infraRequirements.compute.handlers.find((h) => h.name === "static");
+
+export const handler = await createWebAppHandler({
+  basePath: process.env.STARKEEP_APP_BASE_PATH,
+  assetsDir: new URL("./assets/", import.meta.url),
+  staticPaths: shell.staticAssetPaths,
+  upstream: import("./app/index.mjs"),
+});
+```
+
+It owns six things: stripping the `/apps/<appId>` mount prefix (and treating the
+bare prefix and its trailing-slash spelling as your app root), converting API
+Gateway v2 events to and from web `Request`/`Response`, carrying cookies across
+that conversion in both directions, serving your declared paths from a staged
+directory with MIME resolution, refusing a path that escapes that directory, and
+answering `immutable` for content-addressed assets and `must-revalidate` for
+everything else. It composes with `createLambdaEntry`, so adopting it gets you
+the INIT guarantee without having to know the invariant exists.
+
+Pass `requestUpstream` instead of `upstream` when your app is written against
+web `Request`/`Response` rather than against Lambda events; the adapter then
+hands your handler the request and the app-relative path.
+
+`staticPaths` comes from the manifest rather than from a hand-written predicate,
+because **the static branch runs before your own gate**. Anything it answers is
+answered anonymously, which makes the list an enforcement bypass by
+construction. Declare it as `staticAssetPaths` on the handler:
+
+```jsonc
+"publicPaths": ["/", "/_next/static/*", "/BUILD_ID", "/sign-in", "/api/session/*"],
+"staticAssetPaths": ["/_next/static/*", "/BUILD_ID"]
+```
+
+The manifest schema refuses a `staticAssetPaths` entry that `publicPaths` does
+not already cover, so a path your bundle serves from disk can never be one the
+manifest failed to declare — or, equivalently, one the gateway refuses while
+your bundle stands ready to serve it.
+
+What is still yours: which framework, the build command that produces its
+output, native dependencies, any handler beyond the shell, and which of your
+public paths are files on disk rather than routes your server answers.
+
 ### 8. Gate the UI behind sign-in (cloud target only)
 
 When paired with a remote data server, requests need a Cognito token. Wrap the

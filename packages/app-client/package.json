@@ -1,6 +1,6 @@
 {
   "name": "@starkeep/app-client",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -26,6 +26,16 @@
       "types": "./dist/edge.d.ts",
       "import": "./dist/edge.js",
       "require": "./dist/edge.cjs"
+    },
+    "./lambda": {
+      "types": "./dist/lambda.d.ts",
+      "import": "./dist/lambda.js",
+      "require": "./dist/lambda.cjs"
+    },
+    "./web": {
+      "types": "./dist/web.d.ts",
+      "import": "./dist/web.js",
+      "require": "./dist/web.cjs"
     }
   },
   "files": [
