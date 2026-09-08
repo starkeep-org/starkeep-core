@@ -13,7 +13,14 @@
  * reasons.
  */
 
-import { toRequest, toResult, type ApiGatewayV2Event, type ApiGatewayV2Result } from "./lambda.js";
+// Payload encoding from the platform rather than from a copy of its own — the
+// same module the browser-facing handler gets it from.
+import {
+  toRequest,
+  toResult,
+  type ApiGatewayV2Event,
+  type ApiGatewayV2Result,
+} from "@starkeep/app-client/web";
 
 export async function handler(event: ApiGatewayV2Event): Promise<ApiGatewayV2Result> {
   const req = toRequest(event);
