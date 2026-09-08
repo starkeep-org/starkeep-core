@@ -110,11 +110,27 @@ const publicPathSchema = z
   .string()
   .regex(/^\/[^\s]*$/, { message: "publicPaths entries must be absolute paths starting with /" });
 
+/**
+ * Does a `publicPaths` entry cover a concrete app-relative path?
+ *
+ * `/x/*` covers `/x` and everything under `/x/`; a literal entry covers only
+ * itself. The platform's web adapter applies the same relation when it decides
+ * whether to answer a request from disk, so the allow-list the installer checks
+ * and the one the bundle enforces cannot come to mean different things.
+ */
+export function publicPathCovers(entry: string, path: string): boolean {
+  if (entry.endsWith("/*")) {
+    const bare = entry.slice(0, -2);
+    return path === bare || path.startsWith(`${bare}/`);
+  }
+  return path === entry;
+}
+
 // `handler` is the Lambda entry point inside the app's `dist.zip` (e.g.
 // `index.handler` or `infra/src/resize-handler.handler`). The app's
 // `pnpm bundle` script is responsible for producing a zip whose contents
 // resolve this path — the installer does not synthesize handler code.
-export const appComputeHandlerSchema = z.object({
+const appComputeHandlerObjectSchema = z.object({
   name: z.string(),
   handler: z.string(),
   runtime: z.enum(["nodejs22.x"]).default("nodejs22.x"),
@@ -155,7 +171,57 @@ export const appComputeHandlerSchema = z.object({
    */
   auth: z.enum(["public", "jwt", "session"]).default("jwt"),
   publicPaths: z.array(publicPathSchema).default([]),
+  /**
+   * The subset of `publicPaths` this handler's bundle answers from files on
+   * disk, before the app's own gate runs.
+   *
+   * Declared as data so the platform's web adapter
+   * (`@starkeep/app-client/web`) can take its allow-list from the manifest
+   * instead of each app hand-writing an `isStaticAssetPath` function it can
+   * widen by accident. The static branch runs ahead of the app's middleware, so
+   * every entry here is an enforcement bypass by construction — which is why
+   * the subset relation below is a schema rule rather than a per-app unit test
+   * that reads a build script back as source text.
+   *
+   * Defaults to an empty array, which keeps a manifest written before this
+   * field installable. Such an app serves nothing from disk, which is a loud
+   * failure — a blank page with 404s in the console — rather than a silent one.
+   */
+  staticAssetPaths: z.array(publicPathSchema).default([]),
 });
+
+/**
+ * Every `staticAssetPaths` entry must sit inside `publicPaths`.
+ *
+ * The bundle answers these paths ahead of the app's own middleware, so a path
+ * served from disk but not declared public is an anonymous route nobody wrote
+ * down — and, once `publicPaths` become real gateway routes, one the gateway
+ * refuses while the bundle stands ready to serve it. Two apps used to check
+ * this by reading their own build script back as source text and grepping it,
+ * which is a description of the duplication rather than a defense against it.
+ *
+ * A wildcard entry is covered by a wildcard declaration of the same or wider
+ * reach: `/_next/static/*` needs `/_next/static/*` or `/_next/*`, and its bare
+ * probe form is what the check compares.
+ */
+export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine(
+  (handler, ctx) => {
+    for (const entry of handler.staticAssetPaths) {
+      const probe = entry.endsWith("/*") ? `${entry.slice(0, -2)}/x` : entry;
+      if (handler.publicPaths.some((p) => publicPathCovers(p, probe))) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["staticAssetPaths"],
+        message:
+          `"${entry}" is served from disk by this handler's bundle but is not covered by ` +
+          `publicPaths. The static branch runs before the app's own gate, so this would be ` +
+          `an anonymous route the manifest never declared — and a route the gateway refuses ` +
+          `while the bundle stands ready to serve it. Declare it in publicPaths, or stop ` +
+          `serving it from disk.`,
+      });
+    }
+  },
+);
 
 const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);
 
