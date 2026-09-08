@@ -652,3 +652,67 @@ describe("anonymous routes and publicPaths", () => {
     expect(result.valid).toBe(false);
   });
 });
+
+describe("staticAssetPaths", () => {
+  function withHandlers(handlers: Record<string, unknown>[]): Record<string, unknown> {
+    return minimal({ infraRequirements: { compute: { enabled: true, handlers } } });
+  }
+
+  const shell = (over: Record<string, unknown> = {}) => ({
+    name: "static",
+    handler: "index.handler",
+    auth: "session",
+    routes: ["GET /", "ANY /{proxy+}"],
+    publicPaths: ["/", "/_next/static/*", "/BUILD_ID", "/sign-in", "/api/session/*"],
+    ...over,
+  });
+
+  it("defaults to an empty list, so a manifest written before the field installs", () => {
+    const result = validateManifest(withHandlers([shell()]));
+    expect(result.errors).toEqual([]);
+    const handler = result.manifest!.infraRequirements.compute.handlers[0]!;
+    expect(handler.staticAssetPaths).toEqual([]);
+  });
+
+  it("accepts a declared subset of publicPaths", () => {
+    const result = validateManifest(
+      withHandlers([shell({ staticAssetPaths: ["/_next/static/*", "/BUILD_ID"] })]),
+    );
+    expect(result.errors).toEqual([]);
+  });
+
+  it("refuses a path served from disk that publicPaths does not cover", () => {
+    // The regression the two per-app grep tests were reaching for: the bundle
+    // answers this ahead of the app's gate, so it is an anonymous route nobody
+    // declared.
+    const result = validateManifest(
+      withHandlers([shell({ staticAssetPaths: ["/_next/static/*", "/private/dump.json"] })]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("/private/dump.json"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("before the app's own gate"))).toBe(true);
+  });
+
+  it("refuses a wildcard wider than the declaration beside it", () => {
+    const result = validateManifest(withHandlers([shell({ staticAssetPaths: ["/_next/*"] })]));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("/_next/*"))).toBe(true);
+  });
+
+  it("accepts a wildcard declaration wider than the disk allow-list", () => {
+    const result = validateManifest(
+      withHandlers([
+        shell({
+          publicPaths: ["/", "/_next/*", "/sign-in", "/api/session/*"],
+          staticAssetPaths: ["/_next/static/*"],
+        }),
+      ]),
+    );
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects a relative entry at the schema level", () => {
+    const result = validateManifest(withHandlers([shell({ staticAssetPaths: ["_next/static/*"] })]));
+    expect(result.valid).toBe(false);
+  });
+});

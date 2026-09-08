@@ -6,6 +6,7 @@ export {
   sharedResourceRequirementSchema,
   appComputeRouteSchema,
   appComputeHandlerSchema,
+  publicPathCovers,
   appSpecificSyncableSchema,
   syncableTableSchema,
   syncableTableColumnSchema,
