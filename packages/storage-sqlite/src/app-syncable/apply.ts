@@ -4,6 +4,15 @@ import type { HLCTimestamp } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSincePage } from "@starkeep/shared-space-api";
 import {
+  buildAppAggregateQuery,
+  buildAppRowQuery,
+  collectAggregatePage,
+  collectRowPage,
+  fetchLimitFor,
+  SQLITE_APP_QUERY_DIALECT,
+  type BuildOptions,
+  type ParsedQuery,
+  type ParsedQueryResult,
   buildBucketDigest,
   buildScanSinceForNode,
   collectSince,
@@ -345,21 +354,65 @@ export class SqliteAppSyncableApplier
     }
   }
 
-  /** Support read path from the factory's queryRows. */
-  queryRows(
+  /**
+   * Run a parsed query. The read half of the app-data plane.
+   *
+   * Compiled by the shared builder rather than here, so the SQL this emits and
+   * the SQL the DSQL applier emits are one piece of code — the two hand-written
+   * read grammars this replaces had already drifted on their limit defaults
+   * alone.
+   */
+  async runQuery(
     appId: string,
     table: string,
-    where?: Record<string, unknown>,
-  ): Record<string, unknown>[] {
+    query: ParsedQuery,
+    options: BuildOptions = {},
+  ): Promise<ParsedQueryResult> {
     const fullName = appSyncableTableName(appId, table);
-    const whereCols = where ? Object.keys(where) : [];
-    // Filter out soft-deleted rows by default.
-    let query = qb.selectFrom(fullName).selectAll().where("deleted_at", "is", null);
-    for (const c of whereCols) {
-      query = query.where(c, "=", where![c]);
+
+    if (query.mode === "aggregate") {
+      const compiled = buildAppAggregateQuery(
+        qb,
+        fullName,
+        query,
+        SQLITE_APP_QUERY_DIALECT,
+        options,
+      );
+      return collectAggregatePage(query, this.selectRows(compiled));
     }
-    return allCompiled<Record<string, unknown>>(this.db, query.compile());
+
+    const compiled = buildAppRowQuery(qb, fullName, query, {
+      ...options,
+      fetchLimit: fetchLimitFor(query),
+    });
+    // `node:sqlite` has no streaming cursor, so the fetch budget is applied
+    // over an array rather than over an iterator here. The row limit and the
+    // regex scan cap bound what that array can hold, and the response budget
+    // engages only on pathological rows — so what is given up is that a page of
+    // 1 MiB text values is materialized before being cut, on a server running
+    // on the operator's own machine.
+    return collectRowPage(query, this.selectRows(compiled));
   }
+
+  /** Bind and run a compiled SELECT, adapting values SQLite cannot bind. */
+  private selectRows(compiled: CompiledQuery): Record<string, unknown>[] {
+    return this.db
+      .prepare(compiled.sql)
+      .all(...compiled.parameters.map(toSqliteParam)) as Record<string, unknown>[];
+  }
+}
+
+/**
+ * SQLite binds no booleans.
+ *
+ * The parser normalizes a boolean column's value to a real boolean so both
+ * engines are handed one thing, and this is where that one thing becomes the
+ * integer SQLite stores. Postgres takes the boolean unchanged, which is the
+ * whole reason the normalization happens in the parser rather than here.
+ */
+function toSqliteParam(value: unknown): SqlParam {
+  if (typeof value === "boolean") return value ? 1 : 0;
+  return value as SqlParam;
 }
 
 /**

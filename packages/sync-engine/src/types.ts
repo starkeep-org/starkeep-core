@@ -2,11 +2,11 @@ import type {
   StarkeepId,
   HLCTimestamp,
   AnyRecord,
-  LogicalColumnType,
   MetadataRow,
   RecordLabel,
 } from "@starkeep/protocol-primitives";
 import type {
+  AppColumnInfo,
   DatabaseAdapter,
   DigestBucket,
   ObjectStorageAdapter,
@@ -107,13 +107,15 @@ export interface ResidencyHooks {
 // by PK without re-consulting the manifest at apply time.
 // ---------------------------------------------------------------------------
 
-/** One declared column of an app-syncable table, as the registry carries it. */
-export interface AppSyncableColumnInfo {
-  readonly name: string;
-  readonly type: LogicalColumnType;
-  readonly notNull: boolean;
-  readonly primaryKey: boolean;
-}
+/**
+ * One declared column of an app-syncable table, as the registry carries it.
+ *
+ * An alias of `storage-adapter`'s `AppColumnInfo` rather than a second
+ * declaration of the same four fields: the query parser and both SQL compilers
+ * need this shape and all of them sit at or below `storage-adapter`, so naming
+ * it twice would be naming it twice.
+ */
+export type AppSyncableColumnInfo = AppColumnInfo;
 
 export interface AppSyncableTableInfo {
   readonly name: string;

@@ -1,0 +1,507 @@
+/**
+ * The parsed query, compiled to SQL — once, for both engines.
+ *
+ * The same argument `record-queries.ts` makes. Two appliers held two
+ * hand-written read grammars that had already drifted (a 50/500 limit in the
+ * cloud, 100 and uncapped locally), and the whole point of a portable grammar
+ * is that one query means one thing wherever it runs. Fixing that in two places
+ * is how it comes back in one of them.
+ *
+ * What genuinely differs between the backends is carried by
+ * {@link AppQueryDialect} and is small: `avg` returns `numeric` on Postgres and
+ * a float on SQLite, so one of them casts.
+ *
+ * ## Two things this module deliberately does not compile
+ *
+ * **`regex` predicates.** No index on either engine can serve one, so pushing
+ * it down would save row transfer and no scan work, while making the pattern
+ * language whatever the engine underneath implements. It is evaluated over the
+ * caller's row iterator instead, which is also the only way the rows-examined
+ * cap can be exact. See `regexPredicates`.
+ *
+ * **The response budget.** A budget on *fetching* rather than on returning
+ * belongs to whoever holds the cursor, so the caller iterates and stops. This
+ * module only asks for one row more than the limit, so a full page is
+ * distinguishable from a complete result.
+ */
+
+import type { CompiledQuery, ExpressionBuilder, Kysely, SelectQueryBuilder } from "kysely";
+import { sql } from "kysely";
+import type {
+  AggregateQuery,
+  AggregateQueryResult,
+  OrderTerm,
+  Predicate,
+  RowQuery,
+  RowQueryResult,
+  WhereClause,
+} from "./app-query-types.js";
+import { encodePageToken, pageTokenFrom } from "./app-page-token.js";
+
+/** The dynamic (schema-less) row type both adapters' compilers are built on. */
+export type AppQueryDb = Record<string, Record<string, unknown>>;
+
+type Qb = SelectQueryBuilder<AppQueryDb, string, unknown>;
+
+/** What actually differs between the two backends. */
+export interface AppQueryDialect {
+  /**
+   * Whether `avg` needs an explicit cast.
+   *
+   * DSQL returns `numeric` for `avg` over an integer column and `pg` hands that
+   * over as a string; SQLite returns a float. Verified against the live cluster
+   * on 2026-09-09 rather than assumed. Casting to `double precision` is what
+   * makes both servers answer one JSON number type.
+   */
+  readonly castAvgToDouble: boolean;
+}
+
+export const SQLITE_APP_QUERY_DIALECT: AppQueryDialect = { castAvgToDouble: false };
+export const POSTGRES_APP_QUERY_DIALECT: AppQueryDialect = { castAvgToDouble: true };
+
+/**
+ * The alias one ordering value rides back under.
+ *
+ * A page token is cut from the values the database actually ordered on, and a
+ * projection may not have selected them — `select=id&order=due.desc` orders by
+ * a column the caller never asked for. Selecting them under a reserved alias
+ * means the token carries the ordered value rather than a second computation of
+ * it that could disagree, and the alias is stripped before the row is returned.
+ */
+export function orderKeyAlias(index: number): string {
+  return `__ok${index}`;
+}
+
+/**
+ * The alias one regex predicate's column rides back under.
+ *
+ * Same reason as {@link orderKeyAlias}: a regex is evaluated over the returned
+ * rows, and `select=id&where={"tag":{"regex":"^al"}}` filters on a column the
+ * projection did not ask for. Without this the predicate reads `undefined` on
+ * every row and the page comes back empty — a wrong answer that looks like a
+ * correct one.
+ */
+export function regexColumnAlias(column: string): string {
+  return `__rx_${column}`;
+}
+
+/** Is this key one of the reserved aliases the compiler adds? */
+export function isOrderKeyAlias(key: string): boolean {
+  return key.startsWith("__ok") || key.startsWith("__rx_");
+}
+
+/**
+ * The regex predicates a query carries, which the caller evaluates itself.
+ *
+ * Returned rather than compiled, so the caller cannot forget them: a query
+ * whose regex silently vanished would return every row the other predicates
+ * matched, which is a wrong answer rather than a slow one.
+ */
+export function regexPredicates(
+  where: readonly WhereClause[],
+): Array<{ column: string; pattern: string }> {
+  return where
+    .filter((c): c is WhereClause & { predicate: { op: "regex"; pattern: string } } =>
+      c.predicate.op === "regex",
+    )
+    .map((c) => ({ column: c.column, pattern: c.predicate.pattern }));
+}
+
+function applyPredicate(qb: Qb, column: string, predicate: Predicate): Qb {
+  const ref = sql.ref(column);
+  const where = (expr: ReturnType<typeof sql<boolean>>): Qb => qb.where(expr as never) as Qb;
+
+  switch (predicate.op) {
+    case "eq":
+      // `= NULL` is never true in SQL, so an equality against null is compiled
+      // as `IS NULL` — which is what a caller writing `{"col": null}` means.
+      return predicate.value === null
+        ? where(sql<boolean>`${ref} is null`)
+        : where(sql<boolean>`${ref} = ${predicate.value}`);
+
+    case "ne":
+      // `<> NULL` is unknown for every row, so the negation of a null has to be
+      // spelled `IS NOT NULL`. The other direction needs the null bucket added
+      // back: `col <> 'x'` excludes nulls on both engines, and a caller asking
+      // for "not x" means every row that is not x, nulls included.
+      return predicate.value === null
+        ? where(sql<boolean>`${ref} is not null`)
+        : where(sql<boolean>`(${ref} is null or ${ref} <> ${predicate.value})`);
+
+    case "lt":
+    case "lte":
+    case "gt":
+    case "gte": {
+      const op = { lt: "<", lte: "<=", gt: ">", gte: ">=" }[predicate.op];
+      return where(sql<boolean>`${ref} ${sql.raw(op)} ${predicate.value}`);
+    }
+
+    case "in":
+      return where(
+        sql<boolean>`${ref} in (${sql.join(predicate.values.map((v) => sql`${v}`))})`,
+      );
+
+    case "is":
+      return predicate.value === null
+        ? where(sql<boolean>`${ref} is null`)
+        : where(sql<boolean>`${ref} = ${predicate.value}`);
+
+    case "prefix":
+      // A half-open range, which is an index seek on both engines. `upper` is
+      // null only when the prefix has no successor at all, in which case the
+      // lower bound alone is the whole range.
+      return predicate.upper === null
+        ? where(sql<boolean>`${ref} >= ${predicate.lower}`)
+        : where(
+            sql<boolean>`(${ref} >= ${predicate.lower} and ${ref} < ${predicate.upper})`,
+          );
+
+    case "regex":
+      // Evaluated by the caller — see the module note.
+      return qb;
+  }
+}
+
+function applyWhere(qb: Qb, where: readonly WhereClause[]): Qb {
+  let out = qb;
+  for (const clause of where) out = applyPredicate(out, clause.column, clause.predicate);
+  return out;
+}
+
+/**
+ * `ORDER BY` with the null position spelled out.
+ *
+ * Emitted as a leading boolean rather than as `NULLS LAST`, which SQLite only
+ * learned in 3.30 and which the two backends default differently on. The same
+ * shape `record-queries.ts` already uses, for the same reason.
+ */
+function applyOrder(qb: Qb, order: readonly OrderTerm[]): Qb {
+  let out = qb;
+  for (const term of order) {
+    const ref = sql.ref(term.column);
+    out = out.orderBy(sql`(${ref} is null)`, term.nulls === "first" ? "desc" : "asc") as Qb;
+    out = out.orderBy(ref, term.direction) as Qb;
+  }
+  return out;
+}
+
+/**
+ * The keyset predicate: "strictly after the row this token names".
+ *
+ * The expanded lexicographic chain rather than a row-value comparison, because
+ * the keys can run in different directions and a null inside a row-value
+ * comparison evaluates to NULL — which returns an empty page instead of an
+ * error, the quietest possible failure.
+ *
+ *   K1 after
+ *   OR (K1 equal AND K2 after)
+ *   OR (K1 equal AND K2 equal AND K3 after)
+ */
+function applyPageToken(qb: Qb, query: RowQuery): Qb {
+  const token = query.pageToken;
+  if (!token) return qb;
+  const order = query.order;
+
+  return qb.where((eb: ExpressionBuilder<AppQueryDb, string>) => {
+    const after = (i: number) => {
+      const term = order[i]!;
+      const key = token.keys[i]!;
+      const ref = sql.ref(term.column);
+      const op = term.direction === "desc" ? "<" : ">";
+      if (key.isNull) {
+        // The token sits in the null bucket. Whether anything is after it
+        // depends on which end the nulls are at: with nulls last nothing is,
+        // and with nulls first every non-null value is.
+        return term.nulls === "first"
+          ? sql<boolean>`${ref} is not null`
+          : sql<boolean>`1 = 0`;
+      }
+      return term.nulls === "first"
+        ? sql<boolean>`(${ref} is not null and ${ref} ${sql.raw(op)} ${key.value})`
+        : sql<boolean>`(${ref} is null or ${ref} ${sql.raw(op)} ${key.value})`;
+    };
+
+    const equal = (i: number) => {
+      const term = order[i]!;
+      const key = token.keys[i]!;
+      const ref = sql.ref(term.column);
+      return key.isNull
+        ? sql<boolean>`${ref} is null`
+        : sql<boolean>`(${ref} is not null and ${ref} = ${key.value})`;
+    };
+
+    const terms = [];
+    for (let i = 0; i < order.length; i += 1) {
+      const prefix = [];
+      for (let j = 0; j < i; j += 1) prefix.push(equal(j));
+      terms.push(prefix.length === 0 ? after(i) : eb.and([...prefix, after(i)]));
+    }
+    return eb.or(terms);
+  }) as Qb;
+}
+
+export interface BuildOptions {
+  /**
+   * Predicates the server adds and a caller cannot express — the grant
+   * predicate on the shared plane, and anything else the route owns.
+   *
+   * ANDed in beside the caller's own, so the grant rides *inside* the access
+   * path rather than filtering what the access path returned. That property is
+   * what the whole authorization question is about.
+   */
+  readonly serverWhere?: readonly WhereClause[];
+  /**
+   * How many rows to ask for beyond the limit.
+   *
+   * One, normally: it is what distinguishes a full page from a complete result.
+   * A query carrying a regex asks for the scan cap instead, because the extra
+   * rows are candidates the caller will filter and most of them may not match.
+   */
+  readonly fetchLimit?: number;
+}
+
+/** One page of rows, plus whatever `fetchLimit` asked for beyond it. */
+export function buildAppRowQuery(
+  k: Kysely<AppQueryDb>,
+  fullTableName: string,
+  query: RowQuery,
+  options: BuildOptions = {},
+): CompiledQuery {
+  let qb = k.selectFrom(fullTableName as never) as Qb;
+
+  if (query.select === null) {
+    qb = qb.selectAll() as Qb;
+  } else {
+    qb = qb.select(query.select.map((c) => sql.ref(c).as(c)) as never) as Qb;
+  }
+  // The ordering values ride back under reserved aliases so the page token is
+  // cut from what the database ordered on, whatever the projection selected.
+  query.order.forEach((term, index) => {
+    qb = qb.select(sql.ref(term.column).as(orderKeyAlias(index))) as Qb;
+  });
+  // So do the columns the server-side regex predicates read.
+  for (const { column } of regexPredicates(query.where)) {
+    qb = qb.select(sql.ref(column).as(regexColumnAlias(column))) as Qb;
+  }
+
+  // The server owns the soft-delete predicate. A caller cannot name the column
+  // at all, so this cannot be contradicted.
+  qb = qb.where(sql<boolean>`${sql.ref("deleted_at")} is null` as never) as Qb;
+  qb = applyWhere(qb, options.serverWhere ?? []);
+  qb = applyWhere(qb, query.where);
+  qb = applyPageToken(qb, query);
+  qb = applyOrder(qb, query.order);
+  qb = qb.limit(query.limit + (options.fetchLimit ?? 1)) as Qb;
+
+  return qb.compile();
+}
+
+/** The aggregate form: `select` is the `GROUP BY` list. */
+export function buildAppAggregateQuery(
+  k: Kysely<AppQueryDb>,
+  fullTableName: string,
+  query: AggregateQuery,
+  dialect: AppQueryDialect,
+  options: BuildOptions = {},
+): CompiledQuery {
+  let qb = k.selectFrom(fullTableName as never) as Qb;
+
+  for (const column of query.groupBy) {
+    qb = qb.select(sql.ref(column).as(column)) as Qb;
+  }
+  for (const term of query.aggregates) {
+    qb = qb.select(aggregateExpression(term, dialect).as(term.name)) as Qb;
+  }
+
+  qb = qb.where(sql<boolean>`${sql.ref("deleted_at")} is null` as never) as Qb;
+  qb = applyWhere(qb, options.serverWhere ?? []);
+  qb = applyWhere(qb, query.where);
+
+  for (const column of query.groupBy) {
+    qb = qb.groupBy(sql.ref(column)) as Qb;
+  }
+  // An aggregate output is ordered by its alias rather than by a repeat of the
+  // expression: both engines resolve an output name in ORDER BY, and repeating
+  // `count(*)` there would be a second expression free to disagree with the
+  // first.
+  for (const term of query.order) {
+    qb = qb.orderBy(
+      sql.ref(term.column),
+      term.direction,
+    ) as Qb;
+  }
+  qb = qb.limit(query.limit + (options.fetchLimit ?? 1)) as Qb;
+
+  return qb.compile();
+}
+
+function aggregateExpression(
+  term: { fn: string; col: string | null; distinct: boolean },
+  dialect: AppQueryDialect,
+) {
+  if (term.fn === "count") {
+    // `count(*)` counts every matching row including all-null ones and reads no
+    // column; `count(x)` skips nulls. The difference is the caller's to choose
+    // and is why both spellings exist in the grammar.
+    if (term.col === null) return sql<number>`count(*)`;
+    const ref = sql.ref(term.col);
+    return term.distinct ? sql<number>`count(distinct ${ref})` : sql<number>`count(${ref})`;
+  }
+  const ref = sql.ref(term.col!);
+  switch (term.fn) {
+    case "sum":
+      // Not coalesced to 0 over zero rows, deliberately: a coalesced result
+      // cannot distinguish an empty match from a zero total.
+      return sql<number | null>`sum(${ref})`;
+    case "avg":
+      return dialect.castAvgToDouble
+        ? sql<number | null>`cast(avg(${ref}) as double precision)`
+        : sql<number | null>`avg(${ref})`;
+    case "min":
+      return sql<unknown>`min(${ref})`;
+    default:
+      return sql<unknown>`max(${ref})`;
+  }
+}
+
+/** Strip the reserved ordering aliases from a row before it goes on the wire. */
+export function stripOrderKeys(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (!isOrderKeyAlias(key)) out[key] = value;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Executing a compiled query
+// ---------------------------------------------------------------------------
+
+/**
+ * The response budget, in bytes.
+ *
+ * A row limit cannot bound a response at all: DSQL allows a single `text` value
+ * up to 1 MiB, so a handful of rows can exceed any payload ceiling, and
+ * Lambda's 6 MB synchronous response limit fails hard and opaquely rather than
+ * returning a short page. 4 MB leaves margin for the envelope and for base64 on
+ * the API Gateway path, and turns that failure into a short page with a cursor.
+ *
+ * It is a rare-path guard rather than the primary bound. At realistic widths —
+ * Memo's widest table is about 670 bytes per row — 500 rows is around 1 MB and
+ * this never engages.
+ *
+ * It applies on both servers at the same threshold. The local server has no
+ * payload ceiling and needs no protection, but a budget that engaged only in
+ * the cloud would make one query return different results in the two
+ * environments, which is the portability contract the grammar exists to keep.
+ */
+export const RESPONSE_BUDGET_BYTES = 4 * 1024 * 1024;
+
+/**
+ * How many candidate rows a regex predicate may be evaluated against.
+ *
+ * Against a ten-execution Lambda budget, one pathological query is a
+ * platform-wide event rather than one slow page. Reaching the cap sets
+ * `truncated`, which is the signal a caller already handles for the row limit
+ * and the byte budget.
+ */
+export const REGEX_SCAN_CAP = 20_000;
+
+/**
+ * How many rows to fetch beyond the limit.
+ *
+ * One, normally: enough to tell a full page from a complete result. A query
+ * carrying a regex asks for the scan cap instead, because the rows it fetches
+ * are candidates and most of them may not match.
+ */
+export function fetchLimitFor(query: RowQuery): number {
+  return regexPredicates(query.where).length > 0 ? REGEX_SCAN_CAP : 1;
+}
+
+/**
+ * Cut a page from a row stream, applying the regex predicates, the row limit
+ * and the response budget in one pass.
+ *
+ * The budget is on **fetching** rather than on returning. An earlier draft had
+ * serialization stop at 4 MB and throw away the tail, which wastes retrieval
+ * work already paid for; here the caller supplies an iterator —
+ * `better-sqlite3`'s `.iterate()`, a `pg` cursor — and this stops pulling from
+ * it. Nothing retrieved is discarded.
+ */
+export async function collectRowPage(
+  query: RowQuery,
+  source: AsyncIterable<Record<string, unknown>> | Iterable<Record<string, unknown>>,
+): Promise<RowQueryResult> {
+  const regexes = regexPredicates(query.where).map((p) => ({
+    column: p.column,
+    alias: regexColumnAlias(p.column),
+    re: new RegExp(p.pattern, "u"),
+  }));
+
+  const kept: Record<string, unknown>[] = [];
+  let lastRaw: Record<string, unknown> | null = null;
+  let bytes = 0;
+  let examined = 0;
+  let truncated = false;
+
+  for await (const raw of source as AsyncIterable<Record<string, unknown>>) {
+    examined += 1;
+    if (regexes.length > 0 && examined > REGEX_SCAN_CAP) {
+      truncated = true;
+      break;
+    }
+    // A regex over a non-string — a null, or a column holding a number — is a
+    // non-match rather than an error. SQL's own `~` behaves the same way
+    // against NULL, and a page that failed because one row was null would be a
+    // page whose success depended on its contents.
+    if (regexes.some(({ column, alias, re }) => {
+      const value = raw[alias] ?? raw[column];
+      return typeof value !== "string" || !re.test(value);
+    })) {
+      continue;
+    }
+
+    if (kept.length === query.limit) {
+      // One row past the limit exists, so rows were left behind.
+      truncated = true;
+      break;
+    }
+
+    const row = stripOrderKeys(raw);
+    bytes += JSON.stringify(row).length;
+    if (bytes > RESPONSE_BUDGET_BYTES && kept.length > 0) {
+      // Stop before adding this row: a page that exceeded the budget would fail
+      // at the transport, which is the opaque failure the budget exists to turn
+      // into a short page. The first row is always kept, because a page of zero
+      // rows with a cursor pointing at the row that did not fit is a caller
+      // that can make no progress.
+      truncated = true;
+      break;
+    }
+    kept.push(row);
+    lastRaw = raw;
+  }
+
+  return {
+    mode: "rows",
+    rows: kept,
+    truncated,
+    pageToken:
+      truncated && lastRaw
+        ? encodePageToken(pageTokenFrom(query.order, lastRaw, orderKeyAlias))
+        : null,
+  };
+}
+
+/** Cut an aggregate result, which is bounded by `limit` and carries no cursor. */
+export function collectAggregatePage(
+  query: AggregateQuery,
+  groups: readonly Record<string, unknown>[],
+): AggregateQueryResult {
+  const truncated = groups.length > query.limit;
+  return {
+    mode: "aggregate",
+    groups: truncated ? groups.slice(0, query.limit) : [...groups],
+    truncated,
+  };
+}

@@ -9,6 +9,12 @@ import type {
   ChangeNotifier,
 } from "@starkeep/sync-engine";
 import type { AppSpecificOperations, ApiSubject } from "../types.js";
+import { parseQuery } from "../query/parse.js";
+import type {
+  ParsedQuery,
+  ParsedQueryResult,
+  QueryTableSchema,
+} from "../query/types.js";
 import { validateTableName } from "./validation.js";
 import { FILE_RECORDS_TABLE, RESERVED_TABLE_NAMES } from "./reserved.js";
 
@@ -113,20 +119,56 @@ export function createAppSpecificFactory(
     }
 
     /**
+     * The table description the parser validates against.
+     *
+     * Built from the namespace registry rather than from a manifest, because
+     * the data servers never see a manifest. A registry row written before
+     * column types existed reports `columns: null`, and the parser narrows what
+     * it will answer accordingly — see `QueryTableSchema.columns`.
+     */
+    function schemaFor(table: string): QueryTableSchema {
+      const info = ns!.tables.find((t) => t.name === table)!;
+      return {
+        name: table,
+        pkColumns: info.pkColumns,
+        columns: info.columns ?? null,
+        // App tables carry no platform edges, so there is nothing to hydrate.
+        includable: [],
+      };
+    }
+
+    function requireQueryCapable(): QueryCapableApplier {
+      const capable = applier as QueryCapableApplier;
+      if (typeof capable.runQuery !== "function") {
+        throw new Error("The configured applier does not support queries");
+      }
+      return capable;
+    }
+
+    /**
      * Read the reserved `_starkeep_sync_records` index row for `key`, bypassing
      * the `resolveTable` guard that (correctly) blocks apps from addressing the
      * reserved table through the normal query path. Returns null when no live
-     * (non-tombstoned) row exists. `queryRows` already filters `deleted_at`.
+     * (non-tombstoned) row exists; the query path always excludes tombstones.
+     *
+     * The query is built here rather than parsed from parameters because this
+     * is the framework reading its own bookkeeping, not an app asking a
+     * question — there is no caller input to validate.
      */
     async function readFileRecord(
       key: string,
     ): Promise<Record<string, unknown> | null> {
-      const capable = applier as QueryCapableApplier;
-      if (typeof capable.queryRows !== "function") {
-        throw new Error("The configured applier does not support queryRows");
-      }
-      const rows = await capable.queryRows(appId, FILE_RECORDS_TABLE, { id: key });
-      return rows[0] ?? null;
+      const result = await requireQueryCapable().runQuery(appId, FILE_RECORDS_TABLE, {
+        mode: "rows",
+        table: FILE_RECORDS_TABLE,
+        select: null,
+        where: [{ column: "id", predicate: { op: "eq", value: key } }],
+        order: [{ column: "id", direction: "asc", nulls: "last" }],
+        limit: 1,
+        pageToken: null,
+        include: [],
+      });
+      return result.mode === "rows" ? (result.rows[0] ?? null) : null;
     }
 
     async function tombstoneFileRecord(key: string): Promise<void> {
@@ -198,14 +240,12 @@ export function createAppSpecificFactory(
         return 1;
       },
 
-      async queryRows(table, where) {
+      async query(table, params) {
         resolveTable(table);
-        // Reads go directly to the applier's store (no change-log roundtrip
-        // needed — reads don't produce entries).
-        if (typeof (applier as QueryCapableApplier).queryRows === "function") {
-          return (applier as QueryCapableApplier).queryRows(appId, table, where);
-        }
-        throw new Error("The configured applier does not support queryRows");
+        // Parse, then run. Reads go directly to the applier's store — no
+        // change-log roundtrip, since a read produces no entry.
+        const parsed = parseQuery(schemaFor(table), params);
+        return requireQueryCapable().runQuery(appId, table, parsed);
       },
 
       async registerFile(
@@ -277,9 +317,9 @@ export function createAppSpecificFactory(
 
 /** Optional capability for appliers that can execute read queries. */
 interface QueryCapableApplier extends AppSyncableApplier {
-  queryRows(
+  runQuery(
     appId: string,
     table: string,
-    where?: Record<string, unknown>,
-  ): Promise<Record<string, unknown>[]>;
+    query: ParsedQuery,
+  ): Promise<ParsedQueryResult>;
 }

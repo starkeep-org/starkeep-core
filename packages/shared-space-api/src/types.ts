@@ -1,6 +1,7 @@
 import type { HLCClock } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { ChangeEvent, ChangeNotifier } from "@starkeep/sync-engine";
+import type { ParsedQueryResult, QueryParams } from "./query/types.js";
 
 export interface ApiEndpointDefinition {
   readonly namespace: string;
@@ -52,10 +53,22 @@ export interface AppSpecificOperations {
     patch: Record<string, unknown>,
   ): Promise<number>;
   deleteRow(table: string, where: Record<string, unknown>): Promise<number>;
-  queryRows(
-    table: string,
-    where?: Record<string, unknown>,
-  ): Promise<Record<string, unknown>[]>;
+  /**
+   * Ask a question of one of the app's own tables.
+   *
+   * `params` are the request's raw query parameters; the implementation parses
+   * them against the table's registered columns and answers rows or aggregate
+   * groups. Everything a caller may express lives in the grammar — see
+   * `query/parse.ts` — and everything a caller may *not* express is ANDed in
+   * here: the soft-delete predicate always, and the app's own namespace via
+   * `resolveTable`.
+   *
+   * Replaced `queryRows(table, where?)`, which offered equality filters over
+   * `SELECT *` and nothing else: no projection, no comparison, no ordering, no
+   * limit and no cursor. Apps were reimplementing all five in the browser over
+   * full-table downloads.
+   */
+  query(table: string, params: QueryParams): Promise<ParsedQueryResult>;
 
   /**
    * Record the index row for a file whose bytes were uploaded out-of-band

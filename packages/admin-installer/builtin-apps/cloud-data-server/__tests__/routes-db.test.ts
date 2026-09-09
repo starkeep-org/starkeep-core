@@ -1358,7 +1358,22 @@ describe("/app-data routes", () => {
   const NS_SELECT = /from "shared"\."app_syncable_namespaces"/;
   const notesNamespace = {
     app_id: "appdata1",
-    tables_json: JSON.stringify([{ name: "notes", pkColumns: ["id"] }]),
+    tables_json: JSON.stringify([
+      {
+        name: "notes",
+        pkColumns: ["id"],
+        // The registry carries column types now, because the query parser
+        // validates a filter value against its column before either engine
+        // sees it.
+        columns: [
+          { name: "id", type: "text", notNull: true, primaryKey: true },
+          { name: "text", type: "text", notNull: false, primaryKey: false },
+          { name: "updated_at", type: "text", notNull: true, primaryKey: false },
+          { name: "node_id", type: "text", notNull: true, primaryKey: false },
+          { name: "deleted_at", type: "text", notNull: false, primaryKey: false },
+        ],
+      },
+    ]),
     files_enabled: false,
   };
 
@@ -1396,8 +1411,8 @@ describe("/app-data routes", () => {
   it("queries live rows of a declared table", async () => {
     const db = fakeDsqlWithGrants()
       .on(NS_SELECT, [notesNamespace])
-      .on(/select \* from "app_appdata1"\."notes" where "deleted_at" is null/, [
-        { id: "n1", text: "hi" },
+      .on(/from "app_appdata1"\."notes" where "deleted_at" is null/, [
+        { id: "n1", text: "hi", __ok0: "n1" },
       ]);
     setDbFactory(db);
     const res = await handler(
@@ -1405,7 +1420,78 @@ describe("/app-data routes", () => {
       context,
     );
     expect(res.statusCode).toBe(200);
-    expect(bodyOf(res)).toEqual({ rows: [{ id: "n1", text: "hi" }] });
+    // The reserved ordering alias is stripped before the row goes on the wire.
+    expect(bodyOf(res)).toEqual({
+      rows: [{ id: "n1", text: "hi" }],
+      truncated: false,
+      page_token: null,
+    });
+  });
+
+  it("compiles a filter, a projection and an ordering into one statement", async () => {
+    const db = fakeDsqlWithGrants()
+      .on(NS_SELECT, [notesNamespace])
+      .on(/from "app_appdata1"\."notes"/, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "GET",
+        subPath: "/app-data/db/notes",
+        query: {
+          where: JSON.stringify({ text: { prefix: "hi" } }),
+          select: "id",
+          order: "id.desc",
+          limit: "10",
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const sql = db.calls(/from "app_appdata1"\."notes"/)[0]!;
+    // `prefix` is a half-open range rather than a LIKE pattern, so it seeks an
+    // index and means the same thing on both engines.
+    expect(sql.values).toContain("hi");
+    expect(sql.values).toContain("hj");
+    // The null position is explicit, because the two engines default it
+    // differently.
+    expect(sql.text).toMatch(/order by \("id" is null\) asc, "id" desc/);
+    // One row past the limit, so a full page is distinguishable from a
+    // complete result.
+    expect(sql.values).toContain(11);
+  });
+
+  it("refuses the flat parameter form the old grammar read as a filter", async () => {
+    setDbFactory(fakeDsqlWithGrants().on(NS_SELECT, [notesNamespace]));
+    const res = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "GET",
+        subPath: "/app-data/db/notes",
+        query: { id: "n1" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(bodyOf(res)["error"]).toMatch(/is not a query parameter/);
+  });
+
+  it("aggregates without materializing the rows", async () => {
+    const db = fakeDsqlWithGrants()
+      .on(NS_SELECT, [notesNamespace])
+      .on(/count\(\*\).*from "app_appdata1"\."notes"/, [{ n: "2" }]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "GET",
+        subPath: "/app-data/db/notes",
+        query: { aggregate: JSON.stringify({ n: { fn: "count" } }) },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)).toEqual({ groups: [{ n: "2" }], truncated: false });
   });
 
   it("updates and soft-deletes rows through the applier", async () => {
@@ -1483,7 +1569,7 @@ describe("/app-data routes", () => {
     files_enabled: true,
   };
   // The reserved index table the applier reads/writes for app-private files.
-  const FILE_RECORDS_SELECT = /select \* from "app_appdata1"\."_starkeep_sync_records"/;
+  const FILE_RECORDS_SELECT = /from "app_appdata1"\."_starkeep_sync_records"/;
   const FILE_RECORDS_INSERT = /insert into "app_appdata1"\."_starkeep_sync_records"/;
   const fileRow = {
     id: "apps/appdata1/syncable/cover",

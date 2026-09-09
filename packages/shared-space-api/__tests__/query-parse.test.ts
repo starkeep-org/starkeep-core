@@ -15,7 +15,7 @@ import {
   DEFAULT_LIMIT,
   MAX_LIMIT,
   encodePageToken,
-  orderSignature,
+  appOrderSignature,
   prefixUpperBound,
   type QueryTableSchema,
   type RowQuery,
@@ -280,7 +280,7 @@ describe("page_token", () => {
   it("round-trips under the ordering it was cut for", () => {
     const order = rows({ order: "due.desc" }).order;
     const token = encodePageToken({
-      order: orderSignature(order),
+      order: appOrderSignature(order),
       keys: [
         { isNull: false, value: TS },
         { isNull: false, value: "c1" },
@@ -292,7 +292,7 @@ describe("page_token", () => {
 
   it("refuses a token cut under a different ordering rather than restarting", () => {
     const token = encodePageToken({
-      order: orderSignature(rows({ order: "due.desc" }).order),
+      order: appOrderSignature(rows({ order: "due.desc" }).order),
       keys: [
         { isNull: false, value: TS },
         { isNull: false, value: "c1" },

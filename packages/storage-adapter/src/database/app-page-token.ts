@@ -11,7 +11,7 @@
  * parsed one would be depending on a decision this file is free to change.
  */
 
-import { QueryParseError, type OrderTerm, type PageToken, type QueryValue } from "./types.js";
+import { QueryParseError, type OrderTerm, type PageToken, type QueryValue } from "./app-query-types.js";
 
 /**
  * A stable name for one ordering.
@@ -21,7 +21,12 @@ import { QueryParseError, type OrderTerm, type PageToken, type QueryValue } from
  * is the failure keyset pagination exists to prevent; dropping it would
  * silently restart the walk and repeat them.
  */
-export function orderSignature(order: readonly OrderTerm[]): string {
+/**
+ * Named `appOrderSignature` because `query-cursor.ts` already exports an
+ * `orderSignature` for the shared-record cursor. The two encode different
+ * orderings for different tables and must not be confused for each other.
+ */
+export function appOrderSignature(order: readonly OrderTerm[]): string {
   return order.map((t) => `${t.column}.${t.direction}.${t.nulls}`).join(",");
 }
 
@@ -52,7 +57,7 @@ export function decodePageToken(raw: string, order: readonly OrderTerm[]): PageT
     throw new QueryParseError("page_token is not a token this server issued");
   }
   const token = parsed as PageToken;
-  const signature = orderSignature(order);
+  const signature = appOrderSignature(order);
   if (token.order !== signature) {
     throw new QueryParseError(
       `page_token was cut under a different ordering (${token.order}); ` +
@@ -70,15 +75,24 @@ export function decodePageToken(raw: string, order: readonly OrderTerm[]): PageT
   return token;
 }
 
-/** The token that follows a page, cut from the last row it handed out. */
+/**
+ * The token that follows a page, cut from the last row it handed out.
+ *
+ * Reads the reserved aliases the compiler selected rather than the column
+ * names, for two reasons: a projection may not have selected the ordering
+ * columns at all, and the value the database ordered on is the only value the
+ * keyset predicate will compare against. Recomputing it from the row would be a
+ * second derivation free to disagree with the first.
+ */
 export function pageTokenFrom(
   order: readonly OrderTerm[],
   lastRow: Record<string, unknown>,
+  aliasFor: (index: number) => string,
 ): PageToken {
   return {
-    order: orderSignature(order),
-    keys: order.map((term) => {
-      const raw = lastRow[term.column];
+    order: appOrderSignature(order),
+    keys: order.map((term, index) => {
+      const raw = lastRow[aliasFor(index)] ?? lastRow[term.column];
       const value = raw === undefined ? null : (raw as QueryValue);
       return { isNull: value === null, value };
     }),

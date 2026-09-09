@@ -91,7 +91,7 @@ import {
   DsqlAppSyncableApplier,
   withOccRetry,
 } from "@starkeep/storage-aurora-dsql";
-import { createAppSpecificFactory } from "@starkeep/shared-space-api";
+import { createAppSpecificFactory, queryParamsFrom } from "@starkeep/shared-space-api";
 import type { AppSpecificOperations } from "@starkeep/shared-space-api";
 import type {
   DatabaseClientFactory,
@@ -3392,10 +3392,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             const changes = await view.deleteRow(table, body.where);
             return ok({ changes });
           }
+          // GET /app-data/db/<table> — the query grammar.
+          //
+          // Every top-level parameter name is reserved, which is what lets the
+          // filters live under `where` with no sigil. The parser is shared with
+          // the local handler, so the two cannot drift the way the hand-written
+          // grammars did: this one defaulted to limit=50 capped at 500 while
+          // the local one defaulted to 100 with no cap.
           if (method === "GET") {
-            const where: Record<string, unknown> = { ...query };
-            const rows = await view.queryRows(table, Object.keys(where).length ? where : undefined);
-            return ok({ rows });
+            const result = await view.query(table, queryParamsFrom(query));
+            return ok(
+              result.mode === "rows"
+                ? { rows: result.rows, truncated: result.truncated, page_token: result.pageToken }
+                : { groups: result.groups, truncated: result.truncated },
+            );
           }
         } catch (err) {
           return clientErr(err instanceof Error ? err.message : String(err), 400);

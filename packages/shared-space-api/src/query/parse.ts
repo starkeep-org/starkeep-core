@@ -33,7 +33,7 @@
 
 import type { AppSyncableColumnInfo } from "@starkeep/sync-engine";
 import { SOFT_DELETE_COLUMN, SYSTEM_COLUMN_NAMES } from "../app-syncable/columns.js";
-import { decodePageToken } from "./page-token.js";
+import { decodePageToken } from "@starkeep/storage-adapter";
 import { prefixUpperBound } from "./prefix.js";
 import { compileRegexPattern } from "./regex.js";
 import {

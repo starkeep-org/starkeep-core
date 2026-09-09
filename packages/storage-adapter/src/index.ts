@@ -41,6 +41,53 @@ export {
 } from "./database/query-cursor.js";
 
 export {
+  QueryParseError,
+  type AppColumnInfo,
+  type AggregateFn,
+  type AggregateQuery,
+  type AggregateQueryResult,
+  type AggregateTerm,
+  type OrderTerm,
+  type PageToken,
+  type ParsedQuery,
+  type ParsedQueryResult,
+  type Predicate,
+  type QueryParams,
+  type QueryTableSchema,
+  type QueryValue,
+  type RowQuery,
+  type RowQueryResult,
+  type WhereClause,
+} from "./database/app-query-types.js";
+
+export {
+  appOrderSignature,
+  encodePageToken,
+  decodePageToken,
+  pageTokenFrom,
+} from "./database/app-page-token.js";
+
+export {
+  buildAppRowQuery,
+  buildAppAggregateQuery,
+  collectRowPage,
+  collectAggregatePage,
+  fetchLimitFor,
+  regexPredicates,
+  orderKeyAlias,
+  regexColumnAlias,
+  isOrderKeyAlias,
+  stripOrderKeys,
+  RESPONSE_BUDGET_BYTES,
+  REGEX_SCAN_CAP,
+  SQLITE_APP_QUERY_DIALECT,
+  POSTGRES_APP_QUERY_DIALECT,
+  type AppQueryDialect,
+  type AppQueryDb,
+  type BuildOptions,
+} from "./database/app-query.js";
+
+export {
   buildRecordSelect,
   buildRecordCount,
   buildRecordTypeCounts,
