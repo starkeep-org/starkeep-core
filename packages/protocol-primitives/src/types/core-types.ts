@@ -532,6 +532,35 @@ export function isCategoryId(id: string): id is Category {
   return CATEGORIES.some((c) => c.id === id);
 }
 
+/**
+ * The caller's grant discriminant, on every per-category metadata table.
+ *
+ * The metadata tables were the one shared surface with a ceiling and no gate.
+ * The IAM policy, the Postgres `GRANT SELECT` and the `canReadCategory` check
+ * are three spellings of one category-granular rule, and nothing type-granular
+ * sat inside any of them — so a metadata column could not appear in a query
+ * predicate at all, because the server's grant filter would have had to run
+ * over whatever the scan returned rather than riding the access path.
+ *
+ * `shared.records` carries `type` and `shared.record_labels` carries
+ * `record_type` for exactly this reason. With the column here, a pinned-category
+ * query puts `record_type IN (…the caller's granted types)` on a leading index
+ * column, which is the property the whole authorization question is about.
+ *
+ * The column cannot go stale, because a record's type is declared at creation
+ * and immutable — the same trade `shared.record_labels` already made and
+ * documented (`dsql-schema-init.ts`).
+ *
+ * **It must never come from the wire.** Per-category metadata is a sync
+ * passenger: it rides on the record as `SyncRecordItem.metadata`, applied with
+ * the record, with null columns stripped before sending so a node knowing less
+ * cannot erase a peer's columns. That per-column merge is right for a derived
+ * fact and wrong for a grant discriminant, since a peer supplying it would be
+ * asserting who may read the row. It is derived locally from the record it
+ * rides with, on both the sync-apply path and the app write path.
+ */
+export const METADATA_DISCRIMINANT_COLUMN = "record_type";
+
 function pgColumnType(t: LogicalColumnType): string {
   switch (t) {
     case "integer": return "integer";
@@ -565,6 +594,7 @@ function sqliteColumnType(t: LogicalColumnType): string {
 export function pgMetadataDdl(c: CategoryDef): string {
   const cols = [
     `         record_id   text PRIMARY KEY`,
+    `         ${METADATA_DISCRIMINANT_COLUMN} text NOT NULL`,
     ...c.metadataColumns.map((col) => {
       const nullSuffix = col.nullable === false ? " NOT NULL" : "";
       return `         ${col.name} ${pgColumnType(col.type)}${nullSuffix}`;
@@ -581,6 +611,7 @@ export function pgMetadataDdl(c: CategoryDef): string {
 export function sqliteMetadataDdl(c: CategoryDef): string {
   const cols = [
     `      record_id TEXT PRIMARY KEY`,
+    `      ${METADATA_DISCRIMINANT_COLUMN} TEXT NOT NULL`,
     ...c.metadataColumns.map((col) => {
       const nullSuffix = col.nullable === false ? " NOT NULL" : "";
       return `      ${col.name} ${sqliteColumnType(col.type)}${nullSuffix}`;
@@ -588,6 +619,47 @@ export function sqliteMetadataDdl(c: CategoryDef): string {
   ];
   return `CREATE TABLE IF NOT EXISTS ${sqliteMetadataTableName(c.id)} (\n${cols.join(",\n")}\n    )`;
 }
+
+/**
+ * The indexes a per-category metadata table needs, as DDL for one dialect.
+ *
+ * The metadata tables carried no index at all beyond the `record_id` primary
+ * key, so every predicate over them was a full scan — which is why the stranded
+ * `capturedAt` ordering was never worth wiring up.
+ *
+ * One index, and only where it has a column to build on: `(record_type,
+ * captured_at)`, which is the shape every real query over these tables takes.
+ * `record_type` leads because it is the grant predicate and is present on every
+ * query whether or not the caller asked for it, and `captured_at` follows
+ * because ordering a photo library by when the shutter fired is the question
+ * being asked. A category with no `captured_at` gets no index here; the plan is
+ * one per named filter as callers arrive, rather than one per column in advance.
+ */
+export function metadataIndexDdls(
+  c: CategoryDef,
+  dialect: "pg" | "sqlite",
+): Array<{ name: string; sql: string }> {
+  if (!c.metadataColumns.some((col) => col.name === CAPTURED_AT_METADATA_COLUMN)) return [];
+  const columns = `("${METADATA_DISCRIMINANT_COLUMN}", "${CAPTURED_AT_METADATA_COLUMN}")`;
+  if (dialect === "pg") {
+    // ASYNC because DSQL builds an index in the background and the statement
+    // returns before it is usable. No `IF NOT EXISTS`, which DSQL does not
+    // accept on the async form — the caller pre-checks `pg_indexes` by the name
+    // returned here. No `USING`: DSQL refuses the access method.
+    const name = `idx_record_${c.id}_metadata_type_captured_at`;
+    return [{ name, sql: `CREATE INDEX ASYNC "${name}" ON ${pgMetadataTableName(c.id)}${columns}` }];
+  }
+  const name = `idx_${sqliteMetadataTableName(c.id)}_type_captured_at`;
+  return [
+    {
+      name,
+      sql: `CREATE INDEX IF NOT EXISTS "${name}" ON ${sqliteMetadataTableName(c.id)}${columns}`,
+    },
+  ];
+}
+
+/** The capture-time column, which image and video both carry and nothing else does. */
+export const CAPTURED_AT_METADATA_COLUMN = "captured_at";
 
 /**
  * Returns the SQLite metadata table name for a canonical type id or a category

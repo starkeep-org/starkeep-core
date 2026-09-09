@@ -152,7 +152,7 @@ describe("paging a sorted query", () => {
     // library is actually in while the EXIF backfill is still running.
     for (const [index, record] of records.entries()) {
       if (index % 3 === 0) continue;
-      await adapter.putMetadata("image", {
+      await adapter.putMetadata("image/jpeg", {
         recordId: record.id,
         captured_at: `2026-0${(index % 9) + 1}-01T12:00:00`,
       });
@@ -173,7 +173,7 @@ describe("paging a sorted query", () => {
     const records = await seed(6);
     for (const [index, record] of records.entries()) {
       if (index >= 4) continue;
-      await adapter.putMetadata("image", {
+      await adapter.putMetadata("image/jpeg", {
         recordId: record.id,
         captured_at: `2026-01-0${index + 1}T12:00:00`,
       });

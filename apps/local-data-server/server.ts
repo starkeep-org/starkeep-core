@@ -3253,10 +3253,23 @@ async function main() {
           json(res, { error: `Unknown metadata columns: ${unknownKeys.join(", ")}` });
           return;
         }
+        // The record's own type, read from storage rather than taken from the
+        // body's `typeId`. It is the grant discriminant written into the row,
+        // and a row labelled with a caller-supplied type would be readable by
+        // whoever the caller named.
+        const subject = await sdk.data.get(createStarkeepId(recordId));
+        if (!subject || subject.deletedAt) {
+          res.writeHead(404);
+          json(res, { error: "Record not found" });
+          return;
+        }
         // Through the SDK rather than the adapter, deliberately: the SDK also
         // moves the record's `updated_at`, which is the only thing that makes
         // this write visible to sync. See `DataOperations.putMetadata`.
-        await sdk.data.putMetadata(category, { recordId: createStarkeepId(recordId), ...metadata });
+        await sdk.data.putMetadata(subject.type, {
+          recordId: createStarkeepId(recordId),
+          ...metadata,
+        });
         json(res, { ok: true });
         return;
       }

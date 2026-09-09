@@ -776,7 +776,38 @@ describe("metadata routes", () => {
     expect(res.statusCode).toBe(200);
     const writes = db.calls(/insert into "shared"\."record_image_metadata"/);
     expect(writes).toHaveLength(1);
-    expect(writes[0]!.values).toEqual(["r1", 100, 50]);
+    // `record_type` rides the row after `record_id`, taken from the record read
+    // out of storage rather than from the body's `typeId` — it is the grant
+    // discriminant every read of this row gates on, so a caller-supplied value
+    // would let the caller decide who may read it.
+    expect(writes[0]!.values).toEqual(["r1", "image/jpeg", 100, 50]);
+  });
+
+  it("takes record_type from the record, not from the caller's typeId", async () => {
+    const db = fakeDsqlWithGrants([
+      { type_id: "image/jpeg", access: "readwrite", metadata_write: true },
+      { type_id: "image/png", access: "readwrite", metadata_write: true },
+    ])
+      .on(/insert into "shared"\."record_image_metadata"/, [])
+      .on(/from "shared"\."records" where "id" =/, [recordRow({ id: "r2", type: "image/png" })])
+      .on(/insert into "shared"\."records"/, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "md7",
+        method: "POST",
+        subPath: "/data/records/r2/metadata",
+        // The caller names jpeg; the record is a png.
+        body: { typeId: "image/jpeg", metadata: { width: 100 } },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(db.calls(/insert into "shared"\."record_image_metadata"/)[0]!.values).toEqual([
+      "r2",
+      "image/png",
+      100,
+    ]);
   });
 
   it("moves the record's clock on a metadata write, without touching version", async () => {

@@ -46,7 +46,7 @@
 import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import { CATEGORIES, pgMetadataDdl } from "@starkeep/protocol-primitives";
+import { CATEGORIES, pgMetadataDdl, metadataIndexDdls } from "@starkeep/protocol-primitives";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -341,6 +341,12 @@ export async function initializeSharedSchema(
     // alongside the records row).
     for (const c of CATEGORIES.filter((c) => c.id !== "other")) {
       await sql.raw(pgMetadataDdl(c)).execute(db);
+      // Without these every metadata predicate is a full scan, which is why
+      // the `capturedAt` ordering the storage layer already implements was
+      // never worth reaching from a route.
+      for (const index of metadataIndexDdls(c, "pg")) {
+        await ensureIndex(db, "shared", index.name, index.sql);
+      }
     }
 
     // app_install_steps — per-step state for idempotent install/uninstall.

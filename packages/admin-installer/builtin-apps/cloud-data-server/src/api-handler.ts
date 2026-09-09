@@ -2718,7 +2718,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         // hit is somebody else's record and rewriting its derived columns
         // would be a surprise, exactly as re-labelling it would be.
         if (inlineMetadata) {
-          await db.putMetadata(typeCategory(fresh.type), {
+          await db.putMetadata(fresh.type, {
             recordId: fresh.id,
             ...inlineMetadata,
           });
@@ -2984,9 +2984,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // applied row a fresh change to ship back and two nodes would trade the
       // same record forever.
       await withOccRetry("POST /data/records/:id/metadata", async () => {
-        await db.putMetadata(category, { recordId, ...metadata });
+        // The record's own type, read from storage rather than taken from the
+        // body's `typeId`. It is the grant discriminant written into the row,
+        // and a row labelled with a caller-supplied type would be readable by
+        // whoever the caller named.
         const existing = await db.get(recordId);
-        if (!existing) return;
+        if (!existing || existing.deletedAt) return;
+        await db.putMetadata(existing.type, { recordId, ...metadata });
         await db.put({ ...existing, updatedAt: clock.now() });
       });
       return ok({ ok: true });

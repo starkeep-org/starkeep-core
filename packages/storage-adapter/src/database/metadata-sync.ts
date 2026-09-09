@@ -158,7 +158,10 @@ export async function applyRecordMetadata(
     }
   }
 
-  await db.putMetadata(category, { recordId: record.id, ...columns });
+  // The record's own type, not the category: it is the grant discriminant the
+  // metadata row is written with, and it is derived from the record this
+  // metadata rode in on rather than from anything the peer sent.
+  await db.putMetadata(record.type, { recordId: record.id, ...columns });
   return owedBack;
 }
 

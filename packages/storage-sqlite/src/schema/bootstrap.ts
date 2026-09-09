@@ -1,6 +1,6 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql } from "kysely";
-import { CATEGORIES, sqliteMetadataDdl } from "@starkeep/protocol-primitives";
+import { CATEGORIES, sqliteMetadataDdl, metadataIndexDdls } from "@starkeep/protocol-primitives";
 import { compiler as qb } from "../query-builder.js";
 
 /**
@@ -309,6 +309,9 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
   for (const c of CATEGORIES) {
     if (c.id === "other") continue;
     db.exec(sqliteMetadataDdl(c));
+    // Same index as the DSQL side, so a predicate that seeks in the cloud
+    // seeks locally too.
+    for (const index of metadataIndexDdls(c, "sqlite")) db.exec(index.sql);
   }
 }
 
