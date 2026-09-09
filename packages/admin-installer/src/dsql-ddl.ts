@@ -29,6 +29,7 @@ import {
   FILE_RECORDS_COLUMNS,
   FILE_RECORDS_TABLE_INFO,
   appSyncableTableInfo,
+  syncableIndexName,
 } from "@starkeep/shared-space-api";
 import type { AppSyncableTableInfo } from "@starkeep/shared-space-api";
 import { retryOnAccessDenied, retryOnTransientDbError } from "./retry-on-access-denied";
@@ -349,6 +350,23 @@ export async function runAppInstallDdl(
             `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${table.name}_node_watermark" ON ${schemaName}."${table.name}"("node_id", "updated_at")`,
           )
           .execute(db);
+        // App-declared indexes. The query grammar makes an expensive question
+        // cheap to ask; these are what make it cheap to answer, and without a
+        // matching one a new filter or a grouped count is a full scan.
+        //
+        // `ASYNC` because DSQL builds an index in the background and the
+        // statement returns before it is usable; `IF NOT EXISTS` because
+        // install is re-runnable and this is the same shape the two indexes
+        // above already use. No `USING` — DSQL refuses the access method
+        // (`0A000 USING not supported for CREATE INDEX`).
+        for (const index of table.indexes) {
+          await sql
+            .raw(
+              `CREATE INDEX ASYNC IF NOT EXISTS "${syncableIndexName(`${schemaName}_${table.name}`, index.columns)}" ` +
+                `ON ${schemaName}."${table.name}"(${index.columns.map((c) => `"${c}"`).join(", ")})`,
+            )
+            .execute(db);
+        }
         // Grant app role full DML on its own syncable tables.
         await sql
           .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON ${schemaName}."${table.name}" TO ${pgRole}`)

@@ -2,7 +2,7 @@ import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql, type CompiledQuery } from "kysely";
 import type { AppManifest, FileAccess, LabelKey, SyncableTable } from "@starkeep/admin-manifest";
 import { appSyncableTableName, sqliteCompiler as k } from "@starkeep/storage-sqlite";
-import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
+import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS, syncableIndexName } from "@starkeep/shared-space-api";
 import type { LogicalColumnType } from "@starkeep/protocol-primitives";
 
 export type Operation = "install" | "uninstall";
@@ -350,6 +350,7 @@ function createSyncableTable(
   db: RawDatabase,
   fullName: string,
   columns: SyncableColumnDef[],
+  indexes: readonly { columns: string[] }[] = [],
 ): void {
   let tb = k.schema
     .createTable(fullName)
@@ -391,6 +392,23 @@ function createSyncableTable(
       .columns(["node_id", "updated_at"])
       .compile().sql,
   );
+  // App-declared indexes. The query grammar makes an expensive question cheap
+  // to ask; these are what make it cheap to answer, and without a matching one
+  // a new filter or a grouped count is a full scan.
+  //
+  // Named the same way the DSQL side names them, so the two backends carry the
+  // same index under the same name and a reader comparing them is comparing
+  // like with like.
+  for (const index of indexes) {
+    db.exec(
+      k.schema
+        .createIndex(syncableIndexName(fullName, index.columns))
+        .ifNotExists()
+        .on(fullName)
+        .columns(index.columns)
+        .compile().sql,
+    );
+  }
 }
 
 export function createAppSyncableTables(
@@ -408,6 +426,7 @@ export function createAppSyncableTables(
         notNull: Boolean(c.notNull),
         primaryKey: Boolean(c.primaryKey),
       })),
+      table.indexes,
     );
   }
 }

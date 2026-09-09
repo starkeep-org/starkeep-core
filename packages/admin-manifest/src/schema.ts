@@ -253,12 +253,63 @@ export const syncableTableColumnSchema = z
     message: `Column names "updated_at" and "deleted_at" are reserved by the sync runtime`,
   });
 
+/**
+ * One index an app asks for on one of its own tables.
+ *
+ * Deliberately just an ordered column list. Everything else an index can carry
+ * is either unavailable on DSQL or dangerous here:
+ *
+ *   - **No `unique`.** A unique index over existing duplicates fails at
+ *     install time or, worse, on a peer whose rows differ — and nothing in the
+ *     query grammar needs one. Uniqueness is the primary key's job.
+ *   - **No partial index** (`WHERE …`), because a predicate over app data is a
+ *     second grammar to validate and neither engine's planner would be asked
+ *     for one by anything here.
+ *   - **No `USING`.** DSQL refuses the access method outright:
+ *     `0A000 USING not supported for CREATE INDEX`, probed 2026-09-09.
+ *
+ * Expression indexes do work on DSQL and are not exposed yet, because no
+ * caller has asked and an expression is a third thing to validate.
+ */
+export const syncableTableIndexSchema = z.object({
+  columns: z.array(z.string().regex(/^[a-z_][a-z0-9_]*$/)).min(1).max(8),
+});
+
 export const syncableTableSchema = z
   .object({
     // Becomes "<appId>_syncable_<name>" in the local SQLite schema.
     name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
     columns: z.array(syncableTableColumnSchema).min(1),
+    /**
+     * Indexes to create alongside the table.
+     *
+     * The query grammar makes an expensive question cheap to *ask*; an index is
+     * what makes it cheap to answer. A filter or a grouped count over an
+     * unindexed column is a full scan whatever the grammar looks like, so an
+     * app that ships a new filter without a matching index has moved the cost
+     * rather than removed it.
+     */
+    indexes: z.array(syncableTableIndexSchema).default([]),
   })
+  // An index naming a column the table does not declare would be a DDL failure
+  // at install time, on the operator's machine, with a Postgres error message.
+  // Refused here, where the message can name the manifest.
+  .refine(
+    (table) =>
+      table.indexes.every((index) =>
+        index.columns.every(
+          (column) =>
+            table.columns.some((c) => c.name === column) ||
+            RESERVED_SYNC_COLUMNS.has(column) ||
+            column === "node_id",
+        ),
+      ),
+    {
+      message:
+        `An index may only name columns the table declares, or the sync runtime's ` +
+        `own updated_at, deleted_at and node_id.`,
+    },
+  )
   // A syncable table without a primary key is not a table the sync protocol can
   // carry, and the failure is silent and compounding rather than loud. With no
   // key there is no conflict target, so the applier's `ON CONFLICT DO NOTHING`

@@ -79,3 +79,27 @@ export function appSyncableTableInfo(
     ],
   };
 }
+
+/**
+ * A deterministic name for an app-declared index.
+ *
+ * Derived from the columns rather than declared in the manifest, because a name
+ * is a second thing to keep unique and an app author has no reason to care what
+ * it is. Both installers call this, so the same index carries the same name on
+ * both backends and a reader comparing them is comparing like with like.
+ *
+ * `qualifier` is whatever makes the name unique in that engine's namespace: the
+ * schema and table on DSQL, the prefixed table name on SQLite, where index
+ * names are global to the database.
+ *
+ * Capped because Postgres truncates an identifier at 63 bytes, and two long
+ * names truncating to the same thing would collide silently. The hash suffix
+ * keeps them apart.
+ */
+export function syncableIndexName(qualifier: string, columns: readonly string[]): string {
+  const full = `idx_${qualifier}_${columns.join("_")}`;
+  if (full.length <= 60) return full;
+  let hash = 0;
+  for (const ch of full) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+  return `${full.slice(0, 51)}_${(hash >>> 0).toString(36)}`;
+}

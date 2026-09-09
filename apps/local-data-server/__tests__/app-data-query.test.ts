@@ -263,6 +263,43 @@ describe("aggregation", () => {
   });
 });
 
+describe("the write path enforces the declared types", () => {
+  // A declared type is only worth having if something enforces it, and the
+  // write path is the only place it can be: once a value is in the table, the
+  // grammar's promise that `due < $x` compares instants rather than characters
+  // depends on every writer having emitted the canonical form.
+  it("refuses a timestamp that is not canonical ISO-8601", async () => {
+    const res = await app.fetch("/app-data/db/card_state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ row: { id: "bad", due: "2026-09-09T00:00:00Z" } }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/canonical ISO-8601/);
+  });
+
+  it("refuses a value whose type does not match its column", async () => {
+    const res = await app.fetch("/app-data/db/card_state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ row: { id: "bad2", reps: "many" } }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/declared integer/);
+  });
+
+  it("accepts what an app that already writes toISOString() sends", async () => {
+    const res = await app.fetch("/app-data/db/card_state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        row: { id: "good", deck_id: "d1", due: new Date().toISOString(), reps: 0 },
+      }),
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("rejections a caller has to be able to act on", () => {
   it("refuses the flat parameter form the old grammar accepted", async () => {
     // The old handler read every query parameter as an equality filter, so
