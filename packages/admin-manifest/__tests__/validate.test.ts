@@ -152,11 +152,14 @@ describe("syncable table column rules", () => {
   });
 
   it("enforces the column type whitelist", () => {
-    for (const bad of ["varchar", "timestamp", "json", "TEXT"]) {
+    for (const bad of ["varchar", "json", "TEXT", "timestamptz", "datetime"]) {
       const result = validateManifest(withTable([{ name: "col", type: bad }]));
       expect(result.valid, `column type "${bad}" should be rejected`).toBe(false);
     }
-    for (const good of ["text", "integer", "real", "blob", "boolean"]) {
+    // The vocabulary is `LogicalColumnType`, shared with the per-category
+    // metadata registry so the two planes cannot come to mean different things
+    // by one word. `bigint` and `timestamp` joined the original five with it.
+    for (const good of ["text", "integer", "bigint", "real", "blob", "boolean", "timestamp"]) {
       const result = validateManifest(withTable([{ name: "col", type: good }]));
       expect(result.valid, `column type "${good}" should be accepted`).toBe(true);
     }

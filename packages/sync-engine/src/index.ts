@@ -13,6 +13,7 @@ export type {
   SyncEngine,
   SyncEngineOptions,
   SyncStateStore,
+  AppSyncableColumnInfo,
   AppSyncableTableInfo,
   AppSyncableNamespace,
   AppSyncableNamespaceStore,

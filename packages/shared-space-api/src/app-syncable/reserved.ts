@@ -1,4 +1,5 @@
 import type { AppSyncableTableInfo } from "./types.js";
+import { appSyncableTableInfo } from "./columns.js";
 
 /**
  * Name of the framework-owned bookkeeping table created in every
@@ -37,10 +38,10 @@ export const FILE_RECORDS_COLUMNS: readonly FileRecordsTableColumn[] = [
   { name: "created_at", type: "text", notNull: true, primaryKey: false },
 ];
 
-export const FILE_RECORDS_TABLE_INFO: AppSyncableTableInfo = {
-  name: FILE_RECORDS_TABLE,
-  pkColumns: ["id"],
-};
+export const FILE_RECORDS_TABLE_INFO: AppSyncableTableInfo = appSyncableTableInfo(
+  FILE_RECORDS_TABLE,
+  FILE_RECORDS_COLUMNS,
+);
 
 /** Append the reserved table info to a namespace's tables list. */
 export function withFileRecordsTable(

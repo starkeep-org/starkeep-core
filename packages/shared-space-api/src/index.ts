@@ -24,6 +24,7 @@ export {
 export { ApiError, RouteNotFoundError, MethodNotAllowedError } from "./errors.js";
 
 export type {
+  AppSyncableColumnInfo,
   AppSyncableTableInfo,
   AppSyncableNamespace,
   AppSyncableNamespaceStore,
@@ -47,3 +48,11 @@ export {
   withFileRecordsTable,
   type FileRecordsTableColumn,
 } from "./app-syncable/reserved.js";
+export {
+  SYSTEM_COLUMNS,
+  SYSTEM_COLUMN_NAMES,
+  SOFT_DELETE_COLUMN,
+  appSyncableTableInfo,
+  type DeclaredColumn,
+} from "./app-syncable/columns.js";
+export * from "./query/index.js";

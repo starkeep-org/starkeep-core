@@ -3,6 +3,7 @@ import { sql, type CompiledQuery } from "kysely";
 import type { AppManifest, FileAccess, LabelKey, SyncableTable } from "@starkeep/admin-manifest";
 import { appSyncableTableName, sqliteCompiler as k } from "@starkeep/storage-sqlite";
 import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
+import type { LogicalColumnType } from "@starkeep/protocol-primitives";
 
 export type Operation = "install" | "uninstall";
 export type StepStatus = "pending" | "done" | "failed";
@@ -318,12 +319,16 @@ export function deleteAppLabelKeys(db: RawDatabase, appId: string): void {
   run(db, k.deleteFrom("shared_app_label_keys").where("app_id", "=", appId).compile());
 }
 
-const SQLITE_COLUMN_TYPES: Record<SyncableTable["columns"][number]["type"], "text" | "integer" | "real" | "blob"> = {
+const SQLITE_COLUMN_TYPES: Record<LogicalColumnType, "text" | "integer" | "real" | "blob"> = {
   text: "text",
   integer: "integer",
+  // SQLite's INTEGER is already 64-bit, so `bigint` needs no separate affinity.
+  bigint: "integer",
   real: "real",
   blob: "blob",
   boolean: "integer",
+  // A logical type over a physical text column — see LogicalColumnType.
+  timestamp: "text",
 };
 
 interface SyncableColumnDef {
