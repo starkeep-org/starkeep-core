@@ -102,7 +102,11 @@ export interface DataOperations {
    * adapter directly, because bumping on apply would make every applied row a
    * fresh change to ship back.
    */
-  putMetadata(typeId: string, row: MetadataRow): Promise<void>;
+  /**
+   * `recordType` is the record's own `<category>/<format>` id, not a bare
+   * category — see `DatabaseAdapter.putMetadata`.
+   */
+  putMetadata(recordType: string, row: MetadataRow): Promise<void>;
   /** Read a per-type metadata row by recordId. */
   getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null>;
   /** Batch-read per-type metadata rows. */

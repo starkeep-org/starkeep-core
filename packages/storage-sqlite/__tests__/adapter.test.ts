@@ -260,7 +260,7 @@ describe("SqliteDatabaseAdapter", () => {
     it("stores and retrieves a per-type metadata row", async () => {
       const record = createDataRecord(baseInput({ type: "image" }), clock);
       await adapter.put(record);
-      await adapter.putMetadata("image", {
+      await adapter.putMetadata("image/jpeg", {
         recordId: record.id,
         width: 1920,
         height: 1080,
@@ -280,8 +280,8 @@ describe("SqliteDatabaseAdapter", () => {
       // so a second write naming one column must not erase the first.
       const record = createDataRecord(baseInput({ type: "image" }), clock);
       await adapter.put(record);
-      await adapter.putMetadata("image", { recordId: record.id, width: 1920, height: 1080 });
-      await adapter.putMetadata("image", { recordId: record.id, thumb_hash: "TH" });
+      await adapter.putMetadata("image/jpeg", { recordId: record.id, width: 1920, height: 1080 });
+      await adapter.putMetadata("image/jpeg", { recordId: record.id, thumb_hash: "TH" });
 
       const row = (await adapter.getMetadata("image", record.id))!;
       expect(row["width"]).toBe(1920);
@@ -292,7 +292,7 @@ describe("SqliteDatabaseAdapter", () => {
     it("deleteMetadata removes the row", async () => {
       const record = createDataRecord(baseInput({ type: "image" }), clock);
       await adapter.put(record);
-      await adapter.putMetadata("image", { recordId: record.id, width: 1, height: 1 });
+      await adapter.putMetadata("image/jpeg", { recordId: record.id, width: 1, height: 1 });
       await adapter.deleteMetadata("image", record.id);
       expect(await adapter.getMetadata("image", record.id)).toBeNull();
     });

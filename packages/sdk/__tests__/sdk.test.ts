@@ -110,7 +110,7 @@ describe("createStarkeepSdk", () => {
       );
 
       // Metadata is keyed by category (jpg → image).
-      await sdk.data.putMetadata("image", {
+      await sdk.data.putMetadata("image/jpeg", {
         recordId: record.id,
         width: 800,
         height: 600,

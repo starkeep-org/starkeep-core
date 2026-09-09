@@ -264,13 +264,26 @@ describe("metadata tables", () => {
     expect(call.text).toContain('insert into "shared"."record_image_metadata"');
     expect(call.text).toContain('on conflict ("record_id") do update set');
     expect(call.text).toContain('"width" = "excluded"."width"');
-    expect(call.values).toEqual([record.id, 800, 600]);
+    // `record_type` rides after `record_id`: it is the grant discriminant
+    // every read of the row gates on, set from the type this call names.
+    expect(call.values).toEqual([record.id, "image/jpeg", 800, 600]);
   });
 
-  it("uses DO NOTHING when the row carries no columns beyond record_id", async () => {
+  it("still updates the discriminant when the row carries nothing else", async () => {
     const record = sampleRecord();
     await adapter.putMetadata("image/jpeg", { recordId: record.id });
-    expect(client.calls[0].text).toContain('on conflict ("record_id") do nothing');
+    // `record_type` is always a column to update, so the DO NOTHING branch is
+    // now unreachable — which is right: an upsert that left the discriminant
+    // alone would be an upsert that could leave a stale one behind.
+    expect(client.calls[0].text).toContain('on conflict ("record_id") do update set');
+    expect(client.calls[0].values).toEqual([record.id, "image/jpeg"]);
+  });
+
+  it("refuses a bare category, which would store an ungated discriminant", async () => {
+    const record = sampleRecord();
+    await expect(
+      adapter.putMetadata("image", { recordId: record.id, width: 1 }),
+    ).rejects.toThrow(/needs the record's own type/);
   });
 
   it("getMetadata round-trips and getMetadataByIds maps rows by record", async () => {

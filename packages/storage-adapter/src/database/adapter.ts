@@ -102,12 +102,24 @@ export interface DatabaseAdapter {
   transaction<T>(callback: (transaction: Transaction) => Promise<T>): Promise<T>;
 
   /**
-   * Write (insert-or-replace) the per-type metadata row keyed by `row.recordId`.
-   * Caller is responsible for ensuring the corresponding records-table row
-   * exists; we do not enforce FK at the DB level (Aurora DSQL doesn't support
-   * FKs anyway) but a metadata row without its record is meaningless.
+   * Write (insert-or-replace) the per-category metadata row keyed by
+   * `row.recordId`. Caller is responsible for ensuring the corresponding
+   * records-table row exists; we do not enforce FK at the DB level (Aurora DSQL
+   * doesn't support FKs anyway) but a metadata row without its record is
+   * meaningless.
+   *
+   * `recordType` is the record's own `<category>/<format>` id and a bare
+   * category is refused. It picks the table, as it always did, and it is also
+   * written into the row's `record_type` column — the grant discriminant every
+   * read of the table gates on. A row labelled with the wrong one is readable
+   * by the wrong app, which is why a caller holding only a category has to go
+   * and read the record's type rather than pass what it has.
+   *
+   * The value is never taken from `row`: metadata rides the wire as a sync
+   * passenger, and a peer supplying this column would be asserting who may read
+   * the row. See METADATA_DISCRIMINANT_COLUMN.
    */
-  putMetadata(typeId: string, row: MetadataRow): Promise<void>;
+  putMetadata(recordType: string, row: MetadataRow): Promise<void>;
 
   /** Read the per-type metadata row for `recordId`, or null if absent. */
   getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null>;

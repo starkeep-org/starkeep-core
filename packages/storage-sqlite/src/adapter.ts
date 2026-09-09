@@ -7,7 +7,13 @@ import type {
   RecordLabel,
   StarkeepId,
 } from "@starkeep/protocol-primitives";
-import { serializeHLC, deserializeHLC, sqliteMetadataTableName } from "@starkeep/protocol-primitives";
+import {
+  serializeHLC,
+  deserializeHLC,
+  isKnownType,
+  sqliteMetadataTableName,
+  METADATA_DISCRIMINANT_COLUMN,
+} from "@starkeep/protocol-primitives";
 import type {
   DatabaseAdapter,
   Query,
@@ -386,13 +392,9 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
-  async putMetadata(typeId: string, row: MetadataRow): Promise<void> {
-    const table = sqliteMetadataTableName(typeId);
-    const values: Record<string, unknown> = { record_id: row.recordId };
-    for (const [key, value] of Object.entries(row)) {
-      if (key === "recordId") continue;
-      values[key] = value;
-    }
+  async putMetadata(recordType: string, row: MetadataRow): Promise<void> {
+    const table = sqliteMetadataTableName(recordType);
+    const values = metadataValues(recordType, row);
     const updateColumns = Object.keys(values).filter((c) => c !== "record_id");
     const query = qb
       .insertInto(table)
@@ -622,4 +624,37 @@ function columnsToMetadataRow(
     row[key] = value;
   }
   return row;
+}
+
+/**
+ * The values to write, with the grant discriminant derived from `recordType`.
+ *
+ * `recordType` is the record's own `<category>/<format>` id, not a bare
+ * category, and a bare one is refused here rather than stored. A metadata row
+ * labelled with the wrong discriminant is readable by the wrong app, so a
+ * caller that had only a category has lost the thing this column exists to
+ * carry and must go and read the record's type.
+ *
+ * Never taken from `row`: metadata rides the wire as a sync passenger, and a
+ * peer supplying this column would be asserting who may read the row. See
+ * METADATA_DISCRIMINANT_COLUMN.
+ */
+function metadataValues(recordType: string, row: MetadataRow): Record<string, unknown> {
+  if (!isKnownType(recordType)) {
+    throw new StorageError(
+      `putMetadata needs the record's own type, not "${recordType}": the ` +
+        `${METADATA_DISCRIMINANT_COLUMN} column gates every read of this row`,
+    );
+  }
+  const values: Record<string, unknown> = {
+    record_id: row.recordId,
+    [METADATA_DISCRIMINANT_COLUMN]: recordType,
+  };
+  for (const [key, value] of Object.entries(row)) {
+    // `recordId` is spelled `record_id` above, and the discriminant is the
+    // server's to set — a wire row carrying one is ignored, not honoured.
+    if (key === "recordId" || key === METADATA_DISCRIMINANT_COLUMN) continue;
+    values[key] = value;
+  }
+  return values;
 }

@@ -353,12 +353,14 @@ export async function createStarkeepSdk(
         return result.records;
       },
 
-      // `typeId` may be a record's extension or a category id; the adapter
-      // derives the per-category metadata table. The `other` category has no
-      // metadata table, so these are no-ops for it.
-      async putMetadata(typeId: string, row: MetadataRow) {
-        if (metadataCategory(typeId) === "other") return;
-        await databaseAdapter.putMetadata(typeId, row);
+      // `recordType` is the record's own `<category>/<format>` id. It picks the
+      // per-category metadata table and it is written into the row's
+      // `record_type` column, which is what gates every read of that row — so a
+      // caller holding only a category has to go and read the record's type.
+      // The `other` category has no metadata table, so this is a no-op for it.
+      async putMetadata(recordType: string, row: MetadataRow) {
+        if (metadataCategory(recordType) === "other") return;
+        await databaseAdapter.putMetadata(recordType, row);
 
         // Move the record's clock, because metadata now rides the record over
         // sync and the outbound scan is a delta scan over exactly this column.

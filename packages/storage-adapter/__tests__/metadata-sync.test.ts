@@ -29,7 +29,7 @@ beforeEach(async () => {
 
 describe("loadMetadataForRecords", () => {
   it("strips null columns, so absence on the wire means one thing", async () => {
-    await db.putMetadata("image", {
+    await db.putMetadata("image/jpeg", {
       recordId: PHOTO,
       width: 4032,
       height: null,
@@ -44,7 +44,7 @@ describe("loadMetadataForRecords", () => {
   });
 
   it("omits a record whose row holds nothing but nulls", async () => {
-    await db.putMetadata("image", { recordId: PHOTO, width: null });
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, width: null });
     expect((await loadMetadataForRecords(db, [photo])).has(PHOTO)).toBe(false);
   });
 
@@ -57,7 +57,7 @@ describe("loadMetadataForRecords", () => {
     // Postgres hands back a `Date`; SQLite a string. JSON.stringify would
     // normalize one of those on an HTTP round and leave an in-process round
     // writing the other, so the conversion happens here instead.
-    await db.putMetadata("image", {
+    await db.putMetadata("image/jpeg", {
       recordId: PHOTO,
       captured_at: new Date("2026-01-02T03:04:05.000Z"),
     });
@@ -68,7 +68,7 @@ describe("loadMetadataForRecords", () => {
 
 describe("applyRecordMetadata", () => {
   it("merges the named columns and leaves the rest alone", async () => {
-    await db.putMetadata("image", { recordId: PHOTO, width: 4032, height: 3024 });
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, width: 4032, height: 3024 });
 
     await applyRecordMetadata(db, photo, { thumb_hash: "TH" }, { detectOwedBack: true });
 
@@ -76,6 +76,23 @@ describe("applyRecordMetadata", () => {
     expect(row["width"]).toBe(4032);
     expect(row["height"]).toBe(3024);
     expect(row["thumb_hash"]).toBe("TH");
+  });
+
+  it("derives record_type from the record, never from the wire", async () => {
+    // Metadata is a sync passenger: it rides on the record, applied with the
+    // record, with null columns stripped so a node knowing less cannot erase a
+    // peer's columns. That per-column merge is right for a derived fact and
+    // wrong for a grant discriminant — a peer supplying it would be asserting
+    // who may read the row.
+    await applyRecordMetadata(
+      db,
+      photo,
+      { width: 4032, record_type: "image/svg" },
+      { detectOwedBack: false },
+    );
+    const row = (await db.getMetadata("image", PHOTO))!;
+    expect(row["record_type"]).toBe(photo.type);
+    expect(row["width"]).toBe(4032);
   });
 
   it("drops a column the category does not declare", async () => {
@@ -95,7 +112,7 @@ describe("applyRecordMetadata", () => {
   });
 
   it("reports the sender as owed when this node holds a column the snapshot omits", async () => {
-    await db.putMetadata("image", { recordId: PHOTO, thumb_hash: "TH" });
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, thumb_hash: "TH" });
 
     const owedBack = await applyRecordMetadata(
       db,
@@ -108,7 +125,7 @@ describe("applyRecordMetadata", () => {
   });
 
   it("reports nothing owed once the snapshot names everything held", async () => {
-    await db.putMetadata("image", { recordId: PHOTO, thumb_hash: "TH" });
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, thumb_hash: "TH" });
 
     const owedBack = await applyRecordMetadata(
       db,
@@ -124,7 +141,7 @@ describe("applyRecordMetadata", () => {
   });
 
   it("reads nothing when the caller does not ask", async () => {
-    await db.putMetadata("image", { recordId: PHOTO, thumb_hash: "TH" });
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, thumb_hash: "TH" });
 
     // A first sync arrives with thousands of records none of which this node
     // has seen, and a responder declines the question outright — see the note
@@ -149,7 +166,7 @@ describe("applyRecordMetadata", () => {
 
 describe("deleteRecordMetadata", () => {
   it("drops the row, the way a local delete already cascades", async () => {
-    await db.putMetadata("image", { recordId: PHOTO, width: 4032 });
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, width: 4032 });
     await deleteRecordMetadata(db, photo);
     expect(await db.getMetadata("image", PHOTO)).toBeNull();
   });
@@ -161,8 +178,8 @@ describe("MockDatabaseAdapter.putMetadata", () => {
     // The mock replaced the whole row until this was fixed, which made it the
     // one backend where writing a partial row erased the rest — and the
     // metadata a sync round carries is deliberately partial.
-    await db.putMetadata("image", { recordId: PHOTO, width: 4032, height: 3024 });
-    await db.putMetadata("image", { recordId: PHOTO, thumb_hash: "TH" });
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, width: 4032, height: 3024 });
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, thumb_hash: "TH" });
 
     const row = (await db.getMetadata("image", PHOTO))!;
     expect(row["width"]).toBe(4032);

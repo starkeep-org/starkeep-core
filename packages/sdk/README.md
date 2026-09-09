@@ -43,7 +43,7 @@ await sdk.data.delete(record.id);
 
 // Per-category metadata (deterministically derivable from the file bytes).
 // Keyed by category — "image" here. The `other` category has no metadata table.
-await sdk.data.putMetadata("image", { recordId: record.id, width: 800, height: 600 });
+await sdk.data.putMetadata("image/jpeg", { recordId: record.id, width: 800, height: 600 });
 const meta = await sdk.data.getMetadata("image", record.id);
 
 // Search across records.

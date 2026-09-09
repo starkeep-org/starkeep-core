@@ -115,7 +115,7 @@ async function writeMetadataThroughApi(
   record: DataRecord,
   columns: Record<string, unknown>,
 ): Promise<void> {
-  await db.putMetadata("image", { recordId: record.id, ...columns });
+  await db.putMetadata("image/jpeg", { recordId: record.id, ...columns });
   const existing = (await db.get(record.id))!;
   await db.put({ ...existing, updatedAt: clock.now() });
 }
@@ -131,7 +131,7 @@ describe("metadata riding the record it belongs to", () => {
   it("ships metadata written before the record's first sync", async () => {
     const p = await makePair();
     const record = await seedPhoto(p.local, p.localStorage, p.localClock);
-    await p.local.putMetadata("image", { recordId: record.id, width: 4032, height: 3024 });
+    await p.local.putMetadata("image/jpeg", { recordId: record.id, width: 4032, height: 3024 });
 
     await p.engine.exchange();
 
@@ -167,12 +167,12 @@ describe("metadata riding the record it belongs to", () => {
   it("leaves columns the snapshot does not name alone", async () => {
     const p = await makePair();
     const record = await seedPhoto(p.local, p.localStorage, p.localClock);
-    await p.local.putMetadata("image", { recordId: record.id, thumb_hash: "TH" });
+    await p.local.putMetadata("image/jpeg", { recordId: record.id, thumb_hash: "TH" });
     // The cloud already knows the dimensions — from its own decode, or from an
     // earlier round. A snapshot naming only `thumb_hash` must not erase them,
     // which is the entire reason nulls are stripped rather than sent.
     await p.cloud.put(record);
-    await p.cloud.putMetadata("image", {
+    await p.cloud.putMetadata("image/jpeg", {
       recordId: record.id,
       width: 4032,
       height: 3024,
@@ -189,11 +189,11 @@ describe("metadata riding the record it belongs to", () => {
   it("overwrites a column the receiver already holds", async () => {
     const p = await makePair();
     const record = await seedPhoto(p.local, p.localStorage, p.localClock);
-    await p.local.putMetadata("image", { recordId: record.id, width: 4032 });
+    await p.local.putMetadata("image/jpeg", { recordId: record.id, width: 4032 });
     await p.cloud.put(record);
     // A wrong value on the receiver, which is what overwrite exists for: a
     // corrected extraction has to be able to travel.
-    await p.cloud.putMetadata("image", { recordId: record.id, width: 1 });
+    await p.cloud.putMetadata("image/jpeg", { recordId: record.id, width: 1 });
 
     await p.engine.exchange();
 
@@ -203,7 +203,7 @@ describe("metadata riding the record it belongs to", () => {
   it("absorbs metadata from a snapshot the receiver's own row is ahead of", async () => {
     const p = await makePair();
     const record = await seedPhoto(p.local, p.localStorage, p.localClock);
-    await p.local.putMetadata("image", { recordId: record.id, width: 4032 });
+    await p.local.putMetadata("image/jpeg", { recordId: record.id, width: 4032 });
     // The cloud's row is strictly newer, so LWW skips the row write. The
     // metadata must still land: the record's clock does not move when metadata
     // is written, so a newer row is no evidence at all about its metadata.
@@ -217,7 +217,7 @@ describe("metadata riding the record it belongs to", () => {
   it("drops the metadata row when a tombstone applies", async () => {
     const p = await makePair();
     const record = await seedPhoto(p.local, p.localStorage, p.localClock);
-    await p.local.putMetadata("image", { recordId: record.id, width: 4032 });
+    await p.local.putMetadata("image/jpeg", { recordId: record.id, width: 4032 });
     await p.engine.exchange();
     expect(await metadataOf(p.cloud, record.id)).not.toBeNull();
 
@@ -243,7 +243,7 @@ describe("metadata riding the record it belongs to", () => {
       const writeLocal = () =>
         writeMetadataThroughApi(p.local, p.localClock, record, { width: 4032 });
       const writeCloud = async () => {
-        await p.cloud.putMetadata("image", { recordId: record.id, thumb_hash: "TH" });
+        await p.cloud.putMetadata("image/jpeg", { recordId: record.id, thumb_hash: "TH" });
         const existing = (await p.cloud.get(record.id))!;
         await p.cloud.put({ ...existing, updatedAt: p.cloudClock.now() });
       };
@@ -275,7 +275,7 @@ describe("metadata riding the record it belongs to", () => {
     const record = await seedPhoto(p.local, p.localStorage, p.localClock);
     await p.cloud.put(record);
     await p.cloudStorage.put(record.objectStorageKey, new Uint8Array([1, 2, 3]));
-    await p.cloud.putMetadata("image", { recordId: record.id, thumb_hash: "TH" });
+    await p.cloud.putMetadata("image/jpeg", { recordId: record.id, thumb_hash: "TH" });
     const seeded = (await p.cloud.get(record.id))!;
     await p.cloud.put({ ...seeded, updatedAt: p.cloudClock.now() });
     await writeMetadataThroughApi(p.local, p.localClock, record, { width: 4032 });
@@ -300,7 +300,7 @@ describe("metadata riding the record it belongs to", () => {
     // Two decoders disagreeing about one column — a HEIC through the platform
     // decoder against the same file through sharp. The design settles that as a
     // swap on purpose, and nothing must turn it into a flap.
-    await p.cloud.putMetadata("image", { recordId: record.id, thumb_hash: "FROM-CLOUD" });
+    await p.cloud.putMetadata("image/jpeg", { recordId: record.id, thumb_hash: "FROM-CLOUD" });
     const seeded = (await p.cloud.get(record.id))!;
     await p.cloud.put({ ...seeded, updatedAt: p.cloudClock.now() });
     await writeMetadataThroughApi(p.local, p.localClock, record, {
@@ -344,7 +344,7 @@ describe("peers that do not speak the field", () => {
   it("leaves a responder that ignores it applying the record unchanged", async () => {
     const p = await makePair();
     const record = await seedPhoto(p.local, p.localStorage, p.localClock);
-    await p.local.putMetadata("image", { recordId: record.id, width: 4032 });
+    await p.local.putMetadata("image/jpeg", { recordId: record.id, width: 4032 });
 
     // An older responder parses the record array without validating elements
     // (`sanitizeExchangeRequest`) and writes it through a row whitelist
@@ -383,7 +383,7 @@ describe("peers that do not speak the field", () => {
     // "no information", never as "no value".
     const record = await seedPhoto(p.cloud, p.cloudStorage, p.cloudClock);
     await p.local.put(record);
-    await p.local.putMetadata("image", { recordId: record.id, width: 4032 });
+    await p.local.putMetadata("image/jpeg", { recordId: record.id, width: 4032 });
 
     const stripped: SyncTransport = {
       exchange: async (request) => {

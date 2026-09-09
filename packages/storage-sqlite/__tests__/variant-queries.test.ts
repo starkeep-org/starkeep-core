@@ -65,7 +65,7 @@ describe("loadVariantsForPage", () => {
   ): Promise<StarkeepId> {
     const id = await addRecord({ parentId: parent, type: "image/avif" });
     await label(id, RENDITION.appId, RENDITION.key, value);
-    await adapter.putMetadata("image", { recordId: id, width, height });
+    await adapter.putMetadata("image/jpeg", { recordId: id, width, height });
     return id;
   }
 
@@ -117,7 +117,7 @@ describe("loadVariantsForPage", () => {
     const parent = await addRecord();
     const crop = await addRecord({ parentId: parent, type: "image/jpeg" });
     await label(crop, "photos", "crop");
-    await adapter.putMetadata("image", { recordId: crop, width: 400, height: 400 });
+    await adapter.putMetadata("image/jpeg", { recordId: crop, width: 400, height: 400 });
 
     const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400]);
     expect(out.get(parent)).toBeUndefined();
@@ -152,7 +152,7 @@ describe("loadVariantsForPage", () => {
     const parent = await addRecord();
     const v = await addRecord({ parentId: parent, type: "image/avif" });
     await label(v, "otherapp", "rendition", "someclass");
-    await adapter.putMetadata("image", { recordId: v, width: 400, height: 300 });
+    await adapter.putMetadata("image/jpeg", { recordId: v, width: 400, height: 300 });
 
     const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400]);
     expect(out.get(parent)).toBeUndefined();

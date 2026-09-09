@@ -5,7 +5,13 @@ import type {
   RecordLabel,
   StarkeepId,
 } from "@starkeep/protocol-primitives";
-import { compareHLC, serializeHLC, typeCategory } from "@starkeep/protocol-primitives";
+import {
+  compareHLC,
+  isKnownType,
+  serializeHLC,
+  typeCategory,
+  METADATA_DISCRIMINANT_COLUMN,
+} from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "../database/adapter.js";
 import {
   mergeDigestBuckets,
@@ -46,7 +52,7 @@ import {
 
 export class MockDatabaseAdapter implements DatabaseAdapter {
   private store = new Map<string, DataRecord>();
-  private metadata = new Map<string, Map<string, MetadataRow>>();
+  private metadata = new Map<string, Map<StarkeepId, MetadataRow>>();
   /** Keyed `<recordId> <appId> <key>` — the label primary key. */
   private labels = new Map<string, RecordLabel>();
   private initialized = false;
@@ -351,21 +357,49 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
    * mock that replaced would have reported the merge working while the real
    * backends did something else.
    */
-  async putMetadata(typeId: string, row: MetadataRow): Promise<void> {
-    let typeTable = this.metadata.get(typeId);
-    if (!typeTable) {
-      typeTable = new Map();
-      this.metadata.set(typeId, typeTable);
+  async putMetadata(recordType: string, row: MetadataRow): Promise<void> {
+    // A bare category is refused here as it is by both SQL adapters: the
+    // discriminant written below gates every read of the row, so a caller
+    // holding only a category has lost the thing this column exists to carry.
+    if (!isKnownType(recordType)) {
+      throw new Error(
+        `putMetadata needs the record's own type, not "${recordType}": the ` +
+          `${METADATA_DISCRIMINANT_COLUMN} column gates every read of this row`,
+      );
     }
-    const existing = typeTable.get(row.recordId);
-    typeTable.set(
-      row.recordId,
-      existing ? { ...existing, ...structuredClone(row) } : structuredClone(row),
-    );
+    const table = this.metadataTable(recordType);
+    const existing = table.get(row.recordId);
+    const incoming = structuredClone(row);
+    // Server-set, never merged from the caller's row — see
+    // METADATA_DISCRIMINANT_COLUMN.
+    delete incoming[METADATA_DISCRIMINANT_COLUMN];
+    table.set(row.recordId, {
+      ...(existing ?? {}),
+      ...incoming,
+      [METADATA_DISCRIMINANT_COLUMN]: recordType,
+      recordId: row.recordId,
+    });
+  }
+
+  /**
+   * Keyed by **category**, the way both SQL adapters key it: one table per
+   * category, addressed by a type id or a category id alike
+   * (`sqliteMetadataTableName` / `pgMetadataTableName` accept both). Keying by
+   * the raw argument would let a write as `image/jpeg` and a read as `image`
+   * miss each other, which no real backend does.
+   */
+  private metadataTable(typeOrCategory: string): Map<StarkeepId, MetadataRow> {
+    const category = typeCategory(typeOrCategory);
+    let table = this.metadata.get(category);
+    if (!table) {
+      table = new Map();
+      this.metadata.set(category, table);
+    }
+    return table;
   }
 
   async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
-    const row = this.metadata.get(typeId)?.get(recordId);
+    const row = this.metadataTable(typeId).get(recordId);
     return row ? structuredClone(row) : null;
   }
 
@@ -373,9 +407,8 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     typeId: string,
     recordIds: StarkeepId[],
   ): Promise<Map<StarkeepId, MetadataRow>> {
-    const table = this.metadata.get(typeId);
+    const table = this.metadataTable(typeId);
     const result = new Map<StarkeepId, MetadataRow>();
-    if (!table) return result;
     for (const id of recordIds) {
       const row = table.get(id);
       if (row) result.set(id, structuredClone(row));
@@ -384,7 +417,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
   }
 
   async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
-    this.metadata.get(typeId)?.delete(recordId);
+    this.metadataTable(typeId).delete(recordId);
   }
 
   // ---- Cross-app record labels -------------------------------------------
