@@ -13,6 +13,7 @@ export type {
   FindByLabelQuery,
   FindByLabelResult,
   StoredAvailability,
+  RecordTypeCount,
 } from "./database/types.js";
 
 export {
@@ -42,6 +43,7 @@ export {
 export {
   buildRecordSelect,
   buildRecordCount,
+  buildRecordTypeCounts,
   cursorKeysFrom,
   nextCursorFrom,
   orderingFor,

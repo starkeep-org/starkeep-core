@@ -452,6 +452,30 @@ export function buildRecordCount(
 }
 
 /**
+ * The matching rows tallied by `type` — the type histogram as one `GROUP BY`.
+ *
+ * Same filters as {@link buildRecordCount}, and absent for the same reasons:
+ * ordering cannot change a tally, and `limit`/`cursor` would make it a tally of
+ * one page. The caller's grant is already in `query.filters` as `type IN (…)`,
+ * so the aggregate runs over exactly the readable rows.
+ */
+export function buildRecordTypeCounts(
+  k: Kysely<RecordDb>,
+  dialect: RecordDialect,
+  query: Query,
+): CompiledQuery {
+  let qb = k
+    .selectFrom(dialect.records as never)
+    .select([
+      sql.ref(`${dialect.records}.type`).as("type"),
+      sql<number>`count(*)`.as("count"),
+      sql<string | null>`max(${sql.ref(`${dialect.records}.updated_at`)})`.as("latest_updated_at"),
+    ]) as Qb;
+  qb = applyFilters(qb, dialect, query, false);
+  return (qb.groupBy(sql.ref(`${dialect.records}.type`)) as Qb).compile();
+}
+
+/**
  * The ordering key of one returned row, for the cursor that follows it.
  *
  * Reads the reserved aliases {@link buildRecordSelect} added, so the value a

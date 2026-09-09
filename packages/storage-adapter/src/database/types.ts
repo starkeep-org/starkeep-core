@@ -64,6 +64,20 @@ export interface QueryResult {
   hasMore: boolean;
 }
 
+/** One `GROUP BY type` row from {@link DatabaseAdapter.countRecordsByType}. */
+export interface RecordTypeCount {
+  type: string;
+  count: number;
+  /**
+   * `MAX(updated_at)` within the type, as a serialized HLC.
+   *
+   * Carried because `/data/types` reports it and used to derive it from the
+   * page it materialized. A `MAX` in the same aggregate costs nothing beyond
+   * the scan the count already pays for.
+   */
+  latestUpdatedAt: string | null;
+}
+
 /** One row to write via {@link DatabaseAdapter.upsertLabels}. */
 export interface LabelUpsert {
   recordId: StarkeepId;

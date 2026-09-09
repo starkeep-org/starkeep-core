@@ -16,6 +16,7 @@ import type {
   FindByLabelQuery,
   FindByLabelResult,
   StoredAvailability,
+  RecordTypeCount,
 } from "./types.js";
 import type { DigestBucket } from "./digest-queries.js";
 import type { SincePage } from "./since-queries.js";
@@ -47,6 +48,21 @@ export interface DatabaseAdapter {
    * independent of.
    */
   countRecords(query: Query): Promise<number>;
+
+  /**
+   * The matching rows tallied by `type`, as one `GROUP BY` rather than a page
+   * of records counted in JavaScript.
+   *
+   * Exists because `/data/types` was doing the latter: it materialized up to
+   * 10,000 records to build a histogram and then answered `total:
+   * result.records.length`, so a library of 12,000 reported 10,000 — a wrong
+   * number rather than a slow one. `sort`, `limit` and `cursor` are ignored for
+   * the same reason {@link countRecords} ignores them.
+   *
+   * The caller's grant rides in as an ordinary `type IN (…)` filter, so the
+   * count is taken over exactly the rows the caller may read.
+   */
+  countRecordsByType(query: Query): Promise<RecordTypeCount[]>;
 
   /**
    * Per-nodeId MAX(updated_at) over every stored row (tombstones included) —

@@ -31,6 +31,7 @@ import type {
   FindByLabelQuery,
   FindByLabelResult,
   StoredAvailability,
+  RecordTypeCount,
 } from "../database/types.js";
 import {
   encodeLabelCursor,
@@ -263,6 +264,30 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     void cursor;
     const page = await this.query(rest);
     return page.records.length;
+  }
+
+  async countRecordsByType(query: Query): Promise<RecordTypeCount[]> {
+    // Same route as `countRecords`: through `query` with paging off, so the
+    // mock cannot disagree with itself about what "matches" means.
+    const { sort, limit, cursor, ...rest } = query;
+    void sort;
+    void limit;
+    void cursor;
+    const page = await this.query(rest);
+    const byType = new Map<string, { count: number; latestUpdatedAt: string | null }>();
+    for (const record of page.records) {
+      const updatedAt = serializeHLC(record.updatedAt);
+      const existing = byType.get(record.type);
+      if (!existing) {
+        byType.set(record.type, { count: 1, latestUpdatedAt: updatedAt });
+        continue;
+      }
+      existing.count += 1;
+      if (existing.latestUpdatedAt === null || updatedAt > existing.latestUpdatedAt) {
+        existing.latestUpdatedAt = updatedAt;
+      }
+    }
+    return Array.from(byType.entries()).map(([type, info]) => ({ type, ...info }));
   }
 
   /**

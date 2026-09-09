@@ -182,10 +182,47 @@ describe("metadata writes", () => {
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("no metadata table");
 
-    // Reading metadata for `other` yields null rather than an error.
-    const read = await drive.fetch(`/data/records/someid/metadata/zzz-unmapped`);
+    // Reading metadata for an `other`-category record yields null rather than
+    // an error. The record has to exist: the read route now authorizes on the
+    // record's own type, so it resolves the record before anything else.
+    const { record } = await createRecordWithBytes(drive, {
+      fileName: "unmapped.zzz",
+      type: "other/other",
+      contentType: "application/octet-stream",
+    });
+    const read = await drive.fetch(`/data/records/${record.id}/metadata/zzz-unmapped`);
     expect(read.status).toBe(200);
     expect(((await read.json()) as { metadata: unknown }).metadata).toBeNull();
+  });
+
+  // The path's typeId addresses the metadata table and is caller-supplied, so
+  // authorizing on the category it derives from let any grant in a category
+  // read every record in that category. `jpgOnly` holds image/jpeg alone and
+  // must not reach an image/png record's metadata.
+  it("metadata reads are gated on the record's own type, not the path's", async () => {
+    const jpgOnly = await installApp(server, {
+      id: "jpg-only-metadata",
+      name: "Jpg Only Metadata",
+      version: "1.0.0",
+      tier: "community",
+      infraRequirements: {
+        fileAccess: [
+          { types: ["image/jpeg"], access: "readwrite", metadataWrite: true, rationale: "t" },
+        ],
+      },
+    });
+    const { record } = await createRecordWithBytes(imageApp, {
+      fileName: "gated.png",
+      type: "image/png",
+      contentType: "image/png",
+    });
+    const res = await jpgOnly.fetch(`/data/records/${record.id}/metadata/image`);
+    expect(res.status).toBe(403);
+
+    // A record of its own granted type still reads.
+    const mine = await createRecordWithBytes(jpgOnly, { fileName: "mine.jpg" });
+    const okRes = await jpgOnly.fetch(`/data/records/${mine.record.id}/metadata/image`);
+    expect(okRes.status).toBe(200);
   });
 
   it("ordinary apps cannot reach `other` at all (403 before the table guard)", async () => {
