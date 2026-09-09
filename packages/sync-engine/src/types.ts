@@ -2,6 +2,7 @@ import type {
   StarkeepId,
   HLCTimestamp,
   AnyRecord,
+  LogicalColumnType,
   MetadataRow,
   RecordLabel,
 } from "@starkeep/protocol-primitives";
@@ -106,9 +107,36 @@ export interface ResidencyHooks {
 // by PK without re-consulting the manifest at apply time.
 // ---------------------------------------------------------------------------
 
+/** One declared column of an app-syncable table, as the registry carries it. */
+export interface AppSyncableColumnInfo {
+  readonly name: string;
+  readonly type: LogicalColumnType;
+  readonly notNull: boolean;
+  readonly primaryKey: boolean;
+}
+
 export interface AppSyncableTableInfo {
   readonly name: string;
   readonly pkColumns: string[];
+  /**
+   * The table's declared columns, protocol-owned ones included.
+   *
+   * Optional, and a registry row written before this field existed simply has
+   * none. The repo keeps no migration ledger by design and reinstall
+   * repopulates the registry, so the fallback is the migration: without types
+   * the query parser rejects every operator that needs one — every comparison,
+   * every aggregate over a column — while equality goes on working, because
+   * equality is the one predicate whose meaning does not turn on the type.
+   *
+   * The reason to carry them at all is that the parser has to check a value
+   * against its column before either engine sees it. SQLite's dynamic typing
+   * accepts a numeric bound against a text column and Postgres refuses it, so
+   * a grammar that cannot type-check its own input is a grammar whose queries
+   * mean different things on the two backends. Aggregation makes it
+   * unavoidable rather than merely desirable: `sum` and `avg` have to refuse a
+   * text column, and there is nothing else to ask.
+   */
+  readonly columns?: readonly AppSyncableColumnInfo[];
 }
 
 export interface AppSyncableNamespace {

@@ -22,8 +22,15 @@ import {
   APP_GRANTABLE_CATEGORIES,
   typeCategory,
   type Category,
+  type LogicalColumnType,
 } from "@starkeep/protocol-primitives";
-import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
+import {
+  FILE_RECORDS_TABLE,
+  FILE_RECORDS_COLUMNS,
+  FILE_RECORDS_TABLE_INFO,
+  appSyncableTableInfo,
+} from "@starkeep/shared-space-api";
+import type { AppSyncableTableInfo } from "@starkeep/shared-space-api";
 import { retryOnAccessDenied, retryOnTransientDbError } from "./retry-on-access-denied";
 
 /**
@@ -390,12 +397,15 @@ export async function runAppInstallDdl(
 
       // Upsert namespace registry row so the pull path knows which tables exist.
       if (appSyncableTables.length > 0 || appSyncableFilesEnabled) {
-        const tablesInfo = appSyncableTables.map((t) => ({
-          name: t.name,
-          pkColumns: t.columns.filter((c) => c.primaryKey).map((c) => c.name),
-        }));
+        // Column types travel with the registry row because the query parser
+        // validates a filter value against its column before either engine
+        // sees it, and the parser has nowhere else to read them from — it runs
+        // in the data servers, which never see a manifest.
+        const tablesInfo: AppSyncableTableInfo[] = appSyncableTables.map((t) =>
+          appSyncableTableInfo(t.name, t.columns),
+        );
         if (appSyncableFilesEnabled) {
-          tablesInfo.push({ name: FILE_RECORDS_TABLE, pkColumns: ["id"] });
+          tablesInfo.push(FILE_RECORDS_TABLE_INFO);
         }
         const tablesJson = JSON.stringify(tablesInfo);
         await db
@@ -419,12 +429,18 @@ export async function runAppInstallDdl(
   });
 }
 
-const DSQL_COLUMN_TYPES: Record<string, string> = {
+const DSQL_COLUMN_TYPES: Record<LogicalColumnType, string> = {
   text: "text",
   integer: "integer",
+  bigint: "bigint",
   real: "real",
   blob: "bytea",
   boolean: "boolean",
+  // A logical type over a physical `text` column: SQLite has no native
+  // timestamp, and the declaration exists to promise that lexical comparison is
+  // time comparison — which canonical ISO-8601 text delivers identically on
+  // both engines and a `timestamptz` here would not.
+  timestamp: "text",
 };
 
 /**

@@ -2,6 +2,7 @@
 // callers can import them from @starkeep/shared-space-api without knowing the
 // internal layering.
 export type {
+  AppSyncableColumnInfo,
   AppSyncableTableInfo,
   AppSyncableNamespace,
   AppSyncableNamespaceStore,

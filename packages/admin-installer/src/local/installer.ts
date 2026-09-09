@@ -26,7 +26,7 @@ import {
   getAppSyncableNamespace,
   upsertAppSyncableNamespace,
 } from "@starkeep/storage-sqlite";
-import { FILE_RECORDS_TABLE_INFO } from "@starkeep/shared-space-api";
+import { FILE_RECORDS_TABLE_INFO, appSyncableTableInfo } from "@starkeep/shared-space-api";
 
 export interface InstallLocalResult {
   appId: string;
@@ -96,10 +96,10 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
   });
 
   runStep(db, appId, "install", "register_syncable_namespace", done, () => {
-    const declaredTables = syncable.tables.map((t) => ({
-      name: t.name,
-      pkColumns: t.columns.filter((c) => c.primaryKey).map((c) => c.name),
-    }));
+    // Column types travel with the registry row for the same reason they do on
+    // the DSQL side: the query parser validates a filter value against its
+    // column, and it runs in the data server, which never sees a manifest.
+    const declaredTables = syncable.tables.map((t) => appSyncableTableInfo(t.name, t.columns));
     const tables = syncable.files
       ? [...declaredTables, FILE_RECORDS_TABLE_INFO]
       : declaredTables;

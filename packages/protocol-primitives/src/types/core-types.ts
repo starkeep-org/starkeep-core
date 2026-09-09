@@ -25,13 +25,82 @@
  * registration path — apps cannot register new types or extend metadata columns.
  */
 
+/**
+ * The one column-type vocabulary both data planes name.
+ *
+ * Per-category metadata columns and app-syncable table columns are declared in
+ * different places — this file's registry and an app's manifest — and used to
+ * be spelled by two enums that mostly agreed. Two enums that mostly agree is
+ * how they drift, and the query grammar has to validate a value against a
+ * declared type on both planes, so the type has to mean one thing.
+ *
+ * `blob` came from the manifest side and `bigint` and `timestamp` from this
+ * one; the union of the two is the vocabulary. Nothing requires every surface
+ * to use every member: no metadata column is a `blob`, and none needs to be.
+ *
+ * `timestamp` is a **logical** type over a physical `text` column holding
+ * canonical ISO-8601 in UTC. Deliberately not a physical `timestamptz`: SQLite
+ * has no native timestamp, so a physical type would mean two representations
+ * and a conversion layer between them. The declaration's whole job is to let
+ * the platform promise that lexical comparison *is* time comparison, and
+ * canonical text delivers that identically on both engines. The per-category
+ * metadata tables predate that reasoning and do use a physical `timestamptz`
+ * on the DSQL side; they are platform-written and platform-read, so nothing
+ * app-facing depends on the difference.
+ */
 export type LogicalColumnType =
   | "integer"
   | "bigint"
   | "real"
   | "text"
+  | "blob"
   | "timestamp"
   | "boolean";
+
+/** Every member of {@link LogicalColumnType}, for schema validators. */
+export const LOGICAL_COLUMN_TYPES = [
+  "integer",
+  "bigint",
+  "real",
+  "text",
+  "blob",
+  "timestamp",
+  "boolean",
+] as const satisfies readonly LogicalColumnType[];
+
+/**
+ * Types an ordered comparison (`lt`, `gt`, `min`, `max`) is defined over.
+ *
+ * Everything but `blob`. Byte-string ordering is defined in SQL and means
+ * nothing an app asked for.
+ */
+export function isOrderableColumnType(t: LogicalColumnType): boolean {
+  return t !== "blob";
+}
+
+/** Types `sum` and `avg` are defined over. */
+export function isNumericColumnType(t: LogicalColumnType): boolean {
+  return t === "integer" || t === "bigint" || t === "real";
+}
+
+/**
+ * The canonical `timestamp` spelling: ISO-8601, UTC, millisecond precision.
+ *
+ * Fixed rather than permissive because the guarantee is lexical: two values
+ * compare as instants only while every writer pads identically and every value
+ * carries the same offset. `2026-01-01T00:00:00Z` and `2026-01-01T00:00:00.000Z`
+ * denote the same instant and sort apart, so only one of them can be legal.
+ */
+const CANONICAL_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/** Is `value` a canonical `timestamp` string? See {@link CANONICAL_TIMESTAMP_RE}. */
+export function isCanonicalTimestamp(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    CANONICAL_TIMESTAMP_RE.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  );
+}
 
 export interface CoreTypeMetadataColumn {
   name: string;
@@ -469,6 +538,7 @@ function pgColumnType(t: LogicalColumnType): string {
     case "bigint": return "bigint";
     case "real": return "double precision";
     case "text": return "text";
+    case "blob": return "bytea";
     case "timestamp": return "timestamptz";
     case "boolean": return "boolean";
   }
@@ -480,6 +550,7 @@ function sqliteColumnType(t: LogicalColumnType): string {
     case "bigint": return "INTEGER";
     case "real": return "REAL";
     case "text": return "TEXT";
+    case "blob": return "BLOB";
     case "timestamp": return "TEXT";
     case "boolean": return "INTEGER";
   }

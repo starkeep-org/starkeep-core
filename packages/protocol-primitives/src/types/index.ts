@@ -13,6 +13,10 @@ export {
 } from "./common.js";
 export {
   type LogicalColumnType,
+  LOGICAL_COLUMN_TYPES,
+  isOrderableColumnType,
+  isNumericColumnType,
+  isCanonicalTimestamp,
   type CoreTypeMetadataColumn,
   type Category,
   type CategoryDef,

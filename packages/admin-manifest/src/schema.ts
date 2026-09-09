@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LOGICAL_COLUMN_TYPES } from "@starkeep/protocol-primitives";
 
 export const appTierSchema = z.enum(["official", "verified", "community"]);
 
@@ -225,10 +226,26 @@ export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine
 
 const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);
 
+/**
+ * The column-type vocabulary, from the one place that owns it.
+ *
+ * `bigint` and `timestamp` join the five this schema used to list, because the
+ * query grammar validates every filter value against a declared type and the
+ * declaration is only worth having if it is the same declaration the metadata
+ * plane makes. See {@link LogicalColumnType}.
+ *
+ * `timestamp` is a logical type over a physical `text` column holding canonical
+ * ISO-8601 in UTC at millisecond precision, validated on the write path. An app
+ * that already writes `toISOString()` values — which is what the JavaScript
+ * default produces — declares the type and changes nothing about its data. What
+ * the declaration buys is the promise that `due < $x` compares instants rather
+ * than characters that happen to agree, which is a property no amount of app
+ * discipline lets the platform *check*.
+ */
 export const syncableTableColumnSchema = z
   .object({
     name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
-    type: z.enum(["text", "integer", "real", "blob", "boolean"]),
+    type: z.enum(LOGICAL_COLUMN_TYPES),
     notNull: z.boolean().default(false),
     primaryKey: z.boolean().default(false),
   })
