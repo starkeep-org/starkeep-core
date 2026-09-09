@@ -188,12 +188,20 @@ different granularities are in play, and it's easy to confuse them:
   (`image/jpeg`, `image/png`, …) and your manifest's `fileAccess.types` lists
   those same full ids. A bare category like `"image"` is **not** a valid record
   type or grant key and won't match anything.
-- **Category-namespaced resources** — object-storage keys (`shared/<category>/…`)
-  and the per-category metadata table — authorize at the *category* level. This
-  is why `data-server-client.ts` passes the bare `"image"` as the object-key
-  prefix and as the metadata `typeId`, while still creating the record with the
-  full `image/jpeg` type. The bare value there is the **category**, not a record
-  type.
+- **Category-namespaced resources** — object-storage keys
+  (`shared/<category>/…`) — authorize at the *category* level. This is why
+  `data-server-client.ts` passes the bare `"image"` as the object-key prefix
+  while still creating the record with the full `image/jpeg` type. The bare
+  value there is the **category**, not a record type.
+
+  The category is a **ceiling**, not a gate. It says what an app could possibly
+  reach; the per-type grant says what it may actually read.
+- **Per-category metadata now authorizes per type**, not per category.
+  `GET /data/records/:id/metadata/:typeId` resolves the record and checks your
+  grant against the record's own type; the `typeId` in the path decides nothing
+  and is kept only because callers send it. Declaring `image/jpeg` and
+  `image/png` no longer reaches an `image/svg` record's metadata. If a type
+  matters to your app, declare it.
 
 **A note on advisory labels.** If your app writes shared records that may not be
 of interest to *other* apps that read that same type, include a `label` on
@@ -237,6 +245,77 @@ and show only the originals. Guidance:
   `image_enriched` table (caption, title, date override).
 - `files: true` — opt into an `apps/<appId>/syncable/` object-storage prefix for
   app-private blobs. Leave false for row-only apps.
+- `indexes[]` on a table — an ordered column list, e.g.
+  `{"columns": ["deck_id", "due"]}`. Declare one for every filter and grouping
+  your app actually issues. Without a matching index a filter is a full scan
+  whatever the query looks like, which moves the cost rather than removing it.
+  No uniqueness, no partial indexes: uniqueness is the primary key's job.
+
+Column types are `text`, `integer`, `bigint`, `real`, `blob`, `boolean` and
+`timestamp`. A `timestamp` column is physically `text` holding **canonical
+ISO-8601 in UTC at millisecond precision** — exactly what JavaScript's
+`toISOString()` produces. The write path rejects any other spelling, which is
+the point: string comparison equals time comparison only while every writer
+emits one format, and that is a correctness property the platform cannot check
+unless you declare it.
+
+### 6a. Querying your app's tables
+
+`GET /app-data/db/<table>` takes a query grammar. Every top-level parameter
+name below is reserved, which is what lets filters live under `where` with no
+sigil to keep them apart from column names — an unrecognized parameter is a
+400 rather than being ignored.
+
+```
+GET /app-data/db/card_state
+  ?where={"deck_id":"d1","suspended":0,"due":{"lte":"2026-09-09T00:00:00.000Z"}}
+  &select=id,due,strength
+  &order=due.asc,id.asc
+  &limit=200
+  &page_token=<opaque>
+```
+
+- **`where`** — strict JSON. A column maps either to a scalar, meaning
+  equality, or to an object of operator to value. Operators are `lt`, `lte`,
+  `gt`, `gte`, `ne`, `in`, `is`, `prefix` and `regex`, joined with AND. `is`
+  takes `null`, `true` or `false`. `in` takes a JSON array, so nothing needs
+  comma-escaping. There is no `or`; issue two requests and merge.
+- **`select`** — a comma-separated column list. Omitted means every column.
+- **`order`** — `col.asc`, `col.desc`, optionally `.nullsfirst` or
+  `.nullslast`. State the null position when it matters: the two backends
+  default it differently, so the grammar makes you say.
+- **`limit`** — default 30, maximum 500.
+- **`aggregate`** — strict JSON, each key naming one output column:
+  `{"due_count":{"fn":"count"},"next_due":{"fn":"min","col":"due"}}`. The
+  functions are `count` (alone, with `col`, or with `distinct`), `sum`, `avg`,
+  `min` and `max`. When `aggregate` is present, **`select` is the `GROUP BY`
+  list** — the two are one list, because SQL requires every non-aggregate
+  output column to be grouped.
+
+`prefix` compiles to a half-open range and seeks an index; a `^`-anchored
+`regex` asks the same question and no index can serve it. They look alike and
+have opposite costs, so reach for `prefix` first. A `regex` also needs a
+companion predicate on another column, so it never scans a table on its own.
+
+**Five things that surprise people, and are cheaper to read than to discover:**
+
+1. `sum` and `avg` return `null` over zero matching rows, not `0`. A coalesced
+   result cannot tell an empty match from a zero total, so the server does not
+   coalesce.
+2. A grouped aggregate **omits empty groups entirely**. A deck with nothing due
+   produces no row rather than a row holding zero; fill the gap from your own
+   list.
+3. `page_token` is opaque. Do not parse it — its shape is the server's to
+   change.
+4. A short page is signalled by `truncated`, and it can come from the row
+   limit, from a 4 MB response budget, or from the regex scan cap. Never treat
+   a short page as a complete result.
+5. The grammar follows PostgREST's filter spelling and claims conformance to
+   nothing. Top-level parameter names are reserved; column names live under
+   `where`, `select` and `order`.
+
+The response is `{rows, truncated, page_token}`, or `{groups, truncated}` in
+aggregate mode.
 
 ### 7. Cloud compute + the bundle (cloud target only)
 

@@ -23,6 +23,40 @@
  * paths — derives its view from the registries below. Adding a type, an alias
  * extension, or a metadata column is a one-file edit here. There is no runtime
  * registration path — apps cannot register new types or extend metadata columns.
+ *
+ * ## What platform metadata is, exactly
+ *
+ * Narrower than "derived from the bytes". It is the intersection of four
+ * properties, and all four are required:
+ *
+ *   1. **Derivable from the bytes** — anyone re-deriving it from the same file
+ *      reproduces it.
+ *   2. **Declared upfront** in the registry below.
+ *   3. **Scoped to a category** rather than to an app.
+ *   4. **Standard**, in that every app reading that category means the same
+ *      thing by it.
+ *
+ * Derivability alone is not sufficient, and the wording used to invite that
+ * inference. A face count, an OCR confidence and a word count from one app's
+ * own parser are all derived from the bytes and none of them is metadata: the
+ * registry is closed, so a per-app derived value can never be a metadata column
+ * whatever its provenance. The two-way choice for such a value is a **label**
+ * when other apps may read it and a **row in the app's own table** when only
+ * the owning app reads it.
+ *
+ * ## The schema rule for anything queryable
+ *
+ * **Every queryable access path to shared data carries the caller's grant
+ * discriminant in a position the index can use, and a resource namespaced by
+ * category is a ceiling rather than a gate.**
+ *
+ * A surface built without one is unqueryable, and nothing says so at
+ * schema-design time — which is how the per-category metadata tables came to
+ * hold `record_id` and the category's columns and nothing else, while
+ * `shared.record_labels` carries a denormalized `record_type` because somebody
+ * hit this and solved it in one place without generalizing. Applying the rule
+ * to the metadata tables is what made a metadata predicate expressible at all.
+ * See METADATA_DISCRIMINANT_COLUMN.
  */
 
 /**
@@ -146,7 +180,8 @@ const IMAGE_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
   { name: "gps_lat", type: "real" },
   { name: "gps_lon", type: "real" },
   // Both are deterministic from the bytes, which is what makes them metadata
-  // rather than labels: a label is an app's *assertion* about a record, and
+  // rather than labels — see the four properties above. A label is an app's
+  // *assertion* about a record, and
   // these are facts anyone re-deriving from the same file would reproduce. Both
   // are computed during derivation, when the decoded bitmap is already in hand.
   //
@@ -307,8 +342,14 @@ const TYPE_SPECS: readonly TypeSpec[] = [
   // Each maker's raw format is its own type rather than one shared `image/raw`,
   // because they are not interchangeable — the embedded-preview layout that
   // derivation reads differs per vendor, and a single type would leave nothing
-  // to branch on. Grants are per category, so an app granted `image` gets all
-  // of them regardless.
+  // to branch on.
+  //
+  // Grants are per **type**, not per category: `fileAccess` enumerates
+  // `<category>/<format>` ids and `canRead` tests one of them, so an app that
+  // wants ProRAW has to declare `image/dng` and does not get it by declaring
+  // `image/jpeg`. What *is* category-granular is the ceiling — the IAM policy,
+  // the Postgres GRANT and the object-storage prefix — which is a different
+  // thing from the gate. See the note on METADATA_DISCRIMINANT_COLUMN.
   { category: "image", format: "dng", extensions: ["dng"] },
   { category: "image", format: "cr2", extensions: ["cr2"] },
   { category: "image", format: "cr3", extensions: ["cr3"] },
