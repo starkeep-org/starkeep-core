@@ -50,7 +50,7 @@ import {
   canWriteMetadataCategory,
   type AccessGrants,
 } from "../../packages/protocol-primitives/src/access/grants.js";
-import { serializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
+import { serializeHLC, deserializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { INTENT_TAG_KEY, LADDER_TAG_KEY, LADDER_TAG_COMPLETE } from "../../packages/protocol-primitives/src/storage/retrieval-intent.js";
 import { sha256HexToBase64, loadVariantsForPage, loadVariantCandidatesForPage } from "@starkeep/storage-adapter";
@@ -1331,33 +1331,38 @@ async function main() {
         return;
       }
 
-      // GET /data/types — list record types with counts
+      // GET /data/types — list record types with counts.
+      //
+      // One `GROUP BY type` rather than a page counted in JavaScript. The old
+      // shape materialized 10,000 records, filtered them by grant afterwards
+      // and answered the surviving length, so a library past the cap reported
+      // the cap. The grant now rides in as a `type IN (…)` predicate, which is
+      // what makes the aggregate both correct and cheap.
       if (path === "/data/types" && req.method === "GET") {
-        const result = await databaseAdapter.query({ limit: 10000 });
-
-        const typeCounts = new Map<string, { count: number; latest: number }>();
-        for (const record of result.records) {
-          if (record.deletedAt) continue;
-          // When appId is present, restrict to types the app can access
-          if (!appCanRead(localDb, appId!, record.type)) continue;
-          const existing = typeCounts.get(record.type);
-          const wallTime = record.updatedAt.wallTime;
-          if (!existing) {
-            typeCounts.set(record.type, { count: 1, latest: wallTime });
-          } else {
-            existing.count++;
-            if (wallTime > existing.latest) existing.latest = wallTime;
-          }
+        const grants = appGrants(localDb, appId!);
+        if (!grants.allAccess && grants.readableTypes.size === 0) {
+          json(res, { types: [], total: 0 });
+          return;
         }
+        const filters: Filter[] = [{ field: "deletedAt", operator: "isNull" }];
+        if (!grants.allAccess) {
+          filters.unshift({ field: "type", operator: "in", value: [...grants.readableTypes] });
+        }
+        const counts = await databaseAdapter.countRecordsByType({ filters });
 
-        const types = Array.from(typeCounts.entries()).map(([type, info]) => ({
-          record_type: type,
-          count: info.count,
-          latest_updated: new Date(info.latest).toISOString(),
+        const types = counts.map((row) => ({
+          record_type: row.type,
+          count: row.count,
+          // `updated_at` is a serialized HLC whose leading field is hex wall
+          // time, so `MAX` over it is the latest write and `deserializeHLC`
+          // recovers the instant the old code read off the record object.
+          latest_updated: row.latestUpdatedAt
+            ? new Date(deserializeHLC(row.latestUpdatedAt).wallTime).toISOString()
+            : null,
         }));
         types.sort((a, b) => b.count - a.count);
 
-        json(res, { types, total: result.records.filter(r => !r.deletedAt && appCanRead(localDb, appId!, r.type)).length });
+        json(res, { types, total: counts.reduce((sum, row) => sum + row.count, 0) });
         return;
       }
 
@@ -3249,17 +3254,31 @@ async function main() {
       }
 
       // GET /data/records/:id/metadata/:typeId — read type-specific metadata for a record.
-      // Requires read or readwrite access to the type.
+      // Requires read or readwrite access to the record's *own* type.
+      //
+      // The path's `typeId` is caller-supplied, so deriving the category from
+      // it and checking the category grant let any grant in a category read
+      // every record in that category — which is what the comment above this
+      // route always claimed the code did and what the code did not do.
+      //
+      // The record's `type` decides both the grant check and which metadata
+      // table answers, which leaves the path segment carrying nothing. It stays
+      // in the URL because existing callers send it, and it is now ignored.
       const metadataReadMatch = path.match(/^\/data\/records\/([^/]+)\/metadata\/([^/]+)$/);
       if (metadataReadMatch && req.method === "GET") {
         const recordId = metadataReadMatch[1]!;
-        const typeId = metadataReadMatch[2]!;
-        const category = typeCategory(typeId);
-        if (!appCanReadCategory(localDb, appId!, category)) {
-          res.writeHead(403);
-          json(res, { error: "AccessDenied", detail: `app "${appId}" has no read grant on category "${category}"` });
+        const record = await sdk.data.get(createStarkeepId(recordId));
+        if (!record || record.deletedAt) {
+          res.writeHead(404);
+          json(res, { error: "Record not found" });
           return;
         }
+        if (!appCanRead(localDb, appId!, record.type)) {
+          res.writeHead(403);
+          json(res, { error: "AccessDenied", detail: `app "${appId}" has no read grant on type "${record.type}"` });
+          return;
+        }
+        const category = typeCategory(record.type);
         if (category === "other") {
           // `other` has no metadata table; nothing to read.
           json(res, { metadata: null });

@@ -18,6 +18,7 @@ import type {
   FindByLabelQuery,
   FindByLabelResult,
   StoredAvailability,
+  RecordTypeCount,
 } from "@starkeep/storage-adapter";
 import {
   StorageError,
@@ -60,7 +61,12 @@ import {
   columnsToMetadataRow,
   type PostgresRow,
 } from "./serialization.js";
-import { buildPostgresCountQuery, buildPostgresQuery, compiler } from "./query-builder.js";
+import {
+  buildPostgresCountQuery,
+  buildPostgresQuery,
+  buildPostgresTypeCountsQuery,
+  compiler,
+} from "./query-builder.js";
 import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
 import { sql, type CompiledQuery } from "kysely";
 
@@ -299,6 +305,26 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       // rather than risk a lossy number. Parsed here so every adapter answers
       // the same type.
       return typeof total === "string" ? Number.parseInt(total, 10) : (total ?? 0);
+    });
+  }
+
+  async countRecordsByType(query: Query): Promise<RecordTypeCount[]> {
+    return withOccRetry("countRecordsByType", async () => {
+      const { text, values } = buildPostgresTypeCountsQuery(query);
+      const result = await this.getClient().query(text, values);
+      return (
+        result.rows as Array<{
+          type: string;
+          count: string | number;
+          latest_updated_at: string | null;
+        }>
+      ).map((row) => ({
+        type: row.type,
+        // `count(*)` is a bigint, which `pg` hands over as a string rather than
+        // risk a lossy number — the same parse `countRecords` does.
+        count: typeof row.count === "string" ? Number.parseInt(row.count, 10) : row.count,
+        latestUpdatedAt: row.latest_updated_at,
+      }));
     });
   }
 

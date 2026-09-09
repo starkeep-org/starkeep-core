@@ -1,5 +1,10 @@
 import type { Query } from "@starkeep/storage-adapter";
-import { buildRecordCount, buildRecordSelect, type RecordDialect } from "@starkeep/storage-adapter";
+import {
+  buildRecordCount,
+  buildRecordSelect,
+  buildRecordTypeCounts,
+  type RecordDialect,
+} from "@starkeep/storage-adapter";
 import { sqliteMetadataTableName } from "@starkeep/protocol-primitives";
 import {
   DummyDriver,
@@ -48,5 +53,10 @@ export function buildSelectQuery(query: Query): BuiltQuery {
 
 export function buildCountQuery(query: Query): BuiltQuery {
   const compiled = buildRecordCount(compiler, DIALECT, query);
+  return { sql: compiled.sql, params: [...compiled.parameters] };
+}
+
+export function buildTypeCountsQuery(query: Query): BuiltQuery {
+  const compiled = buildRecordTypeCounts(compiler, DIALECT, query);
   return { sql: compiled.sql, params: [...compiled.parameters] };
 }

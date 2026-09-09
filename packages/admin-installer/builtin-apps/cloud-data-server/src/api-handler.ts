@@ -2093,6 +2093,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     // GET /apps/{appId}/data/types
+    //
+    // One `GROUP BY type` rather than a page counted in JavaScript. The old
+    // shape materialized up to 10,000 records and answered
+    // `total: result.records.length`, so a library of 12,000 reported 10,000 —
+    // wrong rather than merely slow, and silently so.
+    //
+    // The grant was already a query predicate here, so nothing about
+    // authorization changes: `type IN (…)` rides into the aggregate exactly as
+    // it rode into the page.
     if (method === "GET" && subPath === "/data/types") {
       if (!grants.allAccess && grants.readableTypes.size === 0) return ok({ types: [], total: 0 });
       const filters: Filter[] = [{ field: "deletedAt", operator: "isNull" }];
@@ -2101,13 +2110,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!grants.allAccess) {
         filters.unshift({ field: "type", operator: "in", value: [...grants.readableTypes] });
       }
-      const result = await db.query({ filters, limit: 10000 });
-      const counts = new Map<string, number>();
-      for (const record of result.records) {
-        counts.set(record.type, (counts.get(record.type) ?? 0) + 1);
-      }
-      const types = Array.from(counts.entries()).map(([record_type, count]) => ({ record_type, count }));
-      return ok({ types, total: result.records.length });
+      const counts = await db.countRecordsByType({ filters });
+      const types = counts.map((row) => ({ record_type: row.type, count: row.count }));
+      return ok({ types, total: counts.reduce((sum, row) => sum + row.count, 0) });
     }
 
     // GET /apps/{appId}/data/records
@@ -2988,12 +2993,22 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     // GET /apps/{appId}/data/records/:id/metadata/:typeId — read metadata.
+    //
+    // The path's `typeId` is caller-supplied, so deriving the category from it
+    // and checking `canReadCategory` let any grant in a category read every
+    // record in that category. Photos declares 17 of the 19 image types and
+    // used to reach the metadata of the two it declined.
+    //
+    // The record's `type` decides both the grant check and which metadata table
+    // answers, which leaves the path segment carrying nothing. It stays in the
+    // URL because existing callers send it, and it is now ignored.
     const metadataReadMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata\/([^/]+)$/);
     if (metadataReadMatch && method === "GET") {
       const recordId = decodeURIComponent(metadataReadMatch[1]!) as StarkeepId;
-      const typeId = decodeURIComponent(metadataReadMatch[2]!);
-      const category = typeCategory(typeId);
-      if (!canReadCategory(grants, category)) return clientErr("Forbidden", 403);
+      const record = await db.get(recordId);
+      if (!record || record.deletedAt) return clientErr("Record not found", 404);
+      if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
+      const category = typeCategory(record.type);
       if (category === "other") return ok({ metadata: null });
       const metadata = await db.getMetadata(category, recordId);
       return ok({ metadata });

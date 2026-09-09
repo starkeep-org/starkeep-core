@@ -20,6 +20,7 @@ import type {
   FindByLabelQuery,
   FindByLabelResult,
   StoredAvailability,
+  RecordTypeCount,
 } from "@starkeep/storage-adapter";
 import {
   StorageError,
@@ -52,7 +53,12 @@ import {
 } from "@starkeep/storage-adapter";
 import { sql as kSql } from "kysely";
 import { recordToRow, rowToRecord, type SqliteRow } from "./serialization.js";
-import { buildCountQuery, buildSelectQuery, compiler as qb } from "./query-builder.js";
+import {
+  buildCountQuery,
+  buildSelectQuery,
+  buildTypeCountsQuery,
+  compiler as qb,
+} from "./query-builder.js";
 import { initializeLocalSchema } from "./schema/bootstrap.js";
 
 export interface SqliteDatabaseAdapterOptions {
@@ -328,6 +334,20 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     const { sql, params } = buildCountQuery(query);
     const row = this.getRow<{ total: number }>(sql, ...params);
     return row?.total ?? 0;
+  }
+
+  async countRecordsByType(query: Query): Promise<RecordTypeCount[]> {
+    const { sql, params } = buildTypeCountsQuery(query);
+    const rows = this.allRows<{
+      type: string;
+      count: number;
+      latest_updated_at: string | null;
+    }>(sql, ...params);
+    return rows.map((row) => ({
+      type: row.type,
+      count: Number(row.count),
+      latestUpdatedAt: row.latest_updated_at,
+    }));
   }
 
   async batch(operations: BatchOperation[]): Promise<void> {

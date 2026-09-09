@@ -1,5 +1,10 @@
 import type { Query } from "@starkeep/storage-adapter";
-import { buildRecordCount, buildRecordSelect, type RecordDialect } from "@starkeep/storage-adapter";
+import {
+  buildRecordCount,
+  buildRecordSelect,
+  buildRecordTypeCounts,
+  type RecordDialect,
+} from "@starkeep/storage-adapter";
 import { pgMetadataTableName } from "@starkeep/protocol-primitives";
 import {
   DummyDriver,
@@ -48,5 +53,10 @@ export function buildPostgresQuery(query: Query): BuiltPostgresQuery {
 
 export function buildPostgresCountQuery(query: Query): BuiltPostgresQuery {
   const compiled = buildRecordCount(compiler, DIALECT, query);
+  return { text: compiled.sql, values: [...compiled.parameters] };
+}
+
+export function buildPostgresTypeCountsQuery(query: Query): BuiltPostgresQuery {
+  const compiled = buildRecordTypeCounts(compiler, DIALECT, query);
   return { text: compiled.sql, values: [...compiled.parameters] };
 }

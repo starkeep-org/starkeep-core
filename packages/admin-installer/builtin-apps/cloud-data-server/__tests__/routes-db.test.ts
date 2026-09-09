@@ -133,6 +133,9 @@ function bodyOf(res: { body: string }): Record<string, unknown> {
 
 const RECORDS_SELECT = /select \* from "shared"\."records"/;
 const RECORDS_INSERT = /insert into "shared"\."records"/;
+/** The `/data/types` histogram: one `GROUP BY type` over the readable rows. */
+const RECORDS_TYPE_COUNTS =
+  /count\(\*\).*from "shared"\."records".*group by "shared"\."records"\."type"/;
 // The responder's coverage-watermark summary, computed on every exchange.
 const RECORDS_NODE_WATERMARKS =
   /select "node_id", max\("updated_at"\).*from "shared"\."records" group by "node_id"/;
@@ -201,13 +204,16 @@ describe("grants parity on records routes", () => {
     expect(bodyOf(resNone)).toEqual({ types: [], total: 0 });
     expect(dbNone.calls(RECORDS_SELECT)).toHaveLength(0);
 
+    // The route aggregates in SQL now, so the fake answers the `GROUP BY`
+    // rather than handing back rows for the handler to tally. Counting a page
+    // in JavaScript is exactly the bug this route had: past the 10,000-row
+    // materialization cap it reported the cap as the total.
     const dbSome = fakeDsqlWithGrants([
       { type_id: "image/jpeg", access: "read" },
       { type_id: "image/png", access: "read" },
-    ]).on(RECORDS_SELECT, [
-      recordRow({ id: "t1", type: "image/jpeg" }),
-      recordRow({ id: "t2", type: "image/jpeg" }),
-      recordRow({ id: "t3", type: "image/png" }),
+    ]).on(RECORDS_TYPE_COUNTS, [
+      { type: "image/jpeg", count: "2", latest_updated_at: TEST_HLC_FOR_LABELS },
+      { type: "image/png", count: "1", latest_updated_at: TEST_HLC_FOR_LABELS },
     ]);
     setDbFactory(dbSome);
     const resSome = await handler(
@@ -218,6 +224,10 @@ describe("grants parity on records routes", () => {
     expect(body.total).toBe(3);
     expect(body.types).toContainEqual({ record_type: "image/jpeg", count: 2 });
     expect(body.types).toContainEqual({ record_type: "image/png", count: 1 });
+    // No page was materialized to produce the histogram.
+    expect(dbSome.calls(RECORDS_SELECT)).toHaveLength(0);
+    // The grant is inside the aggregate's own predicate.
+    expect(dbSome.calls(RECORDS_TYPE_COUNTS)[0]!.values).toContain("image/jpeg");
   });
 
   it("403s a record registration for a read-only type before touching S3", async () => {
@@ -816,11 +826,12 @@ describe("metadata routes", () => {
     expect(bodyOf(res)["error"]).toMatch(/no metadata table/);
   });
 
-  it("reads metadata for a readable category and null for other", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
-      /from "shared"\."record_image_metadata" where "record_id"/,
-      [{ record_id: "r9", width: 640 }],
-    );
+  it("reads metadata for a readable record and null for other", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(/from "shared"\."records" where "id" =/, [recordRow({ id: "r9", type: "image/jpeg" })])
+      .on(/from "shared"\."record_image_metadata" where "record_id"/, [
+        { record_id: "r9", width: 640 },
+      ]);
     setDbFactory(db);
     const res = await handler(
       signedEvent({ appId: "md4", method: "GET", subPath: "/data/records/r9/metadata/image" }),
@@ -828,7 +839,10 @@ describe("metadata routes", () => {
     );
     expect(bodyOf(res)["metadata"]).toMatchObject({ recordId: "r9", width: 640 });
 
-    setDbFactory(fakeDsqlWithGrants());
+    const dbOther = fakeDsqlWithGrants().on(/from "shared"\."records" where "id" =/, [
+      recordRow({ id: "r9", type: "other/other" }),
+    ]);
+    setDbFactory(dbOther);
     const resOther = await handler(
       signedEvent({
         appId: "starkeep-drive",
@@ -838,6 +852,39 @@ describe("metadata routes", () => {
       context,
     );
     expect(bodyOf(resOther)).toEqual({ metadata: null });
+  });
+
+  // The path's typeId is caller-supplied, so deriving the category from it and
+  // checking the *category* grant let any grant in a category read every
+  // record in that category. Photos declares 17 of the 19 image types and so
+  // reached the metadata of the two it declined.
+  it("403s metadata for a record whose own type the caller cannot read", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(/from "shared"\."records" where "id" =/, [recordRow({ id: "r10", type: "image/svg" })])
+      .on(/from "shared"\."record_image_metadata" where "record_id"/, [
+        { record_id: "r10", width: 640 },
+      ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "md5", method: "GET", subPath: "/data/records/r10/metadata/image" }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+    // Refused before the metadata table was touched.
+    expect(db.calls(/from "shared"\."record_image_metadata" where "record_id"/)).toHaveLength(0);
+  });
+
+  it("404s metadata for a record that does not exist", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
+      /from "shared"\."records" where "id" =/,
+      [],
+    );
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "md6", method: "GET", subPath: "/data/records/nope/metadata/image" }),
+      context,
+    );
+    expect(res.statusCode).toBe(404);
   });
 });
 
