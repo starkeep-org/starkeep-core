@@ -13,6 +13,8 @@ const state = {
   pgRoleExists: false,
   iamMappingExists: false,
   statements: [] as string[],
+  /** Statements with their bound parameters, for the few assertions about values. */
+  queries: [] as Array<{ text: string; params: unknown[] }>,
 };
 
 vi.mock("@aws-sdk/dsql-signer", () => ({
@@ -25,12 +27,12 @@ vi.mock("@aws-sdk/dsql-signer", () => ({
 
 vi.mock("pg", () => {
   class FakePool {
-    async query(text: string) {
-      return handleQuery(text);
+    async query(text: string, params?: unknown[]) {
+      return handleQuery(text, params);
     }
     async connect() {
       return {
-        query: async (text: string) => handleQuery(text),
+        query: async (text: string, params?: unknown[]) => handleQuery(text, params),
         release() {},
       };
     }
@@ -39,8 +41,10 @@ vi.mock("pg", () => {
       return this;
     }
   }
-  function handleQuery(text: string) {
-    state.statements.push(text.replace(/\s+/g, " ").trim());
+  function handleQuery(text: string, params?: unknown[]) {
+    const normalized = text.replace(/\s+/g, " ").trim();
+    state.statements.push(normalized);
+    state.queries.push({ text: normalized, params: params ?? [] });
     if (text.includes("FROM pg_roles")) {
       return { rows: [{ exists: state.pgRoleExists }], rowCount: 1 };
     }
@@ -80,6 +84,7 @@ beforeEach(() => {
   state.pgRoleExists = false;
   state.iamMappingExists = false;
   state.statements = [];
+  state.queries = [];
 });
 
 function stmts(): string[] {
@@ -174,6 +179,58 @@ describe("install DDL for the photos manifest", () => {
     expect(createTable).toContain('primary key ("record_id")');
     expect(s.some((t) => t.includes('CREATE INDEX ASYNC IF NOT EXISTS "idx_app_photos_image_enriched_updated_at"'))).toBe(true);
     expect(s.some((t) => t.includes('GRANT SELECT, INSERT, UPDATE, DELETE ON app_photos."image_enriched"'))).toBe(true);
+  });
+
+  it("creates the indexes a manifest declares, and names them from the columns", async () => {
+    await runAppInstallDdl(
+      opts,
+      "memo",
+      [],
+      false,
+      [
+        {
+          name: "card_state",
+          columns: [
+            { name: "id", type: "text", notNull: true, primaryKey: true },
+            { name: "deck_id", type: "text", notNull: false, primaryKey: false },
+            { name: "due", type: "timestamp", notNull: false, primaryKey: false },
+          ],
+          indexes: [{ columns: ["deck_id", "due"] }],
+        },
+      ],
+      false,
+    );
+    const s = stmts();
+    // ASYNC because DSQL builds the index in the background; IF NOT EXISTS
+    // because install is re-runnable. No USING — DSQL refuses the access
+    // method outright.
+    const created = s.find((t) => t.includes('"idx_app_memo_card_state_deck_id_due"'));
+    expect(created).toBeDefined();
+    expect(created).toContain("CREATE INDEX ASYNC IF NOT EXISTS");
+    expect(created).toContain('ON app_memo."card_state"("deck_id", "due")');
+    expect(created).not.toContain("USING");
+    expect(created).not.toContain("UNIQUE");
+  });
+
+  it("carries column types into the namespace registry row", async () => {
+    await installPhotos();
+    const ns = stmts().find((t) => t.includes('insert into "shared"."app_syncable_namespaces"'));
+    expect(ns).toBeDefined();
+    // The parser validates a filter value against its column and runs in the
+    // data servers, which never see a manifest. This row is where it reads
+    // the types from.
+    const values = state.queries.find((q) => q.text === ns)?.params ?? [];
+    const tablesJson = values.find((v) => typeof v === "string" && v.includes("pkColumns"));
+    expect(tablesJson).toBeDefined();
+    const tables = JSON.parse(String(tablesJson)) as Array<{
+      name: string;
+      columns?: Array<{ name: string; type: string }>;
+    }>;
+    const enriched = tables.find((t) => t.name === "image_enriched");
+    expect(enriched?.columns?.some((c) => c.name === "record_id" && c.type === "text")).toBe(true);
+    // The protocol's own columns are described too, because `order=updated_at.desc`
+    // is a question about a real column.
+    expect(enriched?.columns?.some((c) => c.name === "updated_at")).toBe(true);
   });
 
   it("creates the reserved file-records table when files sync is enabled, and registers the namespace", async () => {

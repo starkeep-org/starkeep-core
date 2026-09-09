@@ -10,6 +10,8 @@ import type {
 } from "@starkeep/sync-engine";
 import type { AppSpecificOperations, ApiSubject } from "../types.js";
 import { parseQuery } from "../query/parse.js";
+import { checkValue } from "../query/values.js";
+import { SYSTEM_COLUMN_NAMES } from "./columns.js";
 import type {
   ParsedQuery,
   ParsedQueryResult,
@@ -137,6 +139,40 @@ export function createAppSpecificFactory(
       };
     }
 
+    /**
+     * Check an app's row values against the columns it declared.
+     *
+     * A declared type is only worth having if something enforces it, and the
+     * write path is the only place it *can* be enforced: once a value is in the
+     * table, the query grammar's promise that `due < $x` compares instants
+     * rather than characters depends on every writer having emitted the
+     * canonical form. Leaving that to app discipline puts a correctness
+     * property in the one place the platform cannot check it.
+     *
+     * Only declared columns are checked. An undeclared key is left to the
+     * applier, which fails on it as it always has — narrowing that is a
+     * separate decision with its own migration.
+     *
+     * A registry row written before column types existed declares nothing, so
+     * nothing is checked and writes behave exactly as they did.
+     */
+    function validateRow(table: string, row: Record<string, unknown>): void {
+      const info = ns!.tables.find((t) => t.name === table);
+      const columns = info?.columns;
+      if (!columns) return;
+      for (const [name, value] of Object.entries(row)) {
+        const column = columns.find((c) => c.name === name);
+        if (!column) continue;
+        // The sync runtime writes its own columns and does not answer to the
+        // app's declarations for them.
+        if (SYSTEM_COLUMN_NAMES.has(name)) continue;
+        const checked = checkValue(column, value);
+        if (!checked.ok) {
+          throw new Error(`${table}: ${checked.message}`);
+        }
+      }
+    }
+
     function requireQueryCapable(): QueryCapableApplier {
       const capable = applier as QueryCapableApplier;
       if (typeof capable.runQuery !== "function") {
@@ -196,6 +232,7 @@ export function createAppSpecificFactory(
     return {
       async insertRow(table, row) {
         resolveTable(table);
+        validateRow(table, row);
         const ts = clock.now();
         const entry: AppSyncableRowEntry = {
           timestamp: ts,
@@ -210,6 +247,11 @@ export function createAppSpecificFactory(
 
       async updateRow(table, where, patch) {
         resolveTable(table);
+        // Both halves: a patch writes values and a `where` compares them, and a
+        // value that does not match its column would mean one thing on SQLite's
+        // dynamic typing and another on Postgres.
+        validateRow(table, patch);
+        validateRow(table, where);
         const ts = clock.now();
         const entry: AppSyncableRowEntry = {
           timestamp: ts,
@@ -227,6 +269,7 @@ export function createAppSpecificFactory(
 
       async deleteRow(table, where) {
         resolveTable(table);
+        validateRow(table, where);
         const ts = clock.now();
         const entry: AppSyncableRowEntry = {
           timestamp: ts,

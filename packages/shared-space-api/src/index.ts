@@ -53,6 +53,7 @@ export {
   SYSTEM_COLUMN_NAMES,
   SOFT_DELETE_COLUMN,
   appSyncableTableInfo,
+  syncableIndexName,
   type DeclaredColumn,
 } from "./app-syncable/columns.js";
 export * from "./query/index.js";
