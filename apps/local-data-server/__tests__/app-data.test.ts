@@ -59,7 +59,9 @@ describe("declared-table CRUD", () => {
     });
     expect(insert.status).toBe(200);
 
-    const query = await appA.fetch("/app-data/db/notes?note_id=n1");
+    const query = await appA.fetch(
+      `/app-data/db/notes?where=${encodeURIComponent(JSON.stringify({ note_id: "n1" }))}`,
+    );
     const { rows } = (await query.json()) as { rows: Array<Record<string, unknown>> };
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ note_id: "n1", body: "hello" });
@@ -80,7 +82,9 @@ describe("declared-table CRUD", () => {
     });
     expect(((await del.json()) as { changes: number }).changes).toBe(1);
 
-    const after = await appA.fetch("/app-data/db/notes?note_id=n1");
+    const after = await appA.fetch(
+      `/app-data/db/notes?where=${encodeURIComponent(JSON.stringify({ note_id: "n1" }))}`,
+    );
     expect(((await after.json()) as { rows: unknown[] }).rows).toHaveLength(0);
   });
 

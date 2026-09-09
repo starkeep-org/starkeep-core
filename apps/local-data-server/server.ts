@@ -32,6 +32,7 @@ import {
   sqliteCompiler as qb,
 } from "../../packages/storage-sqlite/src/index.js";
 import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
+import { queryParamsFrom } from "../../packages/shared-space-api/src/query/params.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
@@ -2410,11 +2411,18 @@ async function main() {
               json(res, { changes });
               return;
             }
+            // GET /app-data/db/<table> — the query grammar.
+            //
+            // Every top-level parameter name is reserved, which is what lets
+            // the filters live under `where` with no sigil. The parser is
+            // shared with the cloud handler, so the two cannot drift the way
+            // the hand-written grammars did: this one defaulted to limit=100
+            // with no cap while the cloud one defaulted to 50 capped at 500.
             if (req.method === "GET") {
-              const where: Record<string, unknown> = {};
-              for (const [k, v] of url.searchParams) where[k] = v;
-              const rows = await view.queryRows(table, Object.keys(where).length ? where : undefined);
-              json(res, { rows });
+              const result = await view.query(table, queryParamsFrom(url.searchParams));
+              json(res, result.mode === "rows"
+                ? { rows: result.rows, truncated: result.truncated, page_token: result.pageToken }
+                : { groups: result.groups, truncated: result.truncated });
               return;
             }
           } catch (err) {

@@ -47,16 +47,6 @@ import { QueryParseError } from "./types.js";
 export const MAX_PATTERN_LENGTH = 200;
 
 /**
- * How many candidate rows one regex predicate may be evaluated against.
- *
- * Against a ten-execution Lambda budget, one pathological query is a
- * platform-wide event rather than one slow page, so this is a hard stop rather
- * than a suggestion. Reaching it sets `truncated`, which is the same signal a
- * caller already handles for the row limit and the byte budget.
- */
-export const REGEX_SCAN_CAP = 20_000;
-
-/**
  * Constructs the parser accepts, as the app-facing documentation states them:
  * literals, bracket classes without POSIX names, anchors, alternation,
  * grouping, and the three quantifiers.

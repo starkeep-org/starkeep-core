@@ -8,6 +8,15 @@ import type {
   ScanSincePage,
 } from "@starkeep/shared-space-api";
 import {
+  buildAppAggregateQuery,
+  buildAppRowQuery,
+  collectAggregatePage,
+  collectRowPage,
+  fetchLimitFor,
+  POSTGRES_APP_QUERY_DIALECT,
+  type BuildOptions,
+  type ParsedQuery,
+  type ParsedQueryResult,
   buildBucketDigest,
   buildScanSinceForNode,
   collectSince,
@@ -329,20 +338,45 @@ export class DsqlAppSyncableApplier
     return out;
   }
 
-  /** Support read path from the factory's queryRows. */
-  async queryRows(
+  /**
+   * Run a parsed query. The read half of the app-data plane.
+   *
+   * Compiled by the shared builder rather than here, so the SQL this emits and
+   * the SQL the SQLite applier emits are one piece of code — the two
+   * hand-written read grammars this replaces had already drifted on their limit
+   * defaults alone.
+   */
+  async runQuery(
     appId: string,
     table: string,
-    where?: Record<string, unknown>,
-  ): Promise<Record<string, unknown>[]> {
+    query: ParsedQuery,
+    options: BuildOptions = {},
+  ): Promise<ParsedQueryResult> {
     const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
-    const whereCols = where ? Object.keys(where) : [];
-    let query = qb.selectFrom(schemaTable).selectAll().where("deleted_at", "is", null);
-    for (const c of whereCols) {
-      query = query.where(c, "=", where![c]);
+
+    if (query.mode === "aggregate") {
+      const compiled = buildAppAggregateQuery(
+        qb,
+        schemaTable,
+        query,
+        POSTGRES_APP_QUERY_DIALECT,
+        options,
+      );
+      const result = await this.run(compiled);
+      return collectAggregatePage(query, result.rows);
     }
-    const result = await this.run(query.compile());
-    return result.rows;
+
+    const compiled = buildAppRowQuery(qb, schemaTable, query, {
+      ...options,
+      fetchLimit: fetchLimitFor(query),
+    });
+    // The broker holds a plain `pg` client rather than a cursor, so the rows
+    // arrive as an array and the fetch budget is applied over it. The row limit
+    // and the regex scan cap bound what that array can hold; the response
+    // budget's job here is to keep a page of pathological rows from failing at
+    // Lambda's 6 MB synchronous response ceiling, which it still does.
+    const { rows } = await this.run(compiled);
+    return collectRowPage(query, rows);
   }
 }
 
