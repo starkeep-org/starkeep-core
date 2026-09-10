@@ -33,7 +33,11 @@ import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/clie
 import { getSignedUrl as getCloudFrontSignedUrl } from "@aws-sdk/cloudfront-signer";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
-import { AuroraDsqlDatabaseAdapter, postgresCompiler } from "@starkeep/storage-aurora-dsql";
+import {
+  AuroraDsqlDatabaseAdapter,
+  applyPgTypeParsers,
+  postgresCompiler,
+} from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import {
   createDataRecord,
@@ -116,6 +120,14 @@ import {
   canWriteCategory,
   type AccessGrants,
 } from "./access-enforcer.js";
+
+// `pg` keeps its type parsers in module state, so this runs once, at import,
+// before any client on this module issues a query. Without it the driver turns
+// a `timestamp without time zone` into a `Date` using the *process* zone, and
+// one stored value reads back as a different instant on a runtime that is not
+// UTC. Lambda is UTC, which is exactly why the defect would stay invisible
+// here and appear somewhere else. See `pg-timestamps.ts`.
+applyPgTypeParsers(pg);
 
 // ---------------------------------------------------------------------------
 // Per-app credential cache (STS sessions ~15 min, refreshed at 14 min)

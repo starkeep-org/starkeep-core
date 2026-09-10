@@ -692,6 +692,77 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       equal(result.map((g) => Number(g["n"])), [3, 2], "groups by size, descending");
     },
   },
+
+  {
+    name: "a real column keeps full float8 significance on both engines",
+    async run(h) {
+      await seedQueryRows(h);
+      // Postgres `real` is float4 and rounds this to 37.77493; SQLite's REAL is
+      // always 8-byte IEEE. The installer used to emit `real` on one engine and
+      // `double precision` on the other, so one value became two — and an app
+      // row carries whatever it got onto the sync wire verbatim, which is how a
+      // cloud round trip silently changed Memo's scheduler state.
+      const precise = 37.774929496;
+      await h.applier.apply({
+        timestamp: hlc(9_000),
+        appId: h.appId,
+        table: h.table,
+        op: "insert",
+        row: {
+          id: "r-precision",
+          name: null,
+          n: null,
+          r: precise,
+          flag: null,
+          ts: null,
+          updated_at: serializeHLC(hlc(9_000)),
+          deleted_at: null,
+        },
+      });
+      const { result } = await rows(h, { where: [{ column: "id", predicate: { op: "eq", value: "r-precision" } }] });
+      equal(result.rows[0]?.["r"], precise, "real round-trips at float8");
+    },
+  },
+
+  {
+    name: "a timestamp column returns one canonical string on both engines",
+    async run(h) {
+      await seedQueryRows(h);
+      const { result } = await rows(h, {
+        where: [{ column: "id", predicate: { op: "eq", value: "r1" } }],
+      });
+      // Postgres stores a real `timestamp` and renders it `2026-09-01 00:00:00`
+      // — a space, no `Z`, and a fractional part that vanishes at zero — while
+      // SQLite returns the canonical string unchanged. Two engines answering
+      // one query with two strings is the divergence this suite exists to
+      // catch, so the Postgres side normalizes on the way out.
+      equal(result.rows[0]?.["ts"], "2026-09-01T00:00:00.000Z", "canonical ISO-8601 in UTC");
+    },
+  },
+
+  {
+    name: "a timestamp is stored and returned unchanged from a non-UTC process zone",
+    async run(h) {
+      // The case that would have caught it. Everything persisted is UTC and no
+      // column carries a zone, but both drivers parse a naive timestamp by
+      // handing it to `new Date(...)`, which reads it in the *process* zone —
+      // so one stored value came back as a different instant depending on where
+      // the process ran. Lambda is UTC, which is precisely why nothing noticed.
+      const previous = process.env.TZ;
+      process.env.TZ = "Asia/Tokyo";
+      try {
+        await seedQueryRows(h);
+        const { result } = await rows(h, {
+          where: [{ column: "id", predicate: { op: "eq", value: "r1" } }],
+          order: [{ column: "ts", direction: "asc", nulls: "last" }],
+        });
+        equal(result.rows[0]?.["ts"], "2026-09-01T00:00:00.000Z", "unshifted under TZ=Asia/Tokyo");
+      } finally {
+        if (previous === undefined) delete process.env.TZ;
+        else process.env.TZ = previous;
+      }
+    },
+  },
 ];
 
 /**

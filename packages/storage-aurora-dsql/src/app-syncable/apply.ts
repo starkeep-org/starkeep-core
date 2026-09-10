@@ -31,6 +31,7 @@ import type { DatabaseClient } from "../types.js";
 import { withOccRetry } from "../occ-retry.js";
 import { isMissingRelation } from "../missing-relation.js";
 import { compiler as qb } from "../query-builder.js";
+import { fromPgRows } from "../pg-timestamps.js";
 
 /**
  * DSQL-backed implementation of `AppSyncableApplier`.
@@ -362,7 +363,15 @@ export class DsqlAppSyncableApplier
         options,
       );
       const result = await this.run(compiled);
-      return collectAggregatePage(query, result.rows);
+      // A grouped `timestamp` rides back under its own column name; a
+      // `min`/`max` over one rides back under the aggregate's output name, so
+      // both have to be named for the conversion to reach them.
+      const declared = timestampColumnsOf(this.namespace, appId, table);
+      const outputs = new Set<string>(declared ?? []);
+      for (const term of query.aggregates) {
+        if (term.col && declared?.has(term.col)) outputs.add(term.name);
+      }
+      return collectAggregatePage(query, fromPgRows(result.rows, outputs));
     }
 
     const compiled = buildAppRowQuery(qb, schemaTable, query, options);
@@ -372,8 +381,33 @@ export class DsqlAppSyncableApplier
     // a page of pathological rows from failing at Lambda's 6 MB synchronous
     // response ceiling, which it still does.
     const { rows } = await this.run(compiled);
-    return collectRowPage(query, rows);
+    // Converted before the page is collected rather than after, so the page
+    // token is cut from the same representation the rows carry.
+    return collectRowPage(
+      query,
+      fromPgRows(rows, timestampColumnsOf(this.namespace, appId, table)),
+    );
   }
+}
+
+/**
+ * The names of a table's declared `timestamp` columns, or null when it has
+ * none.
+ *
+ * Null rather than an empty set so the caller can skip the row walk entirely.
+ * The SQLite side spells the same thing for `boolean`; the two engines each
+ * convert exactly the types their driver would otherwise hand back in its own
+ * shape.
+ */
+function timestampColumnsOf(
+  namespace: AppSyncableNamespaceStore,
+  appId: string,
+  table: string,
+): Set<string> | null {
+  const columns = namespace.get(appId)?.tables.find((t) => t.name === table)?.columns;
+  if (!columns) return null;
+  const names = columns.filter((c) => c.type === "timestamp").map((c) => c.name);
+  return names.length > 0 ? new Set(names) : null;
 }
 
 /**

@@ -10,3 +10,10 @@ export { DsqlAppSyncableNamespaceStore } from "./app-syncable/namespace.js";
 export { DsqlAppSyncableApplier } from "./app-syncable/apply.js";
 export { isRetryableDsqlConflict, withOccRetry } from "./occ-retry.js";
 export type { OccRetryOpts } from "./occ-retry.js";
+export {
+  PG_TIMESTAMP_OID,
+  PG_RAW_PARSERS,
+  applyPgTypeParsers,
+  toCanonicalTimestamp,
+  fromPgRows,
+} from "./pg-timestamps.js";

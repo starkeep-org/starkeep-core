@@ -22,7 +22,7 @@ import {
   APP_GRANTABLE_CATEGORIES,
   typeCategory,
   type Category,
-  type LogicalColumnType,
+  pgColumnType,
 } from "@starkeep/protocol-primitives";
 import {
   FILE_RECORDS_TABLE,
@@ -326,7 +326,7 @@ export async function runAppInstallDdl(
       for (const table of appSyncableTables) {
         let tb = db.schema.createTable(`${schemaName}.${table.name}`).ifNotExists();
         for (const c of table.columns) {
-          const pgType = DSQL_COLUMN_TYPES[c.type] ?? "text";
+          const pgType = pgColumnType(c.type);
           tb = tb.addColumn(c.name, sql.raw(pgType), (col) =>
             c.notNull || c.primaryKey ? col.notNull() : col,
           );
@@ -446,20 +446,6 @@ export async function runAppInstallDdl(
     }
   });
 }
-
-const DSQL_COLUMN_TYPES: Record<LogicalColumnType, string> = {
-  text: "text",
-  integer: "integer",
-  bigint: "bigint",
-  real: "real",
-  blob: "bytea",
-  boolean: "boolean",
-  // A logical type over a physical `text` column: SQLite has no native
-  // timestamp, and the declaration exists to promise that lexical comparison is
-  // time comparison — which canonical ISO-8601 text delivers identically on
-  // both engines and a `timestamptz` here would not.
-  timestamp: "text",
-};
 
 /**
  * Per-app uninstall DDL. Revokes grants and drops the app schema + PG role.
