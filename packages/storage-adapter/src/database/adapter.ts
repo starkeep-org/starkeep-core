@@ -20,6 +20,8 @@ import type {
 } from "./types.js";
 import type { DigestBucket } from "./digest-queries.js";
 import type { SincePage } from "./since-queries.js";
+import type { ParsedQuery, ParsedQueryResult, WhereClause } from "./app-query-types.js";
+import type { SharedQueryTarget } from "./shared-query-schemas.js";
 
 export interface DatabaseAdapter {
   init(): Promise<void>;
@@ -63,6 +65,34 @@ export interface DatabaseAdapter {
    * count is taken over exactly the rows the caller may read.
    */
   countRecordsByType(query: Query): Promise<RecordTypeCount[]>;
+
+  /**
+   * Run a parsed query against one of the shared plane's three queryable
+   * tables — `shared.records`, `shared.record_labels`, or a per-category
+   * metadata table.
+   *
+   * The same {@link ParsedQuery} the app-syncable plane runs, compiled by the
+   * same builder. One grammar, one operator set, one cursor convention and one
+   * conformance suite across both planes: two parsers would mean the shared
+   * plane drifting from the app plane again, which is the failure the design
+   * exists to prevent.
+   *
+   * `serverWhere` carries the caller's grant as an ordinary predicate over the
+   * table's discriminant column — `type` on records, `record_type` on the other
+   * two. It is ANDed in beside the caller's own predicates, so the grant rides
+   * *inside* the access path rather than filtering what the access path
+   * returned. The route owns it; nothing a caller can write reaches it.
+   *
+   * Authorization is the caller's to compute and this method's to apply. An
+   * omitted `serverWhere` means unrestricted access, which is what the
+   * User-Data-Owner has and what every other caller must not be given by
+   * accident.
+   */
+  queryShared(
+    target: SharedQueryTarget,
+    query: ParsedQuery,
+    options?: { readonly serverWhere?: readonly WhereClause[] },
+  ): Promise<ParsedQueryResult>;
 
   /**
    * Per-nodeId MAX(updated_at) over every stored row (tombstones included) —

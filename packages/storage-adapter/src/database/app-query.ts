@@ -220,6 +220,28 @@ export interface BuildOptions {
    * what the whole authorization question is about.
    */
   readonly serverWhere?: readonly WhereClause[];
+  /**
+   * Whether the table carries `deleted_at` and soft-deleted rows are excluded.
+   *
+   * Defaults to true, which is every app-syncable table, `shared.records` and
+   * `shared.record_labels`. The per-category metadata tables are the exception:
+   * a metadata row is derived state keyed by `record_id` and is deleted
+   * outright when its record goes, so the column does not exist and a query
+   * naming it fails at the engine rather than returning nothing.
+   *
+   * An option rather than a probe of the schema, because the caller that names
+   * the table already knows which kind it is, and a compiler that guessed would
+   * be able to guess wrong on a table it had never seen.
+   */
+  readonly excludeSoftDeleted?: boolean;
+}
+
+/** The soft-delete predicate, applied unless the table has no such column. */
+function applySoftDelete(qb: Qb, options: BuildOptions): Qb {
+  // The server owns this predicate. A caller cannot name the column at all, so
+  // this cannot be contradicted.
+  if (options.excludeSoftDeleted === false) return qb;
+  return qb.where(sql<boolean>`${sql.ref("deleted_at")} is null` as never) as Qb;
 }
 
 /** One page of rows, plus the one extra row that reveals a further page. */
@@ -241,9 +263,7 @@ export function buildAppRowQuery(
   query.order.forEach((term, index) => {
     qb = qb.select(sql.ref(term.column).as(orderKeyAlias(index))) as Qb;
   });
-  // The server owns the soft-delete predicate. A caller cannot name the column
-  // at all, so this cannot be contradicted.
-  qb = qb.where(sql<boolean>`${sql.ref("deleted_at")} is null` as never) as Qb;
+  qb = applySoftDelete(qb, options);
   qb = applyWhere(qb, options.serverWhere ?? []);
   qb = applyWhere(qb, query.where);
   qb = applyPageToken(qb, query);
@@ -273,7 +293,7 @@ export function buildAppAggregateQuery(
     qb = qb.select(aggregateExpression(term, dialect).as(term.name)) as Qb;
   }
 
-  qb = qb.where(sql<boolean>`${sql.ref("deleted_at")} is null` as never) as Qb;
+  qb = applySoftDelete(qb, options);
   qb = applyWhere(qb, options.serverWhere ?? []);
   qb = applyWhere(qb, query.where);
 

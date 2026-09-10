@@ -84,24 +84,86 @@ export function toCanonicalTimestamp(value: unknown): unknown {
 }
 
 /**
- * Apply {@link toCanonicalTimestamp} to a page's declared `timestamp` columns.
+ * Per-column conversions applied to everything leaving this backend.
+ *
+ * Keyed by output name. The parser forbids an aggregate output from colliding
+ * with a column name, so matching by name is unambiguous.
+ */
+export type PgValueConverters = ReadonlyMap<string, (value: unknown) => unknown>;
+
+/**
+ * The conversions a table's declared columns call for, or null when it needs
+ * none.
+ *
+ * Two logical types reach JavaScript in a shape SQLite would not have produced,
+ * and both are converted here rather than at each call site:
+ *
+ *   - `timestamp` renders as `YYYY-MM-DD HH:MM:SS[.ffffff]`, which
+ *     {@link toCanonicalTimestamp} puts back into canonical ISO-8601 UTC.
+ *   - `bigint` is `int8`, which node-postgres hands over as a *string* to avoid
+ *     losing precision past 2^53. SQLite's INTEGER is already 64-bit and comes
+ *     back as a number, so without this the same column reads as `"1024"` from
+ *     the cloud and `1024` locally — and an app row carries whatever it got
+ *     onto the sync wire verbatim.
+ *
+ * Null rather than an empty map so the caller can skip the row walk entirely.
+ */
+export function pgConvertersFor(
+  columns: readonly { name: string; type: string }[] | null | undefined,
+): PgValueConverters | null {
+  if (!columns) return null;
+  const converters = new Map<string, (value: unknown) => unknown>();
+  for (const column of columns) {
+    if (column.type === "timestamp") converters.set(column.name, toCanonicalTimestamp);
+    else if (column.type === "bigint") converters.set(column.name, toNumberOrNull);
+  }
+  return converters.size > 0 ? converters : null;
+}
+
+/**
+ * Extend a table's converters to the aggregate outputs that read a converted
+ * column.
+ *
+ * A grouped `timestamp` rides back under its own column name; a `min`/`max`
+ * over one rides back under the aggregate's output name, so both have to be
+ * named for the conversion to reach them. `count`, `sum` and `avg` are excluded
+ * — a count of `bigint` values is not itself a `bigint`, and Postgres already
+ * renders `sum`/`avg` as its own numeric type.
+ */
+export function withAggregateOutputs(
+  converters: PgValueConverters | null,
+  aggregates: readonly { name: string; fn: string; col: string | null }[],
+): PgValueConverters | null {
+  if (!converters) return null;
+  const out = new Map(converters);
+  for (const term of aggregates) {
+    if (term.fn !== "min" && term.fn !== "max") continue;
+    const convert = term.col === null ? undefined : converters.get(term.col);
+    if (convert) out.set(term.name, convert);
+  }
+  return out;
+}
+
+function toNumberOrNull(value: unknown): unknown {
+  return value === null || value === undefined ? value : Number(value);
+}
+
+/**
+ * Apply a page's conversions on the way out.
  *
  * Mirrors `fromSqliteRows` on the other engine, and applies to everything
- * leaving the applier — query rows, aggregate group keys and `min`/`max`
- * outputs, and rows bound for the wire. The parser forbids an aggregate output
- * from colliding with a column name, so matching by name is unambiguous; an
- * aggregate over a timestamp column is matched by the column it reads, which is
- * why the caller passes the aggregate's output names too.
+ * leaving the backend — query rows, aggregate group keys and `min`/`max`
+ * outputs, and rows bound for the wire.
  */
 export function fromPgRows(
   rows: Record<string, unknown>[],
-  timestampColumns: ReadonlySet<string> | null,
+  converters: PgValueConverters | null,
 ): Record<string, unknown>[] {
-  if (!timestampColumns || timestampColumns.size === 0) return rows;
+  if (!converters || converters.size === 0) return rows;
   return rows.map((row) => {
     const out: Record<string, unknown> = { ...row };
-    for (const name of timestampColumns) {
-      if (name in out) out[name] = toCanonicalTimestamp(out[name]);
+    for (const [name, convert] of converters) {
+      if (name in out) out[name] = convert(out[name]);
     }
     return out;
   });

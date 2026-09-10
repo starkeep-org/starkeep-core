@@ -593,6 +593,58 @@ Things worth knowing before you design around them:
 > excluding, forever. Prefer the positive filter and treat coverage as an
 > obligation on the labelling app — but know which way it fails.
 
+### 9a. Querying metadata and labels
+
+The same grammar §6a describes over your own tables also answers two shared
+tables. Every parameter means what it means there — `where`, `select`, `order`,
+`limit`, `page_token` and `aggregate` — and the response is the same
+`{rows, truncated, page_token}` or `{groups, truncated}`.
+
+```
+# One category's derived metadata, ordered by when the shutter fired.
+GET /data/metadata/image
+  ?where={"captured_at":{"gte":"2026-01-01T00:00:00.000Z"}}
+  &order=captured_at.desc
+  &limit=200
+
+# How many photos per person, most-tagged first — one index scan.
+GET /data/labels
+  ?where={"app_id":"faces","key":"person"}
+  &select=value
+  &aggregate={"n":{"fn":"count"}}
+  &order=n.desc
+```
+
+The category in the path picks the table, and the columns you may name are that
+category's declared metadata columns. `image` and `video` carry `captured_at`
+and are indexed on it; the other categories carry what
+`CATEGORIES` declares for them.
+
+Four rules govern both routes, and each of them is load-bearing:
+
+1. **You see exactly the rows whose record type you were granted.** The server
+   ANDs `record_type IN (…your readable types…)` into every query, so a
+   category you hold three of nineteen types in answers about those three. The
+   column is not yours to name — filtering it, ordering by it or projecting it
+   is a 400 on the metadata route — because it carries the authorization
+   decision rather than data.
+2. **A category you hold no type in is a 403,** not an empty page. An empty
+   page would say the library is empty where the truth is that it is not yours.
+3. **A label query must pin `app_id` and `key` in `where`.** The reverse index
+   is `(app_id, key, deleted_at, value, record_id)`, so a query that pins
+   neither reads every app's assertions about every record. Pinning both leaves
+   `value` as an ordered key column, which is why a range or an `in` list on
+   `value` is a seek rather than a scan.
+4. **A label query reads every app's labels, yours included.** Labels are
+   cross-app assertions and `app_id` selects whose to read; what restricts the
+   answer is the labelled record's type. Reading another app's namespace is the
+   ordinary case rather than the exception.
+
+`GET /data/records?label=…` keeps its shape and is still the way to fetch the
+*records* a label selects. This route returns label rows, which is the
+different question: what values exist, how many carry each, and on which record
+ids.
+
 ## 10. Who authenticates the end user in your app
 
 **You do.** This is the single most important thing to know before you deploy

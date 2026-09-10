@@ -31,6 +31,18 @@ import type {
 import {
   StorageError,
   TransactionError,
+  buildAppAggregateQuery,
+  buildAppRowQuery,
+  collectAggregatePage,
+  collectRowPage,
+  sharedQueryExcludesSoftDeleted,
+  sharedQuerySchema,
+  sharedQueryTableName,
+  SQLITE_APP_QUERY_DIALECT,
+  type ParsedQuery,
+  type ParsedQueryResult,
+  type SharedQueryTarget,
+  type WhereClause,
   buildFindByLabel,
   buildGetLabel,
   buildLabelNodeWatermarks,
@@ -66,6 +78,7 @@ import {
   compiler as qb,
 } from "./query-builder.js";
 import { initializeLocalSchema } from "./schema/bootstrap.js";
+import { booleanColumnNames, fromSqliteRows, toSqliteParam } from "./row-values.js";
 
 export interface SqliteDatabaseAdapterOptions {
   path: string | ":memory:";
@@ -354,6 +367,56 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       count: Number(row.count),
       latestUpdatedAt: row.latest_updated_at,
     }));
+  }
+
+  /**
+   * See `DatabaseAdapter.queryShared`. Compiled by the same builder the
+   * app-syncable plane uses, against the table the target names on this engine.
+   */
+  async queryShared(
+    target: SharedQueryTarget,
+    query: ParsedQuery,
+    options: { readonly serverWhere?: readonly WhereClause[] } = {},
+  ): Promise<ParsedQueryResult> {
+    const schema = sharedQuerySchema(target);
+    const table = sharedQueryTableName(target, "sqlite");
+    const build = {
+      serverWhere: options.serverWhere,
+      excludeSoftDeleted: sharedQueryExcludesSoftDeleted(target),
+    };
+    // Only the metadata tables declare one today (model3d's two flags), but
+    // asking the schema rather than the target is what keeps a column added
+    // later from reading back as 0 and 1 from this engine alone.
+    const booleans = booleanColumnNames(schema.columns);
+
+    if (query.mode === "aggregate") {
+      const compiled = buildAppAggregateQuery(
+        qb,
+        table,
+        query,
+        SQLITE_APP_QUERY_DIALECT,
+        build,
+      );
+      return collectAggregatePage(
+        query,
+        fromSqliteRows(this.selectCompiled(compiled), booleans),
+      );
+    }
+    const compiled = buildAppRowQuery(qb, table, query, build);
+    // Converted before the page is collected rather than after, so the page
+    // token is cut from the same representation the rows carry.
+    return collectRowPage(query, fromSqliteRows(this.selectCompiled(compiled), booleans));
+  }
+
+  /** Bind and run a compiled SELECT, adapting values SQLite cannot bind. */
+  private selectCompiled(compiled: {
+    sql: string;
+    parameters: readonly unknown[];
+  }): Record<string, unknown>[] {
+    return this.allRows<Record<string, unknown>>(
+      compiled.sql,
+      ...compiled.parameters.map(toSqliteParam),
+    );
   }
 
   async batch(operations: BatchOperation[]): Promise<void> {

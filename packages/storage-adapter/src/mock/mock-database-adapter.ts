@@ -26,6 +26,18 @@ import {
   type QueryCursorKey,
 } from "../database/query-cursor.js";
 import { orderingFor } from "../database/record-queries.js";
+import { runInMemoryQuery } from "../database/app-query-memory.js";
+import { labelToRow } from "../database/label-row.js";
+import {
+  sharedQuerySchema,
+  sharedQueryExcludesSoftDeleted,
+  type SharedQueryTarget,
+} from "../database/shared-query-schemas.js";
+import type {
+  ParsedQuery,
+  ParsedQueryResult,
+  WhereClause,
+} from "../database/app-query-types.js";
 import type {
   Query,
   QueryResult,
@@ -323,6 +335,64 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     const usable =
       typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean" ? raw : null;
     return { isNull: usable === null, value: usable };
+  }
+
+  /**
+   * See `DatabaseAdapter.queryShared`. Evaluated in JavaScript by
+   * `app-query-memory.ts` against the same parsed value the SQL adapters
+   * compile, over a row-shaped view of whichever store the target names.
+   *
+   * The row view is not optional detail. The mock holds `DataRecord`,
+   * `RecordLabel` and `MetadataRow` objects in camelCase, and every predicate a
+   * caller writes names a *column*. Answering over the objects would make the
+   * mock accept a grammar the real backends reject and reject one they accept.
+   */
+  async queryShared(
+    target: SharedQueryTarget,
+    query: ParsedQuery,
+    options: { readonly serverWhere?: readonly WhereClause[] } = {},
+  ): Promise<ParsedQueryResult> {
+    // Asked for its side effect: an unknown category, or `other`, has no
+    // metadata table and must fail here rather than answer an empty page.
+    sharedQuerySchema(target);
+    const rows = this.sharedRows(target);
+    // The compiler applies the soft-delete predicate; nothing parses it, so it
+    // is applied here for the two tables that carry the column.
+    const live = sharedQueryExcludesSoftDeleted(target)
+      ? rows.filter((row) => row["deleted_at"] === null || row["deleted_at"] === undefined)
+      : rows;
+    return runInMemoryQuery(live, query, options);
+  }
+
+  /** A column-shaped view of one shared table. */
+  private sharedRows(target: SharedQueryTarget): Record<string, unknown>[] {
+    if (target.kind === "labels") {
+      return [...this.labels.values()].map((label) => ({ ...labelToRow(label) }));
+    }
+    if (target.kind === "metadata") {
+      const table = this.metadata.get(target.category);
+      if (!table) return [];
+      return [...table.values()].map(({ recordId, ...columns }) => ({
+        record_id: recordId as string,
+        ...columns,
+      }));
+    }
+    return [...this.store.values()].map((record) => ({
+      id: record.id as string,
+      type: record.type,
+      created_at: serializeHLC(record.createdAt),
+      updated_at: serializeHLC(record.updatedAt),
+      node_id: record.updatedAt.nodeId,
+      deleted_at: record.deletedAt ? serializeHLC(record.deletedAt) : null,
+      version: record.version,
+      content_hash: record.contentHash,
+      object_storage_key: record.objectStorageKey,
+      mime_type: record.mimeType,
+      size_bytes: record.sizeBytes,
+      original_filename: record.originalFilename,
+      origin_app_id: record.originAppId,
+      parent_id: record.parentId,
+    }));
   }
 
   async batch(operations: BatchOperation[]): Promise<void> {

@@ -13,6 +13,7 @@ import { describe, it, afterEach } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
   appSyncableQueryConformance,
+  METADATA_SHAPED_COLUMNS,
   QUERY_COLUMNS,
   type QueryConformanceHarness,
 } from "@starkeep/storage-adapter/conformance/query";
@@ -27,6 +28,7 @@ import type { DatabaseClient } from "../src/types.js";
 
 const APP = "query-conformance-app";
 const TABLE = "rows_under_test";
+const METADATA_TABLE = "metadata_shaped";
 const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
 
 const open: PGlite[] = [];
@@ -60,27 +62,51 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
   const columns = QUERY_COLUMNS.map(
     (c) => `${c.name} ${pgColumnType(c.type)}${c.primaryKey ? " PRIMARY KEY" : ""}`,
   ).join(", ");
+  // The metadata-shaped table: a primary key, two ordinary columns, and no
+  // `deleted_at`. Created from the same declared list the case reads, so the
+  // suite cannot be checking a table shape the schema never describes.
+  const metadataColumns = METADATA_SHAPED_COLUMNS.map(
+    (c) => `${c.name} ${pgColumnType(c.type)}${c.primaryKey ? " PRIMARY KEY" : ""}`,
+  ).join(", ");
   await pg.exec(`
     CREATE SCHEMA ${SCHEMA};
     CREATE TABLE ${SCHEMA}.${TABLE} (${columns});
     CREATE INDEX idx_${TABLE}_node_watermark ON ${SCHEMA}.${TABLE} (node_id, updated_at);
+    CREATE TABLE ${SCHEMA}.${METADATA_TABLE} (${metadataColumns});
   `);
 
   const ns: AppSyncableNamespace = {
     appId: APP,
-    tables: [{ name: TABLE, pkColumns: ["id"], columns: QUERY_COLUMNS }],
+    tables: [
+      { name: TABLE, pkColumns: ["id"], columns: QUERY_COLUMNS },
+      { name: METADATA_TABLE, pkColumns: ["record_id"], columns: METADATA_SHAPED_COLUMNS },
+    ],
     filesEnabled: false,
-    tableNames: [TABLE],
+    tableNames: [TABLE, METADATA_TABLE],
   };
   const namespaces: AppSyncableNamespaceStore = {
     get: (id) => (id === APP ? ns : null),
     list: () => [ns],
   };
 
+  const client = clientFor(pg);
   return {
-    applier: new DsqlAppSyncableApplier(clientFor(pg), namespaces) as never,
+    applier: new DsqlAppSyncableApplier(client, namespaces) as never,
     appId: APP,
     table: TABLE,
+    metadataShapedTable: METADATA_TABLE,
+    async seedMetadataShaped(rows) {
+      // Written directly rather than through the applier: the applier's LWW
+      // upsert needs `updated_at`, and this table deliberately has none.
+      for (const row of rows) {
+        const names = Object.keys(row);
+        await client.query(
+          `INSERT INTO ${SCHEMA}.${METADATA_TABLE} (${names.join(", ")}) ` +
+            `VALUES (${names.map((_, i) => `$${i + 1}`).join(", ")})`,
+          names.map((n) => row[n]),
+        );
+      }
+    },
   };
 }
 

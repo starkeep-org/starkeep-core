@@ -14,6 +14,7 @@ import { DatabaseSync } from "node:sqlite";
 import { applyConnectionPragmas } from "../src/schema/bootstrap.js";
 import {
   appSyncableQueryConformance,
+  METADATA_SHAPED_COLUMNS,
   QUERY_COLUMNS,
   type QueryConformanceHarness,
 } from "@starkeep/storage-adapter/conformance/query";
@@ -26,6 +27,7 @@ import { appSyncableTableName } from "../src/app-syncable/namespace.js";
 
 const APP = "query-conformance-app";
 const TABLE = "rows_under_test";
+const METADATA_TABLE = "metadata_shaped";
 
 /** What the local installer emits for each declared column type. */
 const SQLITE_TYPES: Record<string, string> = {
@@ -56,11 +58,24 @@ function makeHarness(): QueryConformanceHarness {
   db.exec(`CREATE TABLE ${fullName} (${columns})`);
   db.exec(`CREATE INDEX idx_${fullName}_node_watermark ON ${fullName} (node_id, updated_at)`);
 
+  // The metadata-shaped table: a primary key, two ordinary columns, and no
+  // `deleted_at`. Created from the same declared list the case reads, so the
+  // suite cannot be checking a table shape the schema never describes.
+  const metadataFullName = appSyncableTableName(APP, METADATA_TABLE);
+  db.exec(
+    `CREATE TABLE ${metadataFullName} (${METADATA_SHAPED_COLUMNS.map(
+      (c) => `${c.name} ${SQLITE_TYPES[c.type]}${c.primaryKey ? " PRIMARY KEY" : ""}`,
+    ).join(", ")})`,
+  );
+
   const ns: AppSyncableNamespace = {
     appId: APP,
-    tables: [{ name: TABLE, pkColumns: ["id"], columns: QUERY_COLUMNS }],
+    tables: [
+      { name: TABLE, pkColumns: ["id"], columns: QUERY_COLUMNS },
+      { name: METADATA_TABLE, pkColumns: ["record_id"], columns: METADATA_SHAPED_COLUMNS },
+    ],
     filesEnabled: false,
-    tableNames: [TABLE],
+    tableNames: [TABLE, METADATA_TABLE],
   };
   const namespaces: AppSyncableNamespaceStore = {
     get: (id) => (id === APP ? ns : null),
@@ -71,6 +86,18 @@ function makeHarness(): QueryConformanceHarness {
     applier: new SqliteAppSyncableApplier(db as never, namespaces) as never,
     appId: APP,
     table: TABLE,
+    metadataShapedTable: METADATA_TABLE,
+    async seedMetadataShaped(rows) {
+      // Written directly rather than through the applier: the applier's LWW
+      // upsert needs `updated_at`, and this table deliberately has none.
+      for (const row of rows) {
+        const names = Object.keys(row);
+        db.prepare(
+          `INSERT INTO ${metadataFullName} (${names.join(", ")}) ` +
+            `VALUES (${names.map(() => "?").join(", ")})`,
+        ).run(...names.map((n) => row[n] as never));
+      }
+    },
   };
 }
 

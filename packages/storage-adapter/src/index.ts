@@ -85,6 +85,18 @@ export {
 } from "./database/app-query.js";
 
 export {
+  sharedQuerySchema,
+  sharedQueryTableName,
+  sharedQueryExcludesSoftDeleted,
+  sharedQueryDiscriminant,
+  withDeclaredProjection,
+  type SharedQueryTarget,
+  type SharedQueryDialect,
+} from "./database/shared-query-schemas.js";
+
+export { runInMemoryQuery } from "./database/app-query-memory.js";
+
+export {
   buildRecordSelect,
   buildRecordCount,
   buildRecordTypeCounts,

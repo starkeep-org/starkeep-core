@@ -24,8 +24,7 @@ import {
 } from "@starkeep/storage-adapter";
 import { compiler as qb } from "../query-builder.js";
 import { appSyncableTableName } from "./namespace.js";
-
-type SqlParam = null | number | bigint | string | Uint8Array;
+import { booleanColumnNames, fromSqliteRows, toSqliteParam } from "../row-values.js";
 
 // Both go through `toSqliteParam` for the reason the read path does: SQLite
 // binds no boolean, and a declared `boolean` column reaches here as one from
@@ -336,7 +335,7 @@ export class SqliteAppSyncableApplier
       return {
         // Converted before the row becomes a wire entry: what goes on the wire
         // is what the app sees, and a peer's applier binds a boolean it can.
-        rows: fromSqliteRows(rows, booleanColumnsOf(this.namespace, appId, table))
+        rows: fromSqliteRows(rows, this.booleanColumnsOf(appId, table))
           .map((row) => rowToWireEntry(appId, table, row, pkColumns, deserializeHLC))
           .filter((entry): entry is AppSyncableRowEntry => entry !== null),
         hasMore,
@@ -376,7 +375,7 @@ export class SqliteAppSyncableApplier
   ): Promise<ParsedQueryResult> {
     const fullName = appSyncableTableName(appId, table);
 
-    const booleanColumns = booleanColumnsOf(this.namespace, appId, table);
+    const booleanColumns = this.booleanColumnsOf(appId, table);
 
     if (query.mode === "aggregate") {
       const compiled = buildAppAggregateQuery(
@@ -404,77 +403,19 @@ export class SqliteAppSyncableApplier
     return collectRowPage(query, fromSqliteRows(this.selectRows(compiled), booleanColumns));
   }
 
+  /** The names of a declared table's `boolean` columns, or null when it has none. */
+  private booleanColumnsOf(appId: string, table: string): Set<string> | null {
+    return booleanColumnNames(
+      this.namespace.get(appId)?.tables.find((t) => t.name === table)?.columns,
+    );
+  }
+
   /** Bind and run a compiled SELECT, adapting values SQLite cannot bind. */
   private selectRows(compiled: CompiledQuery): Record<string, unknown>[] {
     return this.db
       .prepare(compiled.sql)
       .all(...compiled.parameters.map(toSqliteParam)) as Record<string, unknown>[];
   }
-}
-
-/**
- * The names of a table's declared `boolean` columns, or null when it has none.
- *
- * Null rather than an empty set so the caller can skip the row walk entirely,
- * which is every table today.
- */
-function booleanColumnsOf(
-  namespace: AppSyncableNamespaceStore,
-  appId: string,
-  table: string,
-): Set<string> | null {
-  const columns = namespace.get(appId)?.tables.find((t) => t.name === table)?.columns;
-  if (!columns) return null;
-  const names = columns.filter((c) => c.type === "boolean").map((c) => c.name);
-  return names.length > 0 ? new Set(names) : null;
-}
-
-/**
- * The read half of the boolean conversion: `0` and `1` back to `false` and
- * `true`.
- *
- * SQLite stores a declared `boolean` as an integer, Postgres stores it as a
- * native boolean and returns one, and an app row travels the sync wire exactly
- * as its engine returned it (`rowToWireEntry`). Without this the same logical
- * row reads as `1` from the local server and `true` from the cloud, and the
- * wire form of a boolean would depend on which node happened to send it — so
- * this is what makes the JSON boolean the one app-facing and on-the-wire form
- * of the type, on both engines.
- *
- * Applies to every row leaving this applier: query rows, aggregate group keys
- * (the parser forbids an aggregate output from colliding with a column name,
- * so matching by name is unambiguous), and rows bound for the wire.
- */
-function fromSqliteRows(
-  rows: Record<string, unknown>[],
-  booleanColumns: Set<string> | null,
-): Record<string, unknown>[] {
-  if (!booleanColumns) return rows;
-  return rows.map((row) => {
-    const out: Record<string, unknown> = { ...row };
-    for (const name of booleanColumns) {
-      const value = out[name];
-      if (typeof value === "number") out[name] = value !== 0;
-    }
-    return out;
-  });
-}
-
-/**
- * SQLite binds no booleans.
- *
- * A boolean column's value is normalized to a real boolean before it reaches
- * either engine — by the parser for a predicate, by `validateRow` for a written
- * row — so both engines are handed one thing, and this is where that one thing
- * becomes the integer SQLite stores. Postgres takes the boolean unchanged,
- * which is the whole reason the normalization happens upstream rather than here.
- *
- * Every bind on this connection goes through it, reads and writes alike. A
- * conversion applied to only half the traffic is the bug this file had.
- */
-function toSqliteParam(value: unknown): SqlParam {
-  if (typeof value === "boolean") return value ? 1 : 0;
-  return value as SqlParam;
 }
 
 /**
