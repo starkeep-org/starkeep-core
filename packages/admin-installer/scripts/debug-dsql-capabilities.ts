@@ -21,7 +21,9 @@
  * Pass `--ddl` to additionally answer whether a `tsvector` column can be stored
  * and indexed, which no expression-level probe can reach. That path creates one
  * uniquely-named table, inserts one row, tries two index shapes and drops the
- * table again, so it writes to the cluster where the default run does not.
+ * table again, so it writes to the cluster where the default run does not. It
+ * also answers the `ALTER TABLE` questions the metadata `record_type` backfill
+ * turns on and whether a CHECK constraint is accepted and enforced.
  */
 
 // First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
@@ -363,6 +365,51 @@ async function runStorageProbes(client: pg.Client): Promise<ProbeResult[]> {
         await step(
           "ALTER TABLE ALTER COLUMN SET NOT NULL",
           `ALTER TABLE ${t} ALTER COLUMN record_type SET NOT NULL`,
+          "unknown",
+        );
+        // Whether the metadata backfill needs a catalog pre-check or a single
+        // guarded statement. Stock Postgres accepts the guard; the run above
+        // asked only about the unguarded form, and the guard is what decides
+        // whether `initializeSharedSchema` can add the column itself on every
+        // run the way it creates every other object. Three steps, because
+        // "accepted" and "suppresses the duplicate" are separate answers and
+        // only the second makes the statement idempotent.
+        await step(
+          "ALTER TABLE ADD COLUMN IF NOT EXISTS (column absent)",
+          `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS guard_probe text`,
+          "unknown",
+        );
+        await step(
+          "ALTER TABLE ADD COLUMN IF NOT EXISTS (column present)",
+          `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS guard_probe text`,
+          "unknown",
+        );
+        await step(
+          "ALTER TABLE ADD COLUMN without the guard (column present)",
+          `ALTER TABLE ${t} ADD COLUMN guard_probe text`,
+          "unsupported",
+        );
+      },
+    );
+
+    // Whether a declared `boolean` app column can carry its domain constraint
+    // in the cloud the way it would locally. SQLite has no boolean type, so a
+    // local boolean is an INTEGER that only a CHECK can hold to 0/1; DSQL has
+    // the native type and needs no constraint. The question here is whether the
+    // two installers *could* emit one shape, and acceptance and enforcement are
+    // separate answers — a constraint the DDL parses and the writer ignores is
+    // worse than none.
+    await withTable(
+      "chk",
+      "id int PRIMARY KEY, flag integer CHECK (flag IN (0,1))",
+      "CHECK constraint in CREATE TABLE",
+      "unknown",
+      async (t) => {
+        await step("CHECK rejects an out-of-domain value", `INSERT INTO ${t} VALUES (1, 7)`, "unsupported");
+        await step("CHECK admits 1", `INSERT INTO ${t} VALUES (2, 1)`, "supported");
+        await step(
+          "ALTER TABLE ADD CONSTRAINT ... CHECK (retrofit)",
+          `ALTER TABLE ${t} ADD CONSTRAINT capprobe_chk2 CHECK (id > 0)`,
           "unknown",
         );
       },
