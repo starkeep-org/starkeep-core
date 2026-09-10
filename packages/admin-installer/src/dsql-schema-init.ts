@@ -46,6 +46,24 @@
  *      exists, and the unguarded form fails with 42P07 against an existing
  *      index — so the guard is doing real work rather than being tolerated.
  *
+ *   6. `ALTER TABLE ALTER COLUMN SET NOT NULL` → SQLSTATE 0A000 "unsupported
+ *      ALTER TABLE ALTER COLUMN ...", and `ALTER TABLE ADD CONSTRAINT ...
+ *      CHECK` likewise. A column added to a table that already exists is
+ *      therefore nullable forever, and a CHECK constraint can only arrive with
+ *      the `CREATE TABLE` that declares the column. `ADD COLUMN` does work, and
+ *      `ADD COLUMN IF NOT EXISTS` works and suppresses the duplicate — the
+ *      unguarded form fails with 42701 against an existing column, so the guard
+ *      does real work and needs no `information_schema` pre-check. A CHECK
+ *      constraint written into `CREATE TABLE` is accepted and enforced (23514
+ *      on an out-of-domain row). All probed against the live cluster on
+ *      2026-09-10 (`debug:dsql-capabilities --ddl`).
+ *
+ *      The ordering these facts impose: add a column *before* any index or
+ *      write naming it. `CREATE TABLE IF NOT EXISTS` is silent about a table it
+ *      does not create, so a new column in the DDL text never reaches an
+ *      existing table, and the first statement referencing the column dies with
+ *      42703.
+ *
  * If you add to this file, keep every entry to a single non-PL/pgSQL
  * statement with no FK constraints or partial-index predicates, and use the
  * role/index pre-check pattern for anything Postgres would normally express

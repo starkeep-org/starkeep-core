@@ -636,11 +636,24 @@ function sqliteColumnType(t: LogicalColumnType): string {
  * These tables are created `IF NOT EXISTS`, so a cluster provisioned before the
  * discriminant arrived keeps its old table and never gains the column from this
  * statement. Adding it afterwards reaches only half way: `ALTER TABLE ADD
- * COLUMN` works on DSQL, but `ALTER TABLE ALTER COLUMN SET NOT NULL` fails with
- * `0A000 unsupported ALTER TABLE ALTER COLUMN ...` (probed 2026-09-10). A
- * migrated table therefore holds a nullable `record_type` that this DDL declares
- * NOT NULL, permanently. Read gates must treat a NULL discriminant as unknown
- * and deny rather than trusting the constraint.
+ * COLUMN IF NOT EXISTS` works on DSQL and is idempotent, but `ALTER TABLE ALTER
+ * COLUMN SET NOT NULL` fails with `0A000 unsupported ALTER TABLE ALTER COLUMN
+ * ...` (both probed against the live cluster 2026-09-10). A migrated table
+ * therefore holds a nullable `record_type` that this DDL declares NOT NULL,
+ * permanently. Read gates must treat a NULL discriminant as unknown and deny
+ * rather than trusting the constraint.
+ *
+ * None of that is wired up, deliberately. Pre-production, the per-category
+ * metadata tables are derived data over shared records and are treated as
+ * disposable: dropping them lets this statement recreate them with the column
+ * and the constraint intact, which is why no `ALTER TABLE` path exists in the
+ * installer. The facts above are recorded for whoever first needs to migrate a
+ * table that cannot be dropped.
+ *
+ * Note the ordering trap either way: `metadataIndexDdls` builds an index over
+ * `record_type`, so an index statement issued against a table that predates the
+ * column fails with `42703` and takes the whole install with it. That is the
+ * symptom a stale install shows, and dropping the table is the fix.
  */
 export function pgMetadataDdl(c: CategoryDef): string {
   const cols = [
