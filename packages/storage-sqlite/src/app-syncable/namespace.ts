@@ -5,6 +5,7 @@ import type {
   AppSyncableTableInfo,
   AppSyncableNamespaceStore,
 } from "@starkeep/shared-space-api";
+import { parseAppSyncableTables } from "@starkeep/shared-space-api";
 
 export type { AppSyncableNamespace, AppSyncableTableInfo };
 
@@ -24,7 +25,7 @@ function rowToNamespace(r: {
   tables_json: string;
   files_enabled: number;
 }): AppSyncableNamespace {
-  const tables: AppSyncableTableInfo[] = JSON.parse(r.tables_json);
+  const tables = parseAppSyncableTables(r.app_id, r.tables_json);
   return {
     appId: r.app_id,
     tables,

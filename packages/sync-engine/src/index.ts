@@ -31,7 +31,7 @@ export type {
   ResidencyHooks,
   AcquireResult,
 } from "./types.js";
-export { SHARED_DIGEST_SCOPE } from "./types.js";
+export { SHARED_DIGEST_SCOPE, parseAppSyncableTables } from "./types.js";
 export {
   computeCeilings,
   cutRound,

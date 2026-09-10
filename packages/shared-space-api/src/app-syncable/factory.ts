@@ -152,15 +152,12 @@ export function createAppSpecificFactory(
      * Only declared columns are checked. An undeclared key is left to the
      * applier, which fails on it as it always has — narrowing that is a
      * separate decision with its own migration.
-     *
-     * A registry row written before column types existed declares nothing, so
-     * nothing is checked and writes behave exactly as they did.
      */
     function validateRow(table: string, row: Record<string, unknown>): void {
       const info = ns!.tables.find((t) => t.name === table);
-      const columns = info?.columns;
-      if (!columns) return;
+      if (!info) return;
       for (const [name, value] of Object.entries(row)) {
+        const columns = info.columns;
         const column = columns.find((c) => c.name === name);
         if (!column) continue;
         // The sync runtime writes its own columns and does not answer to the
