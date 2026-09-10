@@ -24,9 +24,29 @@ import { compiler as qb } from "../query-builder.js";
  * ~/.starkeep/data.db (or the local-data-server's STARKEEP_DIR is fresh)
  * before this code runs.
  */
+/**
+ * Connection settings the query grammar's portability depends on.
+ *
+ * Separate from the schema DDL and exported because a connection can be opened
+ * without the full local schema — the conformance harness creates one table and
+ * nothing else — and a setting that the real server has and the conformance
+ * suite does not is a setting whose divergence the suite cannot catch.
+ *
+ * `case_sensitive_like` is the whole list today. SQLite's LIKE folds ASCII case
+ * by default and Postgres's does not, so `like: "photo%"` would otherwise match
+ * `PHOTO123` locally and not in the cloud. DSQL uses the `C` collation only, so
+ * with the fold turned off the two agree byte for byte. Turning it off also
+ * lets SQLite use a btree index for an anchored pattern, which the fold rules
+ * out.
+ */
+export function applyConnectionPragmas(db: RawDatabase): void {
+  db.exec("PRAGMA case_sensitive_like = ON");
+}
+
 function applyLocalSchemaDdl(db: RawDatabase): void {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
+  applyConnectionPragmas(db);
 
   // shared_records: node_id is denormalized from updated_at (its nodeId
   // component) on every write — it feeds the sync responder's per-node

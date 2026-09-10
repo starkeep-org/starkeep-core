@@ -11,6 +11,7 @@
 
 import { describe, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
+import { applyConnectionPragmas } from "../src/schema/bootstrap.js";
 import {
   appSyncableQueryConformance,
   QUERY_COLUMNS,
@@ -41,6 +42,9 @@ const SQLITE_TYPES: Record<string, string> = {
 
 function makeHarness(): QueryConformanceHarness {
   const db = new DatabaseSync(":memory:");
+  // The same connection settings the real local server applies. `like` means
+  // one thing on both backends only because of these.
+  applyConnectionPragmas(db as never);
   const fullName = appSyncableTableName(APP, TABLE);
   const columns = QUERY_COLUMNS.map(
     (c) => `${c.name} ${SQLITE_TYPES[c.type]}${c.primaryKey ? " PRIMARY KEY" : ""}`,

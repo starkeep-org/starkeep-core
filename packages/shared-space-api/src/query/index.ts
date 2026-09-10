@@ -12,8 +12,8 @@ export {
 } from "@starkeep/storage-adapter";
 export { prefixUpperBound } from "./prefix.js";
 export { queryParamsFrom } from "./params.js";
-export { compileRegexPattern, MAX_PATTERN_LENGTH } from "./regex.js";
-export { REGEX_SCAN_CAP, RESPONSE_BUDGET_BYTES } from "@starkeep/storage-adapter";
+export { validateLikePattern, MAX_LIKE_PATTERN_LENGTH } from "./like.js";
+export { RESPONSE_BUDGET_BYTES } from "@starkeep/storage-adapter";
 export { checkValue, isNumericColumn, isOrderableColumn, type ValueCheck } from "./values.js";
 export {
   QueryParseError,

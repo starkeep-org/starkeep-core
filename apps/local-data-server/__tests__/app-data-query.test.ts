@@ -153,13 +153,22 @@ describe("filtering and projection", () => {
     expect(body.rows.map((r) => r.id)).toEqual(["c1", "c2", "c4", "c5"]);
   });
 
-  it("filters by regex, which the server evaluates itself", async () => {
+  it("matches a wildcard pattern, which the engine evaluates", async () => {
     const body = await rows({
-      where: JSON.stringify({ deck_id: "d1", tag: { regex: "^al" } }),
+      where: JSON.stringify({ deck_id: "d1", tag: { like: "al%" } }),
       select: "id",
       order: "id.asc",
     });
     expect(body.rows.map((r) => r.id)).toEqual(["c1", "c3"]);
+  });
+
+  it("matches a substring, which prefix cannot express", async () => {
+    const body = await rows({
+      where: JSON.stringify({ tag: { like: "%ph%" } }),
+      select: "id",
+      order: "id.asc",
+    });
+    expect(body.rows.map((r) => r.id)).toEqual(["c1", "c3", "c5"]);
   });
 });
 
