@@ -328,7 +328,7 @@ async function runStorageProbes(client: pg.Client): Promise<ProbeResult[]> {
     // metadata `record_type` backfill turns on.
     await withTable(
       "idx",
-      "id int PRIMARY KEY, k text",
+      "id int PRIMARY KEY, k text, flag_probe integer",
       "probe table for index and ALTER probes",
       "supported",
       async (t) => {
@@ -388,6 +388,23 @@ async function runStorageProbes(client: pg.Client): Promise<ProbeResult[]> {
           "ALTER TABLE ADD COLUMN without the guard (column present)",
           `ALTER TABLE ${t} ADD COLUMN guard_probe text`,
           "unsupported",
+        );
+        // Whether a column's *type* can change in place. An app that declared a
+        // flag `integer` and wants `boolean` needs exactly this, because DSQL
+        // maps the two onto different physical types while SQLite maps both
+        // onto INTEGER — so the change is free locally and is this statement in
+        // the cloud. `SET NOT NULL` failing with a message naming
+        // "ALTER TABLE ALTER COLUMN ..." suggests the whole family is refused,
+        // but suggests is not settles.
+        await step(
+          "ALTER TABLE ALTER COLUMN TYPE (integer -> boolean)",
+          `ALTER TABLE ${t} ALTER COLUMN flag_probe TYPE boolean USING (flag_probe <> 0)`,
+          "unknown",
+        );
+        await step(
+          "ALTER TABLE ALTER COLUMN TYPE (widening, no USING)",
+          `ALTER TABLE ${t} ALTER COLUMN flag_probe TYPE bigint`,
+          "unknown",
         );
       },
     );
