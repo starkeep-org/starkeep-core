@@ -140,7 +140,8 @@ export function createAppSpecificFactory(
     }
 
     /**
-     * Check an app's row values against the columns it declared.
+     * Check an app's row values against the columns it declared, and return the
+     * row in the canonical form each value's declared type defines.
      *
      * A declared type is only worth having if something enforces it, and the
      * write path is the only place it *can* be enforced: once a value is in the
@@ -149,13 +150,25 @@ export function createAppSpecificFactory(
      * canonical form. Leaving that to app discipline puts a correctness
      * property in the one place the platform cannot check it.
      *
+     * **Returning the checked value rather than only its verdict** is what makes
+     * `boolean` writable. `checkValue` accepts `true`, `false`, `0` and `1` and
+     * normalizes all four to a JavaScript boolean, which is the one form both
+     * appliers know how to bind — the same normalization the read path has
+     * always applied to a predicate value. An earlier version called
+     * `checkValue` for its error message and passed the caller's row through
+     * untouched, so a `true` reached SQLite's driver, which binds no boolean.
+     *
      * Only declared columns are checked. An undeclared key is left to the
      * applier, which fails on it as it always has — narrowing that is a
      * separate decision with its own migration.
      */
-    function validateRow(table: string, row: Record<string, unknown>): void {
+    function validateRow(
+      table: string,
+      row: Record<string, unknown>,
+    ): Record<string, unknown> {
       const info = ns!.tables.find((t) => t.name === table);
-      if (!info) return;
+      if (!info) return row;
+      const normalized: Record<string, unknown> = { ...row };
       for (const [name, value] of Object.entries(row)) {
         const columns = info.columns;
         const column = columns.find((c) => c.name === name);
@@ -167,7 +180,9 @@ export function createAppSpecificFactory(
         if (!checked.ok) {
           throw new Error(`${table}: ${checked.message}`);
         }
+        normalized[name] = checked.value;
       }
+      return normalized;
     }
 
     function requireQueryCapable(): QueryCapableApplier {
@@ -229,14 +244,14 @@ export function createAppSpecificFactory(
     return {
       async insertRow(table, row) {
         resolveTable(table);
-        validateRow(table, row);
+        const checked = validateRow(table, row);
         const ts = clock.now();
         const entry: AppSyncableRowEntry = {
           timestamp: ts,
           appId,
           table,
           op: "insert",
-          row: { ...row, updated_at: serializeHLC(ts), deleted_at: null },
+          row: { ...checked, updated_at: serializeHLC(ts), deleted_at: null },
         };
         await applier.apply(entry);
         emitLocalChange();
@@ -246,17 +261,19 @@ export function createAppSpecificFactory(
         resolveTable(table);
         // Both halves: a patch writes values and a `where` compares them, and a
         // value that does not match its column would mean one thing on SQLite's
-        // dynamic typing and another on Postgres.
-        validateRow(table, patch);
-        validateRow(table, where);
+        // dynamic typing and another on Postgres. Both halves are normalized
+        // too, since a `where` comparing an un-normalized value against a
+        // normalized column matches nothing.
+        const checkedPatch = validateRow(table, patch);
+        const checkedWhere = validateRow(table, where);
         const ts = clock.now();
         const entry: AppSyncableRowEntry = {
           timestamp: ts,
           appId,
           table,
           op: "update",
-          row: { ...patch, updated_at: serializeHLC(ts) },
-          where,
+          row: { ...checkedPatch, updated_at: serializeHLC(ts) },
+          where: checkedWhere,
         };
         await applier.apply(entry);
         emitLocalChange();
@@ -266,14 +283,14 @@ export function createAppSpecificFactory(
 
       async deleteRow(table, where) {
         resolveTable(table);
-        validateRow(table, where);
+        const checkedWhere = validateRow(table, where);
         const ts = clock.now();
         const entry: AppSyncableRowEntry = {
           timestamp: ts,
           appId,
           table,
           op: "delete",
-          where,
+          where: checkedWhere,
         };
         await applier.apply(entry);
         emitLocalChange();

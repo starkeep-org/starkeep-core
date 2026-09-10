@@ -103,13 +103,23 @@ export const LOGICAL_COLUMN_TYPES = [
 ] as const satisfies readonly LogicalColumnType[];
 
 /**
- * Types an ordered comparison (`lt`, `gt`, `min`, `max`) is defined over.
+ * Types an ordered comparison (`lt`, `gt`, `min`, `max`, `order`) is defined
+ * over.
  *
- * Everything but `blob`. Byte-string ordering is defined in SQL and means
- * nothing an app asked for.
+ * Everything but `blob` and `boolean`. Byte-string ordering is defined in SQL
+ * and means nothing an app asked for. A flag has two values and no order worth
+ * asking for either: `min(suspended)` and `order=suspended.asc` answer
+ * questions nobody posed, and `is`, equality and `ne` cover every real one.
+ *
+ * `boolean` used to be admitted here while `predicateFor` rejected
+ * `flag > false` by inspecting the *bound value*'s JavaScript type, so one rule
+ * was enforced in two places with two messages and `order` escaped both.
+ * Excluding the type states the rule once. It also keeps a boolean out of a
+ * keyset page token, which would otherwise carry a sort key whose two possible
+ * values cannot separate the rows a cursor has to.
  */
 export function isOrderableColumnType(t: LogicalColumnType): boolean {
-  return t !== "blob";
+  return t !== "blob" && t !== "boolean";
 }
 
 /** Types `sum` and `avg` are defined over. */

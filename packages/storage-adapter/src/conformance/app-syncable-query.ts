@@ -68,19 +68,20 @@ export interface QueryConformanceHarness {
 /**
  * The columns every query-conformance table declares.
  *
- * `flag` is `integer` rather than `boolean` deliberately. A physical `boolean`
- * column would need the *write* path to bind a boolean, and the write path
- * passes an app's row values through untouched — SQLite's driver refuses a
- * boolean bind, so no app can currently write one. That is a pre-existing gap
- * in the write path rather than something the read grammar introduces, and
- * putting it in this table would test the gap instead of the grammar.
+ * `flag` is `boolean` and `n` is `integer`, so both types are asked every
+ * question. The boolean matters most here: SQLite stores one as an integer and
+ * Postgres as a native boolean, so it is the one column whose *representation*
+ * the two engines can disagree about, and a suite that declared it `integer`
+ * would prove nothing about the type an app actually writes. The seed below
+ * loads real booleans through the applier, so a case reading `flag` back is
+ * checking the whole round trip — bind, store, return — on each engine.
  */
 export const QUERY_COLUMNS: readonly AppColumnInfo[] = [
   { name: "id", type: "text", notNull: true, primaryKey: true },
   { name: "name", type: "text", notNull: false, primaryKey: false },
   { name: "n", type: "integer", notNull: false, primaryKey: false },
   { name: "r", type: "real", notNull: false, primaryKey: false },
-  { name: "flag", type: "integer", notNull: false, primaryKey: false },
+  { name: "flag", type: "boolean", notNull: false, primaryKey: false },
   { name: "ts", type: "timestamp", notNull: false, primaryKey: false },
   { name: "updated_at", type: "text", notNull: true, primaryKey: false },
   { name: "node_id", type: "text", notNull: true, primaryKey: false },
@@ -98,11 +99,11 @@ export const QUERY_COLUMNS: readonly AppColumnInfo[] = [
  * numbers.
  */
 export const QUERY_ROWS: readonly Record<string, unknown>[] = [
-  { id: "r1", name: "alpha", n: 3, r: 1.5, flag: 0, ts: "2026-09-01T00:00:00.000Z" },
-  { id: "r2", name: "alphabet", n: 1, r: 2.5, flag: 0, ts: "2026-09-05T00:00:00.000Z" },
-  { id: "r3", name: null, n: null, r: null, flag: 1, ts: null },
-  { id: "r4", name: "BETA", n: 7, r: 4.0, flag: 0, ts: "2026-09-03T00:00:00.000Z" },
-  { id: "r5", name: "gamma", n: 2, r: null, flag: 1, ts: "2026-09-09T00:00:00.000Z" },
+  { id: "r1", name: "alpha", n: 3, r: 1.5, flag: false, ts: "2026-09-01T00:00:00.000Z" },
+  { id: "r2", name: "alphabet", n: 1, r: 2.5, flag: false, ts: "2026-09-05T00:00:00.000Z" },
+  { id: "r3", name: null, n: null, r: null, flag: true, ts: null },
+  { id: "r4", name: "BETA", n: 7, r: 4.0, flag: false, ts: "2026-09-03T00:00:00.000Z" },
+  { id: "r5", name: "gamma", n: 2, r: null, flag: true, ts: "2026-09-09T00:00:00.000Z" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -383,7 +384,7 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
           name: "100%_off",
           n: null,
           r: null,
-          flag: 0,
+          flag: false,
           ts: null,
           updated_at: serializeHLC(ts),
           deleted_at: null,
@@ -603,18 +604,77 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
     name: "a grouped aggregate omits empty groups entirely",
     async run(h) {
       await seedQueryRows(h);
-      // Only flag=0 rows have a non-null `r`, so grouping those by flag
+      // Only `flag: true` rows have a null `r`, so grouping those by flag
       // produces one group rather than two. A caller wanting a row per flag
       // fills the gap from its own list — worth stating in the app docs,
       // because the alternative reading is a silent hole in a dashboard.
+      //
+      // No `order` term: a boolean has no ordering the grammar will accept, so
+      // ordering by one here would demonstrate something no caller can ask for.
+      // One surviving group makes the order immaterial anyway.
       const result = await groups(h, {
         groupBy: ["flag"],
         where: [{ column: "r", predicate: { op: "is", value: null } }],
         aggregates: [{ name: "n", fn: "count", col: null, distinct: false }],
-        order: [{ column: "flag", direction: "asc", nulls: "last" }],
       });
       equal(result.length, 1, "group count");
       equal(Number(result[0]!["n"]), 2, "rows in the surviving group");
+    },
+  },
+
+  {
+    name: "a boolean column round-trips as a JSON boolean on both engines",
+    async run(h) {
+      await seedQueryRows(h);
+      // The case the two engines can disagree about. SQLite stores a declared
+      // `boolean` as an integer and Postgres as a native boolean, and an app
+      // row goes on the sync wire exactly as its engine returned it — so if
+      // this ever reads `1` on one side and `true` on the other, the same
+      // logical row has two wire forms and the peer that receives the wrong one
+      // cannot bind it.
+      const { result } = await rows(h, { where: [{ column: "id", predicate: { op: "eq", value: "r3" } }] });
+      equal(result.rows[0]!["flag"], true, "true reads back as true");
+      const off = await rows(h, { where: [{ column: "id", predicate: { op: "eq", value: "r1" } }] });
+      equal(off.result.rows[0]!["flag"], false, "false reads back as false");
+
+      // Each of the three ways the grammar lets a caller name a flag. `lt`,
+      // `gt`, `min`, `max` and `order` are absent by design: `boolean` is not
+      // an orderable type, so the parser refuses all five.
+      equal(
+        (await rows(h, { where: [{ column: "flag", predicate: { op: "is", value: true } }] })).ids,
+        ["r3", "r5"],
+        "is true",
+      );
+      equal(
+        (await rows(h, { where: [{ column: "flag", predicate: { op: "eq", value: false } }] })).ids,
+        ["r1", "r2", "r4"],
+        "equality against false",
+      );
+      equal(
+        (await rows(h, { where: [{ column: "flag", predicate: { op: "ne", value: false } }] })).ids,
+        ["r3", "r5"],
+        "ne false",
+      );
+    },
+  },
+
+  {
+    name: "a boolean groups by its two values",
+    async run(h) {
+      await seedQueryRows(h);
+      // Group keys travel the same conversion the rows do, so the key is a
+      // JSON boolean rather than whichever spelling the engine holds. Ordered
+      // by the aggregate output, since the grouping column has no ordering.
+      const result = await groups(h, {
+        groupBy: ["flag"],
+        aggregates: [{ name: "n", fn: "count", col: null, distinct: false }],
+        order: [{ column: "n", direction: "desc", nulls: "last" }],
+      });
+      equal(result.length, 2, "one group per value");
+      equal(result[0]!["flag"], false, "the larger group is the false one");
+      equal(Number(result[0]!["n"]), 3, "false rows");
+      equal(result[1]!["flag"], true, "the smaller group is the true one");
+      equal(Number(result[1]!["n"]), 2, "true rows");
     },
   },
 

@@ -100,6 +100,26 @@ describe("where", () => {
   it("normalizes a boolean column's 0 and 1 to a real boolean", () => {
     const q = rows({ where: JSON.stringify({ suspended: 0 }) });
     expect(q.where[0]!.predicate).toEqual({ op: "eq", value: false });
+    expect(rows({ where: JSON.stringify({ suspended: 1 }) }).where[0]!.predicate).toEqual({
+      op: "eq",
+      value: true,
+    });
+    // The spellings a JSON caller would reach for first, unchanged.
+    expect(rows({ where: JSON.stringify({ suspended: true }) }).where[0]!.predicate).toEqual({
+      op: "eq",
+      value: true,
+    });
+    rejects({ where: JSON.stringify({ suspended: 2 }) }, /expected true, false, 0 or 1/);
+    rejects({ where: JSON.stringify({ suspended: "true" }) }, /expected true, false, 0 or 1/);
+  });
+
+  it("refuses an ordered comparison against a boolean column", () => {
+    // A flag has two values and no order worth asking for. `boolean` is not an
+    // orderable type, so this is refused by the column's declaration rather
+    // than by the JavaScript type of the value it normalized to — which is what
+    // also gets `order` and `min`/`max` below.
+    rejects({ where: JSON.stringify({ suspended: { gt: false } }) }, /has no ordering/);
+    rejects({ where: JSON.stringify({ suspended: { lte: 1 } }) }, /has no ordering/);
   });
 
   it("takes null, true and false through `is`, and nothing else", () => {
@@ -255,6 +275,13 @@ describe("select, order and limit", () => {
     expect(rows({ order: "id.desc" }).order.map((t) => t.column)).toEqual(["id"]);
   });
 
+  it("refuses ordering by a boolean column", () => {
+    // The case a value-shaped guard never caught: `order` carries no value to
+    // inspect, so before `boolean` left the orderable types this parsed and a
+    // page token ended up keyed on a column with two possible values.
+    rejects({ order: "suspended.asc" }, /has no ordering/);
+  });
+
   it("refuses an unknown order modifier", () => {
     rejects({ order: "due.sideways" }, /not an order modifier/);
   });
@@ -331,6 +358,20 @@ describe("aggregate", () => {
     });
     expect(q.aggregates).toHaveLength(7);
     expect(q.aggregates.find((a) => a.name === "distinct_count")).toMatchObject({ distinct: true });
+  });
+
+  it("refuses min and max over a boolean column", () => {
+    // Same rule as the comparison operators, reached through the aggregate
+    // path. `count(distinct suspended)` stays legal — counting the two values
+    // is a question; asking which is smaller is not.
+    rejects(
+      { aggregate: JSON.stringify({ lo: { fn: "min", col: "suspended" } }) },
+      /needs an orderable column/,
+    );
+    expect(
+      groups({ aggregate: JSON.stringify({ n: { fn: "count", distinct: "suspended" } }) })
+        .aggregates,
+    ).toEqual([{ name: "n", fn: "count", col: "suspended", distinct: true }]);
   });
 
   it("refuses sum and avg over a non-numeric column", () => {
