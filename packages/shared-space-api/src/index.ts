@@ -23,6 +23,8 @@ export {
 } from "./helpers/pagination.js";
 export { ApiError, RouteNotFoundError, MethodNotAllowedError } from "./errors.js";
 
+export { parseAppSyncableTables } from "@starkeep/sync-engine";
+
 export type {
   AppSyncableColumnInfo,
   AppSyncableTableInfo,

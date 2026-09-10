@@ -123,22 +123,47 @@ export interface AppSyncableTableInfo {
   /**
    * The table's declared columns, protocol-owned ones included.
    *
-   * Optional, and a registry row written before this field existed simply has
-   * none. The repo keeps no migration ledger by design and reinstall
-   * repopulates the registry, so the fallback is the migration: without types
-   * the query parser rejects every operator that needs one — every comparison,
-   * every aggregate over a column — while equality goes on working, because
-   * equality is the one predicate whose meaning does not turn on the type.
+   * Required. The parser has to check a value against its column before either
+   * engine sees it — SQLite's dynamic typing accepts a numeric bound against a
+   * text column and Postgres refuses it — so a grammar that cannot type-check
+   * its own input is a grammar whose queries mean different things on the two
+   * backends. Aggregation makes it unavoidable rather than merely desirable:
+   * `sum` and `avg` have to refuse a text column, and there is nothing else to
+   * ask.
    *
-   * The reason to carry them at all is that the parser has to check a value
-   * against its column before either engine sees it. SQLite's dynamic typing
-   * accepts a numeric bound against a text column and Postgres refuses it, so
-   * a grammar that cannot type-check its own input is a grammar whose queries
-   * mean different things on the two backends. Aggregation makes it
-   * unavoidable rather than merely desirable: `sum` and `avg` have to refuse a
-   * text column, and there is nothing else to ask.
+   * A registry row written before this field existed carries none, and the
+   * namespace stores refuse to load one rather than degrading to a second,
+   * weaker grammar for it. Reinstalling the app rewrites the row, which is the
+   * whole migration; the repo keeps no migration ledger by design.
    */
-  readonly columns?: readonly AppSyncableColumnInfo[];
+  readonly columns: readonly AppSyncableColumnInfo[];
+}
+
+/**
+ * Parse a namespace registry row's `tables_json`, refusing an unusable one.
+ *
+ * A row whose tables carry no `columns` was written by an installer build that
+ * predates the field. Loading it anyway would mean a second, weaker grammar:
+ * the parser could not check a value against its column, could not tell a real
+ * column from a typo, and the write path's type enforcement would silently do
+ * nothing. Every one of those is a wrong answer rather than a missing feature,
+ * so the row is refused where an operator sees it — at startup, naming the app.
+ *
+ * Reinstalling the app rewrites the row from the manifest, which is the whole
+ * migration.
+ */
+export function parseAppSyncableTables(appId: string, tablesJson: string): AppSyncableTableInfo[] {
+  const tables = JSON.parse(tablesJson) as AppSyncableTableInfo[];
+  const untyped = tables.filter((t) => !t.columns || t.columns.length === 0);
+  if (untyped.length > 0) {
+    throw new Error(
+      `App "${appId}" has a namespace registry row with no column types for ` +
+        `${untyped.map((t) => `"${t.name}"`).join(", ")}. The row predates typed ` +
+        `columns and the query grammar cannot run against it. Reinstall the app to ` +
+        `rewrite the registry from its manifest.`,
+    );
+  }
+  return tables;
 }
 
 export interface AppSyncableNamespace {

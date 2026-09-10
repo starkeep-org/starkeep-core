@@ -15,6 +15,7 @@ import {
 } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableApplier,
+  AppSyncableColumnInfo,
   AppSyncableNamespace,
   AppSyncableNamespaceStore,
   AppSyncableRowEntry,
@@ -42,6 +43,35 @@ export interface MockAppRowStore {
 export interface TableSpec {
   readonly name: string;
   readonly pkColumns: readonly string[];
+  /**
+   * The table's columns, if a test cares what they are.
+   *
+   * A namespace registry row must carry columns — the real stores refuse one
+   * that does not — so when a spec says nothing, the primary keys plus the sync
+   * runtime's own three stand in. Nothing in this harness type-checks a value;
+   * the field exists so the mock namespace is the same shape as a real one.
+   */
+  readonly columns?: readonly AppSyncableColumnInfo[];
+}
+
+/** Columns the sync runtime owns on every app-syncable table. */
+const SYNC_COLUMNS: readonly AppSyncableColumnInfo[] = [
+  { name: "updated_at", type: "text", notNull: true, primaryKey: false },
+  { name: "node_id", type: "text", notNull: true, primaryKey: false },
+  { name: "deleted_at", type: "text", notNull: false, primaryKey: false },
+];
+
+function columnsFor(t: TableSpec): readonly AppSyncableColumnInfo[] {
+  if (t.columns) return t.columns;
+  return [
+    ...t.pkColumns.map((name) => ({
+      name,
+      type: "text" as const,
+      notNull: true,
+      primaryKey: true,
+    })),
+    ...SYNC_COLUMNS,
+  ];
 }
 
 /**
@@ -77,7 +107,11 @@ export function makeMockAppSource(
   const rows = new Map<string, Record<string, unknown>>();
   const ns: AppSyncableNamespace = {
     appId,
-    tables: tables.map((t) => ({ name: t.name, pkColumns: [...t.pkColumns] })),
+    tables: tables.map((t) => ({
+      name: t.name,
+      pkColumns: [...t.pkColumns],
+      columns: columnsFor(t),
+    })),
     filesEnabled: tables.some((t) => t.name === FILE_RECORDS_TABLE),
     tableNames: tables.map((t) => t.name),
   };

@@ -17,6 +17,7 @@ import {
   RestoreObjectCommand,
 } from "@aws-sdk/client-s3";
 import { signRequest } from "@starkeep/app-client";
+import { appSyncableTableInfo, FILE_RECORDS_TABLE_INFO } from "@starkeep/shared-space-api";
 import { installUserTokenFixture } from "./user-token.js";
 import { dataRecordObjectKey, serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
@@ -1593,9 +1594,13 @@ describe("/app-data routes", () => {
     app_id: "appdata1",
     // The installer persists the reserved index table into tables_json for any
     // files_enabled app (withFileRecordsTable), so the applier knows its pk.
+    // Both tables carry column types, because the namespace store refuses a
+    // registry row without them.
     tables_json: JSON.stringify([
-      { name: "notes", pkColumns: ["id"] },
-      { name: "_starkeep_sync_records", pkColumns: ["id"] },
+      appSyncableTableInfo("notes", [
+        { name: "id", type: "text", notNull: true, primaryKey: true },
+      ]),
+      FILE_RECORDS_TABLE_INFO,
     ]),
     files_enabled: true,
   };
@@ -2357,7 +2362,7 @@ describe("GET /files/{key}/presign — the sync download path", () => {
       fakeDsqlWithGrants().on(/from "shared"\."app_syncable_namespaces"/, [
         {
           app_id: "app1",
-          tables_json: JSON.stringify([{ name: "_starkeep_sync_records", pkColumns: ["id"] }]),
+          tables_json: JSON.stringify([FILE_RECORDS_TABLE_INFO]),
           files_enabled: true,
         },
       ]),
