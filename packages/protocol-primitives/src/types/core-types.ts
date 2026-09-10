@@ -631,6 +631,16 @@ function sqliteColumnType(t: LogicalColumnType): string {
  * statement for DSQL. Single non-PL/pgSQL statement, no FK constraints — see
  * `dsql-schema-init.ts` for the DSQL surface caveats. Callers must skip the
  * `other` category (no metadata table).
+ *
+ * A caution about `record_type NOT NULL` on an install that already exists.
+ * These tables are created `IF NOT EXISTS`, so a cluster provisioned before the
+ * discriminant arrived keeps its old table and never gains the column from this
+ * statement. Adding it afterwards reaches only half way: `ALTER TABLE ADD
+ * COLUMN` works on DSQL, but `ALTER TABLE ALTER COLUMN SET NOT NULL` fails with
+ * `0A000 unsupported ALTER TABLE ALTER COLUMN ...` (probed 2026-09-10). A
+ * migrated table therefore holds a nullable `record_type` that this DDL declares
+ * NOT NULL, permanently. Read gates must treat a NULL discriminant as unknown
+ * and deny rather than trusting the constraint.
  */
 export function pgMetadataDdl(c: CategoryDef): string {
   const cols = [
@@ -684,11 +694,17 @@ export function metadataIndexDdls(
   const columns = `("${METADATA_DISCRIMINANT_COLUMN}", "${CAPTURED_AT_METADATA_COLUMN}")`;
   if (dialect === "pg") {
     // ASYNC because DSQL builds an index in the background and the statement
-    // returns before it is usable. No `IF NOT EXISTS`, which DSQL does not
-    // accept on the async form — the caller pre-checks `pg_indexes` by the name
-    // returned here. No `USING`: DSQL refuses the access method.
+    // returns before it is usable. `IF NOT EXISTS` because install is
+    // re-runnable — DSQL accepts the guard on the async form, probed against
+    // the live cluster on 2026-09-10. No `USING`: DSQL refuses the access
+    // method.
     const name = `idx_record_${c.id}_metadata_type_captured_at`;
-    return [{ name, sql: `CREATE INDEX ASYNC "${name}" ON ${pgMetadataTableName(c.id)}${columns}` }];
+    return [
+      {
+        name,
+        sql: `CREATE INDEX ASYNC IF NOT EXISTS "${name}" ON ${pgMetadataTableName(c.id)}${columns}`,
+      },
+    ];
   }
   const name = `idx_${sqliteMetadataTableName(c.id)}_type_captured_at`;
   return [
