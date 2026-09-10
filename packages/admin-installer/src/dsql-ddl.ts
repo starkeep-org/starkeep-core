@@ -380,7 +380,12 @@ export async function runAppInstallDdl(
       if (appSyncableFilesEnabled) {
         let tb = db.schema.createTable(`${schemaName}.${FILE_RECORDS_TABLE}`).ifNotExists();
         for (const c of FILE_RECORDS_COLUMNS) {
-          tb = tb.addColumn(c.name, c.type === "integer" ? "bigint" : "text", (col) =>
+          // Through the one mapping, like every other table on both planes.
+          // This was a hand-written `c.type === "integer" ? "bigint" : "text"`,
+          // which is how the reserved table ended up with a physical type its
+          // own declaration did not name — and how it ended up disagreeing with
+          // the SQLite installer's ternary about the same column.
+          tb = tb.addColumn(c.name, sql.raw(pgColumnType(c.type)), (col) =>
             c.notNull || c.primaryKey ? col.notNull() : col,
           );
         }

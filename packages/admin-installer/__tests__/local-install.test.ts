@@ -17,6 +17,8 @@ import {
   getAppSyncableNamespace,
 } from "@starkeep/storage-sqlite";
 import { installLocal } from "../src/local/installer.js";
+import { FILE_RECORDS_COLUMNS, FILE_RECORDS_TABLE } from "@starkeep/shared-space-api";
+import { sqliteColumnType } from "@starkeep/protocol-primitives";
 
 const MANIFEST = {
   id: "memo",
@@ -42,12 +44,23 @@ const MANIFEST = {
   },
 };
 
-function install() {
+function install(manifest: unknown = MANIFEST) {
   const db = new DatabaseSync(":memory:") as never;
   initializeLocalSchema(db);
-  installLocal(db, MANIFEST);
+  installLocal(db, manifest as never);
   return db;
 }
+
+/** The same manifest with files sync on, so the reserved table gets created. */
+const MANIFEST_WITH_FILES = {
+  ...MANIFEST,
+  infraRequirements: {
+    appSpecificSyncable: {
+      ...MANIFEST.infraRequirements.appSpecificSyncable,
+      files: true,
+    },
+  },
+};
 
 describe("installLocal — app-syncable schema", () => {
   it("creates the index a manifest declares, over the columns it names", () => {
@@ -103,6 +116,33 @@ describe("installLocal — app-syncable schema", () => {
     // The protocol's own columns are described too, because `order=updated_at.desc`
     // is a question about a real column.
     expect(types).toMatchObject({ updated_at: "text", node_id: "text", deleted_at: "text" });
+  });
+
+  it("types the reserved file-records table from the one mapping", () => {
+    const db = install(MANIFEST_WITH_FILES);
+    const columns = (db as unknown as DatabaseSync)
+      .prepare(`SELECT name, type FROM pragma_table_info(?)`)
+      .all(appSyncableTableName("memo", FILE_RECORDS_TABLE)) as Array<{
+      name: string;
+      type: string;
+    }>;
+    expect(columns.length).toBeGreaterThan(0);
+
+    // Every column's physical type is whatever `sqliteColumnType` says for its
+    // declared type. Both installers used to translate this one table with a
+    // hand-written ternary instead, and the two ternaries disagreed: the DSQL
+    // side emitted `bigint` for `size_bytes` where this side emitted `integer`,
+    // for a column the manifest-facing declaration called `integer` and neither
+    // engine could be checked against.
+    const emitted = Object.fromEntries(columns.map((c) => [c.name, c.type.toUpperCase()]));
+    for (const column of FILE_RECORDS_COLUMNS) {
+      expect(emitted[column.name]).toBe(sqliteColumnType(column.type).toUpperCase());
+    }
+    // SQLite's INTEGER is 64-bit either way, so `bigint` and `integer` land in
+    // the same affinity here. The declaration is what the Postgres side and the
+    // read-path conversion both key off, which is why it has to be true rather
+    // than merely harmless locally.
+    expect(emitted["size_bytes"]).toBe("INTEGER");
   });
 
   it("stores a `timestamp` column as text, so no conversion layer exists", () => {
