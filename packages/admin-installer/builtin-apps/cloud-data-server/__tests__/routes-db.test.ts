@@ -786,8 +786,10 @@ describe("metadata routes", () => {
 
   it("takes record_type from the record, not from the caller's typeId", async () => {
     const db = fakeDsqlWithGrants([
-      { type_id: "image/jpeg", access: "readwrite", metadata_write: true },
-      { type_id: "image/png", access: "readwrite", metadata_write: true },
+      // No `metadata_write`: the cloud selects only `type_id` and `access` and
+      // gates a metadata write by writable category — see `loadAccessGrants`.
+      { type_id: "image/jpeg", access: "readwrite" },
+      { type_id: "image/png", access: "readwrite" },
     ])
       .on(/insert into "shared"\."record_image_metadata"/, [])
       .on(/from "shared"\."records" where "id" =/, [recordRow({ id: "r2", type: "image/png" })])

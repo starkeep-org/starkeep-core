@@ -83,11 +83,18 @@ export async function installUserTokenFixture(): Promise<{ token: string }> {
   resetKeySetCache();
 
   const realFetch = globalThis.fetch;
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+  // Borrowed from the global rather than spelled out: `RequestInfo` is a DOM
+  // type and this package compiles with `lib: ["ES2022"]` and Node's types
+  // only, where `fetch` exists but that name does not. Taking the parameter
+  // types off the function being stubbed is also the one spelling that cannot
+  // drift from it.
+  type FetchInput = Parameters<typeof fetch>[0];
+  type FetchInit = Parameters<typeof fetch>[1];
+  vi.stubGlobal("fetch", async (input: FetchInput, init?: FetchInit) => {
     if (String(input).includes("/.well-known/jwks.json")) {
       return new Response(JSON.stringify({ keys: [key.jwk] }), { status: 200 });
     }
-    return realFetch(input as RequestInfo, init);
+    return realFetch(input, init);
   });
 
   return { token: await mintTestUserToken() };

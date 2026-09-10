@@ -66,8 +66,21 @@ function makeDevice() {
   return {
     privateKey,
     publicKeySpki: Buffer.concat([SPKI_PREFIX, Buffer.from(publicKey)]).toString("base64"),
-    /** Byte-for-byte what `device-key.ts` produces. */
-    sign(appId: string, method: string, path: string, body: string | undefined, ts = Date.now()) {
+    /**
+     * Byte-for-byte what `device-key.ts` produces.
+     *
+     * Typed as a header bag rather than left to infer the four keys it happens
+     * to return, because callers both add a header to it and assert that a
+     * header is absent — and an inferred closed record makes the second a type
+     * error rather than the assertion it is.
+     */
+    sign(
+      appId: string,
+      method: string,
+      path: string,
+      body: string | undefined,
+      ts = Date.now(),
+    ): Record<string, string> {
       const upper = method.toUpperCase();
       const signedBody = upper === "GET" || upper === "HEAD" ? "" : (body ?? "");
       const message = Buffer.concat([
