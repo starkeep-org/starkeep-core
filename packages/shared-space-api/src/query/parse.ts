@@ -199,10 +199,12 @@ function predicateFor(column: AppSyncableColumnInfo, op: string, operand: unknow
         `${op} against null is never true; use {"is": null} to test for absence`,
       );
     }
-    if (typeof bound === "boolean") {
-      throw new QueryParseError(`"${name}" is a boolean and has no ordering`);
-    }
-    return { op: op as "lt" | "lte" | "gt" | "gte", value: bound };
+    // No second boolean guard here. `isOrderableColumn` now excludes the type,
+    // so the check above catches a flag by its declaration rather than by the
+    // JavaScript type of whatever `value` happened to normalize it to — which
+    // also catches `order` and `min`/`max`, where a value-shaped guard never
+    // ran at all.
+    return { op: op as "lt" | "lte" | "gt" | "gte", value: bound as string | number };
   }
 
   switch (op) {

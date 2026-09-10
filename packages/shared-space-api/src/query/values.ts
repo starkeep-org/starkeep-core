@@ -13,7 +13,11 @@
  */
 
 import type { LogicalColumnType } from "@starkeep/protocol-primitives";
-import { isCanonicalTimestamp, isNumericColumnType } from "@starkeep/protocol-primitives";
+import {
+  isCanonicalTimestamp,
+  isNumericColumnType,
+  isOrderableColumnType,
+} from "@starkeep/protocol-primitives";
 import type { AppSyncableColumnInfo } from "@starkeep/sync-engine";
 import type { QueryValue } from "./types.js";
 
@@ -117,9 +121,15 @@ export function isNumericColumn(column: AppSyncableColumnInfo): boolean {
 /**
  * Is this column's type one an ordered comparison is defined over?
  *
- * Everything but `blob`. `text` counts, and `timestamp` counts precisely
- * because its canonical spelling makes lexical order agree with time order.
+ * `text` counts, and `timestamp` counts precisely because its canonical
+ * spelling makes lexical order agree with time order. `blob` and `boolean` do
+ * not — see {@link isOrderableColumnType}, which owns the rule.
+ *
+ * Delegated rather than restated. This function used to carry its own
+ * `!== "blob"`, which agreed with the shared predicate until `boolean` left it
+ * and then quietly did not — the same two-definitions-that-mostly-agree failure
+ * `LogicalColumnType` exists to have removed once.
  */
 export function isOrderableColumn(column: AppSyncableColumnInfo): boolean {
-  return column.type !== "blob";
+  return isOrderableColumnType(column.type);
 }

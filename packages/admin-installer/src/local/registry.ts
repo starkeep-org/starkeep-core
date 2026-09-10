@@ -336,6 +336,15 @@ interface SyncableColumnDef {
   type: "text" | "integer" | "real" | "blob";
   notNull: boolean;
   primaryKey: boolean;
+  /**
+   * True when the app declared this column `boolean`.
+   *
+   * `SQLITE_COLUMN_TYPES` maps `boolean` onto `integer`, since SQLite has no
+   * boolean type, and the physical type is all the rest of this shape needs.
+   * The domain constraint does need the distinction, so it is carried
+   * separately rather than recovered by guessing which integers are flags.
+   */
+  boolean?: boolean;
 }
 
 /**
@@ -356,9 +365,17 @@ function createSyncableTable(
     .createTable(fullName)
     .ifNotExists();
   for (const c of columns) {
-    tb = tb.addColumn(c.name, c.type, (col) =>
-      c.notNull || c.primaryKey ? col.notNull() : col,
-    );
+    tb = tb.addColumn(c.name, c.type, (col) => {
+      const withNull = c.notNull || c.primaryKey ? col.notNull() : col;
+      // A declared `boolean` is physically an INTEGER here, so nothing but this
+      // holds it to 0 and 1. The platform's own write path already checks the
+      // value, but the sync-apply path does not: a wire row goes straight to the
+      // applier, so a peer running different code can put anything in the
+      // column. DSQL needs no equivalent — its native `boolean` *is* the domain
+      // — and DSQL could not gain one later anyway, since it rejects
+      // `ALTER TABLE ADD CONSTRAINT` (probed 2026-09-10).
+      return c.boolean ? withNull.check(sql`${sql.ref(c.name)} in (0, 1)`) : withNull;
+    });
   }
   tb = tb
     .addColumn("updated_at", "text", (col) => col.notNull())
@@ -425,6 +442,7 @@ export function createAppSyncableTables(
         type: SQLITE_COLUMN_TYPES[c.type],
         notNull: Boolean(c.notNull),
         primaryKey: Boolean(c.primaryKey),
+        boolean: c.type === "boolean",
       })),
       table.indexes,
     );

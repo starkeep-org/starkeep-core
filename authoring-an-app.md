@@ -259,6 +259,16 @@ the point: string comparison equals time comparison only while every writer
 emits one format, and that is a correctness property the platform cannot check
 unless you declare it.
 
+A `boolean` column takes `true`, `false`, `0` or `1` and **always reads back as
+`true` or `false`**, on both backends and over sync. The two backends store one
+differently — an integer locally, a native boolean in the cloud — and the
+platform converts at each edge so your app never sees the difference. Declare
+`boolean` rather than `integer` for a flag: the declaration is what makes `2` or
+`"yes"` a rejected write rather than a stored value, and locally it also becomes
+a database constraint. A flag has **no ordering**, so `lt`, `lte`, `gt`, `gte`,
+`min`, `max` and `order` all refuse a boolean column; use `is`, equality and
+`ne`, which is every question a flag answers.
+
 ### 6a. Querying your app's tables
 
 `GET /app-data/db/<table>` takes a query grammar. Every top-level parameter
@@ -278,8 +288,11 @@ GET /app-data/db/card_state
 - **`where`** — strict JSON. A column maps either to a scalar, meaning
   equality, or to an object of operator to value. Operators are `lt`, `lte`,
   `gt`, `gte`, `ne`, `in`, `is`, `prefix` and `like`, joined with AND. `is`
-  takes `null`, `true` or `false`. `in` takes a JSON array, so nothing needs
-  comma-escaping. There is no `or`; issue two requests and merge.
+  takes `null`, `true` or `false`; `is true` and `is false` apply to a `boolean`
+  column only. `in` takes a JSON array, so nothing needs comma-escaping. There
+  is no `or`; issue two requests and merge. The four ordered comparisons refuse
+  a `blob` and a `boolean` column, neither of which has an ordering worth
+  asking for.
 - **`select`** — a comma-separated column list. Omitted means every column.
 - **`order`** — `col.asc`, `col.desc`, optionally `.nullsfirst` or
   `.nullslast`. State the null position when it matters: the two backends

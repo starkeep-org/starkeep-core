@@ -46,9 +46,13 @@ function makeHarness(): QueryConformanceHarness {
   // one thing on both backends only because of these.
   applyConnectionPragmas(db as never);
   const fullName = appSyncableTableName(APP, TABLE);
-  const columns = QUERY_COLUMNS.map(
-    (c) => `${c.name} ${SQLITE_TYPES[c.type]}${c.primaryKey ? " PRIMARY KEY" : ""}`,
-  ).join(", ");
+  const columns = QUERY_COLUMNS.map((c) => {
+    // The installer's domain constraint for a declared boolean, since SQLite's
+    // INTEGER affinity is not one. Present here so the suite runs against the
+    // table shape the installer actually creates.
+    const check = c.type === "boolean" ? ` CHECK (${c.name} IN (0, 1))` : "";
+    return `${c.name} ${SQLITE_TYPES[c.type]}${check}${c.primaryKey ? " PRIMARY KEY" : ""}`;
+  }).join(", ");
   db.exec(`CREATE TABLE ${fullName} (${columns})`);
   db.exec(`CREATE INDEX idx_${fullName}_node_watermark ON ${fullName} (node_id, updated_at)`);
 
