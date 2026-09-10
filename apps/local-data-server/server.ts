@@ -41,7 +41,14 @@ import { createNodeClock, createStarkeepSdk } from "../../packages/sdk/src/sdk.j
 import { createSqliteSyncStateStore, createChangeNotifier, projectPolicy, validateRetentionPolicy, validateOverrideRules } from "../../packages/sync-engine/src/index.js";
 import { setHashFactory } from "@starkeep/storage-adapter";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
-import { getCategory, typeCategory, isCategoryId, isKnownType } from "../../packages/protocol-primitives/src/types/core-types.js";
+import {
+  getCategory,
+  typeCategory,
+  isCategoryId,
+  isKnownType,
+  checkMetadataValues,
+  type Category,
+} from "../../packages/protocol-primitives/src/types/core-types.js";
 import {
   buildAccessGrants,
   canRead,
@@ -2002,13 +2009,10 @@ async function main() {
             });
             return;
           }
-          const allowed = new Set(
-            getCategory(metadataCategory)!.metadataColumns.map((c) => c.name),
-          );
-          const unknownKeys = Object.keys(metadata).filter((k) => !allowed.has(k));
-          if (unknownKeys.length > 0) {
+          const checked = checkMetadataValues(metadataCategory as Category, metadata);
+          if (!checked.ok) {
             res.writeHead(400);
-            json(res, { error: `Unknown metadata columns: ${unknownKeys.join(", ")}` });
+            json(res, { error: checked.message });
             return;
           }
         }
@@ -3245,12 +3249,10 @@ async function main() {
           json(res, { error: `Category "other" has no metadata table — only mapped categories support metadata` });
           return;
         }
-        const categoryDef = getCategory(category)!;
-        const allowedColumns = new Set(categoryDef.metadataColumns.map((c) => c.name));
-        const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
-        if (unknownKeys.length > 0) {
+        const checked = checkMetadataValues(category as Category, metadata);
+        if (!checked.ok) {
           res.writeHead(400);
-          json(res, { error: `Unknown metadata columns: ${unknownKeys.join(", ")}` });
+          json(res, { error: checked.message });
           return;
         }
         // The record's own type, read from storage rather than taken from the

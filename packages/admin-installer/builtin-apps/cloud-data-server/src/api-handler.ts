@@ -62,6 +62,7 @@ import {
   DEFAULT_AVAILABILITY,
   DEFAULT_RETRIEVAL_INTENT,
   RETRIEVAL_INTENTS,
+  checkMetadataValues,
   typeCategory,
   getCategory,
   isCategoryId,
@@ -73,6 +74,7 @@ import {
   parseRecordIdFilter,
 } from "@starkeep/protocol-primitives";
 import type {
+  Category,
   DataRecord,
   StarkeepId,
   HLCClock,
@@ -2639,13 +2641,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         if (metadataCategory === "other") {
           return clientErr(`Category "other" has no metadata table`, 400);
         }
-        const allowed = new Set(
-          getCategory(metadataCategory)!.metadataColumns.map((c) => c.name),
-        );
-        const unknownKeys = Object.keys(inlineMetadata).filter((k) => !allowed.has(k));
-        if (unknownKeys.length > 0) {
-          return clientErr(`Unknown metadata columns: ${unknownKeys.join(", ")}`, 400);
-        }
+        const checked = checkMetadataValues(metadataCategory as Category, inlineMetadata);
+        if (!checked.ok) return clientErr(checked.message, 400);
       }
 
       const contentHash = body.contentHash;
@@ -2968,12 +2965,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (category === "other") {
         return clientErr(`Category "other" has no metadata table`, 400);
       }
-      const categoryDef = getCategory(category)!;
-      const allowedColumns = new Set(categoryDef.metadataColumns.map((c) => c.name));
-      const unknownKeys = Object.keys(metadata).filter((k) => !allowedColumns.has(k));
-      if (unknownKeys.length > 0) {
-        return clientErr(`Unknown metadata columns: ${unknownKeys.join(", ")}`, 400);
-      }
+      const checked = checkMetadataValues(category as Category, metadata);
+      if (!checked.ok) return clientErr(checked.message, 400);
       // The write and the record's clock bump are one OCC unit: the bump is a
       // read-modify-write, so a retry has to re-read the row rather than replay
       // a stale one.
