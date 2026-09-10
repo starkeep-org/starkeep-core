@@ -17,6 +17,8 @@ export {
   isOrderableColumnType,
   isNumericColumnType,
   isCanonicalTimestamp,
+  pgColumnType,
+  sqliteColumnType,
   type CoreTypeMetadataColumn,
   type Category,
   type CategoryDef,

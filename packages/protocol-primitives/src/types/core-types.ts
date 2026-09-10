@@ -146,6 +146,61 @@ export function isCanonicalTimestamp(value: unknown): value is string {
   );
 }
 
+/**
+ * The physical column type one {@link LogicalColumnType} compiles to, per
+ * engine.
+ *
+ * **One mapping per engine, for every table on both planes.** Per-category
+ * metadata DDL, the DSQL app-syncable installer, the local SQLite installer and
+ * the conformance harness each used to carry a copy. Five copies is how they
+ * drift, and they had: the two Postgres copies disagreed about `real` and about
+ * `timestamp`, and the conformance harness — the suite whose whole job is to
+ * catch engine divergence — agreed with neither installer, so it built tables no
+ * installer would build and could not catch either defect.
+ *
+ * Two mappings are load-bearing and easy to get wrong in the other direction.
+ *
+ * `real` is `double precision`, never Postgres `real`. Postgres `real` is
+ * float4 and SQLite's REAL is always 8-byte IEEE, so the narrower type silently
+ * rounds — `37.774929496` stores as `37.77493` — and a value that round-trips
+ * through the cloud comes back changed.
+ *
+ * `timestamp` is `timestamp without time zone`, never `timestamptz`, and it
+ * holds canonical ISO-8601 in UTC. Everything persisted is UTC and no column
+ * carries a zone; zone handling belongs entirely to the client. `timestamptz`
+ * would accept and render through a session zone, which is a conversion this
+ * system has no reason to perform. The type states the rule and cannot enforce
+ * it — a value carrying an offset is silently truncated to its naive part — so
+ * the write path validates with {@link isCanonicalTimestamp}, and the Postgres
+ * read path returns the raw string rather than a `Date`. See
+ * `plan-query-plane-c3-c4-2026-09-10.md` section 0.1.
+ */
+export function pgColumnType(t: LogicalColumnType): string {
+  switch (t) {
+    case "integer": return "integer";
+    case "bigint": return "bigint";
+    case "real": return "double precision";
+    case "text": return "text";
+    case "blob": return "bytea";
+    case "timestamp": return "timestamp";
+    case "boolean": return "boolean";
+  }
+}
+
+/** The SQLite half of {@link pgColumnType}. SQLite has neither a timestamp nor
+ *  a boolean type, so both ride the affinity that already holds their values. */
+export function sqliteColumnType(t: LogicalColumnType): string {
+  switch (t) {
+    case "integer": return "INTEGER";
+    case "bigint": return "INTEGER";
+    case "real": return "REAL";
+    case "text": return "TEXT";
+    case "blob": return "BLOB";
+    case "timestamp": return "TEXT";
+    case "boolean": return "INTEGER";
+  }
+}
+
 export interface CoreTypeMetadataColumn {
   name: string;
   type: LogicalColumnType;
@@ -611,30 +666,6 @@ export function isCategoryId(id: string): id is Category {
  * rides with, on both the sync-apply path and the app write path.
  */
 export const METADATA_DISCRIMINANT_COLUMN = "record_type";
-
-function pgColumnType(t: LogicalColumnType): string {
-  switch (t) {
-    case "integer": return "integer";
-    case "bigint": return "bigint";
-    case "real": return "double precision";
-    case "text": return "text";
-    case "blob": return "bytea";
-    case "timestamp": return "timestamptz";
-    case "boolean": return "boolean";
-  }
-}
-
-function sqliteColumnType(t: LogicalColumnType): string {
-  switch (t) {
-    case "integer": return "INTEGER";
-    case "bigint": return "INTEGER";
-    case "real": return "REAL";
-    case "text": return "TEXT";
-    case "blob": return "BLOB";
-    case "timestamp": return "TEXT";
-    case "boolean": return "INTEGER";
-  }
-}
 
 /**
  * Emits a `CREATE TABLE IF NOT EXISTS shared.record_<category>_metadata`

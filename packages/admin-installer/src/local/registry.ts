@@ -3,7 +3,7 @@ import { sql, type CompiledQuery } from "kysely";
 import type { AppManifest, FileAccess, LabelKey, SyncableTable } from "@starkeep/admin-manifest";
 import { appSyncableTableName, sqliteCompiler as k } from "@starkeep/storage-sqlite";
 import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS, syncableIndexName } from "@starkeep/shared-space-api";
-import type { LogicalColumnType } from "@starkeep/protocol-primitives";
+import { sqliteColumnType } from "@starkeep/protocol-primitives";
 
 export type Operation = "install" | "uninstall";
 export type StepStatus = "pending" | "done" | "failed";
@@ -319,27 +319,16 @@ export function deleteAppLabelKeys(db: RawDatabase, appId: string): void {
   run(db, k.deleteFrom("shared_app_label_keys").where("app_id", "=", appId).compile());
 }
 
-const SQLITE_COLUMN_TYPES: Record<LogicalColumnType, "text" | "integer" | "real" | "blob"> = {
-  text: "text",
-  integer: "integer",
-  // SQLite's INTEGER is already 64-bit, so `bigint` needs no separate affinity.
-  bigint: "integer",
-  real: "real",
-  blob: "blob",
-  boolean: "integer",
-  // A logical type over a physical text column — see LogicalColumnType.
-  timestamp: "text",
-};
-
 interface SyncableColumnDef {
   name: string;
-  type: "text" | "integer" | "real" | "blob";
+  /** The emitted SQL type, from `sqliteColumnType`. */
+  type: string;
   notNull: boolean;
   primaryKey: boolean;
   /**
    * True when the app declared this column `boolean`.
    *
-   * `SQLITE_COLUMN_TYPES` maps `boolean` onto `integer`, since SQLite has no
+   * `sqliteColumnType` maps `boolean` onto INTEGER, since SQLite has no
    * boolean type, and the physical type is all the rest of this shape needs.
    * The domain constraint does need the distinction, so it is carried
    * separately rather than recovered by guessing which integers are flags.
@@ -365,7 +354,7 @@ function createSyncableTable(
     .createTable(fullName)
     .ifNotExists();
   for (const c of columns) {
-    tb = tb.addColumn(c.name, c.type, (col) => {
+    tb = tb.addColumn(c.name, sql.raw(c.type), (col) => {
       const withNull = c.notNull || c.primaryKey ? col.notNull() : col;
       // A declared `boolean` is physically an INTEGER here, so nothing but this
       // holds it to 0 and 1. The platform's own write path already checks the
@@ -439,7 +428,7 @@ export function createAppSyncableTables(
       appSyncableTableName(appId, table.name),
       table.columns.map((c) => ({
         name: c.name,
-        type: SQLITE_COLUMN_TYPES[c.type],
+        type: sqliteColumnType(c.type),
         notNull: Boolean(c.notNull),
         primaryKey: Boolean(c.primaryKey),
         boolean: c.type === "boolean",

@@ -20,24 +20,14 @@ import type {
   AppSyncableNamespace,
   AppSyncableNamespaceStore,
 } from "@starkeep/sync-engine";
+import { pgColumnType } from "@starkeep/protocol-primitives";
+import { PG_RAW_PARSERS } from "../src/pg-timestamps.js";
 import { DsqlAppSyncableApplier } from "../src/app-syncable/apply.js";
 import type { DatabaseClient } from "../src/types.js";
 
 const APP = "query-conformance-app";
 const TABLE = "rows_under_test";
 const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
-
-/** What `dsql-ddl.ts` emits for each declared column type. */
-const PG_TYPES: Record<string, string> = {
-  text: "TEXT",
-  integer: "INTEGER",
-  bigint: "BIGINT",
-  real: "DOUBLE PRECISION",
-  blob: "BYTEA",
-  boolean: "BOOLEAN",
-  // A logical type over a physical text column — see LogicalColumnType.
-  timestamp: "TEXT",
-};
 
 const open: PGlite[] = [];
 
@@ -48,7 +38,14 @@ afterEach(async () => {
 function clientFor(pg: PGlite): DatabaseClient {
   return {
     async query(text: string, values?: unknown[]) {
-      const result = await pg.query(text, values as unknown[] | undefined);
+      // The parsers are part of the connection contract, not test scaffolding:
+      // without them the driver turns a `timestamp` into a `Date` using the
+      // *process* zone, and a suite that skipped them could not catch the
+      // divergence it exists to catch. The SQLite side says the same thing
+      // about `applyConnectionPragmas`.
+      const result = await pg.query(text, values as unknown[] | undefined, {
+        parsers: PG_RAW_PARSERS,
+      });
       return { rows: result.rows as Record<string, unknown>[] };
     },
     async end() {},
@@ -61,7 +58,7 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
   open.push(pg);
 
   const columns = QUERY_COLUMNS.map(
-    (c) => `${c.name} ${PG_TYPES[c.type]}${c.primaryKey ? " PRIMARY KEY" : ""}`,
+    (c) => `${c.name} ${pgColumnType(c.type)}${c.primaryKey ? " PRIMARY KEY" : ""}`,
   ).join(", ");
   await pg.exec(`
     CREATE SCHEMA ${SCHEMA};
