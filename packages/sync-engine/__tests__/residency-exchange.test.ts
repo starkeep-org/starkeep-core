@@ -21,7 +21,7 @@ import { createInProcessSyncTransport } from "../src/transports/in-process-trans
 import { residencyOf } from "../src/residency.js";
 import { resolveSizeClass } from "../src/residency-policy.js";
 import type { BlobCandidate, ResidencyVerdict } from "../src/residency-policy.js";
-import type { SyncStateStore, Watermarks } from "../src/types.js";
+import type { FileRecordRow, SyncStateStore, Watermarks } from "../src/types.js";
 
 
 interface Fixture {
@@ -321,7 +321,10 @@ describe("a failed fetch is not a decline", () => {
 });
 
 describe("residencyOf names the ways a blob can be missing", () => {
-  const row = {
+  // Annotated rather than inferred: the literal infers `original_filename` and
+  // `deleted_at` as `null`, which is narrower than the column type, so the
+  // helpers below would only accept the nulls this fixture happens to use.
+  const row: FileRecordRow = {
     id: "r1",
     object_storage_key: "shared/image/aa/" + "a".repeat(64),
     content_hash: "a".repeat(64),
@@ -341,8 +344,8 @@ describe("residencyOf names the ways a blob can be missing", () => {
   ): ResidencyVerdict => ({ decision, sizeClass: null, reason });
 
   const stateOf = async (
-    decide?: (r: typeof row) => ResidencyVerdict,
-    over: Partial<typeof row> = {},
+    decide?: (r: FileRecordRow) => ResidencyVerdict,
+    over: Partial<FileRecordRow> = {},
   ) => {
     const storage = new MockObjectStorageAdapter();
     await storage.init();

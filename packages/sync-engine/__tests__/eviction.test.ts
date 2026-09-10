@@ -50,6 +50,9 @@ function entry(over: Partial<ResidentEntry> & { objectStorageKey: string; sizeBy
     // holds.
     resident: true,
     reserved: false,
+    // Held, for the same reason: `heldEver` separates a blob this node lost
+    // from one it never had, and every case here is about bytes it has.
+    heldEver: true,
     ...over,
   };
 }
