@@ -37,6 +37,7 @@ export {
   getCategory,
   isCategoryId,
   METADATA_DISCRIMINANT_COLUMN,
+  checkMetadataValues,
   CAPTURED_AT_METADATA_COLUMN,
   metadataIndexDdls,
   pgMetadataDdl,

@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  checkMetadataValues,
+  pgColumnType,
+  sqliteColumnType,
   TYPES,
   TYPE_IDS,
   EXTENSIONS,
@@ -167,5 +170,63 @@ describe("derived-from-bytes metadata columns (media plan items 4 / 21)", () => 
       expect(ddl).toContain("perceptual_hash");
       expect(ddl).toContain("thumb_hash");
     }
+  });
+});
+
+describe("checkMetadataValues", () => {
+  it("accepts a canonical timestamp", () => {
+    expect(checkMetadataValues("image", { captured_at: "2026-09-01T12:34:56.789Z" }))
+      .toEqual({ ok: true });
+  });
+
+  it("accepts null, which means the value was never derived", () => {
+    expect(checkMetadataValues("image", { captured_at: null })).toEqual({ ok: true });
+  });
+
+  it("rejects a zoneless timestamp, which is what parseExifDate can emit", () => {
+    // Photos' `parseExifDate` string branch returns `YYYY-MM-DDTHH:MM:SS`. The
+    // physical column silently accepts it, so this is the only gate.
+    const result = checkMetadataValues("image", { captured_at: "2026-09-01T12:34:56" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a non-UTC offset, which Postgres would silently truncate", () => {
+    // `+05:00` denotes 19:00 UTC the previous day; a naive column stores the
+    // 00:00 and loses the offset with no error at all.
+    const result = checkMetadataValues("image", { captured_at: "2026-09-01T00:00:00.000+05:00" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a timestamp with no milliseconds, because ordering is lexical", () => {
+    // `...T00:00:00Z` and `...T00:00:00.000Z` are the same instant and sort
+    // apart, so only one spelling can be legal.
+    expect(checkMetadataValues("image", { captured_at: "2026-09-01T00:00:00Z" }).ok).toBe(false);
+  });
+
+  it("still rejects an undeclared column", () => {
+    const result = checkMetadataValues("image", { not_a_column: 1 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("not_a_column");
+  });
+
+  it("leaves non-timestamp columns alone", () => {
+    // Deliberately narrow: widening to every declared type would reject writes
+    // that succeed today. See the note on checkMetadataValues.
+    expect(checkMetadataValues("image", { width: "1024" })).toEqual({ ok: true });
+  });
+});
+
+describe("physical column types", () => {
+  it("maps real to double precision, never Postgres real", () => {
+    // Postgres `real` is float4 and rounds 37.774929496 to 37.77493, while
+    // SQLite's REAL is always 8-byte IEEE.
+    expect(pgColumnType("real")).toBe("double precision");
+    expect(sqliteColumnType("real")).toBe("REAL");
+  });
+
+  it("maps timestamp to a zoneless type on both engines", () => {
+    // Everything persisted is UTC and no column carries a zone.
+    expect(pgColumnType("timestamp")).toBe("timestamp");
+    expect(sqliteColumnType("timestamp")).toBe("TEXT");
   });
 });

@@ -665,6 +665,53 @@ export function isCategoryId(id: string): id is Category {
  * asserting who may read the row. It is derived locally from the record it
  * rides with, on both the sync-apply path and the app write path.
  */
+/**
+ * Check a metadata write against the category's declared columns.
+ *
+ * Both servers had this as a name check written twice each, and a name check is
+ * not enough for one type. A `timestamp` column promises that lexical
+ * comparison is time comparison, which holds only while every value is
+ * canonical ISO-8601 in UTC — and the physical column cannot enforce it.
+ * Postgres silently truncates an offset (`2026-01-01T00:00:00.000+05:00`, an
+ * instant of 19:00 UTC, stores as `00:00:00`) and SQLite stores whatever string
+ * it is handed. So the promise is kept here, on the way in, or not at all.
+ *
+ * `parseExifDate` in Photos is the live example: its string branch emits a
+ * zoneless `YYYY-MM-DDTHH:MM:SS`, which nothing rejected before this.
+ *
+ * Deliberately narrow. It checks column names and `timestamp` values, and
+ * nothing else. Widening it to every declared type would reject writes that
+ * succeed today, which is a behaviour change worth making on its own rather
+ * than smuggling in beside a correctness fix.
+ */
+export function checkMetadataValues(
+  category: Category,
+  metadata: Record<string, unknown>,
+): { ok: true } | { ok: false; message: string } {
+  const def = getCategory(category);
+  if (!def) return { ok: false, message: `Unknown category "${category}"` };
+
+  const declared = new Map(def.metadataColumns.map((c) => [c.name, c]));
+  const unknown = Object.keys(metadata).filter((k) => !declared.has(k));
+  if (unknown.length > 0) {
+    return { ok: false, message: `Unknown metadata columns: ${unknown.join(", ")}` };
+  }
+
+  for (const [name, value] of Object.entries(metadata)) {
+    if (value === null || value === undefined) continue;
+    if (declared.get(name)!.type !== "timestamp") continue;
+    if (!isCanonicalTimestamp(value)) {
+      return {
+        ok: false,
+        message:
+          `"${name}" is a timestamp and must be canonical ISO-8601 in UTC ` +
+          `(YYYY-MM-DDTHH:MM:SS.mmmZ); received ${JSON.stringify(value)}`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 export const METADATA_DISCRIMINANT_COLUMN = "record_type";
 
 /**
