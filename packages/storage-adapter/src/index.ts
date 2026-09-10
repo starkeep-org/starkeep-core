@@ -58,6 +58,7 @@ export {
   type RowQuery,
   type RowQueryResult,
   type WhereClause,
+  LIKE_ESCAPE_CHAR,
 } from "./database/app-query-types.js";
 
 export {
@@ -72,14 +73,10 @@ export {
   buildAppAggregateQuery,
   collectRowPage,
   collectAggregatePage,
-  fetchLimitFor,
-  regexPredicates,
   orderKeyAlias,
-  regexColumnAlias,
   isOrderKeyAlias,
   stripOrderKeys,
   RESPONSE_BUDGET_BYTES,
-  REGEX_SCAN_CAP,
   SQLITE_APP_QUERY_DIALECT,
   POSTGRES_APP_QUERY_DIALECT,
   type AppQueryDialect,

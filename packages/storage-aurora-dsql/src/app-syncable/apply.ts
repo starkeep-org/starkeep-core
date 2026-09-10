@@ -12,7 +12,6 @@ import {
   buildAppRowQuery,
   collectAggregatePage,
   collectRowPage,
-  fetchLimitFor,
   POSTGRES_APP_QUERY_DIALECT,
   type BuildOptions,
   type ParsedQuery,
@@ -366,15 +365,12 @@ export class DsqlAppSyncableApplier
       return collectAggregatePage(query, result.rows);
     }
 
-    const compiled = buildAppRowQuery(qb, schemaTable, query, {
-      ...options,
-      fetchLimit: fetchLimitFor(query),
-    });
+    const compiled = buildAppRowQuery(qb, schemaTable, query, options);
     // The broker holds a plain `pg` client rather than a cursor, so the rows
     // arrive as an array and the fetch budget is applied over it. The row limit
-    // and the regex scan cap bound what that array can hold; the response
-    // budget's job here is to keep a page of pathological rows from failing at
-    // Lambda's 6 MB synchronous response ceiling, which it still does.
+    // bounds what that array can hold; the response budget's job here is to keep
+    // a page of pathological rows from failing at Lambda's 6 MB synchronous
+    // response ceiling, which it still does.
     const { rows } = await this.run(compiled);
     return collectRowPage(query, rows);
   }

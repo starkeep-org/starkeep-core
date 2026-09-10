@@ -66,27 +66,41 @@ export type Predicate =
    * A half-open range, not a pattern match.
    *
    * `prefix` compiles to `col >= lower AND col < upper`, which is an index seek
-   * on both engines: DSQL uses the `C` collation only and SQLite defaults to
-   * `BINARY`, so byte order agrees. `LIKE 'x%'` returns the same rows and is
-   * deliberately not exposed — it needs wildcard escaping on app-supplied
-   * values, SQLite's `LIKE` is case-insensitive for ASCII while Postgres's is
-   * not, and it reaches a btree index only under engine-specific preconditions.
+   * on both engines *unconditionally*: DSQL uses the `C` collation only and
+   * SQLite defaults to `BINARY`, so byte order agrees. It takes a literal, so
+   * `%` and `_` in app data carry no meaning and nothing needs escaping.
+   *
+   * `like` answers the anchored case too and reaches an index there, but only
+   * because both engines' preconditions happen to hold. Prefer `prefix` when
+   * the question really is "starts with".
    *
    * `upper` is null when the prefix has no successor (every trailing code unit
    * is at the top of its range), which compiles to the lower bound alone.
    */
   | { readonly op: "prefix"; readonly lower: string; readonly upper: string | null }
   /**
-   * A regular expression, evaluated by the server rather than by the database.
+   * SQL `LIKE`, with `%` and `_` as the wildcards and a backslash escape.
    *
-   * No index on either engine can serve a regex, so pushing it down would save
-   * row transfer and no scan work, while making the pattern language whatever
-   * the engine underneath happens to implement — POSIX on DSQL, nothing at all
-   * on SQLite until a host registers a function. Evaluating it in one place
-   * makes one query mean one thing, and makes the rows-examined cap exact
-   * rather than aspirational. See `regex.ts`.
+   * Pushed into the engine, unlike the `regex` operator this replaces. `LIKE`
+   * is linear in the pattern and the subject on both engines, so there is no
+   * pathological pattern to cap and no reason to evaluate it in the server:
+   * the database filters, and only matching rows cross the wire.
+   *
+   * The pattern's escape sequences are validated by the parser, and the local
+   * connection sets `PRAGMA case_sensitive_like = ON` so SQLite's ASCII
+   * case-folding does not make the same pattern mean two things. See
+   * `like.ts`.
    */
-  | { readonly op: "regex"; readonly pattern: string };
+  | { readonly op: "like"; readonly pattern: string };
+
+/**
+ * The character that makes the next `%` or `_` in a `like` pattern a literal.
+ *
+ * Declared beside the predicate rather than beside the parser because the SQL
+ * compiler binds it and the parser validates against it, and the two must not
+ * be able to drift apart.
+ */
+export const LIKE_ESCAPE_CHAR = "\\";
 
 /** One `WHERE` term: a column and a predicate over it, ANDed with the rest. */
 export interface WhereClause {
@@ -225,21 +239,16 @@ export type ParsedQueryResult = RowQueryResult | AggregateQueryResult;
 export interface QueryTableSchema {
   readonly name: string;
   /**
-   * The table's columns, or null when the namespace registry row predates
-   * column types.
+   * The table's columns.
    *
-   * `null` is the migration. The repo keeps no migration ledger by design and
-   * reinstalling an app repopulates the registry, so rather than refusing every
-   * query until someone reinstalls, an untyped table answers the predicates
-   * whose meaning does not depend on a type — equality, its negation, an `in`
-   * list and `is null` — and refuses the rest with a message that says to
-   * reinstall. Every comparison, `prefix`, `regex` and every aggregate over a
-   * column needs a type and is therefore refused.
-   *
-   * The shared plane always has columns: records, labels and the metadata
-   * tables describe themselves in code rather than in a registry row.
+   * Always present. An app-syncable table's columns come from its namespace
+   * registry row, which both installers write from the manifest through one
+   * helper; the shared plane's tables describe themselves in code. A registry
+   * row carrying no columns is an install that did not finish, and the
+   * namespace stores refuse to load one rather than letting a second, weaker
+   * grammar exist for it.
    */
-  readonly columns: readonly AppColumnInfo[] | null;
+  readonly columns: readonly AppColumnInfo[];
   /** Ordered, and the tiebreaker the parser appends to every row query. */
   readonly pkColumns: readonly string[];
   /**

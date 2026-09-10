@@ -35,7 +35,7 @@ import type { AppSyncableColumnInfo } from "@starkeep/sync-engine";
 import { SOFT_DELETE_COLUMN, SYSTEM_COLUMN_NAMES } from "../app-syncable/columns.js";
 import { decodePageToken } from "@starkeep/storage-adapter";
 import { prefixUpperBound } from "./prefix.js";
-import { compileRegexPattern } from "./regex.js";
+import { validateLikePattern } from "./like.js";
 import {
   QueryParseError,
   type AggregateFn,
@@ -75,7 +75,7 @@ export const DEFAULT_LIMIT = 30;
 export const MAX_LIMIT = 500;
 
 const COMPARISON_OPS = new Set(["lt", "lte", "gt", "gte"]);
-const ALL_OPS = ["lt", "lte", "gt", "gte", "ne", "in", "is", "prefix", "regex"] as const;
+const ALL_OPS = ["lt", "lte", "gt", "gte", "ne", "in", "is", "prefix", "like"] as const;
 const AGGREGATE_FNS = new Set<AggregateFn>(["count", "sum", "avg", "min", "max"]);
 
 /**
@@ -113,51 +113,13 @@ function splitList(raw: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-/**
- * A column reference, resolved as far as the table's description allows.
- *
- * `known: false` is the untyped case — a namespace registry row written before
- * column types existed. The column may well exist; the registry simply does not
- * say what it holds, so nothing that turns on a type may be asked of it. See
- * {@link QueryTableSchema.columns}.
- */
-type ResolvedColumn =
-  | { readonly known: true; readonly info: AppSyncableColumnInfo }
-  | { readonly known: false; readonly name: string };
-
-/** The identifier shape the manifest schema and both installers already pin. */
-const IDENTIFIER_RE = /^[a-z_][a-z0-9_]*$/;
-
 /** Look a column up, refusing anything the table does not declare. */
-function columnOf(schema: QueryTableSchema, name: string): ResolvedColumn {
-  if (schema.columns === null) {
-    if (!IDENTIFIER_RE.test(name)) {
-      throw new QueryParseError(`"${name}" is not a valid column name`);
-    }
-    return { known: false, name };
-  }
+function columnOf(schema: QueryTableSchema, name: string): AppSyncableColumnInfo {
   const column = schema.columns.find((c) => c.name === name);
   if (!column) {
     throw new QueryParseError(`"${name}" is not a column of "${schema.name}"`);
   }
-  return { known: true, info: column };
-}
-
-/**
- * Refuse something an untyped table cannot answer, and say what to do about it.
- *
- * Reinstalling the app repopulates the registry, which is the whole migration —
- * so the message names the remedy rather than describing the shortfall.
- */
-function requireTypes(schema: QueryTableSchema, column: ResolvedColumn, what: string): AppSyncableColumnInfo {
-  if (!column.known) {
-    throw new QueryParseError(
-      `"${schema.name}" has no declared column types in the namespace registry, so ${what} ` +
-        `on "${column.name}" cannot be validated. Reinstall the app to record them; ` +
-        `equality, ne, in and is null work meanwhile.`,
-    );
-  }
-  return column.info;
+  return column;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +157,7 @@ function parseWhere(schema: QueryTableSchema, raw: string | undefined): WhereCla
       throw new QueryParseError(`where["${name}"] is an empty object and asks nothing`);
     }
     for (const [op, operand] of entries) {
-      clauses.push({ column: name, predicate: predicateFor(schema, column, op, operand) });
+      clauses.push({ column: name, predicate: predicateFor(column, op, operand) });
     }
   }
 
@@ -209,61 +171,25 @@ function parseWhere(schema: QueryTableSchema, raw: string | undefined): WhereCla
     }
   }
 
-  // A regex is the one predicate no index can serve, so it never runs on its
-  // own: something else has to cut the candidate set down first. Checked here
-  // rather than in the applier because a rejection at parse time costs nothing
-  // and a scan does not.
-  const regexClauses = clauses.filter((c) => c.predicate.op === "regex");
-  if (regexClauses.length > 0) {
-    const companion = clauses.some(
-      (c) => c.predicate.op !== "regex" && !regexClauses.some((r) => r.column === c.column),
-    );
-    if (!companion) {
-      throw new QueryParseError(
-        `a regex predicate needs a companion predicate on another column: no index can ` +
-          `serve a regex, so on its own it examines the whole table`,
-      );
-    }
-  }
-
   return clauses;
 }
 
-function value(column: ResolvedColumn, raw: unknown): QueryValue {
-  if (!column.known) {
-    // Nothing to check it against. Equality against whatever the app sent is
-    // exactly what the hand-written grammar this replaces already did, so an
-    // untyped table is no worse off than before rather than newly broken.
-    if (
-      raw === null ||
-      typeof raw === "string" ||
-      typeof raw === "number" ||
-      typeof raw === "boolean"
-    ) {
-      return raw;
-    }
-    throw new QueryParseError(`"${column.name}" received a value that is not a JSON scalar`);
-  }
-  const checked = checkValue(column.info, raw);
+function value(column: AppSyncableColumnInfo, raw: unknown): QueryValue {
+  const checked = checkValue(column, raw);
   if (!checked.ok) throw new QueryParseError(checked.message);
   return checked.value;
 }
 
-function predicateFor(
-  schema: QueryTableSchema,
-  column: ResolvedColumn,
-  op: string,
-  operand: unknown,
-): Predicate {
+function predicateFor(column: AppSyncableColumnInfo, op: string, operand: unknown): Predicate {
   if (!(ALL_OPS as readonly string[]).includes(op)) {
     throw new QueryParseError(
       `"${op}" is not an operator; supported operators are ${ALL_OPS.join(", ")}`,
     );
   }
-  const name = column.known ? column.info.name : column.name;
+  const name = column.name;
 
   if (COMPARISON_OPS.has(op)) {
-    const info = requireTypes(schema, column, `the ${op} operator`);
+    const info = column;
     if (!isOrderableColumn(info)) {
       throw new QueryParseError(`"${name}" is a ${info.type} and has no ordering`);
     }
@@ -306,26 +232,21 @@ function predicateFor(
         throw new QueryParseError(`is takes null, true or false`);
       }
       if (operand !== null) {
-        // `is true` is only meaningful once the column is known to be a
-        // boolean; `is null` needs no type at all, which is why it works on an
-        // untyped table and this does not.
-        const info = requireTypes(schema, column, `is true/false`);
-        if (info.type !== "boolean") {
+        if (column.type !== "boolean") {
           throw new QueryParseError(
-            `is true/false applies to a boolean column; "${name}" is ${info.type}`,
+            `is true/false applies to a boolean column; "${name}" is ${column.type}`,
           );
         }
-      } else if (column.known && column.info.notNull) {
+      } else if (column.notNull) {
         throw new QueryParseError(`"${name}" is NOT NULL, so is null matches nothing`);
       }
       return { op: "is", value: operand };
     }
 
     case "prefix": {
-      const info = requireTypes(schema, column, `prefix`);
-      if (info.type !== "text" && info.type !== "timestamp") {
+      if (column.type !== "text" && column.type !== "timestamp") {
         throw new QueryParseError(
-          `prefix applies to a text or timestamp column; "${name}" is ${info.type}`,
+          `prefix applies to a text or timestamp column; "${name}" is ${column.type}`,
         );
       }
       if (typeof operand !== "string" || operand.length === 0) {
@@ -334,20 +255,16 @@ function predicateFor(
       return { op: "prefix", lower: operand, upper: prefixUpperBound(operand) };
     }
 
-    case "regex": {
-      const info = requireTypes(schema, column, `regex`);
-      if (info.type !== "text" && info.type !== "timestamp") {
+    case "like": {
+      if (column.type !== "text" && column.type !== "timestamp") {
         throw new QueryParseError(
-          `regex applies to a text or timestamp column; "${name}" is ${info.type}`,
+          `like applies to a text or timestamp column; "${name}" is ${column.type}`,
         );
       }
       if (typeof operand !== "string") {
-        throw new QueryParseError(`regex takes a string pattern`);
+        throw new QueryParseError(`like takes a string pattern`);
       }
-      // Compiled now so a pattern the subset admits and `RegExp` refuses fails
-      // as a parse error rather than once per row, halfway through a page.
-      compileRegexPattern(operand);
-      return { op: "regex", pattern: operand };
+      return { op: "like", pattern: validateLikePattern(operand) };
     }
 
     default:
@@ -487,7 +404,7 @@ function parseAggregate(schema: QueryTableSchema, raw: string): AggregateTerm[] 
     if (typeof col !== "string") {
       throw new QueryParseError(`aggregate["${name}"].col must name a column for ${fn}`);
     }
-    const column = requireTypes(schema, aggregateColumn(schema, name, col), `${fn}`);
+    const column = aggregateColumn(schema, name, col);
     if (fn === "sum" || fn === "avg") {
       if (!isNumericColumn(column)) {
         throw new QueryParseError(
@@ -505,7 +422,7 @@ function aggregateColumn(
   schema: QueryTableSchema,
   outputName: string,
   column: string,
-): ResolvedColumn {
+): AppSyncableColumnInfo {
   if (column === SOFT_DELETE_COLUMN) {
     throw new QueryParseError(
       `aggregate["${outputName}"] names "${SOFT_DELETE_COLUMN}", which the server owns`,
@@ -540,10 +457,8 @@ function parseRowQuery(
       throw new QueryParseError(`"${SOFT_DELETE_COLUMN}" is owned by the server`);
     }
     const resolved = columnOf(schema, column);
-    // Ordering needs no value to check, so an untyped table can still be
-    // ordered — it just cannot be told that the column is a blob.
-    if (resolved.known && !isOrderableColumn(resolved.info)) {
-      throw new QueryParseError(`"${column}" is a ${resolved.info.type} and has no ordering`);
+    if (!isOrderableColumn(resolved)) {
+      throw new QueryParseError(`"${column}" is a ${resolved.type} and has no ordering`);
     }
   });
 

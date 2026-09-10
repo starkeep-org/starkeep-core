@@ -5,7 +5,7 @@
 export { SqliteDatabaseAdapter, type SqliteDriver } from "./adapter.js";
 export { compiler as sqliteCompiler } from "./query-builder.js";
 export type { SqliteDatabaseAdapterOptions } from "./adapter.js";
-export { initializeLocalSchema } from "./schema/bootstrap.js";
+export { initializeLocalSchema, applyConnectionPragmas } from "./schema/bootstrap.js";
 export {
   appSyncableTableName,
   getAppSyncableNamespace,

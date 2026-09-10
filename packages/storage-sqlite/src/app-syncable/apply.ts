@@ -8,7 +8,6 @@ import {
   buildAppRowQuery,
   collectAggregatePage,
   collectRowPage,
-  fetchLimitFor,
   SQLITE_APP_QUERY_DIALECT,
   type BuildOptions,
   type ParsedQuery,
@@ -381,16 +380,13 @@ export class SqliteAppSyncableApplier
       return collectAggregatePage(query, this.selectRows(compiled));
     }
 
-    const compiled = buildAppRowQuery(qb, fullName, query, {
-      ...options,
-      fetchLimit: fetchLimitFor(query),
-    });
+    const compiled = buildAppRowQuery(qb, fullName, query, options);
     // `node:sqlite` has no streaming cursor, so the fetch budget is applied
-    // over an array rather than over an iterator here. The row limit and the
-    // regex scan cap bound what that array can hold, and the response budget
-    // engages only on pathological rows — so what is given up is that a page of
-    // 1 MiB text values is materialized before being cut, on a server running
-    // on the operator's own machine.
+    // over an array rather than over an iterator here. The row limit bounds what
+    // that array can hold, and the response budget engages only on pathological
+    // rows — so what is given up is that a page of 1 MiB text values is
+    // materialized before being cut, on a server running on the operator's own
+    // machine.
     return collectRowPage(query, this.selectRows(compiled));
   }
 

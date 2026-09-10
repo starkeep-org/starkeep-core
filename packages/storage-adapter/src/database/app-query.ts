@@ -11,13 +11,7 @@
  * {@link AppQueryDialect} and is small: `avg` returns `numeric` on Postgres and
  * a float on SQLite, so one of them casts.
  *
- * ## Two things this module deliberately does not compile
- *
- * **`regex` predicates.** No index on either engine can serve one, so pushing
- * it down would save row transfer and no scan work, while making the pattern
- * language whatever the engine underneath implements. It is evaluated over the
- * caller's row iterator instead, which is also the only way the rows-examined
- * cap can be exact. See `regexPredicates`.
+ * ## The one thing this module deliberately does not compile
  *
  * **The response budget.** A budget on *fetching* rather than on returning
  * belongs to whoever holds the cursor, so the caller iterates and stops. This
@@ -27,6 +21,7 @@
 
 import type { CompiledQuery, ExpressionBuilder, Kysely, SelectQueryBuilder } from "kysely";
 import { sql } from "kysely";
+import { LIKE_ESCAPE_CHAR } from "./app-query-types.js";
 import type {
   AggregateQuery,
   AggregateQueryResult,
@@ -72,39 +67,9 @@ export function orderKeyAlias(index: number): string {
   return `__ok${index}`;
 }
 
-/**
- * The alias one regex predicate's column rides back under.
- *
- * Same reason as {@link orderKeyAlias}: a regex is evaluated over the returned
- * rows, and `select=id&where={"tag":{"regex":"^al"}}` filters on a column the
- * projection did not ask for. Without this the predicate reads `undefined` on
- * every row and the page comes back empty — a wrong answer that looks like a
- * correct one.
- */
-export function regexColumnAlias(column: string): string {
-  return `__rx_${column}`;
-}
-
 /** Is this key one of the reserved aliases the compiler adds? */
 export function isOrderKeyAlias(key: string): boolean {
-  return key.startsWith("__ok") || key.startsWith("__rx_");
-}
-
-/**
- * The regex predicates a query carries, which the caller evaluates itself.
- *
- * Returned rather than compiled, so the caller cannot forget them: a query
- * whose regex silently vanished would return every row the other predicates
- * matched, which is a wrong answer rather than a slow one.
- */
-export function regexPredicates(
-  where: readonly WhereClause[],
-): Array<{ column: string; pattern: string }> {
-  return where
-    .filter((c): c is WhereClause & { predicate: { op: "regex"; pattern: string } } =>
-      c.predicate.op === "regex",
-    )
-    .map((c) => ({ column: c.column, pattern: c.predicate.pattern }));
+  return key.startsWith("__ok");
 }
 
 function applyPredicate(qb: Qb, column: string, predicate: Predicate): Qb {
@@ -156,9 +121,14 @@ function applyPredicate(qb: Qb, column: string, predicate: Predicate): Qb {
             sql<boolean>`(${ref} >= ${predicate.lower} and ${ref} < ${predicate.upper})`,
           );
 
-    case "regex":
-      // Evaluated by the caller — see the module note.
-      return qb;
+    case "like":
+      // The escape character is bound rather than written into the SQL text,
+      // so neither engine's string-literal rules can reinterpret it. SQLite
+      // matches Postgres here only because the local connection sets
+      // `PRAGMA case_sensitive_like = ON` — see `bootstrap.ts`.
+      return where(
+        sql<boolean>`${ref} like ${predicate.pattern} escape ${LIKE_ESCAPE_CHAR}`,
+      );
   }
 }
 
@@ -250,17 +220,9 @@ export interface BuildOptions {
    * what the whole authorization question is about.
    */
   readonly serverWhere?: readonly WhereClause[];
-  /**
-   * How many rows to ask for beyond the limit.
-   *
-   * One, normally: it is what distinguishes a full page from a complete result.
-   * A query carrying a regex asks for the scan cap instead, because the extra
-   * rows are candidates the caller will filter and most of them may not match.
-   */
-  readonly fetchLimit?: number;
 }
 
-/** One page of rows, plus whatever `fetchLimit` asked for beyond it. */
+/** One page of rows, plus the one extra row that reveals a further page. */
 export function buildAppRowQuery(
   k: Kysely<AppQueryDb>,
   fullTableName: string,
@@ -279,11 +241,6 @@ export function buildAppRowQuery(
   query.order.forEach((term, index) => {
     qb = qb.select(sql.ref(term.column).as(orderKeyAlias(index))) as Qb;
   });
-  // So do the columns the server-side regex predicates read.
-  for (const { column } of regexPredicates(query.where)) {
-    qb = qb.select(sql.ref(column).as(regexColumnAlias(column))) as Qb;
-  }
-
   // The server owns the soft-delete predicate. A caller cannot name the column
   // at all, so this cannot be contradicted.
   qb = qb.where(sql<boolean>`${sql.ref("deleted_at")} is null` as never) as Qb;
@@ -291,7 +248,10 @@ export function buildAppRowQuery(
   qb = applyWhere(qb, query.where);
   qb = applyPageToken(qb, query);
   qb = applyOrder(qb, query.order);
-  qb = qb.limit(query.limit + (options.fetchLimit ?? 1)) as Qb;
+  // One row past the limit, which is what distinguishes a full page from a
+  // complete result. Every predicate is now applied by the engine, so a fetched
+  // row is a matching row rather than a candidate.
+  qb = qb.limit(query.limit + 1) as Qb;
 
   return qb.compile();
 }
@@ -330,7 +290,10 @@ export function buildAppAggregateQuery(
       term.direction,
     ) as Qb;
   }
-  qb = qb.limit(query.limit + (options.fetchLimit ?? 1)) as Qb;
+  // One row past the limit, which is what distinguishes a full page from a
+  // complete result. Every predicate is now applied by the engine, so a fetched
+  // row is a matching row rather than a candidate.
+  qb = qb.limit(query.limit + 1) as Qb;
 
   return qb.compile();
 }
@@ -398,29 +361,7 @@ export function stripOrderKeys(row: Record<string, unknown>): Record<string, unk
 export const RESPONSE_BUDGET_BYTES = 4 * 1024 * 1024;
 
 /**
- * How many candidate rows a regex predicate may be evaluated against.
- *
- * Against a ten-execution Lambda budget, one pathological query is a
- * platform-wide event rather than one slow page. Reaching the cap sets
- * `truncated`, which is the signal a caller already handles for the row limit
- * and the byte budget.
- */
-export const REGEX_SCAN_CAP = 20_000;
-
-/**
- * How many rows to fetch beyond the limit.
- *
- * One, normally: enough to tell a full page from a complete result. A query
- * carrying a regex asks for the scan cap instead, because the rows it fetches
- * are candidates and most of them may not match.
- */
-export function fetchLimitFor(query: RowQuery): number {
-  return regexPredicates(query.where).length > 0 ? REGEX_SCAN_CAP : 1;
-}
-
-/**
- * Cut a page from a row stream, applying the regex predicates, the row limit
- * and the response budget in one pass.
+ * Cut a page from a row stream, applying the row limit and the response budget.
  *
  * The budget is on **fetching** rather than on returning. An earlier draft had
  * serialization stop at 4 MB and throw away the tail, which wastes retrieval
@@ -432,35 +373,12 @@ export async function collectRowPage(
   query: RowQuery,
   source: AsyncIterable<Record<string, unknown>> | Iterable<Record<string, unknown>>,
 ): Promise<RowQueryResult> {
-  const regexes = regexPredicates(query.where).map((p) => ({
-    column: p.column,
-    alias: regexColumnAlias(p.column),
-    re: new RegExp(p.pattern, "u"),
-  }));
-
   const kept: Record<string, unknown>[] = [];
   let lastRaw: Record<string, unknown> | null = null;
   let bytes = 0;
-  let examined = 0;
   let truncated = false;
 
   for await (const raw of source as AsyncIterable<Record<string, unknown>>) {
-    examined += 1;
-    if (regexes.length > 0 && examined > REGEX_SCAN_CAP) {
-      truncated = true;
-      break;
-    }
-    // A regex over a non-string — a null, or a column holding a number — is a
-    // non-match rather than an error. SQL's own `~` behaves the same way
-    // against NULL, and a page that failed because one row was null would be a
-    // page whose success depended on its contents.
-    if (regexes.some(({ column, alias, re }) => {
-      const value = raw[alias] ?? raw[column];
-      return typeof value !== "string" || !re.test(value);
-    })) {
-      continue;
-    }
-
     if (kept.length === query.limit) {
       // One row past the limit exists, so rows were left behind.
       truncated = true;

@@ -39,7 +39,6 @@ const CARD_STATE: QueryTableSchema = {
 };
 
 /** A registry row written before column types existed. */
-const UNTYPED: QueryTableSchema = { name: "legacy", pkColumns: ["id"], columns: null };
 
 const TS = "2026-09-09T00:00:00.000Z";
 
@@ -83,7 +82,7 @@ describe("where", () => {
   });
 
   it("refuses an unknown operator", () => {
-    rejects({ where: JSON.stringify({ reps: { like: "x" } }) }, /not an operator/);
+    rejects({ where: JSON.stringify({ reps: { matches: "x" } }) }, /not an operator/);
   });
 
   it("checks a value against the column's declared type", () => {
@@ -189,46 +188,43 @@ describe("prefix", () => {
   });
 });
 
-describe("regex", () => {
-  const companion = { deck_id: "d1" };
-
-  it("accepts the documented subset", () => {
-    for (const pattern of ["^photo", "a|b", "(ab)+c", "[a-z]*", "x?", "\\d+"]) {
-      const q = rows({ where: JSON.stringify({ ...companion, id: { regex: pattern } }) });
-      expect(q.where.some((c) => c.predicate.op === "regex")).toBe(true);
+describe("like", () => {
+  it("accepts wildcards anywhere in the pattern", () => {
+    for (const pattern of ["photo%", "%photo", "%pho%to%", "photo_", "plain"]) {
+      const q = rows({ where: JSON.stringify({ id: { like: pattern } }) });
+      expect(q.where.some((c) => c.predicate.op === "like")).toBe(true);
     }
   });
 
-  it("refuses constructs outside it", () => {
-    const cases: Array<[string, RegExp]> = [
-      ["[[:alpha:]]", /POSIX character classes/],
-      ["(?=x)", /lookaround/],
-      ["(?<=x)", /lookaround/],
-      ["a{2,3}", /\{n,m\} repetition/],
-      ["(a)\\1", /backreferences/],
-      ["[abc", /unterminated/],
-      ["a\\", /trailing backslash/],
-    ];
-    for (const [pattern, match] of cases) {
-      rejects({ where: JSON.stringify({ ...companion, id: { regex: pattern } }) }, match);
+  it("needs no companion predicate", () => {
+    // Unlike the `regex` operator it replaces. `LIKE` is pushed into the engine
+    // and is linear in the subject, so an unanchored pattern costs what an `eq`
+    // on an unindexed column costs and earns no special rule.
+    const q = rows({ where: JSON.stringify({ id: { like: "%x%" } }) });
+    expect(q.where).toHaveLength(1);
+  });
+
+  it("accepts the three meaningful escapes", () => {
+    for (const pattern of ["100\\%", "a\\_b", "c\\\\d"]) {
+      const q = rows({ where: JSON.stringify({ id: { like: pattern } }) });
+      expect(q.where.some((c) => c.predicate.op === "like")).toBe(true);
     }
   });
 
-  it("caps pattern length", () => {
-    rejects(
-      { where: JSON.stringify({ ...companion, id: { regex: "a".repeat(201) } }) },
-      /the maximum is 200/,
-    );
+  it("refuses an escape that means nothing", () => {
+    // `\d` would quietly match a literal `d` on both engines, so an author who
+    // wrote it meaning "a digit" gets an error rather than a wrong answer.
+    rejects({ where: JSON.stringify({ id: { like: "\\d+" } }) }, /not a like escape/);
+    rejects({ where: JSON.stringify({ id: { like: "a\\" } }) }, /lone/);
   });
 
-  it("requires a companion predicate, because no index can serve it", () => {
-    rejects({ where: JSON.stringify({ id: { regex: "^x" } }) }, /needs a companion predicate/);
-    // A second predicate on the same column is not a companion: it constrains
-    // the same access path the regex is already stuck on.
-    rejects(
-      { where: JSON.stringify({ id: { regex: "^x", prefix: "y" } }) },
-      /needs a companion predicate/,
-    );
+  it("caps pattern length and refuses an empty one", () => {
+    rejects({ where: JSON.stringify({ id: { like: "a".repeat(201) } }) }, /the maximum is 200/);
+    rejects({ where: JSON.stringify({ id: { like: "" } }) }, /non-empty/);
+  });
+
+  it("applies to text and timestamp columns only", () => {
+    rejects({ where: JSON.stringify({ reps: { like: "1%" } }) }, /like applies to a text/);
   });
 });
 
@@ -384,44 +380,3 @@ describe("aggregate", () => {
   });
 });
 
-describe("a registry row written before column types existed", () => {
-  // Reinstalling the app repopulates the registry, so this is the whole
-  // migration: the predicates whose meaning does not turn on a type keep
-  // working, and the rest says what to do about it.
-  it("still answers the predicates that need no type", () => {
-    const q = parseQuery(UNTYPED, {
-      where: JSON.stringify({
-        id: "x",
-        deck_id: { ne: "d1" },
-        state: { in: [1, 2] },
-        due: { is: null },
-      }),
-      select: "id,due",
-      order: "due.desc",
-      limit: "50",
-    });
-    expect(q.mode).toBe("rows");
-    expect(q.where.map((c) => c.predicate.op)).toEqual(["eq", "ne", "in", "is"]);
-  });
-
-  it("refuses every operator that needs one, and names the remedy", () => {
-    for (const where of [
-      { due: { gte: TS } },
-      { id: { prefix: "x" } },
-      { deck_id: "d", id: { regex: "^x" } },
-      { suspended: { is: true } },
-    ]) {
-      expect(() => parseQuery(UNTYPED, { where: JSON.stringify(where) })).toThrow(
-        /Reinstall the app to record them/,
-      );
-    }
-    expect(() =>
-      parseQuery(UNTYPED, { aggregate: JSON.stringify({ t: { fn: "sum", col: "reps" } }) }),
-    ).toThrow(/Reinstall the app to record them/);
-  });
-
-  it("still answers count(*), which reads no column", () => {
-    const q = parseQuery(UNTYPED, { aggregate: JSON.stringify({ n: { fn: "count" } }) });
-    expect(q.mode).toBe("aggregate");
-  });
-});

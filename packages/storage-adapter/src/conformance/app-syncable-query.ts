@@ -301,33 +301,121 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
   },
 
   {
-    name: "`regex` returns the same rows on both engines",
+    name: "`like` returns the same rows on both engines",
     async run(h) {
       await seedQueryRows(h);
-      // Evaluated by the server rather than by the database, which is what
-      // makes this answer possible at all: SQLite ships no regex
-      // implementation and DSQL evaluates POSIX.
       equal(
-        (await rows(h, {
-          where: [
-            { column: "flag", predicate: { op: "eq", value: 0 } },
-            { column: "name", predicate: { op: "regex", pattern: "^alpha" } },
-          ],
-        })).ids,
+        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "alpha%" } }] }))
+          .ids,
         ["r1", "r2"],
-        "name matches ^alpha",
+        "anchored pattern",
       );
-      // A regex over a null is a non-match rather than an error, the same way
-      // SQL's own `~` behaves against NULL.
+      // The substring question `prefix` cannot answer, and the reason `like`
+      // exists alongside it.
+      equal(
+        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "%mm%" } }] }))
+          .ids,
+        ["r5"],
+        "leading and trailing wildcard",
+      );
+      // `_` is exactly one character, so it matches `alpha` and not `alphabet`.
+      equal(
+        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "alph_" } }] }))
+          .ids,
+        ["r1"],
+        "single-character wildcard",
+      );
+      // `LIKE` against NULL is unknown, so a null column value is a non-match
+      // rather than an error.
       equal(
         (await rows(h, {
           where: [
             { column: "id", predicate: { op: "in", values: ["r3", "r5"] } },
-            { column: "name", predicate: { op: "regex", pattern: "a" } },
+            { column: "name", predicate: { op: "like", pattern: "%a%" } },
           ],
         })).ids,
         ["r5"],
-        "regex over a null column value",
+        "like over a null column value",
+      );
+    },
+  },
+
+  {
+    name: "`like` is case-sensitive on both engines",
+    async run(h) {
+      await seedQueryRows(h);
+      // The single most important case in this file. SQLite's LIKE folds ASCII
+      // case by default and Postgres's does not, so without
+      // `PRAGMA case_sensitive_like = ON` this pattern matches r4 locally and
+      // nothing in the cloud — one query, two answers, which is the whole thing
+      // the grammar exists to prevent.
+      equal(
+        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "beta%" } }] }))
+          .ids,
+        [],
+        "lowercase pattern does not match BETA",
+      );
+      equal(
+        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "BETA%" } }] }))
+          .ids,
+        ["r4"],
+        "exact-case pattern matches BETA",
+      );
+    },
+  },
+
+  {
+    name: "`like` escapes a wildcard back into a literal",
+    async run(h) {
+      await seedQueryRows(h);
+      // Needs a row holding the wildcard characters themselves. Inserted here
+      // rather than in QUERY_ROWS because every aggregate case counts that
+      // fixture, and a sixth row would restate five expected numbers to prove
+      // something only this case asks about.
+      const ts = hlc(99);
+      await h.applier.apply({
+        timestamp: ts,
+        appId: h.appId,
+        table: h.table,
+        op: "insert",
+        row: {
+          id: "r6",
+          name: "100%_off",
+          n: null,
+          r: null,
+          flag: 0,
+          ts: null,
+          updated_at: serializeHLC(ts),
+          deleted_at: null,
+        },
+      });
+
+      // Unescaped, both wildcards do their usual job and the pattern matches.
+      equal(
+        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "100%_off" } }] }))
+          .ids,
+        ["r6"],
+        "unescaped wildcards match",
+      );
+      // Escaped, they are the literal characters — which this row happens to
+      // hold, so the same pattern still matches and proves the escape reached
+      // the engine rather than being dropped.
+      equal(
+        (await rows(h, {
+          where: [{ column: "name", predicate: { op: "like", pattern: "100\\%\\_off" } }],
+        })).ids,
+        ["r6"],
+        "escaped wildcards match the literal characters",
+      );
+      // The discriminating half: `alpha\%` is a literal `alpha%`, which no row
+      // holds, while `alpha%` matches two. An engine that ignored the escape
+      // clause would return r1 and r2 here.
+      equal(
+        (await rows(h, {
+          where: [{ column: "name", predicate: { op: "like", pattern: "alpha\\%" } }],
+        })).ids,
+        [],
+        "escaped % is a literal and matches nothing",
       );
     },
   },

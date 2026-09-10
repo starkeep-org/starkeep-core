@@ -8,6 +8,7 @@
  */
 export {
   QueryParseError,
+  LIKE_ESCAPE_CHAR,
   type AppColumnInfo,
   type AggregateFn,
   type AggregateQuery,

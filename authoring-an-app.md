@@ -277,7 +277,7 @@ GET /app-data/db/card_state
 
 - **`where`** — strict JSON. A column maps either to a scalar, meaning
   equality, or to an object of operator to value. Operators are `lt`, `lte`,
-  `gt`, `gte`, `ne`, `in`, `is`, `prefix` and `regex`, joined with AND. `is`
+  `gt`, `gte`, `ne`, `in`, `is`, `prefix` and `like`, joined with AND. `is`
   takes `null`, `true` or `false`. `in` takes a JSON array, so nothing needs
   comma-escaping. There is no `or`; issue two requests and merge.
 - **`select`** — a comma-separated column list. Omitted means every column.
@@ -292,10 +292,22 @@ GET /app-data/db/card_state
   list** — the two are one list, because SQL requires every non-aggregate
   output column to be grouped.
 
-`prefix` compiles to a half-open range and seeks an index; a `^`-anchored
-`regex` asks the same question and no index can serve it. They look alike and
-have opposite costs, so reach for `prefix` first. A `regex` also needs a
-companion predicate on another column, so it never scans a table on its own.
+`prefix` and `like` both match text and are not interchangeable. `prefix` takes
+a literal and compiles to a half-open range, so it always seeks an index and
+`%` or `_` inside your data means nothing. `like` takes a pattern where `%`
+matches any run of characters and `_` matches exactly one; write `\%`, `\_` or
+`\\` for those characters themselves, and any other backslash sequence is
+rejected rather than silently matching the letter after it. Reach for `prefix`
+when the question is "starts with"; reach for `like` when the pattern has a
+wildcard anywhere else, which is the substring search `prefix` cannot express.
+A pattern that starts with `%` cannot use an index and scans, which costs what
+an equality filter on an unindexed column costs — declare an index for the
+columns you filter on either way.
+
+`like` is case-sensitive on both backends, deliberately and identically. `LIKE`
+is case-insensitive for ASCII in stock SQLite and case-sensitive in Postgres, so
+the platform pins the local side to the Postgres behaviour; a pattern that
+matches in the cloud matches locally and the reverse.
 
 **Five things that surprise people, and are cheaper to read than to discover:**
 
@@ -307,9 +319,9 @@ companion predicate on another column, so it never scans a table on its own.
    list.
 3. `page_token` is opaque. Do not parse it — its shape is the server's to
    change.
-4. A short page is signalled by `truncated`, and it can come from the row
-   limit, from a 4 MB response budget, or from the regex scan cap. Never treat
-   a short page as a complete result.
+4. A short page is signalled by `truncated`, and it can come from the row limit
+   or from a 4 MB response budget. Never treat a short page as a complete
+   result.
 5. The grammar follows PostgREST's filter spelling and claims conformance to
    nothing. Top-level parameter names are reserved; column names live under
    `where`, `select` and `order`.
