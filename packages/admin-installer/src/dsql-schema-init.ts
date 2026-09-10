@@ -34,8 +34,17 @@
  *
  *   5. Synchronous secondary indexes → SQLSTATE 0A000 "unsupported mode.
  *      please use CREATE INDEX ASYNC.". DSQL builds secondary indexes
- *      asynchronously and does not accept `IF NOT EXISTS` on the async form,
- *      so we pre-check pg_indexes — see `ensureIndex` below.
+ *      asynchronously. `IF NOT EXISTS` IS accepted on the async form and is
+ *      how every index here is made idempotent — see `ensureIndex` below.
+ *
+ *      This entry used to claim the opposite, and the claim was wrong for
+ *      three months. The error above names `ASYNC` as the remedy, so hitting
+ *      it while writing `CREATE INDEX IF NOT EXISTS` reads as a rejection of
+ *      the guard rather than of the synchronous form. Probed against the live
+ *      cluster on 2026-09-10 (`debug:dsql-capabilities --ddl`): the guarded
+ *      async form succeeds both when the index is absent and when it already
+ *      exists, and the unguarded form fails with 42P07 against an existing
+ *      index — so the guard is doing real work rather than being tolerated.
  *
  * If you add to this file, keep every entry to a single non-PL/pgSQL
  * statement with no FK constraints or partial-index predicates, and use the
@@ -105,23 +114,24 @@ async function ensureRole(
 }
 
 /**
- * Idempotent CREATE INDEX ASYNC for DSQL. DSQL requires secondary indexes to
- * be built asynchronously and does not accept IF NOT EXISTS on the async
- * form, so we pre-check pg_indexes by name.
+ * Run one `CREATE INDEX ASYNC ... IF NOT EXISTS`.
+ *
+ * A wrapper rather than a bare `sql.raw` so the requirement stays visible at
+ * every call site: DSQL refuses a synchronous secondary index, and the guard is
+ * what makes a re-run of the installer a no-op.
+ *
+ * This used to pre-check `pg_indexes` because the file's header claimed the
+ * async form refused `IF NOT EXISTS`. It does not — see note 5 above. The
+ * pre-check was a round trip per index and a race between the check and the
+ * create; the guard is neither.
  */
 async function ensureIndex(
   db: Kysely<Record<string, never>>,
-  schemaname: string,
-  indexname: string,
   createSql: string,
 ): Promise<void> {
-  const existing = await sql<{ exists: boolean }>`
-    SELECT EXISTS (
-      SELECT 1 FROM pg_indexes
-      WHERE schemaname = ${schemaname} AND indexname = ${indexname}
-    ) AS exists
-  `.execute(db);
-  if (existing.rows[0]?.exists) return;
+  if (!/\bIF NOT EXISTS\b/i.test(createSql)) {
+    throw new Error(`ensureIndex requires an IF NOT EXISTS guard: ${createSql}`);
+  }
   await sql.raw(createSql).execute(db);
 }
 
@@ -345,7 +355,7 @@ export async function initializeSharedSchema(
       // the `capturedAt` ordering the storage layer already implements was
       // never worth reaching from a route.
       for (const index of metadataIndexDdls(c, "pg")) {
-        await ensureIndex(db, "shared", index.name, index.sql);
+        await ensureIndex(db, index.sql);
       }
     }
 
@@ -441,9 +451,7 @@ export async function initializeSharedSchema(
       .execute(db);
     await ensureIndex(
       db,
-      "shared",
-      "uq_records_parent_filename_hash",
-      `CREATE UNIQUE INDEX ASYNC uq_records_parent_filename_hash
+      `CREATE UNIQUE INDEX ASYNC IF NOT EXISTS uq_records_parent_filename_hash
          ON shared.records (parent_id, original_filename, content_hash, deleted_at)
          NULLS NOT DISTINCT`,
     );
@@ -462,9 +470,7 @@ export async function initializeSharedSchema(
     // index above carries it as a column.
     await ensureIndex(
       db,
-      "shared",
-      "idx_records_content_hash",
-      `CREATE INDEX ASYNC idx_records_content_hash
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_records_content_hash
          ON shared.records (content_hash, parent_id, deleted_at)`,
     );
 
@@ -473,9 +479,7 @@ export async function initializeSharedSchema(
     // index-only scan instead of a per-exchange table scan.
     await ensureIndex(
       db,
-      "shared",
-      "idx_records_node_watermark",
-      `CREATE INDEX ASYNC idx_records_node_watermark
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_records_node_watermark
          ON shared.records (node_id, updated_at)`,
     );
 
@@ -510,9 +514,7 @@ export async function initializeSharedSchema(
     // "tidy" the column order.
     await ensureIndex(
       db,
-      "shared",
-      "idx_record_labels_reverse",
-      `CREATE INDEX ASYNC idx_record_labels_reverse
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_record_labels_reverse
          ON shared.record_labels (app_id, key, deleted_at, value, record_id)
          INCLUDE (record_type)`,
     );
@@ -520,9 +522,7 @@ export async function initializeSharedSchema(
     // Sync watermark, mirroring idx_records_node_watermark.
     await ensureIndex(
       db,
-      "shared",
-      "idx_record_labels_node_watermark",
-      `CREATE INDEX ASYNC idx_record_labels_node_watermark
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_record_labels_node_watermark
          ON shared.record_labels (node_id, updated_at)`,
     );
 

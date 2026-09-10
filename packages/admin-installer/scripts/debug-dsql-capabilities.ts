@@ -317,6 +317,56 @@ async function runStorageProbes(client: pg.Client): Promise<ProbeResult[]> {
       `SELECT coalesce(string_agg(amname, ','), '(none)') FROM pg_am`,
       "unknown",
     );
+
+    // Two claims in this codebase contradict each other. `dsql-schema-init.ts`
+    // states that DSQL does not accept `IF NOT EXISTS` on the async index form
+    // and pre-checks `pg_indexes` instead; `dsql-ddl.ts` has been emitting
+    // `CREATE INDEX ASYNC IF NOT EXISTS` since 2026-05-18. Settle which is
+    // right, and separately answer the two `ALTER TABLE` questions the
+    // metadata `record_type` backfill turns on.
+    await withTable(
+      "idx",
+      "id int PRIMARY KEY, k text",
+      "probe table for index and ALTER probes",
+      "supported",
+      async (t) => {
+        const name = `idx_capprobe_ine_${process.pid}`;
+        await step(
+          "CREATE INDEX IF NOT EXISTS (synchronous form)",
+          `CREATE INDEX IF NOT EXISTS ${name}_sync ON ${t} (k)`,
+          "unknown",
+        );
+        await step(
+          "CREATE INDEX ASYNC IF NOT EXISTS (first time)",
+          `CREATE INDEX ASYNC IF NOT EXISTS ${name} ON ${t} (k)`,
+          "unknown",
+        );
+        // The index is built asynchronously, so give it a moment to appear in
+        // the catalog before asking whether the guard actually suppresses the
+        // duplicate.
+        await new Promise((r) => setTimeout(r, 5000));
+        await step(
+          "CREATE INDEX ASYNC IF NOT EXISTS (index already exists)",
+          `CREATE INDEX ASYNC IF NOT EXISTS ${name} ON ${t} (k)`,
+          "unknown",
+        );
+        await step(
+          "CREATE INDEX ASYNC without the guard (index already exists)",
+          `CREATE INDEX ASYNC ${name} ON ${t} (k)`,
+          "unsupported",
+        );
+        await step(
+          "ALTER TABLE ADD COLUMN",
+          `ALTER TABLE ${t} ADD COLUMN record_type text`,
+          "unknown",
+        );
+        await step(
+          "ALTER TABLE ALTER COLUMN SET NOT NULL",
+          `ALTER TABLE ${t} ALTER COLUMN record_type SET NOT NULL`,
+          "unknown",
+        );
+      },
+    );
   } finally {
     for (const table of created) {
       await client.query(`DROP TABLE IF EXISTS ${table}`).catch((err) => {

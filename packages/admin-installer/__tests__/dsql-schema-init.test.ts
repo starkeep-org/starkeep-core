@@ -129,17 +129,18 @@ describe("shared.record_labels", () => {
     expect(idx).toContain("ON shared.record_labels (node_id, updated_at)");
   });
 
-  it("pre-checks pg_indexes before each async index, and skips when present", async () => {
+  it("guards every async index with IF NOT EXISTS rather than pre-checking", async () => {
+    // DSQL accepts `IF NOT EXISTS` on the async form — probed against the live
+    // cluster on 2026-09-10, after this file's header had claimed the opposite
+    // for three months. The guard replaces a `pg_indexes` round trip per index
+    // and the race between checking and creating.
     const statements = await init();
-    const probe = statements.findIndex((s) => s.includes("FROM pg_indexes"));
-    const create = statements.findIndex((s) => s.includes("idx_record_labels_reverse"));
-    expect(probe).toBeGreaterThanOrEqual(0);
-    expect(create).toBeGreaterThan(probe);
-
-    state.statements = [];
-    state.exists = true;
-    const second = await init();
-    expect(second.some((s) => s.includes("CREATE INDEX ASYNC"))).toBe(false);
+    const creates = statements.filter((s) => s.includes("CREATE INDEX ASYNC") || s.includes("CREATE UNIQUE INDEX ASYNC"));
+    expect(creates.length).toBeGreaterThan(0);
+    for (const create of creates) {
+      expect(create).toMatch(/IF NOT EXISTS/i);
+    }
+    expect(statements.some((s) => s.includes("FROM pg_indexes"))).toBe(false);
   });
 
   it("grants DML to PUBLIC — per-app confinement is application-layer", async () => {
