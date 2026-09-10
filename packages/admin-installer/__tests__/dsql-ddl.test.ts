@@ -58,6 +58,8 @@ vi.mock("pg", () => {
 
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "../src/dsql-ddl";
 import { validateManifest } from "@starkeep/admin-manifest";
+import { FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
+import { pgColumnType } from "@starkeep/protocol-primitives";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -240,6 +242,23 @@ describe("install DDL for the photos manifest", () => {
     const ns = s.find((t) => t.includes('insert into "shared"."app_syncable_namespaces"'));
     expect(ns).toBeDefined();
     expect(ns).toContain('on conflict ("app_id") do update');
+  });
+
+  it("types the reserved table from the one mapping, not from a ternary of its own", async () => {
+    await installPhotos();
+    const create = stmts().find(
+      (t) => t.startsWith("create table") && t.includes('"app_photos"."_starkeep_sync_records"'),
+    )!;
+    // Every column's physical type is whatever `pgColumnType` says for its
+    // declared type — the assertion the hand-written ternary this replaced
+    // could not satisfy, because it named `bigint` for a column declared
+    // `integer` while the SQLite installer's twin named `integer`.
+    for (const column of FILE_RECORDS_COLUMNS) {
+      expect(create).toContain(`"${column.name}" ${pgColumnType(column.type)}`);
+    }
+    // Spelled out for the column the disagreement was about. A file over 2 GiB
+    // is ordinary, and int4 would cap one here.
+    expect(create).toContain('"size_bytes" bigint');
   });
 });
 

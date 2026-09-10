@@ -451,9 +451,12 @@ export function createReservedFileRecordsTable(
   createSyncableTable(
     db,
     appSyncableTableName(appId, FILE_RECORDS_TABLE),
+    // Through the one mapping, like `createAppSyncableTables` above. This was a
+    // hand-written ternary whose Postgres twin in `dsql-ddl.ts` answered
+    // `bigint` where this one answered `integer`, for one declared type.
     FILE_RECORDS_COLUMNS.map((c) => ({
       name: c.name,
-      type: c.type === "integer" ? "integer" : "text",
+      type: sqliteColumnType(c.type),
       notNull: Boolean(c.notNull),
       primaryKey: Boolean(c.primaryKey),
     })),
