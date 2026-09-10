@@ -11,6 +11,19 @@ export {
   pageTokenFrom,
 } from "@starkeep/storage-adapter";
 export { prefixUpperBound } from "./prefix.js";
+export {
+  planMetadataQuery,
+  planLabelQuery,
+  type SharedQueryPlan,
+} from "./shared-plan.js";
+export {
+  sharedQuerySchema,
+  sharedQueryTableName,
+  sharedQueryDiscriminant,
+  sharedQueryExcludesSoftDeleted,
+  withDeclaredProjection,
+  type SharedQueryTarget,
+} from "@starkeep/storage-adapter";
 export { queryParamsFrom } from "./params.js";
 export { validateLikePattern, MAX_LIKE_PATTERN_LENGTH } from "./like.js";
 export { RESPONSE_BUDGET_BYTES } from "@starkeep/storage-adapter";

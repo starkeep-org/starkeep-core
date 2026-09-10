@@ -97,7 +97,14 @@ import {
   DsqlAppSyncableApplier,
   withOccRetry,
 } from "@starkeep/storage-aurora-dsql";
-import { createAppSpecificFactory, queryParamsFrom } from "@starkeep/shared-space-api";
+import {
+  createAppSpecificFactory,
+  planLabelQuery,
+  planMetadataQuery,
+  queryParamsFrom,
+  ApiError,
+  type SharedQueryPlan,
+} from "@starkeep/shared-space-api";
 import type { AppSpecificOperations } from "@starkeep/shared-space-api";
 import type {
   DatabaseClientFactory,
@@ -1384,6 +1391,40 @@ async function signCandidatesForPage(
  * while a user scrolls.
  */
 const VARIANT_URL_TTL_SECONDS = 6 * 60 * 60;
+
+/**
+ * Run one shared-plane query and return its page.
+ *
+ * The plan — parse, then the caller's grant as a predicate — is built by
+ * `shared-plan.ts` in `@starkeep/shared-space-api` and shared with the local
+ * handler, so the two servers cannot drift on the one thing that matters here.
+ * What stays local is the transport: a status code and a JSON body.
+ */
+async function runSharedQuery(db: DatabaseAdapter, build: () => SharedQueryPlan) {
+  let plan: SharedQueryPlan;
+  try {
+    plan = build();
+  } catch (err) {
+    // A parse rejection and a grant denial are both the caller's, and both
+    // carry the status they mean. Anything else is the server's and rethrows.
+    const status =
+      err instanceof ApiError
+        ? err.statusCode
+        : (err as { status?: number }).status === 400
+          ? 400
+          : null;
+    if (status === null) throw err;
+    return clientErr(err instanceof Error ? err.message : String(err), status);
+  }
+  const result = await db.queryShared(plan.target, plan.query, {
+    serverWhere: plan.serverWhere,
+  });
+  return ok(
+    result.mode === "rows"
+      ? { rows: result.rows, truncated: result.truncated, page_token: result.pageToken }
+      : { groups: result.groups, truncated: result.truncated },
+  );
+}
 
 /**
  * Batch-load per-category metadata for a page of records so the list endpoint
@@ -3021,6 +3062,38 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (category === "other") return ok({ metadata: null });
       const metadata = await db.getMetadata(category, recordId);
       return ok({ metadata });
+    }
+
+    // GET /apps/{appId}/data/metadata/:category — the query grammar over one
+    // category's per-category metadata table.
+    //
+    // The first route that lets a metadata column appear in predicate position.
+    // It exists because `record_type` now sits on every metadata row: the
+    // caller's grant compiles to `record_type IN (…)` on a leading index
+    // column, so the gate rides inside the access path rather than filtering
+    // what a scan returned. Without that column there was a ceiling and no
+    // gate, and no predicate could be answered safely at all.
+    const metadataQueryMatch = subPath.match(/^\/data\/metadata\/([^/]+)$/);
+    if (metadataQueryMatch && method === "GET") {
+      const category = decodeURIComponent(metadataQueryMatch[1]!);
+      if (!isCategoryId(category)) return clientErr(`"${category}" is not a category`, 400);
+      return runSharedQuery(db, () =>
+        planMetadataQuery(category, grants, queryParamsFrom(query)),
+      );
+    }
+
+    // GET /apps/{appId}/data/labels — the query grammar over
+    // shared.record_labels.
+    //
+    // `where` must pin `app_id` and `key`, which the schema enforces: the
+    // reverse index is (app_id, key, deleted_at, value, record_id), so a query
+    // pinning neither scans every app's assertions about every record.
+    //
+    // Labels are cross-app assertions, so the caller's own app id restricts
+    // nothing here. What restricts the answer is `record_type IN (…)`, which is
+    // the same gate every other read of shared data carries.
+    if (subPath === "/data/labels" && method === "GET") {
+      return runSharedQuery(db, () => planLabelQuery(grants, queryParamsFrom(query)));
     }
 
     // POST /apps/{appId}/data/records/file-urls — batch signed URLs.

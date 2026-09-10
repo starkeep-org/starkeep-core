@@ -32,7 +32,7 @@
  */
 
 import type { AppSyncableColumnInfo } from "@starkeep/sync-engine";
-import { SOFT_DELETE_COLUMN, SYSTEM_COLUMN_NAMES } from "../app-syncable/columns.js";
+import { SOFT_DELETE_COLUMN } from "../app-syncable/columns.js";
 import { decodePageToken } from "@starkeep/storage-adapter";
 import { prefixUpperBound } from "./prefix.js";
 import { validateLikePattern } from "./like.js";
@@ -138,7 +138,7 @@ function parseWhere(schema: QueryTableSchema, raw: string | undefined): WhereCla
           `soft-deleted rows; it cannot appear in where`,
       );
     }
-    if (PROJECTION_ONLY_SYSTEM_COLUMNS.has(name)) {
+    if (PROJECTION_ONLY_SYSTEM_COLUMNS.has(name) || (schema.projectionOnly ?? []).includes(name)) {
       throw new QueryParseError(
         `"${name}" is a sync-internal column and may appear in select and order only`,
       );

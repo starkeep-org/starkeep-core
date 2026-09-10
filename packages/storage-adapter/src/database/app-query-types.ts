@@ -261,6 +261,17 @@ export interface QueryTableSchema {
    * place it can be expressed cheaply.
    */
   readonly requiredFilters?: readonly string[];
+  /**
+   * Columns a caller may project and order but never filter.
+   *
+   * The parser refuses `updated_at` and `node_id` in `where` on every table,
+   * because filtering on a sync-internal clock is not a promise the platform
+   * makes. The shared tables extend that list by one: `created_at` is a
+   * serialized HLC there too, while on an app-syncable table it is an ordinary
+   * app-owned column with app-chosen meaning. One rule, stated per table rather
+   * than hard-coded for both planes.
+   */
+  readonly projectionOnly?: readonly string[];
   /** Edge names `include` may carry. Empty on the app-syncable plane. */
   readonly includable?: readonly string[];
 }

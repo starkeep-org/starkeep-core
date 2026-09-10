@@ -33,6 +33,12 @@ import {
 } from "../../packages/storage-sqlite/src/index.js";
 import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
 import { queryParamsFrom } from "../../packages/shared-space-api/src/query/params.js";
+import {
+  planLabelQuery,
+  planMetadataQuery,
+  type SharedQueryPlan,
+} from "../../packages/shared-space-api/src/query/shared-plan.js";
+import { ApiError } from "../../packages/shared-space-api/src/errors.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
@@ -42,7 +48,6 @@ import { createSqliteSyncStateStore, createChangeNotifier, projectPolicy, valida
 import { setHashFactory } from "@starkeep/storage-adapter";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
 import {
-  getCategory,
   typeCategory,
   isCategoryId,
   isKnownType,
@@ -53,7 +58,6 @@ import {
   buildAccessGrants,
   canRead,
   canWrite,
-  canReadCategory,
   canWriteCategory,
   canWriteMetadataCategory,
   type AccessGrants,
@@ -199,10 +203,6 @@ function appCanWrite(db: RawDatabase, appId: string, type: string): boolean {
 // per-category metadata tables are category-namespaced (so is the IAM ceiling),
 // so they authorize against the categories the app's type grants map to —
 // a category is accessible when at least one granted type maps to it.
-function appCanReadCategory(db: RawDatabase, appId: string, category: string): boolean {
-  return canReadCategory(appGrants(db, appId), category);
-}
-
 function appCanWriteCategory(db: RawDatabase, appId: string, category: string): boolean {
   return canWriteCategory(appGrants(db, appId), category);
 }
@@ -569,6 +569,44 @@ async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredent
       expiration: raw.expiration ? new Date(raw.expiration) : undefined,
     };
   };
+}
+
+/**
+ * Run one shared-plane query and write its page.
+ *
+ * The plan — parse, then the caller's grant as a predicate — is built by
+ * `shared-plan.ts` and shared with the cloud handler, so the two servers cannot
+ * drift on the one thing that matters here. What stays local is the transport:
+ * a status code and a JSON body.
+ */
+async function runSharedQuery(
+  res: import("node:http").ServerResponse,
+  adapter: SqliteDatabaseAdapter,
+  build: () => SharedQueryPlan,
+): Promise<void> {
+  let plan: SharedQueryPlan;
+  try {
+    plan = build();
+  } catch (err) {
+    // A parse rejection and a grant denial are both the caller's, and both
+    // carry the status they mean. Anything else is the server's and rethrows.
+    const status =
+      err instanceof ApiError
+        ? err.statusCode
+        : (err as { status?: number }).status === 400
+          ? 400
+          : null;
+    if (status === null) throw err;
+    res.writeHead(status);
+    json(res, { error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  const result = await adapter.queryShared(plan.target, plan.query, {
+    serverWhere: plan.serverWhere,
+  });
+  json(res, result.mode === "rows"
+    ? { rows: result.rows, truncated: result.truncated, page_token: result.pageToken }
+    : { groups: result.groups, truncated: result.truncated });
 }
 
 async function main() {
@@ -3309,6 +3347,45 @@ async function main() {
         }
         const metadata = await sdk.data.getMetadata(category, createStarkeepId(recordId));
         json(res, { metadata });
+        return;
+      }
+
+      // GET /data/metadata/:category — the query grammar over one category's
+      // per-category metadata table.
+      //
+      // The first route that lets a metadata column appear in predicate
+      // position. It exists because `record_type` now sits on every metadata
+      // row: the caller's grant compiles to `record_type IN (…)` on a leading
+      // index column, so the gate rides inside the access path rather than
+      // filtering what a scan returned. Without that column there was a ceiling
+      // and no gate, and no predicate could be answered safely at all.
+      const metadataQueryMatch = path.match(/^\/data\/metadata\/([^/]+)$/);
+      if (metadataQueryMatch && req.method === "GET") {
+        const category = decodeURIComponent(metadataQueryMatch[1]!);
+        if (!isCategoryId(category)) {
+          res.writeHead(400);
+          json(res, { error: `"${category}" is not a category` });
+          return;
+        }
+        await runSharedQuery(res, databaseAdapter, () =>
+          planMetadataQuery(category, appGrants(localDb, appId!), queryParamsFrom(url.searchParams)),
+        );
+        return;
+      }
+
+      // GET /data/labels — the query grammar over shared_record_labels.
+      //
+      // `where` must pin `app_id` and `key`, which the schema enforces: the
+      // reverse index is (app_id, key, deleted_at, value, record_id), so a
+      // query pinning neither scans every app's assertions about every record.
+      //
+      // Labels are cross-app assertions, so the caller's own app id restricts
+      // nothing here. What restricts the answer is `record_type IN (…)`, which
+      // is the same gate every other read of shared data carries.
+      if (path === "/data/labels" && req.method === "GET") {
+        await runSharedQuery(res, databaseAdapter, () =>
+          planLabelQuery(appGrants(localDb, appId!), queryParamsFrom(url.searchParams)),
+        );
         return;
       }
 

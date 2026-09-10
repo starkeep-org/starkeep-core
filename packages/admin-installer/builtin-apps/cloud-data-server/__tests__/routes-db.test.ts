@@ -2736,3 +2736,146 @@ describe("POST /files/presign pins the expected checksum", () => {
   });
 
 });
+
+describe("the shared-plane query routes", () => {
+  const IMAGE_METADATA_SELECT = /from "shared"\."record_image_metadata"/;
+  const LABELS_SELECT = /from "shared"\."record_labels" where/;
+
+  it("puts the caller's readable types inside the metadata access path", async () => {
+    const db = fakeDsqlWithGrants([
+      { type_id: "image/jpeg", access: "read" },
+      { type_id: "image/png", access: "read" },
+      // A grant in another category, which must not widen the image query.
+      { type_id: "video/mp4", access: "read" },
+    ]).on(IMAGE_METADATA_SELECT, [
+      { record_id: "rec-1", width: 4032, captured_at: "2026-09-01 12:00:00" },
+    ]);
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "mq1",
+        method: "GET",
+        subPath: "/data/metadata/image",
+        query: { order: "captured_at.desc", limit: "10" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res) as { rows: Array<Record<string, unknown>> };
+    // Postgres renders a `timestamp` as `2026-09-01 12:00:00`; one query must
+    // not answer in two spellings depending on the engine behind it.
+    expect(body.rows[0]).toMatchObject({
+      record_id: "rec-1",
+      captured_at: "2026-09-01T12:00:00.000Z",
+    });
+
+    const issued = db.calls(IMAGE_METADATA_SELECT)[0]!;
+    expect(issued.values).toContain("image/jpeg");
+    expect(issued.values).toContain("image/png");
+    expect(issued.values).not.toContain("video/mp4");
+    expect(issued.text).toContain('"record_type" in');
+    // The metadata tables carry no `deleted_at`, so the predicate every other
+    // table gets must not be emitted here.
+    expect(issued.text).not.toContain('"deleted_at" is null');
+  });
+
+  it("403s a category the caller holds no type in, without querying", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "mq2", method: "GET", subPath: "/data/metadata/video" }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(db.calls(/record_video_metadata/)).toHaveLength(0);
+  });
+
+  it("400s a predicate the metadata schema does not declare", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "mq3",
+        method: "GET",
+        subPath: "/data/metadata/image",
+        query: { where: JSON.stringify({ record_type: "image/jpeg" }) },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(String(bodyOf(res).error)).toContain("record_type");
+    expect(db.calls(IMAGE_METADATA_SELECT)).toHaveLength(0);
+  });
+
+  it("requires app_id and key on the label route", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "lq1",
+        method: "GET",
+        subPath: "/data/labels",
+        query: { where: JSON.stringify({ app_id: "photos" }) },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(db.calls(LABELS_SELECT)).toHaveLength(0);
+  });
+
+  it("gates a label query on the labelled record's type", async () => {
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
+      LABELS_SELECT,
+      [
+        {
+          record_id: "rec-1",
+          app_id: "photos",
+          key: "album",
+          value: "trip",
+          record_type: "image/jpeg",
+          created_at: TEST_HLC_FOR_LABELS,
+          updated_at: TEST_HLC_FOR_LABELS,
+          node_id: "test",
+        },
+      ],
+    );
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "lq2",
+        method: "GET",
+        subPath: "/data/labels",
+        query: { where: JSON.stringify({ app_id: "photos", key: "album" }) },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const issued = db.calls(LABELS_SELECT)[0]!;
+    expect(issued.text).toContain('"record_type" in');
+    expect(issued.text).toContain('"deleted_at" is null');
+    expect(issued.values).toContain("image/jpeg");
+    // The tiebreaker is the index's residual order, not the literal primary
+    // key: `app_id` and `key` are pinned, so `(value, record_id)` is both a
+    // total order and the order the reverse index already produces.
+    expect(issued.text).toContain('order by ("value" is null) asc, "value" asc');
+  });
+
+  it("omits the grant predicate entirely for the User-Data-Owner", async () => {
+    // Drive's authorization is by app id and cannot be written as a finite set
+    // of types, so an `IN` list would be a narrower rule wearing the same
+    // clothes.
+    const db = fakeDsqlWithGrants([]).on(IMAGE_METADATA_SELECT, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "starkeep-drive",
+        method: "GET",
+        subPath: "/data/metadata/image",
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(db.calls(IMAGE_METADATA_SELECT)[0]!.text).not.toContain('"record_type" in');
+  });
+});

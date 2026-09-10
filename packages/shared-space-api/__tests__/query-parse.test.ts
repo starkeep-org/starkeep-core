@@ -20,6 +20,8 @@ import {
   type QueryTableSchema,
   type RowQuery,
   type AggregateQuery,
+  sharedQuerySchema,
+  withDeclaredProjection,
 } from "../src/query/index.js";
 import { SYSTEM_COLUMNS } from "../src/app-syncable/columns.js";
 
@@ -421,3 +423,68 @@ describe("aggregate", () => {
   });
 });
 
+
+describe("the shared plane's own table descriptions", () => {
+  const LABELS = sharedQuerySchema({ kind: "labels" });
+  const IMAGE_METADATA = sharedQuerySchema({ kind: "metadata", category: "image" });
+  const pinned = JSON.stringify({ app_id: "photos", key: "album" });
+
+  it("requires app_id and key on the label table", () => {
+    // The reverse index is (app_id, key, deleted_at, value, record_id), so a
+    // query pinning neither scans every app's assertions about every record.
+    // A cost ceiling expressed as a query precondition.
+    expect(() => parseQuery(LABELS, { where: JSON.stringify({ key: "album" }) })).toThrow(
+      /requires "app_id" and "key"/,
+    );
+    expect(parseQuery(LABELS, { where: pinned }).where).toHaveLength(2);
+  });
+
+  it("completes the label ordering with the index's residual key, not the primary key", () => {
+    // With app_id and key pinned, (value, record_id) is both a total order over
+    // the result and the order the reverse index already produces.
+    const parsed = parseQuery(LABELS, { where: pinned });
+    if (parsed.mode !== "rows") throw new Error("expected a row query");
+    expect(parsed.order.map((t) => t.column)).toEqual(["value", "record_id"]);
+  });
+
+  it("treats created_at as sync-internal on the shared plane", () => {
+    // A serialized HLC, not a wall clock. Ordering by sync time is a real
+    // question a UI asks; filtering on the encoding is not a promise the
+    // platform makes.
+    expect(() =>
+      parseQuery(LABELS, { where: JSON.stringify({ app_id: "p", key: "k", created_at: "x" }) }),
+    ).toThrow(/sync-internal/);
+    const parsed = parseQuery(LABELS, { where: pinned, order: "created_at.desc" });
+    if (parsed.mode !== "rows") throw new Error("expected a row query");
+    expect(parsed.order[0]!.column).toBe("created_at");
+  });
+
+  it("hides the grant discriminant from the metadata schema entirely", () => {
+    // Present on every row and carrying the server's predicate, and absent from
+    // what a caller may name — in `where`, in `order` and in `select` alike.
+    for (const params of [
+      { where: JSON.stringify({ record_type: "image/jpeg" }) },
+      { order: "record_type.asc" },
+      { select: "record_type" },
+    ]) {
+      expect(() => parseQuery(IMAGE_METADATA, params)).toThrow(
+        /"record_type" is not a column/,
+      );
+    }
+    expect(IMAGE_METADATA.columns.map((c) => c.name)).toContain("captured_at");
+  });
+
+  it("narrows a bare page to the declared columns", () => {
+    // `select: null` compiles to SELECT *, which would return `record_type`.
+    const parsed = withDeclaredProjection(parseQuery(IMAGE_METADATA, {}), IMAGE_METADATA);
+    if (parsed.mode !== "rows") throw new Error("expected a row query");
+    expect(parsed.select).toEqual(IMAGE_METADATA.columns.map((c) => c.name));
+    expect(parsed.select).not.toContain("record_type");
+  });
+
+  it("has no metadata table for the catch-all category", () => {
+    expect(() => sharedQuerySchema({ kind: "metadata", category: "other" })).toThrow(
+      /no metadata table/,
+    );
+  });
+});

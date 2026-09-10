@@ -37,6 +37,7 @@
 
 import { serializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
 import type { AppColumnInfo, ParsedQueryResult, RowQuery } from "../database/app-query-types.js";
+import type { BuildOptions } from "../database/app-query.js";
 import type { KeyedRowEntry } from "../database/app-syncable-rows.js";
 
 /** The applier surface these cases exercise. */
@@ -46,6 +47,7 @@ export interface QueryConformanceApplier {
     appId: string,
     table: string,
     query: RowQuery | Parameters<never>[0],
+    options?: BuildOptions,
   ): Promise<ParsedQueryResult>;
 }
 
@@ -63,7 +65,37 @@ export interface QueryConformanceHarness {
   readonly applier: QueryConformanceApplier;
   readonly appId: string;
   readonly table: string;
+  /**
+   * A second table shaped like a per-category metadata table: a primary key,
+   * ordinary columns, and no `deleted_at` at all.
+   *
+   * Declared by {@link METADATA_SHAPED_COLUMNS} and seeded by
+   * {@link QueryConformanceHarness.seedMetadataShaped}, which writes rows
+   * directly rather than through the applier — the applier's LWW upsert needs
+   * `updated_at`, and a metadata table genuinely has none. A table shaped
+   * "almost like" the one under test would prove nothing about the one that
+   * exists.
+   */
+  readonly metadataShapedTable: string;
+  seedMetadataShaped(rows: readonly Record<string, unknown>[]): Promise<void>;
 }
+
+/**
+ * A metadata table's columns, in miniature: a primary key and two ordinary
+ * columns, and none of the four the sync runtime adds.
+ */
+export const METADATA_SHAPED_COLUMNS: readonly AppColumnInfo[] = [
+  { name: "record_id", type: "text", notNull: true, primaryKey: true },
+  { name: "width", type: "integer", notNull: false, primaryKey: false },
+  { name: "captured_at", type: "timestamp", notNull: false, primaryKey: false },
+];
+
+/** The rows the soft-delete case reasons about. */
+export const METADATA_SHAPED_ROWS: readonly Record<string, unknown>[] = [
+  { record_id: "m1", width: 100, captured_at: "2026-09-01T00:00:00.000Z" },
+  { record_id: "m2", width: 200, captured_at: null },
+  { record_id: "m3", width: 300, captured_at: "2026-09-05T00:00:00.000Z" },
+];
 
 /**
  * The columns every query-conformance table declares.
@@ -690,6 +722,51 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       // Ordered by the output alias rather than by a repeat of `count(*)`,
       // which would be a second expression free to disagree with the first.
       equal(result.map((g) => Number(g["n"])), [3, 2], "groups by size, descending");
+    },
+  },
+
+  {
+    name: "a table with no deleted_at answers only when the soft-delete predicate is off",
+    async run(h) {
+      await h.seedMetadataShaped(METADATA_SHAPED_ROWS);
+      const query: RowQuery = {
+        mode: "rows",
+        table: h.metadataShapedTable,
+        select: null,
+        where: [],
+        order: [{ column: "captured_at", direction: "desc", nulls: "last" }],
+        limit: 100,
+        pageToken: null,
+        include: [],
+      };
+
+      // The per-category metadata tables are the one queryable surface with no
+      // `deleted_at`: a metadata row is derived state keyed by `record_id`,
+      // deleted outright with its record rather than tombstoned. The predicate
+      // the compiler adds to every other table names a column that is not there.
+      const result = await h.applier.runQuery(h.appId, h.metadataShapedTable, query, {
+        excludeSoftDeleted: false,
+      });
+      if (result.mode !== "rows") fail("expected a row result");
+      equal(
+        result.rows.map((r) => String(r["record_id"])),
+        ["m3", "m1", "m2"],
+        "every row, ordered by captured_at desc with nulls last",
+      );
+      // The value came back through the same `timestamp` boundary the declared
+      // columns go through, which is the second thing this table is shaped to
+      // check: a metadata column is read by the query path, not by `getMetadata`.
+      equal(result.rows[0]?.["captured_at"], "2026-09-05T00:00:00.000Z", "canonical ISO-8601");
+
+      // And the option does real work rather than being ignored: the default is
+      // still to emit the predicate, which this table cannot answer.
+      let rejected = false;
+      try {
+        await h.applier.runQuery(h.appId, h.metadataShapedTable, query);
+      } catch {
+        rejected = true;
+      }
+      if (!rejected) fail("a query with the soft-delete predicate on a table without the column should fail");
     },
   },
 

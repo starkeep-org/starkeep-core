@@ -29,6 +29,18 @@ import type {
 import {
   StorageError,
   TransactionError,
+  buildAppAggregateQuery,
+  buildAppRowQuery,
+  collectAggregatePage,
+  collectRowPage,
+  sharedQueryExcludesSoftDeleted,
+  sharedQuerySchema,
+  sharedQueryTableName,
+  POSTGRES_APP_QUERY_DIALECT,
+  type ParsedQuery,
+  type ParsedQueryResult,
+  type SharedQueryTarget,
+  type WhereClause,
   buildFindByLabel,
   buildGetLabel,
   buildLabelNodeWatermarks,
@@ -74,6 +86,7 @@ import {
   compiler,
 } from "./query-builder.js";
 import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
+import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "./pg-timestamps.js";
 import { sql, type CompiledQuery } from "kysely";
 
 /**
@@ -339,6 +352,44 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   // memory and every op is an idempotent single statement, so replaying the
   // transaction from BEGIN converges. Inner ops use the raw (unwrapped) helpers
   // to avoid a redundant nested retry.
+  /**
+   * See `DatabaseAdapter.queryShared`. Compiled by the same builder the
+   * app-syncable plane uses, against the table the target names on this engine.
+   */
+  async queryShared(
+    target: SharedQueryTarget,
+    query: ParsedQuery,
+    options: { readonly serverWhere?: readonly WhereClause[] } = {},
+  ): Promise<ParsedQueryResult> {
+    const schema = sharedQuerySchema(target);
+    const table = sharedQueryTableName(target, "pg");
+    const build = {
+      serverWhere: options.serverWhere,
+      excludeSoftDeleted: sharedQueryExcludesSoftDeleted(target),
+    };
+    const converters = pgConvertersFor(schema.columns);
+
+    if (query.mode === "aggregate") {
+      const compiled = buildAppAggregateQuery(
+        compiler,
+        table,
+        query,
+        POSTGRES_APP_QUERY_DIALECT,
+        build,
+      );
+      const result = await this.run(compiled);
+      return collectAggregatePage(
+        query,
+        fromPgRows(result.rows, withAggregateOutputs(converters, query.aggregates)),
+      );
+    }
+    const compiled = buildAppRowQuery(compiler, table, query, build);
+    const { rows } = await this.run(compiled);
+    // Converted before the page is collected rather than after, so the page
+    // token is cut from the same representation the rows carry.
+    return collectRowPage(query, fromPgRows(rows, converters));
+  }
+
   async batch(operations: BatchOperation[]): Promise<void> {
     await withOccRetry("batch", async () => {
       await this.getClient().query("BEGIN");
