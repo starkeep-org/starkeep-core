@@ -2879,3 +2879,147 @@ describe("the shared-plane query routes", () => {
     expect(db.calls(IMAGE_METADATA_SELECT)[0]!.text).not.toContain('"record_type" in');
   });
 });
+
+/**
+ * `/data/records` on the one parser.
+ *
+ * The equivalence between the old parameter set and the grammar is asserted
+ * over real HTTP in `apps/local-data-server/__tests__/records-grammar.test.ts`,
+ * against a real database. What is only assertable here is the SQL this handler
+ * emits — the page size it defaults to, the predicate it binds, and the join it
+ * builds for an ordering that is not a column.
+ */
+describe("the query grammar on /data/records", () => {
+  const grants = [{ type_id: "image/jpeg", access: "readwrite" as const }];
+  /** The capture-ordered shape, which joins both metadata tables. */
+  const RECORDS_CAPTURE_ORDER =
+    /from "shared"\."records" left join "shared"\."record_image_metadata"/;
+  const RECORDS_COUNT = /select count\(\*\).*from "shared"\."records"/;
+
+  it("keeps this handler's own page size rather than taking the grammar's", async () => {
+    // 50, not the grammar's 30. The compiler asks for one row more than the
+    // page so a full page is distinguishable from a complete result, which is
+    // why the bound value is 51.
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({ appId: "rg1", method: "GET", subPath: "/data/records" }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(db.calls(RECORDS_SELECT)[0]!.values).toContain(51);
+  });
+
+  it("binds a grammar predicate beside the grant rather than instead of it", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "rg2",
+        method: "GET",
+        subPath: "/data/records",
+        query: { where: JSON.stringify({ parent_id: "rec-parent" }) },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const call = db.calls(RECORDS_SELECT)[0]!;
+    expect(call.text).toContain('"parent_id"');
+    expect(call.values).toContain("rec-parent");
+    // The caller can only ever narrow what it may already read.
+    expect(call.values).toContain("image/jpeg");
+  });
+
+  it("compiles a null predicate as IS NULL rather than as = null", async () => {
+    // `= NULL` is never true in SQL, and the parameter set's `parentId=none`
+    // meant `IS NULL`. One predicate compiler serves both spellings so the two
+    // cannot drift.
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, []);
+    setDbFactory(db);
+    await handler(
+      signedEvent({
+        appId: "rg3",
+        method: "GET",
+        subPath: "/data/records",
+        query: { where: JSON.stringify({ parent_id: null }) },
+      }),
+      context,
+    );
+    expect(db.calls(RECORDS_SELECT)[0]!.text).toMatch(/"parent_id" is null/);
+  });
+
+  it("joins the metadata tables for a capture-ordered page", async () => {
+    // The ordering key is not a column of `shared.records`, and this is the
+    // join `record-queries.ts` builds to answer it. Nothing reached it before,
+    // because no route passed an ordering.
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_CAPTURE_ORDER, []);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "rg4",
+        method: "GET",
+        subPath: "/data/records",
+        query: { order: "captured_at.desc" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const text = db.calls(RECORDS_CAPTURE_ORDER)[0]!.text;
+    expect(text).toContain('"shared"."record_video_metadata"');
+    expect(text).toContain("coalesce");
+    // Nulls last on both engines, spelled as a leading boolean rather than as
+    // `NULLS LAST` — see `query-cursor.ts`.
+    expect(text).toMatch(/order by \(coalesce\(.*\) is null\) asc/);
+  });
+
+  it("cuts the adapter's keyset cursor, not a bare record id", async () => {
+    // This handler used to answer `records[last].id` whatever the ordering,
+    // which is a continuation of `id asc` and of nothing else. A page ordered
+    // by capture time and continued with `id > <cursor>` is an arbitrary
+    // subset of the library rather than its next page.
+    const rows = Array.from({ length: 51 }, (_, i) =>
+      recordRow({ id: `rec-${String(i).padStart(2, "0")}`, type: "image/jpeg" }),
+    );
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_CAPTURE_ORDER, rows);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "rg5",
+        method: "GET",
+        subPath: "/data/records",
+        query: { order: "captured_at.desc" },
+      }),
+      context,
+    );
+    const body = bodyOf(res) as { hasMore: boolean; nextCursor: string };
+    expect(body.hasMore).toBe(true);
+    expect(body.nextCursor).not.toBe("rec-49");
+    // An opaque token carrying the ordering it was cut under. The tiebreaker
+    // runs ascending because the parser completes every ordering with the
+    // table's primary key ascending, and `orderingFor` adopts that rather than
+    // appending a second `id` of its own.
+    expect(JSON.parse(Buffer.from(body.nextCursor, "base64url").toString())).toEqual([
+      "capturedAt:desc,id:asc",
+      [[1, null]],
+      "rec-49",
+    ]);
+  });
+
+  it("answers a count over the readable library without paging through it", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORDS_COUNT, [{ total: 12 }]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "rg6",
+        method: "GET",
+        subPath: "/data/records",
+        query: { aggregate: JSON.stringify({ total: { fn: "count" } }) },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)).toEqual({ groups: [{ total: 12 }], truncated: false });
+    // Counted over exactly the rows the caller may read.
+    expect(db.calls(RECORDS_COUNT)[0]!.values).toContain("image/jpeg");
+  });
+});
