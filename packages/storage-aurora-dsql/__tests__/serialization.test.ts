@@ -53,12 +53,51 @@ describe("record ↔ row serialization", () => {
 describe("columnsToMetadataRow", () => {
   it("copies columns and drops the redundant record_id key", () => {
     const id = createStarkeepId("0123456789abcdefghjkmnpqrs");
-    const row = columnsToMetadataRow(id, {
+    const row = columnsToMetadataRow(id, "image/jpeg", {
       record_id: "should-be-dropped",
       width: 800,
       height: 600,
-      exif_taken_at: null,
+      color_space: null,
     });
-    expect(row).toEqual({ recordId: id, width: 800, height: 600, exif_taken_at: null });
+    expect(row).toEqual({ recordId: id, width: 800, height: 600, color_space: null });
+  });
+
+  // The defect this exists for: Postgres renders a `timestamp` as
+  // `YYYY-MM-DD HH:MM:SS`, which `new Date` reads as *local* time. A row that
+  // leaves this function unconverted moves every capture time in the library by
+  // the reader's UTC offset.
+  it("puts a timestamp column back into canonical UTC", () => {
+    const id = createStarkeepId("0123456789abcdefghjkmnpqrs");
+    const row = columnsToMetadataRow(id, "image/jpeg", {
+      record_id: id,
+      captured_at: "2026-08-30 19:17:55",
+    });
+    expect(row.captured_at).toBe("2026-08-30T19:17:55.000Z");
+  });
+
+  it("leaves a null timestamp null and an already-canonical one untouched", () => {
+    const id = createStarkeepId("0123456789abcdefghjkmnpqrs");
+    const row = columnsToMetadataRow(id, "image/jpeg", {
+      record_id: id,
+      captured_at: null,
+    });
+    expect(row.captured_at).toBeNull();
+    const canonical = columnsToMetadataRow(id, "image/jpeg", {
+      record_id: id,
+      captured_at: "2026-08-30T19:17:55.000Z",
+    });
+    expect(canonical.captured_at).toBe("2026-08-30T19:17:55.000Z");
+  });
+
+  // `bigint` is `int8`, which node-postgres hands over as a string to keep
+  // precision. SQLite returns a number for the same column, and an app row
+  // carries whatever it got onto the sync wire verbatim.
+  it("turns a bigint column back into a number", () => {
+    const id = createStarkeepId("0123456789abcdefghjkmnpqrs");
+    const row = columnsToMetadataRow(id, "video/mp4", {
+      record_id: id,
+      duration_ms: "185000",
+    });
+    expect(row.duration_ms).toBe(185000);
   });
 });

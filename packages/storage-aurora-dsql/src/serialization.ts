@@ -1,9 +1,17 @@
 import type {
+  Category,
   DataRecord,
   MetadataRow,
   StarkeepId,
 } from "@starkeep/protocol-primitives";
-import { serializeHLC, deserializeHLC, createStarkeepId } from "@starkeep/protocol-primitives";
+import {
+  serializeHLC,
+  deserializeHLC,
+  createStarkeepId,
+  getCategory,
+  typeCategory,
+} from "@starkeep/protocol-primitives";
+import { pgConvertersFor } from "./pg-timestamps.js";
 
 export interface PostgresRow {
   id: string;
@@ -68,14 +76,34 @@ export function rowToRecord(row: PostgresRow): DataRecord {
  */
 export { rowToLabel, labelToRow, type LabelRow as PostgresLabelRow } from "@starkeep/storage-adapter";
 
+/**
+ * One stored metadata row, with Postgres' renderings turned back into the
+ * shapes the columns declare.
+ *
+ * The read half of the `timestamp` and `bigint` boundaries, and the exact
+ * counterpart of the boolean conversion `columnsToMetadataRow` performs on
+ * SQLite. A metadata row rides the sync wire in whatever shape its engine
+ * returned, so a conversion this path skips is a conversion no later path
+ * applies: without it `captured_at` leaves the cloud as Postgres'
+ * `YYYY-MM-DD HH:MM:SS`, which every reader downstream parses as *local* time
+ * and every node then holds four hours late.
+ *
+ * The same {@link pgConvertersFor} every other read on this backend runs
+ * through, driven by the category's declared metadata columns rather than by a
+ * second list of column names kept here.
+ */
 export function columnsToMetadataRow(
   recordId: StarkeepId,
+  typeId: string,
   columns: Record<string, unknown>,
 ): MetadataRow {
+  const category = typeCategory(typeId) ?? (typeId as Category);
+  const converters = pgConvertersFor(getCategory(category)?.metadataColumns);
   const row: MetadataRow = { recordId };
   for (const [key, value] of Object.entries(columns)) {
     if (key === "record_id") continue;
-    row[key] = value;
+    const convert = converters?.get(key);
+    row[key] = convert ? convert(value) : value;
   }
   return row;
 }
