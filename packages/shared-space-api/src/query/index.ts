@@ -20,7 +20,6 @@ export {
   planRecordQuery,
   assertRecordParams,
   type ParamSource,
-  type RecordLabelPath,
   type RecordQueryPlan,
   type RecordVariantRequest,
 } from "./records-plan.js";
