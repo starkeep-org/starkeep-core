@@ -37,9 +37,11 @@ import {
   type AccessGrants,
 } from "@starkeep/protocol-primitives";
 import {
+  planFindByLabel,
   sharedQuerySchema,
   type AggregateQuery,
   type Filter,
+  type LabelFindPlan,
   type Query,
   type RowQuery,
   type SortField,
@@ -51,17 +53,6 @@ import { QueryParseError, type QueryParams } from "./types.js";
 
 /** Where a parameter's value comes from, whatever transport carried it. */
 export type ParamSource = (name: string) => string | undefined;
-
-/** The reverse-index access path, as `?label=<appId>/<key>` names it. */
-export interface RecordLabelPath {
-  readonly appId: string;
-  readonly key: string;
-  /**
-   * Absent is a presence filter and `""` is a bare flag, and the two are
-   * different questions — see {@link FindByLabelQuery.value}.
-   */
-  readonly value: string | undefined;
-}
 
 /** `?variant=<appId>/<key>` and the pixel sizes to resolve against it. */
 export interface RecordVariantRequest {
@@ -93,10 +84,19 @@ export interface RecordQueryPlan {
    * still gets a 403, because it named a resource.
    */
   readonly empty: boolean;
-  /** `?label=` selects through the reverse index instead of the records table. */
-  readonly labelPath: RecordLabelPath | null;
-  /** What the label path pages with; the records path carries it in `query`. */
-  readonly cursor: string | undefined;
+  /**
+   * `?label=` selects through the reverse index instead of the records table.
+   *
+   * The parameters stay explicit — a reverse-index lookup is a join rather than
+   * a predicate on `shared.records` — and what they translate into is the same
+   * parsed query `DatabaseAdapter.findByLabel` builds against the labels
+   * schema, paged by the grammar's own token. See `label-find.ts`.
+   *
+   * Null when the caller holds no readable type, which is the one case the
+   * reverse query cannot be built for — and the same case `empty` reports, so
+   * the route has already answered before reaching this.
+   */
+  readonly labelPath: LabelFindPlan | null;
   readonly includeMetadata: boolean;
   readonly includeLabels: boolean;
   readonly labelApps: string | undefined;
@@ -251,7 +251,6 @@ export function planRecordQuery(
       serverWhere,
       empty,
       labelPath: null,
-      cursor: undefined,
       includeMetadata: false,
       includeLabels: false,
       labelApps: undefined,
@@ -284,8 +283,19 @@ export function planRecordQuery(
     labelPath:
       labelParam === undefined
         ? null
-        : { ...labelRef("label", labelParam), value: labelValue },
-    cursor: pageTokenParam,
+        : // The reverse-index read, parsed. `labelValue` keeps its two
+          // readings: absent is a presence filter and `""` asks for bare flags
+          // specifically, because collapsing them returns a superset — which
+          // looks like it works.
+          planFindByLabel({
+            ...labelRef("label", labelParam),
+            value: labelValue,
+            // The grant, applied inside the index so unreadable rows are never
+            // materialized and the page comes back full.
+            readableTypes: grants.allAccess ? undefined : grants.readableTypes,
+            limit: rows.limit,
+            cursor: pageTokenParam,
+          }),
     includeMetadata: include.includes("metadata"),
     includeLabels: include.includes("labels"),
     labelApps: get("labelApps"),

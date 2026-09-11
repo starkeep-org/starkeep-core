@@ -51,6 +51,10 @@ import type { Filter } from "../../packages/storage-adapter/src/database/types.j
 import { createNodeClock, createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore, createChangeNotifier, projectPolicy, validateRetentionPolicy, validateOverrideRules } from "../../packages/sync-engine/src/index.js";
 import { setHashFactory } from "@starkeep/storage-adapter";
+import {
+  labelPageFrom,
+  LABEL_QUERY_TARGET,
+} from "../../packages/storage-adapter/src/database/label-find.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
 import {
   typeCategory,
@@ -1541,27 +1545,23 @@ async function main() {
         const variantTargets = plan.variant?.targets ?? [];
 
         // Two ways to select a page. The reverse-label query is its own
-        // access path with its own order and its own cursor; everything after
-        // this point (hydration, rendering) is shared.
+        // access path, over its own table and in its own order; everything
+        // after this point (hydration, rendering) is shared.
         let readable: DataRecord[];
         let pageHasMore: boolean;
         let pageCursor: string | null;
 
         if (plan.labelPath) {
-          // The grant filter rides inside the reverse index, so unreadable
-          // rows are never materialized and the page comes back full.
-          const found = await databaseAdapter.findByLabel({
-            appId: plan.labelPath.appId,
-            key: plan.labelPath.key,
-            // Absent = presence filter (any value, flags included); `""` asks
-            // for bare flags specifically. The plan preserves the difference,
-            // because collapsing it returns a superset — which looks like it
-            // works.
-            value: plan.labelPath.value,
-            readableTypes: grants.allAccess ? undefined : grants.readableTypes,
-            limit: plan.query.limit!,
-            cursor: plan.cursor,
-          });
+          // The reverse index, read through the query grammar: the plan carries
+          // the parsed query and the grant as the server's own predicate, so
+          // unreadable rows are never materialized and the page comes back
+          // full. Its page token is the grammar's, cut over `(value,
+          // record_id)` — the index's residual order.
+          const found = labelPageFrom(
+            await databaseAdapter.queryShared(LABEL_QUERY_TARGET, plan.labelPath.query, {
+              serverWhere: plan.labelPath.serverWhere,
+            }),
+          );
 
           // One batched fetch of the matching records, then restore the
           // index's order — `query` returns id-ascending, which is not the

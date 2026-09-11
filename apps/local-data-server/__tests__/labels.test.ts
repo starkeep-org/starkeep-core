@@ -338,6 +338,60 @@ describe("reverse query", () => {
     expect(res.status).toBe(400);
   });
 
+  it("400s a page_token this server did not issue, rather than restarting", async () => {
+    // The reverse query pages with the grammar's token now, and the grammar
+    // rejects a token it did not cut. Answering the first page instead is the
+    // worse failure: a caller that asked to continue and got the beginning has
+    // no way to notice, and pages forever.
+    const res = await owner.fetch(
+      "/data/records?label=annotator/faces-detected&page_token=hand-edited",
+    );
+    expect(res.status).toBe(400);
+    expect(String(((await res.json()) as { error: string }).error)).toMatch(/page_token/);
+  });
+
+  it("continues a ?label= page from a token /data/labels cut", async () => {
+    // The two routes read one table in one order, so their tokens are
+    // interchangeable rather than merely similar. Before this phase they were
+    // two encodings of the same page and neither would decode the other's.
+    const made: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { record } = await createRecordWithBytes(owner, { fileName: `xfer-${i}.jpg` });
+      made.push(record.id);
+    }
+    await setLabels(
+      annotator,
+      made.map((recordId) => ({ recordId, key: "faces-detected" })),
+    );
+
+    const labelsRes = await owner.fetch(
+      `/data/labels?where=${encodeURIComponent(
+        JSON.stringify({ app_id: "annotator", key: "faces-detected" }),
+      )}&limit=1`,
+    );
+    expect(labelsRes.status).toBe(200);
+    const labelsBody = (await labelsRes.json()) as {
+      rows: Array<{ record_id: string }>;
+      page_token: string | null;
+    };
+    expect(labelsBody.page_token).toBeTruthy();
+
+    const recordsRes = await owner.fetch(
+      `/data/records?label=annotator/faces-detected&limit=1000&page_token=${encodeURIComponent(
+        labelsBody.page_token!,
+      )}`,
+    );
+    expect(recordsRes.status).toBe(200);
+    const { records } = (await recordsRes.json()) as { records: Array<{ id: string }> };
+    // Everything the label route already handed out is behind the token, so the
+    // record route continues from there rather than starting again.
+    const seen = records.map((r) => r.id);
+    expect(seen).not.toContain(labelsBody.rows[0]!.record_id);
+    for (const id of made.filter((id) => id !== labelsBody.rows[0]!.record_id)) {
+      expect(seen).toContain(id);
+    }
+  });
+
   it("pages to exhaustion without skipping or repeating", async () => {
     const made: string[] = [];
     for (let i = 0; i < 5; i++) {

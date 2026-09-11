@@ -118,6 +118,8 @@ import {
   sha256HexToBase64,
   loadVariantsForPage,
   loadVariantCandidatesForPage,
+  labelPageFrom,
+  LABEL_QUERY_TARGET,
 } from "@starkeep/storage-adapter";
 import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
@@ -2225,22 +2227,19 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const variantLabel = plan.variant?.label;
       const variantTargets = plan.variant?.targets ?? [];
 
-      // The reverse-label query is its own access path with its own order and
-      // its own cursor; hydration and rendering below are shared.
+      // The reverse-label query is its own access path, over its own table and
+      // in its own order; hydration and rendering below are shared.
       if (plan.labelPath) {
-        // The grant filter rides inside the reverse index, so unreadable rows
-        // are never materialized and the page comes back full.
-        const found = await db.findByLabel({
-          appId: plan.labelPath.appId,
-          key: plan.labelPath.key,
-          // Absent = presence filter (any value, flags included); `""` asks for
-          // bare flags specifically. The plan preserves the difference, because
-          // collapsing it returns a superset — which looks like it works.
-          value: plan.labelPath.value,
-          readableTypes: grants.allAccess ? undefined : grants.readableTypes,
-          limit: plan.query.limit!,
-          cursor: plan.cursor,
-        });
+        // The reverse index, read through the query grammar: the plan carries
+        // the parsed query and the grant as the server's own predicate, so
+        // unreadable rows are never materialized and the page comes back full.
+        // Its page token is the grammar's, cut over `(value, record_id)` — the
+        // index's residual order.
+        const found = labelPageFrom(
+          await db.queryShared(LABEL_QUERY_TARGET, plan.labelPath.query, {
+            serverWhere: plan.labelPath.serverWhere,
+          }),
+        );
 
         // Restore the index's order: `query` returns id-ascending, which is
         // not the (value, record_id) order the cursor is keyed on.
