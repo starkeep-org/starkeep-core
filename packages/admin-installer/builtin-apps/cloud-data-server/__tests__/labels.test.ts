@@ -106,7 +106,12 @@ const RECORDS_INSERT = /insert into "shared"\."records"/;
 const RECORDS_UPDATE = /update "shared"\."records"/;
 const LABELS_INSERT = /insert into "shared"\."record_labels"/;
 const LABELS_UPDATE = /update "shared"\."record_labels"/;
-const LABELS_SELECT = /select \* from "shared"\."record_labels"/;
+/**
+ * The reverse query — `?label=`, now a parsed query over the labels schema.
+ * Matched on the ordering-key aliases the grammar's compiler selects, which is
+ * what keeps it from shadowing the forward hydration below.
+ */
+const LABELS_SELECT = /select \*, "value" as "__ok0", "record_id" as "__ok1" from "shared"\."record_labels"/;
 /**
  * The forward hydration shape — `?include=labels`, and now also the
  * value-cardinality cap's read of what the app already has stored. Narrow
@@ -370,7 +375,7 @@ describe("GET /data/records with labels", () => {
   it("hydrates labels only when include=labels is requested", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
       .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "image/jpeg" })])
-      .on(LABELS_SELECT, [
+      .on(LABELS_BY_IDS, [
         {
           record_id: "rec1",
           app_id: "annotator",
@@ -545,6 +550,7 @@ describe("the reverse query end to end", () => {
   it("hydrates metadata and labels on the reverse path too", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
       .on(LABELS_SELECT, [labelRow({ record_id: "rec1", key: "face-count", value: "3" })])
+      .on(LABELS_BY_IDS, [labelRow({ record_id: "rec1", key: "face-count", value: "3" })])
       .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "image/jpeg" })])
       .on(/from "shared"\."record_image_metadata"/, [{ record_id: "rec1", width: 4, height: 2 }]);
     setDbFactory(db);
@@ -568,7 +574,7 @@ describe("the reverse query end to end", () => {
   it("narrows hydration to the namespaces labelApps asks for", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
       .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "image/jpeg" })])
-      .on(LABELS_SELECT, [
+      .on(LABELS_BY_IDS, [
         labelRow({ record_id: "rec1", app_id: "annotator" }),
         labelRow({ record_id: "rec1", app_id: "photos", key: "thumbnail" }),
       ]);

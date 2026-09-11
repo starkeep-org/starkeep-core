@@ -1,71 +1,23 @@
 /**
- * The `findByLabel` pagination cursor.
+ * The label **scan** cursor, for the sync outbound scan.
  *
- * The cursor encodes the composite **`(value, record_id)`** — the reverse
- * index's own residual order once `app_id`, `key` and `deleted_at` are pinned —
- * and not a bare record id. A bare id is only correct when `value` is pinned or
- * uniformly null; on a value-less query against a key carrying varied values,
- * `record_id` is not monotonic across the range, so `record_id > cursor` would
- * silently skip and repeat rows. Encoding the index's order is correct in every
- * case and collapses to plain id order whenever value is pinned or uniformly
- * null.
+ * Ordered by the primary key `(record_id, app_id, key, value)` rather than by
+ * the reverse index, and it includes tombstones, because sync ships retractions
+ * like any other row.
  *
- * It is opaque to callers, which is what lets it be a composite at no cost to
- * the API surface.
+ * ## Why the reverse query's cursor is not here
  *
- * ## `value` is NOT NULL, which is what makes this simple
- *
- * `value` used to be nullable (a bare flag), and the two backends disagree about
- * where nulls sort: SQLite puts them first in an ASC scan, Postgres/DSQL puts
- * them last. That forced both adapters to normalize on nulls-first — spelled out
- * as `NULLS FIRST` on the Postgres side — or the same cursor would have meant
- * different things against a local and a cloud data-server, skipping rows on one
- * of them.
- *
- * With `value` NOT NULL (a bare flag is `""`, which sorts first naturally on
- * both) that whole divergence is gone rather than papered over, and a plain
- * row-value comparison `(value, record_id) > (?, ?)` is usable — it was not
- * before, because a NULL on either side evaluates to NULL rather than true or
- * false, silently returning an empty page instead of erroring.
+ * `findByLabel` used to carry its own composite `(value, record_id)` token
+ * beside this one, and conflating them would have produced a token that meant
+ * one thing to each. The reverse query is a parsed query now and pages with the
+ * grammar's `page_token` — see `label-find.ts` — so only the scan cursor is
+ * left, and the risk of confusing the two is gone rather than documented.
  */
 
 import type { StarkeepId } from "@starkeep/protocol-primitives";
 import { decodeBase64Url, encodeBase64Url } from "./base64url.js";
 
-export interface LabelCursor {
-  /** `""` for a bare flag; never null — see the note above. */
-  value: string;
-  recordId: StarkeepId;
-}
-
-export function encodeLabelCursor(cursor: LabelCursor): string {
-  return encodeBase64Url(JSON.stringify([cursor.value, cursor.recordId]));
-}
-
-/** Returns `null` for a malformed token rather than throwing: a caller that
- *  hand-edits an opaque cursor gets the first page, not a 500. */
-export function decodeLabelCursor(token: string): LabelCursor | null {
-  try {
-    const json = decodeBase64Url(token);
-    if (json === null) return null;
-    const parsed = JSON.parse(json) as unknown;
-    if (!Array.isArray(parsed) || parsed.length !== 2) return null;
-    const [value, recordId] = parsed as [unknown, unknown];
-    if (typeof value !== "string") return null;
-    if (typeof recordId !== "string" || recordId.length === 0) return null;
-    return { value, recordId: recordId as StarkeepId };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Cursor for the sync-side scan over *all* label rows, which is ordered by the
- * primary key rather than by the reverse index. Separate from
- * {@link LabelCursor} because it keys on a different order and includes
- * tombstones; conflating them would produce a token that means one thing to
- * `findByLabel` and another to `queryLabels`.
- */
+/** Cursor for the sync-side scan over *all* label rows, tombstones included. */
 export interface LabelScanCursor {
   recordId: StarkeepId;
   appId: string;
@@ -104,38 +56,7 @@ export function decodeLabelScanCursor(token: string): LabelScanCursor | null {
   }
 }
 
-/**
- * The SQL form of the predicate is built once, in label-queries.ts, with the
- * calling adapter's Kysely expression builder — so parameter binding stays the
- * compiler's job. With `value` NOT NULL it is a single case, and the same one
- * the comparator below spells:
- *
- *   `value > ? OR (value = ? AND record_id > ?)`
- */
-
-/** The part of a label the reverse-index order is defined over. */
-interface OrderedLabel {
-  value: string;
-  recordId: StarkeepId;
-}
-
-/**
- * The reverse index's order as a comparator: value ascending, then record id.
- *
- * Exists so an in-memory adapter can present the same order the SQL ones do
- * without restating the rule.
- */
-export function compareLabelOrder(a: OrderedLabel, b: OrderedLabel): number {
-  if (a.value !== b.value) return a.value < b.value ? -1 : 1;
-  return a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0;
-}
-
-/** Is this label strictly after the cursor, in {@link compareLabelOrder}? */
-export function isAfterLabelCursor(label: OrderedLabel, cursor: LabelCursor): boolean {
-  return compareLabelOrder(label, cursor) > 0;
-}
-
-/** The same, for the primary-key order the sync scan uses. */
+/** Is this row strictly after the cursor, in {@link compareLabelScanOrder}? */
 export function isAfterLabelScanCursor(
   label: LabelScanCursor,
   cursor: LabelScanCursor,

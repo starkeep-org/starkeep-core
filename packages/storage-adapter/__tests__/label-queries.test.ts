@@ -1,13 +1,17 @@
 /**
- * The SQL both backends share, and the three things that differ between them.
+ * The label SQL both backends share — the write path, the forward lookup and
+ * the sync-side scan.
  *
  * These tests compile against *both* dialects from one call site, which is the
  * point: the label queries used to be written twice, and the copies could drift
  * without any test noticing. Here a change that only lands in one dialect shows
  * up as a diff between the two compiled statements.
  *
+ * The **reverse** query is a parsed query now and is pinned next door in
+ * `label-find.test.ts`, against the same two dialects.
+ *
  * DSQL's real behaviour cannot be exercised offline, so this is also where the
- * Postgres-only spellings — `NULLS FIRST`, schema-qualified table names — are
+ * Postgres-only spellings — schema-qualified table names among them — are
  * pinned; the AWS e2e journey is the only place they run for real.
  */
 import { describe, it, expect } from "vitest";
@@ -23,7 +27,6 @@ import {
 } from "kysely";
 import { createHLCClock, type StarkeepId } from "@starkeep/protocol-primitives";
 import {
-  buildFindByLabel,
   buildGetLabel,
   buildLabelNodeWatermarks,
   buildLabelRetraction,
@@ -32,7 +35,6 @@ import {
   buildLabelsByRecordIds,
   buildQueryLabels,
   buildTombstoneLabelsForRecord,
-  encodeLabelCursor,
   encodeLabelScanCursor,
   type LabelDb,
   type LabelDialect,
@@ -238,108 +240,6 @@ describe("buildLabelRetraction and the delete cascade", () => {
       // Already-tombstoned rows are left alone rather than restamped.
       expect(q.sql).toMatch(/"deleted_at" is null/);
     }
-  });
-});
-
-describe("buildFindByLabel", () => {
-  it("always pins deleted_at, which is what keeps tombstones out of the range", () => {
-    const { sqlite: s, dsql: d } = both((k, dialect) =>
-      buildFindByLabel(k, dialect, { appId: "alpha", key: "k" })!,
-    );
-    for (const q of [s, d]) expect(q.sql).toMatch(/"deleted_at" is null/);
-  });
-
-  it("orders identically on both backends, with no NULLS spelling anywhere", () => {
-    // SQLite sorts nulls first in an ASC scan and Postgres sorts them last, so
-    // while `value` was nullable one side had to spell `NULLS FIRST` out or the
-    // same cursor meant different things against a local and a cloud data
-    // server. NOT NULL removes the divergence rather than normalizing it.
-    const { sqlite: s, dsql: d } = both((k, dialect) =>
-      buildFindByLabel(k, dialect, { appId: "alpha", key: "k" })!,
-    );
-    expect(d.sql).toMatch(/order by "value" asc, "record_id" asc/);
-    expect(s.sql).toMatch(/order by "value" asc, "record_id" asc/);
-    for (const q of [s, d]) expect(q.sql).not.toMatch(/nulls/i);
-  });
-
-  it("fetches limit + 1 so a full page is distinguishable from the last one", () => {
-    const { dsql } = both((k, dialect) =>
-      buildFindByLabel(k, dialect, { appId: "alpha", key: "k", limit: 50 })!,
-    );
-    expect(dsql.parameters).toContain(51);
-  });
-
-  it("omitting value is a presence filter; supplying it is an exact match", () => {
-    const presence = buildFindByLabel(postgres, DSQL, { appId: "alpha", key: "k" })!;
-    expect(presence.sql).not.toMatch(/"value" = /);
-
-    const exact = buildFindByLabel(postgres, DSQL, {
-      appId: "alpha",
-      key: "k",
-      value: "high",
-    })!;
-    expect(exact.sql).toMatch(/"value" = /);
-    expect(exact.parameters).toContain("high");
-  });
-
-  it('value: "" is a real filter — bare flags — and not "no filter"', () => {
-    // The parser-level version of this bug degrades a flag query into an
-    // unfiltered presence query, which returns a superset and so looks like it
-    // works. Pinned here because the builder is where the two must stay apart.
-    const flags = buildFindByLabel(postgres, DSQL, {
-      appId: "alpha",
-      key: "k",
-      value: "",
-    })!;
-    expect(flags.sql).toMatch(/"value" = /);
-    expect(flags.parameters).toContain("");
-  });
-
-  it("returns null — no query at all — for a caller with no readable types", () => {
-    const both0 = both((k, dialect) =>
-      buildFindByLabel(k, dialect, {
-        appId: "alpha",
-        key: "k",
-        readableTypes: new Set(),
-      }),
-    );
-    expect(both0.sqlite).toBeNull();
-    expect(both0.dsql).toBeNull();
-  });
-
-  it("applies the readable-type set as an index condition on the scan", () => {
-    const q = buildFindByLabel(postgres, DSQL, {
-      appId: "alpha",
-      key: "k",
-      readableTypes: new Set(["image/jpeg", "image/png"]),
-    })!;
-    expect(q.sql).toMatch(/"record_type" in/);
-    expect(q.parameters).toContain("image/jpeg");
-  });
-
-  it("compares the cursor in one case, with no null branch left", () => {
-    // Two branches used to be needed because `(value, record_id) > (?, ?)`
-    // evaluates to NULL — not false — with a null on either side, silently
-    // returning an empty page. NOT NULL collapses it to the single comparison.
-    for (const value of ["", "m"]) {
-      const q = buildFindByLabel(postgres, DSQL, {
-        appId: "alpha",
-        key: "k",
-        cursor: encodeLabelCursor({ value, recordId: rid("rec5") }),
-      })!;
-      expect(q.sql, value).toMatch(/"value" > /);
-      expect(q.sql, value).toMatch(/"value" = .* and "record_id" > /);
-      expect(q.sql, value).not.toMatch(/"value" is( not)? null/);
-    }
-  });
-
-  it("ignores a malformed cursor instead of failing the query", () => {
-    const q = buildFindByLabel(postgres, DSQL, {
-      appId: "alpha",
-      key: "k",
-      cursor: "hand-edited-nonsense",
-    })!;
-    expect(q.sql).not.toMatch(/"record_id" > /);
   });
 });
 

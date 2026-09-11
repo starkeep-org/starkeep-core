@@ -2,41 +2,35 @@
  * Label SQL, built once for both backends.
  *
  * SQLite and DSQL store labels in the same nine columns and answer the same
- * five questions about them; before this module each adapter built those
- * queries itself, and the copies drifted only in the ways that are genuinely
+ * questions about them; before this module each adapter built those queries
+ * itself, and the copies drifted only in the ways that are genuinely
  * dialect-specific:
  *
  *   1. **Table name** — `shared_record_labels` vs `shared.record_labels`.
  *   2. **Transaction wrapping** — DSQL wraps everything in `withOccRetry`,
  *      which is the adapter's business, not the query's.
  *
- * Null ordering used to be a third: SQLite sorts nulls first in an ASC scan and
- * Postgres sorts them last, so the reverse query had to spell out `NULLS FIRST`
- * on one side or the same cursor meant two different things. `value` is NOT NULL
- * now, so that divergence is gone rather than normalized.
+ * Everything left here — the column list, the `ON CONFLICT` update set, the
+ * scan cursor, the page-plus-one paging — is one behaviour that must not
+ * differ, so it is written once. Each adapter passes in its own compile-only
+ * Kysely instance, which is what keeps the dialect's compiler in charge of
+ * quoting and parameter binding.
  *
- * Everything else — the column list, the `ON CONFLICT` update set, the cursor
- * predicate, the page-plus-one paging — is one behaviour that must not differ,
- * so it is written once. Each adapter passes in its own compile-only Kysely
- * instance, which is what keeps the dialect's compiler in charge of quoting
- * and parameter binding.
+ * ## What is no longer here
+ *
+ * The **reverse query** — "which records did app A label with key K" — used to
+ * be `buildFindByLabel` beside these, with its own cursor and its own null
+ * ordering note. It is a parsed query now: see `label-find.ts`, which builds it
+ * against the labels schema and runs it through the same compiler every other
+ * shared query uses. What survives here is the write path, the forward lookup
+ * and the sync-side scan, none of which the grammar expresses.
  */
 
 import type { CompiledQuery, Kysely } from "kysely";
 import type { HLCTimestamp, RecordLabel, StarkeepId } from "@starkeep/protocol-primitives";
 import { serializeHLC } from "@starkeep/protocol-primitives";
-import type {
-  FindByLabelQuery,
-  LabelRetraction,
-  LabelUpsert,
-  LabelValueReplacement,
-} from "./types.js";
-import {
-  decodeLabelCursor,
-  decodeLabelScanCursor,
-  encodeLabelCursor,
-  encodeLabelScanCursor,
-} from "./label-cursor.js";
+import type { LabelRetraction, LabelUpsert, LabelValueReplacement } from "./types.js";
+import { decodeLabelScanCursor, encodeLabelScanCursor } from "./label-cursor.js";
 import { labelToRow, rowToLabel, type LabelRow } from "./label-row.js";
 
 /** The dynamic (schema-less) row type both adapters' compilers are built on. */
@@ -48,7 +42,6 @@ export interface LabelDialect {
   table: string;
 }
 
-export const DEFAULT_FIND_LIMIT = 50;
 export const DEFAULT_SCAN_LIMIT = 500;
 
 const PK_COLUMNS = ["record_id", "app_id", "key", "value"] as const;
@@ -271,74 +264,6 @@ export function buildGetLabel(
 }
 
 /**
- * The reverse query: which records a given app labelled with a given key.
- *
- * Returns `null` when the query cannot match anything — a caller with an empty
- * readable-type set — so both adapters short-circuit identically instead of
- * compiling a `type in ()` that the two dialects disagree about.
- *
- * Fetches `limit + 1` rows so the caller can tell a full page from the last
- * one without a second count.
- */
-export function buildFindByLabel(
-  k: Kysely<LabelDb>,
-  dialect: LabelDialect,
-  query: FindByLabelQuery,
-): CompiledQuery | null {
-  const limit = query.limit ?? DEFAULT_FIND_LIMIT;
-
-  let q = k
-    .selectFrom(dialect.table)
-    .selectAll()
-    .where("app_id", "=", query.appId)
-    .where("key", "=", query.key)
-    // Pinned by every reverse query — nobody asks for retracted labels — and
-    // pinning it is what keeps the tombstone pile out of the scanned range.
-    // On DSQL it is the third key column of idx_record_labels_reverse and
-    // plans as a scan key: 20 index entries scanned behind 20,000 tombstones,
-    // against 20,040 for the same index without it.
-    .where("deleted_at", "is", null);
-
-  // Omitted value = presence filter (any value, flags included); supplied =
-  // exact match. See FindByLabelQuery.value for why exact-only.
-  if (query.value !== undefined) {
-    q = q.where("value", "=", query.value);
-  }
-
-  // The caller's read grants, applied here rather than after fetching the
-  // records, so a page comes back full. `record_type` rides in the reverse
-  // index as an INCLUDE payload, which is what makes this an index condition
-  // rather than a post-fetch filter.
-  if (query.readableTypes !== undefined) {
-    const types = [...query.readableTypes];
-    if (types.length === 0) return null;
-    q = q.where("record_type", "in", types);
-  }
-
-  // "Strictly after the cursor" in `(value, record_id)` order. A single case
-  // now that `value` is NOT NULL — the two-branch version this replaces existed
-  // only because a NULL on either side of the comparison evaluates to NULL.
-  const cursor = query.cursor ? decodeLabelCursor(query.cursor) : null;
-  if (cursor) {
-    const { value, recordId } = cursor;
-    q = q.where((eb) =>
-      eb.or([
-        eb("value", ">", value),
-        eb.and([eb("value", "=", value), eb("record_id", ">", recordId)]),
-      ]),
-    );
-  }
-
-  // No `NULLS FIRST`: with no nulls in the column the two dialects order this
-  // identically on their own.
-  return q
-    .orderBy("value", "asc")
-    .orderBy("record_id", "asc")
-    .limit(limit + 1)
-    .compile();
-}
-
-/**
  * Paginated scan over every label row, **tombstones included**, for the sync
  * outbound scan. Ordered by primary key, with its own cursor: the reverse
  * index's `(value, record_id)` order means something else entirely, and one
@@ -409,29 +334,12 @@ export function buildLabelNodeWatermarks(
 // ---- Shared result shaping -------------------------------------------------
 
 /**
- * Turn the `limit + 1` rows {@link buildFindByLabel} asked for into a page.
+ * Turn the `limit + 1` rows {@link buildQueryLabels} asked for into a page.
  *
- * The extra row is what distinguishes "there is more" from "this was the
- * last page", and `nextCursor` is null in the second case — which is the only
- * signal a caller may stop on. A *short* page means nothing: an orphaned label
- * (its record deleted in a way that raced sync) drops out above this layer.
+ * The extra row is what distinguishes "there is more" from "this was the last
+ * page", and `nextCursor` is null in the second case — the only signal a caller
+ * may stop on.
  */
-export function paginateFindByLabel(
-  rows: LabelRow[],
-  limit = DEFAULT_FIND_LIMIT,
-): { labels: RecordLabel[]; nextCursor: string | null; hasMore: boolean } {
-  const hasMore = rows.length > limit;
-  const labels = (hasMore ? rows.slice(0, limit) : rows).map(rowToLabel);
-  const last = labels[labels.length - 1];
-  return {
-    labels,
-    hasMore,
-    nextCursor:
-      hasMore && last ? encodeLabelCursor({ value: last.value, recordId: last.recordId }) : null,
-  };
-}
-
-/** The same, for the primary-key-ordered sync scan. */
 export function paginateLabelScan(
   rows: LabelRow[],
   limit = DEFAULT_SCAN_LIMIT,

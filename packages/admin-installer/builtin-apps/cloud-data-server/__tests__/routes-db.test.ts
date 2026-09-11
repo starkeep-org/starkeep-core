@@ -1918,7 +1918,9 @@ describe("GET /data/records filters", () => {
 
   it("combines parentId with a label filter", async () => {
     const db = fakeDsqlWithGrants(grants)
-      .on(/from "shared"\."record_labels" where "app_id" =/, [
+      // The reverse query is a parsed query now, so the grant and the
+      // soft-delete predicate precede the caller's `app_id` in the WHERE list.
+      .on(/from "shared"\."record_labels" where .*"app_id" = /, [
         {
           record_id: "child-1",
           app_id: "photos",

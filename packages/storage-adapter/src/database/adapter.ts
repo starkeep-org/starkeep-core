@@ -226,6 +226,11 @@ export interface DatabaseAdapter {
    * Results come back in the reverse index's own order, `(value, record_id)`,
    * and the cursor encodes that composite rather than a bare record id — see
    * {@link FindByLabelQuery.cursor}.
+   *
+   * Implemented as a parsed query over `shared.record_labels` and run through
+   * {@link queryShared}, so it is the same compiler, the same keyset predicate
+   * and the same page token the `/data/labels` route uses. See `label-find.ts`
+   * for what that bought and what it cost.
    */
   findByLabel(query: FindByLabelQuery): Promise<FindByLabelResult>;
 

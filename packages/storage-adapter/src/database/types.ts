@@ -163,12 +163,19 @@ export interface FindByLabelQuery {
   readableTypes?: ReadonlySet<string>;
   limit?: number;
   /**
-   * Opaque continuation token. Encodes the composite `(value, record_id)` —
-   * the reverse index's own residual order — **not** a bare record id. A bare
-   * id is only correct when `value` is pinned or uniformly null; on a
+   * Opaque continuation token — the query grammar's `page_token`, cut over the
+   * ordering `(value, record_id)`: the reverse index's own residual order once
+   * `app_id`, `key` and `deleted_at` are pinned. **Not** a bare record id. A
+   * bare id is only correct when `value` is pinned or uniformly null; on a
    * value-less query against a key with varied values it would silently skip
-   * and repeat rows. Callers never inspect it; implementations must not
-   * "simplify" it back to an id.
+   * and repeat rows.
+   *
+   * The same token `/data/labels` issues for a query in that order, because it
+   * is the same query — see `label-find.ts`. Callers never inspect it.
+   *
+   * A token this server did not issue, or one cut under a different ordering,
+   * is **rejected** rather than answered with the first page: a caller that
+   * asked to continue and got the beginning has no way to notice.
    */
   cursor?: string;
 }

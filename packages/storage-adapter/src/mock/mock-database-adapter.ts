@@ -52,15 +52,17 @@ import type {
   RecordTypeCount,
 } from "../database/types.js";
 import {
-  encodeLabelCursor,
-  decodeLabelCursor,
   encodeLabelScanCursor,
   decodeLabelScanCursor,
-  compareLabelOrder,
   compareLabelScanOrder,
-  isAfterLabelCursor,
   isAfterLabelScanCursor,
 } from "../database/label-cursor.js";
+import {
+  emptyLabelPage,
+  labelPageFrom,
+  planFindByLabel,
+  LABEL_QUERY_TARGET,
+} from "../database/label-find.js";
 
 export class MockDatabaseAdapter implements DatabaseAdapter {
   private store = new Map<string, DataRecord>();
@@ -569,37 +571,22 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     return result;
   }
 
+  /**
+   * The reverse label read, run through the query grammar — see
+   * `label-find.ts`.
+   *
+   * Built from the same plan the SQL adapters run and evaluated by the same
+   * in-memory evaluator every other shared query uses here, so an in-memory run
+   * and a real one page identically instead of agreeing only by coincidence.
+   */
   async findByLabel(query: FindByLabelQuery): Promise<FindByLabelResult> {
-    const limit = query.limit ?? 50;
-    const matches = [...this.labels.values()].filter(
-      (l) =>
-        !l.deletedAt &&
-        l.appId === query.appId &&
-        l.key === query.key &&
-        (query.value === undefined || l.value === query.value) &&
-        (query.readableTypes === undefined || query.readableTypes.has(l.recordType)),
+    const plan = planFindByLabel(query);
+    if (!plan) return emptyLabelPage();
+    return labelPageFrom(
+      await this.queryShared(LABEL_QUERY_TARGET, plan.query, {
+        serverWhere: plan.serverWhere,
+      }),
     );
-
-    // Nulls first, then by value, then by id. Both the order and the "strictly
-    // after the cursor" test come from label-cursor.ts, which is also where the
-    // SQL adapters' predicate is spelled — so an in-memory run and a real one
-    // page identically instead of agreeing only by coincidence.
-    matches.sort(compareLabelOrder);
-
-    const cursor = query.cursor ? decodeLabelCursor(query.cursor) : null;
-    const after = cursor ? matches.filter((l) => isAfterLabelCursor(l, cursor)) : matches;
-
-    const hasMore = after.length > limit;
-    const page = after.slice(0, limit).map((l) => structuredClone(l));
-    const last = page[page.length - 1];
-    return {
-      labels: page,
-      hasMore,
-      nextCursor:
-        hasMore && last
-          ? encodeLabelCursor({ value: last.value, recordId: last.recordId })
-          : null,
-    };
   }
 
   // ---- Label sync ---------------------------------------------------------

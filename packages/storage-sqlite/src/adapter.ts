@@ -46,7 +46,6 @@ import {
   type ParsedQueryResult,
   type SharedQueryTarget,
   type WhereClause,
-  buildFindByLabel,
   buildGetLabel,
   buildLabelNodeWatermarks,
   buildBucketDigest,
@@ -66,7 +65,10 @@ import {
   buildQueryLabels,
   buildTombstoneLabelsForRecord,
   groupLabelsByRecordId,
-  paginateFindByLabel,
+  emptyLabelPage,
+  LABEL_QUERY_TARGET,
+  labelPageFrom,
+  planFindByLabel,
   paginateLabelScan,
   rowToLabel,
   type LabelDialect,
@@ -583,13 +585,22 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     );
   }
 
+  /**
+   * The reverse label read, run through the query grammar — see
+   * `label-find.ts`. The grant rides in as `serverWhere` rather than as one of
+   * the caller's own predicates, which is the separation every other shared
+   * query draws.
+   */
   async findByLabel(query: FindByLabelQuery): Promise<FindByLabelResult> {
     // `null` means the query cannot match anything — a caller with no readable
     // types — so there is nothing to ask the database.
-    const compiled = buildFindByLabel(qb, LABELS, query);
-    if (!compiled) return { labels: [], nextCursor: null, hasMore: false };
-    const rows = this.allRows<LabelRow>(compiled.sql, ...compiled.parameters);
-    return paginateFindByLabel(rows, query.limit);
+    const plan = planFindByLabel(query);
+    if (!plan) return emptyLabelPage();
+    return labelPageFrom(
+      await this.queryShared(LABEL_QUERY_TARGET, plan.query, {
+        serverWhere: plan.serverWhere,
+      }),
+    );
   }
 
   // ---- Label sync ---------------------------------------------------------
