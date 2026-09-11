@@ -122,6 +122,7 @@ const RECORD_PARAMS: readonly string[] = [
   "page_token",
   "include",
   "aggregate",
+  "select",
   // The legacy spellings of the same four things.
   "type",
   "ids",
@@ -217,6 +218,19 @@ export function planRecordQuery(
   // The whole page is one bounded list, so `limit` and a cursor say nothing.
   const requestedIds = idsParam === undefined ? null : readIds(idsParam);
 
+  // `select` is the `GROUP BY` list of an aggregate and a column projection
+  // everywhere else, and this route has no projection to narrow: it answers a
+  // rendered record — a category, an availability, a set of variants and a
+  // hydrated metadata row — rather than the columns of `shared.records`. A
+  // caller wanting columns has `/data/metadata/:category`.
+  const selectParam = get("select");
+  if (selectParam !== undefined && aggregateParam === undefined) {
+    throw new QueryParseError(
+      `select projects columns, and /data/records answers a rendered record rather ` +
+        `than a row; it applies to aggregate as the grouping list only`,
+    );
+  }
+
   const params: QueryParams = {
     where: whereParam ?? legacyWhere(legacyType, requestedIds, parentIdParam),
     order: get("order"),
@@ -227,6 +241,7 @@ export function planRecordQuery(
         : boundedLimit(get("limit"), options.defaultLimit),
     ),
     ...(aggregateParam === undefined ? {} : { aggregate: aggregateParam }),
+    ...(selectParam === undefined ? {} : { select: selectParam }),
   };
 
   const parsed = parseQuery(schema, params);
