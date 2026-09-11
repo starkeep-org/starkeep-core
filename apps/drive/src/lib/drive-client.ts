@@ -143,7 +143,10 @@ export interface DriveTypeSummary {
 
 export async function listRecords(type?: string): Promise<DriveRecord[]> {
   const qs = new URLSearchParams({ limit: "1000" });
-  if (type) qs.set("type", type);
+  // The type filter is a `where` clause rather than a named parameter: one
+  // grammar answers both data planes, and a record type is an ordinary
+  // equality over a column of `shared.records`.
+  if (type) qs.set("where", JSON.stringify({ type }));
   const { records } = await ldsGet<{ records: DriveRecord[] }>(
     `/data/records?${qs.toString()}`,
   );
@@ -229,7 +232,7 @@ async function ldsGetCloud<T>(path: string): Promise<T> {
 
 export async function listCloudRecords(type?: string): Promise<CloudRecord[]> {
   const qs = new URLSearchParams({ limit: "1000" });
-  if (type) qs.set("type", type);
+  if (type) qs.set("where", JSON.stringify({ type }));
   const { records } = await ldsGetCloud<{ records: CloudRecord[] }>(
     `/cloud/data/records?${qs.toString()}`,
   );
