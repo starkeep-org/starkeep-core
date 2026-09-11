@@ -144,16 +144,24 @@ describe("list", () => {
     }
     const limited = await listRecords(app, "?limit=2");
     expect(limited.length).toBe(2);
-    const jpgs = await listRecords(app, "?type=image/jpeg");
+    const jpgs = await listRecords(
+      app,
+      `?where=${encodeURIComponent(JSON.stringify({ type: "image/jpeg" }))}`,
+    );
     expect(jpgs.every((r) => r.type === "image/jpeg")).toBe(true);
   });
 
-  it("returns a deterministic bounded set selected by ids", async () => {
+  it("returns a deterministic bounded set selected by id", async () => {
     const first = await createRecordWithBytes(app, { fileName: "ids-a.jpg" });
     const second = await createRecordWithBytes(app, { fileName: "ids-b.jpg" });
     await createRecordWithBytes(app, { fileName: "ids-unrequested.jpg" });
-    const raw = `${second.record.id},${first.record.id},${second.record.id}`;
-    const res = await app.fetch(`/data/records?ids=${encodeURIComponent(raw)}&include=metadata`);
+    // A duplicate in the list is one row in the answer, and the answer is in
+    // the table's order rather than the caller's.
+    const ids = [second.record.id, first.record.id, second.record.id];
+    const res = await app.fetch(
+      `/data/records?where=${encodeURIComponent(JSON.stringify({ id: { in: ids } }))}` +
+        `&limit=${ids.length}&include=metadata`,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       records: Array<{ id: string; metadata?: unknown }>;
@@ -167,9 +175,11 @@ describe("list", () => {
     expect(body).toMatchObject({ hasMore: false, nextCursor: null });
   });
 
-  it("rejects an oversized ids filter", async () => {
-    const ids = Array.from({ length: 101 }, (_, index) => `id-${index}`).join(",");
-    const res = await app.fetch(`/data/records?ids=${encodeURIComponent(ids)}`);
+  it("rejects an oversized in-list", async () => {
+    const ids = Array.from({ length: 501 }, (_, index) => `id-${index}`);
+    const res = await app.fetch(
+      `/data/records?where=${encodeURIComponent(JSON.stringify({ id: { in: ids } }))}`,
+    );
     expect(res.status).toBe(400);
   });
 
@@ -213,7 +223,7 @@ describe("list", () => {
     expect(records.some((r) => r.id === after.record.id)).toBe(true);
   });
 
-  it("pages to exhaustion with cursor, visiting every record exactly once", async () => {
+  it("pages to exhaustion with page_token, visiting every record exactly once", async () => {
     for (let i = 0; i < 5; i++) {
       await createRecordWithBytes(app, { fileName: `paged-${i}.jpg` });
     }
@@ -223,7 +233,7 @@ describe("list", () => {
     let pages = 0;
     do {
       const res = await app.fetch(
-        `/data/records?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+        `/data/records?limit=2${cursor ? `&page_token=${encodeURIComponent(cursor)}` : ""}`,
       );
       const body = (await res.json()) as {
         records: Array<{ id: string }>;

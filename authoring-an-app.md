@@ -167,9 +167,9 @@ refresh) and `src/lib/data-server-client.ts` (the calls). The key endpoints:
 - `POST /files/presign` then S3 `PUT`, then `POST /data/records` — upload large
   file bytes out-of-band, then register the record by content hash (bypasses the
   API Gateway ~7 MB inline-body cap).
-- `GET /data/records` — list records. **A type-less query is server-scoped to the
-  app's granted types**, so Photos gets every image type in one call without
-  hardcoding a type filter.
+- `GET /data/records` — list records, under the query grammar of §9b. **A query
+  naming no type is server-scoped to the app's granted types**, so Photos gets
+  every image type in one call without hardcoding a filter.
 - `GET /data/records/:id/file-url` — presigned download URL.
 - `POST /data/records/:id/metadata` — write into the shared metadata table
   (requires `metadataWrite` in the manifest).
@@ -644,6 +644,62 @@ Four rules govern both routes, and each of them is load-bearing:
 *records* a label selects. This route returns label rows, which is the
 different question: what values exist, how many carry each, and on which record
 ids.
+
+### 9b. Querying records
+
+`GET /data/records` takes the same grammar, over the columns of the shared
+records table. It answers a *rendered record* rather than a row — a category, an
+availability, a resolved variant set, a hydrated metadata row — so `select` is
+the one parameter that does not apply to it, except as an aggregate's grouping
+list.
+
+```
+# The library in capture order, originals only, ready to paint.
+GET /data/records
+  ?order=captured_at.desc
+  &limit=100
+  &include=metadata,labels
+  &notLabel=photos/rendition
+
+# One bounded batch of records by id.
+GET /data/records
+  ?where={"id":{"in":["rec-a","rec-b"]}}
+  &limit=2
+
+# The children of one record.
+GET /data/records?where={"parent_id":"rec-a"}
+
+# How many records you can read, without paging through them.
+GET /data/records?aggregate={"total":{"fn":"count"}}
+```
+
+Five things about this route specifically:
+
+1. **A page holds 100 records by default** (50 from the cloud data server),
+   rather than the grammar's 30, and a `limit` above the grammar's ceiling is
+   clamped rather than refused. Page until `nextCursor` is null either way.
+2. **The continuation is `page_token`,** and the response still names it
+   `nextCursor`. Hand back what you were given; its shape is the server's.
+3. **`captured_at` is an ordering key and not a column.** It lives in the
+   per-category metadata table, and this route reads it through a join it builds
+   only to sort, so it can be named in `order` and nowhere else. To *filter* on
+   it, query `/data/metadata/image` and hydrate by id.
+4. **`created_at` and `updated_at` are serialized HLCs.** You can order by them
+   and read them back; you cannot filter on them, because a sync-internal clock
+   is not a promise the platform makes. `updated_after=<iso>` is the supported
+   question, and the server converts the instant into the bound.
+5. **The access paths are not grammar and stay named parameters.** `label` and
+   `labelValue` select through the reverse index, which is a join; `notLabel`
+   is an anti-join; `variant`, `variantLongEdge`, `labelApps` and `include`
+   hydrate the page after it is cut. None of them is a predicate over the
+   records table, and expressing them as one would be a worse API rather than a
+   more uniform one.
+
+Naming a type you were not granted is a 403 rather than an empty page, for the
+reason rule 2 of §9a gives. Naming a parameter this route does not have is a
+400: the parameter set it replaced — `type`, `ids`, `parentId` and `cursor` —
+read named parameters as filters, so silently ignoring an unrecognized one would
+answer the whole library to a caller that asked for one record's children.
 
 ## 10. Who authenticates the end user in your app
 

@@ -465,7 +465,13 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     }
 
     if (rest === "/data/records" && req.method === "GET") {
-      const typeFilter = new URL(req.url ?? "/", url).searchParams.get("type") ?? undefined;
+      // The one clause the real route's callers send here. A `where` object can
+      // carry any predicate the grammar accepts; honouring the single equality
+      // is enough for a fake, and anything richer belongs in a test against a
+      // real server rather than against this.
+      const where = new URL(req.url ?? "/", url).searchParams.get("where");
+      const typeFilter =
+        where === null ? undefined : (JSON.parse(where) as { type?: string }).type;
       const records = (await collectSharedRecords()).filter(
         (r) => !r.deletedAt && (typeFilter === undefined || r.type === typeFilter),
       );

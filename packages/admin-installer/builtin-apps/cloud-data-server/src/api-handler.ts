@@ -71,7 +71,6 @@ import {
   planLabelRetractions,
   labelValueSetKey,
   parseLabelRef,
-  parseRecordIdFilter,
 } from "@starkeep/protocol-primitives";
 import type {
   Category,

@@ -98,7 +98,9 @@ describe("LDS /cloud/data proxy with a real cloud HMAC check (gap 1)", () => {
     // Sanity that the cloud check is real, not always-true: the LDS signs the
     // proxied call as `starkeep-drive`, so a verifier that only trusts a
     // different app would 401. (Asserted directly via drift below.)
-    const res = await drive.fetch("/cloud/data/records?type=image/jpeg");
+    const res = await drive.fetch(
+      `/cloud/data/records?where=${encodeURIComponent(JSON.stringify({ type: "image/jpeg" }))}`,
+    );
     expect(res.status).toBe(200);
     const { records } = (await res.json()) as { records: Array<{ type?: string }> };
     expect(records.length).toBeGreaterThanOrEqual(1);

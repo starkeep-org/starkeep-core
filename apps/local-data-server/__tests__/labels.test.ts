@@ -355,7 +355,7 @@ describe("reverse query", () => {
     do {
       const res = await owner.fetch(
         `/data/records?label=annotator/faces-detected&limit=2${
-          cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+          cursor ? `&page_token=${encodeURIComponent(cursor)}` : ""
         }`,
       );
       const body = (await res.json()) as {
@@ -403,7 +403,7 @@ describe("reverse query across a partially-readable library", () => {
     do {
       const res = await annotator.fetch(
         `/data/records?label=owner/thumbnail&limit=2${
-          cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+          cursor ? `&page_token=${encodeURIComponent(cursor)}` : ""
         }`,
       );
       const body = (await res.json()) as {
@@ -462,7 +462,7 @@ describe("reverse query across a partially-readable library", () => {
     do {
       const res = await owner.fetch(
         `/data/records?label=annotator/faces-detected&limit=2${
-          cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+          cursor ? `&page_token=${encodeURIComponent(cursor)}` : ""
         }`,
       );
       const body = (await res.json()) as {

@@ -153,7 +153,12 @@ describe("grants parity on records routes", () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]);
     setDbFactory(db);
     const res = await handler(
-      signedEvent({ appId: "gp1", method: "GET", subPath: "/data/records", query: { type: "audio/mp3" } }),
+      signedEvent({
+        appId: "gp1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { where: JSON.stringify({ type: "audio/mp3" }) },
+      }),
       context,
     );
     expect(res.statusCode).toBe(403);
@@ -1795,7 +1800,7 @@ describe("/app-data routes", () => {
 describe("GET /data/records filters", () => {
   const grants = [{ type_id: "image/jpeg", access: "readwrite" }];
 
-  it("pushes a deduplicated ids filter into the authorized record query", async () => {
+  it("pushes a deduplicated id list into the authorized record query", async () => {
     const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
       recordRow({ id: "a", type: "image/jpeg" }),
       recordRow({ id: "b", type: "image/jpeg" }),
@@ -1806,7 +1811,7 @@ describe("GET /data/records filters", () => {
         appId: "app1",
         method: "GET",
         subPath: "/data/records",
-        query: { ids: "b,a,b" },
+        query: { where: JSON.stringify({ id: { in: ["b", "a", "b"] } }) },
       }),
       context,
     );
@@ -1817,7 +1822,7 @@ describe("GET /data/records filters", () => {
     expect(bodyOf(res)).toMatchObject({ hasMore: false, nextCursor: null });
   });
 
-  it("rejects an oversized ids filter before querying records", async () => {
+  it("rejects an oversized in-list before querying records", async () => {
     const db = fakeDsqlWithGrants(grants);
     setDbFactory(db);
     const res = await handler(
@@ -1825,7 +1830,11 @@ describe("GET /data/records filters", () => {
         appId: "app1",
         method: "GET",
         subPath: "/data/records",
-        query: { ids: Array.from({ length: 101 }, (_, index) => `id-${index}`).join(",") },
+        query: {
+          where: JSON.stringify({
+            id: { in: Array.from({ length: 501 }, (_, index) => `id-${index}`) },
+          }),
+        },
       }),
       context,
     );
@@ -1833,7 +1842,7 @@ describe("GET /data/records filters", () => {
     expect(db.calls(RECORDS_SELECT)).toHaveLength(0);
   });
 
-  it("pushes parentId into the query rather than filtering after it", async () => {
+  it("pushes a parent predicate into the query rather than filtering after it", async () => {
     const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
       recordRow({ id: "child-1", type: "image/jpeg", parent_id: "parent-1" }),
     ]);
@@ -1843,7 +1852,7 @@ describe("GET /data/records filters", () => {
         appId: "app1",
         method: "GET",
         subPath: "/data/records",
-        query: { parentId: "parent-1" },
+        query: { where: JSON.stringify({ parent_id: "parent-1" }) },
       }),
       context,
     );
@@ -1853,10 +1862,10 @@ describe("GET /data/records filters", () => {
     expect(sql.values).toContain("parent-1");
   });
 
-  // "Originals only" for a grid. Expressed as a sentinel rather than an empty
-  // value because `?parentId=` would be indistinguishable from a caller that
-  // built the query string from an undefined variable.
-  it("treats parentId=none as a null-parent filter", async () => {
+  // "Originals only" for a grid. JSON `null` says it directly, where the
+  // parameter set needed a `none` sentinel: `?parentId=` was indistinguishable
+  // from a caller that built its query string from an undefined variable.
+  it("compiles a null parent as IS NULL", async () => {
     const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, []);
     setDbFactory(db);
     await handler(
@@ -1864,7 +1873,7 @@ describe("GET /data/records filters", () => {
         appId: "app1",
         method: "GET",
         subPath: "/data/records",
-        query: { parentId: "none" },
+        query: { where: JSON.stringify({ parent_id: null }) },
       }),
       context,
     );
@@ -1931,7 +1940,10 @@ describe("GET /data/records filters", () => {
         appId: "app1",
         method: "GET",
         subPath: "/data/records",
-        query: { label: "photos/thumbnail", parentId: "parent-1" },
+        query: {
+          label: "photos/thumbnail",
+          where: JSON.stringify({ parent_id: "parent-1" }),
+        },
       }),
       context,
     );
