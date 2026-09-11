@@ -1,14 +1,11 @@
 /**
- * `/data/records`: the old parameter set and the grammar answer the same thing.
+ * `/data/records` under the query grammar.
  *
- * Both spellings run through one parser, so the risk this suite covers is the
- * translation between them rather than the parser itself. Every case here
- * issues the *exact shape a production caller issues* against one seeded
- * fixture, in both spellings, and asserts one response — which is what licenses
- * migrating those callers one at a time.
- *
- * The route also has no golden-response coverage of its own, so the fixture is
- * worth having even where the two spellings are trivially equal.
+ * Every case here issues the *exact shape a production caller issues* against
+ * one seeded fixture. The suite began as an equivalence proof between the old
+ * parameter set and the grammar, which is what licensed migrating those callers
+ * one at a time; the parameters are gone now, and what the cases are worth
+ * keeping for is that this route had no golden-response coverage of its own.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
@@ -109,13 +106,6 @@ function scrubUrls(value: unknown): unknown {
   return out;
 }
 
-/** Both spellings of one production call site, asserted to be one answer. */
-async function equivalent(legacy: string, grammar: string): Promise<unknown> {
-  const answer = await body(legacy);
-  expect(await body(grammar)).toEqual(answer);
-  return answer;
-}
-
 describe("the route's own defaults, which are not the grammar's", () => {
   it("answers 100 records rather than the grammar's 30 when no limit is named", async () => {
     // The whole library is 36 records: above the grammar's default page and
@@ -142,17 +132,14 @@ describe("the route's own defaults, which are not the grammar's", () => {
   });
 });
 
-describe("the shapes production issues, in both spellings", () => {
+describe("the shapes production issues", () => {
   it("drive: the whole library", async () => {
-    const answer = (await equivalent("?limit=1000", "?limit=1000")) as {
-      records: { id: string }[];
-    };
+    const answer = (await body("?limit=1000")) as { records: { id: string }[] };
     expect(answer.records).toHaveLength(ORIGINAL_COUNT + renditions.length);
   });
 
   it("drive: the whole library of one type", async () => {
-    const answer = (await equivalent(
-      "?limit=1000&type=image/jpeg",
+    const answer = (await body(
       `?limit=1000&where=${encodeURIComponent(JSON.stringify({ type: "image/jpeg" }))}`,
     )) as { records: { id: string }[] };
     expect(answer.records).toHaveLength(ORIGINAL_COUNT + renditions.length);
@@ -161,27 +148,28 @@ describe("the shapes production issues, in both spellings", () => {
   it("photos library: a page of originals with metadata and labels", async () => {
     const suffix =
       `&include=metadata,labels&notLabel=${encodeURIComponent(RENDITION)}`;
-    const answer = (await equivalent(
-      `?limit=10${suffix}`,
-      `?limit=10${suffix}`,
-    )) as { records: { id: string }[]; hasMore: boolean; nextCursor: string };
+    const answer = (await body(`?limit=10${suffix}`)) as {
+      records: { id: string }[];
+      hasMore: boolean;
+      nextCursor: string;
+    };
     // The renditions are cut by the anti-join, so the page is originals only.
     expect(answer.records.map((r) => r.id)).not.toContain(renditions[0]);
     expect(answer.hasMore).toBe(true);
 
-    // The second page, which is the parameter the two spellings disagree on.
-    expect(
-      await body(`?limit=10${suffix}&page_token=${encodeURIComponent(answer.nextCursor)}`),
-    ).toEqual(await body(`?limit=10${suffix}&cursor=${encodeURIComponent(answer.nextCursor)}`));
+    // The second page carries the records the first one did not.
+    const second = (await body(
+      `?limit=10${suffix}&page_token=${encodeURIComponent(answer.nextCursor)}`,
+    )) as { records: { id: string }[] };
+    const first = new Set(answer.records.map((r) => r.id));
+    expect(second.records.some((r) => first.has(r.id))).toBe(false);
   });
 
   it("photos renditions: a bounded id list with metadata and variants", async () => {
     const ids = [originals[0]!.id, originals[1]!.id].sort();
-    const answer = (await equivalent(
-      `?ids=${encodeURIComponent(ids.join(","))}&include=metadata` +
-        `&variant=${encodeURIComponent(RENDITION)}`,
+    const answer = (await body(
       `?where=${encodeURIComponent(JSON.stringify({ id: { in: ids } }))}` +
-        `&include=metadata&variant=${encodeURIComponent(RENDITION)}`,
+        `&limit=${ids.length}&include=metadata&variant=${encodeURIComponent(RENDITION)}`,
     )) as { records: { id: string }[]; hasMore: boolean; nextCursor: string | null };
     expect(answer.records.map((r) => r.id).sort()).toEqual(ids);
     // A bounded list is the whole answer, so there is nothing to page.
@@ -193,18 +181,29 @@ describe("the shapes production issues, in both spellings", () => {
     const suffix =
       `&include=metadata,labels&notLabel=${encodeURIComponent(RENDITION)}` +
       `&variant=${encodeURIComponent(RENDITION)}`;
-    await equivalent(`?limit=20${suffix}`, `?limit=20${suffix}`);
+    const { records } = (await body(`?limit=20${suffix}`)) as {
+      records: { id: string; variant_candidates: unknown[]; metadata: unknown }[];
+    };
+    // Originals only, each carrying its derived children and its dimensions —
+    // the three things one sweep page has to answer in one request.
+    expect(records.map((r) => r.id)).not.toContain(renditions[0]);
+    expect(records.every((r) => Array.isArray(r.variant_candidates))).toBe(true);
+    expect(records.every((r) => r.metadata !== undefined)).toBe(true);
   });
 
   it("vision scan: a page of everything, labels included", async () => {
-    await equivalent("?include=labels&limit=20", "?include=labels&limit=20");
+    const { records, hasMore } = (await body("?include=labels&limit=20")) as {
+      records: { id: string; labels: unknown[] }[];
+      hasMore: boolean;
+    };
+    expect(records).toHaveLength(20);
+    expect(hasMore).toBe(true);
+    expect(records.every((r) => Array.isArray(r.labels))).toBe(true);
   });
 
   it("publish-renditions: the children of one record, by label", async () => {
     const parent = originals[0]!.id;
-    const answer = (await equivalent(
-      `?parentId=${encodeURIComponent(parent)}&label=${RENDITION}` +
-        `&include=labels,metadata&limit=50`,
+    const answer = (await body(
       `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent }))}` +
         `&label=${RENDITION}&include=labels,metadata&limit=50`,
     )) as { records: { id: string }[] };
@@ -213,17 +212,18 @@ describe("the shapes production issues, in both spellings", () => {
 
   it("labels: one child of one record, at one label value", async () => {
     const parent = originals[1]!.id;
-    const answer = (await equivalent(
-      `?parentId=${encodeURIComponent(parent)}&label=${RENDITION}&labelValue=thumbnail&limit=1`,
+    const answer = (await body(
       `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent }))}` +
         `&label=${RENDITION}&labelValue=thumbnail&limit=1`,
     )) as { records: { id: string }[] };
     expect(answer.records.map((r) => r.id)).toEqual([renditions[1]]);
   });
 
-  it("the parentless half of parentId, which has no other spelling", async () => {
-    const answer = (await equivalent(
-      "?parentId=none&limit=1000",
+  it("originals only, which the parameter set spelled with a sentinel", async () => {
+    // `parentId=none`, because `?parentId=` was indistinguishable from a caller
+    // that built its query string from an undefined variable. JSON `null` says
+    // it directly.
+    const answer = (await body(
       `?where=${encodeURIComponent(JSON.stringify({ parent_id: null }))}&limit=1000`,
     )) as { records: { id: string }[] };
     expect(answer.records).toHaveLength(ORIGINAL_COUNT);
@@ -315,17 +315,21 @@ describe("what the route refuses", () => {
     expect(res.status).toBe(400);
   });
 
-  it("refuses both spellings of one thing in one request", async () => {
-    const res = await app.fetch(
-      `/data/records?type=image/jpeg&where=${encodeURIComponent(JSON.stringify({ id: "x" }))}`,
-    );
-    expect(res.status).toBe(400);
+  it("refuses a parameter it does not have, retired spellings included", async () => {
+    for (const query of ["?parent_id=x", "?type=image/jpeg", "?parentId=none", "?cursor=abc"]) {
+      const res = await app.fetch(`/data/records${query}`);
+      expect(res.status, query).toBe(400);
+    }
   });
 
-  it("refuses a parameter it does not have", async () => {
-    const res = await app.fetch("/data/records?parent_id=x");
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toContain("parent_id");
+  it("403s a type the caller may not read rather than answering an empty page", async () => {
+    // The grant is ANDed in either way, so the rows are the same. What differs
+    // is whether the caller can tell "no photographs of this kind" from "not
+    // yours" — the distinction the parameter set drew and the grammar keeps.
+    const res = await app.fetch(
+      `/data/records?where=${encodeURIComponent(JSON.stringify({ type: "audio/mpeg" }))}`,
+    );
+    expect(res.status).toBe(403);
   });
 
   it("refuses nullsfirst, which its cursor cannot honour", async () => {

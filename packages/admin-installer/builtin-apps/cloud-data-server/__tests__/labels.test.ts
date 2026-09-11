@@ -589,7 +589,7 @@ describe("the reverse query end to end", () => {
     expect(records[0].labels.map((l) => l.app_id)).toEqual(["photos"]);
   });
 
-  it("hands back a nextCursor and accepts it on the next request", async () => {
+  it("hands back a nextCursor and accepts it back as a page token", async () => {
     // limit + 1 rows come back, so the page is full and there is more.
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
       .on(LABELS_SELECT, [labelRow({ record_id: "rec1" }), labelRow({ record_id: "rec2" })])
@@ -619,7 +619,7 @@ describe("the reverse query end to end", () => {
         appId: "reader",
         method: "GET",
         subPath: "/data/records",
-        query: { label: "annotator/faces-detected", limit: "1", cursor: nextCursor! },
+        query: { label: "annotator/faces-detected", limit: "1", page_token: nextCursor! },
       }),
       context,
     );

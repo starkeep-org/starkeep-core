@@ -50,7 +50,9 @@ async function addRendition(width: number, height: number, sizeClass: string): P
 }
 
 const list = async (query: string) => {
-  const res = await app.fetch(`/data/records?parentId=none&${query}`);
+  const res = await app.fetch(
+    `/data/records?where=${encodeURIComponent(JSON.stringify({ parent_id: null }))}&${query}`,
+  );
   expect(res.status).toBe(200);
   const body = (await res.json()) as {
     records: Array<{ id: string; variant_candidates?: Candidate[]; variants?: Record<string, unknown> }>;

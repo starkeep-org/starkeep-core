@@ -344,7 +344,7 @@ describe("two nodes producing the same file", () => {
       [copyOne, fromOne],
       [copyTwo, fromTwo],
     ] as const) {
-      const children = await listRecords(driveA, `?parentId=${encodeURIComponent(parent.id)}`);
+      const children = await listRecords(driveA, `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent.id }))}`);
       expect(children.map((r) => r.id)).toEqual([child.id]);
     }
 
@@ -354,7 +354,7 @@ describe("two nodes producing the same file", () => {
       [copyOne, fromOne],
       [copyTwo, fromTwo],
     ] as const) {
-      const children = await listRecords(driveB, `?parentId=${encodeURIComponent(parent.id)}`);
+      const children = await listRecords(driveB, `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent.id }))}`);
       expect(children.map((r) => r.id)).toEqual([child.id]);
       expect(await fetchBytes(driveB, child.id)).toBe(derivedBytes);
     }
@@ -390,7 +390,7 @@ describe("two nodes producing the same file", () => {
 
     await converge();
     for (const node of [driveA, driveB]) {
-      const children = await listRecords(node, `?parentId=${encodeURIComponent(parent.id)}`);
+      const children = await listRecords(node, `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent.id }))}`);
       expect(children.map((r) => r.id)).toEqual([onA.id]);
       expect(await fetchBytes(node, onA.id)).toBe(derived);
     }

@@ -3,12 +3,11 @@
  *
  * The route's parameters fall into three groups, and only the first is grammar:
  *
- *   - **Filter, projection, order and page** — `type`, `ids`, `parentId`,
- *     `limit`, `cursor` and the absent `sort` — become `where`, `order`,
- *     `limit` and `page_token`, parsed by {@link parseQuery} against the
- *     `shared.records` schema. Both spellings are accepted and both produce one
- *     {@link ParsedQuery}, so the legacy parameter set is a translation rather
- *     than a second engine.
+ *   - **Filter, projection, order and page** — `where`, `order`, `limit`,
+ *     `page_token` and `aggregate`, parsed by {@link parseQuery} against the
+ *     `shared.records` schema. These replaced a hand-written parameter set —
+ *     `type`, `ids`, `parentId`, `cursor` and an unreachable `sort` — which was
+ *     the third read grammar on the shared plane and the last one left.
  *   - **Access path** — `label`, `labelValue`, `notLabel` and `updated_after` —
  *     stays explicit. A reverse-index lookup is a join, `notLabel` is an
  *     anti-join no filter grammar expresses, and `updated_after` compares
@@ -33,7 +32,6 @@
  */
 
 import {
-  parseRecordIdFilter,
   parseVariantLongEdges,
   serializeHLC,
   type AccessGrants,
@@ -123,11 +121,6 @@ const RECORD_PARAMS: readonly string[] = [
   "include",
   "aggregate",
   "select",
-  // The legacy spellings of the same four things.
-  "type",
-  "ids",
-  "parentId",
-  "cursor",
   // Access paths.
   "label",
   "labelValue",
@@ -191,32 +184,9 @@ export function planRecordQuery(
 ): RecordQueryPlan {
   const schema = sharedQuerySchema({ kind: "records" });
 
-  const legacyType = get("type");
-  const idsParam = get("ids");
-  const parentIdParam = get("parentId");
-  const cursorParam = get("cursor");
   const pageTokenParam = get("page_token");
   const whereParam = get("where");
   const aggregateParam = get("aggregate");
-
-  if (whereParam !== undefined) {
-    for (const legacy of ["type", "ids", "parentId"] as const) {
-      if (get(legacy) !== undefined) {
-        throw new QueryParseError(
-          `"${legacy}" is the legacy spelling of a where clause; send where or the ` +
-            `legacy parameters, not both`,
-        );
-      }
-    }
-  }
-  if (cursorParam !== undefined && pageTokenParam !== undefined) {
-    throw new QueryParseError(
-      `"cursor" is the legacy spelling of page_token; send one or the other`,
-    );
-  }
-
-  // The whole page is one bounded list, so `limit` and a cursor say nothing.
-  const requestedIds = idsParam === undefined ? null : readIds(idsParam);
 
   // `select` is the `GROUP BY` list of an aggregate and a column projection
   // everywhere else, and this route has no projection to narrow: it answers a
@@ -232,14 +202,10 @@ export function planRecordQuery(
   }
 
   const params: QueryParams = {
-    where: whereParam ?? legacyWhere(legacyType, requestedIds, parentIdParam),
+    where: whereParam,
     order: get("order"),
     include: get("include"),
-    limit: String(
-      requestedIds
-        ? Math.max(requestedIds.length, 1)
-        : boundedLimit(get("limit"), options.defaultLimit),
-    ),
+    limit: String(boundedLimit(get("limit"), options.defaultLimit)),
     ...(aggregateParam === undefined ? {} : { aggregate: aggregateParam }),
     ...(selectParam === undefined ? {} : { select: selectParam }),
   };
@@ -250,9 +216,7 @@ export function planRecordQuery(
   // what a scan returned. Omitted under `allAccess`, whose authorization is by
   // app id and cannot be written as a finite set of types.
   const readableTypes = [...grants.readableTypes].sort();
-  if (legacyType !== undefined && !grants.allAccess && !grants.readableTypes.has(legacyType)) {
-    throw new ApiError(`No read grant on type "${legacyType}"`, 403);
-  }
+  if (!grants.allAccess) assertNamedTypesReadable(parsed.where, grants);
   const empty = !grants.allAccess && readableTypes.length === 0;
   const serverWhere: WhereClause[] = grants.allAccess
     ? []
@@ -305,7 +269,7 @@ export function planRecordQuery(
     where: [...rows.where, ...serverWhere],
     ...(rows.order.length > 0 ? { sort: sortFor(rows) } : {}),
     limit: rows.limit,
-    ...(requestedIds ? {} : { cursor: cursorParam ?? pageTokenParam }),
+    ...(pageTokenParam === undefined ? {} : { cursor: pageTokenParam }),
     ...(notLabelParam === undefined
       ? {}
       : { excludeLabel: labelRef("notLabel", notLabelParam) }),
@@ -321,7 +285,7 @@ export function planRecordQuery(
       labelParam === undefined
         ? null
         : { ...labelRef("label", labelParam), value: labelValue },
-    cursor: cursorParam ?? pageTokenParam,
+    cursor: pageTokenParam,
     includeMetadata: include.includes("metadata"),
     includeLabels: include.includes("labels"),
     labelApps: get("labelApps"),
@@ -341,33 +305,39 @@ export function assertRecordParams(names: Iterable<string>): void {
   }
 }
 
-function readIds(raw: string): string[] {
-  const parsed = parseRecordIdFilter(raw);
-  if (!parsed.ok) throw new QueryParseError(parsed.message);
-  return parsed.ids;
-}
-
 /**
- * The legacy filter parameters, as the `where` object they mean.
+ * A caller that named a type it may not read gets a 403, not an empty page.
  *
- * Built as JSON and handed to the parser rather than turned straight into
- * clauses, so the legacy spelling and the grammar spelling run through exactly
- * the same type checks, the same rejections and the same column lookup. A
- * translation that skipped the parser would be the second engine this work
- * exists to delete.
+ * The grant is ANDed into the query either way, so an ungranted type returns
+ * nothing whether or not this check exists. What it adds is the difference
+ * between "there are no photographs of this kind" and "not yours" — the same
+ * distinction the route has drawn since `?type=` was a parameter, restated over
+ * the parsed clause so the grammar inherits it rather than losing it.
+ *
+ * Only an `eq` or an `in` names a finite set. A range or a pattern over `type`
+ * describes a set the caller may not know the membership of, so the grant
+ * predicate narrowing it silently is the right answer there.
  */
-function legacyWhere(
-  type: string | undefined,
-  ids: readonly string[] | null,
-  parentId: string | undefined,
-): string | undefined {
-  const clauses: Record<string, unknown> = {};
-  if (type !== undefined) clauses["type"] = type;
-  if (ids !== null) clauses["id"] = { in: ids };
-  // `parentId=none` asks for records with no parent at all, which is the one
-  // value that cannot also be a record id.
-  if (parentId !== undefined) clauses["parent_id"] = parentId === "none" ? null : parentId;
-  return Object.keys(clauses).length === 0 ? undefined : JSON.stringify(clauses);
+function assertNamedTypesReadable(
+  where: readonly WhereClause[],
+  grants: AccessGrants,
+): void {
+  for (const clause of where) {
+    if (clause.column !== "type") continue;
+    const named =
+      clause.predicate.op === "eq"
+        ? [clause.predicate.value]
+        : clause.predicate.op === "in"
+          ? [...clause.predicate.values]
+          : null;
+    if (named === null) continue;
+    if (!named.some((type) => typeof type === "string" && grants.readableTypes.has(type))) {
+      throw new ApiError(
+        `No read grant on ${named.map((t) => JSON.stringify(t)).join(", ")}`,
+        403,
+      );
+    }
+  }
 }
 
 /**
