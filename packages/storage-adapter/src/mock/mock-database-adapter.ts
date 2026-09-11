@@ -26,7 +26,7 @@ import {
   type QueryCursorKey,
 } from "../database/query-cursor.js";
 import { orderingFor } from "../database/record-queries.js";
-import { runInMemoryQuery } from "../database/app-query-memory.js";
+import { matchesWhere, runInMemoryQuery } from "../database/app-query-memory.js";
 import { labelToRow } from "../database/label-row.js";
 import {
   sharedQuerySchema,
@@ -195,6 +195,14 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
         });
       }
     }
+    // The grammar's own predicates, evaluated by the one in-memory evaluator
+    // the shared-plane path uses. Against a column view of the record, because
+    // a `where` clause names a column and this store holds camelCase objects.
+    if (query.where && query.where.length > 0) {
+      const clauses = query.where;
+      records = records.filter((record) => matchesWhere(recordToRow(record), clauses));
+    }
+
     // The label anti-join, which this mock used to ignore entirely.
     //
     // Ignoring it made every test written against this adapter blind to the one
@@ -377,22 +385,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
         ...columns,
       }));
     }
-    return [...this.store.values()].map((record) => ({
-      id: record.id as string,
-      type: record.type,
-      created_at: serializeHLC(record.createdAt),
-      updated_at: serializeHLC(record.updatedAt),
-      node_id: record.updatedAt.nodeId,
-      deleted_at: record.deletedAt ? serializeHLC(record.deletedAt) : null,
-      version: record.version,
-      content_hash: record.contentHash,
-      object_storage_key: record.objectStorageKey,
-      mime_type: record.mimeType,
-      size_bytes: record.sizeBytes,
-      original_filename: record.originalFilename,
-      origin_app_id: record.originAppId,
-      parent_id: record.parentId,
-    }));
+    return [...this.store.values()].map(recordToRow);
   }
 
   async batch(operations: BatchOperation[]): Promise<void> {
@@ -800,4 +793,30 @@ function pageByNode<T>(
     }
   }
   return { rows, hasMore, truncated };
+}
+
+/**
+ * A `DataRecord` as the columns of `shared.records`.
+ *
+ * One mapping, used by both the shared-plane query path and the record query's
+ * grammar predicates: a `where` clause names a column, and the mock holds
+ * camelCase objects.
+ */
+function recordToRow(record: DataRecord): Record<string, unknown> {
+  return {
+    id: record.id as string,
+    type: record.type,
+    created_at: serializeHLC(record.createdAt),
+    updated_at: serializeHLC(record.updatedAt),
+    node_id: record.updatedAt.nodeId,
+    deleted_at: record.deletedAt ? serializeHLC(record.deletedAt) : null,
+    version: record.version,
+    content_hash: record.contentHash,
+    object_storage_key: record.objectStorageKey,
+    mime_type: record.mimeType,
+    size_bytes: record.sizeBytes,
+    original_filename: record.originalFilename,
+    origin_app_id: record.originAppId,
+    parent_id: record.parentId,
+  };
 }

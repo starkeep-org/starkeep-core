@@ -19,7 +19,13 @@
  * distinguishable from a complete result.
  */
 
-import type { CompiledQuery, ExpressionBuilder, Kysely, SelectQueryBuilder } from "kysely";
+import type {
+  CompiledQuery,
+  ExpressionBuilder,
+  Kysely,
+  RawBuilder,
+  SelectQueryBuilder,
+} from "kysely";
 import { sql } from "kysely";
 import { LIKE_ESCAPE_CHAR } from "./app-query-types.js";
 import type {
@@ -72,17 +78,26 @@ export function isOrderKeyAlias(key: string): boolean {
   return key.startsWith("__ok");
 }
 
-function applyPredicate(qb: Qb, column: string, predicate: Predicate): Qb {
-  const ref = sql.ref(column);
-  const where = (expr: ReturnType<typeof sql<boolean>>): Qb => qb.where(expr as never) as Qb;
-
+/**
+ * One predicate, as a boolean SQL expression over a caller-supplied reference.
+ *
+ * Takes the reference rather than a column name because `record-queries.ts`
+ * qualifies its columns whenever the capture-time joins are in play, and that
+ * module compiles the same predicates this one does. Two copies of the null
+ * rules below is exactly how the two planes would start answering the same
+ * `{"parent_id": null}` differently.
+ */
+export function predicateExpression(
+  ref: RawBuilder<unknown>,
+  predicate: Predicate,
+): RawBuilder<boolean> {
   switch (predicate.op) {
     case "eq":
       // `= NULL` is never true in SQL, so an equality against null is compiled
       // as `IS NULL` — which is what a caller writing `{"col": null}` means.
       return predicate.value === null
-        ? where(sql<boolean>`${ref} is null`)
-        : where(sql<boolean>`${ref} = ${predicate.value}`);
+        ? sql<boolean>`${ref} is null`
+        : sql<boolean>`${ref} = ${predicate.value}`;
 
     case "ne":
       // `<> NULL` is unknown for every row, so the negation of a null has to be
@@ -90,46 +105,44 @@ function applyPredicate(qb: Qb, column: string, predicate: Predicate): Qb {
       // back: `col <> 'x'` excludes nulls on both engines, and a caller asking
       // for "not x" means every row that is not x, nulls included.
       return predicate.value === null
-        ? where(sql<boolean>`${ref} is not null`)
-        : where(sql<boolean>`(${ref} is null or ${ref} <> ${predicate.value})`);
+        ? sql<boolean>`${ref} is not null`
+        : sql<boolean>`(${ref} is null or ${ref} <> ${predicate.value})`;
 
     case "lt":
     case "lte":
     case "gt":
     case "gte": {
       const op = { lt: "<", lte: "<=", gt: ">", gte: ">=" }[predicate.op];
-      return where(sql<boolean>`${ref} ${sql.raw(op)} ${predicate.value}`);
+      return sql<boolean>`${ref} ${sql.raw(op)} ${predicate.value}`;
     }
 
     case "in":
-      return where(
-        sql<boolean>`${ref} in (${sql.join(predicate.values.map((v) => sql`${v}`))})`,
-      );
+      return sql<boolean>`${ref} in (${sql.join(predicate.values.map((v) => sql`${v}`))})`;
 
     case "is":
       return predicate.value === null
-        ? where(sql<boolean>`${ref} is null`)
-        : where(sql<boolean>`${ref} = ${predicate.value}`);
+        ? sql<boolean>`${ref} is null`
+        : sql<boolean>`${ref} = ${predicate.value}`;
 
     case "prefix":
       // A half-open range, which is an index seek on both engines. `upper` is
       // null only when the prefix has no successor at all, in which case the
       // lower bound alone is the whole range.
       return predicate.upper === null
-        ? where(sql<boolean>`${ref} >= ${predicate.lower}`)
-        : where(
-            sql<boolean>`(${ref} >= ${predicate.lower} and ${ref} < ${predicate.upper})`,
-          );
+        ? sql<boolean>`${ref} >= ${predicate.lower}`
+        : sql<boolean>`(${ref} >= ${predicate.lower} and ${ref} < ${predicate.upper})`;
 
     case "like":
       // The escape character is bound rather than written into the SQL text,
       // so neither engine's string-literal rules can reinterpret it. SQLite
       // matches Postgres here only because the local connection sets
       // `PRAGMA case_sensitive_like = ON` — see `bootstrap.ts`.
-      return where(
-        sql<boolean>`${ref} like ${predicate.pattern} escape ${LIKE_ESCAPE_CHAR}`,
-      );
+      return sql<boolean>`${ref} like ${predicate.pattern} escape ${LIKE_ESCAPE_CHAR}`;
   }
+}
+
+function applyPredicate(qb: Qb, column: string, predicate: Predicate): Qb {
+  return qb.where(predicateExpression(sql.ref(column), predicate) as never) as Qb;
 }
 
 function applyWhere(qb: Qb, where: readonly WhereClause[]): Qb {

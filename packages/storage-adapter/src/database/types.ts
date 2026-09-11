@@ -4,6 +4,7 @@ import type {
   RecordLabel,
   StarkeepId,
 } from "@starkeep/protocol-primitives";
+import type { WhereClause } from "./app-query-types.js";
 
 export type SortDirection = "asc" | "desc";
 
@@ -34,6 +35,22 @@ export interface SortField {
 export interface Query {
   type?: string;
   filters?: Filter[];
+  /**
+   * Grammar predicates, compiled by the one predicate compiler.
+   *
+   * Separate from {@link Filter} rather than replacing it, because the two say
+   * different things about null. `filters` is the platform's own internal
+   * vocabulary — sync, derivation and the watcher all build one — and its `eq`
+   * means literal `= ?`. A {@link WhereClause} comes from the query grammar,
+   * where `{"col": null}` means `IS NULL` and `{"ne": "x"}` includes the null
+   * bucket, and those rules are compiled by `predicateExpression` so that one
+   * parsed query means one thing on either plane.
+   *
+   * Both lists are ANDed together when both are present, which is what lets a
+   * route hand over a caller's parsed `where` beside the server's own
+   * soft-delete and grant predicates.
+   */
+  where?: readonly WhereClause[];
   sort?: SortField[];
   limit?: number;
   cursor?: string;
