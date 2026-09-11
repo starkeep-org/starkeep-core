@@ -272,6 +272,21 @@ export interface QueryTableSchema {
    * than hard-coded for both planes.
    */
   readonly projectionOnly?: readonly string[];
+  /**
+   * Ordering keys that are not columns of the table.
+   *
+   * `captured_at` on `shared.records` is the only one: a record's capture time
+   * lives in the per-category metadata table, and the records compiler answers
+   * an order by it with a `coalesce()` over the image and video joins. It is
+   * nameable in `order` and nowhere else — filtering it would compile a
+   * predicate against a column the table does not have, projecting it would
+   * promise a field the row does not carry, and `include=metadata` is how a
+   * caller reads the value itself.
+   *
+   * Declared as columns rather than as names because the parser checks an
+   * ordering key's declared type before accepting it.
+   */
+  readonly orderOnly?: readonly AppColumnInfo[];
   /** Edge names `include` may carry. Empty on the app-syncable plane. */
   readonly includable?: readonly string[];
 }

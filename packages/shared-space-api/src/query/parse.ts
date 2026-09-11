@@ -117,9 +117,25 @@ function splitList(raw: string): string[] {
 function columnOf(schema: QueryTableSchema, name: string): AppSyncableColumnInfo {
   const column = schema.columns.find((c) => c.name === name);
   if (!column) {
+    if ((schema.orderOnly ?? []).some((c) => c.name === name)) {
+      throw new QueryParseError(
+        `"${name}" is not a column of "${schema.name}" and may appear in order only`,
+      );
+    }
     throw new QueryParseError(`"${name}" is not a column of "${schema.name}"`);
   }
   return column;
+}
+
+/**
+ * Look an *ordering* key up, which is the one position `orderOnly` answers.
+ *
+ * `captured_at` is not a column of `shared.records`, and a query ordered by it
+ * is a join the records compiler builds rather than a column it reads.
+ */
+function orderColumnOf(schema: QueryTableSchema, name: string): AppSyncableColumnInfo {
+  const declared = (schema.orderOnly ?? []).find((c) => c.name === name);
+  return declared ?? columnOf(schema, name);
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +474,7 @@ function parseRowQuery(
     if (column === SOFT_DELETE_COLUMN) {
       throw new QueryParseError(`"${SOFT_DELETE_COLUMN}" is owned by the server`);
     }
-    const resolved = columnOf(schema, column);
+    const resolved = orderColumnOf(schema, column);
     if (!isOrderableColumn(resolved)) {
       throw new QueryParseError(`"${column}" is a ${resolved.type} and has no ordering`);
     }

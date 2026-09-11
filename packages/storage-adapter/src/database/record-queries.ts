@@ -37,6 +37,7 @@ import type {
 import type { StarkeepId } from "@starkeep/protocol-primitives";
 import { sql } from "kysely";
 import type { Query } from "./types.js";
+import { predicateExpression } from "./app-query.js";
 import {
   decodeQueryCursor,
   encodeQueryCursor,
@@ -151,9 +152,21 @@ export function orderingFor(query: Query): {
     field: s.field,
     direction: s.direction === "desc" ? "desc" : "asc",
   }));
+  // A caller that already ended its ordering with `id` has named the
+  // tiebreaker, so it is adopted rather than appended a second time — the query
+  // parser completes every ordering with the table's primary key, and two `id`
+  // keys would put the column in the `ORDER BY` twice and in the cursor twice.
+  const trailing = keys[keys.length - 1].field === "id" ? keys.pop() : undefined;
+  if (keys.length === 0) {
+    // `order=id.asc` and no ordering at all are the same query, and the second
+    // is the one whose cursor every existing caller holds.
+    return trailing?.direction === "desc"
+      ? { keys: [], idDirection: "desc", signature: "id:desc", bareId: false }
+      : { keys: [], idDirection: "asc", signature: "id:asc", bareId: true };
+  }
   // The id follows the last key's direction, so the trailing tiebreaker reads
   // as a continuation of the order rather than a reversal inside it.
-  const idDirection = keys[keys.length - 1].direction;
+  const idDirection = trailing?.direction ?? keys[keys.length - 1].direction;
   return {
     keys,
     idDirection,
@@ -239,6 +252,18 @@ function applyFilters(
       case "isNotNull": out = out.where(col, "is not", null) as Qb; break;
       default: break;
     }
+  }
+
+  // The grammar's own predicates, compiled by the one predicate compiler
+  // rather than by the switch above: `{"parent_id": null}` means `IS NULL` and
+  // `{"ne": "x"}` keeps the null bucket, and neither rule is `filters`'.
+  for (const clause of query.where ?? []) {
+    out = out.where(
+      predicateExpression(
+        columnRef(dialect, mapField(clause.column), qualified),
+        clause.predicate,
+      ) as never,
+    ) as Qb;
   }
 
   if (query.excludeLabel) {

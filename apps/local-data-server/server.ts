@@ -38,6 +38,11 @@ import {
   planMetadataQuery,
   type SharedQueryPlan,
 } from "../../packages/shared-space-api/src/query/shared-plan.js";
+import {
+  assertRecordParams,
+  planRecordQuery,
+  type RecordQueryPlan,
+} from "../../packages/shared-space-api/src/query/records-plan.js";
 import { ApiError } from "../../packages/shared-space-api/src/errors.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
@@ -62,7 +67,7 @@ import {
   canWriteMetadataCategory,
   type AccessGrants,
 } from "../../packages/protocol-primitives/src/access/grants.js";
-import { serializeHLC, deserializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
+import { deserializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { INTENT_TAG_KEY, LADDER_TAG_KEY, LADDER_TAG_COMPLETE } from "../../packages/protocol-primitives/src/storage/retrieval-intent.js";
 import { sha256HexToBase64, loadVariantsForPage, loadVariantCandidatesForPage } from "@starkeep/storage-adapter";
@@ -74,10 +79,7 @@ import {
   createStarkeepId,
   planLabelWrites,
   planLabelRetractions,
-  parseLabelRef,
   labelValueSetKey,
-  parseVariantLongEdges,
-  parseRecordIdFilter,
 } from "@starkeep/protocol-primitives";
 import type { RecordLabel, DataRecord } from "@starkeep/protocol-primitives";
 import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
@@ -579,6 +581,18 @@ async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredent
  * drift on the one thing that matters here. What stays local is the transport:
  * a status code and a JSON body.
  */
+/**
+ * The status a thrown rejection means, or null when it is the server's.
+ *
+ * A parse rejection and a grant denial are both the caller's, and both carry
+ * the status they mean. Anything else rethrows, because a 500 that reads as a
+ * 400 is a bug hidden behind a plausible answer.
+ */
+function clientErrorStatus(err: unknown): number | null {
+  if (err instanceof ApiError) return err.statusCode;
+  return (err as { status?: number }).status === 400 ? 400 : null;
+}
+
 async function runSharedQuery(
   res: import("node:http").ServerResponse,
   adapter: SqliteDatabaseAdapter,
@@ -588,14 +602,7 @@ async function runSharedQuery(
   try {
     plan = build();
   } catch (err) {
-    // A parse rejection and a grant denial are both the caller's, and both
-    // carry the status they mean. Anything else is the server's and rethrows.
-    const status =
-      err instanceof ApiError
-        ? err.statusCode
-        : (err as { status?: number }).status === 400
-          ? 400
-          : null;
+    const status = clientErrorStatus(err);
     if (status === null) throw err;
     res.writeHead(status);
     json(res, { error: err instanceof Error ? err.message : String(err) });
@@ -1473,171 +1480,65 @@ async function main() {
         });
       };
 
-      // GET /data/records?type=xxx&limit=100&cursor=<id>&updated_after=<iso>
-      //                  &include=metadata,labels
-      //                  &label=<appId>/<key>&labelValue=<v>
+      // GET /data/records — the query grammar over shared.records, plus the
+      // access paths and the hydration that are not grammar.
       //
-      // Results come back in `id asc` order — the order the adapter's cursor
-      // predicate (`id > cursor`) is keyed on. An `updatedAt desc` sort here
-      // would make the cursor skip and repeat rows, so paging and sorting
-      // cannot both be had from this endpoint; callers wanting recency sort
-      // client-side, as Photos already does. (The `?label=` reverse query has
-      // its own order — see below.)
+      //   where={"type":"image/jpeg"}&order=captured_at.desc&limit=100
+      //   &page_token=<token>&include=metadata,labels
+      //   &label=<appId>/<key>&labelValue=<v>&notLabel=<appId>/<key>
+      //
+      // `planRecordQuery` parses all of it, and the cloud handler calls the
+      // same function, so the two servers cannot drift on what a parameter
+      // means. What stays here is the transport, the hydration and the local
+      // answers — availability read off this disk, and file URLs on this port.
       if (path === "/data/records" && req.method === "GET") {
-        const recordType = url.searchParams.get("type");
-        const limit = parseInt(url.searchParams.get("limit") || "100", 10);
-        const cursor = url.searchParams.get("cursor") ?? undefined;
-        const updatedAfter = url.searchParams.get("updated_after");
-        // Opt-in enrichment: `include` is a comma list, so labels join
-        // metadata in it rather than introducing a per-feature boolean.
-        const include = (url.searchParams.get("include") ?? "")
-          .split(",")
-          .map(s => s.trim());
-        const includeMetadata = include.includes("metadata");
-        const includeLabels = include.includes("labels");
-        const labelApps = url.searchParams.get("labelApps");
-        const labelFilter = url.searchParams.get("label");
-        const labelValue = url.searchParams.get("labelValue");
-        const idsParam = url.searchParams.get("ids");
-        const parsedIds = idsParam === null ? null : parseRecordIdFilter(idsParam);
-        if (parsedIds && !parsedIds.ok) {
-          res.writeHead(400);
-          json(res, { error: parsedIds.message });
-          return;
-        }
-        const requestedIds = parsedIds?.ids;
-
         const grants = appGrants(localDb, appId!);
 
-        if (labelValue !== null && labelFilter === null) {
-          res.writeHead(400);
-          json(res, { error: "labelValue requires label" });
+        let plan: RecordQueryPlan;
+        try {
+          assertRecordParams(url.searchParams.keys());
+          plan = planRecordQuery(
+            grants,
+            (name) => url.searchParams.get(name) ?? undefined,
+            // 100 rather than the grammar's 30: this route has answered 100
+            // since before the grammar existed, and a caller that never sent
+            // `limit` should not find its page size changed by a refactor.
+            { defaultLimit: 100 },
+          );
+        } catch (err) {
+          const status = clientErrorStatus(err);
+          if (status === null) throw err;
+          res.writeHead(status);
+          json(res, { error: err instanceof Error ? err.message : String(err) });
           return;
         }
 
-        // `parentId=<id>` restricts to that record's children; `parentId=none`
-        // restricts to records with no parent at all. Two questions the resize
-        // path used to answer by listing the whole library and filtering
-        // client-side — which was also silently capped at whatever `limit` the
-        // caller passed, so on a large library it answered them wrongly.
-        const parentIdParam = url.searchParams.get("parentId");
-        const parentFilter: Filter | null =
-          parentIdParam === null
-            ? null
-            : parentIdParam === "none"
-              ? { field: "parentId", operator: "isNull" }
-              : { field: "parentId", operator: "eq", value: parentIdParam };
-
-        // `notLabel=<appId>/<key>` excludes records carrying that label at any
-        // value. This is what lets the grid page originals server-side: with a
-        // rendition label on every derived child, a 60k-item library is 300k+
-        // records, and a page that mixes them is a page the client cannot use.
-        const notLabelParam = url.searchParams.get("notLabel");
-        let excludeLabel: { appId: string; key: string } | undefined;
-        if (notLabelParam !== null) {
-          const ref = parseLabelRef(notLabelParam);
-          if (!ref) {
-            res.writeHead(400);
-            json(res, {
-              error: "InvalidLabel",
-              detail: `notLabel must be of the form "<appId>/<key>" (got "${notLabelParam}")`,
-            });
-            return;
-          }
-          excludeLabel = { appId: ref.appId, key: ref.key };
+        if (plan.mode === "aggregate") {
+          // An aggregate over the readable library, compiled by the same
+          // builder the metadata and label routes use. `empty` short-circuits
+          // it: `type IN ()` is not a predicate either engine will compile.
+          const result = plan.empty
+            ? { mode: "aggregate" as const, groups: [], truncated: false }
+            : await databaseAdapter.queryShared({ kind: "records" }, plan.aggregate!, {
+                serverWhere: plan.serverWhere,
+              });
+          json(res, {
+            groups: result.mode === "aggregate" ? result.groups : [],
+            truncated: result.truncated,
+          });
+          return;
         }
 
-        // `variant=<appId>/<key>&variantLongEdge=400,1280` — resolve, per
-        // record, which derived child best answers each requested pixel size.
-        //
-        // `variant=<appId>/<key>` **alone** answers the unnarrowed question
-        // instead: every derived child of the record, with its dimensions. That
-        // is a strictly more primitive question than resolution and this server
-        // already computes the set internally before choosing among it, so it
-        // names no class either. An app that owns a ladder needs it, because
-        // narrowing to a pixel target throws away the two things it most often
-        // wants next — whether the rung it did not get is missing or was never
-        // going to exist, and what smaller rung it could show meanwhile.
-        //
-        // Both forms are generic over child records, a label key and the
-        // width/height columns, so this server never learns what a size class
-        // is.
-        const variantParam = url.searchParams.get("variant");
-        const variantLongEdgeParam = url.searchParams.get("variantLongEdge");
-        let variantLabel: { appId: string; key: string } | undefined;
-        let variantTargets: number[] = [];
-        if (variantParam !== null || variantLongEdgeParam !== null) {
-          if (variantParam === null) {
-            // A pixel size with nothing to resolve it against is meaningless,
-            // and answering it as though it were valid would return no variants
-            // — which reads as "this record has none" rather than "you asked
-            // wrongly".
-            res.writeHead(400);
-            json(res, { error: "variantLongEdge requires variant" });
-            return;
-          }
-          const vref = parseLabelRef(variantParam);
-          if (!vref) {
-            res.writeHead(400);
-            json(res, {
-              error: "InvalidLabel",
-              detail: `variant must be of the form "<appId>/<key>" (got "${variantParam}")`,
-            });
-            return;
-          }
-          variantLabel = { appId: vref.appId, key: vref.key };
-          if (variantLongEdgeParam !== null) {
-            const parsed = parseVariantLongEdges(variantLongEdgeParam);
-            if (!parsed.ok) {
-              res.writeHead(400);
-              json(res, { error: parsed.message });
-              return;
-            }
-            variantTargets = parsed.targets;
-          }
-        }
-
-        // Per-type read enforcement, pushed into the query rather than applied
-        // after it: a post-filter would let a page come back short of `limit`
-        // for reasons the caller can't see, and would make the cursor derived
-        // from it skip rows.
-        if (recordType !== null) {
-          if (!canRead(grants, recordType)) {
-            res.writeHead(403);
-            json(res, {
-              error: "AccessDenied",
-              detail: `app "${appId}" has no read grant on type "${recordType}"`,
-            });
-            return;
-          }
-        } else if (!grants.allAccess && grants.readableTypes.size === 0) {
+        if (plan.empty) {
           json(res, { records: [], hasMore: false, nextCursor: null });
           return;
         }
 
-        // Soft-deletes are excluded in the query rather than after it, so the
-        // adapter's own `hasMore`/`nextCursor` describe the page the caller
-        // actually gets.
-        const filters: Filter[] = [{ field: "deletedAt", operator: "isNull" }];
-        if (recordType) {
-          filters.push({ field: "type", operator: "eq", value: recordType });
-        }
-
-        if (updatedAfter) {
-          const ms = new Date(updatedAfter).getTime();
-          if (!isNaN(ms)) {
-            filters.push({
-              field: "updatedAt",
-              operator: "gt",
-              value: serializeHLC({ wallTime: ms, counter: 0, nodeId: "" }),
-            });
-          }
-        }
-        if (!recordType && !grants.allAccess) {
-          filters.push({ field: "type", operator: "in", value: [...grants.readableTypes] });
-        }
-        if (parentFilter) filters.push(parentFilter);
-        if (requestedIds) filters.push({ field: "id", operator: "in", value: requestedIds });
+        const includeMetadata = plan.includeMetadata;
+        const includeLabels = plan.includeLabels;
+        const labelApps = plan.labelApps ?? null;
+        const variantLabel = plan.variant?.label;
+        const variantTargets = plan.variant?.targets ?? [];
 
         // Two ways to select a page. The reverse-label query is its own
         // access path with its own order and its own cursor; everything after
@@ -1646,30 +1547,20 @@ async function main() {
         let pageHasMore: boolean;
         let pageCursor: string | null;
 
-        if (labelFilter !== null) {
-          const ref = parseLabelRef(labelFilter);
-          if (!ref) {
-            res.writeHead(400);
-            json(res, {
-              error: "InvalidLabel",
-              detail: `label must be of the form "<appId>/<key>" (got "${labelFilter}")`,
-            });
-            return;
-          }
-
+        if (plan.labelPath) {
           // The grant filter rides inside the reverse index, so unreadable
           // rows are never materialized and the page comes back full.
           const found = await databaseAdapter.findByLabel({
-            appId: ref.appId,
-            key: ref.key,
-            // Absent = presence filter (any value, flags included). `??`, never
-            // `||`: `?labelValue=` is `""` here and asks for bare flags
-            // specifically, which `||` would widen back into a presence query —
-            // a superset, so it looks like it works.
-            value: labelValue ?? undefined,
+            appId: plan.labelPath.appId,
+            key: plan.labelPath.key,
+            // Absent = presence filter (any value, flags included); `""` asks
+            // for bare flags specifically. The plan preserves the difference,
+            // because collapsing it returns a superset — which looks like it
+            // works.
+            value: plan.labelPath.value,
             readableTypes: grants.allAccess ? undefined : grants.readableTypes,
-            limit,
-            cursor,
+            limit: plan.query.limit!,
+            cursor: plan.cursor,
           });
 
           // One batched fetch of the matching records, then restore the
@@ -1682,13 +1573,13 @@ async function main() {
               filters: [
                 { field: "id", operator: "in", value: ids },
                 { field: "deletedAt", operator: "isNull" },
-                // Combinable with the label filter, per the plan: "which
-                // rendition of *this* record" is one query, not a label scan
-                // followed by a client-side parent check.
-                ...(parentFilter ? [parentFilter] : []),
               ],
+              // Combinable with the label filter, per the plan: "which
+              // rendition of *this* record" is one query, not a label scan
+              // followed by a client-side parent check.
+              where: plan.query.where,
               limit: ids.length,
-              ...(excludeLabel ? { excludeLabel } : {}),
+              ...(plan.query.excludeLabel ? { excludeLabel: plan.query.excludeLabel } : {}),
             });
             for (const r of fetched.records) byId.set(r.id, r);
           }
@@ -1702,15 +1593,10 @@ async function main() {
           pageHasMore = found.hasMore;
           pageCursor = found.nextCursor;
         } else {
-          const result = await databaseAdapter.query({
-            filters,
-            limit: requestedIds?.length ?? limit,
-            cursor: requestedIds ? undefined : cursor,
-            ...(excludeLabel ? { excludeLabel } : {}),
-          });
+          const result = await databaseAdapter.query(plan.query);
           readable = result.records;
-          pageHasMore = requestedIds ? false : result.hasMore;
-          pageCursor = requestedIds ? null : result.nextCursor;
+          pageHasMore = result.hasMore;
+          pageCursor = result.nextCursor;
         }
 
         // When enrichment is requested, batch-read per-category metadata for the

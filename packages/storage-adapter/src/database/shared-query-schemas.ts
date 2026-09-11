@@ -115,6 +115,23 @@ const RECORD_LABEL_COLUMNS: readonly AppColumnInfo[] = [
 const SHARED_RECORD_PROJECTION_ONLY: readonly string[] = ["created_at"];
 
 /**
+ * Ordering keys `shared.records` answers with a join rather than a column.
+ *
+ * `captured_at` lives in `record_image_metadata` and `record_video_metadata`,
+ * one row per record in exactly one of them, and the records compiler orders by
+ * a `coalesce()` across both. A photo library sorted by when the shutter fired
+ * is the question the grid asks, and it is the only ordering key that is not a
+ * column of the table — see `record-queries.ts` for why the general "order by
+ * any metadata column" is not offered.
+ *
+ * Declared `timestamp` because that is what both metadata tables declare, and
+ * the parser refuses an ordering key whose type has no ordering.
+ */
+const SHARED_RECORD_ORDER_ONLY: readonly AppColumnInfo[] = [
+  { name: "captured_at", type: "timestamp", notNull: false, primaryKey: false },
+];
+
+/**
  * The label table's tiebreaker, which is not its primary key.
  *
  * The primary key is `(record_id, app_id, key, value)` and the reverse index is
@@ -157,7 +174,16 @@ export function sharedQuerySchema(target: SharedQueryTarget): QueryTableSchema {
       columns: SHARED_RECORD_COLUMNS,
       pkColumns: ["id"],
       projectionOnly: SHARED_RECORD_PROJECTION_ONLY,
-      includable: [],
+      orderOnly: SHARED_RECORD_ORDER_ONLY,
+      // The two platform edges `/data/records` hydrates after the page is cut.
+      // Both are joins the caller does not express and could not: metadata is
+      // one table per category and labels are a second table entirely.
+      includable: ["metadata", "labels"],
+      // Deliberately none. The grid's first page is a bare list of the library
+      // in capture order, and there is no filter it could be made to pin: the
+      // ordering is served by an index and the caller's grant already narrows
+      // the scan. `record_labels` requires two because its reverse index is
+      // useless unpinned; `records` has no such precondition.
     };
   }
   if (target.kind === "labels") {

@@ -53,6 +53,21 @@ export async function runInMemoryQuery(
 // Predicates
 // ---------------------------------------------------------------------------
 
+/**
+ * Does this row satisfy every clause?
+ *
+ * Exported because the mock's record `query` evaluates grammar predicates over
+ * a column view of a `DataRecord`, and restating the null rules there is how
+ * the mock would start answering `{"parent_id": null}` differently from the two
+ * SQL adapters.
+ */
+export function matchesWhere(
+  row: Record<string, unknown>,
+  where: readonly WhereClause[],
+): boolean {
+  return matches(row, where);
+}
+
 function matches(row: Record<string, unknown>, where: readonly WhereClause[]): boolean {
   return where.every((clause) => holds(row[clause.column], clause.predicate));
 }

@@ -17,6 +17,14 @@ export {
   type SharedQueryPlan,
 } from "./shared-plan.js";
 export {
+  planRecordQuery,
+  assertRecordParams,
+  type ParamSource,
+  type RecordLabelPath,
+  type RecordQueryPlan,
+  type RecordVariantRequest,
+} from "./records-plan.js";
+export {
   sharedQuerySchema,
   sharedQueryTableName,
   sharedQueryDiscriminant,
