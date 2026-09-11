@@ -473,7 +473,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         compiler.selectFrom(table).selectAll().where("record_id", "=", recordId).compile(),
       );
       if (result.rows.length === 0) return null;
-      return columnsToMetadataRow(recordId, result.rows[0] as Record<string, unknown>);
+      return columnsToMetadataRow(recordId, typeId, result.rows[0] as Record<string, unknown>);
     });
   }
 
@@ -491,7 +491,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       for (const raw of dbResult.rows) {
         const row = raw as Record<string, unknown>;
         const recordId = row["record_id"] as StarkeepId;
-        result.set(recordId, columnsToMetadataRow(recordId, row));
+        result.set(recordId, columnsToMetadataRow(recordId, typeId, row));
       }
       return result;
     });
