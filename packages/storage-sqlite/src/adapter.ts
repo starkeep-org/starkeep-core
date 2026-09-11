@@ -1,6 +1,7 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import { nextCursorFrom } from "@starkeep/storage-adapter";
 import type {
+  Category,
   DataRecord,
   HLCTimestamp,
   MetadataRow,
@@ -10,8 +11,10 @@ import type {
 import {
   serializeHLC,
   deserializeHLC,
+  getCategory,
   isKnownType,
   sqliteMetadataTableName,
+  typeCategory,
   METADATA_DISCRIMINANT_COLUMN,
 } from "@starkeep/protocol-primitives";
 import type {
@@ -217,16 +220,30 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   // borrow node:sqlite's parameter types. `RawStatement` declares `unknown[]`
   // directly, so they were already no-ops — and they were the last thing in
   // this file referring to a concrete driver.
+  //
+  // All three map their parameters through `toSqliteParam`, which is what makes
+  // `row-values.ts`'s claim true — every bind on this connection, reads and
+  // writes alike. It was true only of the query path until 2026-09-10, so a
+  // declared `boolean` written through `putMetadata` reached the driver as a
+  // JavaScript boolean and threw "Provided value cannot be bound to SQLite
+  // parameter". Nothing had exercised it because no metadata column was a
+  // boolean until `exif_present`.
   private runStmt(sql: string, ...params: unknown[]): void {
-    this.getDatabase().prepare(sql).run(...params);
+    this.getDatabase()
+      .prepare(sql)
+      .run(...params.map(toSqliteParam));
   }
 
   private getRow<T = SqliteRow>(sql: string, ...params: unknown[]): T | undefined {
-    return this.getDatabase().prepare(sql).get(...params) as T | undefined;
+    return this.getDatabase()
+      .prepare(sql)
+      .get(...params.map(toSqliteParam)) as T | undefined;
   }
 
   private allRows<T = SqliteRow>(sql: string, ...params: unknown[]): T[] {
-    return this.getDatabase().prepare(sql).all(...params) as T[];
+    return this.getDatabase()
+      .prepare(sql)
+      .all(...params.map(toSqliteParam)) as T[];
   }
 
   async put(record: DataRecord): Promise<void> {
@@ -478,7 +495,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     const query = qb.selectFrom(table).selectAll().where("record_id", "=", recordId).compile();
     const row = this.getRow<Record<string, unknown>>(query.sql, ...query.parameters);
     if (!row) return null;
-    return columnsToMetadataRow(recordId, row);
+    return columnsToMetadataRow(recordId, typeId, row);
   }
 
   async getMetadataByIds(
@@ -492,7 +509,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     const rows = this.allRows<Record<string, unknown>>(query.sql, ...query.parameters);
     for (const row of rows) {
       const recordId = row["record_id"] as StarkeepId;
-      result.set(recordId, columnsToMetadataRow(recordId, row));
+      result.set(recordId, columnsToMetadataRow(recordId, typeId, row));
     }
     return result;
   }
@@ -677,14 +694,27 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 }
 
+/**
+ * One stored metadata row, with SQLite's integers turned back into the booleans
+ * the column declares.
+ *
+ * The read half of the boolean boundary, for the same reason as
+ * `fromSqliteRows`: DSQL returns `true` and SQLite returns `1` for the same
+ * logical row, and a metadata row rides the sync wire in whatever shape its
+ * engine returned. Without this, `exif_present` would mean two things depending
+ * on which node answered.
+ */
 function columnsToMetadataRow(
   recordId: StarkeepId,
+  typeId: string,
   columns: Record<string, unknown>,
 ): MetadataRow {
+  const category = typeCategory(typeId) ?? (typeId as Category);
+  const booleans = booleanColumnNames(getCategory(category)?.metadataColumns);
   const row: MetadataRow = { recordId };
   for (const [key, value] of Object.entries(columns)) {
     if (key === "record_id") continue;
-    row[key] = value;
+    row[key] = booleans?.has(key) && typeof value === "number" ? value !== 0 : value;
   }
   return row;
 }

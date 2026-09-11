@@ -289,6 +289,25 @@ describe("SqliteDatabaseAdapter", () => {
       expect(row["thumb_hash"]).toBe("TH");
     });
 
+    // SQLite binds no booleans and stores a declared one as an integer, so both
+    // halves of the conversion have to be in the adapter or a `boolean` metadata
+    // column throws on write and reads back as 1 while DSQL reads it as true.
+    // `exif_present` is the first such column; before it, nothing exercised this.
+    it("round-trips a boolean metadata column as a boolean", async () => {
+      const record = createDataRecord(baseInput({ type: "image" }), clock);
+      await adapter.put(record);
+      await adapter.putMetadata("image/jpeg", { recordId: record.id, exif_present: true });
+      expect((await adapter.getMetadata("image", record.id))!["exif_present"]).toBe(true);
+
+      // False is the value the column exists for — "a reader looked and this
+      // file carries nothing" — and 0 must not read back as a missing answer.
+      await adapter.putMetadata("image/jpeg", { recordId: record.id, exif_present: false });
+      expect((await adapter.getMetadata("image", record.id))!["exif_present"]).toBe(false);
+
+      const batch = await adapter.getMetadataByIds("image", [record.id]);
+      expect(batch.get(record.id)!["exif_present"]).toBe(false);
+    });
+
     it("deleteMetadata removes the row", async () => {
       const record = createDataRecord(baseInput({ type: "image" }), clock);
       await adapter.put(record);
