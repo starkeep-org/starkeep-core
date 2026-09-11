@@ -244,6 +244,26 @@ const IMAGE_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
   { name: "focal_length_mm", type: "real" },
   { name: "gps_lat", type: "real" },
   { name: "gps_lon", type: "real" },
+  // exif_present — whether this file's header carries any of the tags above.
+  //
+  // Null is the load-bearing state: it means nobody has read the header yet.
+  // False means a reader that maps every column above looked and found none of
+  // them, which is the ordinary answer for a screenshot, a re-encode, or an
+  // image a messaging app stripped. Without the distinction, "no capture time"
+  // and "never asked" are the same row, and every pass over the library re-reads
+  // every untagged file forever.
+  //
+  // It is a fact about the bytes like the rest of this table — anyone reading
+  // the same file reaches the same answer — which is what earns it a column
+  // rather than a node-local ledger. That also makes it syncable, so one node's
+  // read spares every other node the same work.
+  //
+  // A reader that maps only *some* of the columns above must leave this null.
+  // photos-mobile reads two tags on purpose (see its `media/exif.ts`), so it
+  // writes `captured_at` and `orientation` and never this: marking a record
+  // scanned would tell a node that reads the whole header not to bother, and
+  // camera make and model would never arrive.
+  { name: "exif_present", type: "boolean" },
   // Both are deterministic from the bytes, which is what makes them metadata
   // rather than labels — see the four properties above. A label is an app's
   // *assertion* about a record, and
