@@ -23,6 +23,7 @@ import {
   sharedQuerySchema,
   withDeclaredProjection,
 } from "../src/query/index.js";
+import { planFindByLabel } from "@starkeep/storage-adapter";
 import { SYSTEM_COLUMNS } from "../src/app-syncable/columns.js";
 
 const CARD_STATE: QueryTableSchema = {
@@ -485,6 +486,44 @@ describe("the shared plane's own table descriptions", () => {
   it("has no metadata table for the catch-all category", () => {
     expect(() => sharedQuerySchema({ kind: "metadata", category: "other" })).toThrow(
       /no metadata table/,
+    );
+  });
+
+  it("builds the same query findByLabel does, from the other spelling", () => {
+    // `planFindByLabel` constructs its `RowQuery` directly rather than going
+    // through the parser, because it lives in `storage-adapter` and the parser
+    // depends on that package. Two spellings of one query is exactly the drift
+    // this whole migration exists to remove, so the equality is asserted rather
+    // than assumed: what `/data/labels?where={app_id,key,value}` parses to and
+    // what an adapter's `findByLabel` runs must be the same value.
+    const parsed = parseQuery(LABELS, {
+      where: JSON.stringify({ app_id: "photos", key: "album", value: "trip" }),
+      limit: "25",
+    });
+    const planned = planFindByLabel({
+      appId: "photos",
+      key: "album",
+      value: "trip",
+      limit: 25,
+    })!;
+    expect(planned.query).toEqual(parsed);
+  });
+
+  it("cuts a page token the other spelling accepts, and the other way round", () => {
+    // One ordering means one signature, which is what makes the two tokens
+    // interchangeable rather than merely similar.
+    const parsed = parseQuery(LABELS, { where: pinned });
+    if (parsed.mode !== "rows") throw new Error("expected a row query");
+    const token = encodePageToken({
+      order: appOrderSignature(parsed.order),
+      keys: [
+        { isNull: false, value: "trip" },
+        { isNull: false, value: "rec1" },
+      ],
+    });
+    const planned = planFindByLabel({ appId: "photos", key: "album", cursor: token })!;
+    expect(planned.query.pageToken).toEqual(
+      (parseQuery(LABELS, { where: pinned, page_token: token }) as RowQuery).pageToken,
     );
   });
 });

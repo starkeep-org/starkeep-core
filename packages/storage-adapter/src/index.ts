@@ -17,15 +17,10 @@ export type {
 } from "./database/types.js";
 
 export {
-  encodeLabelCursor,
-  decodeLabelCursor,
   encodeLabelScanCursor,
   decodeLabelScanCursor,
-  compareLabelOrder,
   compareLabelScanOrder,
-  isAfterLabelCursor,
   isAfterLabelScanCursor,
-  type LabelCursor,
   type LabelScanCursor,
 } from "./database/label-cursor.js";
 
@@ -112,6 +107,15 @@ export {
 export { rowToLabel, labelToRow, type LabelRow } from "./database/label-row.js";
 
 export {
+  planFindByLabel,
+  labelPageFrom,
+  emptyLabelPage,
+  DEFAULT_FIND_LIMIT,
+  LABEL_QUERY_TARGET,
+  type LabelFindPlan,
+} from "./database/label-find.js";
+
+export {
   loadVariantsForPage,
   loadVariantCandidatesForPage,
 } from "./database/variant-queries.js";
@@ -131,13 +135,10 @@ export {
   buildTombstoneLabelsForRecord,
   buildLabelsByRecordIds,
   buildGetLabel,
-  buildFindByLabel,
   buildQueryLabels,
   buildLabelNodeWatermarks,
-  paginateFindByLabel,
   paginateLabelScan,
   groupLabelsByRecordId,
-  DEFAULT_FIND_LIMIT,
   DEFAULT_SCAN_LIMIT,
   type LabelDb,
   type LabelDialect,

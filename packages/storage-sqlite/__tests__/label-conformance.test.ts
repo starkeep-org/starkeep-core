@@ -2,8 +2,8 @@
  * The label contract, run against every adapter that can be run offline.
  *
  * Label SQL is built once in `@starkeep/storage-adapter` and shared by both SQL
- * backends, and the in-memory adapter borrows the same order and cursor
- * comparators — but each still implements `DatabaseAdapter` in its own terms,
+ * backends, and the reverse query runs through the query grammar on all three —
+ * but each still implements `DatabaseAdapter` in its own terms,
  * and the SDK's tests run entirely against the mock. So the mock agreeing with
  * a real store is load-bearing: if it ordered the reverse scan differently, or
  * revived a tombstone on upsert, every SDK test would still pass and nothing
@@ -12,8 +12,8 @@
  * This file lives in storage-sqlite because it is the package with both
  * implementations on its dependency path — storage-adapter must not depend on a
  * concrete backend. DSQL cannot join in offline; its SQL shape is pinned in
- * `storage-adapter/__tests__/label-queries.test.ts` and its behaviour by the
- * AWS e2e journey.
+ * `storage-adapter/__tests__/label-queries.test.ts` and
+ * `label-find.test.ts`, and its behaviour by the AWS e2e journey.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
@@ -527,14 +527,16 @@ describe.each(backends)("label contract — $name", (backend) => {
     expect(first.nextCursor).toBeNull();
   });
 
-  it("treats a malformed cursor as the first page rather than failing", async () => {
+  it("rejects a malformed cursor rather than silently answering the first page", async () => {
+    // The reverse query pages with the grammar's token now, and the grammar
+    // rejects a token it did not issue. The hand-written path this replaced
+    // answered the first page instead, which is the worse of the two: a caller
+    // that asked to continue and got the beginning has no way to notice, and
+    // pages forever.
     await setLabel(rid(1), "alpha", "k");
-    const found = await adapter.findByLabel({
-      appId: "alpha",
-      key: "k",
-      cursor: "not-a-real-cursor",
-    });
-    expect(found.labels).toHaveLength(1);
+    await expect(
+      adapter.findByLabel({ appId: "alpha", key: "k", cursor: "not-a-real-cursor" }),
+    ).rejects.toThrow(/page_token/);
   });
 
   // ---- the sync-facing surface -------------------------------------------

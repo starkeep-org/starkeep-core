@@ -82,7 +82,14 @@ function labelRow(over: Record<string, unknown> = {}): Record<string, unknown> {
 
 const LABELS_INSERT = /insert into "shared"\."record_labels"/;
 const LABELS_UPDATE = /update "shared"\."record_labels"/;
-const LABELS_SELECT = /select \* from "shared"\."record_labels"/;
+/**
+ * The reverse query, which is a parsed query over the labels schema now — so it
+ * carries the ordering-key aliases the grammar's compiler selects.
+ */
+const LABELS_SELECT = /select \*, "value" as "__ok0", "record_id" as "__ok1" from "shared"\."record_labels"/;
+/** The sync-facing selects — `getLabel` and `queryLabels` — which project the
+ *  bare row and so no longer share a shape with the reverse query. */
+const LABELS_ROW_SELECT = /select \* from "shared"\."record_labels"/;
 
 let client: FakeClient;
 let adapter: AuroraDsqlDatabaseAdapter;
@@ -235,7 +242,10 @@ describe("the sync-facing surface", () => {
 
   it("getLabel returns null on a miss and a mapped row on a hit", async () => {
     expect(await adapter.getLabel(rid("rec1"), "alpha", "k")).toBeNull();
-    client.responses.push({ match: LABELS_SELECT, rows: [labelRow({ deleted_at: serializeHLC(HLC) })] });
+    client.responses.push({
+      match: LABELS_ROW_SELECT,
+      rows: [labelRow({ deleted_at: serializeHLC(HLC) })],
+    });
     const found = await adapter.getLabel(rid("rec1"), "alpha", "quality");
     // Tombstones come back: that is what a later arrival is compared against.
     expect(found!.deletedAt).toEqual(HLC);
@@ -243,7 +253,7 @@ describe("the sync-facing surface", () => {
 
   it("queryLabels pages by primary key and hands back a scan cursor", async () => {
     client.responses.push({
-      match: LABELS_SELECT,
+      match: LABELS_ROW_SELECT,
       rows: [
         labelRow({ record_id: "rec1" }),
         labelRow({ record_id: "rec2" }),
