@@ -191,6 +191,64 @@ function printState(label: string, state: TableState[]): void {
   }
 }
 
+/**
+ * Report which app roles hold metadata-table grants, and name the ones holding
+ * none.
+ *
+ * The signature is a role that can **write** `shared.records` and cannot touch
+ * a single metadata table. Writing records and deriving metadata about them go
+ * together — `runAppInstallDdl` issues both from one manifest — so holding the
+ * first without the second is a state no install produces. It is the state
+ * `starkeep_app_starkeep_drive` was found in on 2026-09-11, after Phase A's
+ * recreate on 2026-09-10 revoked its grants and no DDL re-ran to restore them,
+ * with every sync exchange 500ing on `42501`.
+ *
+ * Write access is the discriminant rather than any access, because a read-only
+ * consumer legitimately needs no metadata grant. `starkeep_app_memo` holds
+ * `SELECT` on `shared.records` and nothing else, declares no file access, and
+ * would otherwise be reported here every run — a check that cries wolf on a
+ * healthy app is one an operator learns to skip.
+ *
+ * It reports rather than repairs on purpose. Whether a given role *should* hold
+ * these grants is a question only its manifest answers, and this script has no
+ * business reading three apps' manifests to find out. Naming the suspects is
+ * what turns a silent 42501 weeks later into a line of output now.
+ */
+async function auditAppGrants(client: pg.Client): Promise<void> {
+  const rows = (
+    await client.query<{ grantee: string; metadata_tables: number; writes_records: boolean }>(
+      `SELECT grantee,
+              count(DISTINCT table_name) FILTER (
+                WHERE table_name LIKE 'record\\_%\\_metadata') ::int AS metadata_tables,
+              bool_or(table_name = 'records' AND privilege_type = 'INSERT') AS writes_records
+         FROM information_schema.table_privileges
+        WHERE table_schema = 'shared' AND grantee LIKE 'starkeep\\_app\\_%'
+        GROUP BY grantee ORDER BY grantee`,
+    )
+  ).rows;
+
+  console.log("\n=== per-app grant audit ===");
+  const suspect: string[] = [];
+  for (const r of rows) {
+    const note = r.metadata_tables === 0 && r.writes_records ? "  <-- NO metadata grants" : "";
+    if (note) suspect.push(r.grantee);
+    console.log(
+      `  ${r.grantee.padEnd(30)} writes records=${String(r.writes_records).padEnd(5)} ` +
+        `metadata tables=${r.metadata_tables}${note}`,
+    );
+  }
+  if (suspect.length > 0) {
+    console.log(
+      `\n  ${suspect.join(", ")} writes shared.records and cannot touch any metadata\n` +
+        `  table. No install produces that: every metadata apply fails with 42501 and\n` +
+        `  takes the whole sync exchange down with it, so shared-record sync is off for\n` +
+        `  that app entirely. Re-run its install DDL — step 6 of\n` +
+        `  docs/schema-change-runbook.md. Clearing one ledger row is the unsafe move;\n` +
+        `  clear the whole ledger or call runAppInstallDdl directly.`,
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const apply = process.argv.includes("--apply");
 
@@ -242,6 +300,7 @@ async function main(): Promise<void> {
       }
 
       if (!apply) {
+        await auditAppGrants(client);
         console.log("\nread-only; pass --apply to drop and recreate.");
         return;
       }
@@ -276,16 +335,24 @@ async function main(): Promise<void> {
       // Per-app grants are the half a drop-and-recreate silently loses, and
       // nobody would notice until an app 403s on a metadata write.
       // `initializeSharedSchema` issues none of them: they come from
-      // `runAppInstallDdl`, which derives them from the app's manifest. On this
-      // cluster that is `starkeep_app_photos` on the image and video tables.
+      // `runAppInstallDdl`, which derives them from the app's manifest.
       //
-      // Re-issuing exactly what stood before the drop restores the state rather
-      // than recomputing it. Recomputing would mean running each installed
-      // app's full install DDL, which also rewrites IAM role mappings, syncable
-      // tables, access grants and label keys — a far wider blast radius than a
-      // grant restore, and it would quietly fold in manifest drift that has
-      // nothing to do with this change. Drift is its own problem; see
-      // `plan-app-upgrade-path-2026-09-10.md`.
+      // **Restoring the snapshot is a floor, not a repair.** It guarantees the
+      // recreate leaves nothing worse than it found, and it guarantees nothing
+      // else — if a role was already missing a grant it should hold, this puts
+      // the same hole back. That is not hypothetical. Phase A recreated these
+      // tables on 2026-09-10 and revoked every app's metadata access with them;
+      // Photos got its own back only because its install DDL was re-run that
+      // day for an unrelated reason, and `starkeep_app_starkeep_drive` was
+      // still holding nothing when this script first ran on 2026-09-11 — with
+      // every Drive sync exchange 500ing on `42501 permission denied`.
+      //
+      // The authoritative repair after any recreate is re-running **every**
+      // installed app's install DDL. Nothing here can do that: the ledger marks
+      // `run_dsql_ddl` done and only the infra steps carry `alwaysRun`, so no
+      // reinstall of the cloud data server will ever reissue these — however
+      // many times it runs. The audit below is what makes the gap visible
+      // instead of silent.
       const restored: string[] = [];
       for (const t of recreated) {
         const was = before.find((b) => b.name === t.name);
@@ -308,6 +375,7 @@ async function main(): Promise<void> {
       });
       if (lost.length > 0) throw new Error(`grants still missing: ${lost.join(", ")}`);
       console.log("\nevery pre-drop grant is back.");
+      await auditAppGrants(verify);
     } finally {
       await verify.end().catch(() => {});
     }

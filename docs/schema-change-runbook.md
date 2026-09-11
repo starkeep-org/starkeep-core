@@ -99,6 +99,31 @@ Verify both:
 
 ## Gotchas
 
+- **Dropping a shared table revokes every app's grants on it, and nothing puts
+  them back.** `DROP TABLE` destroys every privilege on the table.
+  `initializeSharedSchema` recreates the table and reissues only its own grants
+  — PUBLIC, the installer, `user_data_owner` by default privileges. The
+  per-category metadata grants come from `runAppInstallDdl`, keyed by each app's
+  manifest, and the recreate never reads a manifest. **Re-run every installed
+  app's install DDL after recreating a shared table**, not just the app whose
+  schema you were changing.
+
+  Skipping this fails silently and late. The ledger marks `run_dsql_ddl` done
+  and only the infra steps carry `alwaysRun`, so no later reinstall repairs it.
+  The app keeps syncing until the first row carrying metadata arrives, then
+  every exchange 500s on `42501 permission denied` — and because
+  `applyRecordMetadata` throws inside the exchange, that app's shared-record
+  sync stops entirely, not just its metadata.
+
+  This happened on 2026-09-10 and was found on 2026-09-11. Recreating the
+  metadata tables revoked `starkeep_app_starkeep_drive`'s access to all ten.
+  Photos escaped only because its install DDL was re-run that day for an
+  unrelated reason. Drive has no Lambda and no compute stack, so reinstalling
+  the cloud data server looks like it covers Drive and touches none of its DDL.
+  `packages/admin-installer/scripts/recreate-dsql-metadata-tables.ts` audits for
+  the condition: a role that writes `shared.records` and holds no metadata grant
+  anywhere.
+
 - **Every app's namespace row must be typed, or every app 500s.**
   `DsqlAppSyncableNamespaceStore.load()` reads all rows and throws on the first
   untyped one, so a stale row for one app breaks the others. Re-run the DDL for
