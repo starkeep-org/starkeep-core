@@ -37,7 +37,7 @@ describe("formatAnonymousRouteReport", () => {
           handler: "index.handler",
           auth: "public",
           routes: ["GET /", "ANY /{proxy+}"],
-          publicPaths: ["/", "/_next/static/*"],
+          publicPaths: ["/", "/_immutable/*"],
         },
       ]),
     )!;
@@ -58,11 +58,11 @@ describe("formatAnonymousRouteReport", () => {
           handler: "index.handler",
           auth: "public",
           routes: ["GET /", "ANY /{proxy+}"],
-          publicPaths: ["/", "/_next/static/*"],
+          publicPaths: ["/", "/_immutable/*"],
         },
       ]),
     )!;
-    expect(report).toContain("/_next/static/*");
+    expect(report).toContain("/_immutable/*");
   });
 
   it("warns that a catch-all reaches further than its declaration", () => {
@@ -150,7 +150,7 @@ describe("formatAnonymousRouteReport under auth: \"session\"", () => {
               handler: "index.handler",
               auth: "public",
               routes: ["GET /", "ANY /{proxy+}"],
-              publicPaths: ["/", "/_next/static/*"],
+              publicPaths: ["/", "/_immutable/*"],
             },
           ],
         },
@@ -161,7 +161,7 @@ describe("formatAnonymousRouteReport under auth: \"session\"", () => {
 
   it("does not list the data proxy, which is the whole point", () => {
     const report = formatAnonymousRouteReport(
-      sessionManifest(["/", "/_next/static/*", "/sign-in", "/api/session/*"]),
+      sessionManifest(["/", "/_immutable/*", "/sign-in", "/api/session/*"]),
     )!;
     expect(report).not.toContain("local-data");
     // A declared wildcard like /api/session/* is a bounded catch-all and is

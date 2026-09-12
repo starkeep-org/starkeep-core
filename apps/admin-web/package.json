@@ -7,6 +7,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "lint": "eslint app/ src/",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -41,10 +42,14 @@
   },
   "devDependencies": {
     "@starkeep/testkit": "workspace:*",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/node": "^25.4.0",
     "@types/pg": "^8.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "aws-sdk-client-mock": "^4.1.0",
+    "jsdom": "^30.0.1",
     "typescript": "^5.7.0",
     "vitest": "^3.2.7"
   }

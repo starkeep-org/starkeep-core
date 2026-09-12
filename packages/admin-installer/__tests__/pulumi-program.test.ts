@@ -155,7 +155,7 @@ describe("auth wiring", () => {
           name: "static",
           auth: "public",
           routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
-          publicPaths: ["/", "/_next/static/*"],
+          publicPaths: ["/", "/_immutable/*"],
         },
       ]),
     );
@@ -190,7 +190,7 @@ describe("auth wiring: session", () => {
     name: "static",
     auth: "session" as const,
     routes: ["GET /", "ANY /{proxy+}"],
-    publicPaths: ["/", "/_next/static/*", "/sign-in", "/api/session/*"],
+    publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
   };
 
   it("puts the session authorizer on the catch-all", async () => {
@@ -205,7 +205,7 @@ describe("auth wiring: session", () => {
     const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
     for (const key of [
       "ANY /apps/photos",
-      "ANY /apps/photos/_next/static/{proxy+}",
+      "ANY /apps/photos/_immutable/{proxy+}",
       "ANY /apps/photos/sign-in",
       "ANY /apps/photos/api/session/{proxy+}",
     ]) {
@@ -231,7 +231,7 @@ describe("auth wiring: session", () => {
       .map((r) => r.inputs.routeKey);
     expect(anonymous.sort()).toEqual([
       "ANY /apps/photos",
-      "ANY /apps/photos/_next/static/{proxy+}",
+      "ANY /apps/photos/_immutable/{proxy+}",
       "ANY /apps/photos/api/session/{proxy+}",
       "ANY /apps/photos/sign-in",
     ]);
@@ -346,11 +346,24 @@ describe("lambda wiring", () => {
       STARKEEP_DSQL_HOSTNAME: "fake.dsql",
       STARKEEP_FILES_BUCKET: "starkeep-files",
       STARKEEP_APP_CLIENT_MODE: "cloud",
+      STARKEEP_APP_BASE_PATH: "/apps/photos",
       STARKEEP_CLOUD_DATA_BASE: "https://api.example.com",
       STARKEEP_APP_CREDS_PARAMETER_NAME: "/starkeep/app-creds/photos",
       MY_CUSTOM: "value",
       STARKEEP_USER_POOL_ID: "filled-by-cli",
     });
+  });
+
+  it("states the mount prefix, so the app half never derives it", async () => {
+    // The installer chooses where the app is mounted, and it already passes
+    // this name into `pnpm bundle`. An app's server half needs the same answer
+    // at runtime whenever it emits a URL a browser will resolve, and deriving
+    // it from the app id in app code would be a second copy of a platform
+    // routing choice. `appBasePath()` in @starkeep/app-client/hono reads this.
+    await run(manifestWithHandlers([{ name: "static" }]));
+    const fn = created.find((r) => r.type === "aws:lambda/function:Function");
+    const env = (fn!.inputs.environment as { variables: Record<string, string> }).variables;
+    expect(env.STARKEEP_APP_BASE_PATH).toBe("/apps/photos");
   });
 
   it("grants API Gateway invoke permission scoped to the gateway execution ARN", async () => {

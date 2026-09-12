@@ -2,7 +2,7 @@
  * Multi-process orchestration harness for Tier-2 e2e tests.
  *
  * Boots the real platform topology: a local-data-server child process (via
- * @starkeep/testkit) against a throwaway STARKEEP_DIR, plus `next dev`
+ * @starkeep/testkit) against a throwaway STARKEEP_DIR, plus web-server
  * instances of admin-web and drive on ephemeral ports, all wired together
  * through the same env vars production uses (STARKEEP_DIR,
  * STARKEEP_LOCAL_DATA_SERVER_URL). Installed apps are not booted here —
@@ -33,10 +33,10 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export const CORE_FIXTURE_APPS_DIR = resolve(REPO_ROOT, "test-apps");
 
 // ---------------------------------------------------------------------------
-// next dev child processes
+// Web-server child processes
 // ---------------------------------------------------------------------------
 
-export interface NextDevServer {
+export interface WebServer {
   url: string;
   port: number;
   child: ChildProcess;
@@ -44,27 +44,62 @@ export interface NextDevServer {
   stop(): Promise<void>;
 }
 
-/**
- * Spawn `next dev -p <port>` in `appDir` and wait until `readyPath` responds
- * 200. Spawned detached (own process group) so stop() can take down next's
- * worker processes with it.
- */
-export async function startNextDev(options: {
+/** @deprecated The server is not a Next server. Use `WebServer`. */
+export type NextDevServer = WebServer;
+
+export interface WebServerOptions {
   appDir: string;
   env?: Record<string, string>;
   /** Path polled for readiness; default "/" (forces the first compile). */
   readyPath?: string;
   startTimeoutMs?: number;
-}): Promise<NextDevServer> {
+  /**
+   * What to start.
+   *
+   *   - `"next"` (default) spawns the app's own `next dev`. It survives until
+   *     the last app leaves Next behind.
+   *   - `"node"` spawns `command` with `args`, which is what a bundler-built
+   *     app's server entry is: `node dist/server.js`. The allocated port is
+   *     appended on `portFlag`, defaulting to `--port`.
+   */
+  mode?: "next" | "node";
+  /** `mode: "node"` only. Defaults to the Node running the harness. */
+  command?: string;
+  /** `mode: "node"` only. The entry and any flags, before the port. */
+  args?: string[];
+  /** `mode: "node"` only. Default `--port`. */
+  portFlag?: string;
+}
+
+/**
+ * Spawn an app's web server on a free port and wait until `readyPath` responds
+ * 200. Spawned detached (own process group) so stop() can take down the
+ * server's worker processes with it.
+ */
+export async function startWebServer(options: WebServerOptions): Promise<WebServer> {
   const port = await getFreePort();
   // localhost, not 127.0.0.1: Next's dev-origin protection treats the bare IP
   // as cross-origin and silently drops the turbopack HMR websocket handshake,
-  // which stalls hydration in the browser.
+  // which stalls hydration in the browser. Kept for the node mode too, so both
+  // modes hand a spec the same origin and a cookie set under one is readable
+  // under the other.
   const url = `http://localhost:${port}`;
-  const nextBin = join(options.appDir, "node_modules/.bin/next");
+
+  const mode = options.mode ?? "next";
+  const [command, args] =
+    mode === "next"
+      ? [join(options.appDir, "node_modules/.bin/next"), ["dev", "-p", String(port)]]
+      : [
+          options.command ?? process.execPath,
+          [...(options.args ?? []), options.portFlag ?? "--port", String(port)],
+        ];
+
+  if (mode === "node" && !options.args?.length) {
+    throw new Error("startWebServer({ mode: 'node' }) needs args naming the server entry");
+  }
 
   let output = "";
-  const child = spawn(nextBin, ["dev", "-p", String(port)], {
+  const child = spawn(command, args, {
     cwd: options.appDir,
     env: { ...process.env, ...options.env },
     stdio: ["ignore", "pipe", "pipe"],
@@ -75,6 +110,8 @@ export async function startNextDev(options: {
   const exited = new Promise<void>((resolveExit) => {
     child.once("exit", () => resolveExit());
   });
+
+  const label = `${mode === "next" ? "next dev" : command} in ${options.appDir}`;
 
   async function stop(): Promise<void> {
     if (child.exitCode === null && child.pid) {
@@ -101,9 +138,7 @@ export async function startNextDev(options: {
   const deadline = Date.now() + startTimeoutMs;
   for (;;) {
     if (child.exitCode !== null) {
-      throw new Error(
-        `next dev in ${options.appDir} exited before becoming ready.\n--- output ---\n${output}`,
-      );
+      throw new Error(`${label} exited before becoming ready.\n--- output ---\n${output}`);
     }
     try {
       const res = await fetch(readyUrl, { signal: AbortSignal.timeout(10_000) });
@@ -114,7 +149,7 @@ export async function startNextDev(options: {
     if (Date.now() > deadline) {
       await stop();
       throw new Error(
-        `next dev in ${options.appDir} not ready on ${readyUrl} within ${startTimeoutMs}ms.\n--- output ---\n${output}`,
+        `${label} not ready on ${readyUrl} within ${startTimeoutMs}ms.\n--- output ---\n${output}`,
       );
     }
     await new Promise((r) => setTimeout(r, 250));
@@ -122,6 +157,13 @@ export async function startNextDev(options: {
 
   return { url, port, child, logs: () => output, stop };
 }
+
+/**
+ * @deprecated Use `startWebServer`. The name is kept because Photos' e2e suite
+ * consumes it from this package through a `link:` dependency, and that suite
+ * moves off Next in its own phase.
+ */
+export const startNextDev = startWebServer;
 
 // ---------------------------------------------------------------------------
 // The platform stack
@@ -187,10 +229,10 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
     drive: await getFreePort(),
   };
 
-  let admin: NextDevServer | undefined;
-  let drive: NextDevServer | undefined;
+  let admin: WebServer | undefined;
+  let drive: WebServer | undefined;
   try {
-    admin = await startNextDev({
+    admin = await startWebServer({
       appDir: join(REPO_ROOT, "apps/admin-web"),
       readyPath: "/api/apps/list",
       env: {
@@ -201,7 +243,7 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
       },
     });
     if (options.drive !== false) {
-      drive = await startNextDev({
+      drive = await startWebServer({
         appDir: join(REPO_ROOT, "apps/drive"),
         readyPath: "/api/types",
         env: {
@@ -309,7 +351,7 @@ export async function startAppDaemonViaAdmin(
   if (!port) {
     throw new Error(`daemon start for ${appId} returned no port`);
   }
-  // localhost for the same dev-origin reason as startNextDev.
+  // localhost for the same dev-origin reason as startWebServer.
   const url = `http://localhost:${port}`;
   await eventually(
     async () => {

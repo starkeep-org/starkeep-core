@@ -361,7 +361,7 @@ In the manifest, `infraRequirements.compute`:
         { "route": "ANY /api/local-data/{proxy+}", "auth": "jwt" }
       ],
       "auth": "public",
-      "publicPaths": ["/", "/_next/static/*", "/starkeep-runtime-config"],
+      "publicPaths": ["/", "/_immutable/*", "/starkeep-runtime-config"],
       "env": { "STARKEEP_API_GATEWAY_URL": "", "STARKEEP_USER_POOL_ID": "", ... } }
   ]
 }
@@ -468,7 +468,23 @@ the INIT guarantee without having to know the invariant exists.
 
 Pass `requestUpstream` instead of `upstream` when your app is written against
 web `Request`/`Response` rather than against Lambda events; the adapter then
-hands your handler the request and the app-relative path.
+hands your handler the request and the app-relative path. A Hono app is wrapped
+in `honoUpstream` from `@starkeep/app-client/hono`, which rewrites the request's
+URL to that path — so **your routes never name the mount**, and the same route
+table matches locally and under `/apps/<appId>` in the cloud. When you need the
+origin-facing prefix, to build an absolute redirect or print a link, call
+`appBasePath()`; nothing derives it from a request.
+
+`/_immutable/*` is the platform's reserved prefix for content-addressed build
+output. Everything under it is cacheable forever, which is what earns it
+CloudFront's `CachingOptimized` behavior while the rest of your app gets
+`must-revalidate`. Point your bundler's asset directory at it and name it in
+`immutablePaths`.
+
+An app whose browser half is a bundler-built SPA also passes `shellPaths` — the
+client routes the router owns — and the adapter answers each of them with
+`index.html` from disk, ahead of your server half. Those paths are declared
+rather than inferred for the same reason `staticPaths` is.
 
 `staticPaths` comes from the manifest rather than from a hand-written predicate,
 because **the static branch runs before your own gate**. Anything it answers is
@@ -476,8 +492,8 @@ answered anonymously, which makes the list an enforcement bypass by
 construction. Declare it as `staticAssetPaths` on the handler:
 
 ```jsonc
-"publicPaths": ["/", "/_next/static/*", "/BUILD_ID", "/sign-in", "/api/session/*"],
-"staticAssetPaths": ["/_next/static/*", "/BUILD_ID"]
+"publicPaths": ["/", "/_immutable/*", "/manifest.webmanifest", "/sign-in", "/api/session/*"],
+"staticAssetPaths": ["/_immutable/*", "/manifest.webmanifest"]
 ```
 
 The manifest schema refuses a `staticAssetPaths` entry that `publicPaths` does

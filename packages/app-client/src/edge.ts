@@ -1,20 +1,31 @@
 /**
- * The origin gate, as Next middleware.
+ * The origin gate.
  *
- * Edge-safe by construction: this module imports nothing but `auth/verify.ts`,
- * because OpenNext runs middleware in an edge runtime where `node:crypto` and
- * the AWS SDK are unavailable.
+ * One function of `Request -> Response | undefined`: a refusal, or nothing to
+ * say. That signature is a framework's middleware in every framework worth the
+ * name — Next middleware, a Hono middleware via `honoOriginGate`, or an `if`
+ * at the top of a hand-written server — so the gate itself names none of them.
+ *
+ * Dependency-free by construction: this module imports nothing at all, because
+ * it has run in an edge runtime where `node:crypto` and the AWS SDK are
+ * unavailable, and because keeping it that way is what lets every surface mount
+ * the same copy.
  *
  * It is deny-by-default. A path the app has not declared public is refused,
  * which inverts the shape that produced the 2026-08 exposure — there, a public
  * catch-all was wider than the declaration sitting beside it, and every route
  * an app added was anonymous until someone noticed.
  *
- * This is a gate, not *the* gate. After the platform session authorizer lands
- * at the API Gateway, the enforcement that matters happens before a request
- * reaches app code at all. This stays because it is the only gate on the local
- * surface, where there is no gateway, and because it still applies if a
- * `publicPaths` entry is ever declared wider than intended.
+ * This is a gate, not *the* gate, and it is a cloud gate only. Its first line
+ * returns `undefined` unless `STARKEEP_APP_CLIENT_MODE` is `cloud`, so on the
+ * local surface it refuses nothing: the browser, the data and the person are
+ * all on one machine, which is the local-first guarantee the platform makes and
+ * the same reason `sessionAuth()` defaults `allowAnonymousLocal` to true. In
+ * the cloud the enforcement that matters is the platform session authorizer at
+ * the API Gateway, which runs before a request reaches app code at all. This
+ * stays because it still applies if a `publicPaths` entry is ever declared
+ * wider than intended, and because an app served outside the gateway has
+ * nothing else.
  */
 
 export interface AuthGateOptions {
@@ -53,7 +64,7 @@ function hasCookie(req: Request, name: string): boolean {
   return header.split(";").some((part) => part.trim().startsWith(`${name}=`));
 }
 
-export function createAuthGateMiddleware(opts: AuthGateOptions) {
+export function createOriginGate(opts: AuthGateOptions): (req: Request) => Response | undefined {
   const cookieName = opts.cookieName ?? DEFAULT_COOKIE;
   const basePath = opts.basePath ?? "";
 
@@ -92,3 +103,12 @@ export function createAuthGateMiddleware(opts: AuthGateOptions) {
     });
   };
 }
+
+/**
+ * The gate under its former name, kept for Next middleware call sites.
+ *
+ * @deprecated Use `createOriginGate`. The name said "middleware" and said
+ * "Next", and the function is neither: it is one `Request -> Response |
+ * undefined`, which is what let it move to Hono without a line of change.
+ */
+export const createAuthGateMiddleware = createOriginGate;

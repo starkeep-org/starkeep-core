@@ -1185,7 +1185,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(body).toContain(table.expectInBody);
       });
 
-      it("Part A: SPA + _next/static served through the CloudFront distribution (edge hit)", async () => {
+      it("Part A: SPA + immutable assets served through the CloudFront distribution (edge hit)", async () => {
         // The whole point of Part A: browser-facing traffic goes to the CloudFront
         // domain (publicBaseUrl), not the raw gateway. Every other step in this
         // journey deliberately hits apiGatewayUrl directly (the gateway stays
@@ -1212,15 +1212,26 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(html).toContain("<");
         expect((spa.headers.get("via") ?? "").toLowerCase()).toContain("cloudfront");
 
-        // A content-hashed asset the shell references → the
-        // /apps/*/_next/static/* behavior (CachingOptimized). These are
-        // immutable, so the edge caches them: after a priming fetch a later fetch
-        // reports `x-cache: Hit`. The path is the platform's cache-behavior
-        // convention rather than a framework's, so every app serves its immutable
-        // assets under it.
-        const assetPattern = new RegExp(`/apps/${app.appId}/_next/static/[^"'\\\\]+`);
+        // A content-hashed asset the shell references → the CachingOptimized
+        // behavior for the platform's immutable prefix. These are immutable, so
+        // the edge caches them: after a priming fetch a later fetch reports
+        // `x-cache: Hit`.
+        //
+        // Two prefixes, because this suite runs against whichever app it is
+        // pointed at and the two halves of the framework migration spell it
+        // differently. `_immutable` is the platform's reserved prefix for
+        // content-addressed build output; `_next/static` is what an app that
+        // still builds with Next emits. The CloudFront distribution names both
+        // for the same reason, and this alternation narrows to `_immutable`
+        // when the last app has moved.
+        const assetPattern = new RegExp(
+          `/apps/${app.appId}/(?:_immutable|_next/static)/[^"'\\\\]+`,
+        );
         const match = html.match(assetPattern);
-        expect(match, "the app shell should reference a _next/static asset").toBeTruthy();
+        expect(
+          match,
+          "the app shell should reference an immutable asset under /_immutable or /_next/static",
+        ).toBeTruthy();
         const assetUrl = `${base}${match![0]}`;
 
         const asset = await fetchWhenReady(assetUrl);

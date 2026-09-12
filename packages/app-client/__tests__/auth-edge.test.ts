@@ -6,12 +6,12 @@
  * whose default nobody has checked, and the default is the whole design.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createAuthGateMiddleware } from "../src/edge.js";
+import { createAuthGateMiddleware, createOriginGate } from "../src/edge.js";
 
-const DEFAULT_PUBLIC = ["/", "/_next/static/*", "/starkeep-runtime-config"];
+const DEFAULT_PUBLIC = ["/", "/_immutable/*", "/starkeep-runtime-config"];
 const savedMode = process.env.STARKEEP_APP_CLIENT_MODE;
 
-const gate = createAuthGateMiddleware({
+const gate = createOriginGate({
   publicPaths: [...DEFAULT_PUBLIC, "/sign-in", "/api/session/*"],
   signInPath: "/sign-in",
   basePath: "/apps/memo",
@@ -36,10 +36,10 @@ afterEach(() => {
   else process.env.STARKEEP_APP_CLIENT_MODE = savedMode;
 });
 
-describe("createAuthGateMiddleware", () => {
+describe("createOriginGate", () => {
   it("allows each of the three platform defaults with no cookie", () => {
     expect(gate(req("/apps/memo/"))).toBeUndefined();
-    expect(gate(req("/apps/memo/_next/static/chunks/main.js"))).toBeUndefined();
+    expect(gate(req("/apps/memo/_immutable/chunks/main.js"))).toBeUndefined();
     expect(gate(req("/apps/memo/starkeep-runtime-config"))).toBeUndefined();
   });
 
@@ -75,10 +75,10 @@ describe("createAuthGateMiddleware", () => {
     expect(gate(req("/apps/memo/api/local-data/x", { cookie: "sk_session=abc" }))).toBeUndefined();
   });
 
-  it("matches /_next/static/* as a prefix, not as a literal", () => {
-    expect(gate(req("/apps/memo/_next/static/css/a/b/c.css"))).toBeUndefined();
+  it("matches /_immutable/* as a prefix, not as a literal", () => {
+    expect(gate(req("/apps/memo/_immutable/css/a/b/c.css"))).toBeUndefined();
     // The prefix must not leak to a sibling that merely starts with the text.
-    expect(gate(req("/apps/memo/_next/staticky", { dest: "empty" }))?.status).toBe(401);
+    expect(gate(req("/apps/memo/_immutableky", { dest: "empty" }))?.status).toBe(401);
   });
 
   it("does not let the root entry match every path", () => {
@@ -93,7 +93,7 @@ describe("createAuthGateMiddleware", () => {
   });
 
   it("works with no basePath, for an app served at the root", () => {
-    const rootGate = createAuthGateMiddleware({
+    const rootGate = createOriginGate({
       publicPaths: DEFAULT_PUBLIC,
       signInPath: "/sign-in",
     });
@@ -101,5 +101,14 @@ describe("createAuthGateMiddleware", () => {
     expect(rootGate(req("/decks", { dest: "document" }))?.headers.get("location")).toBe(
       "https://cdn.example.com/sign-in",
     );
+  });
+});
+
+describe("the former name", () => {
+  it("is the same function, so a Next middleware call site keeps working", () => {
+    // Memo and Photos import `createAuthGateMiddleware` from the published
+    // package and move off Next in later phases. The alias is what lets the
+    // rename land here without a coordinated release.
+    expect(createAuthGateMiddleware).toBe(createOriginGate);
   });
 });

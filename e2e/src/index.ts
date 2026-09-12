@@ -1,5 +1,6 @@
 export {
   startPlatformStack,
+  startWebServer,
   startNextDev,
   installAppViaAdmin,
   uninstallAppViaAdmin,
@@ -9,6 +10,8 @@ export {
   CORE_FIXTURE_APPS_DIR,
   type PlatformStack,
   type PlatformStackOptions,
+  type WebServer,
+  type WebServerOptions,
   type NextDevServer,
 } from "./stack.js";
 export {

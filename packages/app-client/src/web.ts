@@ -67,6 +67,10 @@ export type EventUpstreamHandler = (
  * passed alongside the request rather than rewritten into `request.url` so an
  * app that needs the origin-facing URL — building an absolute redirect, say —
  * still has it.
+ *
+ * A router matches on the request's own pathname, which still carries the
+ * prefix, so a routed app wraps itself in `honoUpstream`
+ * (`@starkeep/app-client/hono`), which does the rewrite once for every app.
  */
 export type RequestUpstreamHandler = (
   request: Request,
@@ -96,11 +100,38 @@ interface CommonOptions {
   staticPaths?: string[];
   /**
    * Which static paths are content-addressed, and therefore cacheable forever.
-   * Defaults to `/_next/static/*` — the platform's own cache-behavior
-   * convention, which the CloudFront distribution already names and which an
-   * app using no framework at all still adopts.
+   *
+   * Pass it. The default is a migration aid, not a convention: it carries both
+   * `/_immutable/*` (the platform's prefix) and `/_next/static/*` (the one the
+   * framework left behind), because a default is how the framework's name
+   * reached the platform in the first place. The CloudFront distribution names
+   * both prefixes for the same reason, and both spellings disappear from the
+   * default once no app emits `_next`.
    */
   immutablePaths?: string[];
+  /**
+   * The app's **client routes** — paths a bundler-built SPA answers with its
+   * shell rather than with a file of its own, e.g. `["/", "/settings",
+   * "/study/*"]`.
+   *
+   * Declared rather than inferred, and taken from the manifest like
+   * `staticPaths` is, for the same reason: the shell is served from disk ahead
+   * of the app's own gate, so an entry here is an enforcement bypass by
+   * construction, and the schema's check that a static path sits inside
+   * `publicPaths` has to keep applying to it.
+   *
+   * The static branch runs first, so a path that is in `staticPaths` *and* has
+   * a file on disk gets the file rather than the shell. That is what an app
+   * with a real `/about.html` wants, and it is why the two lists say different
+   * things: `staticPaths` names what the build emitted, `shellPaths` names what
+   * the router owns.
+   */
+  shellPaths?: string[];
+  /**
+   * The shell file inside `assetsDir`, relative to it. Defaults to
+   * `index.html`, which is what every bundler emits.
+   */
+  shellFile?: string;
   /**
    * What to answer when a declared static path names no file on disk.
    *
@@ -110,6 +141,11 @@ interface CommonOptions {
    *     disk, so a prefix-wide glob has to fall through.
    *   - `"notFound"` answers 404 here. Right for an app whose assets directory
    *     is the whole truth for the paths it declared.
+   *
+   * `shellPaths` is consulted *after* this choice is made, so a path that is
+   * both a declared static path and a declared client route under
+   * `"notFound"` gets the 404 and never reaches the shell. Declare a client
+   * route in one list or the other, not both.
    */
   staticMiss?: "upstream" | "notFound";
   /**
@@ -176,7 +212,17 @@ const TEXT_EXT = new Set([
   ".xml",
 ]);
 
-const DEFAULT_IMMUTABLE_PATHS = ["/_next/static/*"];
+/**
+ * Both prefixes, for the length of the Next.js migration. `/_immutable/*` is
+ * the platform's; `/_next/static/*` is what an app that still builds with Next
+ * emits. Naming both here keeps a half-migrated tree cacheable on every app at
+ * once, and every call site in this repository passes `immutablePaths`
+ * explicitly rather than relying on it.
+ */
+const DEFAULT_IMMUTABLE_PATHS = ["/_immutable/*", "/_next/static/*"];
+
+/** The SPA shell's file name inside `assetsDir`, when `shellPaths` is declared. */
+const DEFAULT_SHELL_FILE = "index.html";
 
 /** The content type for a file, defaulting to bytes rather than to a guess. */
 export function contentTypeFor(path: string): string {
@@ -335,6 +381,21 @@ async function serveAsset(
  * });
  * ```
  *
+ * An app whose browser half is a bundler-built SPA declares its client routes
+ * too, and the shell becomes a file on disk rather than a response the upstream
+ * renders:
+ *
+ * ```js
+ * export const handler = await createWebAppHandler({
+ *   basePath: process.env.STARKEEP_APP_BASE_PATH,
+ *   assetsDir: new URL("./assets/", import.meta.url),
+ *   staticPaths: shell.staticAssetPaths,
+ *   immutablePaths: ["/_immutable/*"],
+ *   shellPaths: ["/", "/settings", "/study/*"],
+ *   requestUpstream: import("./app.js").then((m) => ({ handler: honoUpstream(m.app) })),
+ * });
+ * ```
+ *
  * The upstream import is awaited here, during INIT, because this composes with
  * `createLambdaEntry` rather than reimplementing it. An app that adopts the web
  * adapter therefore gets the INIT guarantee without having to know the
@@ -347,7 +408,17 @@ export async function createWebAppHandler(
   const assetsDir = resolveAssetsDir(opts.assetsDir);
   const staticPaths = opts.staticPaths ?? [];
   const immutablePaths = opts.immutablePaths ?? DEFAULT_IMMUTABLE_PATHS;
+  const shellPaths = opts.shellPaths ?? [];
+  const shellFile = opts.shellFile ?? DEFAULT_SHELL_FILE;
   const staticMiss = opts.staticMiss ?? "upstream";
+
+  if (shellPaths.length > 0 && !assetsDir) {
+    throw new Error(
+      `Starkeep web adapter: shellPaths declares ${shellPaths.length} client route(s) answered ` +
+        `with ${shellFile} from disk but no assetsDir was given. Pass assetsDir, or declare no ` +
+        `shellPaths.`,
+    );
+  }
 
   if (staticPaths.length > 0 && !assetsDir) {
     throw new Error(
@@ -394,6 +465,15 @@ export async function createWebAppHandler(
             body: "Not found",
           };
         }
+      }
+      // The SPA shell, after the file branch and before the app: a client route
+      // has no file of its own, and the app half has no page to answer it with.
+      // A missing shell falls through to the upstream rather than 404ing, so a
+      // build that never ran reads as "the app answered" rather than as a
+      // routing bug.
+      if (assetsDir && coveredByAny(shellPaths, path)) {
+        const shell = await serveAsset(assetsDir, `/${shellFile}`, false);
+        if (shell) return shell;
       }
       return await callUpstream(event, context, path);
     } catch (err) {

@@ -71,7 +71,7 @@ describe("matchRoute — gateway specificity", () => {
   });
 
   it("falls back to the catch-all for everything else", () => {
-    expect(matchRoute(routes, "GET", "/_next/static/chunk.js")!.declared).toBe("ANY /{proxy+}");
+    expect(matchRoute(routes, "GET", "/_immutable/chunk.js")!.declared).toBe("ANY /{proxy+}");
   });
 
   it("matches the root route exactly, not the catch-all", () => {
@@ -91,12 +91,12 @@ describe("isAnonymouslyReachable", () => {
   const split = handler({
     auth: "public",
     routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
-    publicPaths: ["/", "/_next/static/*"],
+    publicPaths: ["/", "/_immutable/*"],
   });
 
   it("says yes for the shell and its chunks", () => {
     expect(isAnonymouslyReachable(split, "GET", "/")).toBe(true);
-    expect(isAnonymouslyReachable(split, "GET", "/_next/static/x.js")).toBe(true);
+    expect(isAnonymouslyReachable(split, "GET", "/_immutable/x.js")).toBe(true);
   });
 
   it("says no for the data subtree", () => {
@@ -129,7 +129,7 @@ describe("anonymousRoutes", () => {
               handler: "index.handler",
               auth: "public",
               routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
-              publicPaths: ["/", "/_next/static/*"],
+              publicPaths: ["/", "/_immutable/*"],
             },
           ],
         },
@@ -170,7 +170,7 @@ describe("anonymousRoutes", () => {
 
 describe("probePathFor", () => {
   it("turns a wildcard declaration into a concrete path", () => {
-    expect(probePathFor("/_next/static/*")).toBe("/_next/static/x");
+    expect(probePathFor("/_immutable/*")).toBe("/_immutable/x");
     expect(probePathFor("/*")).toBe("/x");
     expect(probePathFor("/sign-in")).toBe("/sign-in");
   });
@@ -207,7 +207,7 @@ describe("auth: \"session\" — publicPaths become real routes", () => {
     });
   }
 
-  const DEFAULTS = ["/", "/_next/static/*", "/starkeep-runtime-config", "/sign-in", "/api/session/*"];
+  const DEFAULTS = ["/", "/_immutable/*", "/starkeep-runtime-config", "/sign-in", "/api/session/*"];
 
   it("gates the catch-all", () => {
     const handler = sessionManifest(DEFAULTS).infraRequirements.compute.handlers[0]!;
@@ -222,7 +222,7 @@ describe("auth: \"session\" — publicPaths become real routes", () => {
     const derived = resolveHandlerRoutes(handler).filter((r) => r.derived);
     expect(derived.map((r) => `${r.method} ${r.path}`)).toEqual([
       "ANY /",
-      "ANY /_next/static/{proxy+}",
+      "ANY /_immutable/{proxy+}",
       "ANY /starkeep-runtime-config",
       "ANY /sign-in",
       "ANY /api/session/{proxy+}",
@@ -255,7 +255,7 @@ describe("auth: \"session\" — publicPaths become real routes", () => {
     const routes = resolveHandlerRoutes(handler);
     for (const [method, path] of [
       ["GET", "/"],
-      ["GET", "/_next/static/chunks/main.js"],
+      ["GET", "/_immutable/chunks/main.js"],
       ["GET", "/starkeep-runtime-config"],
       ["GET", "/sign-in"],
       ["POST", "/api/session/sign-in"],

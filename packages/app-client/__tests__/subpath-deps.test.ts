@@ -85,8 +85,17 @@ describe("the lambda and web subpaths carry no runtime dependencies", () => {
     expect(external.filter((s) => !NODE_BUILTIN.test(s))).toEqual([]);
   });
 
+  it("imports no Hono from src/hono.ts, which is what keeps it out of the bundle", () => {
+    // The integration is structural on purpose: an app with `hono` installed
+    // and an app without both import this module, and neither gets a second
+    // copy of Hono in its Lambda zip. An `import { Hono } from "hono"` here
+    // would end that quietly.
+    const { external } = sourceGraph(resolve(PKG_DIR, "src", "hono.ts"));
+    expect(external.filter((s) => !NODE_BUILTIN.test(s) && !s.startsWith("."))).toEqual([]);
+  });
+
   it("never reaches credentials.ts, which is what pulls in the AWS SDK", () => {
-    for (const entry of ["lambda.ts", "web.ts"]) {
+    for (const entry of ["lambda.ts", "web.ts", "hono.ts"]) {
       const { files } = sourceGraph(resolve(PKG_DIR, "src", entry));
       expect(files.some((f) => f.endsWith("credentials.ts"))).toBe(false);
     }
@@ -97,7 +106,7 @@ describe("the lambda and web subpaths carry no runtime dependencies", () => {
     // subpath can be free of the AWS SDK in its own file and reach it one
     // `./chunk-*.js` hop away — which is the shape a check that stopped at the
     // entry would call clean.
-    for (const built of ["dist/lambda.js", "dist/web.js"]) {
+    for (const built of ["dist/lambda.js", "dist/web.js", "dist/hono.js"]) {
       const entry = resolve(PKG_DIR, built);
       if (!existsSync(entry)) continue; // `pnpm build` has not run in this tree.
       const seen: string[] = [];

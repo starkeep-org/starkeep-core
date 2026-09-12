@@ -315,7 +315,7 @@ export function anonymousRoutes(manifest: AppManifest): AnonymousRouteEntry[] {
 
 /**
  * Turn a `publicPaths` declaration into a concrete path to test against the
- * route table. `/_next/static/*` probes as `/_next/static/x`; a literal entry
+ * route table. `/_immutable/*` probes as `/_immutable/x`; a literal entry
  * probes as itself.
  */
 export function probePathFor(publicPath: string): string {

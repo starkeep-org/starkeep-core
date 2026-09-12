@@ -16,6 +16,7 @@
  */
 
 import { createWebAppHandler } from "@starkeep/app-client/web";
+import { honoUpstream } from "@starkeep/app-client/hono";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
 
 const shell = manifest.infraRequirements.compute.handlers.find((h) => h.name === "static");
@@ -31,9 +32,15 @@ export const handler = await createWebAppHandler({
   // before the app's gate, so this list is an enforcement bypass by
   // construction and the schema refuses an entry `publicPaths` does not cover.
   staticPaths: shell.staticAssetPaths,
-  // `.then` on an already-started import, not a thunk: the app names its entry
-  // `handleRequest`, and the mapping still settles during INIT.
-  requestUpstream: import("./app.js").then((m) => ({ handler: m.handleRequest })),
+  // Stated rather than defaulted. A default is how the previous framework's
+  // name reached the platform, and the adapter's is a migration aid that will
+  // be removed.
+  immutablePaths: ["/_immutable/*"],
+  // `.then` on an already-started import, not a thunk: `honoUpstream` adapts the
+  // Hono app to the adapter's `(request, path)` upstream — rewriting the URL to
+  // the app-relative path so the app's routes never name the mount — and the
+  // mapping still settles during INIT.
+  requestUpstream: import("./app.js").then((m) => ({ handler: honoUpstream(m.app) })),
   // Answered rather than thrown: a thrown Lambda error becomes a bare 502 with
   // nothing in the response to say what failed, and this fixture exists to make
   // platform failures legible.

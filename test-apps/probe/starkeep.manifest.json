@@ -86,12 +86,12 @@
           "auth": "session",
           "publicPaths": [
             "/",
-            "/_next/static/*",
+            "/_immutable/*",
             "/sign-in",
             "/api/session/*"
           ],
           "staticAssetPaths": [
-            "/_next/static/*"
+            "/_immutable/*"
           ],
           "env": {
             "STARKEEP_API_GATEWAY_URL": "",

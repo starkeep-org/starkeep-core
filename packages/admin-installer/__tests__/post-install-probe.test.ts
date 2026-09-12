@@ -170,12 +170,12 @@ describe("declared public paths that do not answer", () => {
 
   it("turn a wildcard declaration into a concrete path to ask about", async () => {
     const report = await probeAnonymousSurface(
-      manifest(["/_next/static/*"]),
+      manifest(["/_immutable/*"]),
       "https://cdn.example.com",
       fetchReturning([[/./, 200]]),
     );
     expect(report.publicPaths.map((r) => new URL(r.url).pathname)).toEqual([
-      "/apps/memo/_next/static/x",
+      "/apps/memo/_immutable/x",
     ]);
   });
 });

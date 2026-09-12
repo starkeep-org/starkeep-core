@@ -16,8 +16,9 @@ Photos' own suites (in the `starkeep-apps` checkout) cover what is true of Photo
 Probe is deliberately the smallest app that touches every surface the platform
 offers an app:
 
-- a served shell and an immutable asset under `_next/static/`, which is the
-  platform's CloudFront cache-behavior convention;
+- a served shell and an immutable asset under `_immutable/`, the platform's
+  reserved prefix for content-addressed output and the one path CloudFront
+  caches forever;
 - a sign-in page and the `/api/session/*` routes, taken from
   `@starkeep/app-client` rather than reimplemented;
 - an `/api/local-data/*` signing proxy, the browser's only route to the data
@@ -29,11 +30,14 @@ offers an app:
 
 ## How it runs
 
-One implementation in `src/app.ts`, written against web `Request`/`Response`,
-with two adapters. `src/serve.ts` bundles to `serve.mjs` for a local install
-(what the manifest's `localRun` starts). `src/static-handler.ts` and
-`src/api-handler.ts` bundle into `dist.zip` for a cloud install (what
-`cli-install-app` builds through `pnpm bundle`).
+One Hono app in `src/app.ts`, with two adapters. `src/serve.ts` runs it under
+`@hono/node-server` and bundles to `serve.mjs` for a local install (what the
+manifest's `localRun` starts). `src/static-handler.ts` hands it to
+`createWebAppHandler` through `honoUpstream` and, with `src/api-handler.ts`,
+bundles into `dist.zip` for a cloud install (what `cli-install-app` builds
+through `pnpm bundle`).
 
 Both surfaces run the same app code, so a divergence between them is the
-platform's rather than the fixture's.
+platform's rather than the fixture's. Every route in `src/app.ts` is written
+app-relative — `honoUpstream` strips the `/apps/probe` mount before Hono routes
+— which is the shape `authoring-an-app.md` asks every app to take.

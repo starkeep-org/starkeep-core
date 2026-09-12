@@ -8,6 +8,7 @@ export default defineConfig({
     "src/edge.ts",
     "src/lambda.ts",
     "src/web.ts",
+    "src/hono.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,

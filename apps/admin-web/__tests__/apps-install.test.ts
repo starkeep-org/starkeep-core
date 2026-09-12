@@ -5,9 +5,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chmodSync, existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { NextRequest, NextResponse } from "next/server";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import {
+  asRouteHandler,
   eventually,
   isAlive,
   jsonRequest,
@@ -16,9 +16,10 @@ import {
   spawnIdleProcess,
   testAppManifest,
   writeAdminConfig,
+  type RouteHandler,
 } from "./helpers";
 
-let POST: (req: NextRequest) => Promise<NextResponse>;
+let POST: RouteHandler;
 let lds: LocalDataServer;
 let dataDir: string;
 let credsDir: string;
@@ -38,7 +39,7 @@ beforeAll(async () => {
   lds = await startLocalDataServer();
   process.env.STARKEEP_DIR = dataDir;
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = lds.url;
-  ({ POST } = await import("../app/api/apps/install/route"));
+  POST = asRouteHandler((await import("../app/api/apps/install/route")).POST);
 });
 
 afterAll(async () => {

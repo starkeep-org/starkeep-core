@@ -9,21 +9,22 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { NextRequest, NextResponse } from "next/server";
 import { getFreePort } from "@starkeep/testkit";
 import {
+  asRouteHandler,
   eventually,
-  getRequest,
+  nextUrlRequest,
   isAlive,
   jsonRequest,
   makeAppDir,
   makeDataDir,
   testAppManifest,
   writeAdminConfig,
+  type RouteHandler,
 } from "./helpers";
 
-let daemonPOST: (req: NextRequest) => Promise<NextResponse>;
-let statusGET: (req: NextRequest) => Promise<NextResponse>;
+let daemonPOST: RouteHandler;
+let statusGET: RouteHandler;
 let pidsDir: string;
 const strays: number[] = [];
 
@@ -93,8 +94,8 @@ beforeAll(async () => {
   writeFileSync(join(parent, "nodeps-app", "server.mjs"), SERVER_MJS);
 
   process.env.STARKEEP_DIR = dataDir;
-  ({ POST: daemonPOST } = await import("../app/api/exec/daemon/route"));
-  ({ GET: statusGET } = await import("../app/api/exec/daemon/status/route"));
+  daemonPOST = asRouteHandler((await import("../app/api/exec/daemon/route")).POST);
+  statusGET = asRouteHandler((await import("../app/api/exec/daemon/status/route")).GET);
 });
 
 afterAll(() => {
@@ -121,7 +122,7 @@ afterAll(() => {
 
 const act = (body: unknown) => daemonPOST(jsonRequest("/api/exec/daemon", body));
 const status = async (id: string) => {
-  const res = await statusGET(getRequest(`/api/exec/daemon/status?id=${id}`));
+  const res = await statusGET(nextUrlRequest(`/api/exec/daemon/status?id=${id}`));
   expect(res.status).toBe(200);
   return (await res.json()) as { running: boolean; pid?: number; port?: number };
 };
@@ -145,7 +146,7 @@ describe("input validation", () => {
   });
 
   it("status without an id is 400", async () => {
-    const res = await statusGET(getRequest("/api/exec/daemon/status"));
+    const res = await statusGET(nextUrlRequest("/api/exec/daemon/status"));
     expect(res.status).toBe(400);
   });
 });
