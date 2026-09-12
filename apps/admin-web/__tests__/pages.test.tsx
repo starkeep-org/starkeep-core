@@ -1,36 +1,20 @@
 /**
  * @vitest-environment jsdom
  *
- * The three pages render, show their own sections, and link to each other.
+ * The three pages render inside the shell, show their own sections, and
+ * navigate between each other.
  *
- * Nothing rendered any page or any component before this file, and the
- * framework migration rewrites routing and layout wiring in most of them. These
- * are smoke tests on purpose: what they hold is that each page mounts without
- * throwing, that the sections a reader looks for are present, and that the
- * navigation between them carries the hrefs it should. Behavior inside the
- * components is the components' own to test.
- *
- * `next/link` and `next/navigation` are stubbed because they are exactly what
- * the migration replaces. A stub that renders a plain anchor is also what
- * react-router's `<Link>` renders, so the href assertions survive the swap.
+ * Everything here goes through the real route table in `src/App.tsx` rather
+ * than rendering a page component directly. That is what the route group used
+ * to express — the header and the credential-refresh gate wrap every page — and
+ * it is the part a routing change breaks. `MemoryRouter` supplies the history
+ * so a test can start at any path and then click its way to another.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
-
-const push = vi.fn();
-
-vi.mock("next/link", () => ({
-  default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (
-    <a href={href} {...rest}>
-      {children}
-    </a>
-  ),
-}));
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push, replace: vi.fn(), refresh: vi.fn(), back: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
-  usePathname: () => "/",
-}));
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router";
+import { App } from "../src/App";
 
 /**
  * Every network call the pages make, answered with the shape of a machine that
@@ -57,8 +41,16 @@ function stubFetch(routes: Record<string, unknown> = {}) {
   });
 }
 
+/** Mount the app at a path, the way a reload or a pasted URL arrives. */
+function renderAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <App />
+    </MemoryRouter>,
+  );
+}
+
 beforeEach(() => {
-  push.mockReset();
   vi.stubGlobal("fetch", stubFetch());
   localStorage.clear();
 });
@@ -70,25 +62,20 @@ afterEach(() => {
 
 describe("the dashboard", () => {
   it("renders both columns", async () => {
-    const { default: DashboardPage } = await import("../app/(shell)/page");
-    render(<DashboardPage />);
+    renderAt("/");
     expect(await screen.findByRole("heading", { name: "Local" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Cloud" })).toBeTruthy();
   });
 
   it("shows the built-in data server card with its offline state", async () => {
-    const { default: DashboardPage } = await import("../app/(shell)/page");
-    render(<DashboardPage />);
+    renderAt("/");
     expect(await screen.findByText("Data Server")).toBeTruthy();
-    expect(
-      await screen.findByText(/local data server must be running/i),
-    ).toBeTruthy();
+    expect(await screen.findByText(/local data server must be running/i)).toBeTruthy();
     expect(await screen.findByRole("button", { name: /Start Data Server/ })).toBeTruthy();
   });
 
   it("offers exactly one thing to do with no cloud deployment: deploy one", async () => {
-    const { default: DashboardPage } = await import("../app/(shell)/page");
-    render(<DashboardPage />);
+    renderAt("/");
     const deploy = await screen.findByRole("link", { name: /Deploy Starkeep Cloud/ });
     expect(deploy.getAttribute("href")).toBe("/cloud-setup");
   });
@@ -109,69 +96,55 @@ describe("the dashboard", () => {
         throw new TypeError("fetch failed");
       }),
     );
-    const { default: DashboardPage } = await import("../app/(shell)/page");
-    render(<DashboardPage />);
+    renderAt("/");
     expect(await screen.findByText(/list failed: 500/)).toBeTruthy();
   });
 });
 
 describe("the storage page", () => {
   it("renders its heading, its experimental badge and the retention section", async () => {
-    const { default: StoragePage } = await import("../app/(shell)/storage/page");
-    render(<StoragePage />);
-    expect(screen.getByRole("heading", { name: "Storage" })).toBeTruthy();
+    renderAt("/storage");
+    expect(await screen.findByRole("heading", { name: "Storage" })).toBeTruthy();
     expect(screen.getByText("Experimental")).toBeTruthy();
     expect(screen.getByRole("heading", { name: /Retention & budgets/i })).toBeTruthy();
   });
 
   it("links back to the dashboard", async () => {
-    const { default: StoragePage } = await import("../app/(shell)/storage/page");
-    render(<StoragePage />);
-    expect(screen.getByRole("link", { name: /Dashboard/ }).getAttribute("href")).toBe("/");
+    renderAt("/storage");
+    const back = await screen.findByRole("link", { name: /← Dashboard/ });
+    expect(back.getAttribute("href")).toBe("/");
   });
 });
 
 describe("the cloud-setup page", () => {
   it("renders the wizard inside it", async () => {
-    const { default: CloudSetupPage } = await import("../app/(shell)/cloud-setup/page");
-    render(<CloudSetupPage />);
-    expect(screen.getByRole("heading", { name: "Cloud Setup" })).toBeTruthy();
+    renderAt("/cloud-setup");
+    expect(await screen.findByRole("heading", { name: "Cloud Setup" })).toBeTruthy();
     // The wizard resumes from the config before it renders its steps.
     expect(await screen.findByText("Steps")).toBeTruthy();
   });
 
   it("links back to the dashboard", async () => {
-    const { default: CloudSetupPage } = await import("../app/(shell)/cloud-setup/page");
-    render(<CloudSetupPage />);
-    expect(screen.getByRole("link", { name: /Dashboard/ }).getAttribute("href")).toBe("/");
+    renderAt("/cloud-setup");
+    const back = await screen.findByRole("link", { name: /← Dashboard/ });
+    expect(back.getAttribute("href")).toBe("/");
   });
 
   it("starts at step 1 for a machine with no cloud configured", async () => {
-    const { default: CloudSetupPage } = await import("../app/(shell)/cloud-setup/page");
-    render(<CloudSetupPage />);
+    renderAt("/cloud-setup");
     expect(await screen.findByRole("heading", { name: "Bootstrap Stack" })).toBeTruthy();
   });
 });
 
 describe("the shell around all three", () => {
-  it("renders its header and the page inside it", async () => {
-    const { default: ShellLayout } = await import("../app/(shell)/layout");
-    render(
-      <ShellLayout>
-        <p>page body</p>
-      </ShellLayout>,
-    );
+  it("renders its header above whichever page is mounted", async () => {
+    renderAt("/storage");
     expect(await screen.findByText("Starkeep Admin")).toBeTruthy();
-    expect(screen.getByText("page body")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Storage" })).toBeTruthy();
   });
 
   it("puts the home link on the product name, which is the only nav it has", async () => {
-    const { default: ShellLayout } = await import("../app/(shell)/layout");
-    render(
-      <ShellLayout>
-        <p>page body</p>
-      </ShellLayout>,
-    );
+    renderAt("/storage");
     const header = (await screen.findByText("Starkeep Admin")).closest("a");
     expect(header?.getAttribute("href")).toBe("/");
   });
@@ -190,40 +163,56 @@ describe("the shell around all three", () => {
           }),
       ),
     );
-    const { default: ShellLayout } = await import("../app/(shell)/layout");
-    render(
-      <ShellLayout>
-        <p>page body</p>
-      </ShellLayout>,
-    );
-    expect(screen.queryByText("page body")).toBeNull();
+    renderAt("/storage");
+    expect(screen.queryByRole("heading", { name: "Storage" })).toBeNull();
     resolveConfig(Response.json({ config: null }));
-    await waitFor(() => expect(screen.getByText("page body")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Storage" })).toBeTruthy());
   });
 });
 
-describe("navigation between the three pages", () => {
-  it("reaches cloud-setup from the dashboard and the dashboard from both others", async () => {
-    const { default: DashboardPage } = await import("../app/(shell)/page");
-    const { default: StoragePage } = await import("../app/(shell)/storage/page");
-    const { default: CloudSetupPage } = await import("../app/(shell)/cloud-setup/page");
+describe("navigating between the three pages", () => {
+  it("reaches cloud-setup from the dashboard", async () => {
+    const user = userEvent.setup();
+    renderAt("/");
+    await user.click(await screen.findByRole("link", { name: /Deploy Starkeep Cloud/ }));
+    expect(await screen.findByRole("heading", { name: "Cloud Setup" })).toBeTruthy();
+  });
 
-    const dashboard = render(<DashboardPage />);
-    expect(
-      (await within(dashboard.container).findByRole("link", { name: /Deploy Starkeep Cloud/ }))
-        .getAttribute("href"),
-    ).toBe("/cloud-setup");
-    cleanup();
+  it("comes back to the dashboard from cloud-setup", async () => {
+    const user = userEvent.setup();
+    renderAt("/cloud-setup");
+    await user.click(await screen.findByRole("link", { name: /← Dashboard/ }));
+    expect(await screen.findByRole("heading", { name: "Local" })).toBeTruthy();
+  });
 
-    const storage = render(<StoragePage />);
-    expect(
-      within(storage.container).getByRole("link", { name: /Dashboard/ }).getAttribute("href"),
-    ).toBe("/");
-    cleanup();
+  it("comes back to the dashboard from storage", async () => {
+    const user = userEvent.setup();
+    renderAt("/storage");
+    await user.click(await screen.findByRole("link", { name: /← Dashboard/ }));
+    expect(await screen.findByRole("heading", { name: "Local" })).toBeTruthy();
+  });
 
-    const setup = render(<CloudSetupPage />);
-    expect(
-      within(setup.container).getByRole("link", { name: /Dashboard/ }).getAttribute("href"),
-    ).toBe("/");
+  it("keeps the shell mounted across a navigation", async () => {
+    // The gate is a layout route, so moving between pages must not unmount it
+    // and re-run the credential refresh it starts.
+    const user = userEvent.setup();
+    const fetchSpy = stubFetch();
+    vi.stubGlobal("fetch", fetchSpy);
+    renderAt("/");
+    await screen.findByRole("heading", { name: "Local" });
+    const configReadsBefore = fetchSpy.mock.calls.filter(([u]) =>
+      String(u).includes("/api/config"),
+    ).length;
+
+    await user.click(await screen.findByRole("link", { name: /Deploy Starkeep Cloud/ }));
+    await screen.findByRole("heading", { name: "Cloud Setup" });
+    expect(screen.getByText("Starkeep Admin")).toBeTruthy();
+
+    // The wizard reads the config for itself; the gate must not have read it
+    // again on top of that.
+    const gateReadsAfter = fetchSpy.mock.calls.filter(([u]) =>
+      String(u).includes("/api/config"),
+    ).length;
+    expect(gateReadsAfter).toBeLessThanOrEqual(configReadsBefore + 1);
   });
 });

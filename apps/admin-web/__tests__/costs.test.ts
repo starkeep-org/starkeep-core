@@ -18,12 +18,12 @@ import {
 } from "@aws-sdk/client-s3";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { jsonRequest, makeDataDir, type RouteHandler } from "./helpers";
+import { jsonRequest, makeDataDir } from "./helpers";
 
 const s3 = mockClient(S3Client);
 const sts = mockClient(STSClient);
 
-let POST: RouteHandler;
+let POST: (req: Request) => Promise<Response>;
 
 const CREDENTIALS = {
   accessKeyId: "AKIA",
@@ -34,8 +34,8 @@ const CREDENTIALS = {
 
 beforeAll(async () => {
   process.env.STARKEEP_DIR = makeDataDir("adminweb-costs-");
-  const route = await import("../app/api/costs/route");
-  POST = route.POST as unknown as RouteHandler;
+  const route = await import("../src/routes/costs");
+  POST = route.POST;
 });
 
 afterEach(() => {

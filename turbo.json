@@ -18,8 +18,15 @@
       "dependsOn": ["^build"]
     },
     "test:e2e": {
-      "dependsOn": ["^build"],
+      // admin-web's client is a real build now rather than something compiled
+      // on demand, so the tier-2 stack needs `dist/` present before it boots
+      // the server that serves it.
+      "dependsOn": ["^build", "admin-web#build"],
       "cache": false
+    },
+    "admin-web#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
     },
     "test:aws": {
       "dependsOn": ["^build"],

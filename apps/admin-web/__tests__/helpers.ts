@@ -10,28 +10,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NextRequest } from "next/server";
-
-/**
- * A route handler as this suite holds it: plain `Request` in, plain `Response`
- * out, and the route's own context argument when it has one.
- *
- * The routes still annotate `NextRequest`/`NextResponse`, which is wider than
- * anything they use — every handler here touches only `json()`, `text()`,
- * `headers` and, in one case, `nextUrl`. `asRouteHandler` is the single place
- * that acknowledges those annotations, so the tests are written against the web
- * types and survive the routes dropping the framework ones.
- */
-type UncheckedRouteHandler = (
-  req: never,
-  ...rest: never[]
-) => Response | Promise<Response>;
-
-export type RouteHandler<C = never> = (req: Request, ctx?: C) => Promise<Response>;
-
-export function asRouteHandler<C = never>(handler: UncheckedRouteHandler): RouteHandler<C> {
-  return handler as unknown as RouteHandler<C>;
-}
 
 /** Temp dir to act as STARKEEP_DIR (config.json, app-creds/, pids/). */
 export function makeDataDir(prefix = "adminweb-test-"): string {
@@ -96,18 +74,6 @@ export function jsonRequest(
 /** A plain GET request. */
 export function getRequest(path: string): Request {
   return new Request(`http://localhost${path}`);
-}
-
-/**
- * A GET request the daemon-status route can read a query string from.
- *
- * That route is the one handler in the app that reaches past the web `Request`
- * — it reads `req.nextUrl.searchParams` rather than parsing `req.url` — so it
- * is the one place a test has to hand it the framework's request. Everything
- * else in this suite uses `getRequest`.
- */
-export function nextUrlRequest(path: string): Request {
-  return new NextRequest(`http://localhost${path}`);
 }
 
 /**

@@ -1,11 +1,25 @@
-import "server-only";
-import { resolve } from "node:path";
+/**
+ * The commands admin-web spawns, and where it spawns them from.
+ *
+ * Server-side only. Nothing the browser loads may import this module — it names
+ * the process table, and `daemon-control.ts` reaches `node:child_process`
+ * through it. The rule used to be carried by a `server-only` import, which is a
+ * marker the previous bundler resolved and no bundler here does; it is now an
+ * eslint `no-restricted-imports` rule plus
+ * `__tests__/server-module-isolation.test.ts`, which walks the real graph.
+ */
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type DaemonId = "local-data-server" | "drive";
 export type StreamCommandId = "reset-local-data" | "local-deploy";
 
-// Next.js runs from apps/admin-web; ../../ is the repo root
-export const REPO_ROOT = resolve(process.cwd(), "../..");
+// Resolved from this file rather than from `process.cwd()`. The server used to
+// be started by a framework that always ran from `apps/admin-web`; it is now a
+// plain Node process, which can be started from anywhere, and a repo root that
+// depended on the caller's directory would silently spawn every daemon and CLI
+// against the wrong tree.
+export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
 // Default app parent dir: the sibling-of-starkeep-core `starkeep-apps/` checkout.
 // Seeded into `appParentDirs` in ~/.starkeep/config.json on first read by the

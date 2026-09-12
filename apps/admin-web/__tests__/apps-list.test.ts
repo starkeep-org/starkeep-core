@@ -50,7 +50,7 @@ beforeAll(async () => {
   ldsPort = await getFreePort();
   process.env.STARKEEP_DIR = dataDir;
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = `http://127.0.0.1:${ldsPort}`;
-  ({ GET } = await import("../app/api/apps/list/route"));
+  ({ GET } = await import("../src/routes/apps-list"));
 });
 
 afterAll(async () => {

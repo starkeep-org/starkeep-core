@@ -5,10 +5,10 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { asRouteHandler, jsonRequest, makeDataDir, writeAdminConfig, type RouteHandler } from "./helpers";
+import { jsonRequest, makeDataDir, writeAdminConfig } from "./helpers";
 
 let GET: () => Promise<Response>;
-let PATCH: RouteHandler;
+let PATCH: (req: Request) => Promise<Response>;
 let DEFAULT_APPS_DIR: string;
 let dataDir: string;
 let configPath: string;
@@ -17,9 +17,9 @@ beforeAll(async () => {
   dataDir = makeDataDir();
   configPath = join(dataDir, "config.json");
   process.env.STARKEEP_DIR = dataDir;
-  const route = await import("../app/api/config/route");
+  const route = await import("../src/routes/config");
   GET = route.GET;
-  PATCH = asRouteHandler(route.PATCH);
+  PATCH = route.PATCH;
   ({ DEFAULT_APPS_DIR } = await import("../src/lib/exec-commands"));
 });
 

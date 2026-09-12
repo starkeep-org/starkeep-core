@@ -1,15 +1,15 @@
-"use client"
-
-import { useTheme } from "next-themes"
 import { Toaster as Sonner, type ToasterProps } from "sonner"
 import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
+// Registry-generated, with one change: the `next-themes` hook is gone.
+// Nothing in admin-web ever mounted a ThemeProvider, so the hook only ever
+// returned its "system" default — which is what sonner is told directly. A
+// later `shadcn add` regenerates this file with the hook back in; correct it
+// again rather than adopting the dependency.
 const Toaster = ({ ...props }: ToasterProps) => {
-  const { theme = "system" } = useTheme()
-
   return (
     <Sonner
-      theme={theme as ToasterProps["theme"]}
+      theme="system"
       className="toaster group"
       icons={{
         success: (

@@ -1,0 +1,21 @@
+<!doctype html>
+<!--
+  The app shell. Vite emits this plus content-hashed assets; `src/server.ts`
+  serves it for every client route, which is what makes the shell a file on disk
+  rather than a response a server renders.
+
+  `class="font-sans"` is what `app/layout.tsx` set on <html>, and it is still the
+  one place the whole document's face is chosen. The variable that backs it now
+  comes from `src/globals.css` instead of from `next/font`.
+-->
+<html lang="en" class="font-sans">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Starkeep Admin</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

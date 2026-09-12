@@ -1,7 +1,5 @@
-"use client";
-
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router";
 import { Check, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1188,7 +1186,7 @@ interface Props {
 }
 
 export function CloudSetupWizard({ onComplete }: Props) {
-  const router = useRouter();
+  const navigate = useNavigate();
 
   const [currentStep, setCurrentStep] = useState<StepId>(1);
   const [completedSteps, setCompletedSteps] = useState<Set<StepId>>(new Set());
@@ -1280,7 +1278,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
     }
 
     restore();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   const fullCognitoConfig = (): CognitoConfig | null => {
     if (!cloudConfig) return null;
@@ -1294,7 +1292,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
     if (onComplete) {
       onComplete();
     } else {
-      router.push("/");
+      navigate("/");
     }
   };
 

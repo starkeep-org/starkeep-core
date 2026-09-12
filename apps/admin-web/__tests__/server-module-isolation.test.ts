@@ -4,19 +4,21 @@
  *
  * `src/lib/app-scan.ts`, `src/lib/daemon-control.ts` and
  * `src/lib/exec-commands.ts` are the three modules that touch
- * `node:child_process` and `node:fs`. Today the line is held by a `server-only`
- * import, which is a marker package the framework's bundler resolves — there is
- * no such package in this tree, which is why `vitest.config.ts` has to alias it
- * to a stub. A bundler that does not know the convention enforces nothing, and
- * a client entry that imported `exec-commands.ts` would put
- * `node:child_process` in the browser graph with no error anywhere.
+ * `node:child_process` and `node:fs`. The line used to be held by a
+ * `server-only` import — a marker package the previous bundler resolved and
+ * refused in a client graph. There is no such package in this tree, and the
+ * bundler that ships the browser half now would not know the convention if
+ * there were: an SPA entry that imported `exec-commands.ts` would simply bundle
+ * `node:child_process` for the browser, with no error anywhere.
  *
- * So the marker is replaced by two things that do not depend on a bundler
+ * So the marker is replaced by two things that depend on no bundler
  * convention: an eslint `no-restricted-imports` rule for the edit that
  * introduces it, and this test, which walks the real import graph in CI.
  *
- * Written while `server-only` still holds the line, so it is verified against a
- * graph known to be clean.
+ * `src/main.tsx` is the whole of the browser half's entry now — one file, and
+ * everything the bundle contains is reachable from it. The per-file cases below
+ * it are not redundant: a failure there names the page or component that
+ * introduced the edge, which the single entry-point case cannot.
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -34,6 +36,22 @@ const SERVER_ONLY = [
 ];
 
 const rel = (file: string) => relative(APP_DIR, file);
+
+/** Every file in this package reachable from `entry`. */
+function reachableFrom(entry: string): string[] {
+  const seen = new Set<string>([entry]);
+  const queue = [entry];
+  while (queue.length > 0) {
+    const file = queue.shift()!;
+    for (const specifier of specifiersIn(file)) {
+      const resolved = resolveLocal(file, specifier);
+      if (!resolved || seen.has(resolved)) continue;
+      seen.add(resolved);
+      queue.push(resolved);
+    }
+  }
+  return [...seen];
+}
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -103,35 +121,46 @@ function chainTo(entry: string, targets: string[]): string[] | null {
   return null;
 }
 
+/** The browser bundle's one entry point. */
+const BROWSER_ENTRY = join(APP_DIR, "src", "main.tsx");
+
 /**
- * What the browser loads: the pages and layouts the router renders, plus every
- * component. The page files are the client entry today and the router's route
- * components after the migration, so the set of files this walks does not
- * change when the framework does.
+ * The pages and components the router renders, checked individually so a
+ * failure names the file that introduced the edge rather than only the entry.
  */
-const clientEntries = [
-  ...walk(join(APP_DIR, "app")).filter((f) => !f.includes(`${join("app", "api")}`)),
+const clientModules = [
+  BROWSER_ENTRY,
+  join(APP_DIR, "src", "App.tsx"),
+  ...walk(join(APP_DIR, "src", "pages")),
   ...walk(join(APP_DIR, "src", "components")),
   ...walk(join(APP_DIR, "src", "hooks")),
 ];
 
 describe("the traversal itself", () => {
-  it("finds the pages and components it is meant to be checking", () => {
+  it("finds the entry, the pages and the components it is meant to be checking", () => {
     // A traversal bug that found nothing would make every assertion below pass
     // vacuously — the one shape of failure a guard must not have.
-    const names = clientEntries.map(rel);
-    expect(names).toContain("app/(shell)/page.tsx");
-    expect(names).toContain("app/(shell)/cloud-setup/page.tsx");
-    expect(names).toContain("app/(shell)/storage/page.tsx");
+    const names = clientModules.map(rel);
+    expect(names).toContain("src/main.tsx");
+    expect(names).toContain("src/pages/Dashboard.tsx");
+    expect(names).toContain("src/pages/CloudSetup.tsx");
+    expect(names).toContain("src/pages/Storage.tsx");
     expect(names).toContain("src/components/CloudSetupWizard.tsx");
-    expect(clientEntries.length).toBeGreaterThan(20);
+    expect(clientModules.length).toBeGreaterThan(20);
+  });
+
+  it("reaches the pages from the entry, so the entry case is not trivially clean", () => {
+    // If `main.tsx` reached nothing it would reach no server module either.
+    const reached = reachableFrom(BROWSER_ENTRY).map(rel);
+    expect(reached).toContain("src/pages/Dashboard.tsx");
+    expect(reached).toContain("src/components/CloudSetupWizard.tsx");
+    expect(reached).toContain("src/lib/cognito-auth.ts");
   });
 
   it("finds a chain when there is one", () => {
-    // The complement: a route handler does reach these modules, on purpose, so
-    // the assertions below are failing to find something that is findable.
-    const chain = chainTo(join(APP_DIR, "app", "api", "exec", "daemon", "route.ts"), SERVER_ONLY);
-    expect(chain).not.toBeNull();
+    // The complement: a route module does reach these, on purpose, so the
+    // assertions below are failing to find something that is findable.
+    expect(chainTo(join(APP_DIR, "src", "routes", "exec-daemon.ts"), SERVER_ONLY)).not.toBeNull();
   });
 
   it("names each server-only module as a file that exists", () => {
@@ -141,33 +170,39 @@ describe("the traversal itself", () => {
   });
 });
 
-describe("no client entry reaches a server-only module", () => {
-  it.each(clientEntries.map((file) => [rel(file), file] as const))("%s", (_name, file) => {
+describe("the browser bundle reaches no server-only module", () => {
+  it("src/main.tsx — the whole of what ships to the browser", () => {
+    const chain = chainTo(BROWSER_ENTRY, SERVER_ONLY);
+    expect(
+      chain === null,
+      chain
+        ? `the browser bundle reaches a server-only module:\n  ${chain.map(rel).join("\n\u2192 ")}`
+        : undefined,
+    ).toBe(true);
+  });
+
+  it.each(clientModules.map((file) => [rel(file), file] as const))("%s", (_name, file) => {
     const chain = chainTo(file, SERVER_ONLY);
     expect(
       chain === null,
-      chain ? `import chain into a server-only module:\n  ${chain.map(rel).join("\n→ ")}` : undefined,
+      chain
+        ? `import chain into a server-only module:\n  ${chain.map(rel).join("\n\u2192 ")}`
+        : undefined,
     ).toBe(true);
   });
 });
 
-describe("the list and the marker say the same thing", () => {
-  // Keeps the list honest from the other direction. While `server-only` is
-  // still in the tree the two must agree exactly, so a module that acquires the
-  // marker without joining this list — or the reverse — fails here rather than
-  // going unguarded. When the marker goes, this pair of assertions goes with
-  // it and the list above becomes the whole statement.
-
-  it("every module on the list carries the marker", () => {
-    for (const file of SERVER_ONLY) {
-      expect(readFileSync(file, "utf-8"), rel(file)).toContain('import "server-only"');
-    }
-  });
-
-  it("every module carrying the marker is on the list", () => {
-    const marked = [...walk(join(APP_DIR, "src")), ...walk(join(APP_DIR, "app"))].filter((file) =>
-      readFileSync(file, "utf-8").includes('import "server-only"'),
+describe("the marker it replaced", () => {
+  it("is gone from the tree, rather than left in place enforcing nothing", () => {
+    // `server-only` was never a declared dependency, and the bundler that
+    // resolved it is gone. Left in the source it would read as a guard while
+    // being an unresolvable import, so the graph walk above is the whole
+    // statement now and the marker must not come back. The *words* still appear
+    // in comments here and in `exec-commands.ts`, which is why this looks for
+    // the import rather than the text.
+    const marked = walk(join(APP_DIR, "src")).filter((file) =>
+      /(?:^|\s)import\s*["']server-only["']/.test(readFileSync(file, "utf-8")),
     );
-    expect(marked.map(rel).sort()).toEqual(SERVER_ONLY.map(rel).sort());
+    expect(marked.map(rel)).toEqual([]);
   });
 });

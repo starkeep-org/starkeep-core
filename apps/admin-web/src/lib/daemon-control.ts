@@ -1,4 +1,3 @@
-import "server-only";
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { starkeepDir } from "@starkeep/app-client";

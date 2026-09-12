@@ -232,8 +232,16 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
   let admin: WebServer | undefined;
   let drive: WebServer | undefined;
   try {
+    // admin-web is the first app off the framework: its server is a plain Node
+    // process serving a built client, so the harness starts what an operator
+    // starts rather than a dev server. `tsx` runs the TypeScript entry directly,
+    // the way `apps/local-data-server` is run.
+    const adminDir = join(REPO_ROOT, "apps/admin-web");
     admin = await startWebServer({
-      appDir: join(REPO_ROOT, "apps/admin-web"),
+      appDir: adminDir,
+      mode: "node",
+      command: join(adminDir, "node_modules/.bin/tsx"),
+      args: ["src/server.ts"],
       readyPath: "/api/apps/list",
       env: {
         STARKEEP_DIR: adminDataDir,

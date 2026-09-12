@@ -35,8 +35,8 @@ beforeAll(async () => {
     getRuntimeConfig: async () => ({ localDataServerUrl: daemon.url, driveUrl: daemon.url }),
   }));
 
-  ({ GET: residencyGET } = await import("../app/api/residency/route"));
-  const policy = await import("../app/api/residency/policy/route");
+  ({ GET: residencyGET } = await import("../src/routes/residency"));
+  const policy = await import("../src/routes/residency-policy");
   policyPOST = policy.POST as unknown as typeof policyPOST;
   policyPUT = policy.PUT as unknown as typeof policyPUT;
 });
@@ -109,8 +109,8 @@ describe("when the daemon is not running", () => {
         driveUrl: "http://127.0.0.1:1",
       }),
     }));
-    const down = await import("../app/api/residency/route");
-    const downPolicy = await import("../app/api/residency/policy/route");
+    const down = await import("../src/routes/residency");
+    const downPolicy = await import("../src/routes/residency-policy");
 
     const calls: Array<Promise<Response>> = [
       down.GET(),

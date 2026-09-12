@@ -10,9 +10,9 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { jsonRequest, makeDataDir, type RouteHandler } from "./helpers";
+import { jsonRequest, makeDataDir } from "./helpers";
 
-let POST: RouteHandler;
+let POST: (req: Request) => Promise<Response>;
 let dataDir: string;
 let configPath: string;
 
@@ -32,8 +32,8 @@ beforeAll(async () => {
   dataDir = makeDataDir("adminweb-cloud-list-");
   configPath = join(dataDir, "config.json");
   process.env.STARKEEP_DIR = dataDir;
-  const route = await import("../app/api/apps/cloud/list/route");
-  POST = route.POST as unknown as RouteHandler;
+  const route = await import("../src/routes/apps-cloud-list");
+  POST = route.POST;
 });
 
 beforeEach(() => {

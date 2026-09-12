@@ -19,7 +19,7 @@ beforeAll(async () => {
   dataDir = makeDataDir("adminweb-deploy-outputs-");
   configPath = join(dataDir, "config.json");
   process.env.STARKEEP_DIR = dataDir;
-  ({ GET } = await import("../app/api/exec/deploy-outputs/route"));
+  ({ GET } = await import("../src/routes/exec-deploy-outputs"));
 });
 
 beforeEach(() => {

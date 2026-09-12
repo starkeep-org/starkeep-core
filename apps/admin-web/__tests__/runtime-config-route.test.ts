@@ -13,7 +13,7 @@ async function freshRoute(): Promise<{ GET: () => Response }> {
   // The handler reads env per request, but the module is re-imported anyway so
   // a future capture-at-load would not quietly pass this suite.
   vi.resetModules();
-  return (await import("../app/api/runtime-config/route")) as { GET: () => Response };
+  return (await import("../src/routes/runtime-config")) as { GET: () => Response };
 }
 
 afterEach(() => {
