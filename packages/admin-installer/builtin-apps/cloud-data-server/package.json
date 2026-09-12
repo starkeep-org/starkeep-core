@@ -34,6 +34,6 @@
     "aws-sdk-client-mock": "^4.1.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.2.7"
+    "vitest": "^4.1.11"
   }
 }
