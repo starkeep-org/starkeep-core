@@ -97,7 +97,7 @@ export const appComputeRouteSchema = z.union([
 
 /**
  * A path under the handler that is *intended* to be reachable without
- * authentication, e.g. `/`, `/_next/static/*`, `/sign-in`.
+ * authentication, e.g. `/`, `/_immutable/*`, `/sign-in`.
  *
  * Required whenever a handler leaves a catch-all route anonymous. A catch-all
  * publishes far more than the author is usually thinking about, so the
@@ -202,7 +202,7 @@ const appComputeHandlerObjectSchema = z.object({
  * which is a description of the duplication rather than a defense against it.
  *
  * A wildcard entry is covered by a wildcard declaration of the same or wider
- * reach: `/_next/static/*` needs `/_next/static/*` or `/_next/*`, and its bare
+ * reach: `/_immutable/*` needs `/_immutable/*`, and its bare
  * probe form is what the check compares.
  */
 export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine(

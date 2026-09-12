@@ -25,9 +25,10 @@ let assetsDir: string;
 
 beforeAll(() => {
   assetsDir = mkdtempSync(join(tmpdir(), "starkeep-web-adapter-"));
-  mkdirSync(join(assetsDir, "_next", "static"), { recursive: true });
-  writeFileSync(join(assetsDir, "_next", "static", "probe.5f3a9c21.js"), "console.log(1)\n");
-  writeFileSync(join(assetsDir, "BUILD_ID"), "abc123");
+  mkdirSync(join(assetsDir, "_immutable"), { recursive: true });
+  writeFileSync(join(assetsDir, "_immutable", "probe.5f3a9c21.js"), "console.log(1)\n");
+  writeFileSync(join(assetsDir, "version"), "abc123");
+  writeFileSync(join(assetsDir, "index.html"), "<!doctype html><title>shell</title>\n");
   writeFileSync(join(assetsDir, "icon.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   mkdirSync(join(assetsDir, "sub"), { recursive: true });
   writeFileSync(join(assetsDir, "..", "outside.txt"), "secret");
@@ -172,14 +173,14 @@ describe("static assets", () => {
     return createWebAppHandler({
       basePath: BASE,
       assetsDir,
-      staticPaths: ["/_next/static/*", "/BUILD_ID", "/icon.png"],
+      staticPaths: ["/_immutable/*", "/version", "/icon.png"],
       requestUpstream: requestUpstream(),
       ...over,
     });
   }
 
   it("serves a declared path from disk with its content type", async () => {
-    const res = await (await staticHandler())(event(`${BASE}/_next/static/probe.5f3a9c21.js`));
+    const res = await (await staticHandler())(event(`${BASE}/_immutable/probe.5f3a9c21.js`));
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toBe("application/javascript; charset=utf-8");
     expect(res.body).toBe("console.log(1)\n");
@@ -197,7 +198,7 @@ describe("static assets", () => {
     const handler = await createWebAppHandler({
       basePath: BASE,
       assetsDir,
-      staticPaths: ["/BUILD_ID"],
+      staticPaths: ["/version"],
       requestUpstream: requestUpstream(),
     });
     const res = await handler(event(`${BASE}/icon.png`));
@@ -205,13 +206,13 @@ describe("static assets", () => {
   });
 
   it("falls through to the upstream on a miss by default", async () => {
-    const res = await (await staticHandler())(event(`${BASE}/_next/static/gone.js`));
-    expect(res.body).toBe("upstream:/_next/static/gone.js");
+    const res = await (await staticHandler())(event(`${BASE}/_immutable/gone.js`));
+    expect(res.body).toBe("upstream:/_immutable/gone.js");
   });
 
   it("answers 404 on a miss when the app owns the whole prefix", async () => {
     const res = await (await staticHandler({ staticMiss: "notFound" }))(
-      event(`${BASE}/_next/static/gone.js`),
+      event(`${BASE}/_immutable/gone.js`),
     );
     expect(res.statusCode).toBe(404);
   });
@@ -220,7 +221,7 @@ describe("static assets", () => {
     await expect(
       createWebAppHandler({
         basePath: BASE,
-        staticPaths: ["/BUILD_ID"],
+        staticPaths: ["/version"],
         requestUpstream: requestUpstream(),
       }),
     ).rejects.toThrow(/no assetsDir was given/);
@@ -230,13 +231,117 @@ describe("static assets", () => {
     const handler = await createWebAppHandler({
       basePath: BASE,
       assetsDir: new URL(`file://${assetsDir}/`),
-      staticPaths: ["/BUILD_ID"],
+      staticPaths: ["/version"],
       requestUpstream: requestUpstream(),
     });
-    // BUILD_ID carries no extension, so it is bytes rather than text — the
+    // `version` carries no extension, so it is bytes rather than text — the
     // same answer the wrappers this replaces gave it.
-    const res = await handler(event(`${BASE}/BUILD_ID`));
+    const res = await handler(event(`${BASE}/version`));
     expect(Buffer.from(res.body!, "base64").toString("utf8")).toBe("abc123");
+  });
+});
+
+describe("the SPA shell", () => {
+  async function shellHandler(over: Record<string, unknown> = {}) {
+    return createWebAppHandler({
+      basePath: BASE,
+      assetsDir,
+      staticPaths: ["/_immutable/*", "/icon.png"],
+      shellPaths: ["/", "/settings", "/study/*"],
+      requestUpstream: requestUpstream(),
+      ...over,
+    });
+  }
+
+  it("answers a declared client route with index.html", async () => {
+    const res = await (await shellHandler())(event(`${BASE}/settings`));
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toBe("text/html; charset=utf-8");
+    expect(res.body).toContain("<title>shell</title>");
+  });
+
+  it("answers the app root, in both spellings the platform can produce", async () => {
+    const handler = await shellHandler();
+    for (const rawPath of [BASE, `${BASE}/`]) {
+      const res = await handler(event(rawPath));
+      expect(res.body, rawPath).toContain("<title>shell</title>");
+    }
+  });
+
+  it("answers everything under a wildcard client route", async () => {
+    // Memo's deck ids contain colons, which is the case a hand-rolled matcher
+    // gets wrong: the shell has to answer the whole subtree, not one segment.
+    const res = await (await shellHandler())(event(`${BASE}/study/deck:abc/1`));
+    expect(res.body).toContain("<title>shell</title>");
+  });
+
+  it("leaves an undeclared path to the app", async () => {
+    const res = await (await shellHandler())(event(`${BASE}/api/records`));
+    expect(res.body).toBe("upstream:/api/records");
+  });
+
+  it("prefers a real file over the shell", async () => {
+    // `/icon.png` is both declared static and, were it listed, a client route.
+    // The file is the more specific answer and wins.
+    const res = await (await shellHandler({ shellPaths: ["/", "/icon.png"] }))(
+      event(`${BASE}/icon.png`),
+    );
+    expect(res.headers["content-type"]).toBe("image/png");
+  });
+
+  it("does not mark the shell immutable — it is the one file that changes", async () => {
+    const res = await (await shellHandler())(event(`${BASE}/settings`));
+    expect(res.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
+  });
+
+  it("falls through to the app when the shell file is missing", async () => {
+    // A build that never ran should read as "the app answered", not as a
+    // routing bug with a 404 nobody can place.
+    const res = await (await shellHandler({ shellFile: "never-built.html" }))(
+      event(`${BASE}/settings`),
+    );
+    expect(res.body).toBe("upstream:/settings");
+  });
+
+  it("gives the 404 to a path declared both ways under notFound", async () => {
+    // The two lists say different things — `staticPaths` names what the build
+    // emitted, `shellPaths` names what the router owns — and the static branch
+    // runs first. A path in both, under `notFound`, never reaches the shell.
+    const res = await (
+      await shellHandler({
+        staticPaths: ["/settings"],
+        shellPaths: ["/settings"],
+        staticMiss: "notFound",
+      })
+    )(event(`${BASE}/settings`));
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("refuses to build a handler that declares client routes with no assets dir", async () => {
+    await expect(
+      createWebAppHandler({
+        basePath: BASE,
+        shellPaths: ["/"],
+        requestUpstream: requestUpstream(),
+      }),
+    ).rejects.toThrow(/shellPaths declares 1 client route/);
+  });
+
+  it("answers the shell without touching the upstream", async () => {
+    let calls = 0;
+    const handler = await createWebAppHandler({
+      basePath: BASE,
+      assetsDir,
+      shellPaths: ["/"],
+      upstream: Promise.resolve({
+        handler: () => {
+          calls++;
+          return { statusCode: 200, headers: {}, body: "" };
+        },
+      }),
+    });
+    expect((await handler(event(BASE))).body).toContain("<title>shell</title>");
+    expect(calls).toBe(0);
   });
 });
 
@@ -245,10 +350,10 @@ describe("path safety", () => {
     const handler = await createWebAppHandler({
       basePath: BASE,
       assetsDir,
-      staticPaths: ["/_next/static/*"],
+      staticPaths: ["/_immutable/*"],
       requestUpstream: requestUpstream(),
     });
-    const res = await handler(event(`${BASE}/_next/static/../../../outside.txt`));
+    const res = await handler(event(`${BASE}/_immutable/../../../outside.txt`));
     expect(res.statusCode).toBe(400);
     expect(res.body).toBe("Bad path");
   });
@@ -270,24 +375,43 @@ describe("cache-control", () => {
     const handler = await createWebAppHandler({
       basePath: BASE,
       assetsDir,
-      staticPaths: ["/_next/static/*", "/BUILD_ID"],
+      staticPaths: ["/_immutable/*", "/version"],
       requestUpstream: requestUpstream(),
     });
-    const asset = await handler(event(`${BASE}/_next/static/probe.5f3a9c21.js`));
+    const asset = await handler(event(`${BASE}/_immutable/probe.5f3a9c21.js`));
     expect(asset.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
-    const buildId = await handler(event(`${BASE}/BUILD_ID`));
-    expect(buildId.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
+    const plain = await handler(event(`${BASE}/version`));
+    expect(plain.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
+  });
+
+  it("marks both migration-era prefixes immutable by default", async () => {
+    // The default is a migration aid: `/_immutable/*` is the platform's and
+    // `/_next/static/*` is what an app that still builds with Next emits. An
+    // app on either half of the migration caches correctly without passing the
+    // option, and every call site in this repository passes it anyway.
+    mkdirSync(join(assetsDir, "_next", "static"), { recursive: true });
+    writeFileSync(join(assetsDir, "_next", "static", "legacy.abc123.js"), "console.log(2)\n");
+    const handler = await createWebAppHandler({
+      basePath: BASE,
+      assetsDir,
+      staticPaths: ["/_immutable/*", "/_next/static/*"],
+      requestUpstream: requestUpstream(),
+    });
+    for (const path of ["/_immutable/probe.5f3a9c21.js", "/_next/static/legacy.abc123.js"]) {
+      const res = await handler(event(`${BASE}${path}`));
+      expect(res.headers["cache-control"], path).toBe("public, max-age=31536000, immutable");
+    }
   });
 
   it("lets an app name its own content-addressed prefix", async () => {
     const handler = await createWebAppHandler({
       basePath: BASE,
       assetsDir,
-      staticPaths: ["/BUILD_ID"],
-      immutablePaths: ["/BUILD_ID"],
+      staticPaths: ["/version"],
+      immutablePaths: ["/version"],
       requestUpstream: requestUpstream(),
     });
-    expect((await handler(event(`${BASE}/BUILD_ID`))).headers["cache-control"]).toBe(
+    expect((await handler(event(`${BASE}/version`))).headers["cache-control"]).toBe(
       "public, max-age=31536000, immutable",
     );
   });
@@ -315,7 +439,7 @@ describe("the event upstream", () => {
     const handler = await createWebAppHandler({
       basePath: BASE,
       assetsDir,
-      staticPaths: ["/BUILD_ID"],
+      staticPaths: ["/version"],
       upstream: Promise.resolve({
         handler: () => {
           calls++;
@@ -323,7 +447,7 @@ describe("the event upstream", () => {
         },
       }),
     });
-    await handler(event(`${BASE}/BUILD_ID`));
+    await handler(event(`${BASE}/version`));
     expect(calls).toBe(0);
   });
 });
@@ -363,10 +487,10 @@ describe("errors", () => {
 
 describe("pathCoveredBy", () => {
   it("matches the manifest's own subset relation", () => {
-    expect(pathCoveredBy("/_next/static/*", "/_next/static/a.js")).toBe(true);
-    expect(pathCoveredBy("/_next/static/*", "/_next/static")).toBe(true);
-    expect(pathCoveredBy("/_next/static/*", "/_next/staticx")).toBe(false);
-    expect(pathCoveredBy("/BUILD_ID", "/BUILD_ID")).toBe(true);
-    expect(pathCoveredBy("/BUILD_ID", "/BUILD_ID/x")).toBe(false);
+    expect(pathCoveredBy("/_immutable/*", "/_immutable/a.js")).toBe(true);
+    expect(pathCoveredBy("/_immutable/*", "/_immutable")).toBe(true);
+    expect(pathCoveredBy("/_immutable/*", "/_immutablex")).toBe(false);
+    expect(pathCoveredBy("/version", "/version")).toBe(true);
+    expect(pathCoveredBy("/version", "/version/x")).toBe(false);
   });
 });

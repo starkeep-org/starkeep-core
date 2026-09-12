@@ -140,8 +140,18 @@ describe("default behavior — auth headers must survive the edge", () => {
   });
 });
 
-describe("/apps/*/_next/static/* — immutable Next assets", () => {
-  it("uses CachingOptimized against the gateway origin", () => {
+describe("immutable app assets", () => {
+  it("caches /apps/*/_immutable/* optimally against the gateway origin", () => {
+    const behavior = behaviorFor("/apps/*/_immutable/*");
+    expect(behavior).toBeDefined();
+    expect(behavior!.cachePolicyId).toBe("cache:Managed-CachingOptimized");
+    expect(behavior!.targetOriginId).toBe("api-gateway");
+  });
+
+  it("still caches the prefix Next emits, so a half-migrated tree is whole", () => {
+    // Ordered behaviors are a list, so both prefixes can be named at once. An
+    // app that has not yet left Next behind keeps its assets cacheable, and
+    // this entry goes when the last one has.
     const behavior = behaviorFor("/apps/*/_next/static/*");
     expect(behavior).toBeDefined();
     expect(behavior!.cachePolicyId).toBe("cache:Managed-CachingOptimized");

@@ -9,10 +9,11 @@
  */
 
 /**
- * A content-hashed asset path, so the platform's `/apps/*\/_next/static/*`
- * CloudFront behavior has something immutable to cache. The `_next/static`
- * spelling is the platform's cache-behavior convention rather than a Next.js
- * artifact — Probe uses no framework at all.
+ * A content-hashed asset path, so the platform's `/apps/*\/_immutable/*`
+ * CloudFront behavior has something immutable to cache. `_immutable` is the
+ * platform's reserved prefix for content-addressed output: everything under it
+ * is cacheable forever, which is what earns it CloudFront's `CachingOptimized`
+ * behavior while the rest of an app gets `must-revalidate`.
  */
 export const ASSET_NAME = "probe.5f3a9c21.js";
 

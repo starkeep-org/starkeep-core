@@ -1,5 +1,5 @@
 /**
- * The Probe fixture app, as one request handler.
+ * The Probe fixture app, as a Hono app.
  *
  * Probe exists so the platform's own test suites have a conforming app to
  * install, run, serve, sign in to, sync and uninstall without depending on any
@@ -8,13 +8,19 @@
  * signing proxy, a shared-record write path, a declared label vocabulary, an
  * app-private table, and a JWT-gated compute route.
  *
- * Written against web `Request`/`Response` so one implementation serves both
- * surfaces the platform runs an app on: `serve.mjs` adapts it to `node:http`
- * for a local install, and in the cloud the platform's own web adapter
- * (`@starkeep/app-client/web`, wired up in `static-handler.ts`) adapts it to an
- * API Gateway v2 Lambda event. The suites therefore exercise the same app code
- * on both tiers, and a divergence between the two surfaces is the platform's,
- * not the fixture's.
+ * It is also the platform's worked example of the shape every Starkeep app
+ * takes. The server half is a Hono app; `serve.ts` runs it under
+ * `@hono/node-server` for a local install, and `static-handler.ts` hands it to
+ * `createWebAppHandler` through `honoUpstream` for the cloud. The suites
+ * therefore exercise the same app code on both tiers, and a divergence between
+ * the two surfaces is the platform's, not the fixture's.
+ *
+ * **Every route here is written app-relative.** In the cloud the platform mounts
+ * the app at `/apps/probe` and the Lambda sees that prefix, but `honoUpstream`
+ * rewrites the request's URL to the app-relative path before Hono routes it, so
+ * nothing below names the mount. The two places that still need it — the shell's
+ * script tag and the sign-in page's form action, both of which emit URLs a
+ * browser will resolve — read it from `appBasePath()`.
  *
  * Everything session- and signing-related comes from `@starkeep/app-client`
  * rather than being reimplemented here. That is the point: an app author is
@@ -23,8 +29,11 @@
  * an app would actually use.
  */
 
+import { Hono } from "hono";
 import { createSessionRoutes } from "@starkeep/app-client/auth";
 import { createNextProxyHandler, sessionAuth } from "@starkeep/app-client";
+import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
+import manifest from "../starkeep.manifest.json" with { type: "json" };
 import { ASSET_NAME, assetScript } from "./assets.js";
 
 /** The app id, fixed to match `starkeep.manifest.json`. */
@@ -35,14 +44,11 @@ function isCloud(): boolean {
   return process.env.STARKEEP_APP_CLIENT_MODE === "cloud";
 }
 
-/**
- * The path everything this app serves sits under. In the cloud the platform
- * mounts the app at `/apps/<appId>`, and the Lambda sees the full path; locally
- * the app owns its own origin and the prefix is empty.
- */
-function basePath(): string {
-  return isCloud() ? `/apps/${APP_ID}` : "";
+const shellHandler = manifest.infraRequirements.compute.handlers.find((h) => h.name === "static");
+if (!shellHandler?.publicPaths) {
+  throw new Error("probe manifest has no `static` compute handler with publicPaths");
 }
+const PUBLIC_PATHS: string[] = shellHandler.publicPaths;
 
 const sessionRoutes = createSessionRoutes({ appId: APP_ID });
 
@@ -109,66 +115,68 @@ function shellPage(base: string, cloud: boolean): string {
 <p id="status" role="status"></p>
 <div id="grid"></div>
 <script>window.__PROBE__ = ${JSON.stringify({ base, cloud })};</script>
-<script src="${base}/_next/static/${ASSET_NAME}"></script>
+<script src="${base}/_immutable/${ASSET_NAME}"></script>
 </body></html>`;
 }
 
-/**
- * Serve one request.
- *
- * `path` is the app-relative path with the platform's mount prefix already
- * stripped, so both adapters agree on what the app is being asked for.
- */
-export async function handleRequest(req: Request, path: string): Promise<Response> {
-  const base = basePath();
-  const cloud = isCloud();
+export const app = new Hono();
 
-  // The immutable asset. Cached hard on purpose: the platform's CloudFront
-  // behavior for this path is CachingOptimized, and an edge hit on it is what
-  // the tier-3 suite asserts.
-  //
-  // This branch answers the local surface. In the cloud the bundle stages the
-  // same bytes to disk and the web adapter serves them ahead of this handler,
-  // which is what makes Probe a test of the adapter's static path rather than
-  // only of its payload encoding. Both answers come from `assetScript()`, so
-  // the two surfaces cannot drift.
-  if (path === `/_next/static/${ASSET_NAME}`) {
-    return new Response(assetScript(), {
-      headers: {
-        "Content-Type": "application/javascript; charset=utf-8",
-        "Cache-Control": "public, max-age=31536000, immutable",
-      },
-    });
-  }
+// The origin gate, deny-by-default over the manifest's own `publicPaths`. It is
+// inert on the local surface and redundant with the gateway's session
+// authorizer in the cloud; it is mounted anyway because it is the one gate an
+// app served outside the gateway would still have, and because a fixture that
+// does not mount it would not prove it mounts.
+app.use(
+  "*",
+  honoOriginGate({ publicPaths: PUBLIC_PATHS, signInPath: "/sign-in" }),
+);
 
-  if (path === "/sign-in") return html(signInPage(base));
+// The immutable asset. Cached hard on purpose: the platform's CloudFront
+// behavior for this path is CachingOptimized, and an edge hit on it is what
+// the tier-3 suite asserts.
+//
+// This route answers the local surface. In the cloud the bundle stages the same
+// bytes to disk and the web adapter serves them ahead of this app, which is what
+// makes Probe a test of the adapter's static path rather than only of its
+// payload encoding. Both answers come from `assetScript()`, so the two surfaces
+// cannot drift.
+app.get(`/_immutable/${ASSET_NAME}`, () =>
+  new Response(assetScript(), {
+    headers: {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "public, max-age=31536000, immutable",
+    },
+  }),
+);
 
-  // Session sign-in / sign-out / refresh, straight from the platform library.
-  if (path.startsWith("/api/session/")) {
-    const action = path.slice("/api/session/".length).split("/").filter(Boolean);
-    const ctx = { params: Promise.resolve({ action }) };
-    if (req.method === "POST") return sessionRoutes.POST(req, ctx);
-    if (req.method === "GET") return sessionRoutes.GET(req, ctx);
-    return json({ error: "Method not allowed" }, 405);
-  }
+app.get("/sign-in", () => html(signInPage(appBasePath())));
 
-  // The signing proxy: the browser's only route to the data plane, and the
-  // only place the app's HMAC secret is used.
-  if (path.startsWith("/api/local-data/")) {
-    const segments = path.slice("/api/local-data/".length).split("/").filter(Boolean);
-    return proxy(req, { params: Promise.resolve({ path: segments }) });
-  }
+// Session sign-in / sign-out / refresh, straight from the platform library.
+app.all("/api/session/*", (c) => {
+  const action = c.req.path.slice("/api/session/".length).split("/").filter(Boolean);
+  const ctx = { params: Promise.resolve({ action }) };
+  if (c.req.method === "POST") return sessionRoutes.POST(c.req.raw, ctx);
+  if (c.req.method === "GET") return sessionRoutes.GET(c.req.raw, ctx);
+  return json({ error: "Method not allowed" }, 405);
+});
 
-  // Local-surface upload relay. See assetScript() for why the local surface
-  // cannot PUT to the presigned URL from the page.
-  if (path === "/api/upload" && req.method === "PUT" && !cloud) {
-    return relayUpload(req);
-  }
+// The signing proxy: the browser's only route to the data plane, and the
+// only place the app's HMAC secret is used.
+app.all("/api/local-data/*", (c) => {
+  const segments = c.req.path.slice("/api/local-data/".length).split("/").filter(Boolean);
+  return proxy(c.req.raw, { params: Promise.resolve({ path: segments }) });
+});
 
-  if (path === "/" || path === "") return html(shellPage(base, cloud));
+// Local-surface upload relay. See assetScript() for why the local surface
+// cannot PUT to the presigned URL from the page.
+app.put("/api/upload", (c) => {
+  if (isCloud()) return json({ error: "The upload relay is a local-surface route" }, 404);
+  return relayUpload(c.req.raw);
+});
 
-  return json({ error: `Probe has no route for ${path}` }, 404);
-}
+app.get("/", () => html(shellPage(appBasePath(), isCloud())));
+
+app.notFound((c) => json({ error: `Probe has no route for ${c.req.path}` }, 404));
 
 /**
  * Store bytes on the local data server and answer with what the page needs to

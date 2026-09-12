@@ -164,10 +164,10 @@ describe("passes through", () => {
 
   it("a static chunk, which this behavior is not attached to anyway", () => {
     // Belt and braces: the function is associated only with the default cache
-    // behavior, never with /apps/*/_next/static/*, which forwards no cookies
+    // behavior, never with /apps/*/_immutable/*, which forwards no cookies
     // and must keep its cache. If it were ever attached there, this case says
     // what should happen.
-    const r = req("/apps/memo/_next/static/chunks/main.js", { dest: "script" });
+    const r = req("/apps/memo/_immutable/chunks/main.js", { dest: "script" });
     expect(handler({ request: r })).toBe(r);
   });
 });

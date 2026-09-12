@@ -92,6 +92,12 @@ export function buildPulumiProgram(
             // signed calls through the shared API Gateway. See
             // packages/app-client/src/credentials.ts.
             STARKEEP_APP_CLIENT_MODE: "cloud",
+            // The mount prefix, as a runtime fact rather than a build-time one.
+            // The installer already passes this name into `pnpm bundle`; the
+            // app's server half needs the same answer when it emits a URL a
+            // browser will resolve, and deriving it from the app id in app code
+            // would be a second copy of the platform's own routing choice.
+            STARKEEP_APP_BASE_PATH: `/apps/${ctx.appId}`,
             STARKEEP_CLOUD_DATA_BASE: ctx.apiGatewayUrl,
             STARKEEP_APP_CREDS_PARAMETER_NAME: `/${ctx.stackPrefix}/app-creds/${ctx.appId}`,
             ...handler.env,

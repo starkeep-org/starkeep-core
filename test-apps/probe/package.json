@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@starkeep/app-client": "workspace:*"
+    "@hono/node-server": "^1.19.17",
+    "@starkeep/app-client": "workspace:*",
+    "hono": "^4.12.30"
   },
   "devDependencies": {
     "@types/node": "^25.4.0",

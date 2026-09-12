@@ -96,6 +96,40 @@ import {
   `STARKEEP_USER_POOL_ID`, etc.) as JSON. Mount at any route and add
   `export const dynamic = "force-dynamic"` so env is read at request time.
 
+## The server half: Hono
+
+A Starkeep app's server half is a [Hono](https://hono.dev) app, and
+`@starkeep/app-client/hono` holds the joint between Hono and the platform.
+
+```ts
+import { honoUpstream, honoOriginGate, appBasePath } from "@starkeep/app-client/hono";
+```
+
+- **`honoUpstream(app)`** — adapts a Hono app to `createWebAppHandler`'s
+  `requestUpstream`.
+- **`honoOriginGate(opts)`** — `createOriginGate` as Hono middleware, for
+  `app.use("*", ...)`.
+- **`appBasePath()`** — the app's mount prefix, read from
+  `STARKEEP_APP_BASE_PATH`.
+
+**The mount prefix never reaches app code.** The platform mounts an installed
+app at `/apps/<appId>`, and the Lambda sees that prefix on every path. A router
+matches on the request's own pathname, so something has to reconcile the two.
+`honoUpstream` rewrites the request's URL to the app-relative path before
+calling `app.fetch`, which means an app route is written `/api/records` and
+matches unchanged on the local surface and in the cloud. The alternative —
+every app calling `app.basePath(process.env.STARKEEP_APP_BASE_PATH)` — puts a
+copy of the platform's own mount choice in each app repository, so it is not
+the convention here.
+
+An app that genuinely needs the origin-facing URL, to build an absolute
+redirect or print a link, calls `appBasePath()`. That is the single place the
+mount is stated, and nothing derives it from a request.
+
+Neither the platform nor this module imports Hono: the two shapes it touches —
+an app with a `fetch`, and a middleware `(c, next)` — are structural, so the
+integration adds nothing to an app's Lambda bundle.
+
 ## Cross-target apps
 
 Apps with `targets: ["local", "cloud"]` in their manifest use this package on
@@ -123,14 +157,15 @@ names no app; a component appearing in it means the boundary has been crossed.
 
 Three entry points:
 
-- **`@starkeep/app-client/edge`** — `createAuthGateMiddleware({ publicPaths,
-  signInPath, basePath })`, mounted from the app's `middleware.ts`. It is
-  deny-by-default: a path the manifest has not declared public is refused, so
-  a route added later is gated until someone says otherwise. Pass
+- **`@starkeep/app-client/edge`** — `createOriginGate({ publicPaths,
+  signInPath, basePath })`, one function of `Request -> Response | undefined`.
+  It is deny-by-default: a path the manifest has not declared public is
+  refused, so a route added later is gated until someone says otherwise. Pass
   `publicPaths` from the manifest itself, never as a second hand-maintained
-  copy — Next inlines statically-referenced `process.env` in the edge runtime
-  at build time, so an env-carried list is `undefined` in exactly the place it
-  matters. Edge-safe: no `node:crypto`, no AWS SDK.
+  copy. Dependency-free, so it mounts anywhere: `honoOriginGate` wraps it as
+  Hono middleware, and `createAuthGateMiddleware` is the old name kept for Next
+  `middleware.ts` call sites. The gate is a cloud gate — its first line returns
+  `undefined` unless `STARKEEP_APP_CLIENT_MODE` is `cloud`.
 - **`@starkeep/app-client/auth`** — `createSessionRoutes({ appId })`, mounted
   at `app/api/session/[[...action]]/route.ts`. It serves `sign-in`,
   `new-password`, `refresh`, `sign-out`, a `GET` probe, and `GET token` for the

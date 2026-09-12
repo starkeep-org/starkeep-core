@@ -162,7 +162,7 @@ export function validateManifest(raw: unknown): ValidationResult {
         `infraRequirements.compute.handlers["${handler.name}"]: auth "session" gates every ` +
           `route on this handler, including the one that serves the sign-in page. Declare ` +
           `"publicPaths" with at least the shell and the session routes (e.g. ` +
-          `["/", "/_next/static/*", "/sign-in", "/api/session/*"]), or nobody can sign in.`,
+          `["/", "/_immutable/*", "/sign-in", "/api/session/*"]), or nobody can sign in.`,
       );
       continue;
     }
@@ -183,7 +183,7 @@ export function validateManifest(raw: unknown): ValidationResult {
           `EVERY path under /apps/${manifest.id}/ reachable without authentication — including ` +
           `any data proxy, upload route, or admin route the bundle mounts. Declare ` +
           `"publicPaths" listing the subpaths that are meant to be anonymous (e.g. ` +
-          `["/", "/_next/static/*"]), and give the rest an authenticated route ` +
+          `["/", "/_immutable/*"]), and give the rest an authenticated route ` +
           `(a more specific route with auth "jwt" wins over {proxy+} at the gateway) or ` +
           `enforce the end user in the handler itself.`,
       );
@@ -198,6 +198,34 @@ export function validateManifest(raw: unknown): ValidationResult {
         );
       }
       seenPublicPaths.add(publicPath);
+
+      // A wildcard entry is not a declaration; it is the absence of one.
+      //
+      // `publicPaths` is the single input that removes the gateway authorizer
+      // from a route, and every entry becomes its own more-specific
+      // unauthenticated route. An entry whose derived path is the catch-all
+      // therefore removes the authorizer from the catch-all itself, which
+      // un-gates every path the bundle mounts — the app's data proxy included.
+      // The anonymous-catch-all check above cannot see this: it filters derived
+      // routes out first, deliberately, because counting them would make it
+      // circular.
+      if (publicPathRoutePath(publicPath) === "/{proxy+}") {
+        const gated = declaredRoutes
+          .filter((r) => r.auth !== "public")
+          .map((r) => `"${r.declared}"`);
+        errors.push(
+          `infraRequirements.compute.handlers["${handler.name}"].publicPaths: "${publicPath}" ` +
+            `is a wildcard over the whole handler. It derives the route "ANY /{proxy+}" with no ` +
+            `authorizer, so EVERY path under /apps/${manifest.id}/ becomes anonymous — ` +
+            (gated.length > 0
+              ? `including ${gated.join(", ")}, which this handler gates — `
+              : ``) +
+            `including any data proxy, upload route, or admin route the bundle mounts. List the ` +
+            `paths that are meant to be anonymous instead (e.g. ["/", "/_immutable/*", ` +
+            `"/sign-in", "/api/session/*"]).`,
+        );
+        continue;
+      }
 
       if (handler.auth === "session") {
         // The two checks below do not apply here, and running them would be

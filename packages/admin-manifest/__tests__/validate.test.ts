@@ -512,7 +512,7 @@ describe("anonymous routes and publicPaths", () => {
         staticHandler({
           auth: "public",
           routes: ["GET /", "ANY /{proxy+}"],
-          publicPaths: ["/", "/_next/static/*"],
+          publicPaths: ["/", "/_immutable/*"],
         }),
       ]),
     );
@@ -569,7 +569,7 @@ describe("anonymous routes and publicPaths", () => {
         staticHandler({
           auth: "session",
           routes: ["GET /", "ANY /{proxy+}"],
-          publicPaths: ["/", "/_next/static/*", "/sign-in", "/api/session/*"],
+          publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
         }),
       ]),
     );
@@ -649,10 +649,74 @@ describe("anonymous routes and publicPaths", () => {
   it("rejects a relative publicPaths entry at the schema level", () => {
     const result = validateManifest(
       withHandlers([
-        staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["_next/static/*"] }),
+        staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["_immutable/*"] }),
       ]),
     );
     expect(result.valid).toBe(false);
+  });
+
+  describe("a wildcard entry is not a declaration", () => {
+    // The gap this closes predates the framework migration. `publicPathSchema`
+    // accepts "/*" — the pattern is /^\/[^\s]*$/ — and the anonymous-catch-all
+    // check filters derived routes out before looking, deliberately, because
+    // counting them would make it circular. A wildcard entry therefore went
+    // unchecked and would un-gate the app's whole surface.
+
+    it("refuses \"/*\" on a session handler, where it un-gates everything", () => {
+      const result = validateManifest(
+        withHandlers([
+          staticHandler({
+            auth: "session",
+            routes: ["GET /", "ANY /{proxy+}"],
+            publicPaths: ["/*"],
+          }),
+        ]),
+      );
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("is a wildcard over the whole handler"))).toBe(
+        true,
+      );
+    });
+
+    it("names the routes it would un-gate", () => {
+      const result = validateManifest(
+        withHandlers([
+          staticHandler({
+            auth: "session",
+            routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/local-data/{proxy+}", auth: "jwt" }],
+            publicPaths: ["/*"],
+          }),
+        ]),
+      );
+      const wildcard = result.errors.find((e) => e.includes("wildcard over the whole handler"))!;
+      expect(wildcard).toContain("ANY /api/local-data/{proxy+}");
+      expect(wildcard).toContain("data proxy");
+    });
+
+    it("refuses it on a public handler too", () => {
+      const result = validateManifest(
+        withHandlers([
+          staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/*"] }),
+        ]),
+      );
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("is a wildcard over the whole handler"))).toBe(
+        true,
+      );
+    });
+
+    it("leaves a bounded wildcard alone, which is the ordinary declaration", () => {
+      const result = validateManifest(
+        withHandlers([
+          staticHandler({
+            auth: "session",
+            routes: ["GET /", "ANY /{proxy+}"],
+            publicPaths: ["/", "/_immutable/*", "/api/session/*"],
+          }),
+        ]),
+      );
+      expect(result.errors).toEqual([]);
+    });
   });
 });
 
@@ -666,7 +730,7 @@ describe("staticAssetPaths", () => {
     handler: "index.handler",
     auth: "session",
     routes: ["GET /", "ANY /{proxy+}"],
-    publicPaths: ["/", "/_next/static/*", "/BUILD_ID", "/sign-in", "/api/session/*"],
+    publicPaths: ["/", "/_immutable/*", "/manifest.webmanifest", "/sign-in", "/api/session/*"],
     ...over,
   });
 
@@ -679,7 +743,7 @@ describe("staticAssetPaths", () => {
 
   it("accepts a declared subset of publicPaths", () => {
     const result = validateManifest(
-      withHandlers([shell({ staticAssetPaths: ["/_next/static/*", "/BUILD_ID"] })]),
+      withHandlers([shell({ staticAssetPaths: ["/_immutable/*", "/manifest.webmanifest"] })]),
     );
     expect(result.errors).toEqual([]);
   });
@@ -689,7 +753,7 @@ describe("staticAssetPaths", () => {
     // answers this ahead of the app's gate, so it is an anonymous route nobody
     // declared.
     const result = validateManifest(
-      withHandlers([shell({ staticAssetPaths: ["/_next/static/*", "/private/dump.json"] })]),
+      withHandlers([shell({ staticAssetPaths: ["/_immutable/*", "/private/dump.json"] })]),
     );
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("/private/dump.json"))).toBe(true);
@@ -697,17 +761,24 @@ describe("staticAssetPaths", () => {
   });
 
   it("refuses a wildcard wider than the declaration beside it", () => {
-    const result = validateManifest(withHandlers([shell({ staticAssetPaths: ["/_next/*"] })]));
+    const result = validateManifest(
+      withHandlers([
+        shell({
+          publicPaths: ["/", "/_immutable/fonts/*", "/sign-in", "/api/session/*"],
+          staticAssetPaths: ["/_immutable/*"],
+        }),
+      ]),
+    );
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("/_next/*"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("/_immutable/*"))).toBe(true);
   });
 
   it("accepts a wildcard declaration wider than the disk allow-list", () => {
     const result = validateManifest(
       withHandlers([
         shell({
-          publicPaths: ["/", "/_next/*", "/sign-in", "/api/session/*"],
-          staticAssetPaths: ["/_next/static/*"],
+          publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
+          staticAssetPaths: ["/_immutable/fonts/*"],
         }),
       ]),
     );
@@ -715,7 +786,7 @@ describe("staticAssetPaths", () => {
   });
 
   it("rejects a relative entry at the schema level", () => {
-    const result = validateManifest(withHandlers([shell({ staticAssetPaths: ["_next/static/*"] })]));
+    const result = validateManifest(withHandlers([shell({ staticAssetPaths: ["_immutable/*"] })]));
     expect(result.valid).toBe(false);
   });
 });

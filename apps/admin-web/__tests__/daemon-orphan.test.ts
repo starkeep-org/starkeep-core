@@ -14,13 +14,20 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { NextRequest, NextResponse } from "next/server";
 import type { DaemonId } from "../src/lib/exec-commands";
 import { getFreePort } from "@starkeep/testkit";
-import { eventually, getRequest, isAlive, jsonRequest, makeDataDir } from "./helpers";
+import {
+  asRouteHandler,
+  eventually,
+  isAlive,
+  jsonRequest,
+  makeDataDir,
+  nextUrlRequest,
+  type RouteHandler,
+} from "./helpers";
 
-let daemonPOST: (req: NextRequest) => Promise<NextResponse>;
-let statusGET: (req: NextRequest) => Promise<NextResponse>;
+let daemonPOST: RouteHandler;
+let statusGET: RouteHandler;
 let isWorkspaceDaemonRunning: (id: DaemonId) => boolean;
 let daemonCommands: { drive: { args: string[]; port?: number } };
 let pidsDir: string;
@@ -50,8 +57,8 @@ beforeAll(async () => {
   const dataDir = makeDataDir();
   pidsDir = join(dataDir, "pids");
   process.env.STARKEEP_DIR = dataDir;
-  ({ POST: daemonPOST } = await import("../app/api/exec/daemon/route"));
-  ({ GET: statusGET } = await import("../app/api/exec/daemon/status/route"));
+  daemonPOST = asRouteHandler((await import("../app/api/exec/daemon/route")).POST);
+  statusGET = asRouteHandler((await import("../app/api/exec/daemon/status/route")).GET);
   ({ DAEMON_COMMANDS: daemonCommands } = await import("../src/lib/exec-commands"));
   ({ isWorkspaceDaemonRunning } = await import("../src/lib/daemon-control"));
 });
@@ -75,7 +82,7 @@ afterAll(() => {
 
 const act = (body: unknown) => daemonPOST(jsonRequest("/api/exec/daemon", body));
 const status = async (id: string) => {
-  const res = await statusGET(getRequest(`/api/exec/daemon/status?id=${id}`));
+  const res = await statusGET(nextUrlRequest(`/api/exec/daemon/status?id=${id}`));
   expect(res.status).toBe(200);
   return (await res.json()) as { running: boolean; pid?: number; port?: number; adopted?: boolean };
 };

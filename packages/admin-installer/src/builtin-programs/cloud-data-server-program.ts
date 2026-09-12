@@ -985,9 +985,23 @@ export function buildCloudDataServerProgram(
         ],
         orderedCacheBehaviors: [
           {
-            // Next.js content-hashed assets — immutable, safe for long TTLs.
-            // Public (no auth headers), so CachingOptimized needs no origin
-            // request policy.
+            // The platform's reserved prefix for an app's content-hashed build
+            // output — immutable, safe for long TTLs. Public (no auth headers),
+            // so CachingOptimized needs no origin request policy.
+            pathPattern: "/apps/*/_immutable/*",
+            targetOriginId: gatewayOriginId,
+            viewerProtocolPolicy: "redirect-to-https",
+            allowedMethods: ["GET", "HEAD"],
+            cachedMethods: ["GET", "HEAD"],
+            cachePolicyId: cachingOptimizedId,
+            compress: true,
+          },
+          {
+            // The same behavior under the prefix Next.js emits, for as long as
+            // an installed app still builds with it. Ordered behaviors are a
+            // list, so naming both prefixes is additive: every app caches
+            // correctly whichever half of the migration it is on. This entry
+            // goes when the last app leaves Next behind.
             pathPattern: "/apps/*/_next/static/*",
             targetOriginId: gatewayOriginId,
             viewerProtocolPolicy: "redirect-to-https",
@@ -1023,9 +1037,9 @@ export function buildCloudDataServerProgram(
           cachePolicyId: cachingDisabledId,
           originRequestPolicyId: allViewerExceptHostId,
           compress: true,
-          // Default behavior only. Never on /apps/*/_next/static/*, which
-          // forwards no cookies — the function would see every request as
-          // signed out — and must keep its cache.
+          // Default behavior only. Never on the immutable-asset behaviors,
+          // which forward no cookies — the function would see every request as
+          // signed out — and must keep their cache.
           functionAssociations: [
             { eventType: "viewer-request", functionArn: signedOutRedirect.arn },
           ],

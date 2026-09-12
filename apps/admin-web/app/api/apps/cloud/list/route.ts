@@ -51,9 +51,18 @@ interface StarkeepConfig {
   auroraEndpoint?: string;
 }
 
+/**
+ * The region, derived from the Cognito pool id rather than stored — the rule
+ * `src/lib/cloud-config.ts` states and the reason no `region` field exists.
+ *
+ * The underscore is what makes it a derivation. AWS spells a pool id
+ * `us-east-2_Xxxxx`, so a value with no underscore carries no region, and
+ * treating the whole string as one built a DSQL hostname in a region that does
+ * not exist — a connection timeout where the answer is "finish cloud setup".
+ */
 function regionFromUserPoolId(userPoolId: string): string | null {
-  const region = userPoolId.split("_")[0];
-  return region || null;
+  const parts = userPoolId.split("_");
+  return parts.length > 1 ? parts[0] || null : null;
 }
 
 function installerPgUser(stackPrefix: string): string {

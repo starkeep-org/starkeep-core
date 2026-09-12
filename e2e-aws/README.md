@@ -80,7 +80,7 @@ registry database, which must not land in a checkout you do not own.
 19. The app's JWT-gated route on the gateway **and** through CloudFront (proving
     `Authorization` survives the edge).
 20. An app-private row through the cloud `/app-data` plane.
-21. Part A: shell + `_next/static` through the CloudFront distribution (edge hit).
+21. Part A: shell + `_immutable` assets through the CloudFront distribution (edge hit).
     Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected,
     `apps/*` isolated.
 22. The app's own steps (`extraSteps`), if it has any.
