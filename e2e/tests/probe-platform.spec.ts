@@ -38,12 +38,33 @@ const adminDataDir = () => process.env.E2E_ADMIN_DATA_DIR!;
 
 const NOTE = "a note only Probe can read";
 
-/** The Probe card on the admin Dashboard (Local section). */
+/**
+ * The Probe card on the admin Dashboard (Local section).
+ *
+ * Found by `data-slot="card"`, the attribute every dashboard entry carries
+ * through the shared `AppCard`. The selector used to name the card's utility
+ * classes, and `a5e276e` restyled the card — `rounded-md border` became
+ * `rounded-xl ring-1` — which left this spec hunting an element that had only
+ * changed color.
+ */
 function probeCard(page: Page): Locator {
   return page
-    .locator("div.rounded-md.border")
+    .locator('[data-slot="card"]')
     .filter({ has: page.getByText("Probe", { exact: true }) })
     .first();
+}
+
+/**
+ * Run one of a card's secondary actions.
+ *
+ * Stop and Uninstall used to be buttons on the card face. `a5e276e` gave every
+ * card a single primary button and moved the rest behind an overflow menu, so
+ * they are `menuitem`s now — and the menu renders in a portal, outside the
+ * card, which is why the item is looked up on the page.
+ */
+async function cardMenuAction(page: Page, card: Locator, label: string): Promise<void> {
+  await card.getByRole("button", { name: /^More actions for / }).click();
+  await page.getByRole("menuitem", { name: label, exact: true }).click();
 }
 
 // Written once, re-used for the dedup upload so the bytes are byte-identical.
@@ -65,7 +86,7 @@ test("install through the admin consent flow, with the manifest's grants shown",
   const card = probeCard(page);
   await expect(card).toBeVisible();
 
-  await card.getByRole("button", { name: "Install", exact: true }).click();
+  await card.getByRole("button", { name: /^Install / }).click();
 
   // The consent dialog must surface what the manifest asked for before
   // anything is written. The card lists the grants too, so scope to the modal.
@@ -85,7 +106,7 @@ test("start from the admin UI and reach the app on its allocated port", async ({
   await page.goto(adminUrl());
   const card = probeCard(page);
 
-  await card.getByRole("button", { name: "Start" }).click();
+  await card.getByRole("button", { name: /^Start / }).click();
   const badge = card.getByText(/Running :\d+/);
   await expect(badge).toBeVisible({ timeout: 60_000 });
 
@@ -153,12 +174,12 @@ test("re-uploading identical bytes dedups at the platform layer", async ({ page 
 test("uninstall: app data is gone, shared records survive in Drive", async ({ page }) => {
   await page.goto(adminUrl());
   const card = probeCard(page);
-  await card.getByRole("button", { name: "Stop" }).click();
-  await expect(card.getByRole("button", { name: "Start" })).toBeVisible({ timeout: 60_000 });
+  await cardMenuAction(page, card, "Stop");
+  await expect(card.getByRole("button", { name: /^Start / })).toBeVisible({ timeout: 60_000 });
 
   page.on("dialog", (dialog) => void dialog.accept());
-  await card.getByRole("button", { name: "Uninstall" }).click();
-  await expect(card.getByRole("button", { name: "Install", exact: true })).toBeVisible({
+  await cardMenuAction(page, card, "Uninstall");
+  await expect(card.getByRole("button", { name: /^Install / })).toBeVisible({
     timeout: 60_000,
   });
 
@@ -170,7 +191,7 @@ test("uninstall: app data is gone, shared records survive in Drive", async ({ pa
 test("reinstall re-exposes shared records; app-private rows are gone", async ({ page }) => {
   await page.goto(adminUrl());
   const card = probeCard(page);
-  await card.getByRole("button", { name: "Install", exact: true }).click();
+  await card.getByRole("button", { name: /^Install / }).click();
   await page.getByRole("button", { name: "Approve & Install" }).click();
   await expect(card.getByText("Installed")).toBeVisible({ timeout: 60_000 });
 

@@ -62,10 +62,15 @@ async function writeFixtureApp(
   return appDir;
 }
 
-/** An app's card on the Dashboard, found by its display name. */
+/**
+ * An app's card on the Dashboard, found by its display name.
+ *
+ * Keyed on `data-slot="card"` rather than the card's utility classes, which
+ * `a5e276e` restyled out from under this spec. See `probe-platform.spec.ts`.
+ */
 function appCard(page: Page, name: string): Locator {
   return page
-    .locator("div.rounded-md.border")
+    .locator('[data-slot="card"]')
     .filter({ has: page.getByText(name, { exact: true }) })
     .first();
 }
@@ -78,10 +83,19 @@ function errorAlert(page: Page): Locator {
   return page.locator('[data-slot="alert"]');
 }
 
-/** Click Start and wait for the attempt to settle (the button stops saying "Starting…"). */
+/**
+ * Click Start and wait for the attempt to settle.
+ *
+ * The primary button carries the app's name ("Start Porthog App"), which is why
+ * this matches a prefix rather than the bare verb. The in-flight state is a
+ * badge reading "Starting…" *and* a button reading "Starting <name>…", so the
+ * wait is for neither to be on the card — the older spelling looked for a
+ * button named exactly "Starting…", which no longer exists and therefore
+ * settled instantly, waiting for nothing at all.
+ */
 async function clickStart(page: Page, card: Locator): Promise<void> {
-  await card.getByRole("button", { name: "Start" }).click();
-  await expect(card.getByRole("button", { name: "Starting…" })).toHaveCount(0, { timeout: 60_000 });
+  await card.getByRole("button", { name: /^Start / }).click();
+  await expect(card.getByText(/Starting/)).toHaveCount(0, { timeout: 60_000 });
 }
 
 async function patchParentDirs(dirs: string[]): Promise<void> {
@@ -176,7 +190,7 @@ test("a daemon that dies at startup surfaces its log tail on the Dashboard", asy
   await expect(alert).toContainText("boom: fixture build failed");
 
   // And the card settles back to an actionable Start rather than a stuck spinner.
-  await expect(card.getByRole("button", { name: "Start" })).toBeVisible();
+  await expect(card.getByRole("button", { name: /^Start / })).toBeVisible();
   await expect(card.getByText(/Running :\d+/)).toHaveCount(0);
 });
 
@@ -189,7 +203,7 @@ test("an app with no node_modules is refused with a pnpm install hint", async ({
   const alert = errorAlert(page);
   await expect(alert).toContainText("pnpm install");
   await expect(alert).toContainText("nodeps-app");
-  await expect(card.getByRole("button", { name: "Start" })).toBeVisible();
+  await expect(card.getByRole("button", { name: /^Start / })).toBeVisible();
 });
 
 test("starting an app whose instance is already running fails with the collision, not silently", async ({
@@ -200,7 +214,16 @@ test("starting an app whose instance is already running fails with the collision
 
   // First start comes up and holds the port.
   await clickStart(page, card);
-  await expect(card.getByRole("button", { name: "Stop" })).toBeVisible({ timeout: 60_000 });
+  // Running, stated the way the card states it. Stop moved into the overflow
+  // menu in `a5e276e`, so the running state is read off the primary button:
+  // a stopped app offers "Start <name>", a running one "Open <name>".
+  //
+  // Not the "Running :<port>" badge, which this app in particular never shows.
+  // Porthog binds a fixed port of its own rather than the one admin allocated,
+  // so admin records no port for it and renders the no-address branch — the
+  // Open button, disabled. The badge would assert the port as well as the
+  // running state, and only one of those is what this line is about.
+  await expect(card.getByRole("button", { name: /^Open / })).toBeVisible({ timeout: 60_000 });
 
   // Orphan it: drop admin's pid records the way a crash or a bad stop would,
   // leaving the process alive and still holding its port. An installed app has
@@ -214,7 +237,7 @@ test("starting an app whose instance is already running fails with the collision
 
   await page.reload();
   const orphanedCard = appCard(page, "Porthog App");
-  await expect(orphanedCard.getByRole("button", { name: "Start" })).toBeVisible();
+  await expect(orphanedCard.getByRole("button", { name: /^Start / })).toBeVisible();
 
   // Starting again spawns a duplicate that can't bind — the failure must reach
   // the operator with the reason attached.
