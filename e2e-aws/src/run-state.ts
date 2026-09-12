@@ -135,6 +135,20 @@ export function resetLocalNodeState(paths: RunPaths): void {
 export interface AdminCredentials {
   email: string;
   password: string;
+  /**
+   * The pool the password was minted against.
+   *
+   * A user pool is destroyed and recreated by every teardown, and the new one
+   * knows nothing of the old one's passwords. A run-state dir that outlived a
+   * pool therefore holds a password for an account that no longer exists —
+   * under the same email, in a pool with the same name. Recording which pool
+   * issued it is what lets `ensureAdminUser` tell "already set up" apart from
+   * "set up against something that is gone".
+   *
+   * Optional because a file written before this field existed has none, and a
+   * credential that cannot name its pool is exactly the one not to trust.
+   */
+  userPoolId?: string;
 }
 
 export function readAdminCredentials(paths: RunPaths): AdminCredentials | undefined {
