@@ -173,8 +173,17 @@ describe("metadata writes", () => {
   });
 
   it("`other`-category records have no metadata table (400 even for Drive)", async () => {
+    // The record has to exist, on both verbs. The write route now derives the
+    // category from the record's own type, so it resolves the record before it
+    // can know there is no table — the same order the read route already used.
+    const { record } = await createRecordWithBytes(drive, {
+      fileName: "unmapped.zzz",
+      type: "other/other",
+      contentType: "application/octet-stream",
+    });
+
     // Drive passes the grant check (all-access) and hits the no-table guard.
-    const res = await drive.fetch(`/data/records/someid/metadata`, {
+    const res = await drive.fetch(`/data/records/${record.id}/metadata`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ typeId: "zzz-unmapped", metadata: { x: 1 } }),
@@ -183,16 +192,83 @@ describe("metadata writes", () => {
     expect(((await res.json()) as { error: string }).error).toContain("no metadata table");
 
     // Reading metadata for an `other`-category record yields null rather than
-    // an error. The record has to exist: the read route now authorizes on the
-    // record's own type, so it resolves the record before anything else.
-    const { record } = await createRecordWithBytes(drive, {
-      fileName: "unmapped.zzz",
-      type: "other/other",
-      contentType: "application/octet-stream",
-    });
+    // an error.
     const read = await drive.fetch(`/data/records/${record.id}/metadata/zzz-unmapped`);
     expect(read.status).toBe(200);
     expect(((await read.json()) as { metadata: unknown }).metadata).toBeNull();
+  });
+
+  it("a metadata write against a missing record is a 404", async () => {
+    const res = await imageApp.fetch(`/data/records/someid/metadata`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ typeId: "image/jpeg", metadata: { width: 1 } }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  // The body's typeId used to pick the category the grant was checked against
+  // and the column names were validated against, while the table came from the
+  // record. The two could disagree, and both consequences are covered here.
+  describe("the record's type decides the table, not the body's typeId", () => {
+    // An honest mismatch. Photos' viewer posted image metadata at a clip and
+    // got `table shared_record_video_metadata has no column named exif_present`
+    // as a 500 out of the database. It is a 400 about the caller's own request.
+    it("rejects an image-only column on a video record with a 400", async () => {
+      const bothCategories = await installApp(server, {
+        id: "image-and-video",
+        name: "Image And Video",
+        version: "1.0.0",
+        tier: "community",
+        infraRequirements: {
+          fileAccess: [
+            { types: ["image/jpeg"], access: "readwrite", metadataWrite: true, rationale: "t" },
+            { types: ["video/mp4"], access: "readwrite", metadataWrite: true, rationale: "t" },
+          ],
+        },
+      });
+      const { record } = await createRecordWithBytes(bothCategories, {
+        fileName: "clip.mp4",
+        type: "video/mp4",
+        contentType: "video/mp4",
+      });
+
+      const res = await bothCategories.fetch(`/data/records/${record.id}/metadata`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ typeId: "image", metadata: { exif_present: true } }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("exif_present");
+
+      // A column both categories declare still writes, into the video table.
+      const shared = await bothCategories.fetch(`/data/records/${record.id}/metadata`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ typeId: "image", metadata: { width: 1920, height: 1080 } }),
+      });
+      expect(shared.status).toBe(200);
+      const read = await bothCategories.fetch(`/data/records/${record.id}/metadata/video`);
+      expect((await read.json()).metadata).toMatchObject({ width: 1920, height: 1080 });
+    });
+
+    // The grant half, which is the one that mattered. `imageApp` holds
+    // metadataWrite on image and nothing on video, and used to reach the video
+    // table by naming its own category — writing every column the two share.
+    it("refuses a category the app does not hold, however the body names it", async () => {
+      const { record } = await createRecordWithBytes(drive, {
+        fileName: "someone-elses.mp4",
+        type: "video/mp4",
+        contentType: "video/mp4",
+      });
+      const res = await imageApp.fetch(`/data/records/${record.id}/metadata`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ typeId: "image/jpeg", metadata: { width: 1, height: 2 } }),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { detail: string }).detail).toContain("video");
+    });
   });
 
   // The path's typeId addresses the metadata table and is caller-supplied, so
@@ -226,7 +302,12 @@ describe("metadata writes", () => {
   });
 
   it("ordinary apps cannot reach `other` at all (403 before the table guard)", async () => {
-    const res = await imageApp.fetch(`/data/records/someid/metadata`, {
+    const { record } = await createRecordWithBytes(drive, {
+      fileName: "not-for-you.zzz",
+      type: "other/other",
+      contentType: "application/octet-stream",
+    });
+    const res = await imageApp.fetch(`/data/records/${record.id}/metadata`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ typeId: "zzz-unmapped", metadata: { x: 1 } }),

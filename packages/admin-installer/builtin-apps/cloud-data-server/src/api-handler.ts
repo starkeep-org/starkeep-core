@@ -2913,8 +2913,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // POST /apps/{appId}/data/records/:id/metadata — write metadata.
     // The calling app does the extraction (e.g. EXIF); the server validates keys
     // against the per-category schema and persists via the database adapter.
-    // `typeId` is the record's extension (or a category id); the metadata table
-    // is the derived category's. `other` has no metadata table.
+    //
+    // **The record's type decides the grant, the column schema and the table.**
+    // The body's `typeId` is read and ignored, the same way the read route below
+    // ignores its path segment. A caller-supplied discriminant would let a
+    // caller choose which table its grant is checked against: an app holding
+    // `metadataWrite` on `image` alone could post `typeId: "image"` at a video
+    // record and write every column the two categories share. `other` has no
+    // metadata table. See the matching route in the local data server.
     const metadataWriteMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata$/);
     if (metadataWriteMatch && method === "POST") {
       const recordId = decodeURIComponent(metadataWriteMatch[1]!) as StarkeepId;
@@ -2926,11 +2932,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
         return clientErr("metadata must be an object", 400);
       }
-      // Metadata tables are per-category, so gate on the caller's writable
-      // categories (derived from its type grants). PG GRANTs back this up at
-      // the per-category metadata table. `typeId` may be a full type id or a
-      // bare category id; typeCategory handles both.
-      const category = typeCategory(typeId);
+      // Read the record before anything else: it is what the category, the
+      // grant check and the table are all derived from. A 404 here is the same
+      // answer the write below reaches by returning early, brought forward so
+      // the checks have a type to run against.
+      const subject = await db.get(recordId);
+      if (!subject || subject.deletedAt) return clientErr("Record not found", 404);
+      const category = typeCategory(subject.type);
       if (!canWriteCategory(grants, category)) return clientErr("Forbidden", 403);
       if (category === "other") {
         return clientErr(`Category "other" has no metadata table`, 400);
@@ -2959,10 +2967,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // applied row a fresh change to ship back and two nodes would trade the
       // same record forever.
       await withOccRetry("POST /data/records/:id/metadata", async () => {
-        // The record's own type, read from storage rather than taken from the
-        // body's `typeId`. It is the grant discriminant written into the row,
-        // and a row labelled with a caller-supplied type would be readable by
-        // whoever the caller named.
+        // Re-read inside the retry rather than reusing the row the checks above
+        // ran against: the bump is a read-modify-write, so a retry that replayed
+        // a stale `updatedAt` would lose whatever won the first round. The type
+        // is immutable, so the category the checks were made against still
+        // holds; only the clock can have moved.
         const existing = await db.get(recordId);
         if (!existing || existing.deletedAt) return;
         await db.putMetadata(existing.type, { recordId, ...metadata });

@@ -3144,9 +3144,23 @@ async function main() {
       // POST /data/records/:id/metadata — write metadata for a record.
       // The app is responsible for extracting metadata values (e.g. EXIF from
       // image bytes); the server validates keys against the per-category schema
-      // and persists. `typeId` is the record's extension (or a category id);
-      // the metadata table is the derived category's. Requires metadataWrite
-      // access to the extension.
+      // and persists. Requires metadataWrite on the record's own category.
+      //
+      // **The record's type decides everything: the grant, the column schema
+      // and the table.** The body's `typeId` is read and ignored, exactly as
+      // the read route below ignores its path segment, and for the same reason
+      // — a caller-supplied discriminant lets a caller pick which table its
+      // grant is checked against.
+      //
+      // Before this, the category came from the body and the table came from
+      // the record, so the two could disagree. Two things followed. An app
+      // holding `metadataWrite` on `image` and not on `video` could post
+      // `typeId: "image"` against a video record and write every column the two
+      // categories share — `width`, `captured_at`, `gps_lat`, `thumb_hash`.
+      // And an honest mismatch reached the database as a raw column error:
+      // Photos' viewer posting image metadata against a clip produced
+      // `table shared_record_video_metadata has no column named exif_present`
+      // as a 500, where it is a 400 about the caller's own request.
       const metadataWriteMatch = path.match(/^\/data\/records\/([^/]+)\/metadata$/);
       if (metadataWriteMatch && req.method === "POST") {
         const recordId = metadataWriteMatch[1]!;
@@ -3162,7 +3176,17 @@ async function main() {
           json(res, { error: "metadata must be an object" });
           return;
         }
-        const category = typeCategory(typeId);
+        // Read first, because the record is what the rest of this is derived
+        // from. It is also the grant discriminant written into the row, and a
+        // row labelled with a caller-supplied type would be readable by whoever
+        // the caller named.
+        const subject = await sdk.data.get(createStarkeepId(recordId));
+        if (!subject || subject.deletedAt) {
+          res.writeHead(404);
+          json(res, { error: "Record not found" });
+          return;
+        }
+        const category = typeCategory(subject.type);
         if (!appCanWriteMetadataCategory(localDb, appId!, category)) {
           res.writeHead(403);
           json(res, { error: "AccessDenied", detail: `app "${appId}" has no metadataWrite grant on category "${category}"` });
@@ -3177,16 +3201,6 @@ async function main() {
         if (!checked.ok) {
           res.writeHead(400);
           json(res, { error: checked.message });
-          return;
-        }
-        // The record's own type, read from storage rather than taken from the
-        // body's `typeId`. It is the grant discriminant written into the row,
-        // and a row labelled with a caller-supplied type would be readable by
-        // whoever the caller named.
-        const subject = await sdk.data.get(createStarkeepId(recordId));
-        if (!subject || subject.deletedAt) {
-          res.writeHead(404);
-          json(res, { error: "Record not found" });
           return;
         }
         // Through the SDK rather than the adapter, deliberately: the SDK also

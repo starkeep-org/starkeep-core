@@ -733,8 +733,16 @@ describe("list metadata enrichment (?include=metadata)", () => {
 });
 
 describe("metadata routes", () => {
+  // Each of these stubs the record read, because the route derives the category
+  // from the record's own type and therefore resolves it before any check can
+  // run. See the route's header for why the body's `typeId` decides nothing.
   it("403s a metadata write to a category outside the writable set", async () => {
-    setDbFactory(fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]));
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
+        /from "shared"\."records" where "id" =/,
+        [recordRow({ id: "r1", type: "image/jpeg" })],
+      ),
+    );
     const res = await handler(
       signedEvent({
         appId: "md1",
@@ -748,7 +756,12 @@ describe("metadata routes", () => {
   });
 
   it("400s unknown metadata columns against the category schema", async () => {
-    setDbFactory(fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]));
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
+        /from "shared"\."records" where "id" =/,
+        [recordRow({ id: "r1", type: "image/jpeg" })],
+      ),
+    );
     const res = await handler(
       signedEvent({
         appId: "md2",
@@ -851,18 +864,89 @@ describe("metadata routes", () => {
   });
 
   it('400s metadata writes to "other" even for all-access Drive', async () => {
-    setDbFactory(fakeDsqlWithGrants());
+    setDbFactory(
+      fakeDsqlWithGrants().on(/from "shared"\."records" where "id" =/, [
+        recordRow({ id: "r1", type: "other/other" }),
+      ]),
+    );
     const res = await handler(
       signedEvent({
         appId: "starkeep-drive",
         method: "POST",
         subPath: "/data/records/r1/metadata",
+        // The body names `other` and so does the record. What decides is the
+        // record; the agreement here only keeps the case about the guard.
         body: { typeId: "other", metadata: { anything: 1 } },
       }),
       context,
     );
     expect(res.statusCode).toBe(400);
     expect(bodyOf(res)["error"]).toMatch(/no metadata table/);
+  });
+
+  // The grant half of the caller-supplied-typeId defect. An app holding
+  // `image` and not `video` used to reach the video metadata table by naming
+  // its own category, writing every column the two share.
+  it("403s a write whose grant covers the body's category but not the record's", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
+        /from "shared"\."records" where "id" =/,
+        [recordRow({ id: "rv", type: "video/mp4" })],
+      ),
+    );
+    const res = await handler(
+      signedEvent({
+        appId: "md-cross",
+        method: "POST",
+        subPath: "/data/records/rv/metadata",
+        body: { typeId: "image/jpeg", metadata: { width: 100, height: 50 } },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+  });
+
+  // The honest-mismatch half: an image-only column against a video record is a
+  // 400 about the column, not a 500 out of the database.
+  it("400s an image-only column against a video record", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([
+        { type_id: "image/jpeg", access: "readwrite" },
+        { type_id: "video/mp4", access: "readwrite" },
+      ]).on(/from "shared"\."records" where "id" =/, [
+        recordRow({ id: "rv2", type: "video/mp4" }),
+      ]),
+    );
+    const res = await handler(
+      signedEvent({
+        appId: "md-cross2",
+        method: "POST",
+        subPath: "/data/records/rv2/metadata",
+        body: { typeId: "image", metadata: { exif_present: true } },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(bodyOf(res)["error"]).toMatch(/exif_present/);
+  });
+
+  it("404s a metadata write against a record that does not exist", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
+        /from "shared"\."records" where "id" =/,
+        [],
+      ),
+    );
+    const res = await handler(
+      signedEvent({
+        appId: "md-missing",
+        method: "POST",
+        subPath: "/data/records/nope/metadata",
+        body: { typeId: "image/jpeg", metadata: { width: 1 } },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(404);
   });
 
   it("reads metadata for a readable record and null for other", async () => {

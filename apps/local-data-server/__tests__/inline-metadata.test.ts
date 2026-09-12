@@ -105,8 +105,15 @@ describe("inline metadata at record creation", () => {
     expect(res.status).toBe(403);
 
     // And the same app is refused at the other door, which is the point: one
-    // grant, two entrances.
-    const viaRoute = await noMetadataApp.fetch("/data/records/anything/metadata", {
+    // grant, two entrances. Against a real record, because the metadata route
+    // derives the category from the record's own type and so has to resolve it
+    // before the grant can be checked — a missing id is a 404 there, which
+    // would prove nothing about the grant.
+    const { record } = await createRecordWithBytes(app, {
+      bytes: "inline-metadata-forbidden-target",
+      fileName: "target.jpg",
+    });
+    const viaRoute = await noMetadataApp.fetch(`/data/records/${record.id}/metadata`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ typeId: "image/jpeg", metadata: { width: 1 } }),
