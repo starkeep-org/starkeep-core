@@ -36,7 +36,17 @@ export async function ensureAdminUser(
   const saved = readAdminCredentials(paths);
   const exists = await userExists(client, userPoolId, TEST_ADMIN_EMAIL);
 
-  if (exists && saved?.email === TEST_ADMIN_EMAIL) return saved;
+  // Reusable only when the saved password was minted against *this* pool. The
+  // email matching is not enough: a teardown destroys the pool and the next
+  // bootstrap makes a new one, under the same name, holding an account with the
+  // same email and a different password. A run-state dir that outlived a pool
+  // then hands its stale password to a live account and the sign-in fails with
+  // "Incorrect username or password" — which is what two checkouts sharing one
+  // warm stack produce, the second one carrying an `admin.json` from before the
+  // first one rebuilt the stack.
+  if (exists && saved?.email === TEST_ADMIN_EMAIL && saved.userPoolId === userPoolId) {
+    return saved;
+  }
 
   if (!exists) {
     await client.send(
@@ -52,10 +62,15 @@ export async function ensureAdminUser(
     );
   }
 
-  // User exists but the saved password is missing or stale (e.g. the .run dir
-  // was deleted while the stack stayed up): setting a fresh permanent
-  // password re-syncs state without recreating the user.
-  const creds: AdminCredentials = { email: TEST_ADMIN_EMAIL, password: generatePassword() };
+  // The saved password is missing, or belongs to a pool that is gone. Both
+  // directions of drift land here — the .run dir deleted while the stack stayed
+  // up, and the stack rebuilt while the .run dir stayed put — and setting a
+  // fresh permanent password re-syncs either without recreating the user.
+  const creds: AdminCredentials = {
+    email: TEST_ADMIN_EMAIL,
+    password: generatePassword(),
+    userPoolId,
+  };
   await client.send(
     new AdminSetUserPasswordCommand({
       UserPoolId: userPoolId,
