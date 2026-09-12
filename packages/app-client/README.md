@@ -8,6 +8,26 @@ local-data-server. Owns three things so apps don't have to reimplement them:
 3. Same-origin proxying for browser-driven apps so the HMAC secret stays
    server-side.
 
+## 0.7.0
+
+Carries the platform work that precedes the four apps leaving Next.js behind.
+Nothing here is a breaking change; the old names are aliases.
+
+- **`@starkeep/app-client/hono`** — `honoUpstream`, `honoOriginGate` and
+  `appBasePath`. See "The server half: Hono" below. The mount prefix stops being
+  each app's problem.
+- **`createOriginGate`** replaces `createAuthGateMiddleware`, which stays as an
+  alias. Same function; the name no longer claims a framework.
+- **`createWebAppHandler` gains `shellPaths`** — a declared client route is
+  answered with `index.html` from the assets directory, so a bundler-built SPA's
+  shell is a file on disk rather than a response the app renders.
+- **`/_immutable/*` is the platform's prefix** for content-addressed build
+  output. `DEFAULT_IMMUTABLE_PATHS` carries it alongside `/_next/static/*` for
+  the length of the migration; pass `immutablePaths` explicitly rather than
+  relying on either.
+- **`STARKEEP_APP_BASE_PATH` is now set on an installed app's Lambda**, which is
+  what `appBasePath()` reads. An app needs a cloud reinstall to pick it up.
+
 ## Install
 
 ```sh
