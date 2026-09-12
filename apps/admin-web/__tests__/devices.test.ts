@@ -17,7 +17,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { jsonRequest, makeDataDir, type RouteHandler } from "./helpers";
+import { jsonRequest, makeDataDir } from "./helpers";
 
 const putDeviceKeyParameter = vi.fn();
 const deleteDeviceKeyParameter = vi.fn();
@@ -31,8 +31,8 @@ vi.mock("@starkeep/admin-installer/session", () => ({
   roleChain: (...args: unknown[]) => roleChain(...args),
 }));
 
-let POST: RouteHandler;
-let DELETE: RouteHandler;
+let POST: (req: Request) => Promise<Response>;
+let DELETE: (req: Request) => Promise<Response>;
 let dataDir: string;
 let configPath: string;
 
@@ -61,9 +61,9 @@ beforeAll(async () => {
   dataDir = makeDataDir("adminweb-devices-");
   configPath = join(dataDir, "config.json");
   process.env.STARKEEP_DIR = dataDir;
-  const route = await import("../app/api/devices/route");
-  POST = route.POST as unknown as RouteHandler;
-  DELETE = route.DELETE as unknown as RouteHandler;
+  const route = await import("../src/routes/devices");
+  POST = route.POST;
+  DELETE = route.DELETE;
 });
 
 beforeEach(() => {

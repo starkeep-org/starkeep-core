@@ -19,7 +19,7 @@ beforeAll(async () => {
   process.env.STARKEEP_DIR = makeDataDir("adminweb-install-status-");
   upstream = await startStubServer(() => reply);
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = upstream.url;
-  ({ GET } = (await import("../app/api/apps/[appId]/install-status/route")) as unknown as {
+  ({ GET } = (await import("../src/routes/apps-install-status")) as unknown as {
     GET: typeof GET;
   });
 });
@@ -78,7 +78,7 @@ describe("when the data server is not running", () => {
     vi.resetModules();
     process.env.STARKEEP_LOCAL_DATA_SERVER_URL = "http://127.0.0.1:1";
     const { GET: downGET } = (await import(
-      "../app/api/apps/[appId]/install-status/route"
+      "../src/routes/apps-install-status"
     )) as unknown as { GET: typeof GET };
     process.env.STARKEEP_LOCAL_DATA_SERVER_URL = upstream.url;
 

@@ -1,5 +1,3 @@
-"use client";
-
 import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { readCloudConfig } from "./cloud-config";

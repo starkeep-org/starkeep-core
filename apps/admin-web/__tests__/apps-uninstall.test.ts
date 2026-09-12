@@ -7,17 +7,15 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import {
-  asRouteHandler,
   eventually,
   isAlive,
   jsonRequest,
   makeDataDir,
   spawnIdleProcess,
   testAppManifest,
-  type RouteHandler,
 } from "./helpers";
 
-let POST: RouteHandler;
+let POST: (req: Request) => Promise<Response>;
 let lds: LocalDataServer;
 let dataDir: string;
 let credsDir: string;
@@ -31,7 +29,7 @@ beforeAll(async () => {
   lds = await startLocalDataServer();
   process.env.STARKEEP_DIR = dataDir;
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = lds.url;
-  POST = asRouteHandler((await import("../app/api/apps/uninstall/route")).POST);
+  POST = (await import("../src/routes/apps-uninstall")).POST;
 
   // Install directly on the LDS and lay down the secret file the way the
   // install route would.

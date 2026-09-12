@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Pairing a handset so it may sync.
  *

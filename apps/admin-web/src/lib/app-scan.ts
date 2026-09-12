@@ -1,4 +1,3 @@
-import "server-only";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { starkeepDir } from "@starkeep/app-client";

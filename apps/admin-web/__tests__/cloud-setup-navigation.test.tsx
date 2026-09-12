@@ -3,12 +3,15 @@
  *
  * Where the cloud-setup wizard sends the operator when the deploy finishes.
  *
- * The wizard's last act is a `router.push("/")`, and it is the one piece of
- * client-side navigation in the app — everything else is a `<Link>`. It is also
- * the piece a framework change reaches: `useRouter` from `next/navigation`
- * becomes `useNavigate` from react-router, and nothing else would notice if the
- * call were dropped. The operator would finish a ten-minute deploy and be left
- * staring at the wizard.
+ * The wizard's last act is a navigation to the dashboard, and it is the one
+ * piece of programmatic navigation in the app — everything else is a `<Link>`.
+ * Nothing else would notice if the call were dropped: the operator would finish
+ * a ten-minute deploy and be left staring at the wizard.
+ *
+ * The navigation is asserted by *arriving* rather than by spying on a router.
+ * The wizard is mounted inside the app's real route table, so a working
+ * redirect renders the dashboard and a broken one does not — which is the thing
+ * the operator experiences, and which survives the router being replaced again.
  *
  * Getting there means driving the whole last step, so this file also covers the
  * two-pass deploy: the cloud-data-server pass, the Drive pass, and the single
@@ -17,18 +20,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-
-const push = vi.fn();
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push, replace: vi.fn(), refresh: vi.fn(), back: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
-  usePathname: () => "/cloud-setup",
-}));
-vi.mock("next/link", () => ({
-  default: ({ href, children }: { href: string; children: React.ReactNode }) => (
-    <a href={href}>{children}</a>
-  ),
-}));
+import { MemoryRouter } from "react-router";
+import { App } from "../src/App";
+import { CloudSetupWizard } from "../src/components/CloudSetupWizard";
 
 // Cognito is a network call to AWS. What the wizard needs from it is a session
 // that resumes and credentials that mint, so those are what the stub supplies.
@@ -108,7 +102,6 @@ function stubFetch(over: Partial<Record<string, () => Response>> = {}) {
 
 beforeEach(() => {
   calls = [];
-  push.mockReset();
   localStorage.clear();
   localStorage.setItem(
     "starkeep:cognito-session",
@@ -122,10 +115,32 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Render the wizard and wait for it to resume onto the deploy step. */
-async function renderAtDeployStep(props: { onComplete?: () => void } = {}) {
-  const { CloudSetupWizard } = await import("../src/components/CloudSetupWizard");
-  render(<CloudSetupWizard {...props} />);
+/**
+ * Mount the app at /cloud-setup and wait for the wizard to resume onto the
+ * deploy step. The whole route table is mounted, so the redirect at the end has
+ * somewhere real to go.
+ */
+async function renderAtDeployStep() {
+  render(
+    <MemoryRouter initialEntries={["/cloud-setup"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  expect(
+    await screen.findByRole("heading", { name: "Deploy Starkeep cloud" }, { timeout: 5_000 }),
+  ).toBeTruthy();
+}
+
+/**
+ * The wizard alone, with an `onComplete` handler — the embedded shape, where the
+ * host decides what "done" means instead of the wizard navigating.
+ */
+async function renderEmbedded(onComplete: () => void) {
+  render(
+    <MemoryRouter initialEntries={["/cloud-setup"]}>
+      <CloudSetupWizard onComplete={onComplete} />
+    </MemoryRouter>,
+  );
   expect(
     await screen.findByRole("heading", { name: "Deploy Starkeep cloud" }, { timeout: 5_000 }),
   ).toBeTruthy();
@@ -182,17 +197,17 @@ describe("what Continue does", () => {
     await renderAtDeployStep();
     await user.click(screen.getByRole("button", { name: /Redeploy/ }));
     await user.click(await screen.findByRole("button", { name: /Continue/ }, { timeout: 5_000 }));
-    await waitFor(() => expect(push).toHaveBeenCalledWith("/"));
+    expect(await screen.findByRole("heading", { name: "Local" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Cloud Setup" })).toBeNull();
   });
 
   it("defers to an onComplete prop when the wizard is embedded", async () => {
     const onComplete = vi.fn();
     const user = userEvent.setup();
-    await renderAtDeployStep({ onComplete });
+    await renderEmbedded(onComplete);
     await user.click(screen.getByRole("button", { name: /Redeploy/ }));
     await user.click(await screen.findByRole("button", { name: /Continue/ }, { timeout: 5_000 }));
     await waitFor(() => expect(onComplete).toHaveBeenCalled());
-    expect(push).not.toHaveBeenCalled();
   });
 });
 
@@ -211,7 +226,8 @@ describe("a deploy that fails", () => {
 
     expect(await screen.findByRole("button", { name: /Retry install/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Continue/ })).toBeNull();
-    expect(push).not.toHaveBeenCalled();
+    // Still on the wizard: a failed deploy navigates nowhere.
+    expect(screen.getByRole("heading", { name: "Cloud Setup" })).toBeTruthy();
     // The Drive pass must not have run against a cloud that is not there.
     expect(calls.filter((u) => u.includes("/api/drive/install"))).toHaveLength(0);
   });
@@ -232,6 +248,6 @@ describe("a deploy that fails", () => {
 
     await user.click(await screen.findByRole("button", { name: /Sign in again/ }));
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
-    expect(push).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Cloud Setup" })).toBeTruthy();
   });
 });

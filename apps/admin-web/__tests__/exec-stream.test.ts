@@ -9,7 +9,7 @@
  * are.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { jsonRequest, makeDataDir, type RouteHandler } from "./helpers";
+import { jsonRequest, makeDataDir } from "./helpers";
 import { lastChild, resetSpawns, spawnedChildren } from "./fake-spawn";
 import { lines, readSse } from "./sse";
 
@@ -20,9 +20,9 @@ vi.mock("node:child_process", async (importOriginal) => ({
 
 process.env.STARKEEP_DIR = makeDataDir("adminweb-exec-stream-");
 
-const { POST: rawPOST } = await import("../app/api/exec/stream/route");
+const { POST: rawPOST } = await import("../src/routes/exec-stream");
 const { REPO_ROOT, STREAM_COMMANDS } = await import("../src/lib/exec-commands");
-const POST = rawPOST as unknown as RouteHandler;
+const POST = rawPOST;
 
 const CREDENTIALS = {
   accessKeyId: "AKIA",

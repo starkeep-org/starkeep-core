@@ -1,17 +1,16 @@
 import { fileURLToPath } from "node:url";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // One resolver for the build and the tests: `vite.config.ts`'s plugins and
+  // alias come in wholesale, so `@/` cannot mean one thing to the bundler and
+  // another to a test. Collapsing those two configurations into one is most of
+  // why Vite was chosen.
+  plugins: [react(), tailwindcss()],
   resolve: {
-    alias: {
-      // Route modules import "server-only", which throws outside a Next.js
-      // server build. The routes under test run in plain Node here.
-      "server-only": fileURLToPath(new URL("./__tests__/stubs/server-only.ts", import.meta.url)),
-      // The same `@/` the app is written against. Component tests import the
-      // components as they are, rather than through a second spelling that
-      // would stop matching if the alias moved.
-      "@": fileURLToPath(new URL("./src", import.meta.url)),
-    },
+    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
   test: {
     // Node by default: most of this suite is route handlers against plain

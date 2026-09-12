@@ -1,7 +1,5 @@
-"use client";
-
 import type { ReactNode } from "react";
-import Link from "next/link";
+import { Link } from "react-router";
 import { MoreHorizontalIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -90,7 +88,7 @@ export function AppCard({ name, version, badges, description, primary, actions }
                     title={action.title}
                     onSelect={action.onSelect}
                   >
-                    {action.href ? <Link href={action.href}>{action.label}</Link> : action.label}
+                    {action.href ? <Link to={action.href}>{action.label}</Link> : action.label}
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>

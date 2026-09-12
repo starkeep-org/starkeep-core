@@ -17,17 +17,15 @@ import { join } from "node:path";
 import type { DaemonId } from "../src/lib/exec-commands";
 import { getFreePort } from "@starkeep/testkit";
 import {
-  asRouteHandler,
   eventually,
   isAlive,
   jsonRequest,
   makeDataDir,
-  nextUrlRequest,
-  type RouteHandler,
+  getRequest,
 } from "./helpers";
 
-let daemonPOST: RouteHandler;
-let statusGET: RouteHandler;
+let daemonPOST: (req: Request) => Promise<Response>;
+let statusGET: (req: Request) => Promise<Response>;
 let isWorkspaceDaemonRunning: (id: DaemonId) => boolean;
 let daemonCommands: { drive: { args: string[]; port?: number } };
 let pidsDir: string;
@@ -57,8 +55,8 @@ beforeAll(async () => {
   const dataDir = makeDataDir();
   pidsDir = join(dataDir, "pids");
   process.env.STARKEEP_DIR = dataDir;
-  daemonPOST = asRouteHandler((await import("../app/api/exec/daemon/route")).POST);
-  statusGET = asRouteHandler((await import("../app/api/exec/daemon/status/route")).GET);
+  daemonPOST = (await import("../src/routes/exec-daemon")).POST;
+  statusGET = (await import("../src/routes/exec-daemon-status")).GET;
   ({ DAEMON_COMMANDS: daemonCommands } = await import("../src/lib/exec-commands"));
   ({ isWorkspaceDaemonRunning } = await import("../src/lib/daemon-control"));
 });
@@ -82,7 +80,7 @@ afterAll(() => {
 
 const act = (body: unknown) => daemonPOST(jsonRequest("/api/exec/daemon", body));
 const status = async (id: string) => {
-  const res = await statusGET(nextUrlRequest(`/api/exec/daemon/status?id=${id}`));
+  const res = await statusGET(getRequest(`/api/exec/daemon/status?id=${id}`));
   expect(res.status).toBe(200);
   return (await res.json()) as { running: boolean; pid?: number; port?: number; adopted?: boolean };
 };

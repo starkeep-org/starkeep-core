@@ -55,19 +55,19 @@ let drive: Call;
 let appInstall: Call;
 
 beforeAll(async () => {
-  const cds = await import("../app/api/cloud-data-server/install/route");
+  const cds = await import("../src/routes/cloud-data-server-install");
   cloudDataServer = (body = {}) =>
     (cds.POST as unknown as (r: Request) => Promise<Response>)(
       jsonRequest("/api/cloud-data-server/install", { ...CREDS, ...body }),
     );
 
-  const dr = await import("../app/api/drive/install/route");
+  const dr = await import("../src/routes/drive-install");
   drive = (body = {}) =>
     (dr.POST as unknown as (r: Request) => Promise<Response>)(
       jsonRequest("/api/drive/install", { ...CREDS, ...body }),
     );
 
-  const app = await import("../app/api/apps/[appId]/cloud-install/route");
+  const app = await import("../src/routes/apps-cloud-install");
   appInstall = (body = {}) => {
     const appId = (body.appId as string) ?? "photos";
     return (

@@ -5,10 +5,39 @@ The admin panel is the command center for Starkeep. Start here — it guides you
 ## Running
 
 ```bash
-pnpm --filter admin-web dev
+pnpm --filter admin-web dev            # hot-reloading, on port 3000
 ```
 
-Opens on port 3000.
+For the built client instead of the development one:
+
+```bash
+pnpm --filter admin-web build
+pnpm --filter admin-web start          # --port <n> to move it
+```
+
+## How it is put together
+
+Two halves, joined by `src/server.ts`.
+
+- **The browser half** is a Vite single-page app. `src/main.tsx` mounts it,
+  `src/App.tsx` holds the route table, and `vite build` emits `dist/index.html`
+  plus content-hashed assets under `dist/_immutable/`.
+- **The server half** is a [Hono](https://hono.dev) app. `src/api.ts` is the
+  whole `/api/*` route table in one readable list, and each handler lives in its
+  own module under `src/routes/`.
+
+`src/server.ts` runs both: it serves `/api/*` from the Hono app and everything
+else from the client — Vite in middleware mode under `--dev`, `dist/` otherwise,
+with every client route answered by the shell so a reload or a pasted URL
+resolves. It runs as TypeScript under `tsx`, the way
+`apps/local-data-server` does, because admin-web only ever runs from this
+checkout on the operator's own machine.
+
+`src/lib/app-scan.ts`, `src/lib/daemon-control.ts` and
+`src/lib/exec-commands.ts` are server-side only: they reach
+`node:child_process` and `node:fs`, and nothing the browser loads may import
+them. An eslint rule catches the import and
+`__tests__/server-module-isolation.test.ts` walks the whole graph.
 
 ## What It Does
 
