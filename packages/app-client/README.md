@@ -8,6 +8,22 @@ local-data-server. Owns three things so apps don't have to reimplement them:
 3. Same-origin proxying for browser-driven apps so the HMAC secret stays
    server-side.
 
+## 0.7.1
+
+One fix, found by driving a real app's packaged Lambda: **`honoOriginGate`
+defaults `basePath` to `appBasePath()`.**
+
+`createOriginGate` uses `basePath` for two jobs — stripping the mount off the
+pathname it matches, and prefixing the sign-in path in the `Location` it
+redirects to. Under `honoUpstream` the first job is already done, which made the
+option look unnecessary; the second is not. A gate mounted without it sent a
+signed-out browser to `/sign-in` at the distribution root, outside the app.
+Passing `basePath` explicitly still overrides the default.
+
+Reaching this needs a document navigation to an undeclared path that carries no
+`sk_session` — CloudFront's `signed-out-redirect` function answers most of those
+before the gateway is consulted, which is why it survived a tier-3 run.
+
 ## 0.7.0
 
 Carries the platform work that precedes the four apps leaving Next.js behind.

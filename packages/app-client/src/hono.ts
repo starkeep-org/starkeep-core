@@ -108,14 +108,24 @@ interface GateContext {
  * owns the machine and gating on-device data behind a sign-in would break the
  * local-first guarantee.
  *
- * Mount it before the routes. The gate sees the app-relative pathname because
- * `honoUpstream` has already rewritten it, so `publicPaths` entries are written
- * app-relative — the spelling the manifest uses — and `basePath` is left unset.
+ * Mount it before the routes. `publicPaths` entries are written app-relative —
+ * the spelling the manifest uses — because `honoUpstream` has already rewritten
+ * the request's URL by the time the gate sees it.
+ *
+ * **`basePath` defaults to `appBasePath()` here, and that default is
+ * load-bearing.** `createOriginGate` uses `basePath` for two jobs: stripping the
+ * mount off the pathname it matches, and prefixing the sign-in path in the
+ * `Location` it redirects to. Under this mount the first job is already done and
+ * the option would look unnecessary — but the second is not, and a gate left
+ * with an empty `basePath` sends a signed-out browser to `/sign-in` at the
+ * distribution root, which is outside the app and belongs to nobody. The
+ * stripping stays a no-op because the pathname no longer carries the prefix, so
+ * one value serves both. Pass `basePath` explicitly only to override it.
  */
 export function honoOriginGate(
   opts: AuthGateOptions,
 ): (c: GateContext, next: () => Promise<void>) => Promise<void> {
-  const gate = createOriginGate(opts);
+  const gate = createOriginGate({ ...opts, basePath: opts.basePath ?? appBasePath() });
   return async (c, next) => {
     const refused = gate(c.req.raw);
     if (refused) {
