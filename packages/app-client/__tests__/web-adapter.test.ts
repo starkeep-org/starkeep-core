@@ -80,6 +80,7 @@ describe("mount prefix", () => {
   it("hands the upstream the app-relative path and the origin-facing URL", async () => {
     const seen: { path?: string; url?: string } = {};
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       requestUpstream: requestUpstream(seen),
     });
@@ -145,6 +146,7 @@ describe("payload encoding", () => {
 describe("cookies", () => {
   it("lifts the cookies array into a Cookie header inbound", async () => {
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       requestUpstream: requestUpstream(),
     });
@@ -156,6 +158,7 @@ describe("cookies", () => {
 
   it("splits Set-Cookie back into cookies[] so a second cookie is not lost", async () => {
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       requestUpstream: requestUpstream(),
     });
@@ -171,6 +174,7 @@ describe("cookies", () => {
 describe("static assets", () => {
   async function staticHandler(over: Record<string, unknown> = {}) {
     return createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir,
       staticPaths: ["/_immutable/*", "/version", "/icon.png"],
@@ -196,6 +200,7 @@ describe("static assets", () => {
 
   it("leaves an undeclared path to the upstream even when the file exists", async () => {
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir,
       staticPaths: ["/version"],
@@ -220,6 +225,7 @@ describe("static assets", () => {
   it("refuses to build a handler that declares static paths with no assets dir", async () => {
     await expect(
       createWebAppHandler({
+        immutablePaths: ["/_immutable/*"],
         basePath: BASE,
         staticPaths: ["/version"],
         requestUpstream: requestUpstream(),
@@ -229,6 +235,7 @@ describe("static assets", () => {
 
   it("accepts a file: URL for the assets dir", async () => {
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir: new URL(`file://${assetsDir}/`),
       staticPaths: ["/version"],
@@ -244,6 +251,7 @@ describe("static assets", () => {
 describe("the SPA shell", () => {
   async function shellHandler(over: Record<string, unknown> = {}) {
     return createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir,
       staticPaths: ["/_immutable/*", "/icon.png"],
@@ -320,6 +328,7 @@ describe("the SPA shell", () => {
   it("refuses to build a handler that declares client routes with no assets dir", async () => {
     await expect(
       createWebAppHandler({
+        immutablePaths: ["/_immutable/*"],
         basePath: BASE,
         shellPaths: ["/"],
         requestUpstream: requestUpstream(),
@@ -330,6 +339,7 @@ describe("the SPA shell", () => {
   it("answers the shell without touching the upstream", async () => {
     let calls = 0;
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir,
       shellPaths: ["/"],
@@ -348,6 +358,7 @@ describe("the SPA shell", () => {
 describe("path safety", () => {
   it("rejects a path that escapes the assets directory", async () => {
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir,
       staticPaths: ["/_immutable/*"],
@@ -360,6 +371,7 @@ describe("path safety", () => {
 
   it("treats a directory as a miss rather than a listing", async () => {
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir,
       staticPaths: ["/sub"],
@@ -373,6 +385,7 @@ describe("path safety", () => {
 describe("cache-control", () => {
   it("marks content-addressed assets immutable", async () => {
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir,
       staticPaths: ["/_immutable/*", "/version"],
@@ -384,23 +397,20 @@ describe("cache-control", () => {
     expect(plain.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
   });
 
-  it("marks both migration-era prefixes immutable by default", async () => {
-    // The default is a migration aid: `/_immutable/*` is the platform's and
-    // `/_next/static/*` is what an app that still builds with Next emits. An
-    // app on either half of the migration caches correctly without passing the
-    // option, and every call site in this repository passes it anyway.
-    mkdirSync(join(assetsDir, "_next", "static"), { recursive: true });
-    writeFileSync(join(assetsDir, "_next", "static", "legacy.abc123.js"), "console.log(2)\n");
+  it("forever-caches nothing an app did not name", async () => {
+    // No default. A default decides an app's cache headers for it, and a path
+    // cached forever by accident is unrecoverable at the edge until its TTL
+    // expires — so an empty list is a legal, and honest, answer for a build
+    // that hashes nothing.
     const handler = await createWebAppHandler({
       basePath: BASE,
       assetsDir,
-      staticPaths: ["/_immutable/*", "/_next/static/*"],
+      staticPaths: ["/_immutable/*"],
+      immutablePaths: [],
       requestUpstream: requestUpstream(),
     });
-    for (const path of ["/_immutable/probe.5f3a9c21.js", "/_next/static/legacy.abc123.js"]) {
-      const res = await handler(event(`${BASE}${path}`));
-      expect(res.headers["cache-control"], path).toBe("public, max-age=31536000, immutable");
-    }
+    const res = await handler(event(`${BASE}/_immutable/probe.5f3a9c21.js`));
+    expect(res.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
   });
 
   it("lets an app name its own content-addressed prefix", async () => {
@@ -421,22 +431,24 @@ describe("the event upstream", () => {
   it("passes the original event through, mount prefix intact", async () => {
     let seen: ApiGatewayV2Event | undefined;
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       upstream: Promise.resolve({
         handler: (e: ApiGatewayV2Event) => {
           seen = e;
-          return { statusCode: 200, headers: {}, body: "opennext" };
+          return { statusCode: 200, headers: {}, body: "from the event upstream" };
         },
       }),
     });
     const res = await handler(event(`${BASE}/deck/1`));
     expect(seen?.rawPath).toBe(`${BASE}/deck/1`);
-    expect(res.body).toBe("opennext");
+    expect(res.body).toBe("from the event upstream");
   });
 
   it("answers static assets without touching the upstream", async () => {
     let calls = 0;
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir,
       staticPaths: ["/version"],
@@ -455,6 +467,7 @@ describe("the event upstream", () => {
 describe("errors", () => {
   it("rethrows by default, leaving the framework's own reporting alone", async () => {
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       requestUpstream: Promise.resolve({
         handler: () => {
@@ -467,6 +480,7 @@ describe("errors", () => {
 
   it("answers instead when the app asked for a legible failure", async () => {
     const handler = await createWebAppHandler({
+      immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       requestUpstream: Promise.resolve({
         handler: () => {

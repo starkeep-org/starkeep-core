@@ -986,23 +986,12 @@ export function buildCloudDataServerProgram(
         orderedCacheBehaviors: [
           {
             // The platform's reserved prefix for an app's content-hashed build
-            // output — immutable, safe for long TTLs. Public (no auth headers),
-            // so CachingOptimized needs no origin request policy.
+            // output — immutable, safe for long TTLs, and the *only* prefix
+            // cached forever: an app that wants an asset cached names it here
+            // by hashing it, not by asking for another behavior. Public (no
+            // auth headers), so CachingOptimized needs no origin request
+            // policy.
             pathPattern: "/apps/*/_immutable/*",
-            targetOriginId: gatewayOriginId,
-            viewerProtocolPolicy: "redirect-to-https",
-            allowedMethods: ["GET", "HEAD"],
-            cachedMethods: ["GET", "HEAD"],
-            cachePolicyId: cachingOptimizedId,
-            compress: true,
-          },
-          {
-            // The same behavior under the prefix Next.js emits, for as long as
-            // an installed app still builds with it. Ordered behaviors are a
-            // list, so naming both prefixes is additive: every app caches
-            // correctly whichever half of the migration it is on. This entry
-            // goes when the last app leaves Next behind.
-            pathPattern: "/apps/*/_next/static/*",
             targetOriginId: gatewayOriginId,
             viewerProtocolPolicy: "redirect-to-https",
             allowedMethods: ["GET", "HEAD"],

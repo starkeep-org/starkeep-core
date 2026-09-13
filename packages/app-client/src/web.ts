@@ -13,9 +13,9 @@
  *      `must-revalidate` for everything else.
  *
  * Memo, Photos and Probe each wrote their own copy of that list, and the copies
- * diverged: Probe handles `Set-Cookie` itself, Memo and Photos receive it from
- * OpenNext, and no two of the three would behave identically if swapped. This
- * module is the one copy, so a fix reaches every app that adopts it.
+ * diverged: no two of the three handled `Set-Cookie`, a path escape or a cache
+ * header identically, and none of the differences was a decision anyone made.
+ * This module is the one copy, so a fix reaches every app that adopts it.
  *
  * What stays with the app is the short list the boundary in
  * `authoring-an-app.md` was reaching for: which framework, the build command
@@ -54,7 +54,13 @@ export interface ApiGatewayV2Result {
   isBase64Encoded?: boolean;
 }
 
-/** An upstream that speaks API Gateway events, e.g. an OpenNext server function. */
+/**
+ * An upstream that speaks API Gateway events rather than `Request`s.
+ *
+ * No Starkeep app uses this shape today — every app's server half is a Hono
+ * app reached through `honoUpstream`. It stays for a server framework that
+ * emits a Lambda handler of its own and cannot be asked to speak `Request`.
+ */
 export type EventUpstreamHandler = (
   event: ApiGatewayV2Event,
   context: unknown,
@@ -101,14 +107,14 @@ interface CommonOptions {
   /**
    * Which static paths are content-addressed, and therefore cacheable forever.
    *
-   * Pass it. The default is a migration aid, not a convention: it carries both
-   * `/_immutable/*` (the platform's prefix) and `/_next/static/*` (the one the
-   * framework left behind), because a default is how the framework's name
-   * reached the platform in the first place. The CloudFront distribution names
-   * both prefixes for the same reason, and both spellings disappear from the
-   * default once no app emits `_next`.
+   * Required, and deliberately so. A default here decides an app's cache
+   * headers on the app's behalf, and forever-caching a path the build does not
+   * content-hash is a mistake no later deploy can take back. `/_immutable/*` is
+   * the platform's reserved prefix and is what an app that has nothing else to
+   * name should pass; an empty array is the honest answer for an app whose
+   * build hashes nothing.
    */
-  immutablePaths?: string[];
+  immutablePaths: string[];
   /**
    * The app's **client routes** — paths a bundler-built SPA answers with its
    * shell rather than with a file of its own, e.g. `["/", "/settings",
@@ -135,12 +141,12 @@ interface CommonOptions {
   /**
    * What to answer when a declared static path names no file on disk.
    *
-   *   - `"upstream"` (default) hands the request to the framework. Right
-   *     wherever the framework claims sibling paths under the same prefix —
-   *     Next serves `_next/data/*` from the server while `_next/static/*` is on
-   *     disk, so a prefix-wide glob has to fall through.
+   *   - `"upstream"` (default) hands the request to the app. Right wherever
+   *     the app answers sibling paths under a prefix its build also writes
+   *     files into, so a prefix-wide glob has to fall through.
    *   - `"notFound"` answers 404 here. Right for an app whose assets directory
-   *     is the whole truth for the paths it declared.
+   *     is the whole truth for the paths it declared, which is what a Vite
+   *     build under `/_immutable/*` gives you.
    *
    * `shellPaths` is consulted *after* this choice is made, so a path that is
    * both a declared static path and a declared client route under
@@ -151,7 +157,7 @@ interface CommonOptions {
   /**
    * Turn a thrown upstream error into a response instead of letting it escape.
    *
-   * Off by default, because a framework that already reports its own failures
+   * Off by default, because an upstream that already reports its own failures
    * should keep doing so. An app that would otherwise surface a bare 502 with
    * nothing in it to say what failed wants this.
    */
@@ -211,15 +217,6 @@ const TEXT_EXT = new Set([
   ".html",
   ".xml",
 ]);
-
-/**
- * Both prefixes, for the length of the Next.js migration. `/_immutable/*` is
- * the platform's; `/_next/static/*` is what an app that still builds with Next
- * emits. Naming both here keeps a half-migrated tree cacheable on every app at
- * once, and every call site in this repository passes `immutablePaths`
- * explicitly rather than relying on it.
- */
-const DEFAULT_IMMUTABLE_PATHS = ["/_immutable/*", "/_next/static/*"];
 
 /** The SPA shell's file name inside `assetsDir`, when `shellPaths` is declared. */
 const DEFAULT_SHELL_FILE = "index.html";
@@ -407,7 +404,7 @@ export async function createWebAppHandler(
   const basePath = (opts.basePath ?? "").replace(/\/+$/, "");
   const assetsDir = resolveAssetsDir(opts.assetsDir);
   const staticPaths = opts.staticPaths ?? [];
-  const immutablePaths = opts.immutablePaths ?? DEFAULT_IMMUTABLE_PATHS;
+  const immutablePaths = opts.immutablePaths;
   const shellPaths = opts.shellPaths ?? [];
   const shellFile = opts.shellFile ?? DEFAULT_SHELL_FILE;
   const staticMiss = opts.staticMiss ?? "upstream";
@@ -440,7 +437,7 @@ export async function createWebAppHandler(
     path: string,
   ): Promise<ApiGatewayV2Result> {
     if (isEventUpstream) {
-      // The original event, prefix intact: a framework built with the mount
+      // The original event, prefix intact: an upstream built with the mount
       // prefix baked in reasons in the platform's terms, not the app's.
       return await (upstream as unknown as EventUpstreamHandler)(event, context);
     }

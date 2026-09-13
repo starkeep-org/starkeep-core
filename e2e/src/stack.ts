@@ -44,30 +44,21 @@ export interface WebServer {
   stop(): Promise<void>;
 }
 
-/** @deprecated The server is not a Next server. Use `WebServer`. */
-export type NextDevServer = WebServer;
-
 export interface WebServerOptions {
   appDir: string;
   env?: Record<string, string>;
-  /** Path polled for readiness; default "/" (forces the first compile). */
+  /** Path polled for readiness; default "/". */
   readyPath?: string;
   startTimeoutMs?: number;
   /**
-   * What to start.
-   *
-   *   - `"next"` (default) spawns the app's own `next dev`. It survives until
-   *     the last app leaves Next behind.
-   *   - `"node"` spawns `command` with `args`, which is what a bundler-built
-   *     app's server entry is: `node dist/server.js`. The allocated port is
-   *     appended on `portFlag`, defaulting to `--port`.
+   * What to spawn, and how the allocated port reaches it. Every app's server
+   * half is a plain Node process now: `node dist/server.js`, or `tsx
+   * src/server.ts` for one that runs from its checkout.
    */
-  mode?: "next" | "node";
-  /** `mode: "node"` only. Defaults to the Node running the harness. */
   command?: string;
-  /** `mode: "node"` only. The entry and any flags, before the port. */
+  /** The entry and any flags, before the port. Required. */
   args?: string[];
-  /** `mode: "node"` only. Default `--port`. */
+  /** The flag the port is passed on. Default `--port`. */
   portFlag?: string;
 }
 
@@ -78,25 +69,16 @@ export interface WebServerOptions {
  */
 export async function startWebServer(options: WebServerOptions): Promise<WebServer> {
   const port = await getFreePort();
-  // localhost, not 127.0.0.1: Next's dev-origin protection treats the bare IP
-  // as cross-origin and silently drops the turbopack HMR websocket handshake,
-  // which stalls hydration in the browser. Kept for the node mode too, so both
-  // modes hand a spec the same origin and a cookie set under one is readable
-  // under the other.
+  // localhost, not 127.0.0.1: every spec gets one origin, so a cookie a server
+  // sets under one host is readable under the other.
   const url = `http://localhost:${port}`;
 
-  const mode = options.mode ?? "next";
-  const [command, args] =
-    mode === "next"
-      ? [join(options.appDir, "node_modules/.bin/next"), ["dev", "-p", String(port)]]
-      : [
-          options.command ?? process.execPath,
-          [...(options.args ?? []), options.portFlag ?? "--port", String(port)],
-        ];
-
-  if (mode === "node" && !options.args?.length) {
-    throw new Error("startWebServer({ mode: 'node' }) needs args naming the server entry");
+  if (!options.args?.length) {
+    throw new Error("startWebServer() needs args naming the server entry");
   }
+
+  const command = options.command ?? process.execPath;
+  const args = [...options.args, options.portFlag ?? "--port", String(port)];
 
   let output = "";
   const child = spawn(command, args, {
@@ -111,7 +93,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     child.once("exit", () => resolveExit());
   });
 
-  const label = `${mode === "next" ? "next dev" : command} in ${options.appDir}`;
+  const label = `${command} in ${options.appDir}`;
 
   async function stop(): Promise<void> {
     if (child.exitCode === null && child.pid) {
@@ -132,7 +114,6 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     }
   }
 
-  // Dev-mode Next compiles on demand; the first request is the slow one.
   const startTimeoutMs = options.startTimeoutMs ?? 180_000;
   const readyUrl = `${url}${options.readyPath ?? "/"}`;
   const deadline = Date.now() + startTimeoutMs;
@@ -157,13 +138,6 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 
   return { url, port, child, logs: () => output, stop };
 }
-
-/**
- * @deprecated Use `startWebServer`. The name is kept because Photos' e2e suite
- * consumes it from this package through a `link:` dependency, and that suite
- * moves off Next in its own phase.
- */
-export const startNextDev = startWebServer;
 
 // ---------------------------------------------------------------------------
 // The platform stack
@@ -239,7 +213,6 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
     const adminDir = join(REPO_ROOT, "apps/admin-web");
     admin = await startWebServer({
       appDir: adminDir,
-      mode: "node",
       command: join(adminDir, "node_modules/.bin/tsx"),
       args: ["src/server.ts"],
       readyPath: "/api/apps/list",
@@ -254,7 +227,6 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
       const driveDir = join(REPO_ROOT, "apps/drive");
       drive = await startWebServer({
         appDir: driveDir,
-        mode: "node",
         command: join(driveDir, "node_modules/.bin/tsx"),
         args: ["src/server.ts"],
         readyPath: "/api/types",

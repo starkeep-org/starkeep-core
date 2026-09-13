@@ -27,7 +27,6 @@ let server: Awaited<ReturnType<typeof startWebServer>>;
 test.beforeAll(async () => {
   server = await startWebServer({
     appDir: PROBE_DIR,
-    mode: "node",
     // What the manifest's `localRun` names, and what admin-web spawns: the
     // entry point builds the bundle if it is missing, so a fresh checkout needs
     // no separate build step.

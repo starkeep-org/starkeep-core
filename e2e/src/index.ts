@@ -1,7 +1,6 @@
 export {
   startPlatformStack,
   startWebServer,
-  startNextDev,
   installAppViaAdmin,
   uninstallAppViaAdmin,
   startAppDaemonViaAdmin,
@@ -12,7 +11,6 @@ export {
   type PlatformStackOptions,
   type WebServer,
   type WebServerOptions,
-  type NextDevServer,
 } from "./stack.js";
 export {
   installAppDirect,
