@@ -27,7 +27,10 @@ export interface LocalAppEntry {
   appId: string;
   manifest: ManifestSummary;
   sourceDir: string;
-  status: "active" | "installing" | "uninstalling" | "not_installed";
+  // "unknown" means the install registry could not be read — the local data
+  // server was down when the list was built. It is distinct from
+  // "not_installed", which is a registry answer.
+  status: "active" | "installing" | "uninstalling" | "not_installed" | "unknown";
 }
 
 export interface DaemonStatus {
