@@ -49,10 +49,12 @@ export const DAEMON_COMMANDS: Record<DaemonId, { args: string[]; port?: number }
   },
   // Starkeep Drive UI — a core workspace app (not a starkeep-apps app).
   // Spawned from the repo root via the workspace filter, like the data server.
-  // `dev` mode (no prior build needed) suits the local-admin context, and its
-  // package script reads STARKEEP_DRIVE_PORT to stay in step with this.
+  // `start`, not `dev`: the Dashboard starts the product, and Drive's server
+  // builds its own browser bundle on first start if `dist/` is absent, so no
+  // prior build step is required of the operator. Its package script reads
+  // STARKEEP_DRIVE_PORT to stay in step with this.
   drive: {
-    args: ["pnpm", "--filter", "@starkeep/drive", "dev"],
+    args: ["pnpm", "--filter", "@starkeep/drive", "start"],
     port: daemonPort("STARKEEP_DRIVE_PORT", 9830),
   },
 };

@@ -251,8 +251,12 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
       },
     });
     if (options.drive !== false) {
+      const driveDir = join(REPO_ROOT, "apps/drive");
       drive = await startWebServer({
-        appDir: join(REPO_ROOT, "apps/drive"),
+        appDir: driveDir,
+        mode: "node",
+        command: join(driveDir, "node_modules/.bin/tsx"),
+        args: ["src/server.ts"],
         readyPath: "/api/types",
         env: {
           // Drive reads the LDS registry SQLite directly for its HMAC secret.

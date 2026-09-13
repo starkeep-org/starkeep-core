@@ -1,5 +1,3 @@
-"use client";
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fileLinkHref } from "@/lib/file-link";
 
@@ -42,7 +40,7 @@ function formatBytes(n: number | null): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export default function DrivePage() {
+export function App() {
   const [types, setTypes] = useState<DriveTypeSummary[]>([]);
   const [records, setRecords] = useState<DriveRecord[]>([]);
   const [activeType, setActiveType] = useState<string | null>(null);

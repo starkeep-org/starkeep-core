@@ -18,13 +18,17 @@
       "dependsOn": ["^build"]
     },
     "test:e2e": {
-      // admin-web's client is a real build now rather than something compiled
-      // on demand, so the tier-2 stack needs `dist/` present before it boots
-      // the server that serves it.
-      "dependsOn": ["^build", "admin-web#build"],
+      // admin-web's and Drive's clients are real builds now rather than
+      // something compiled on demand, so the tier-2 stack needs `dist/` present
+      // before it boots the servers that serve them.
+      "dependsOn": ["^build", "admin-web#build", "@starkeep/drive#build"],
       "cache": false
     },
     "admin-web#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "@starkeep/drive#build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },

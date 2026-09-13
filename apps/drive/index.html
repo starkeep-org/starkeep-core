@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  The app shell. Vite emits this plus content-hashed assets; `src/server.ts`
+  serves it at `/`, which is what makes the shell a file on disk rather than a
+  response a server renders.
+
+  The title and description are what `app/layout.tsx`'s `metadata` export
+  declared, and the dark ground under them is `src/globals.css`'s, applied to
+  the document rather than to the body alone so a short page has no white band
+  under it.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Starkeep Drive</title>
+    <meta name="description" content="Unified view of all your shared data." />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

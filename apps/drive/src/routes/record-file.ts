@@ -1,6 +1,5 @@
-import { NextRequest } from "next/server";
-import { getFileUrl, DriveNotInstalledError } from "../../../../../src/lib/drive-client";
-import { httpContentType } from "../../../../../src/lib/file-link";
+import { getFileUrl, DriveNotInstalledError } from "../lib/drive-client";
+import { httpContentType } from "../lib/file-link";
 
 /**
  * Resolve a record's bytes (signed as Drive, server-side) and stream them back
@@ -10,9 +9,8 @@ import { httpContentType } from "../../../../../src/lib/file-link";
  * error. `type` is passed by the listing page, which already holds the
  * authoritative value — it only steers presentation of the user's own bytes.
  */
-export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  const type = req.nextUrl.searchParams.get("type") ?? undefined;
+export async function GET(req: Request, id: string) {
+  const type = new URL(req.url).searchParams.get("type") ?? undefined;
   try {
     const { url, mimeType } = await getFileUrl(id);
     const upstream = await fetch(url, { cache: "no-store" });

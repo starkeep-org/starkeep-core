@@ -2,7 +2,7 @@ import {
   listTypes,
   listCloudTypes,
   DriveNotInstalledError,
-} from "../../../src/lib/drive-client";
+} from "../lib/drive-client";
 
 export async function GET() {
   try {

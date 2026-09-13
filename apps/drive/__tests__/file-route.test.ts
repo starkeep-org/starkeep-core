@@ -28,14 +28,19 @@ vi.mock("../src/lib/drive-client", () => ({
   DriveNotInstalledError,
 }));
 
-import { GET } from "../app/api/records/[id]/file/route";
+import { GET } from "../src/routes/record-file";
 
-/** Build the (req, ctx) pair the route expects from an id + query string. */
+/**
+ * Call the route the way the Hono mount does: a plain `Request`, and the
+ * dynamic segment as its own argument. The id is passed rather than parsed
+ * back out of the URL, so a route that reached for the wrong segment would
+ * fail here rather than agree with itself.
+ */
 function call(id: string, query = "") {
-  const req = {
-    nextUrl: new URL(`http://drive.local/api/records/${id}/file${query}`),
-  } as unknown as Parameters<typeof GET>[0];
-  return GET(req, { params: Promise.resolve({ id }) });
+  const req = new Request(
+    `http://drive.local/api/records/${encodeURIComponent(id)}/file${query}`,
+  );
+  return GET(req, id);
 }
 
 const realFetch = globalThis.fetch;
