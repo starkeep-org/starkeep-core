@@ -6,7 +6,11 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import * as pulumi from "@pulumi/pulumi";
-import { buildPulumiProgram } from "../src/pulumi-program";
+import {
+  buildPulumiProgram,
+  plannedRouteResourceNames,
+  routeResourceName,
+} from "../src/pulumi-program";
 import type { ComputeContext } from "../src/compute-stack";
 import type { AppManifest, AppComputeHandler } from "@starkeep/admin-manifest";
 import { appManifestSchema } from "@starkeep/admin-manifest";
@@ -92,6 +96,53 @@ function routes(): CreatedResource[] {
 
 beforeEach(() => {
   created.length = 0;
+});
+
+describe("route resource naming", () => {
+  // API Gateway refuses to move a route key onto a route while another route
+  // still holds that key, so a Pulumi resource must never change which key it
+  // carries. Naming each route resource after its key is what guarantees that:
+  // an edit to `publicPaths` then adds and removes resources instead of
+  // rewriting the keys of the ones already there.
+  function nameByKey(): Map<string, string> {
+    return new Map(routes().map((r) => [String(r.inputs.routeKey), r.name]));
+  }
+
+  it("keeps a route key on the same resource when publicPaths grows and reorders", async () => {
+    const before = { name: "static", routes: ["GET /", "ANY /{proxy+}"], auth: "session" as const };
+    await run(
+      manifestWithHandlers([{ ...before, publicPaths: ["/", "/sign-in", "/_immutable/*"] }]),
+    );
+    const first = nameByKey();
+
+    created.length = 0;
+    await run(
+      manifestWithHandlers([
+        { ...before, publicPaths: ["/_immutable/*", "/starkeep-runtime-config", "/", "/sign-in"] },
+      ]),
+    );
+    const second = nameByKey();
+
+    for (const [key, name] of first) {
+      expect(second.get(key), key).toBe(name);
+    }
+    expect(second.size).toBe(first.size + 1);
+  });
+
+  it("gives paths that slugify alike distinct resources", () => {
+    expect(routeResourceName("static", "GET /a-b")).not.toBe(
+      routeResourceName("static", "GET /a/b"),
+    );
+  });
+
+  it("plans exactly the names the program registers", async () => {
+    const manifest = manifestWithHandlers([
+      { name: "static", routes: ["GET /", "ANY /{proxy+}"], auth: "session", publicPaths: ["/", "/sign-in"] },
+      { name: "api", routes: ["POST /api/resize"] },
+    ]);
+    await run(manifest);
+    expect(plannedRouteResourceNames(manifest)).toEqual(new Set(routes().map((r) => r.name)));
+  });
 });
 
 describe("route prefix rewriting", () => {
