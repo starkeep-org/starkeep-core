@@ -1,10 +1,9 @@
-import { NextRequest } from "next/server";
 import {
   listRecords,
   listCloudRecords,
   DriveNotInstalledError,
   type DriveRecord,
-} from "../../../src/lib/drive-client";
+} from "../lib/drive-client";
 
 export type SyncStatus =
   | "local-only"
@@ -17,8 +16,8 @@ export interface MergedRecord extends Partial<DriveRecord> {
   sync_status: SyncStatus;
 }
 
-export async function GET(req: NextRequest) {
-  const type = req.nextUrl.searchParams.get("type") ?? undefined;
+export async function GET(req: Request) {
+  const type = new URL(req.url).searchParams.get("type") ?? undefined;
   try {
     // Local is required; cloud is best-effort so the view still renders when
     // the cloud is unconfigured or signed out.

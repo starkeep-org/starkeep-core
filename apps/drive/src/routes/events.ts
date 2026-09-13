@@ -1,8 +1,4 @@
-import { LDS_URL } from "../../../src/lib/drive-client";
-
-// Long-lived SSE stream — never statically optimized or cached.
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+import { LDS_URL } from "../lib/drive-client";
 
 /**
  * Same-origin SSE proxy to the local-data-server `/events` stream. `/events` is
