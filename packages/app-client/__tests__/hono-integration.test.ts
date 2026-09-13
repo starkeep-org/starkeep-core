@@ -157,29 +157,60 @@ describe("honoOriginGate", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("redirects a navigation to the mounted sign-in page", async () => {
-    process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
+  /** A gated app with one private route, mounted under `BASE`. */
+  async function gatedNavigationApp(gateOpts: Record<string, unknown> = {}) {
     const app = new Hono();
     app.use(
       "*",
-      honoOriginGate({
-        publicPaths: ["/sign-in"],
-        signInPath: "/sign-in",
-        // The gate sees an app-relative pathname because honoUpstream rewrote
-        // it, so the redirect target needs the mount back.
-        basePath: "",
-      }),
+      honoOriginGate({ publicPaths: ["/sign-in"], signInPath: "/sign-in", ...gateOpts }),
     );
     app.get("/settings", (c) => c.text("settings"));
-    const handler = await createWebAppHandler({
+    return createWebAppHandler({
       basePath: BASE,
       requestUpstream: Promise.resolve({ handler: honoUpstream(app) }),
     });
-    const res = await handler(
-      event(`${BASE}/settings`, { headers: { "sec-fetch-dest": "document", host: "probe.example.com" } }),
-    );
+  }
+
+  const navigation = (path: string) =>
+    event(path, { headers: { "sec-fetch-dest": "document", host: "probe.example.com" } });
+
+  it("redirects a navigation to the app's own sign-in page, not the origin's", async () => {
+    // `honoUpstream` strips the mount before the gate matches, so the pathname
+    // it judges is app-relative and `publicPaths` is written that way. The
+    // `Location` is not: a browser resolves it against the distribution, where
+    // `/sign-in` belongs to nobody and the app's is at `/apps/probe/sign-in`.
+    // The gate reads the mount from `STARKEEP_APP_BASE_PATH`, which is what the
+    // installer writes on the Lambda.
+    process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
+    process.env.STARKEEP_APP_BASE_PATH = BASE;
+    const res = await (await gatedNavigationApp())(navigation(`${BASE}/settings`));
+    expect(res.statusCode).toBe(302);
+    expect(res.headers["location"]).toBe(`https://probe.example.com${BASE}/sign-in`);
+  });
+
+  it("redirects to the origin root when there is no mount", async () => {
+    // An app served at its own origin. The same code path, with nothing to
+    // prefix — which is what makes the default safe to apply unconditionally.
+    process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
+    const app = new Hono();
+    app.use("*", honoOriginGate({ publicPaths: ["/sign-in"], signInPath: "/sign-in" }));
+    app.get("/settings", (c) => c.text("settings"));
+    const handler = await createWebAppHandler({
+      basePath: "",
+      requestUpstream: Promise.resolve({ handler: honoUpstream(app) }),
+    });
+    const res = await handler(navigation("/settings"));
     expect(res.statusCode).toBe(302);
     expect(res.headers["location"]).toBe("https://probe.example.com/sign-in");
+  });
+
+  it("lets an explicit basePath override the mount it reads from the environment", async () => {
+    process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
+    process.env.STARKEEP_APP_BASE_PATH = BASE;
+    const res = await (await gatedNavigationApp({ basePath: "/elsewhere" }))(
+      navigation(`${BASE}/settings`),
+    );
+    expect(res.headers["location"]).toBe("https://probe.example.com/elsewhere/sign-in");
   });
 
   it("lets a declared public path through", async () => {
