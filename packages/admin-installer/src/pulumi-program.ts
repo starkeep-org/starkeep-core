@@ -5,6 +5,7 @@
  * third-party apps can request to what the manifest schema permits.
  */
 
+import { createHash } from "node:crypto";
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import type { AppManifest } from "@starkeep/admin-manifest";
@@ -20,6 +21,53 @@ import type { ComputeContext } from "./compute-stack";
  * literal collision in a manifest is always a mistake.
  */
 const RESERVED_SUBPATHS = new Set(["data", "files", "sync", "health", "app-data"]);
+
+/**
+ * Pulumi resource name for one route of one handler.
+ *
+ * The name derives from the route key rather than the route's position in the
+ * manifest. Position-based names break on an ordinary manifest edit: inserting
+ * or reordering a `publicPaths` entry shifts every later key onto a different
+ * Pulumi resource, so Pulumi asks API Gateway to rewrite those routes in
+ * place, and API Gateway refuses with `ConflictException: Route with key ANY
+ * /apps/<app>/<path> already exists` because the neighbouring route Pulumi has
+ * not updated yet still holds the key. A key-derived name turns the same edit
+ * into a create and a delete, which never collide, and leaves every unchanged
+ * route untouched.
+ *
+ * The readable slug is lossy — `GET /a-b` and `GET /a/b` both slugify to
+ * `get-a-b` — so a short digest of the exact key follows it and keeps distinct
+ * keys on distinct resources.
+ *
+ * Changing this function renames every route resource, which the installer's
+ * pre-`up` reconciliation in compute-stack.ts handles by deleting the routes
+ * whose names no longer match before Pulumi creates the new ones.
+ */
+export function routeResourceName(handlerName: string, routeKey: string): string {
+  const slug =
+    routeKey
+      .toLowerCase()
+      .replace(/\{proxy\+\}/g, "proxy")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "root";
+  const digest = createHash("sha256").update(routeKey).digest("hex").slice(0, 8);
+  return `route-${handlerName}-${slug}-${digest}`;
+}
+
+/**
+ * Every route resource name the program will register for this manifest.
+ * The installer compares this against the names already in Pulumi state to
+ * find routes left behind by an earlier naming scheme or an earlier manifest.
+ */
+export function plannedRouteResourceNames(manifest: AppManifest): Set<string> {
+  const names = new Set<string>();
+  for (const handler of manifest.infraRequirements.compute.handlers) {
+    for (const route of resolveHandlerRoutes(handler)) {
+      names.add(routeResourceName(handler.name, route.routeKey));
+    }
+  }
+  return names;
+}
 
 /**
  * The session authorizer's id, or a refusal.
@@ -129,9 +177,7 @@ export function buildPulumiProgram(
       // the manifest gave one, else the handler's `auth`. A handler is
       // therefore no longer all-or-nothing — a public shell can sit beside a
       // JWT-gated data subtree on the same Lambda.
-      const routes = resolveHandlerRoutes(handler);
-      for (let i = 0; i < routes.length; i++) {
-        const route = routes[i]!;
+      for (const route of resolveHandlerRoutes(handler)) {
 
         // Prefix every app route under /apps/<appId>. A route key like
         // "GET /foo" becomes "GET /apps/photos/foo". The root "GET /" must
@@ -189,14 +235,15 @@ export function buildPulumiProgram(
                 }
               : { authorizerId: ctx.authorizerId, authorizationType: "JWT" };
 
-        const created = new aws.apigatewayv2.Route(`route-${handler.name}-${i}`, {
+        const resourceName = routeResourceName(handler.name, route.routeKey);
+        const created = new aws.apigatewayv2.Route(resourceName, {
           apiId: ctx.apiGatewayId,
           routeKey: prefixedRouteKey,
           target: pulumi.interpolate`integrations/${integration.id}`,
           ...authorization,
         });
 
-        outputs[`routeId:${handler.name}-${i}`] = created.id;
+        outputs[`routeId:${resourceName}`] = created.id;
       }
 
       outputs[`functionArn:${handler.name}`] = fn.arn;

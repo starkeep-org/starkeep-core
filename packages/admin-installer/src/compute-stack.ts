@@ -11,7 +11,7 @@
 import * as pulumi from "@pulumi/pulumi/automation/index.js";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import type { AwsCredentials } from "./session";
-import { buildPulumiProgram } from "./pulumi-program";
+import { buildPulumiProgram, plannedRouteResourceNames } from "./pulumi-program";
 import { retryOnAccessDenied } from "./retry-on-access-denied";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import {
@@ -50,6 +50,15 @@ async function ensurePulumiCli(): Promise<pulumi.PulumiCommand> {
     });
   }
   return pulumiCommandPromise;
+}
+
+/** One resource as it appears in an exported Pulumi deployment. */
+export interface StateResource {
+  urn: string;
+  /** Provider-side id — the API Gateway route id, the function name, etc. */
+  id?: string;
+  /** Pulumi type token, e.g. `aws:apigatewayv2/route:Route`. */
+  type?: string;
 }
 
 export interface ComputeContext {
@@ -269,6 +278,16 @@ export async function pulumiUpInline(opts: {
   awsCreds: AwsCredentials;
   /** Called after stack selection but before refresh/up, with the set of URNs currently in state. */
   preCleanupOrphans?: (inStateUrns: Set<string>) => Promise<void>;
+  /**
+   * Picks resources to delete before `up` runs, given everything currently in
+   * state. Pulumi creates before it deletes, so a resource whose Pulumi name
+   * changed while its cloud-side identity did not — an API Gateway route
+   * keyed on a path, say — would have its replacement created while the old
+   * one still holds that identity, and the provider rejects the create. Any
+   * URN returned here is destroyed first, which frees the identity and drops
+   * the resource from state in one step.
+   */
+  pruneBeforeUp?: (resources: StateResource[]) => string[];
 }): Promise<Record<string, unknown>> {
   const [passphrase, pulumiCommand] = await Promise.all([
     getPulumiPassphrase({
@@ -306,16 +325,19 @@ export async function pulumiUpInline(opts: {
 
   await stack.setConfig("aws:region", { value: opts.region });
 
+  // Both pre-`up` hooks read the same state snapshot, so export it once.
+  let stateResources: StateResource[] = [];
+  if (opts.preCleanupOrphans || opts.pruneBeforeUp) {
+    const deployment = await stack.exportStack();
+    stateResources =
+      (deployment.deployment as { resources?: StateResource[] } | undefined)?.resources ?? [];
+  }
+
   // Pre-cleanup: detect AWS resources that exist but aren't in Pulumi state
   // (left over from previously interrupted runs) and remove them so the
   // subsequent `up` can create them cleanly instead of failing on AlreadyExists.
   if (opts.preCleanupOrphans) {
-    const deployment = await stack.exportStack();
-    const resources = (
-      (deployment.deployment as { resources?: Array<{ urn: string }> } | undefined)?.resources ?? []
-    );
-    const inStateUrns = new Set(resources.map((r) => r.urn));
-    await opts.preCleanupOrphans(inStateUrns);
+    await opts.preCleanupOrphans(new Set(stateResources.map((r) => r.urn)));
   }
 
   // iam-permission-tests POC: forward pulumi's stderr to our own stderr so
@@ -327,6 +349,14 @@ export async function pulumiUpInline(opts: {
   const onError = PULUMI_VERBOSE_TRACE
     ? (line: string) => process.stderr.write(line)
     : undefined;
+
+  // Prune before refresh: a pruned resource is gone from both AWS and state
+  // by the time `up` plans its creates, so the create sees a free identity.
+  const pruneUrns = opts.pruneBeforeUp?.(stateResources) ?? [];
+  if (pruneUrns.length > 0) {
+    console.log(`Pruning ${pruneUrns.length} superseded resource(s) before update…`);
+    await stack.destroy({ target: pruneUrns, onOutput: console.log, onError });
+  }
 
   // Clear any pending operations left by a prior interrupted run before
   // attempting up. refresh is a no-op on a brand-new stack.
@@ -398,6 +428,25 @@ export async function pulumiDestroyInline(opts: {
   await stack.workspace.removeStack(opts.stackName);
 }
 
+/**
+ * URNs of route resources this stack still owns under a name the program no
+ * longer registers — a route whose path left the manifest, and every route
+ * carried over from the position-based naming this installer used before
+ * {@link routeResourceName}.
+ *
+ * Leaving one in place breaks the install outright. Pulumi would see the old
+ * resource and the new one as unrelated, create the new route first, and API
+ * Gateway would answer `ConflictException: Route with key ANY /apps/<app>/…
+ * already exists` because the old route still holds the key.
+ */
+function staleRouteUrns(manifest: AppManifest, resources: StateResource[]): string[] {
+  const planned = plannedRouteResourceNames(manifest);
+  return resources
+    .filter((r) => r.type === "aws:apigatewayv2/route:Route")
+    .filter((r) => !planned.has(r.urn.split("::").pop() ?? ""))
+    .map((r) => r.urn);
+}
+
 export async function installComputeStack(
   manifest: AppManifest,
   ctx: ComputeContext,
@@ -410,6 +459,7 @@ export async function installComputeStack(
     region: ctx.region,
     stackPrefix: ctx.stackPrefix,
     awsCreds: ctx.infraCreds,
+    pruneBeforeUp: (resources) => staleRouteUrns(manifest, resources),
   });
 
   const functionArns: string[] = [];
