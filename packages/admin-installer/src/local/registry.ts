@@ -205,6 +205,36 @@ export function insertAppRegistry(
   );
 }
 
+/**
+ * Refresh an installed app's manifest and the columns derived from it.
+ *
+ * The row's identity survives: `hmac_secret` because re-minting it would strand
+ * every signer holding the old one — the cloud verifier reads the local secret
+ * through SSM, so a new secret 401s every signed request until the mirror step
+ * runs — and `installed_at` because it records when the app arrived, not when
+ * it was last reconciled. `status` is left to `setAppStatus`.
+ */
+export function updateAppRegistryManifest(
+  db: RawDatabase,
+  appId: string,
+  manifest: AppManifest,
+): void {
+  run(
+    db,
+    k
+      .updateTable("shared_app_registry")
+      .set({
+        name: manifest.name,
+        version: manifest.version,
+        tier: manifest.tier,
+        manifest: JSON.stringify(manifest),
+        updated_at: sql`datetime('now')`,
+      })
+      .where("app_id", "=", appId)
+      .compile(),
+  );
+}
+
 export function setAppStatus(
   db: RawDatabase,
   appId: string,
