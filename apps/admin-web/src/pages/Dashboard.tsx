@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -132,11 +132,37 @@ export function DashboardPage() {
     return () => clearInterval(timer);
   }, [anyDaemonLoading]);
 
+  // Poll every 5s while the data server is known to be down, so a server
+  // started outside this page — from a terminal, or by another tab — is
+  // noticed without a reload. The daemon-start poll above already covers the
+  // starting-from-here case, so don't stack a second interval on it.
+  useEffect(() => {
+    if (localOnline !== false || anyDaemonLoading) return;
+    const timer = setInterval(() => setLocalRefreshKey((k) => k + 1), 5000);
+    return () => clearInterval(timer);
+  }, [localOnline, anyDaemonLoading]);
+
   useEffect(() => {
     if (daemonLoading["local-data-server"] && localOnline === true) {
       setDaemonLoading((l) => ({ ...l, "local-data-server": false }));
     }
   }, [localOnline]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The app list is joined with the data server's install registry, so its
+  // statuses are only as good as the server's reachability when it was built.
+  // Re-fetch on both transitions: coming up replaces unknown with real
+  // statuses, going down replaces now-unverifiable statuses with unknown.
+  // Without this the cards hold their stale answer until the operator reloads.
+  //
+  // The comparison is against the last *answered* probe, not the last render.
+  // null means "not probed yet", and treating it as a reading would fire a
+  // redundant fetch on mount, right behind the one below.
+  const wasLocalOnline = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (localOnline === null) return;
+    if (wasLocalOnline.current !== null && wasLocalOnline.current !== localOnline) refreshApps();
+    wasLocalOnline.current = localOnline;
+  }, [localOnline, refreshApps]);
 
   async function startDaemon(id: string) {
     // Defense in depth: if the data server is already reachable, refuse to
@@ -180,10 +206,13 @@ export function DashboardPage() {
     }
   }
 
-  // Fetch local server data
+  // Fetch local server data. This effect re-runs on a timer while the server is
+  // down, so it must not blank the state it is about to replace: resetting to
+  // null on every pass made the status badge and the watch summary flicker
+  // through their loading state every few seconds. Both states are initialized
+  // to null and every path below ends by setting a real value, so a stale
+  // reading is only ever shown for the length of one probe.
   useEffect(() => {
-    setLocalOnline(null);
-    setWatches(null);
     const controller = new AbortController();
 
     async function fetchLocal() {
@@ -401,6 +430,7 @@ export function DashboardPage() {
           <LocalAppsSection
             apps={localApps}
             refresh={refreshApps}
+            localOnline={localOnline}
             leading={
               <>
                 <AppCard

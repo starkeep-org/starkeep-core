@@ -10,12 +10,16 @@ import {
 } from "@/components/ui/dialog";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
-import { localDataServerUrl } from "@/lib/runtime-config";
 import type { DaemonStatus, InstallStep, LocalAppEntry } from "@/lib/app-types";
 
-export function LocalAppsSection({ apps, refresh, leading }: {
+export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
   apps: LocalAppEntry[] | null;
   refresh: () => Promise<void>;
+  // Whether the local data server is reachable, owned by the Dashboard so the
+  // Data Server card and these cards cannot disagree. Installs route through
+  // it, so the Install button stays disabled until it is online. null = not
+  // yet probed.
+  localOnline: boolean | null;
   /** Cards rendered ahead of the discovered apps — the built-in Drive. */
   leading?: ReactNode;
 }) {
@@ -29,25 +33,6 @@ export function LocalAppsSection({ apps, refresh, leading }: {
   // reflects the target state (running for "start", not-running for "stop"),
   // so the spinner survives the first poll round.
   const [pending, setPending] = useState<Record<string, "start" | "stop" | undefined>>({});
-  // Whether the local-data-server is reachable. Installs route through it, so
-  // the Install button stays disabled until its /health probe succeeds.
-  // null = not yet probed.
-  const [localOnline, setLocalOnline] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const base = await localDataServerUrl();
-        const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) });
-        if (!cancelled) setLocalOnline(res.ok);
-      } catch {
-        if (!cancelled) setLocalOnline(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [apps]);
-
   const refreshStatus = useCallback(async (appIds: string[]) => {
     const entries = await Promise.all(appIds.map(async (id) => {
       try {
@@ -203,6 +188,10 @@ export function LocalAppsSection({ apps, refresh, leading }: {
         {apps?.map((entry) => {
           const name = entry.manifest.name ?? entry.appId;
           const installed = entry.status === "active";
+          // The registry could not be read. Every action below — installing,
+          // uninstalling, reading the step ledger — needs a real answer, so the
+          // card reports the gap and offers nothing until the server is up.
+          const statusUnknown = entry.status === "unknown";
           const status = runStatus[entry.appId];
           const want = pending[entry.appId];
           const running = status?.running === true;
@@ -264,13 +253,29 @@ export function LocalAppsSection({ apps, refresh, leading }: {
                       Stopping…
                     </Badge>
                   )}
-                  {!installed && (
+                  {statusUnknown && (
+                    <Badge
+                      variant="outline"
+                      className="text-xs"
+                      title="The local data server is offline, so its install registry could not be read."
+                    >
+                      Status unknown
+                    </Badge>
+                  )}
+                  {!installed && !statusUnknown && (
                     <Badge variant="outline" className="text-xs">Not installed</Badge>
                   )}
                 </>
               }
               primary={
-                !installed ? (
+                statusUnknown ? (
+                  // No Install button here: offering one would repeat the
+                  // claim that the app is not installed, which is exactly what
+                  // we cannot know while the server is down.
+                  <p className="text-sm text-muted-foreground">
+                    Start the local data server to see this app&rsquo;s status.
+                  </p>
+                ) : !installed ? (
                   <span className="block" title={localOnline ? undefined : "Start the local data server before installing"}>
                     <Button
                       size="sm"

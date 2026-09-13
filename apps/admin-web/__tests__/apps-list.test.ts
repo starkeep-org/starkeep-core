@@ -3,9 +3,9 @@
  * local-data-server's install registry. (Plan §5, Tier 1.)
  *
  * Boot order matters: the first describe block runs with the LDS *down* (the
- * URL points at a pre-allocated but unbound port) to pin the graceful
- * not_installed fallback; the LDS is then started on that same port for the
- * status-join cases.
+ * URL points at a pre-allocated but unbound port) to pin the unknown-status
+ * fallback; the LDS is then started on that same port for the status-join
+ * cases.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdirSync } from "node:fs";
@@ -65,11 +65,17 @@ async function list(): Promise<ListedApp[]> {
 }
 
 describe("with the local-data-server down", () => {
-  it("lists every discovered app as not_installed (graceful fallback)", async () => {
+  it("reports every discovered app as unknown, not not_installed", async () => {
     const apps = await list();
     expect(apps.length).toBeGreaterThan(0);
-    for (const app of apps) expect(app.status).toBe("not_installed");
+    for (const app of apps) expect(app.status).toBe("unknown");
     expect(apps.map((a) => a.appId)).toContain("alpha-app");
+  });
+
+  it("reports the registry as unreadable", async () => {
+    const res = await GET();
+    const body = (await res.json()) as { dataServerReachable: boolean };
+    expect(body.dataServerReachable).toBe(false);
   });
 
   it("skips malformed manifests", async () => {
@@ -111,6 +117,12 @@ describe("with the local-data-server up", () => {
     const apps = await list();
     expect(apps.find((a) => a.appId === "alpha-app")?.status).toBe("active");
     expect(apps.find((a) => a.appId === "renamed-app")?.status).toBe("not_installed");
+  });
+
+  it("reports the registry as readable", async () => {
+    const res = await GET();
+    const body = (await res.json()) as { dataServerReachable: boolean };
+    expect(body.dataServerReachable).toBe(true);
   });
 
   it("does not surface registry-only apps (built-ins) that have no manifest on disk", async () => {
