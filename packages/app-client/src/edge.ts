@@ -3,8 +3,8 @@
  *
  * One function of `Request -> Response | undefined`: a refusal, or nothing to
  * say. That signature is a framework's middleware in every framework worth the
- * name — Next middleware, a Hono middleware via `honoOriginGate`, or an `if`
- * at the top of a hand-written server — so the gate itself names none of them.
+ * name — a Hono middleware via `honoOriginGate`, or an `if` at the top of a
+ * hand-written server — so the gate itself names none of them.
  *
  * Dependency-free by construction: this module imports nothing at all, because
  * it has run in an edge runtime where `node:crypto` and the AWS SDK are
@@ -88,10 +88,10 @@ export function createOriginGate(opts: AuthGateOptions): (req: Request) => Respo
     const dest = req.headers.get("sec-fetch-dest");
     const isDocument = dest === "document" || (dest === null && req.method === "GET");
     if (isDocument) {
-      // Absolute, resolved against the request: Next parses the Location of a
-      // middleware redirect with `new URL(...)` and throws ERR_INVALID_URL on a
-      // path-only value — which surfaces as a 500 on the auth path, where an
-      // outage and a refusal must not look alike.
+      // Absolute, resolved against the request. A path-only Location is legal
+      // HTTP and still the wrong thing to emit here: a caller that parses it
+      // with `new URL(...)` throws on a relative value, which surfaces as a 500
+      // on the auth path, where an outage and a refusal must not look alike.
       return new Response(null, {
         status: 302,
         headers: { Location: new URL(`${basePath}${opts.signInPath}`, url).toString() },
@@ -103,12 +103,3 @@ export function createOriginGate(opts: AuthGateOptions): (req: Request) => Respo
     });
   };
 }
-
-/**
- * The gate under its former name, kept for Next middleware call sites.
- *
- * @deprecated Use `createOriginGate`. The name said "middleware" and said
- * "Next", and the function is neither: it is one `Request -> Response |
- * undefined`, which is what let it move to Hono without a line of change.
- */
-export const createAuthGateMiddleware = createOriginGate;

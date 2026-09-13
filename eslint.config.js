@@ -28,19 +28,18 @@ export default [
      * admin-web's browser half must never import the modules that spawn
      * processes and read the filesystem.
      *
-     * The line was held by a `server-only` import, which is a marker package
-     * the framework's bundler resolves and refuses in a client graph. There is
-     * no such package in this tree — it is not in admin-web's dependencies and
-     * `vitest.config.ts` has to alias it to a stub — so a bundler that does not
-     * know the convention enforces nothing. This rule catches the edit that
-     * introduces the import; `__tests__/server-module-isolation.test.ts` walks
-     * the whole graph in CI and catches one that arrives indirectly.
+     * The line used to be held by a marker package the previous bundler
+     * resolved and refused in a client graph. Vite knows no such convention, so
+     * the rule below is the enforcement: it catches the edit that writes the
+     * import, and `__tests__/server-module-isolation.test.ts` walks the whole
+     * graph in CI to catch one that arrives indirectly.
      */
     files: [
       "apps/admin-web/src/components/**/*.{ts,tsx}",
       "apps/admin-web/src/hooks/**/*.{ts,tsx}",
-      "apps/admin-web/app/**/page.tsx",
-      "apps/admin-web/app/**/layout.tsx",
+      "apps/admin-web/src/pages/**/*.{ts,tsx}",
+      "apps/admin-web/src/App.tsx",
+      "apps/admin-web/src/main.tsx",
     ],
     languageOptions: {
       parser: tsparser,
@@ -48,9 +47,8 @@ export default [
     },
     plugins: {
       // Registered because the components carry `eslint-disable-line
-      // react-hooks/exhaustive-deps` directives written against the framework's
-      // own lint setup. Without the plugin those directives name a rule eslint
-      // does not know, which is itself an error.
+      // react-hooks/exhaustive-deps` directives. Without the plugin those
+      // directives name a rule eslint does not know, which is itself an error.
       "react-hooks": reactHooks,
     },
     rules: {

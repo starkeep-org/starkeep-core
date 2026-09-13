@@ -133,8 +133,7 @@
           "auth": "session",
           "publicPaths": [
             "/",
-            "/_next/static/*",
-            "/BUILD_ID",
+            "/_immutable/*",
             "/starkeep-runtime-config",
             "/sign-in",
             "/api/session/*"

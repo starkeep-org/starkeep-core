@@ -2,9 +2,10 @@
  * Cognito ID token verification, edge-safe.
  *
  * `crypto.subtle` and `fetch` only — no `node:crypto`, no AWS SDK. That
- * constraint is not stylistic: OpenNext runs Next middleware in an edge
- * runtime, and the middleware and the API routes must reach the same verdict
- * about the same token, which means one implementation both can load.
+ * constraint is not stylistic: the origin gate and the routes behind it must
+ * reach the same verdict about the same token, and a gate is deployable to an
+ * edge runtime where neither is available. One implementation both can load is
+ * the only way the two cannot disagree.
  *
  * Every failure path returns `null` rather than throwing. Callers branch on
  * the result; a verifier that throws turns "this token is bad" into "this

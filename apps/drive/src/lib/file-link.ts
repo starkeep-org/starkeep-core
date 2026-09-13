@@ -1,11 +1,11 @@
 /**
  * Pure, framework-free helpers that back Drive's in-browser file clickthrough.
  *
- * This module is deliberately free of `node:*` and `server-only` imports so it
- * can be shared by both the client listing page (which decides whether a row is
- * a link and where it points) and the server route (which decides what
- * Content-Type to serve the bytes under). Keeping the contract in one place
- * stops the two sides from drifting.
+ * This module is deliberately free of `node:*` imports so it can be shared by
+ * both the client listing page (which decides whether a row is a link and where
+ * it points) and the server route (which decides what Content-Type to serve the
+ * bytes under). Keeping the contract in one place stops the two sides from
+ * drifting.
  */
 
 /**

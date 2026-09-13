@@ -1,10 +1,11 @@
 /**
  * The browser entry point.
  *
- * Everything below this line runs in the browser and nothing else does, which
- * is the property `server-only` used to assert and that
- * `__tests__/server-module-isolation.test.ts` now holds: no module reachable
- * from here may touch `node:child_process` or `node:fs`.
+ * Everything below this line runs in the browser and nothing else does. A
+ * marker import used to assert that property; `eslint.config.js`'s
+ * `no-restricted-imports` rule and `__tests__/server-module-isolation.test.ts`
+ * hold it now: no module reachable from here may touch `node:child_process` or
+ * `node:fs`.
  */
 
 import { StrictMode } from "react";

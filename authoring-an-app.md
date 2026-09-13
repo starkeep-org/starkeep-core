@@ -24,6 +24,68 @@ server over HTTP and is otherwise a pure presentation/logic layer. You generally
 embed storage or run access control yourself — you make authenticated requests
 and the data server enforces the rules.
 
+## The two halves, and the platform's answer for each
+
+A Starkeep app's browser half is a **static bundle**. A Starkeep app's server
+half is a **declared set of request handlers**. The platform owns the seam
+between the two and owns nothing else about either.
+
+Each half is still the app's own choice, and the platform states a default for
+each so an author makes one fewer decision and a reviewer reads one shape:
+
+- **The browser half builds with [Vite](https://vitejs.dev).** `vite build`
+  writes an `index.html` shell plus content-hashed assets. The shell is a file
+  the platform serves from disk on both surfaces, not a response the app
+  renders.
+- **The server half is a [Hono](https://hono.dev) app.** Hono routes web
+  `Request`s and returns web `Response`s, which is the only shape the platform
+  consumes.
+
+The contract between the halves is one function of `Request -> Response`. Hono
+spells that function `app.fetch`. Two adapters consume it, and neither asks the
+app to know which surface it runs on:
+
+- **Cloud** — `createWebAppHandler` from `@starkeep/app-client/web`, given
+  `app.fetch` through `honoUpstream` from `@starkeep/app-client/hono`. See §7.
+- **Local** — `@hono/node-server`'s `serve({ fetch: app.fetch, port })`, started
+  by admin-web from the manifest's `localRun`. See §2.
+
+Four rules govern what a browser reaches, and the manifest states each one:
+
+- **`publicPaths` enumerates paths and never wildcards them.** Each entry
+  removes the gateway's authorizer from one path. An entry covering the
+  catch-all removes the authorizer from the whole app, so the schema refuses
+  such an entry outright.
+- **`staticAssetPaths` is a subset of `publicPaths`, and every entry names a
+  literal path or a file-backed prefix.** The static branch answers before the
+  app's own gate runs, which makes each entry an enforcement bypass by
+  construction. The schema enforces the subset relation.
+- **`/_immutable/*` is the reserved prefix for content-hashed output, and
+  nothing else is cached forever.** Point Vite's `assetsDir` at that prefix and
+  pass the prefix as `immutablePaths`. CloudFront caches that one prefix and no
+  other.
+- **App routes are written app-relative.** `honoUpstream` strips the
+  `/apps/<appId>` mount before Hono routes the request, so one route table
+  matches on both surfaces. Call `appBasePath()` for the two cases where a
+  browser resolves a URL itself: an absolute redirect, and a link printed into
+  HTML.
+
+### Probe, the worked example
+
+`test-apps/probe` in this repository is the smallest app that touches every
+surface the platform offers: a served shell, a sign-in flow, a signing proxy, a
+shared-record write path, a declared label vocabulary, an app-private table and
+a JWT-gated compute route. Read `src/app.ts` for the server half, `src/serve.ts`
+for the local surface and `src/static-handler.ts` for the cloud one.
+
+Probe is a fixture the platform tests itself against rather than a template to
+copy. The tier-2 and tier-3 suites install Probe, drive it and assert the
+result, so a change that breaks the pattern breaks those suites first. Being a
+fixture also makes Probe austere on purpose: Probe writes its shell as a string
+and ships no browser bundle at all, because a fixture carrying a build step
+would test the build step. Take the shape from Probe, and read Photos and Memo
+for what a real app's browser half looks like.
+
 ## The pieces, at a glance
 
 | Part | Required? | What it's for |
@@ -82,9 +144,13 @@ example and `@starkeep/admin-manifest`'s `appManifestSchema` for the full schema
   Each entry is a `key` (lowercase identifier, ≤64 chars) and a `description`
   shown to anyone browsing what your app declares. Max 64 keys per app. Any key
   not declared here is rejected at write time. See §9.
-- `localRun` — how admin-web spawns the app's dev/serve process (`command`,
+- `localRun` — how admin-web spawns the app's server process (`command`,
   `args`, optional `portFlag`). Without it, the app can't be started from the
   admin UI. With `portFlag`, admin-web allocates a free port and appends it.
+  Name the command that serves the built app, never a development server: an
+  operator starting the app from the Dashboard is running the product, and a
+  compile-on-demand server there costs seconds on every navigation and ships a
+  development build of React.
 
 **Optional fields** — `protocolMinVersion`, `requiredPermissions` /
 `optionalPermissions`, `homepage`, `author`, `license`, plus the
@@ -105,11 +171,14 @@ data server — it's decided at request time from env. Expose a runtime-config
 route so the client can branch:
 
 ```ts
-// app/starkeep-runtime-config/route.ts
+// src/server-app.ts
 import { createRuntimeConfigHandler } from "@starkeep/app-client";
-export const dynamic = "force-dynamic";   // read env per-request, not at build
-export const GET = createRuntimeConfigHandler();
+const runtimeConfig = createRuntimeConfigHandler();
+app.get("/starkeep-runtime-config", () => runtimeConfig());
 ```
+
+The handler reads the environment on every call, so a Node server gives the
+per-request behavior by construction and needs no build-time opt-out.
 
 `getRuntimeConfig()` reads the `STARKEEP_*` env block (API Gateway URL, Cognito
 pool ids, S3 bucket/region). A local-only build sees these undefined and falls
@@ -122,13 +191,15 @@ The browser must never hold the app's HMAC secret. Add a server-side proxy route
 that signs and forwards:
 
 ```ts
-// app/api/local-data/[...path]/route.ts
-import { createNextProxyHandler } from "@starkeep/app-client";
-const handler = createNextProxyHandler({
-  appId: "photos",
-  endUserAuth: { auth: "session", verifySession },
+// src/routes/local-data.ts
+import { createNextProxyHandler, sessionAuth } from "@starkeep/app-client";
+export const proxy = createNextProxyHandler({ appId: "photos", endUserAuth: sessionAuth() });
+
+// src/server-app.ts — one mount, every verb.
+app.all("/api/local-data/*", (c) => {
+  const path = c.req.path.slice("/api/local-data/".length).split("/").filter(Boolean);
+  return proxy(c.req.raw, { params: Promise.resolve({ path }) });
 });
-export { handler as GET, handler as POST, handler as PUT, handler as PATCH, handler as DELETE };
 ```
 
 `@starkeep/app-client` loads the HMAC secret from
@@ -403,9 +474,11 @@ env in:  STARKEEP_APP_BASE_PATH = /apps/<appId>   (route prefix to bake in)
 out:     dist.zip at STARKEEP_BUNDLE_OUT
 ```
 
-See `infra/build-bundle.ts` for the contract and a full OpenNext + sharp example.
-Knowledge of your framework, native deps, and asset layout lives entirely in this
-script — the platform only ever sees a `dist.zip`.
+See `photos/infra/build-bundle.ts` for the contract and a full worked example:
+`vite build` for the browser half, `esbuild` for the Lambda entries, and a
+platform-matched `sharp` binary staged by hand. Knowledge of your build, your
+native deps and your asset layout lives entirely in this script — the platform
+only ever sees a `dist.zip`.
 
 **Your handler must load its module graph during Lambda's INIT phase.** INIT
 runs at elevated CPU, is not billed, and has a budget separate from the
@@ -440,11 +513,12 @@ it consumes more than four fifths.
 
 #### The web adapter, if your app serves a browser
 
-Everything a browser-facing shell needs in front of its framework is the same
+Everything a browser-facing shell needs in front of its server half is the same
 for every app, so the platform provides it:
 
 ```js
 import { createWebAppHandler } from "@starkeep/app-client/web";
+import { honoUpstream } from "@starkeep/app-client/hono";
 import manifest from "./starkeep.manifest.json" with { type: "json" };
 
 const shell = manifest.infraRequirements.compute.handlers.find((h) => h.name === "static");
@@ -453,7 +527,9 @@ export const handler = await createWebAppHandler({
   basePath: process.env.STARKEEP_APP_BASE_PATH,
   assetsDir: new URL("./assets/", import.meta.url),
   staticPaths: shell.staticAssetPaths,
-  upstream: import("./app/index.mjs"),
+  immutablePaths: ["/_immutable/*"],
+  shellPaths: ["/", "/browse", "/settings"],
+  requestUpstream: import("./app.js").then((m) => ({ handler: honoUpstream(m.app) })),
 });
 ```
 
@@ -466,20 +542,24 @@ answering `immutable` for content-addressed assets and `must-revalidate` for
 everything else. It composes with `createLambdaEntry`, so adopting it gets you
 the INIT guarantee without having to know the invariant exists.
 
-Pass `requestUpstream` instead of `upstream` when your app is written against
-web `Request`/`Response` rather than against Lambda events; the adapter then
-hands your handler the request and the app-relative path. A Hono app is wrapped
-in `honoUpstream` from `@starkeep/app-client/hono`, which rewrites the request's
-URL to that path — so **your routes never name the mount**, and the same route
-table matches locally and under `/apps/<appId>` in the cloud. When you need the
-origin-facing prefix, to build an absolute redirect or print a link, call
-`appBasePath()`; nothing derives it from a request.
+`requestUpstream` hands your handler a web `Request` and the app-relative path.
+`honoUpstream` rewrites the request's URL to that path before Hono routes it, so
+**your routes never name the mount**, and one route table matches locally and
+under `/apps/<appId>` in the cloud. When you need the origin-facing prefix, to
+build an absolute redirect or print a link, call `appBasePath()`; nothing
+derives the prefix from a request. Pass `upstream` instead of `requestUpstream`
+only for a server half that emits a Lambda handler and cannot speak `Request`;
+no Starkeep app does today.
 
 `/_immutable/*` is the platform's reserved prefix for content-addressed build
-output. Everything under it is cacheable forever, which is what earns it
-CloudFront's `CachingOptimized` behavior while the rest of your app gets
-`must-revalidate`. Point your bundler's asset directory at it and name it in
-`immutablePaths`.
+output. Everything under that prefix is cacheable forever, which is what earns
+it CloudFront's `CachingOptimized` behavior while the rest of your app gets
+`must-revalidate`. Set Vite's `build.assetsDir` to `_immutable` and pass the
+prefix as `immutablePaths`.
+
+`immutablePaths` is required and has no default. A default would decide your
+cache headers for you, and a path cached forever by mistake stays wrong at the
+edge until its TTL expires. Pass `[]` for a build that hashes nothing.
 
 An app whose browser half is a bundler-built SPA also passes `shellPaths` — the
 client routes the router owns — and the adapter answers each of them with
@@ -501,9 +581,10 @@ not already cover, so a path your bundle serves from disk can never be one the
 manifest failed to declare — or, equivalently, one the gateway refuses while
 your bundle stands ready to serve it.
 
-What is still yours: which framework, the build command that produces its
-output, native dependencies, any handler beyond the shell, and which of your
-public paths are files on disk rather than routes your server answers.
+What is still yours: which bundler and server library (the platform's answers
+are Vite and Hono, and neither is enforced), the build command that produces
+your output, native dependencies, any handler beyond the shell, and which of
+your public paths are files on disk rather than routes your server answers.
 
 ### 8. Gate the UI behind sign-in (cloud target only)
 

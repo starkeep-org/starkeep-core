@@ -6,7 +6,7 @@
  * whose default nobody has checked, and the default is the whole design.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createAuthGateMiddleware, createOriginGate } from "../src/edge.js";
+import { createOriginGate } from "../src/edge.js";
 
 const DEFAULT_PUBLIC = ["/", "/_immutable/*", "/starkeep-runtime-config"];
 const savedMode = process.env.STARKEEP_APP_CLIENT_MODE;
@@ -101,14 +101,5 @@ describe("createOriginGate", () => {
     expect(rootGate(req("/decks", { dest: "document" }))?.headers.get("location")).toBe(
       "https://cdn.example.com/sign-in",
     );
-  });
-});
-
-describe("the former name", () => {
-  it("is the same function, so a Next middleware call site keeps working", () => {
-    // Memo and Photos import `createAuthGateMiddleware` from the published
-    // package and move off Next in later phases. The alias is what lets the
-    // rename land here without a coordinated release.
-    expect(createAuthGateMiddleware).toBe(createOriginGate);
   });
 });

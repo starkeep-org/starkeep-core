@@ -148,14 +148,16 @@ describe("immutable app assets", () => {
     expect(behavior!.targetOriginId).toBe("api-gateway");
   });
 
-  it("still caches the prefix Next emits, so a half-migrated tree is whole", () => {
-    // Ordered behaviors are a list, so both prefixes can be named at once. An
-    // app that has not yet left Next behind keeps its assets cacheable, and
-    // this entry goes when the last one has.
-    const behavior = behaviorFor("/apps/*/_next/static/*");
-    expect(behavior).toBeDefined();
-    expect(behavior!.cachePolicyId).toBe("cache:Managed-CachingOptimized");
-    expect(behavior!.targetOriginId).toBe("api-gateway");
+  it("caches no second prefix — /_immutable/* is the only forever-cached one", () => {
+    // The distribution used to name `/apps/*/_next/static/*` beside it while
+    // apps still built with Next. A behavior that caches a path the build does
+    // not content-hash is unrecoverable at the edge until the TTL expires, so
+    // the platform offers exactly one prefix and an app opts in by emitting
+    // into it.
+    const appBehaviors = orderedBehaviors
+      .map((b) => b.pathPattern)
+      .filter((p) => p.startsWith("/apps/"));
+    expect(appBehaviors).toEqual(["/apps/*/_immutable/*"]);
   });
 });
 

@@ -8,6 +8,27 @@ local-data-server. Owns three things so apps don't have to reimplement them:
 3. Same-origin proxying for browser-driven apps so the HMAC secret stays
    server-side.
 
+## 0.8.0
+
+Retires the migration aids the four apps needed while they still built with
+Next.js. Two breaking changes, both a compile error rather than a behavior
+change, and neither reached by any app in this codebase.
+
+- **`immutablePaths` is required on `createWebAppHandler`.** The old default
+  named `/_immutable/*` and `/_next/static/*` together so a half-migrated tree
+  cached correctly on every app at once. No app emits the second prefix now, and
+  a default that decides an app's cache headers is the wrong shape regardless: a
+  path cached forever by mistake stays wrong at the edge until its TTL expires.
+  Pass `["/_immutable/*"]`, or `[]` for a build that hashes nothing.
+- **`createAuthGateMiddleware` is gone.** `createOriginGate` is the same
+  function under the name it should always have had. The alias existed for Next
+  `middleware.ts` call sites, and there are none.
+- **`/_immutable/*` is the only forever-cached prefix.** The platform's
+  CloudFront distribution no longer carries an ordered cache behavior for
+  `/apps/*/_next/static/*`. A cloud install therefore needs its app redeployed
+  onto a `/_immutable/*` build before the distribution is redeployed, or that
+  app's assets stop being cached at the edge.
+
 ## 0.7.1
 
 One fix, found by driving a real app's packaged Lambda: **`honoOriginGate`
@@ -108,10 +129,11 @@ import {
   the two HMAC headers. Body may be `string | Buffer | Uint8Array | undefined`.
 - **`signedFetch(creds, path, init?): Promise<Response>`** — `fetch` wrapper
   that adds the headers and resolves `path` against `creds.dataServerUrl`.
-- **`createNextProxyHandler({ appId, endUserAuth })`** — returns a Next.js
-  route handler. Mount at `app/api/local-data/[...path]/route.ts` and re-export
-  it for every verb to give the browser a same-origin URL with HMAC added
-  server-side.
+- **`createNextProxyHandler({ appId, endUserAuth })`** — returns a handler of
+  `(Request, { params }) => Promise<Response>`. Mount it on one catch-all route
+  for every verb (`app.all("/api/local-data/*", …)`) to give the browser a
+  same-origin URL with HMAC added server-side. The name is historical; the
+  handler is framework-free.
 
   `endUserAuth` is **required**, and is either
   `{ auth: "session", verifySession }` or
@@ -127,10 +149,10 @@ import {
   wires in this package's own cookie-session verifier. The explicit
   `verifySession` form stays for an unusual verifier; every app in this
   codebase wants what `sessionAuth()` returns.
-- **`createRuntimeConfigHandler()`** — returns a Next.js GET handler that
-  serves the cloud-config env vars (`STARKEEP_API_GATEWAY_URL`,
-  `STARKEEP_USER_POOL_ID`, etc.) as JSON. Mount at any route and add
-  `export const dynamic = "force-dynamic"` so env is read at request time.
+- **`createRuntimeConfigHandler()`** — returns a `() => Response` that serves
+  the cloud-config env vars (`STARKEEP_API_GATEWAY_URL`,
+  `STARKEEP_USER_POOL_ID`, etc.) as JSON. Mount it on any GET route. It reads
+  the environment on every call, so a Node server needs no build-time opt-out.
 
 ## The server half: Hono
 
@@ -199,8 +221,7 @@ Three entry points:
   refused, so a route added later is gated until someone says otherwise. Pass
   `publicPaths` from the manifest itself, never as a second hand-maintained
   copy. Dependency-free, so it mounts anywhere: `honoOriginGate` wraps it as
-  Hono middleware, and `createAuthGateMiddleware` is the old name kept for Next
-  `middleware.ts` call sites. The gate is a cloud gate — its first line returns
+  Hono middleware. The gate is a cloud gate — its first line returns
   `undefined` unless `STARKEEP_APP_CLIENT_MODE` is `cloud`.
 - **`@starkeep/app-client/auth`** — `createSessionRoutes({ appId })`, mounted
   at `app/api/session/[[...action]]/route.ts`. It serves `sign-in`,
@@ -219,5 +240,5 @@ take.
 This package does **not** depend on `@aws-sdk/client-cognito-identity-provider`
 and must not grow that dependency. `InitiateAuth` and `RespondToAuthChallenge`
 are unauthenticated operations that need no SigV4, so they are a plain `fetch` —
-which is also what keeps the verifier loadable in the edge runtime that
-OpenNext runs middleware in.
+which is also what keeps the verifier loadable in an edge runtime, where the
+origin gate can be deployed.

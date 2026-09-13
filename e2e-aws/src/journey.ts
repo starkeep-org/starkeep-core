@@ -1217,20 +1217,15 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // the edge caches them: after a priming fetch a later fetch reports
         // `x-cache: Hit`.
         //
-        // Two prefixes, because this suite runs against whichever app it is
-        // pointed at and the two halves of the framework migration spell it
-        // differently. `_immutable` is the platform's reserved prefix for
-        // content-addressed build output; `_next/static` is what an app that
-        // still builds with Next emits. The CloudFront distribution names both
-        // for the same reason, and this alternation narrows to `_immutable`
-        // when the last app has moved.
-        const assetPattern = new RegExp(
-          `/apps/${app.appId}/(?:_immutable|_next/static)/[^"'\\\\]+`,
-        );
+        // One prefix. `/_immutable/` is the platform's reserved name for
+        // content-addressed build output and the only path the distribution
+        // caches forever, so a shell that references its bundle from anywhere
+        // else is a build that will not cache — which is what this asserts.
+        const assetPattern = new RegExp(`/apps/${app.appId}/_immutable/[^"'\\\\]+`);
         const match = html.match(assetPattern);
         expect(
           match,
-          "the app shell should reference an immutable asset under /_immutable or /_next/static",
+          "the app shell should reference an immutable asset under /_immutable",
         ).toBeTruthy();
         const assetUrl = `${base}${match![0]}`;
 
