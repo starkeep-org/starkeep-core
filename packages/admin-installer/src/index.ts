@@ -63,6 +63,7 @@ export {
   listAppRegistry,
   sizeClassKeysByApp,
   appRegistryRow,
+  updateAppRegistryManifest,
   listInstallSteps,
 } from "./local/registry";
 export type { RegisteredApp, InstallStepRow } from "./local/registry";

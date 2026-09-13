@@ -158,3 +158,166 @@ describe("installLocal — app-syncable schema", () => {
     expect(due?.type.toUpperCase()).toBe("TEXT");
   });
 });
+
+/**
+ * Installing over an installed app, which is the only route a manifest change
+ * has to reach one.
+ *
+ * `installLocal` used to return early on `status === "active"`, so a new column
+ * type, a new index, a new label key or a new table was applied at first
+ * install and never again. The registry rows for Memo and Photos drifted eight
+ * days behind their manifests that way, and the only action that *would* have
+ * applied them — Uninstall — drops the app's syncable tables.
+ */
+describe("reapplying an install upgrades it", () => {
+  /** `MANIFEST` a version later: a new index, a new column, a new table. */
+  const UPGRADED = {
+    ...MANIFEST,
+    version: "1.1.0",
+    name: "Memo Renamed",
+    infraRequirements: {
+      appSpecificSyncable: {
+        files: false,
+        tables: [
+          {
+            name: "card_state",
+            columns: [
+              { name: "id", type: "text", primaryKey: true, notNull: true },
+              { name: "deck_id", type: "text" },
+              { name: "due", type: "timestamp" },
+              { name: "reps", type: "integer" },
+            ],
+            indexes: [{ columns: ["deck_id", "due"] }, { columns: ["deck_id", "reps"] }],
+          },
+          {
+            name: "review_log",
+            columns: [{ name: "id", type: "text", primaryKey: true, notNull: true }],
+          },
+        ],
+      },
+    },
+  };
+
+  function reapply(db: unknown, manifest: unknown = UPGRADED) {
+    installLocal(db as never, manifest as never);
+    return db as DatabaseSync;
+  }
+
+  function rowOf(db: DatabaseSync, appId = "memo") {
+    return db
+      .prepare(`SELECT * FROM shared_app_registry WHERE app_id = ?`)
+      .get(appId) as Record<string, string>;
+  }
+
+  it("refreshes the stored manifest, which nothing else can do", () => {
+    const db = install() as unknown as DatabaseSync;
+    expect(JSON.parse(rowOf(db).manifest!).version).toBe("1.0.0");
+
+    reapply(db);
+
+    const row = rowOf(db);
+    expect(row.version).toBe("1.1.0");
+    expect(row.name).toBe("Memo Renamed");
+    expect(JSON.parse(row.manifest!).version).toBe("1.1.0");
+  });
+
+  it("keeps the HMAC secret, so every signer holding it stays valid", () => {
+    const db = install() as unknown as DatabaseSync;
+    const before = rowOf(db).hmac_secret;
+
+    const result = installLocal(db as never, UPGRADED as never);
+
+    expect(rowOf(db).hmac_secret).toBe(before);
+    // And hands it back, so a caller rewiring the app's identity gets the
+    // secret the data server will actually verify against.
+    expect(result.hmacSecret).toBe(before);
+  });
+
+  it("records when the app arrived, not when it was last reconciled", () => {
+    const db = install() as unknown as DatabaseSync;
+    const before = rowOf(db).installed_at;
+    reapply(db);
+    expect(rowOf(db).installed_at).toBe(before);
+  });
+
+  it("adds a newly declared index and a newly declared table", () => {
+    const db = install() as unknown as DatabaseSync;
+    const cardState = appSyncableTableName("memo", "card_state");
+
+    const indexesBefore = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?`)
+      .all(cardState) as Array<{ name: string }>;
+    expect(indexesBefore.map((i) => i.name)).not.toContain(
+      `idx_${cardState}_deck_id_reps`,
+    );
+
+    reapply(db);
+
+    const indexesAfter = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?`)
+      .all(cardState) as Array<{ name: string }>;
+    expect(indexesAfter.map((i) => i.name)).toContain(`idx_${cardState}_deck_id_reps`);
+
+    const tables = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .all(appSyncableTableName("memo", "review_log")) as Array<{ name: string }>;
+    expect(tables).toHaveLength(1);
+  });
+
+  it("rewrites the namespace row the query parser validates against", () => {
+    const db = install() as unknown as DatabaseSync;
+    reapply(db);
+
+    const ns = getAppSyncableNamespace(db as never, "memo");
+    expect(ns?.tableNames).toContain("review_log");
+    const cardState = ns?.tables.find((t) => t.name === "card_state");
+    expect(cardState?.columns?.find((c) => c.name === "due")?.type).toBe("timestamp");
+  });
+
+  it("leaves every existing row alone", () => {
+    const db = install() as unknown as DatabaseSync;
+    const table = appSyncableTableName("memo", "card_state");
+    db.prepare(
+      `INSERT INTO ${table} (id, deck_id, due, reps, updated_at, node_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run("card-1", "deck-1", "2026-09-13T00:00:00Z", 3, "2026-09-13T00:00:00Z", "node-1");
+
+    reapply(db);
+
+    const rows = db.prepare(`SELECT id, deck_id, reps FROM ${table}`).all() as Array<{
+      id: string;
+      deck_id: string;
+      reps: number;
+    }>;
+    expect(rows).toEqual([{ id: "card-1", deck_id: "deck-1", reps: 3 }]);
+  });
+
+  it("is not a migration: a changed column type does not move", () => {
+    const db = install() as unknown as DatabaseSync;
+    // `reps` goes integer → text. Both installers create `IF NOT EXISTS`, so
+    // the physical column keeps the type it was made with. An upgrade that
+    // reported this as applied would be the failure the feature introduces.
+    reapply(db, {
+      ...UPGRADED,
+      infraRequirements: {
+        appSpecificSyncable: {
+          files: false,
+          tables: [
+            {
+              name: "card_state",
+              columns: [
+                { name: "id", type: "text", primaryKey: true, notNull: true },
+                { name: "reps", type: "text" },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const columns = db
+      .prepare(`SELECT name, type FROM pragma_table_info(?)`)
+      .all(appSyncableTableName("memo", "card_state")) as Array<{ name: string; type: string }>;
+    expect(columns.find((c) => c.name === "reps")?.type.toUpperCase()).toBe("INTEGER");
+  });
+});

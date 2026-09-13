@@ -17,6 +17,7 @@ import {
   insertAccessGrants,
   insertAppLabelKeys,
   insertAppRegistry,
+  updateAppRegistryManifest,
   recordStep,
   setAppStatus,
   type Operation,
@@ -64,36 +65,86 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
   const appId = manifest.id;
 
   const existing = appRegistryRow(db, appId);
-  if (existing && existing.status === "active") {
-    // Already installed — return the existing secret so the caller can rewire
-    // the app's identity without a reinstall.
-    return { appId, hmacSecret: existing.hmacSecret };
-  }
-
+  // An already-active app falls through rather than returning early, so that
+  // installing over an install *reapplies the manifest* — which is the only
+  // route a manifest change has to an installed app. Every schema step below
+  // carries `alwaysRun` and every one is idempotent, so the reapply is an
+  // upgrade: it adds what the manifest now declares and leaves every row alone.
+  //
+  // What it is not is a migration. Both `createSyncableTable` and its DSQL twin
+  // create `IF NOT EXISTS`, so a column whose *declared* type changed keeps its
+  // physical type. On SQLite that is usually invisible — `boolean` and
+  // `integer` are both INTEGER, `timestamp` and `text` are both TEXT — but a
+  // change that crosses storage classes still needs a drop, and callers must
+  // not report one as applied.
   const done = getCompletedSteps(db, appId, "install");
   const hmacSecret = existing?.hmacSecret ?? mintHmacSecret();
 
-  runStep(db, appId, "install", "create_app_registry_row", done, () => {
-    if (!existing) {
-      insertAppRegistry(db, appId, manifest, hmacSecret);
-    }
-  });
+  const alwaysRun = { alwaysRun: true } as const;
 
-  runStep(db, appId, "install", "create_access_grants", done, () => {
-    insertAccessGrants(db, appId, manifest.infraRequirements.fileAccess);
-  });
+  runStep(
+    db,
+    appId,
+    "install",
+    "create_app_registry_row",
+    done,
+    () => {
+      if (existing) {
+        // The row stays; its manifest is refreshed. `hmac_secret`,
+        // `installed_at` and `status` are preserved — re-minting the secret
+        // would strand every signer holding the old one, and the cloud
+        // verifier with it.
+        updateAppRegistryManifest(db, appId, manifest);
+      } else {
+        insertAppRegistry(db, appId, manifest, hmacSecret);
+      }
+    },
+    alwaysRun,
+  );
 
-  runStep(db, appId, "install", "register_label_keys", done, () => {
-    insertAppLabelKeys(db, appId, manifest.infraRequirements.labelKeys);
-  });
+  runStep(
+    db,
+    appId,
+    "install",
+    "create_access_grants",
+    done,
+    () => {
+      // Replaces the set rather than adding to it, so an upgrade narrows access
+      // the moment the manifest does. Correct, and the same thing a fresh
+      // install would do — but it is a behaviour change to an installed app and
+      // belongs in a release note rather than in a surprise.
+      insertAccessGrants(db, appId, manifest.infraRequirements.fileAccess);
+    },
+    alwaysRun,
+  );
+
+  runStep(
+    db,
+    appId,
+    "install",
+    "register_label_keys",
+    done,
+    () => {
+      insertAppLabelKeys(db, appId, manifest.infraRequirements.labelKeys);
+    },
+    alwaysRun,
+  );
 
   const syncable = manifest.infraRequirements.appSpecificSyncable;
-  runStep(db, appId, "install", "create_syncable_tables", done, () => {
-    createAppSyncableTables(db, appId, syncable.tables);
-    if (syncable.files) {
-      createReservedFileRecordsTable(db, appId);
-    }
-  });
+  runStep(
+    db,
+    appId,
+    "install",
+    "create_syncable_tables",
+    done,
+    () => {
+      createAppSyncableTables(db, appId, syncable.tables);
+      if (syncable.files) {
+        createReservedFileRecordsTable(db, appId);
+      }
+    },
+    alwaysRun,
+  );
 
   runStep(db, appId, "install", "register_syncable_namespace", done, () => {
     // Column types travel with the registry row for the same reason they do on
@@ -104,11 +155,11 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
       ? [...declaredTables, FILE_RECORDS_TABLE_INFO]
       : declaredTables;
     upsertAppSyncableNamespace(db, appId, tables, syncable.files);
-  });
+  }, alwaysRun);
 
   runStep(db, appId, "install", "mark_active", done, () => {
     setAppStatus(db, appId, "active");
-  });
+  }, alwaysRun);
 
   return { appId, hmacSecret };
 }
@@ -202,8 +253,20 @@ function runStep(
   step: string,
   done: Set<string>,
   fn: () => void,
+  opts?: { alwaysRun?: boolean },
 ): void {
-  if (done.has(step)) return;
+  // Most steps are skipped once recorded "done", so a resumed install does not
+  // repeat completed work. A step flagged `alwaysRun` reconciles every time
+  // instead — the same option the cloud orchestrator's `runStep` carries, and
+  // for the same reason: the desired state is the manifest's, and a completed
+  // record is not evidence that the manifest has not changed since.
+  //
+  // Every step marked with it is idempotent and non-destructive by
+  // construction: `CREATE TABLE`/`CREATE INDEX IF NOT EXISTS`, replaced grants,
+  // upserted label keys and namespace, and a registry row whose secret is
+  // preserved. That is what makes reapplying an install an upgrade rather than
+  // a reinstall.
+  if (!opts?.alwaysRun && done.has(step)) return;
   recordStep(db, appId, operation, step, "pending");
   try {
     fn();
