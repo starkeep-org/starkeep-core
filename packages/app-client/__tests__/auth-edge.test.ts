@@ -60,8 +60,9 @@ describe("createOriginGate", () => {
 
   it("redirects a document request to the app's own sign-in page", () => {
     const res = gate(req("/apps/memo/decks", { dest: "document" }));
-    // Absolute, because Next parses this with `new URL(...)` and a path-only
-    // value throws — a 500 where a 302 was meant.
+    // Absolute, because the edge runtimes this gate mounts in parse `Location`
+    // with `new URL(...)`, where a path-only value throws — a 500 where a 302
+    // was meant.
     expect(res?.headers.get("location")).toBe("https://cdn.example.com/apps/memo/sign-in");
   });
 

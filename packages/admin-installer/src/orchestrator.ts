@@ -6,7 +6,7 @@
  * (done or failed).
  *
  * This runs in a local pnpm CLI subprocess that admin-web spawns from its
- * Next.js API routes (see apps/admin-web/app/api/.../install/route.ts). The
+ * install routes (see apps/admin-web/src/routes/apps-install.ts). The
  * caller passes credentials it obtained by signing the operator in to Cognito
  * and assuming the admin-app role in the operator's AWS account; the manager
  * role is assumed from there as the first hop of the role chain.
