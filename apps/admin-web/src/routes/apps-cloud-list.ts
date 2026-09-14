@@ -14,7 +14,7 @@
  *
  * The route inlines the DSQL connection rather than importing from
  * @starkeep/admin-installer because that package transitively pulls Pulumi,
- * which OOMs the dev bundle (see next.config.ts).
+ * which OOMs the dev bundle.
  */
 
 import { existsSync, readFileSync } from "node:fs";

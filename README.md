@@ -64,7 +64,7 @@ The admin app is the command center, allowing you to install and start other app
 pnpm --filter admin-web dev
 ```
 
-The admin app is meant to be opened from the same machine (`http://localhost:3000`). If you want to reach it from another device on your LAN, Next.js blocks cross-origin access to the dev server by default — set `STARKEEP_ADMIN_DEV_ORIGINS` (comma-separated hostnames/IPs as the other device sees this host, e.g. `STARKEEP_ADMIN_DEV_ORIGINS=192.168.1.51`) in the repo-root `.env` and restart.
+The admin app is meant to be opened from the same machine (`http://localhost:3000`). If you want to reach it from another device on your LAN, Vite's dev server rejects requests carrying a Host it was not told to expect — set `STARKEEP_ADMIN_DEV_ORIGINS` (comma-separated hostnames/IPs as the other device sees this host, e.g. `STARKEEP_ADMIN_DEV_ORIGINS=192.168.1.51`) in the repo-root `.env` and restart.
 
 ### 3. Start the local data-server
 

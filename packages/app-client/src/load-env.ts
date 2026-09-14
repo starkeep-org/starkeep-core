@@ -16,7 +16,7 @@ import dotenv from "dotenv";
  *
  * The single repo-root file is the source of truth all consumers load — the
  * local-data-server, the tsx CLIs, the shell scripts (via `scripts/load-env.sh`),
- * and admin-web (via `next.config.ts`).
+ * and admin-web (via its Vite config).
  */
 export function loadStarkeepEnv(root: string = resolveEnvRoot()): void {
   // `.env.local` first so it wins over `.env`; `override: false` keeps any

@@ -25,9 +25,10 @@ export function getRuntimeConfig(): RuntimeConfig {
   };
 }
 
-// Mount as the body of a Next route segment (`export const GET = createRuntimeConfigHandler()`).
-// The caller's route file must also `export const dynamic = "force-dynamic"`
-// so Next reads env at request time rather than baking it into the build.
+// Mount as a GET route (`app.get("/api/runtime-config", createRuntimeConfigHandler())`
+// under Hono). The handler reads `process.env` on every call, which is the
+// point: an installed app's Lambda gets its pool and bucket ids from the
+// environment the installer set, so nothing here may be baked into the build.
 export function createRuntimeConfigHandler(): () => Response {
   return () => Response.json(getRuntimeConfig());
 }

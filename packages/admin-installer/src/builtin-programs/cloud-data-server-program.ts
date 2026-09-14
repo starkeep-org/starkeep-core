@@ -737,7 +737,7 @@ export function buildCloudDataServerProgram(
     // CloudFront distribution (platform-owned) — Part A: app static assets
     //
     // Puts an edge cache in front of the shared API Gateway so each cloud app's
-    // Next.js JS/CSS/HTML (served under /apps/{appId}/*) is cached at the edge
+    // JS/CSS/HTML (served under /apps/{appId}/*) is cached at the edge
     // instead of costing a Lambda invocation per request. Lives in this stack
     // so `pulumi destroy` tears it down (no teardown-bootstrap.sh change).
     //

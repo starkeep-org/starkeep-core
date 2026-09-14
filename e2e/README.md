@@ -5,7 +5,7 @@ orchestration harness it runs on. Run with `pnpm test:e2e` (repo root or here);
 it is deliberately not part of the default `pnpm test`.
 
 `global-setup.ts` boots one real platform stack for the whole run — a
-local-data-server child process (via `@starkeep/testkit`) and `next dev`
+local-data-server child process (via `@starkeep/testkit`) and `tsx src/server.ts`
 instances of admin-web and drive on ephemeral ports, isolated in throwaway temp
 dirs — and tears it all down afterwards. The app under test is *not* booted by
 the harness: the specs install it through the real admin-web consent flow and
@@ -27,9 +27,6 @@ exported from `@starkeep/e2e` so they can consume this harness to do it.
 ## Preconditions
 
 - One-time: `pnpm exec playwright install chromium`.
-- No `next dev` for admin-web or drive may already be running: Next 16 allows a
-  single dev server per app directory, so a leftover one makes the daemon-start
-  flow fail with "Another next dev server is already running".
 
 There is no sibling-checkout precondition. This suite runs against nothing but
 this repository.

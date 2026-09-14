@@ -5,10 +5,10 @@ manifest, learn the manifest schema by trial and error against the validator,
 and reproduce the credentials/proxy setup from scratch (even though
 `@starkeep/app-client` now owns the runtime pieces). Two viable shapes:
 
-- **Light: `starkeep-apps/_template/` directory.** A copy-paste-ready Next.js
-  app skeleton with a stub `starkeep.manifest.json` (sample `fileAccess` +
-  `appSpecificSyncable` entries), `app/api/local-data/[...path]/route.ts`
-  wired up via `createNextProxyHandler`, and a README walking through the
+- **Light: `starkeep-apps/_template/` directory.** A copy-paste-ready Vite +
+  Hono app skeleton with a stub `starkeep.manifest.json` (sample `fileAccess` +
+  `appSpecificSyncable` entries), a `src/routes/local-data.ts`
+  wired up via `createDataProxyHandler`, and a README walking through the
   fill-in points. 6–8 files; light surface to maintain.
 - **Heavy: `pnpm create starkeep-app` generator.** Interactive prompts driven
   by the manifest's Zod schema (`packages/admin-manifest/src/schema.ts`),
@@ -24,3 +24,11 @@ Surfaced during processing of doc id 21 (Developing a local app for Starkeep
 Revisit when: a third local app is being started (Photos + one more is not
 yet enough to justify the template-vs-app-copy trade-off), or someone wants
 to remove the "read the Photos manifest first" step from onboarding.
+
+## Update (2026-09-13)
+
+The migration off Next.js (`plan-nextjs-to-vite-migration-2026-09-12.md`)
+changes what a template would copy, and gives it a source. The reference to
+copy is now `starkeep-core/test-apps/probe`, and the written contract is
+`starkeep-core/authoring-an-app.md`. The premise of this todo survives: neither
+is a scaffolder, and a developer still assembles the pieces by hand.

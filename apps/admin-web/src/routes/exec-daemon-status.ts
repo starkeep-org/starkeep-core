@@ -62,7 +62,8 @@ export async function GET(req: Request) {
     : null;
 
   // For external daemons with a known port, prefer port-based liveness check —
-  // the stored PID is pnpm's launcher process which may exit once Next.js takes over.
+  // the stored PID is pnpm's launcher process which may exit once the app's own
+  // server takes over.
   const running = meta?.port
     ? await isPortBound(meta.port)
     : isAlive(pid);
