@@ -26,7 +26,7 @@
     "@starkeep/aws-bootstrap": "workspace:*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "hono": "^4.12.30",
+    "hono": "^4.13.5",
     "kysely": "^0.28.17",
     "lucide-react": "^1.14.0",
     "pg": "^8.0.0",
