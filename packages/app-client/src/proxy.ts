@@ -31,7 +31,8 @@ const NO_BODY_METHODS = new Set(["GET", "HEAD"]);
  * Framework-agnostic proxy. Given a normalized request, signs it with the
  * app's HMAC secret and forwards to the local-data-server. The caller adapts
  * its framework's request/response shape to {@link ProxyRequest} /
- * {@link ProxyResponse}. (See `nextProxyHandler` for the Next.js adapter.)
+ * {@link ProxyResponse}. (See {@link createDataProxyHandler} for the adapter
+ * every browser-driven app mounts.)
  */
 export async function proxyToDataServer(
   creds: AppCredentials,

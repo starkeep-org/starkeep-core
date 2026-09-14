@@ -7,7 +7,7 @@
  * is good for an hour and is itself `HttpOnly`.
  */
 import { getRuntimeConfig } from "../runtime-config.js";
-import type { MinimalNextRequest } from "../next.js";
+import type { MinimalRequest } from "../data-proxy.js";
 import type { PoolConfig } from "./cognito.js";
 import { refreshTokens } from "./cognito.js";
 import { verifyIdToken, unsafeDecodeExp, type VerifiedClaims } from "./verify.js";
@@ -43,7 +43,7 @@ export function parseCookieHeader(header: string | null): Record<string, string>
   return out;
 }
 
-export function readCookie(req: MinimalNextRequest, name: string): string | null {
+export function readCookie(req: MinimalRequest, name: string): string | null {
   return parseCookieHeader(req.headers.get("cookie"))[name] ?? null;
 }
 
@@ -107,7 +107,7 @@ export interface MintedToken {
  * `Set-Cookie` the caller must echo when a re-mint happened.
  */
 export async function mintIdToken(
-  req: MinimalNextRequest,
+  req: MinimalRequest,
   appId: string,
 ): Promise<MintedToken | null> {
   const minted = await resolveIdToken(req);
@@ -127,7 +127,7 @@ export async function mintIdToken(
  * that can set headers should use {@link mintIdToken} instead.
  */
 export async function requireSession(
-  req: MinimalNextRequest,
+  req: MinimalRequest,
 ): Promise<VerifiedClaims | null> {
   return (await resolveIdToken(req))?.claims ?? null;
 }
@@ -138,7 +138,7 @@ export async function requireSession(
  * Cognito round trip — minting per request would put one on every data call
  * and spend the account's shared user-pool authentication quota.
  */
-async function resolveIdToken(req: MinimalNextRequest): Promise<{
+async function resolveIdToken(req: MinimalRequest): Promise<{
   token: string;
   claims: VerifiedClaims;
   reminted: boolean;

@@ -31,7 +31,7 @@
 
 import { Hono } from "hono";
 import { createSessionRoutes } from "@starkeep/app-client/auth";
-import { createNextProxyHandler, sessionAuth } from "@starkeep/app-client";
+import { createDataProxyHandler, sessionAuth } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
 import { ASSET_NAME, assetScript } from "./assets.js";
@@ -56,7 +56,7 @@ const sessionRoutes = createSessionRoutes({ appId: APP_ID });
 // `allowAnonymousLocal` is left at its default: on the local surface the
 // browser, the data and the person are all on one machine, which is the
 // local-first guarantee the platform makes.
-const proxy = createNextProxyHandler({ appId: APP_ID, endUserAuth: sessionAuth() });
+const proxy = createDataProxyHandler({ appId: APP_ID, endUserAuth: sessionAuth() });
 
 function html(body: string, status = 200): Response {
   return new Response(body, {

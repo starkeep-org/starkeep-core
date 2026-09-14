@@ -21,7 +21,7 @@ import {
   tokenCookie,
 } from "../src/auth/session.js";
 import { clearJwksCache } from "../src/auth/verify.js";
-import type { MinimalNextRequest } from "../src/next.js";
+import type { MinimalRequest } from "../src/data-proxy.js";
 import { makeKey, signJwt, type TestKey } from "./auth-jwt.js";
 
 const REGION = "us-east-2";
@@ -44,7 +44,7 @@ function idClaims(over: Record<string, unknown> = {}) {
   };
 }
 
-function request(cookie?: string): MinimalNextRequest {
+function request(cookie?: string): MinimalRequest {
   return {
     method: "GET",
     url: "https://cdn.example.com/apps/memo/api/local-data/app-data/db/decks",

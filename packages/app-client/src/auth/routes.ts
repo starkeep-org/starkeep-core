@@ -4,7 +4,7 @@
  * because cookie names, flags, path scoping and the Cognito flow are all
  * platform concerns and an app that reimplements them can only get them wrong.
  */
-import type { MinimalNextRequest } from "../next.js";
+import type { MinimalRequest } from "../data-proxy.js";
 import { CognitoError, initiateAuth, respondNewPassword } from "./cognito.js";
 import {
   SESSION_COOKIE,
@@ -46,7 +46,7 @@ function json(body: unknown, status = 200, cookies: string[] = []): Response {
  * nothing. A missing `Origin` is allowed — non-browser callers (curl, the e2e
  * suite) send none, and they are not the CSRF threat.
  */
-function crossOrigin(req: MinimalNextRequest): boolean {
+function crossOrigin(req: MinimalRequest): boolean {
   const origin = req.headers.get("origin");
   if (!origin) return false;
   let sent: string;
@@ -83,7 +83,7 @@ function crossOrigin(req: MinimalNextRequest): boolean {
   return true;
 }
 
-async function readJsonBody(req: MinimalNextRequest): Promise<Record<string, unknown>> {
+async function readJsonBody(req: MinimalRequest): Promise<Record<string, unknown>> {
   try {
     const text = await req.text();
     return text ? (JSON.parse(text) as Record<string, unknown>) : {};
@@ -103,13 +103,13 @@ function cognitoFailure(err: unknown): Response {
 }
 
 export function createSessionRoutes(opts: SessionRouteOptions): {
-  POST: (req: MinimalNextRequest, ctx: RouteContext) => Promise<Response>;
-  GET: (req: MinimalNextRequest, ctx: RouteContext) => Promise<Response>;
+  POST: (req: MinimalRequest, ctx: RouteContext) => Promise<Response>;
+  GET: (req: MinimalRequest, ctx: RouteContext) => Promise<Response>;
 } {
   const { appId } = opts;
   const maxAge = opts.sessionMaxAgeSeconds ?? SESSION_MAX_AGE_S;
 
-  async function signIn(req: MinimalNextRequest): Promise<Response> {
+  async function signIn(req: MinimalRequest): Promise<Response> {
     const cfg = poolConfig();
     if (!cfg) return json({ error: "This deployment has no user pool configured" }, 503);
 
@@ -135,7 +135,7 @@ export function createSessionRoutes(opts: SessionRouteOptions): {
     ]);
   }
 
-  async function newPassword(req: MinimalNextRequest): Promise<Response> {
+  async function newPassword(req: MinimalRequest): Promise<Response> {
     const cfg = poolConfig();
     if (!cfg) return json({ error: "This deployment has no user pool configured" }, 503);
 
@@ -164,7 +164,7 @@ export function createSessionRoutes(opts: SessionRouteOptions): {
    * bare 401 with no way to recover in-band. This route is the recovery: it is
    * left public at the gateway and authenticates on `sk_session` in app code.
    */
-  async function refresh(req: MinimalNextRequest): Promise<Response> {
+  async function refresh(req: MinimalRequest): Promise<Response> {
     const cfg = poolConfig();
     if (!cfg) return json({ error: "This deployment has no user pool configured" }, 503);
 
@@ -194,7 +194,7 @@ export function createSessionRoutes(opts: SessionRouteOptions): {
     return json({ signedIn: false }, 200, clearCookies(appId));
   }
 
-  async function probe(req: MinimalNextRequest): Promise<Response> {
+  async function probe(req: MinimalRequest): Promise<Response> {
     const minted = await mintIdToken(req, appId);
     if (!minted) return json({ signedIn: false });
     return json(
@@ -210,7 +210,7 @@ export function createSessionRoutes(opts: SessionRouteOptions): {
    * the browser must present a bearer token. What this hands out is good for
    * an hour; the refresh token stays server-side.
    */
-  async function token(req: MinimalNextRequest): Promise<Response> {
+  async function token(req: MinimalRequest): Promise<Response> {
     const minted = await mintIdToken(req, appId);
     if (!minted) return json({ error: "Not authenticated" }, 401);
     const remaining = Math.max(0, minted.claims.exp - Math.floor(Date.now() / 1000));

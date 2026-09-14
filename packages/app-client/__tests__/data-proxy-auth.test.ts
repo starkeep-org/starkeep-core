@@ -9,10 +9,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  createNextProxyHandler,
+  createDataProxyHandler,
   clearAppCredentialsCache,
   sessionAuth,
-  type MinimalNextRequest,
+  type MinimalRequest,
 } from "../src/index.js";
 
 const proxyMock = vi.hoisted(() => ({ proxyToDataServer: vi.fn() }));
@@ -51,7 +51,7 @@ afterEach(() => {
   else process.env.STARKEEP_DIR = savedDir;
 });
 
-function request(headers: Record<string, string> = {}): MinimalNextRequest {
+function request(headers: Record<string, string> = {}): MinimalRequest {
   return {
     method: "GET",
     url: "http://localhost:3000/api/data/data/records?limit=5",
@@ -67,7 +67,7 @@ describe("endUserAuth: session", () => {
   it("refuses an unauthenticated cloud request with 401 and never signs", async () => {
     process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
     process.env.STARKEEP_CLOUD_DATA_BASE = "https://gateway.example.com";
-    const handler = createNextProxyHandler({
+    const handler = createDataProxyHandler({
       appId: "testapp",
       endUserAuth: { auth: "session", verifySession: () => false },
     });
@@ -83,7 +83,7 @@ describe("endUserAuth: session", () => {
     // comes from the local file rather than SSM, so the assertion is about the
     // gate and not about the credential source.
     const verifySession = vi.fn().mockResolvedValue(true);
-    const handler = createNextProxyHandler({
+    const handler = createDataProxyHandler({
       appId: "testapp",
       endUserAuth: { auth: "session", verifySession, allowAnonymousLocal: false },
     });
@@ -97,7 +97,7 @@ describe("endUserAuth: session", () => {
 
   it("does not gate local mode by default — local-first means no sign-in in front of on-device data", async () => {
     const verifySession = vi.fn().mockReturnValue(false);
-    const handler = createNextProxyHandler({
+    const handler = createDataProxyHandler({
       appId: "testapp",
       endUserAuth: { auth: "session", verifySession },
     });
@@ -109,7 +109,7 @@ describe("endUserAuth: session", () => {
   });
 
   it("gates local mode too when allowAnonymousLocal is false", async () => {
-    const handler = createNextProxyHandler({
+    const handler = createDataProxyHandler({
       appId: "testapp",
       endUserAuth: { auth: "session", verifySession: () => false, allowAnonymousLocal: false },
     });
@@ -121,7 +121,7 @@ describe("endUserAuth: session", () => {
   });
 
   it("uses onUnauthenticated when supplied", async () => {
-    const handler = createNextProxyHandler({
+    const handler = createDataProxyHandler({
       appId: "testapp",
       endUserAuth: { auth: "session", verifySession: () => false, allowAnonymousLocal: false },
       onUnauthenticated: () => new Response(null, { status: 302, headers: { location: "/sign-in" } }),
@@ -136,7 +136,7 @@ describe("endUserAuth: session", () => {
 
 describe("endUserAuth: anonymous", () => {
   it("forwards without any end-user check", async () => {
-    const handler = createNextProxyHandler({
+    const handler = createDataProxyHandler({
       appId: "testapp",
       endUserAuth: { auth: "anonymous", justification: "test fixture" },
     });
@@ -155,7 +155,7 @@ describe("sessionAuth()", () => {
     // the form whose verifier the app did not write and cannot inspect.
     process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
     process.env.STARKEEP_CLOUD_DATA_BASE = "https://gateway.example.com";
-    const handler = createNextProxyHandler({ appId: "testapp", endUserAuth: sessionAuth() });
+    const handler = createDataProxyHandler({ appId: "testapp", endUserAuth: sessionAuth() });
 
     const res = await handler(request(), ctx);
 
@@ -164,12 +164,12 @@ describe("sessionAuth()", () => {
   });
 
   it("leaves local mode open by default", async () => {
-    const handler = createNextProxyHandler({ appId: "testapp", endUserAuth: sessionAuth() });
+    const handler = createDataProxyHandler({ appId: "testapp", endUserAuth: sessionAuth() });
     expect((await handler(request(), ctx)).status).toBe(200);
   });
 
   it("gates local mode when the app opts in", async () => {
-    const handler = createNextProxyHandler({
+    const handler = createDataProxyHandler({
       appId: "testapp",
       endUserAuth: sessionAuth({ allowAnonymousLocal: false }),
     });

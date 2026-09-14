@@ -192,8 +192,8 @@ that signs and forwards:
 
 ```ts
 // src/routes/local-data.ts
-import { createNextProxyHandler, sessionAuth } from "@starkeep/app-client";
-export const proxy = createNextProxyHandler({ appId: "photos", endUserAuth: sessionAuth() });
+import { createDataProxyHandler, sessionAuth } from "@starkeep/app-client";
+export const proxy = createDataProxyHandler({ appId: "photos", endUserAuth: sessionAuth() });
 
 // src/server-app.ts — one mount, every verb.
 app.all("/api/local-data/*", (c) => {
