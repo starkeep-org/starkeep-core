@@ -23,13 +23,13 @@ export {
   proxyToDataServer,
 } from "./proxy";
 export {
-  createNextProxyHandler,
+  createDataProxyHandler,
   sessionAuth,
-  type NextProxyOptions,
-  type NextProxyParams,
+  type DataProxyOptions,
+  type DataProxyParams,
   type ProxyEndUserAuth,
-  type MinimalNextRequest,
-} from "./next";
+  type MinimalRequest,
+} from "./data-proxy";
 export {
   type RuntimeConfig,
   getRuntimeConfig,

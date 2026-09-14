@@ -9,12 +9,12 @@
  * callers, and the broker refused tokenless calls. Only a live request through
  * both showed the gap, which is why this file exists.
  *
- * Separate from `next-proxy-auth.test.ts` because that suite deliberately uses
+ * Separate from `data-proxy-auth.test.ts` because that suite deliberately uses
  * the real credential loader to prove a rejected caller never causes the secret
  * to be read; here the loader is mocked so the request can get past it.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createNextProxyHandler, type MinimalNextRequest } from "../src/index.js";
+import { createDataProxyHandler, type MinimalRequest } from "../src/index.js";
 
 const proxyMock = vi.hoisted(() => ({ proxyToDataServer: vi.fn() }));
 vi.mock("../src/proxy.js", () => proxyMock);
@@ -54,7 +54,7 @@ afterEach(() => {
   else process.env.STARKEEP_APP_CLIENT_MODE = savedMode;
 });
 
-function request(): MinimalNextRequest {
+function request(): MinimalRequest {
   return {
     method: "GET",
     url: "http://localhost:3000/api/local-data/data/records?limit=5",
@@ -67,7 +67,7 @@ function request(): MinimalNextRequest {
 const ctx = { params: Promise.resolve({ path: ["data", "records"] }) };
 
 function handlerWithSession() {
-  return createNextProxyHandler({
+  return createDataProxyHandler({
     appId: "testapp",
     endUserAuth: { auth: "session", verifySession: () => true },
   });

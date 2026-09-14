@@ -8,6 +8,26 @@ local-data-server. Owns three things so apps don't have to reimplement them:
 3. Same-origin proxying for browser-driven apps so the HMAC secret stays
    server-side.
 
+## 0.9.0
+
+Renames the last three exported names that claimed a framework the platform no
+longer uses. All four apps now build with Vite and serve with Hono, so nothing
+in this package has a Next.js call site left to accommodate. Every change is a
+compile error rather than a behavior change; no runtime behavior moved.
+
+- **`createNextProxyHandler` is now `createDataProxyHandler`.** Same function,
+  same signature, same `endUserAuth` contract. The old name described the mount
+  point of a framework no app uses; the new one describes what the handler
+  does, which is proxy to the data server.
+- **`MinimalNextRequest` is now `MinimalRequest`.** The type never referenced
+  Next — it is the narrow slice of the web `Request` interface this package
+  reads, and it types the whole `@starkeep/app-client/auth` surface as well as
+  the proxy.
+- **`NextProxyOptions` and `NextProxyParams` are now `DataProxyOptions` and
+  `DataProxyParams`.**
+- No aliases. An app upgrading from 0.8.0 changes the import and the call, and
+  the compiler names every site.
+
 ## 0.8.0
 
 Retires the migration aids the four apps needed while they still built with
@@ -71,7 +91,8 @@ Nothing here is a breaking change; the old names are aliases.
 pnpm add @starkeep/app-client
 ```
 
-This package is workspace-internal today; it's not yet published to npm.
+Published to npm. Apps inside `starkeep-core` take it as `workspace:*`;
+`starkeep-apps` and `memo` pin a released version.
 
 ## The HMAC contract
 
@@ -118,7 +139,7 @@ import {
   loadAppCredentials,
   signRequest,
   signedFetch,
-  createNextProxyHandler,
+  createDataProxyHandler,
   createRuntimeConfigHandler,
 } from "@starkeep/app-client";
 ```
@@ -129,11 +150,10 @@ import {
   the two HMAC headers. Body may be `string | Buffer | Uint8Array | undefined`.
 - **`signedFetch(creds, path, init?): Promise<Response>`** — `fetch` wrapper
   that adds the headers and resolves `path` against `creds.dataServerUrl`.
-- **`createNextProxyHandler({ appId, endUserAuth })`** — returns a handler of
+- **`createDataProxyHandler({ appId, endUserAuth })`** — returns a handler of
   `(Request, { params }) => Promise<Response>`. Mount it on one catch-all route
   for every verb (`app.all("/api/local-data/*", …)`) to give the browser a
-  same-origin URL with HMAC added server-side. The name is historical; the
-  handler is framework-free.
+  same-origin URL with HMAC added server-side.
 
   `endUserAuth` is **required**, and is either
   `{ auth: "session", verifySession }` or

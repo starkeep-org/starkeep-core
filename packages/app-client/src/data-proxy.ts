@@ -1,9 +1,11 @@
 import { loadAppCredentials } from "./credentials";
 import { proxyToDataServer } from "./proxy";
 
-// Narrow shape of NextRequest we depend on — avoids taking a `next` peer
-// dependency just to type the param.
-export interface MinimalNextRequest {
+// The narrow slice of the web `Request` interface this package reads. Apps
+// hand over whatever their server gives them — `c.req.raw` under Hono, a bare
+// `Request` elsewhere — and structural typing does the rest, so no framework
+// gets to appear in the signature.
+export interface MinimalRequest {
   method: string;
   url: string;
   headers: { get(name: string): string | null };
@@ -11,7 +13,7 @@ export interface MinimalNextRequest {
   arrayBuffer(): Promise<ArrayBuffer>;
 }
 
-export interface NextProxyParams { path?: string[] }
+export interface DataProxyParams { path?: string[] }
 
 /**
  * Whether a valid end user must be present before this proxy will sign
@@ -38,7 +40,7 @@ export type ProxyEndUserAuth =
        * falsy result means no valid end user and the proxy answers 401
        * without ever loading the app's HMAC credential.
        */
-      verifySession: (req: MinimalNextRequest) => boolean | Promise<boolean>;
+      verifySession: (req: MinimalRequest) => boolean | Promise<boolean>;
       /**
        * Skip the check in local mode, where the browser, the data, and the
        * person are all on one machine and there is no second party to
@@ -60,7 +62,7 @@ export type ProxyEndUserAuth =
       justification: string;
     };
 
-export interface NextProxyOptions {
+export interface DataProxyOptions {
   /** App id whose credentials to load. */
   appId: string;
   /**
@@ -86,10 +88,15 @@ function isCloudMode(): boolean {
 }
 
 /**
- * Returns a handler usable as the body of a Next.js route segment for every
- * verb (GET/POST/PUT/PATCH/DELETE). Forwards to the configured data server
- * with the app's HMAC signature. Browser-driven apps mount this under
- * `app/api/.../[...path]/route.ts` so the HMAC secret stays server-side.
+ * Returns a handler that answers every verb (GET/POST/PUT/PATCH/DELETE) by
+ * forwarding to the configured data server with the app's HMAC signature.
+ * Browser-driven apps mount it behind a catch-all route so the HMAC secret
+ * stays server-side. Under Hono that reads:
+ *
+ * ```ts
+ * app.all("/api/local-data/*", (c) =>
+ *   proxy(c.req.raw, { params: Promise.resolve({ path: segmentsAfterMount(c) }) }));
+ * ```
  *
  * The same mount serves both surfaces: in local mode it forwards to the
  * loopback local-data-server, in cloud mode to the shared API Gateway. That
@@ -97,10 +104,10 @@ function isCloudMode(): boolean {
  * one else to authenticate, and on the cloud surface there is nothing else
  * doing it.
  */
-export function createNextProxyHandler(opts: NextProxyOptions) {
+export function createDataProxyHandler(opts: DataProxyOptions) {
   return async function handler(
-    req: MinimalNextRequest,
-    ctx: { params: Promise<NextProxyParams> },
+    req: MinimalRequest,
+    ctx: { params: Promise<DataProxyParams> },
   ): Promise<Response> {
     // Before anything else, and specifically before the credential load: a
     // request that fails the end-user check must never cause the app's HMAC
@@ -184,7 +191,7 @@ export function createNextProxyHandler(opts: NextProxyOptions) {
   };
 }
 
-async function readBody(req: MinimalNextRequest): Promise<Buffer | string> {
+async function readBody(req: MinimalRequest): Promise<Buffer | string> {
   const ct = req.headers.get("content-type") ?? "";
   // Text-shaped content types stay as strings so the upstream Content-Length
   // and signature both line up with what fetch will send on the wire.

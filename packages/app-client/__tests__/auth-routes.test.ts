@@ -7,7 +7,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createSessionRoutes } from "../src/auth/routes.js";
 import { SESSION_COOKIE, TOKEN_COOKIE } from "../src/auth/session.js";
 import { clearJwksCache } from "../src/auth/verify.js";
-import type { MinimalNextRequest } from "../src/next.js";
+import type { MinimalRequest } from "../src/data-proxy.js";
 import { makeKey, signJwt, type TestKey } from "./auth-jwt.js";
 
 const REGION = "us-east-2";
@@ -35,7 +35,7 @@ function idClaims(over: Record<string, unknown> = {}) {
 
 function req(
   opts: { method?: string; body?: unknown; cookie?: string; origin?: string | null } = {},
-): MinimalNextRequest {
+): MinimalRequest {
   const headers: Record<string, string> = {};
   if (opts.cookie) headers.cookie = opts.cookie;
   if (opts.origin !== null) headers.origin = opts.origin ?? ORIGIN;
