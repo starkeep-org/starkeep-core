@@ -71,8 +71,10 @@ Verify: schema exists, column types are the new ones, and the
 
 ### 7. Reinstall locally without dropping tables
 
-`uninstallLocal` drops the syncable tables and `installLocal` returns early for
-an `active` app, so reset the gate instead:
+`installLocal` returns early for an `active` app, so reset the gate instead of
+uninstalling — and note that `uninstallLocal` keeps the syncable tables unless
+it is passed `deleteData`, so an uninstall is no longer the thing that would
+have dropped them:
 
 ```sql
 UPDATE shared_app_registry SET status = 'installing' WHERE app_id = '<id>';

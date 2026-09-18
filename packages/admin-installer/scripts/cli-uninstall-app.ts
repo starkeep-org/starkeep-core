@@ -2,22 +2,26 @@
 /**
  * Uninstall a Starkeep app from the cloud — the counterpart of
  * cli-install-app. Runs the orchestrator's uninstall state machine: compute
- * stack down, S3 artifacts/files gone, per-app DSQL schema and PG role
- * dropped, SSM app-creds parameter deleted, registry row closed out. Shared
- * records the app created are deliberately left in place (they belong to the
- * user, not the app).
+ * stack down, S3 artifacts gone, SSM app-creds parameter deleted, registry row
+ * closed out. Shared records the app created are deliberately left in place
+ * (they belong to the user, not the app).
  *
- * `--retain-data` keeps the app's own data too: its S3 prefix and its DSQL
- * schema both survive, so reinstalling the same app id finds its
- * app-specific rows and app-private blobs where it left them. That is the
- * uninstall half of a major-version upgrade.
+ * The app's own data is left in place too. Its S3 prefix and its DSQL schema
+ * both survive, so reinstalling the same app id finds its app-specific rows
+ * and app-private blobs where it left them — the uninstall half of a
+ * major-version upgrade.
  *
- * The manifest is still resolved from the app's source dir (same discovery as
+ * `--delete-data` destroys them instead. It is a flag rather than the default
+ * because the two outcomes are not equally recoverable: an operator who meant
+ * to delete and kept the data runs this again, and an operator who meant to
+ * keep it and deleted it has nothing to run.
+ *
+ * The manifest is resolved from the app's source dir (same discovery as
  * install) because the uninstall DDL needs the declared app-specific tables.
  *
  * Usage:
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId>
- *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --retain-data
+ *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --delete-data
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --non-interactive
  */
 
@@ -44,11 +48,11 @@ import {
 
 const flags = process.argv.slice(2);
 const nonInteractive = flags.includes("--non-interactive");
-const retainData = flags.includes("--retain-data");
+const deleteData = flags.includes("--delete-data");
 const appId = flags.find((f) => !f.startsWith("--"));
 
 if (!appId) {
-  console.error("Usage: cli:uninstall-app <appId> [--retain-data] [--non-interactive]");
+  console.error("Usage: cli:uninstall-app <appId> [--delete-data] [--non-interactive]");
   process.exit(1);
 }
 
@@ -138,8 +142,25 @@ console.log(`\nStarkeep ${appId} cloud uninstall`);
 console.log(`  Region : ${region}`);
 console.log(`  Stage  : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
-console.log(`  Data   : ${retainData ? "retained (S3 prefix and DSQL schema kept)" : "deleted"}`);
+console.log(
+  `  Data   : ${deleteData ? "DELETED (S3 prefix and DSQL schema destroyed)" : "retained (S3 prefix and DSQL schema kept)"}`,
+);
 console.log("");
+
+// `--delete-data` is the only thing this CLI does that nothing else can undo.
+// Interactively, it is confirmed at the point of harm as well as on the
+// command line; `--non-interactive` takes the flag as the confirmation, which
+// is what lets a test suite and a script use it.
+if (deleteData && !nonInteractive) {
+  console.log(`This permanently destroys ${appId}'s S3 prefix and its DSQL schema.`);
+  console.log("Shared records the app created are not affected.");
+  const confirmed = await prompt('Type "delete" to continue: ');
+  if (confirmed.trim() !== "delete") {
+    console.log("Aborted.");
+    process.exit(0);
+  }
+  console.log("");
+}
 
 const registryCredentials = {
   accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
@@ -151,7 +172,7 @@ await uninstallApp({
   appId,
   manifest,
   registryCredentials,
-  retainData,
+  deleteData,
   config: {
     stackPrefix,
     region,

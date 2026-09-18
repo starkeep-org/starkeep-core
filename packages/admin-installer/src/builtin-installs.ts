@@ -586,6 +586,12 @@ export async function installDrive(
  * from `uninstallCloudDataServer` (before the foundational tear-down, so the
  * DSQL cluster still exists). Drive has no compute, so `uninstallApp` runs only
  * the identity + data teardown steps.
+ *
+ * `deleteData` is passed explicitly, against the default an app uninstall
+ * takes. Keeping an app's data is for an uninstall that a reinstall follows;
+ * this one is a step of destroying the cluster and the bucket that data lives
+ * in, so retaining it would leave the schema standing for the few minutes
+ * before the cluster it belongs to is deleted underneath it.
  */
 export async function uninstallDrive(
   config: InstallerConfig,
@@ -598,6 +604,7 @@ export async function uninstallDrive(
     manifest,
     config,
     registryCredentials,
+    deleteData: true,
   });
   console.log(`${USER_DATA_OWNER_APP_ID} uninstalled.`);
 }

@@ -8,8 +8,8 @@ const STARKEEP_DIR = starkeepDir();
 const APP_CREDS_DIR = join(STARKEEP_DIR, "app-creds");
 
 export async function POST(req: Request) {
-  const body = (await req.json()) as { appId?: string; retainData?: boolean };
-  const { appId, retainData = false } = body;
+  const body = (await req.json()) as { appId?: string; deleteData?: boolean };
+  const { appId, deleteData = false } = body;
   if (!appId) {
     return Response.json({ error: "appId is required" }, { status: 400 });
   }
@@ -25,8 +25,9 @@ export async function POST(req: Request) {
   try {
     // The flag rides the query string because the local-data-server's
     // uninstall is a DELETE, and a DELETE with a body is a request a proxy is
-    // entitled to drop.
-    const query = retainData ? "?retainData=1" : "";
+    // entitled to drop. Absent, the data stays — the caller has to ask for the
+    // destructive half.
+    const query = deleteData ? "?deleteData=1" : "";
     resp = await fetch(
       `${LOCAL_DATA_SERVER}/admin/apps/${encodeURIComponent(appId)}${query}`,
       { method: "DELETE" },
@@ -53,5 +54,5 @@ export async function POST(req: Request) {
     unlinkSync(secretPath);
   }
 
-  return Response.json({ appId, ok: true, retainData });
+  return Response.json({ appId, ok: true, deleteData });
 }

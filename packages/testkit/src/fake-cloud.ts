@@ -559,7 +559,11 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     dir,
     db,
     installApp: (manifest) => installLocal(db, manifest),
-    uninstallApp: (appId) => uninstallLocal(db, appId),
+    // `deleteData`, against the real uninstall's default: this stands in for a
+    // cloud that has dropped the app's channel outright, which is the state a
+    // test reaching for it wants to exercise. A test that wants the retaining
+    // uninstall asserts against the installer directly.
+    uninstallApp: (appId) => uninstallLocal(db, appId, { deleteData: true }),
     exchangeLog,
     clearExchangeLog: () => {
       exchangeLog.length = 0;

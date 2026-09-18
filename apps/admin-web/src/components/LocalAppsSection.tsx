@@ -156,7 +156,7 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
     }
   };
 
-  const handleUninstall = async (appId: string, retainData: boolean) => {
+  const handleUninstall = async (appId: string, deleteData: boolean) => {
     setPendingRemoval(null);
     setBusyAppId(appId);
     setError(null);
@@ -164,7 +164,7 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
       const res = await fetch("/api/apps/uninstall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appId, retainData }),
+        body: JSON.stringify({ appId, deleteData }),
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -395,9 +395,10 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
 // reads. Uninstalling removes the app; removing from this node removes this
 // machine's copy of it and leaves every other node alone.
 //
-// The "keep this app's data" checkbox belongs to the uninstall alone. A
-// node-local removal deletes this node's copy by definition, so offering to
-// keep it there would be offering to do nothing.
+// The "delete this app's data" checkbox belongs to the uninstall alone, and it
+// starts unticked: an uninstall keeps the app's data unless the operator asks
+// for it to go. A node-local removal deletes this node's copy by definition, so
+// offering the choice there would be offering to do nothing.
 // ---------------------------------------------------------------------------
 
 function RemovalDialog({
@@ -408,15 +409,15 @@ function RemovalDialog({
 }: {
   pending: { entry: LocalAppEntry; kind: "uninstall" | "node" } | null;
   onCancel: () => void;
-  onUninstall: (appId: string, retainData: boolean) => void;
+  onUninstall: (appId: string, deleteData: boolean) => void;
   onRemoveFromNode: (appId: string) => void;
 }) {
-  const [retainData, setRetainData] = useState(false);
+  const [deleteData, setDeleteData] = useState(false);
 
   // Reset between openings. A checkbox left ticked from the last app is a
-  // checkbox that decides the next app's data by accident.
+  // checkbox that deletes the next app's data by accident.
   useEffect(() => {
-    setRetainData(false);
+    setDeleteData(false);
   }, [pending?.entry.appId, pending?.kind]);
 
   if (!pending) return null;
@@ -432,7 +433,7 @@ function RemovalDialog({
           </DialogTitle>
           <DialogDescription>
             {kind === "uninstall"
-              ? "Records this app produced stay in shared storage. They belong to your data, not to the app."
+              ? "The app goes; what it holds stays. Records it produced remain in shared storage, and its own tables and private files stay on disk unless you ask for them below."
               : "This machine drops its copy of the app and everything the app keeps here. The cloud and your other devices are untouched, and installing the app here again refills it from the cloud."}
           </DialogDescription>
         </DialogHeader>
@@ -442,20 +443,20 @@ function RemovalDialog({
             <input
               type="checkbox"
               className="mt-0.5 size-4 accent-primary"
-              checked={retainData}
-              onChange={(e) => setRetainData(e.target.checked)}
+              checked={deleteData}
+              onChange={(e) => setDeleteData(e.target.checked)}
             />
             <span>
-              <span className="font-medium">Keep this app&rsquo;s data.</span>{" "}
+              <span className="font-medium">Also delete this app&rsquo;s data.</span>{" "}
               <span className="text-muted-foreground">
-                The app&rsquo;s own tables and its private files stay on disk, so installing it
-                again picks up where it left off. Leave this unticked to delete them.
+                Leave this unticked and the app&rsquo;s own tables and private files stay on
+                disk, so installing it again picks up where it left off.
               </span>
             </span>
           </label>
         )}
 
-        {kind === "uninstall" && !retainData && (
+        {kind === "uninstall" && deleteData && (
           <Alert variant="destructive">
             <AlertTitle>This deletes {name}&rsquo;s own data</AlertTitle>
             <AlertDescription>
@@ -471,12 +472,12 @@ function RemovalDialog({
             variant="destructive"
             onClick={() =>
               kind === "uninstall"
-                ? onUninstall(entry.appId, retainData)
+                ? onUninstall(entry.appId, deleteData)
                 : onRemoveFromNode(entry.appId)
             }
           >
             {kind === "uninstall"
-              ? retainData ? "Uninstall, keep data" : "Uninstall and delete data"
+              ? deleteData ? "Uninstall and delete data" : "Uninstall, keep data"
               : "Remove from this node"}
           </Button>
         </DialogFooter>

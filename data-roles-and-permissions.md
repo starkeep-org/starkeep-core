@@ -10,7 +10,7 @@ Starkeep operates on two classes of data: "Shared data" is your content (photos,
 
 - **Shared data** is the *user's* content (photos, documents): typed against a platform-owned registry and stored in the single `shared.records` table plus the `shared/<category>/*` object-storage prefix. It is **cross-app and platform-owned** — multiple apps can hold grants on the same type, items outlive the uninstall of any app that touched them, and no app *owns* shared data. An app is a tenant with declared, narrow access: it reaches only the categories/types its manifest was granted.
 
-- **App-specific data** is an *app's* own private state (a photo caption, a tag taxonomy, layout preferences): stored in the app's namespaced schema (`app_<appId>.*`) and filespace (`apps/<appId>/syncable/*`). It is **per-app and app-owned** — invisible to every other app, and torn down when the app is uninstalled at a location. It never interoperates across apps.
+- **App-specific data** is an *app's* own private state (a photo caption, a tag taxonomy, layout preferences): stored in the app's namespaced schema (`app_<appId>.*`) and filespace (`apps/<appId>/syncable/*`). It is **per-app and app-owned** — invisible to every other app, and confined to the locations the app is installed at. An uninstall keeps it by default so a reinstall can adopt it; `deleteData` tears it down at that location. It never interoperates across apps.
 
 These are handled differently at the identity layer, and that difference is the source of most of the nuance below:
 
@@ -21,7 +21,7 @@ These are handled differently at the identity layer, and that difference is the 
 | **Runtime read/write identity** (per-request `/data/*`) | the **calling app's** per-app role, assumed per request by the broker | the **calling app's** per-app role |
 | **Sync write identity** (cloud side) | the single **Starkeep Drive** (User-Data-Owner) role, on one always-on channel | the app's **own** per-app role, on the app's own channel — only while the app is cloud-installed |
 | **Attribution of authorship** | IAM-enforced on the runtime path; on the sync path, carried by the immutable `origin_app_id` data attribute | IAM-enforced — the row lives in the app's own schema/prefix |
-| **Survives uninstall** | yes | no (at that location) |
+| **Survives uninstall** | yes, always | yes by default; deleted at that location under `deleteData` |
 
 Two consequences are worth stating up front, because the principles below lean on them:
 
@@ -111,7 +111,9 @@ Third-party (and additional first-party) apps install via the standard installer
 5. **Provision as install-infra (infra bracket).** For apps with compute, Manager attaches a temp policy on the *install-infra role* (scoped to this app's Lambda name pattern, its log groups, its Pulumi state file, the artifacts-bucket prefix, and `PassRole` onto its own per-app role). A role chain (admin → Manager → install-infra) uploads the app bundle and runs the app's Pulumi program to create its Lambda(s), log group(s), API Gateway integrations, and routes; the program passes the per-app role to Lambda as the function's execution role. Manager detaches the temp infra policy when provisioning completes. (Compute-less apps — e.g. Starkeep Drive — skip this stage entirely.)
 6. **Register.** The app is recorded in the registry along with its access grants. Both install-time roles are back to zero standing permissions; the per-app role retains only its narrow runtime policy.
 
-Uninstall is the symmetric flow, again bracketing each temp policy tightly: Manager attaches a temp uninstall policy on install-infra and runs Pulumi destroy as install-infra, then detaches it; files-bucket prefixes are cleared under the app's own role; Manager attaches a temp DDL policy on install-ddl, revokes grants and drops the PG role and schema as install-ddl, then detaches it; the registry entry is removed; the per-app IAM role is deleted; and the app's SSM signing credential is deleted. Shared records persist for other apps that still have grants.
+Uninstall is the symmetric flow, again bracketing each temp policy tightly: Manager attaches a temp uninstall policy on install-infra and runs Pulumi destroy as install-infra, then detaches it; the registry entry is removed; the per-app IAM role is deleted; and the app's SSM signing credential is deleted. Shared records persist for other apps that still have grants.
+
+The two data-destroying steps run only under `deleteData`, and the temp DDL policy that brackets the second of them runs only with them — granting DB admin around DDL that will not execute is privilege for no purpose. Under `deleteData`, files-bucket prefixes are cleared under the app's own role, and Manager attaches a temp DDL policy on install-ddl so grants can be revoked and the PG role and schema dropped as install-ddl, then detaches it. Without it, the app's schema and its PG role both survive: that one step drops them together, and there is no way to keep the schema and drop the role. The IAM role the PG role maps to is deleted either way, so nothing can authenticate as it in the meantime, and the install DDL probes before creating, so a reinstall reconciles it.
 
 ---
 

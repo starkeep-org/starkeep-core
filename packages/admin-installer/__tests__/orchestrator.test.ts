@@ -487,6 +487,7 @@ describe("uninstall", () => {
       manifest: photosManifest,
       config,
       registryCredentials,
+      deleteData: true,
     });
     expect(doneSteps("uninstall")).toEqual([
       "attach_temp_uninstall_infra_policy",
@@ -518,18 +519,21 @@ describe("uninstall", () => {
       manifest: photosManifest,
       config,
       registryCredentials,
+      deleteData: true,
     });
     // Uninstall ran fully even though install's ledger was complete.
     expect(doneSteps("uninstall")).toHaveLength(12);
   });
 
-  it("retainData skips the two data-destroying steps and the DDL policy around them", async () => {
+  it("keeps the app's data when the caller says nothing about it", async () => {
+    // No `deleteData`. This is the assertion that makes the default a contract
+    // rather than an argument's initializer: a caller that forgets the flag
+    // gets the recoverable outcome.
     await uninstallApp({
       appId: "photos",
       manifest: photosManifest,
       config,
       registryCredentials,
-      retainData: true,
     });
     expect(doneSteps("uninstall")).toEqual([
       "attach_temp_uninstall_infra_policy",
@@ -541,11 +545,23 @@ describe("uninstall", () => {
       "delete_iam_exec_role",
       "delete_app_creds_parameter",
     ]);
-    // The app's files prefix and its DSQL schema are what `retainData` keeps,
+    // The app's files prefix and its DSQL schema are what the default keeps,
     // so the two calls that would remove them never happen.
     expect(vi.mocked(deleteAppFilesObjects)).not.toHaveBeenCalled();
     expect(vi.mocked(runAppUninstallDdl)).not.toHaveBeenCalled();
     // The app itself still goes.
     expect(fakeRegistry.deleteAppRegistryEntry).toHaveBeenCalledWith("photos");
+  });
+
+  it("deleteData: false is the same thing said out loud", async () => {
+    await uninstallApp({
+      appId: "photos",
+      manifest: photosManifest,
+      config,
+      registryCredentials,
+      deleteData: false,
+    });
+    expect(vi.mocked(deleteAppFilesObjects)).not.toHaveBeenCalled();
+    expect(vi.mocked(runAppUninstallDdl)).not.toHaveBeenCalled();
   });
 });

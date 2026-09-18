@@ -3519,15 +3519,15 @@ async function main() {
       }
 
       // DELETE /admin/apps/:appId — run the local uninstaller for an app.
-      // `?retainData=1` keeps the app's syncable tables and app-private blobs,
-      // which is what makes a major-version reinstall an upgrade rather than a
-      // fresh start.
+      // The app's syncable tables and app-private blobs are kept, which is what
+      // makes a major-version reinstall an upgrade rather than a fresh start.
+      // `?deleteData=1` destroys them instead.
       const uninstallMatch = path.match(/^\/admin\/apps\/([^/]+)$/);
       if (uninstallMatch && req.method === "DELETE") {
         const targetAppId = decodeURIComponent(uninstallMatch[1]!);
-        const retainData = url.searchParams.get("retainData") === "1";
+        const deleteData = url.searchParams.get("deleteData") === "1";
         uninstallLocal(localDb, targetAppId, {
-          retainData,
+          deleteData,
           deleteFilesPrefix: async (prefix) => {
             // Storage layout is the FS adapter's basePath/<key>. The syncable
             // prefix is its own directory tree under apps/<appId>/syncable/,
@@ -3539,7 +3539,7 @@ async function main() {
         // Tear down the per-app sync loop, and drop its ladder key with it.
         supervisor?.rescan();
         refreshSizeClassKeys();
-        json(res, { ok: true, appId: targetAppId, retainData });
+        json(res, { ok: true, appId: targetAppId, deleteData });
         return;
       }
 

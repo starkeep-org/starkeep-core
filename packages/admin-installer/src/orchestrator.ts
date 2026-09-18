@@ -130,21 +130,23 @@ export interface UninstallInput {
   config: InstallerConfig;
   registryCredentials: RegistryCredentials;
   /**
-   * Remove the app without removing what it holds. The app's S3 prefix under
-   * the files bucket and its DSQL schema both survive, so a reinstall of the
-   * same app id finds its app-specific rows and app-private blobs where it
-   * left them. This is what makes a major-version upgrade expressible: take
-   * the app down, put a new one up, keep the data.
+   * Also destroy what the app holds: its S3 prefix under the files bucket and
+   * its DSQL schema. Off by default, so an uninstall removes the app and
+   * leaves its data where it is, and a reinstall of the same app id finds its
+   * app-specific rows and app-private blobs where it left them. That default
+   * is what makes a major-version upgrade expressible — take the app down, put
+   * a new one up, keep the data — and it is the safe answer to give an
+   * operator who did not say which they meant.
    *
-   * Everything that is not data still goes — the compute stack, the artifacts,
-   * the IAM roles, the SSM parameter, the registry entry. Skipping the
-   * uninstall DDL also leaves the app's PG role and its grants on `shared.*`
-   * in place, because that one step drops the schema and the role together.
-   * The IAM role the PG role maps to is deleted either way, so nothing can
-   * authenticate as it in the meantime, and a reinstall reconciles both (the
-   * install DDL probes before creating).
+   * Everything that is not data goes either way: the compute stack, the
+   * artifacts, the IAM roles, the SSM parameter, the registry entry. Leaving
+   * the uninstall DDL unrun also leaves the app's PG role and its grants on
+   * `shared.*` in place, because that one step drops the schema and the role
+   * together. The IAM role the PG role maps to is deleted either way, so
+   * nothing can authenticate as it in the meantime, and a reinstall reconciles
+   * both (the install DDL probes before creating).
    */
-  retainData?: boolean;
+  deleteData?: boolean;
 }
 
 export interface InstallResult {
@@ -435,7 +437,7 @@ async function uninstallAppInner(
   input: UninstallInput,
   registry: Registry,
 ): Promise<void> {
-  const { appId, manifest, config, retainData = false } = input;
+  const { appId, manifest, config, deleteData = false } = input;
   const ir = manifest.infraRequirements;
   const done = await registry.getCompletedSteps(appId, "uninstall");
 
@@ -495,10 +497,10 @@ async function uninstallAppInner(
   }
 
   // The two data-destroying steps, and the temporary DDL policy that exists
-  // only to bracket the second of them. `retainData` skips all three: granting
-  // an install-DDL policy and taking it away again around work that will not
-  // run is privilege for no purpose.
-  if (!retainData) {
+  // only to bracket the second of them. All three run only under `deleteData`:
+  // granting an install-DDL policy and taking it away again around work that
+  // will not run is privilege for no purpose.
+  if (deleteData) {
     // Files-bucket cleanup runs under the app's role (its runtime policy +
     // permissions boundary scope it to apps/<appId>/*).
     const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);

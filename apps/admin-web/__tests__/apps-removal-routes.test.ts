@@ -3,7 +3,7 @@
  *
  * Both are thin proxies, and what a proxy is worth testing for is which
  * upstream it calls. That matters more here than usual: the three requests
- * these routes can make — uninstall, uninstall keeping the data, and drop this
+ * these routes can make — uninstall, uninstall deleting the data, and drop this
  * node's copy — differ only in a query parameter and a path suffix, and each
  * pair destroys something the other one keeps.
  */
@@ -29,22 +29,35 @@ afterAll(async () => {
 const lastCall = () => upstream.seen.at(-1)!;
 
 describe("POST /api/apps/uninstall", () => {
-  it("deletes the app's data unless asked not to", async () => {
+  it("keeps the app's data unless asked to delete it", async () => {
     const res = await uninstall(jsonRequest("/api/apps/uninstall", { appId: "photos" }));
     expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ appId: "photos", deleteData: false });
+    // No query string at all, which is what the data server reads as "keep it".
     expect(lastCall()).toMatchObject({ method: "DELETE", url: "/admin/apps/photos" });
   });
 
-  it("asks the data server to keep the data when retainData is set", async () => {
+  it("forwards deleteData when the caller asks for the destructive half", async () => {
     const res = await uninstall(
-      jsonRequest("/api/apps/uninstall", { appId: "photos", retainData: true }),
+      jsonRequest("/api/apps/uninstall", { appId: "photos", deleteData: true }),
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ appId: "photos", retainData: true });
+    expect(await res.json()).toMatchObject({ appId: "photos", deleteData: true });
     expect(lastCall()).toMatchObject({
       method: "DELETE",
-      url: "/admin/apps/photos?retainData=1",
+      url: "/admin/apps/photos?deleteData=1",
     });
+  });
+
+  it("does not read a stray retainData as permission to delete", async () => {
+    // The flag this route used to take, sent by a caller that has not been
+    // updated. It is not the flag any more, and the outcome an unknown field
+    // produces has to be the safe one rather than the old one inverted.
+    const res = await uninstall(
+      jsonRequest("/api/apps/uninstall", { appId: "photos", retainData: false }),
+    );
+    expect(res.status).toBe(200);
+    expect(lastCall()).toMatchObject({ method: "DELETE", url: "/admin/apps/photos" });
   });
 
   it("rejects a missing appId with 400 and calls nothing", async () => {

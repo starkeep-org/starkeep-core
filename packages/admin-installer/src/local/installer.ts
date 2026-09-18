@@ -165,29 +165,35 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
 }
 
 /**
- * Uninstall an app locally: drops its access grants and registry row. Shared
- * records produced by the app stay behind — they belong to the data, not the
- * app — matching the cloud-side design.
+ * Uninstall an app locally: drops its access grants, its label keys, its
+ * syncable namespace and its registry row. Shared records produced by the app
+ * stay behind — they belong to the data, not the app — matching the cloud-side
+ * design, and so does the app's own data unless `deleteData` says otherwise.
  */
 export interface UninstallLocalOptions {
   /**
    * Called with the `apps/<appId>/syncable/` prefix so the caller can delete
-   * any object-storage entries for the uninstalled app. The installer itself
-   * doesn't know about the storage adapter; the local-data-server wires this
-   * up. Errors here don't roll back the uninstall — the DB cleanup is
-   * authoritative — but they are logged.
+   * the uninstalled app's object-storage entries. Only called under
+   * `deleteData`. The installer itself doesn't know about the storage adapter;
+   * the local-data-server wires this up. Errors here don't roll back the
+   * uninstall — the DB cleanup is authoritative — but they are logged.
    */
   deleteFilesPrefix?: (prefix: string) => void | Promise<void>;
   /**
-   * Remove the app without removing what it holds. The app's syncable tables
-   * and its app-private blobs both survive, so reinstalling the same app id
-   * finds its rows and files where it left them — which is what makes a
-   * major-version upgrade expressible. The declarations still go: the registry
-   * row, the access grants, the label keys and the syncable namespace. Table
+   * Also destroy what the app holds: its syncable tables and its app-private
+   * blobs. Off by default, so an uninstall removes the app and leaves both
+   * behind, and reinstalling the same app id finds its rows and files where it
+   * left them — which is what makes a major-version upgrade expressible. Table
    * creation is `IF NOT EXISTS`, so the reinstall adopts the retained tables
    * rather than failing on them.
+   *
+   * The declarations go either way: the registry row, the access grants, the
+   * label keys and the syncable namespace. Keeping data is the default because
+   * the two outcomes are not equally recoverable — an uninstall that kept data
+   * the caller wanted gone can be run again, and an uninstall that deleted data
+   * the caller wanted kept cannot.
    */
-  retainData?: boolean;
+  deleteData?: boolean;
 }
 
 export function uninstallLocal(
@@ -221,10 +227,10 @@ export function uninstallLocal(
     deleteAppLabelKeys(db, appId);
   });
 
-  // The two steps that destroy what the app holds. `retainData` skips both,
-  // and nothing below them reads a table or a blob, so the rest of the
-  // uninstall proceeds unchanged.
-  if (!options.retainData) {
+  // The two steps that destroy what the app holds. They run only under
+  // `deleteData`, and nothing below them reads a table or a blob, so the rest
+  // of the uninstall proceeds unchanged either way.
+  if (options.deleteData) {
     runStep(db, appId, "uninstall", "drop_syncable_tables", done, () => {
       const ns = getAppSyncableNamespace(db, appId);
       if (ns) dropAppSyncableTables(db, appId, ns.tableNames);

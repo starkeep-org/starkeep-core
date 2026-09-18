@@ -131,12 +131,15 @@ describe("uninstall", () => {
     await putAppFile(app, "keep/me.bin", "app private bytes");
   });
 
-  it("drops tables, grants, namespace, and the files prefix — shared records survive", async () => {
+  it("deleteData drops tables, grants, namespace and the files prefix — shared records survive", async () => {
     const before = registryTableNames();
     expect(before).toContain("doomed_app_syncable_notes");
 
-    const res = await fetch(`${server.url}/admin/apps/doomed-app`, { method: "DELETE" });
+    const res = await fetch(`${server.url}/admin/apps/doomed-app?deleteData=1`, {
+      method: "DELETE",
+    });
     expect(res.status).toBe(200);
+    expect((await res.json()) as { deleteData: boolean }).toMatchObject({ deleteData: true });
 
     // Registry row gone.
     const list = await fetch(`${server.url}/admin/apps`);
@@ -182,7 +185,9 @@ describe("uninstall", () => {
   }, 15_000);
 
   it("uninstall of a never-installed app cleanly no-ops", async () => {
-    const res = await fetch(`${server.url}/admin/apps/never-was`, { method: "DELETE" });
+    const res = await fetch(`${server.url}/admin/apps/never-was?deleteData=1`, {
+      method: "DELETE",
+    });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
   });
@@ -192,8 +197,9 @@ describe("uninstall", () => {
     expect(again.hmacSecret).not.toBe(app.hmacSecret);
     const ok = await again.fetch("/data/types");
     expect(ok.status).toBe(200);
-    // Cleanup for other files' sake.
-    await fetch(`${server.url}/admin/apps/doomed-app`, { method: "DELETE" });
+    // Cleanup for other files' sake — `deleteData`, or the tables this test
+    // created outlive it.
+    await fetch(`${server.url}/admin/apps/doomed-app?deleteData=1`, { method: "DELETE" });
   });
 });
 
@@ -254,7 +260,7 @@ function writeSyncStateKey(appId: string, suffix: string, value: string): void {
   }
 }
 
-describe("uninstall with retainData", () => {
+describe("uninstall keeps the app's data by default", () => {
   let app: InstalledApp;
 
   beforeAll(async () => {
@@ -270,11 +276,12 @@ describe("uninstall with retainData", () => {
   it("keeps the app's tables and private files while removing the app", async () => {
     expect(appTableNames("kept_app_syncable_").length).toBeGreaterThan(0);
 
-    const res = await fetch(`${server.url}/admin/apps/kept-app?retainData=1`, {
-      method: "DELETE",
-    });
+    // No query parameter. Keeping the data is what a caller who said nothing
+    // gets, which is the half of this contract most worth pinning: a proxy
+    // that drops the flag, or a caller that forgets it, must not destroy data.
+    const res = await fetch(`${server.url}/admin/apps/kept-app`, { method: "DELETE" });
     expect(res.status).toBe(200);
-    expect((await res.json()) as { retainData: boolean }).toMatchObject({ retainData: true });
+    expect((await res.json()) as { deleteData: boolean }).toMatchObject({ deleteData: false });
 
     // The app is gone as an app.
     const list = await fetch(`${server.url}/admin/apps`);
@@ -297,7 +304,7 @@ describe("uninstall with retainData", () => {
     expect(res.status).toBe(200);
     const { rows } = (await res.json()) as { rows: Array<{ note_id: string; body: string }> };
     expect(rows.find((r) => r.note_id === "kept")?.body).toBe("still here");
-    await fetch(`${server.url}/admin/apps/kept-app`, { method: "DELETE" });
+    await fetch(`${server.url}/admin/apps/kept-app?deleteData=1`, { method: "DELETE" });
   });
 });
 
