@@ -6,6 +6,7 @@
  * stack without importing core test files.
  */
 
+import { createHash } from "node:crypto";
 import { signedFetch, type AppCredentials } from "@starkeep/app-client";
 
 export interface LdsApp extends AppCredentials {
@@ -91,6 +92,67 @@ export async function createRecordWithBytes(
     throw new Error(`register failed: ${register.status} ${await register.text()}`);
   }
   return (await register.json()) as { record: { id: string }; deduped?: boolean };
+}
+
+/**
+ * Write an app-private file through the only supported path: presign, upload
+ * to the returned URL, register the index row. Returns the stored key.
+ *
+ * Here rather than in each suite because the three-step shape is the platform's
+ * and an app testing what survives a removal should not have to restate it.
+ */
+export async function putAppFile(
+  app: LdsApp,
+  subKey: string,
+  bytes: Buffer | string,
+  mimeType = "application/octet-stream",
+): Promise<{ key: string }> {
+  const body = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+
+  const presign = await app.fetch("/app-data/files/presign", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subKey, contentType: mimeType }),
+  });
+  if (!presign.ok) throw new Error(`presign failed: ${presign.status} ${await presign.text()}`);
+  const { url } = (await presign.json()) as { url: string };
+
+  const uploaded = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": mimeType },
+    body: body as unknown as BodyInit,
+  });
+  if (!uploaded.ok) throw new Error(`upload failed: ${uploaded.status}`);
+
+  const register = await app.fetch(`/app-data/files/${subKey}/record`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contentHash: createHash("sha256")
+        .update(body as unknown as Uint8Array)
+        .digest("hex"),
+      mimeType,
+      sizeBytes: body.length,
+    }),
+  });
+  if (!register.ok) throw new Error(`register failed: ${register.status} ${await register.text()}`);
+  return (await register.json()) as { key: string };
+}
+
+/**
+ * Read an app-private file's bytes back, or null when the app has no such file.
+ *
+ * `null` rather than a throw for the 404, because "is it still there" is the
+ * question a removal test asks and both answers are results.
+ */
+export async function readAppFile(app: LdsApp, subKey: string): Promise<string | null> {
+  const res = await app.fetch(`/app-data/files/${subKey}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`app-file resolve failed: ${res.status}`);
+  const { url } = (await res.json()) as { url: string };
+  const bytes = await fetch(url);
+  if (!bytes.ok) throw new Error(`app-file fetch failed: ${bytes.status}`);
+  return bytes.text();
 }
 
 export async function listRecords(

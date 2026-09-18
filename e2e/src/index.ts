@@ -17,6 +17,8 @@ export {
   installAppDirect,
   driveCreds,
   createRecordWithBytes,
+  putAppFile,
+  readAppFile,
   listRecords,
   type LdsApp,
 } from "./lds.js";
