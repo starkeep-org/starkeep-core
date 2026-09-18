@@ -13,6 +13,7 @@ import { createHmac, createHash, randomBytes, randomUUID, timingSafeEqual } from
 import {
   installLocal,
   uninstallLocal,
+  removeAppFromNode,
   LocalInstallError,
   ManifestValidationError,
 } from "../../packages/admin-installer/src/local/installer.js";
@@ -56,6 +57,7 @@ import {
   LABEL_QUERY_TARGET,
 } from "../../packages/storage-adapter/src/database/label-find.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
+import { deletePerAppSyncState } from "./per-app-sync-state-store.js";
 import {
   typeCategory,
   isCategoryId,
@@ -3490,11 +3492,42 @@ async function main() {
         return;
       }
 
+      // DELETE /admin/apps/:appId/node-copy — drop this node's copy of an app
+      // and propagate nothing. Every other node keeps the app and its data;
+      // reinstalling here refills this one from the cloud.
+      //
+      // Matched before the uninstall route below, whose pattern would
+      // otherwise have to exclude this suffix.
+      const nodeCopyMatch = path.match(/^\/admin\/apps\/([^/]+)\/node-copy$/);
+      if (nodeCopyMatch && req.method === "DELETE") {
+        const targetAppId = decodeURIComponent(nodeCopyMatch[1]!);
+        // Before anything is deleted. A draining round writes this app's
+        // watermark back when it ends, and a watermark written after the
+        // removal is the stale one the removal exists to clear.
+        await supervisor?.stopAppAndDrain(targetAppId);
+        removeAppFromNode(localDb, targetAppId, {
+          deleteFilesPrefix: async (prefix) => {
+            const target = join(objectsBasePath, prefix);
+            await rm(target, { recursive: true, force: true });
+          },
+          clearSyncState: () => deletePerAppSyncState(localDb, targetAppId),
+        });
+        supervisor?.rescan();
+        refreshSizeClassKeys();
+        json(res, { ok: true, appId: targetAppId });
+        return;
+      }
+
       // DELETE /admin/apps/:appId — run the local uninstaller for an app.
+      // `?retainData=1` keeps the app's syncable tables and app-private blobs,
+      // which is what makes a major-version reinstall an upgrade rather than a
+      // fresh start.
       const uninstallMatch = path.match(/^\/admin\/apps\/([^/]+)$/);
       if (uninstallMatch && req.method === "DELETE") {
         const targetAppId = decodeURIComponent(uninstallMatch[1]!);
+        const retainData = url.searchParams.get("retainData") === "1";
         uninstallLocal(localDb, targetAppId, {
+          retainData,
           deleteFilesPrefix: async (prefix) => {
             // Storage layout is the FS adapter's basePath/<key>. The syncable
             // prefix is its own directory tree under apps/<appId>/syncable/,
@@ -3506,7 +3539,7 @@ async function main() {
         // Tear down the per-app sync loop, and drop its ladder key with it.
         supervisor?.rescan();
         refreshSizeClassKeys();
-        json(res, { ok: true, appId: targetAppId });
+        json(res, { ok: true, appId: targetAppId, retainData });
         return;
       }
 

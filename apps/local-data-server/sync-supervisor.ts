@@ -196,6 +196,17 @@ export interface SyncSupervisor {
    * apps, stop engines for apps no longer present.
    */
   rescan(): void;
+  /**
+   * Stop one app's engine and wait for whatever it was doing to finish.
+   *
+   * `rescan()` also stops engines, but it is synchronous by contract and lets
+   * the drain settle in the background. That is fine when the app's rows are
+   * merely going away; it is not fine when the caller is about to delete that
+   * app's `sync_state`, because a drain finishing afterwards writes the
+   * watermark back and the deletion silently does nothing. Node-local removal
+   * awaits this first.
+   */
+  stopAppAndDrain(appId: string): Promise<void>;
 }
 
 /**
@@ -795,5 +806,12 @@ export function createSyncSupervisor(
     },
 
     rescan,
+
+    async stopAppAndDrain(appId: string): Promise<void> {
+      const entry = engines.get(appId);
+      if (!entry) return;
+      stopEngineFor(appId);
+      await drained(entry);
+    },
   };
 }

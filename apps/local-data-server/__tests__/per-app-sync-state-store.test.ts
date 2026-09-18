@@ -20,7 +20,10 @@ import { nodeSqliteDriver } from "../../../packages/storage-sqlite/src/node-driv
 import { createSqliteSyncStateStore } from "../../../packages/sync-engine/src/sync-state-sqlite.js";
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import type { SyncStateStore, Watermarks } from "@starkeep/sync-engine";
-import { createPerAppSyncStateStore } from "../per-app-sync-state-store.js";
+import {
+  createPerAppSyncStateStore,
+  deletePerAppSyncState,
+} from "../per-app-sync-state-store.js";
 
 const hlc = (wallTime: number, nodeId: string) => ({ wallTime, counter: 0, nodeId });
 
@@ -125,5 +128,73 @@ describe("per-app sync state", () => {
     await drive.setHlcClockState({ wallTime: 42, counter: 7 });
     expect(await photos.getHlcClockState()).toEqual({ wallTime: 42, counter: 7 });
     expect(await underlying.getHlcClockState()).toEqual({ wallTime: 42, counter: 7 });
+  });
+});
+
+/**
+ * Clearing one app's position, which node-local removal does on its way out.
+ *
+ * A removal that leaves the watermark behind reinstalls into a node that
+ * believes it has already read everything the cloud holds, so the app comes
+ * back empty and stays empty. The two things worth pinning are that the
+ * deletion reaches all four keys and that it reaches nobody else's.
+ */
+describe("deletePerAppSyncState", () => {
+  let adapter: SqliteDatabaseAdapter;
+  let db: RawDatabase;
+
+  beforeEach(async () => {
+    adapter = new SqliteDatabaseAdapter({ path: ":memory:", driver: nodeSqliteDriver });
+    await adapter.init();
+    db = adapter.getRawDatabase();
+  });
+
+  afterEach(async () => {
+    await adapter.close();
+  });
+
+  it("clears all four of one app's keys and leaves every other channel's alone", async () => {
+    const underlying = createSqliteSyncStateStore({ db });
+    const photos = createPerAppSyncStateStore(db, underlying, "photos");
+    const drive = createPerAppSyncStateStore(db, underlying, "starkeep-drive");
+
+    for (const store of [photos, drive]) {
+      await store.setWatermarks({ L: hlc(1, "L") });
+      await store.setPeerWatermarks({ L: hlc(2, "L") });
+      await store.setRepairFloors({ L: hlc(3, "L") });
+      await store.setInboundFloors({ L: hlc(4, "L") });
+    }
+    await underlying.setHlcClockState({ wallTime: 42, counter: 7 });
+
+    deletePerAppSyncState(db, "photos");
+
+    expect(await photos.getWatermarks()).toEqual({});
+    expect(await photos.getPeerWatermarks()).toEqual({});
+    expect(await photos.getRepairFloors()).toEqual({});
+    expect(await photos.getInboundFloors()).toEqual({});
+
+    expect(await drive.getWatermarks()).toEqual({ L: hlc(1, "L") });
+    expect(await drive.getPeerWatermarks()).toEqual({ L: hlc(2, "L") });
+    expect(await drive.getRepairFloors()).toEqual({ L: hlc(3, "L") });
+    expect(await drive.getInboundFloors()).toEqual({ L: hlc(4, "L") });
+
+    // The clock belongs to the node, not to a channel, so a removal must not
+    // take it. A node that forgets its own time reissues HLCs it has already
+    // used, and every LWW comparison in the system rests on that not happening.
+    expect(await underlying.getHlcClockState()).toEqual({ wallTime: 42, counter: 7 });
+  });
+
+  it("no-ops on a node that has never synced, where the table does not exist", () => {
+    // `createSqliteSyncStateStore` is what creates `sync_state`, and it runs
+    // only on a node configured with a cloud. Removing an app from a cloudless
+    // node must not fail on a table whose absence already means "nothing to do".
+    expect(
+      (
+        db
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sync_state'")
+          .all() as unknown[]
+      ).length,
+    ).toBe(0);
+    expect(() => deletePerAppSyncState(db, "photos")).not.toThrow();
   });
 });

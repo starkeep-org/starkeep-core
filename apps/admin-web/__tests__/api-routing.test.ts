@@ -39,6 +39,7 @@ function spy(moduleName: string, exportNames: string[]) {
 vi.mock("../src/routes/apps-list", () => spy("apps-list", ["GET"]));
 vi.mock("../src/routes/apps-install", () => spy("apps-install", ["POST"]));
 vi.mock("../src/routes/apps-uninstall", () => spy("apps-uninstall", ["POST"]));
+vi.mock("../src/routes/apps-remove-node", () => spy("apps-remove-node", ["POST"]));
 vi.mock("../src/routes/apps-cloud-list", () => spy("apps-cloud-list", ["POST"]));
 vi.mock("../src/routes/apps-cloud-install", () => spy("apps-cloud-install", ["POST"]));
 vi.mock("../src/routes/apps-install-status", () => spy("apps-install-status", ["GET"]));
@@ -74,6 +75,7 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["GET", "/api/apps/list", "apps-list", "GET"],
   ["POST", "/api/apps/install", "apps-install", "POST"],
   ["POST", "/api/apps/uninstall", "apps-uninstall", "POST"],
+  ["POST", "/api/apps/remove-from-node", "apps-remove-node", "POST"],
   ["POST", "/api/apps/cloud/list", "apps-cloud-list", "POST"],
   ["POST", "/api/apps/photos/cloud-install", "apps-cloud-install", "POST"],
   ["GET", "/api/apps/photos/install-status", "apps-install-status", "GET"],

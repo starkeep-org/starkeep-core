@@ -55,10 +55,15 @@ export type {
 export {
   installLocal,
   uninstallLocal,
+  removeAppFromNode,
   LocalInstallError,
   ManifestValidationError,
 } from "./local/installer";
-export type { InstallLocalResult, UninstallLocalOptions } from "./local/installer";
+export type {
+  InstallLocalResult,
+  UninstallLocalOptions,
+  RemoveAppFromNodeOptions,
+} from "./local/installer";
 export {
   listAppRegistry,
   sizeClassKeysByApp,

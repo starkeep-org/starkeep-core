@@ -178,6 +178,16 @@ export interface UninstallLocalOptions {
    * authoritative — but they are logged.
    */
   deleteFilesPrefix?: (prefix: string) => void | Promise<void>;
+  /**
+   * Remove the app without removing what it holds. The app's syncable tables
+   * and its app-private blobs both survive, so reinstalling the same app id
+   * finds its rows and files where it left them — which is what makes a
+   * major-version upgrade expressible. The declarations still go: the registry
+   * row, the access grants, the label keys and the syncable namespace. Table
+   * creation is `IF NOT EXISTS`, so the reinstall adopts the retained tables
+   * rather than failing on them.
+   */
+  retainData?: boolean;
 }
 
 export function uninstallLocal(
@@ -211,28 +221,114 @@ export function uninstallLocal(
     deleteAppLabelKeys(db, appId);
   });
 
+  // The two steps that destroy what the app holds. `retainData` skips both,
+  // and nothing below them reads a table or a blob, so the rest of the
+  // uninstall proceeds unchanged.
+  if (!options.retainData) {
+    runStep(db, appId, "uninstall", "drop_syncable_tables", done, () => {
+      const ns = getAppSyncableNamespace(db, appId);
+      if (ns) dropAppSyncableTables(db, appId, ns.tableNames);
+    });
+
+    runStep(db, appId, "uninstall", "delete_syncable_files", done, () => {
+      const ns = getAppSyncableNamespace(db, appId);
+      if (ns?.filesEnabled && options.deleteFilesPrefix) {
+        deleteFilesPrefix(options.deleteFilesPrefix, `apps/${appId}/syncable/`);
+      }
+    });
+  }
+
+  runStep(db, appId, "uninstall", "delete_syncable_namespace", done, () => {
+    deleteAppSyncableNamespace(db, appId);
+  });
+
+  runStep(db, appId, "uninstall", "delete_app_registry_row", done, () => {
+    deleteAppRegistry(db, appId);
+  });
+
+  clearStepLedger(db, appId);
+}
+
+export interface RemoveAppFromNodeOptions {
+  /**
+   * Called with the `apps/<appId>/` prefix so the caller can delete this
+   * node's object-storage entries for the app. Wider than the uninstall's
+   * `apps/<appId>/syncable/` on purpose: a node-local removal is meant to
+   * reclaim everything the app put on this machine, not only the part the sync
+   * engine manages. Errors are logged and do not roll the removal back.
+   */
+  deleteFilesPrefix?: (prefix: string) => void | Promise<void>;
+  /**
+   * Called to delete this app's `sync_state` rows. The installer does not own
+   * the key scheme — the local-data-server's per-app sync state store does —
+   * so the caller supplies the deletion, the way it supplies blob deletion.
+   *
+   * Not optional in practice, and the single step in this operation that is
+   * easiest to omit. A removal that leaves the watermark behind reinstalls
+   * into a node that believes it has already read everything the cloud holds,
+   * so the app comes back empty and stays empty: the puller asks for changes
+   * after a point the cloud has long passed, and no later round ever goes back
+   * for the rows in between.
+   */
+  clearSyncState?: () => void;
+}
+
+/**
+ * Remove this node's copy of an app and propagate nothing.
+ *
+ * The distinction from `uninstallLocal` is what reaches the other nodes.
+ * Uninstalling is a statement about the app; removing from a node is a
+ * statement about this machine's disk, and the cloud's rows, the other
+ * desktops' rows and the handset's rows all stay exactly as they are. Dropping
+ * a syncable table writes no tombstone — the applier only ships rows it is
+ * asked to write — so nothing about this removal is observable to a peer.
+ *
+ * Reinstalling afterwards refills the node from the cloud, which is the whole
+ * point and the reason `clearSyncState` is part of the operation rather than a
+ * refinement of it.
+ */
+export function removeAppFromNode(
+  db: RawDatabase,
+  appId: string,
+  options: RemoveAppFromNodeOptions = {},
+): void {
+  const existing = appRegistryRow(db, appId);
+  if (!existing) {
+    clearStepLedger(db, appId);
+    return;
+  }
+
+  const done = getCompletedSteps(db, appId, "uninstall");
+
+  runStep(db, appId, "uninstall", "mark_uninstalling", done, () => {
+    setAppStatus(db, appId, "uninstalling");
+  });
+
+  runStep(db, appId, "uninstall", "revoke_access_grants", done, () => {
+    deleteAccessGrants(db, appId);
+  });
+
+  runStep(db, appId, "uninstall", "revoke_label_keys", done, () => {
+    deleteAppLabelKeys(db, appId);
+  });
+
   runStep(db, appId, "uninstall", "drop_syncable_tables", done, () => {
     const ns = getAppSyncableNamespace(db, appId);
     if (ns) dropAppSyncableTables(db, appId, ns.tableNames);
   });
 
-  runStep(db, appId, "uninstall", "delete_syncable_files", done, () => {
-    const ns = getAppSyncableNamespace(db, appId);
-    if (ns?.filesEnabled && options.deleteFilesPrefix) {
-      const prefix = `apps/${appId}/syncable/`;
-      try {
-        const result = options.deleteFilesPrefix(prefix);
-        if (result && typeof (result as Promise<void>).then === "function") {
-          // Step ledger is synchronous; fire-and-forget the async deletion.
-          // Local-data-server logs any failure via the returned Promise.
-          (result as Promise<void>).catch((err) =>
-            console.error(`uninstall: failed to clear ${prefix}:`, err),
-          );
-        }
-      } catch (err) {
-        console.error(`uninstall: failed to clear ${prefix}:`, err);
-      }
+  runStep(db, appId, "uninstall", "delete_node_files", done, () => {
+    if (options.deleteFilesPrefix) {
+      deleteFilesPrefix(options.deleteFilesPrefix, `apps/${appId}/`);
     }
+  });
+
+  // Ordered after the tables and the blobs so a failure part-way through
+  // leaves a node that still knows where it had read up to. Clearing the
+  // watermark first and then failing to drop the tables would leave the node
+  // re-applying rows it already holds.
+  runStep(db, appId, "uninstall", "clear_sync_state", done, () => {
+    options.clearSyncState?.();
   });
 
   runStep(db, appId, "uninstall", "delete_syncable_namespace", done, () => {
@@ -244,6 +340,28 @@ export function uninstallLocal(
   });
 
   clearStepLedger(db, appId);
+}
+
+/**
+ * Hand a prefix to the caller's deleter, tolerating both a synchronous and an
+ * asynchronous one. The step ledger is synchronous, so an async deletion is
+ * fire-and-forget with its failure logged rather than awaited — the database
+ * cleanup is what is authoritative.
+ */
+function deleteFilesPrefix(
+  deleter: (prefix: string) => void | Promise<void>,
+  prefix: string,
+): void {
+  try {
+    const result = deleter(prefix);
+    if (result && typeof (result as Promise<void>).then === "function") {
+      (result as Promise<void>).catch((err) =>
+        console.error(`uninstall: failed to clear ${prefix}:`, err),
+      );
+    }
+  } catch (err) {
+    console.error(`uninstall: failed to clear ${prefix}:`, err);
+  }
 }
 
 function runStep(

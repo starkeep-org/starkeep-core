@@ -129,6 +129,22 @@ export interface UninstallInput {
   manifest: AppManifest;
   config: InstallerConfig;
   registryCredentials: RegistryCredentials;
+  /**
+   * Remove the app without removing what it holds. The app's S3 prefix under
+   * the files bucket and its DSQL schema both survive, so a reinstall of the
+   * same app id finds its app-specific rows and app-private blobs where it
+   * left them. This is what makes a major-version upgrade expressible: take
+   * the app down, put a new one up, keep the data.
+   *
+   * Everything that is not data still goes — the compute stack, the artifacts,
+   * the IAM roles, the SSM parameter, the registry entry. Skipping the
+   * uninstall DDL also leaves the app's PG role and its grants on `shared.*`
+   * in place, because that one step drops the schema and the role together.
+   * The IAM role the PG role maps to is deleted either way, so nothing can
+   * authenticate as it in the meantime, and a reinstall reconciles both (the
+   * install DDL probes before creating).
+   */
+  retainData?: boolean;
 }
 
 export interface InstallResult {
@@ -419,7 +435,7 @@ async function uninstallAppInner(
   input: UninstallInput,
   registry: Registry,
 ): Promise<void> {
-  const { appId, manifest, config } = input;
+  const { appId, manifest, config, retainData = false } = input;
   const ir = manifest.infraRequirements;
   const done = await registry.getCompletedSteps(appId, "uninstall");
 
@@ -478,33 +494,39 @@ async function uninstallAppInner(
     );
   }
 
-  // Files-bucket cleanup runs under the app's role (its runtime policy +
-  // permissions boundary scope it to apps/<appId>/*).
-  const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
+  // The two data-destroying steps, and the temporary DDL policy that exists
+  // only to bracket the second of them. `retainData` skips all three: granting
+  // an install-DDL policy and taking it away again around work that will not
+  // run is privilege for no purpose.
+  if (!retainData) {
+    // Files-bucket cleanup runs under the app's role (its runtime policy +
+    // permissions boundary scope it to apps/<appId>/*).
+    const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
 
-  await runStep(registry, appId, "uninstall", "delete_s3_files", done, () =>
-    deleteAppFilesObjects(appId, config.filesBucket, config.region, appCreds),
-  );
+    await runStep(registry, appId, "uninstall", "delete_s3_files", done, () =>
+      deleteAppFilesObjects(appId, config.filesBucket, config.region, appCreds),
+    );
 
-  await runStep(registry, appId, "uninstall", "attach_temp_install_ddl_policy", done, () =>
-    attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
-  );
+    await runStep(registry, appId, "uninstall", "attach_temp_install_ddl_policy", done, () =>
+      attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+    );
 
-  await runStep(registry, appId, "uninstall", "run_dsql_uninstall_ddl", done, async () => {
-    const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
-    const dsqlOpts: DsqlDdlOptions = {
-      hostname: config.dsqlHostname,
-      region: config.region,
-      stackPrefix: config.stackPrefix,
-      accountId: config.accountId,
-      credentials: ddlCreds,
-    };
-    await runAppUninstallDdl(dsqlOpts, appId, ir.fileAccess, ir.fileAccessAll);
-  });
+    await runStep(registry, appId, "uninstall", "run_dsql_uninstall_ddl", done, async () => {
+      const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
+      const dsqlOpts: DsqlDdlOptions = {
+        hostname: config.dsqlHostname,
+        region: config.region,
+        stackPrefix: config.stackPrefix,
+        accountId: config.accountId,
+        credentials: ddlCreds,
+      };
+      await runAppUninstallDdl(dsqlOpts, appId, ir.fileAccess, ir.fileAccessAll);
+    });
 
-  await runStep(registry, appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>
-    detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
-  );
+    await runStep(registry, appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>
+      detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+    );
+  }
 
   await runStep(registry, appId, "uninstall", "delete_app_registry", done, () =>
     registry.deleteAppRegistryEntry(appId),

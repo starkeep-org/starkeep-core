@@ -22,6 +22,7 @@ import { Hono } from "hono";
 import * as appsList from "./routes/apps-list";
 import * as appsInstall from "./routes/apps-install";
 import * as appsUninstall from "./routes/apps-uninstall";
+import * as appsRemoveNode from "./routes/apps-remove-node";
 import * as appsCloudList from "./routes/apps-cloud-list";
 import * as appsCloudInstall from "./routes/apps-cloud-install";
 import * as appsInstallStatus from "./routes/apps-install-status";
@@ -44,8 +45,9 @@ export const api = new Hono().basePath("/api");
 api.get("/apps/list", () => appsList.GET());
 api.post("/apps/install", (c) => appsInstall.POST(c.req.raw));
 api.post("/apps/uninstall", (c) => appsUninstall.POST(c.req.raw));
+api.post("/apps/remove-from-node", (c) => appsRemoveNode.POST(c.req.raw));
 api.post("/apps/cloud/list", (c) => appsCloudList.POST(c.req.raw));
-// `:appId` before the two static `/apps/*` routes above would swallow them, so
+// `:appId` before the static `/apps/*` routes above would swallow them, so
 // the static paths are declared first and Hono's router prefers them anyway —
 // stated in both places rather than relying on either alone.
 api.post("/apps/:appId/cloud-install", (c) =>

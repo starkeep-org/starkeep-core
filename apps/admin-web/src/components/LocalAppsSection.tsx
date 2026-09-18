@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -25,6 +27,13 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
 }) {
   const [error, setError] = useState<string | null>(null);
   const [pendingConsent, setPendingConsent] = useState<LocalAppEntry | null>(null);
+  // The app whose removal dialog is open, and which of the two removals the
+  // operator picked from the menu. Both land in one dialog because both
+  // destroy something and the difference between them — what survives, and
+  // where — is exactly what the dialog exists to state.
+  const [pendingRemoval, setPendingRemoval] = useState<
+    { entry: LocalAppEntry; kind: "uninstall" | "node" } | null
+  >(null);
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<Record<string, DaemonStatus>>({});
   // App whose install-step ledger is currently displayed (null when closed).
@@ -147,19 +156,41 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
     }
   };
 
-  const handleUninstall = async (entry: LocalAppEntry) => {
-    if (!confirm(`Uninstall ${entry.appId}? Records it produced will remain in shared storage.`)) return;
-    setBusyAppId(entry.appId);
+  const handleUninstall = async (appId: string, retainData: boolean) => {
+    setPendingRemoval(null);
+    setBusyAppId(appId);
     setError(null);
     try {
       const res = await fetch("/api/apps/uninstall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appId: entry.appId }),
+        body: JSON.stringify({ appId, retainData }),
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(data?.error ?? `uninstall failed: ${res.status}`);
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAppId(null);
+    }
+  };
+
+  const handleRemoveFromNode = async (appId: string) => {
+    setPendingRemoval(null);
+    setBusyAppId(appId);
+    setError(null);
+    try {
+      const res = await fetch("/api/apps/remove-from-node", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appId }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `remove from this node failed: ${res.status}`);
       }
       await refresh();
     } catch (err) {
@@ -217,10 +248,19 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
             });
             actions.push({
               label: installBusy ? "Uninstalling…" : "Uninstall",
-              onSelect: () => handleUninstall(entry),
+              onSelect: () => setPendingRemoval({ entry, kind: "uninstall" }),
               disabled: installBusy || running || busy,
               destructive: true,
               title: running ? "Stop the app before uninstalling" : undefined,
+            });
+            actions.push({
+              label: "Remove from this node…",
+              onSelect: () => setPendingRemoval({ entry, kind: "node" }),
+              disabled: installBusy || running || busy,
+              destructive: true,
+              title: running
+                ? "Stop the app before removing it"
+                : "Drop this machine's copy. Other nodes keep the app and its data.",
             });
           }
 
@@ -332,11 +372,116 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
         />
       )}
 
+      <RemovalDialog
+        pending={pendingRemoval}
+        onCancel={() => setPendingRemoval(null)}
+        onUninstall={handleUninstall}
+        onRemoveFromNode={handleRemoveFromNode}
+      />
+
+
       <InstallStepsDialog
         appId={stepsOpenFor}
         onClose={() => setStepsOpenFor(null)}
       />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Removal dialog. Two operations share it because an operator choosing between
+// them is choosing between two answers to one question — what survives, and
+// where — and putting those answers side by side is the only way the choice
+// reads. Uninstalling removes the app; removing from this node removes this
+// machine's copy of it and leaves every other node alone.
+//
+// The "keep this app's data" checkbox belongs to the uninstall alone. A
+// node-local removal deletes this node's copy by definition, so offering to
+// keep it there would be offering to do nothing.
+// ---------------------------------------------------------------------------
+
+function RemovalDialog({
+  pending,
+  onCancel,
+  onUninstall,
+  onRemoveFromNode,
+}: {
+  pending: { entry: LocalAppEntry; kind: "uninstall" | "node" } | null;
+  onCancel: () => void;
+  onUninstall: (appId: string, retainData: boolean) => void;
+  onRemoveFromNode: (appId: string) => void;
+}) {
+  const [retainData, setRetainData] = useState(false);
+
+  // Reset between openings. A checkbox left ticked from the last app is a
+  // checkbox that decides the next app's data by accident.
+  useEffect(() => {
+    setRetainData(false);
+  }, [pending?.entry.appId, pending?.kind]);
+
+  if (!pending) return null;
+  const { entry, kind } = pending;
+  const name = entry.manifest.name ?? entry.appId;
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>
+            {kind === "uninstall" ? `Uninstall ${name}?` : `Remove ${name} from this node?`}
+          </DialogTitle>
+          <DialogDescription>
+            {kind === "uninstall"
+              ? "Records this app produced stay in shared storage. They belong to your data, not to the app."
+              : "This machine drops its copy of the app and everything the app keeps here. The cloud and your other devices are untouched, and installing the app here again refills it from the cloud."}
+          </DialogDescription>
+        </DialogHeader>
+
+        {kind === "uninstall" && (
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 size-4 accent-primary"
+              checked={retainData}
+              onChange={(e) => setRetainData(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">Keep this app&rsquo;s data.</span>{" "}
+              <span className="text-muted-foreground">
+                The app&rsquo;s own tables and its private files stay on disk, so installing it
+                again picks up where it left off. Leave this unticked to delete them.
+              </span>
+            </span>
+          </label>
+        )}
+
+        {kind === "uninstall" && !retainData && (
+          <Alert variant="destructive">
+            <AlertTitle>This deletes {name}&rsquo;s own data</AlertTitle>
+            <AlertDescription>
+              Its app-specific tables and private files go with it, on this node. Nothing here
+              restores them.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel}>Cancel</Button>
+          <Button
+            variant="destructive"
+            onClick={() =>
+              kind === "uninstall"
+                ? onUninstall(entry.appId, retainData)
+                : onRemoveFromNode(entry.appId)
+            }
+          >
+            {kind === "uninstall"
+              ? retainData ? "Uninstall, keep data" : "Uninstall and delete data"
+              : "Remove from this node"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -7,28 +7,32 @@ const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://
 const STARKEEP_DIR = starkeepDir();
 const APP_CREDS_DIR = join(STARKEEP_DIR, "app-creds");
 
+/**
+ * POST /api/apps/remove-from-node — drop this machine's copy of an app.
+ *
+ * The uninstall route next door says something about the app; this one says
+ * something about this machine. The cloud's rows, the other desktops' rows and
+ * the handset's rows are all untouched, because dropping a syncable table
+ * writes no tombstone and therefore reaches no peer. Installing the app here
+ * again refills it from the cloud, which is what clearing the sync watermark
+ * on the way out is for.
+ *
+ * Same two local side effects as an uninstall: the app's process stops, and
+ * its signing secret goes. Neither is data.
+ */
 export async function POST(req: Request) {
-  const body = (await req.json()) as { appId?: string; retainData?: boolean };
-  const { appId, retainData = false } = body;
+  const body = (await req.json()) as { appId?: string };
+  const { appId } = body;
   if (!appId) {
     return Response.json({ error: "appId is required" }, { status: 400 });
   }
 
-  // Stop the app's dev server before tearing down its registry row. Otherwise
-  // the running process keeps calling the data-server with a secret that no
-  // longer authenticates, and the operator sees a stream of 401s. Best-effort:
-  // a "not running" result is fine; we only care that nothing keeps signing in
-  // as this app after uninstall.
   stopById(appId);
 
   let resp: Response;
   try {
-    // The flag rides the query string because the local-data-server's
-    // uninstall is a DELETE, and a DELETE with a body is a request a proxy is
-    // entitled to drop.
-    const query = retainData ? "?retainData=1" : "";
     resp = await fetch(
-      `${LOCAL_DATA_SERVER}/admin/apps/${encodeURIComponent(appId)}${query}`,
+      `${LOCAL_DATA_SERVER}/admin/apps/${encodeURIComponent(appId)}/node-copy`,
       { method: "DELETE" },
     );
   } catch (err) {
@@ -43,7 +47,7 @@ export async function POST(req: Request) {
   if (!resp.ok) {
     const text = await resp.text();
     return Response.json(
-      { error: "Uninstall failed", status: resp.status, body: text },
+      { error: "Remove from this node failed", status: resp.status, body: text },
       { status: resp.status },
     );
   }
@@ -53,5 +57,5 @@ export async function POST(req: Request) {
     unlinkSync(secretPath);
   }
 
-  return Response.json({ appId, ok: true, retainData });
+  return Response.json({ appId, ok: true });
 }

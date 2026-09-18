@@ -196,3 +196,171 @@ describe("uninstall", () => {
     await fetch(`${server.url}/admin/apps/doomed-app`, { method: "DELETE" });
   });
 });
+
+/** Poll until `path` no longer exists, or give up. Object deletion is async. */
+async function waitGone(path: string, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await stat(path);
+    } catch {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
+function appTableNames(prefix: string): string[] {
+  return registryTableNames().filter((n) => n.startsWith(prefix));
+}
+
+function syncStateKeys(appId: string): string[] {
+  const db = new DatabaseSync(join(server.starkeepDir, "data.db"), { readOnly: true });
+  try {
+    if (
+      (db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sync_state'")
+        .all() as unknown[]).length === 0
+    ) {
+      return [];
+    }
+    return (
+      db
+        .prepare("SELECT key FROM sync_state WHERE key LIKE ?")
+        .all(`${appId}:%`) as Array<{ key: string }>
+    ).map((r) => r.key);
+  } finally {
+    db.close();
+  }
+}
+
+function writeSyncStateKey(appId: string, suffix: string, value: string): void {
+  const db = new DatabaseSync(join(server.starkeepDir, "data.db"));
+  try {
+    // `createSqliteSyncStateStore` makes this table, and it only runs on a node
+    // configured with a cloud. This server has none, so the test stands the
+    // table up itself with the same shape.
+    db.exec(
+      "CREATE TABLE IF NOT EXISTS sync_state (key text PRIMARY KEY, value_json text NOT NULL, " +
+        "updated_at integer NOT NULL DEFAULT (strftime('%s','now')))",
+    );
+    db.prepare(
+      "INSERT INTO sync_state (key, value_json, updated_at) VALUES (?, ?, strftime('%s','now')) " +
+        "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+    ).run(`${appId}:${suffix}`, value);
+  } finally {
+    db.close();
+  }
+}
+
+describe("uninstall with retainData", () => {
+  let app: InstalledApp;
+
+  beforeAll(async () => {
+    app = await installApp(server, testAppManifest({ id: "kept-app" }));
+    await app.fetch("/app-data/db/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ row: { note_id: "kept", body: "still here" } }),
+    });
+    await putAppFile(app, "keep/me.bin", "app private bytes");
+  });
+
+  it("keeps the app's tables and private files while removing the app", async () => {
+    expect(appTableNames("kept_app_syncable_").length).toBeGreaterThan(0);
+
+    const res = await fetch(`${server.url}/admin/apps/kept-app?retainData=1`, {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { retainData: boolean }).toMatchObject({ retainData: true });
+
+    // The app is gone as an app.
+    const list = await fetch(`${server.url}/admin/apps`);
+    const { apps } = (await list.json()) as { apps: Array<{ appId: string }> };
+    expect(apps.some((a) => a.appId === "kept-app")).toBe(false);
+    expect((await app.fetch("/data/types")).status).toBe(401);
+
+    // Its data is not.
+    expect(appTableNames("kept_app_syncable_").length).toBeGreaterThan(0);
+    // Deletion is asynchronous when it happens at all, so a prefix that is
+    // still there after the window the destructive path is given is a prefix
+    // nothing tried to delete.
+    const prefixPath = join(server.starkeepDir, "objects", "apps", "kept-app");
+    expect(await waitGone(prefixPath, 1_500)).toBe(false);
+  }, 15_000);
+
+  it("a reinstall finds the retained rows where the uninstall left them", async () => {
+    const again = await installApp(server, testAppManifest({ id: "kept-app" }));
+    const res = await again.fetch("/app-data/db/notes");
+    expect(res.status).toBe(200);
+    const { rows } = (await res.json()) as { rows: Array<{ note_id: string; body: string }> };
+    expect(rows.find((r) => r.note_id === "kept")?.body).toBe("still here");
+    await fetch(`${server.url}/admin/apps/kept-app`, { method: "DELETE" });
+  });
+});
+
+describe("remove from this node", () => {
+  let app: InstalledApp;
+  let sharedRecordId: string;
+
+  beforeAll(async () => {
+    app = await installApp(server, testAppManifest({ id: "local-only-app" }));
+    const created = await createRecordWithBytes(app, { fileName: "shared.jpg" });
+    sharedRecordId = created.record.id;
+    await app.fetch("/app-data/db/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ row: { note_id: "local", body: "on this node" } }),
+    });
+    await putAppFile(app, "keep/me.bin", "app private bytes");
+    // The supervisor only writes these once an exchange has run, and this
+    // server has no cloud to exchange with, so the watermarks are seeded
+    // directly. What matters is that the removal deletes rows under the app's
+    // key prefix and nothing else.
+    writeSyncStateKey("local-only-app", "watermarks", JSON.stringify({ cloud: "1" }));
+    writeSyncStateKey("local-only-app", "peer_watermarks", JSON.stringify({ cloud: "1" }));
+    writeSyncStateKey("other-app", "watermarks", JSON.stringify({ cloud: "9" }));
+  });
+
+  it("drops the tables, the whole app prefix and the sync watermark", async () => {
+    expect(syncStateKeys("local-only-app").length).toBe(2);
+
+    const res = await fetch(`${server.url}/admin/apps/local-only-app/node-copy`, {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(200);
+
+    const list = await fetch(`${server.url}/admin/apps`);
+    const { apps } = (await list.json()) as { apps: Array<{ appId: string }> };
+    expect(apps.some((a) => a.appId === "local-only-app")).toBe(false);
+    expect(appTableNames("local_only_app_syncable_")).toEqual([]);
+    expect(syncStateKeys("local-only-app")).toEqual([]);
+    // Another app's watermark is not collateral.
+    expect(syncStateKeys("other-app")).toEqual(["other-app:watermarks"]);
+
+    // The whole `apps/<id>/` subtree goes, not only `syncable/` — a node-local
+    // removal is meant to reclaim everything the app put on this machine.
+    const prefixPath = join(server.starkeepDir, "objects", "apps", "local-only-app");
+    expect(await waitGone(prefixPath)).toBe(true);
+
+    // Shared records are not this node's to remove, and are not removed.
+    const db = new DatabaseSync(join(server.starkeepDir, "data.db"), { readOnly: true });
+    try {
+      const row = db
+        .prepare("SELECT id, deleted_at FROM shared_records WHERE id = ?")
+        .get(sharedRecordId) as { id: string; deleted_at: string | null } | undefined;
+      expect(row).toBeDefined();
+      expect(row!.deleted_at).toBeNull();
+    } finally {
+      db.close();
+    }
+  }, 15_000);
+
+  it("removing an app this node never had cleanly no-ops", async () => {
+    const res = await fetch(`${server.url}/admin/apps/never-was/node-copy`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
+  });
+});

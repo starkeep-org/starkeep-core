@@ -95,7 +95,8 @@ import {
   detachTempInstallInfraPolicy,
 } from "../src/iam";
 import { putAppCredsParameter } from "../src/app-creds";
-import { putAppKeepFile, uploadAppBundle } from "../src/s3";
+import { putAppKeepFile, uploadAppBundle, deleteAppFilesObjects } from "../src/s3";
+import { runAppUninstallDdl } from "../src/dsql-ddl";
 import { installComputeStack } from "../src/compute-stack";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import { readFileSync as rf } from "node:fs";
@@ -520,5 +521,31 @@ describe("uninstall", () => {
     });
     // Uninstall ran fully even though install's ledger was complete.
     expect(doneSteps("uninstall")).toHaveLength(12);
+  });
+
+  it("retainData skips the two data-destroying steps and the DDL policy around them", async () => {
+    await uninstallApp({
+      appId: "photos",
+      manifest: photosManifest,
+      config,
+      registryCredentials,
+      retainData: true,
+    });
+    expect(doneSteps("uninstall")).toEqual([
+      "attach_temp_uninstall_infra_policy",
+      "uninstall_compute_stack",
+      "delete_s3_artifacts",
+      "detach_temp_uninstall_infra_policy",
+      "delete_app_registry",
+      "delete_iam_role",
+      "delete_iam_exec_role",
+      "delete_app_creds_parameter",
+    ]);
+    // The app's files prefix and its DSQL schema are what `retainData` keeps,
+    // so the two calls that would remove them never happen.
+    expect(vi.mocked(deleteAppFilesObjects)).not.toHaveBeenCalled();
+    expect(vi.mocked(runAppUninstallDdl)).not.toHaveBeenCalled();
+    // The app itself still goes.
+    expect(fakeRegistry.deleteAppRegistryEntry).toHaveBeenCalledWith("photos");
   });
 });

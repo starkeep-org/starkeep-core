@@ -10,15 +10,61 @@ import type { SyncStateStore, Watermarks } from "@starkeep/sync-engine";
  * `createSqliteSyncStateStore` manages. HLC clock state is shared across apps
  * (one wall clock per node) — those methods pass through unmodified.
  */
+/**
+ * Every `sync_state` key this store owns for one app.
+ *
+ * One list, read by both the store that writes the keys and the removal that
+ * deletes them, so a fifth watermark cannot be added to the first and
+ * forgotten by the second. Enumerated rather than matched with a `LIKE`
+ * pattern: a prefix match is one wildcard character in an app id away from
+ * taking another app's rows with it.
+ */
+export function perAppSyncStateKeys(appId: string): string[] {
+  return [
+    `${appId}:watermarks`,
+    `${appId}:peer_watermarks`,
+    `${appId}:repair_floors`,
+    `${appId}:inbound_floors`,
+  ];
+}
+
+/**
+ * Drop one app's sync position on this node, so a later install of the same
+ * app id starts reading the cloud from the beginning instead of from wherever
+ * the removed copy had reached.
+ *
+ * The caller has to have stopped that app's sync engine first. An engine
+ * draining a round writes its watermark back at the end of it, and a watermark
+ * written after this deletion is exactly the stale one the deletion exists to
+ * remove.
+ */
+export function deletePerAppSyncState(db: RawDatabase, appId: string): void {
+  // `createSqliteSyncStateStore` creates the table, and it runs only on a node
+  // configured with a cloud. A node that has never synced therefore has no
+  // watermark to clear, and asking is cheaper than letting the removal fail on
+  // a table whose absence already means the answer is "nothing to do".
+  const exists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+    .all("sync_state");
+  if (exists.length === 0) return;
+
+  const keys = perAppSyncStateKeys(appId);
+  const stmt = db.prepare(
+    qb
+      .deleteFrom("sync_state")
+      .where("key", "in", keys.map(() => sql.raw("?")))
+      .compile().sql,
+  );
+  stmt.run(...keys);
+}
+
 export function createPerAppSyncStateStore(
   db: RawDatabase,
   underlying: SyncStateStore,
   appId: string,
 ): SyncStateStore {
-  const watermarksKey = `${appId}:watermarks`;
-  const peerWatermarksKey = `${appId}:peer_watermarks`;
-  const repairFloorsKey = `${appId}:repair_floors`;
-  const inboundFloorsKey = `${appId}:inbound_floors`;
+  const [watermarksKey, peerWatermarksKey, repairFloorsKey, inboundFloorsKey] =
+    perAppSyncStateKeys(appId) as [string, string, string, string];
 
   // sql.raw("?") leaves positional placeholders in the compiled SQL so the
   // statements can be prepared once here and bound per call below.

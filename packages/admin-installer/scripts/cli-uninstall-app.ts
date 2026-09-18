@@ -7,11 +7,17 @@
  * records the app created are deliberately left in place (they belong to the
  * user, not the app).
  *
+ * `--retain-data` keeps the app's own data too: its S3 prefix and its DSQL
+ * schema both survive, so reinstalling the same app id finds its
+ * app-specific rows and app-private blobs where it left them. That is the
+ * uninstall half of a major-version upgrade.
+ *
  * The manifest is still resolved from the app's source dir (same discovery as
  * install) because the uninstall DDL needs the declared app-specific tables.
  *
  * Usage:
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId>
+ *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --retain-data
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --non-interactive
  */
 
@@ -38,10 +44,11 @@ import {
 
 const flags = process.argv.slice(2);
 const nonInteractive = flags.includes("--non-interactive");
+const retainData = flags.includes("--retain-data");
 const appId = flags.find((f) => !f.startsWith("--"));
 
 if (!appId) {
-  console.error("Usage: cli:uninstall-app <appId> [--non-interactive]");
+  console.error("Usage: cli:uninstall-app <appId> [--retain-data] [--non-interactive]");
   process.exit(1);
 }
 
@@ -131,6 +138,7 @@ console.log(`\nStarkeep ${appId} cloud uninstall`);
 console.log(`  Region : ${region}`);
 console.log(`  Stage  : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
+console.log(`  Data   : ${retainData ? "retained (S3 prefix and DSQL schema kept)" : "deleted"}`);
 console.log("");
 
 const registryCredentials = {
@@ -143,6 +151,7 @@ await uninstallApp({
   appId,
   manifest,
   registryCredentials,
+  retainData,
   config: {
     stackPrefix,
     region,
