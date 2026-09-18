@@ -1340,14 +1340,137 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       // reorder these to keep them apart — the meeting is the point.
       app.extraSteps?.(ctx);
 
-      it(`uninstalls ${app.appId}: app plane gone, shared records persist`, async () => {
+      // ---------------------------------------------------------------------
+      // Removal. Three operations that all take the app away and differ in
+      // what they leave, driven here in the order an upgrade would: take the
+      // app down keeping its data, put it back and read the data, drop this
+      // node's copy and watch the node refill, then delete for real.
+      //
+      // These are verification steps 2 and 3 of
+      // `implementation-status-rendition-ownership-phase-1-2026-09-17.md` §5.
+      // The equivalents that need no cloud are asserted in core's Tier-1 and
+      // Tier-2 suites; what only a live run can say is that a real DSQL schema
+      // and a real S3 prefix survive a real uninstall, and that a node-local
+      // removal moves nothing in the cloud.
+      // ---------------------------------------------------------------------
+
+      /** A row of the app's own, written locally and identified by its record id. */
+      const nodeCopyRowId = `node-copy-${Date.now()}`;
+
+      it(`uninstalls ${app.appId} keeping its data: the app plane goes, the data stays`, async () => {
+        // No `--delete-data`. This is the plain uninstall an operator runs, and
+        // the claim is that it is survivable.
         await runInstallCli("cli-uninstall-app", [app.appId], paths, session);
 
         // App-plane access is gone (HMAC secret deleted → 401, or routes 404).
         const appGone = await cloudApp(appUnderTest).fetch("/health");
         expect([401, 403, 404]).toContain(appGone.status);
 
-        // Shared records survive under Drive.
+        // Shared records survive under Drive, as they do under every removal.
+        const listRes = await cloudApp(drive).fetch("/data/records");
+        expect(listRes.status).toBe(200);
+        const { records } = (await listRes.json()) as { records: Array<{ id: string }> };
+        expect(records.some((r) => r.id === syncedRecordId)).toBe(true);
+      });
+
+      it(`reinstalls ${app.appId}: its app-private row is where the uninstall left it`, async () => {
+        await runInstallCli("cli-install-app", [app.appId], paths, session);
+        // `put_app_creds_parameter` is an alwaysRun step, so the reinstall
+        // re-mirrors the registry secret this suite has been signing with and
+        // the same `appUnderTest` credentials authenticate again.
+        const health = await eventually(async () => {
+          const res = await cloudApp(appUnderTest).fetch("/health");
+          expect(res.status).toBe(200);
+          return res.status;
+        });
+        expect(health).toBe(200);
+
+        // The assertion the retaining uninstall exists for, against a real DSQL
+        // schema: the row written before the uninstall reads back after the
+        // reinstall. A schema dropped and recreated would answer with an empty
+        // table rather than an error, so this asserts the content.
+        const query = await cloudApp(appUnderTest).fetch(`/app-data/db/${app.appTable.name}`);
+        expect(query.status).toBe(200);
+        expect(await query.text()).toContain(app.appTable.expectInBody);
+      });
+
+      it("removing this node's copy leaves the cloud's rows exactly where they are", async () => {
+        // A row written locally and shipped up, so the removal below has
+        // something of this node's to take and the cloud has its own copy.
+        const insert = await appUnderTest.fetch(`/app-data/db/${app.appTable.name}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ row: app.appTable.row(nodeCopyRowId) }),
+        });
+        expect(insert.status).toBe(200);
+
+        await eventually(async () => {
+          const sync = await appUnderTest.fetch("/sync/now", { method: "POST" });
+          expect(sync.status).toBe(200);
+          const cloudRows = await cloudApp(appUnderTest).fetch(
+            `/app-data/db/${app.appTable.name}`,
+          );
+          expect(cloudRows.status).toBe(200);
+          expect(await cloudRows.text()).toContain(nodeCopyRowId);
+        });
+
+        // Drop this machine's copy. The route is the local-data-server's, not
+        // admin-web's — this suite has no admin-web, and the proxy in front of
+        // it is covered at Tier 2.
+        const removed = await fetch(
+          `${lds!.url}/admin/apps/${encodeURIComponent(app.appId)}/node-copy`,
+          { method: "DELETE" },
+        );
+        expect(removed.status).toBe(200);
+
+        // The cloud does not notice. Dropping a syncable table writes no
+        // tombstone, so a node-local removal ships nothing and the rows this
+        // node put in the cloud stay readable from the cloud.
+        const stillThere = await cloudApp(appUnderTest).fetch(
+          `/app-data/db/${app.appTable.name}`,
+        );
+        expect(stillThere.status).toBe(200);
+        const body = await stillThere.text();
+        expect(body).toContain(nodeCopyRowId);
+        expect(body).toContain(app.appTable.expectInBody);
+      });
+
+      it("installing the app on this node again refills it from the cloud", async () => {
+        const manifest = JSON.parse(
+          readFileSync(join(app.appDir, "starkeep.manifest.json"), "utf-8"),
+        ) as Record<string, unknown>;
+        appUnderTest = await installAppDirect(lds!.url, manifest);
+        // The removal re-minted the app's local secret, so the cloud's mirror
+        // is stale until the install CLI runs again. Without this the signed
+        // calls below reach the broker with a secret it does not hold.
+        await runInstallCli("cli-install-app", [app.appId], paths, session);
+
+        // Empty on this node to begin with: the removal took the rows, and the
+        // watermark it cleared is what lets the puller go back for them.
+        const fresh = await appUnderTest.fetch(`/app-data/db/${app.appTable.name}`);
+        expect(fresh.status).toBe(200);
+        expect(await fresh.text()).not.toContain(nodeCopyRowId);
+
+        await eventually(
+          async () => {
+            const sync = await appUnderTest.fetch("/sync/now", { method: "POST" });
+            expect(sync.status).toBe(200);
+            const rows = await appUnderTest.fetch(`/app-data/db/${app.appTable.name}`);
+            expect(rows.status).toBe(200);
+            expect(await rows.text()).toContain(nodeCopyRowId);
+          },
+          { timeoutMs: 120_000, intervalMs: 2_000 },
+        );
+      });
+
+      it(`uninstalls ${app.appId} with --delete-data: the app plane and its data both go`, async () => {
+        await runInstallCli("cli-uninstall-app", [app.appId, "--delete-data"], paths, session);
+
+        const appGone = await cloudApp(appUnderTest).fetch("/health");
+        expect([401, 403, 404]).toContain(appGone.status);
+
+        // Shared records are not the app's to take, under either spelling of
+        // the uninstall.
         const listRes = await cloudApp(drive).fetch("/data/records");
         expect(listRes.status).toBe(200);
         const { records } = (await listRes.json()) as { records: Array<{ id: string }> };

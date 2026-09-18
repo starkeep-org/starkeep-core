@@ -4,9 +4,9 @@
  * The properties asserted here belong to the platform rather than to any app:
  * the install consent gate shows what the manifest asked for, the daemon route
  * really starts and stops a process, a record one app writes is visible to
- * another and its app-private rows are not, identical bytes dedup, uninstall
- * drops app data and keeps shared records, and a corrupted HMAC secret turns
- * into a refusal the app surfaces.
+ * another and its app-private rows are not, identical bytes dedup, an uninstall
+ * asked to delete app data does and keeps shared records anyway, and a
+ * corrupted HMAC secret turns into a refusal the app surfaces.
  *
  * Probe rather than a real application, because none of these claims is about
  * any particular app and core must not assume one exists. Photos asserts the
@@ -27,6 +27,7 @@ import {
   solidPng,
   startAppDaemonViaAdmin,
   stopAppDaemonViaAdmin,
+  uninstallAppViaAdmin,
 } from "@starkeep/e2e";
 
 test.describe.configure({ mode: "serial" });
@@ -77,6 +78,13 @@ test.beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "starkeep-probe-fixtures-"));
   fixturePath = join(dir, FIXTURE_NAME);
   await writeFile(fixturePath, solidPng([40, 120, 200], 8));
+
+  // The first test drives the consent dialog, which only appears for an app
+  // that is not installed. Stated as a precondition this file enforces rather
+  // than one it inherits from whichever spec Playwright happened to run first.
+  await uninstallAppViaAdmin(adminUrl(), "probe", { deleteData: true }).catch(() => {
+    /* not installed, which is the state this suite wants */
+  });
 });
 
 test("install through the admin consent flow, with the manifest's grants shown", async ({
@@ -177,8 +185,13 @@ test("uninstall: app data is gone, shared records survive in Drive", async ({ pa
   await cardMenuAction(page, card, "Stop");
   await expect(card.getByRole("button", { name: /^Start / })).toBeVisible({ timeout: 60_000 });
 
-  page.on("dialog", (dialog) => void dialog.accept());
+  // The box has to be ticked for this test's claim to hold: an uninstall keeps
+  // the app's data unless asked. `probe-removal.spec.ts` owns the dialog's own
+  // behavior; here it is the way to reach the outcome the journey asserts.
   await cardMenuAction(page, card, "Uninstall");
+  const removal = page.getByRole("dialog");
+  await removal.getByRole("checkbox").check();
+  await removal.getByRole("button", { name: "Uninstall and delete data" }).click();
   await expect(card.getByRole("button", { name: /^Install / })).toBeVisible({
     timeout: 60_000,
   });

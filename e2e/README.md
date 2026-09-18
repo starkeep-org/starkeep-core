@@ -27,6 +27,12 @@ exported from `@starkeep/e2e` so they can consume this harness to do it.
 ## Preconditions
 
 - One-time: `pnpm exec playwright install chromium`.
+- admin-web and Drive serve **built** clients, so `dist/` must be current before
+  the stack boots. `pnpm test:e2e` declares those builds as dependencies and
+  turbo runs them; `pnpm exec playwright test` from this directory does not, and
+  a stale `dist/` shows up as a UI that behaves like the last build rather than
+  like the working tree. Run `pnpm --filter admin-web build` first when driving
+  Playwright directly.
 
 There is no sibling-checkout precondition. This suite runs against nothing but
 this repository.

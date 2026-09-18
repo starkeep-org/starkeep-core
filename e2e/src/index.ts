@@ -3,6 +3,7 @@ export {
   startWebServer,
   installAppViaAdmin,
   uninstallAppViaAdmin,
+  removeAppFromNodeViaAdmin,
   startAppDaemonViaAdmin,
   stopAppDaemonViaAdmin,
   eventually,

@@ -84,7 +84,17 @@ registry database, which must not land in a checkout you do not own.
     Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected,
     `apps/*` isolated.
 22. The app's own steps (`extraSteps`), if it has any.
-23. Uninstall; assert the app plane is gone but shared records survive.
+23. Uninstall with no flag; assert the app plane is gone and shared records survive.
+24. Reinstall; assert the app-private row written in step 20 reads back — the
+    DSQL schema and the S3 prefix survived the uninstall, which is what makes a
+    major-version replacement an upgrade.
+25. Write an app-private row locally, sync it up, then drop this node's copy
+    (`DELETE /admin/apps/<id>/node-copy`) and assert the cloud's rows do not
+    move: a node-local removal writes no tombstone and reaches no peer.
+26. Reinstall on this node and assert it refills from the cloud — empty first,
+    then complete, which is what clearing the node's sync watermark buys.
+27. Uninstall with `--delete-data`; assert the app plane is gone and shared
+    records survive that too.
 
 ## Environment contract (`src/env.ts`)
 

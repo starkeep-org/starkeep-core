@@ -314,8 +314,36 @@ export async function installAppViaAdmin(adminUrl: string, appId: string): Promi
   await adminPost(adminUrl, "/api/apps/install", { appId, approved: true });
 }
 
-export async function uninstallAppViaAdmin(adminUrl: string, appId: string): Promise<void> {
-  await adminPost(adminUrl, "/api/apps/uninstall", { appId });
+/**
+ * Uninstall an app through the real admin-web route.
+ *
+ * `deleteData` is spelled out at every call site rather than defaulted here,
+ * because the two outcomes differ in what survives and a suite that says
+ * nothing about it is usually a suite that meant one of them. It is the same
+ * flag the route takes: omitted, the app's own tables and app-private files
+ * stay on disk and a reinstall adopts them.
+ */
+export async function uninstallAppViaAdmin(
+  adminUrl: string,
+  appId: string,
+  { deleteData = false }: { deleteData?: boolean } = {},
+): Promise<void> {
+  await adminPost(adminUrl, "/api/apps/uninstall", { appId, deleteData });
+}
+
+/**
+ * Drop this machine's copy of an app through the real admin-web route.
+ *
+ * Distinct from an uninstall in what it reaches: the app's rows here go
+ * unconditionally, along with this node's sync watermark for it, and nothing
+ * is shipped to the cloud or to any other node. Installing the app here again
+ * refills it from the cloud.
+ */
+export async function removeAppFromNodeViaAdmin(
+  adminUrl: string,
+  appId: string,
+): Promise<void> {
+  await adminPost(adminUrl, "/api/apps/remove-from-node", { appId });
 }
 
 /**
