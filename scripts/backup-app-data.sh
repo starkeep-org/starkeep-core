@@ -3,10 +3,11 @@
 # came back.
 #
 # Written for the rendition-ownership phase 1 work, whose new operations
-# (`retainData` and node-local removal) both delete app data on purpose and are
-# both one inverted condition away from deleting the wrong thing. Memo's decks
-# are the one body of app-specific data in the system nothing can regenerate,
-# so they get a backup before any of that runs against them.
+# (`deleteData` on an uninstall, and node-local removal) both delete app data on
+# purpose and are both one inverted condition away from deleting the wrong
+# thing. Memo's decks are the one body of app-specific data in the system
+# nothing can regenerate, so they get a backup before any of that runs against
+# them.
 #
 # The backup lands OUTSIDE $STARKEEP_DIR by default. Every operation phase 1
 # adds deletes inside it, and a backup in ~/.starkeep/backups sits in the blast
