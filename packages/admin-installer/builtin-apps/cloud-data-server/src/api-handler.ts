@@ -156,6 +156,25 @@ interface CachedCreds {
 const credentialCache = new Map<string, CachedCreds>();
 const CRED_REFRESH_BUFFER_MS = 60_000; // refresh 60s before expiry
 
+/**
+ * Forget an app's cached session so the next {@link getAppCreds} re-assumes.
+ *
+ * Expiry is not the only way a session stops working. Deleting an IAM role
+ * invalidates every session assumed from it, and an app's role is deleted and
+ * recreated under the same name by the keep-data uninstall followed by a
+ * reinstall — the upgrade path. The recreated role carries a new principal id,
+ * DSQL's mapping is rebound to it at install, and a warm container still
+ * holding the previous session presents a credential naming a principal that
+ * no longer exists. DSQL refuses that connection with `FATAL 28000`, which is
+ * the same code an unpropagated mapping produces, so the connect retry treated
+ * a permanent condition as a transient one and spent its whole budget on it.
+ *
+ * See {@link AppDsqlClientFactory}, which calls this on the first refusal.
+ */
+function invalidateAppCreds(appId: string): void {
+  credentialCache.delete(appId);
+}
+
 // ---------------------------------------------------------------------------
 // Per-app HMAC secret cache (SSM SecureString, refreshed every 5 min)
 // ---------------------------------------------------------------------------
@@ -468,7 +487,14 @@ function validateDeviceSignature(
   return { ok: true };
 }
 
-async function getAppCreds(appId: string, accountId: string): Promise<CachedCreds> {
+async function getAppCreds(
+  appId: string,
+  accountId: string,
+  options: { forceRefresh?: boolean } = {},
+): Promise<CachedCreds> {
+  if (options.forceRefresh) {
+    invalidateAppCreds(appId);
+  }
   const cached = credentialCache.get(appId);
   if (cached && cached.expiresAt - Date.now() > CRED_REFRESH_BUFFER_MS) {
     return cached;
@@ -533,78 +559,174 @@ function isConnectAuthDenied(err: unknown): boolean {
   return (e?.message ?? "").toLowerCase().includes("unable to accept connection");
 }
 
-class AppDsqlClientFactory implements DatabaseClientFactory {
+/**
+ * How an app's session is obtained, and how it is replaced.
+ *
+ * A function rather than a value because the session can stop working before it
+ * expires: see {@link invalidateAppCreds}. `forceRefresh` discards whatever is
+ * cached and assumes the role again, which is the only way a warm container
+ * escapes a session whose principal has been deleted.
+ */
+export type AppCredsProvider = (
+  options?: { forceRefresh?: boolean },
+) => Promise<CachedCreds>;
+
+/**
+ * DSQL refused every connection attempt this request was willing to make.
+ *
+ * Distinct from a generic failure so the handler can answer 503 and name the
+ * condition. A bare 500 told the caller nothing, and the two conditions behind
+ * it — a mapping that has not propagated yet, and an app whose cloud install
+ * left its DSQL login binding wrong — are both things an operator can act on
+ * once they are named.
+ */
+export class DsqlConnectDeniedError extends Error {
+  constructor(
+    readonly appId: string,
+    readonly attempts: number,
+    readonly elapsedMs: number,
+    readonly cause: unknown,
+  ) {
+    super(
+      `DSQL refused the connection for app '${appId}' on all ${attempts} attempts `
+      + `over ${(elapsedMs / 1000).toFixed(1)}s: ${(cause as Error)?.message ?? String(cause)}`,
+    );
+    this.name = "DsqlConnectDeniedError";
+  }
+}
+
+/**
+ * Open one pg connection to DSQL as `pgUser`, authenticated by `creds`.
+ *
+ * Extracted from the factory as a module-level function so the retry policy
+ * around it can be tested without a cluster — see
+ * {@link __setDsqlConnectForTests}.
+ */
+async function connectToDsql(params: {
+  hostname: string;
+  region: string;
+  database: string;
+  pgUser: string;
+  creds: CachedCreds;
+}): Promise<pg.Client> {
+  const { hostname, region, database, pgUser, creds } = params;
+  const signer = new DsqlSigner({
+    hostname,
+    region,
+    credentials: {
+      accessKeyId: creds.accessKeyId,
+      secretAccessKey: creds.secretAccessKey,
+      sessionToken: creds.sessionToken,
+    },
+  });
+  const token = await signer.getDbConnectAuthToken();
+  const client = new pg.Client({
+    host: hostname,
+    port: 5432,
+    database,
+    user: pgUser,
+    password: token,
+    ssl: { rejectUnauthorized: true },
+  });
+  // Without an 'error' listener, an async socket failure (DSQL token
+  // expiry, idle timeout, network blip) emits 'error' on the Client with
+  // no handler → Node throws uncaughtException → the Lambda worker dies
+  // mid-invocation and API Gateway returns its default 500. Attach a
+  // no-op-with-log listener so socket errors stay async failures we can
+  // surface in CloudWatch instead of process-killers.
+  client.on("error", (err) => {
+    console.warn("[cds] pg client async error:", (err as Error).message);
+  });
+  try {
+    await client.connect();
+  } catch (err) {
+    // connect() rejected — the client owns a half-open socket; close it so a
+    // failed attempt doesn't leak an fd or a dangling 'error' emitter before
+    // the retry mints a fresh client.
+    await client.end().catch(() => {});
+    throw err;
+  }
+  return client;
+}
+
+let dsqlConnectOverrideForTests: typeof connectToDsql | null = null;
+/** Test seam for {@link connectToDsql}; pass null to restore the real one. */
+export function __setDsqlConnectForTests(fn: typeof connectToDsql | null): void {
+  dsqlConnectOverrideForTests = fn;
+}
+
+export class AppDsqlClientFactory implements DatabaseClientFactory {
   constructor(
     private readonly appId: string,
-    private readonly creds: CachedCreds,
+    private readonly credsFor: AppCredsProvider,
     private readonly stackPrefix: string,
+    /**
+     * How the retry loop waits. Injectable so a test can assert the policy —
+     * how many attempts, and when the role is re-assumed — without spending the
+     * eleven seconds of real backoff the policy is deliberately built from.
+     */
+    private readonly sleep: (ms: number) => Promise<void> = (ms) =>
+      new Promise((r) => setTimeout(r, ms)),
   ) {}
 
   async createClient(options: AuroraDsqlDatabaseAdapterOptions): Promise<DatabaseClient> {
     const { hostname, region } = options;
     const pgUser = `${this.stackPrefix}_app_${this.appId}`.toLowerCase().replace(/-/g, "_");
-    const creds = this.creds;
 
-    const connectOnce = async (): Promise<pg.Client> => {
-      const signer = new DsqlSigner({
+    const connectOnce = async (forceRefresh: boolean): Promise<pg.Client> => {
+      const creds = await this.credsFor({ forceRefresh });
+      return (dsqlConnectOverrideForTests ?? connectToDsql)({
         hostname,
         region,
-        credentials: {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
-        },
-      });
-      const token = await signer.getDbConnectAuthToken();
-      const client = new pg.Client({
-        host: hostname,
-        port: 5432,
         database: options.database ?? "postgres",
-        user: pgUser,
-        password: token,
-        ssl: { rejectUnauthorized: true },
+        pgUser,
+        creds,
       });
-      // Without an 'error' listener, an async socket failure (DSQL token
-      // expiry, idle timeout, network blip) emits 'error' on the Client with
-      // no handler → Node throws uncaughtException → the Lambda worker dies
-      // mid-invocation and API Gateway returns its default 500. Attach a
-      // no-op-with-log listener so socket errors stay async failures we can
-      // surface in CloudWatch instead of process-killers.
-      client.on("error", (err) => {
-        console.warn("[cds] pg client async error:", (err as Error).message);
-      });
-      try {
-        await client.connect();
-      } catch (err) {
-        // connect() rejected — the client owns a half-open socket; close it so a
-        // failed attempt doesn't leak an fd or a dangling 'error' emitter before
-        // the retry mints a fresh client.
-        await client.end().catch(() => {});
-        throw err;
-      }
-      return client;
     };
 
-    // Connect-time authorization can transiently fail right after an app is
-    // installed: DSQL maps the app's IAM role to its PG role via `AWS IAM GRANT`
-    // (admin-installer/src/dsql-ddl.ts), and that mapping takes time to
-    // propagate into DSQL's connection authorizer. Until it does, connect()
-    // rejects with SQLSTATE 28000 ("unable to accept connection, access
-    // denied"). This is distinct from the query-time 28000 retry below, which
-    // reconnects an already-authorized role whose DbConnect token has expired —
-    // here the *first* connection is refused. Retry with bounded backoff so a
-    // just-installed app becomes usable without a hard 500. The budget stays
-    // well under the API Gateway ~30s integration timeout; propagation longer
-    // than that is a gate-at-install concern, not something to absorb per
-    // request.
+    // Connect-time authorization can fail for two different reasons, and the
+    // retry policy below treats them differently because only one of them
+    // passes on its own.
+    //
+    // **The mapping has not propagated.** DSQL maps the app's IAM role to its
+    // PG role via `AWS IAM GRANT` (admin-installer/src/dsql-ddl.ts), and the
+    // mapping takes time to reach DSQL's connection authorizer. Until it does,
+    // connect() rejects with SQLSTATE 28000 ("unable to accept connection,
+    // access denied"). Waiting is the whole of the cure, so the loop waits,
+    // with bounded backoff and a budget well under the API Gateway ~30s
+    // integration timeout.
+    //
+    // **The session names a principal that no longer exists.** The keep-data
+    // uninstall deletes the app's IAM role and the reinstall recreates it under
+    // the same name with a new principal id. A warm container holding the
+    // previous session keeps presenting it, and DSQL answers with the same
+    // 28000 — so the loop above waited out its entire budget, every request,
+    // for up to the fifteen minutes the session takes to expire. Waiting never
+    // cures this one; re-assuming the role does. So the **first** refusal
+    // discards the cached session and the next attempt assumes the role again.
+    //
+    // Once, not on every attempt: the refresh is an STS call, and a refusal
+    // that survives a freshly-minted session is propagation, which is what the
+    // remaining attempts are for. This is distinct from the query-time 28000
+    // retry below, which reconnects an already-authorized role whose DbConnect
+    // token has expired — here the *first* connection is refused.
     const createPgClient = async (): Promise<pg.Client> => {
       const maxAttempts = 6;
       const maxDelayMs = 4000;
       let delay = 500;
       const start = Date.now();
+      // Set by the first refusal, consumed by the attempt that follows it.
+      let refreshed = false;
+      let refreshNext = false;
       for (let attempt = 1; ; attempt++) {
+        // Consumed here rather than after a successful connect: an attempt
+        // that asked for a fresh session has spent the refresh whether or not
+        // it got a connection, and leaving the flag set would re-assume the
+        // role on every remaining attempt.
+        const forceRefresh = refreshNext;
+        refreshNext = false;
         try {
-          const client = await connectOnce();
+          const client = await connectOnce(forceRefresh);
           if (attempt > 1) {
             const elapsed = ((Date.now() - start) / 1000).toFixed(1);
             console.log(
@@ -613,13 +735,28 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
           }
           return client;
         } catch (err) {
-          if (attempt >= maxAttempts || !isConnectAuthDenied(err)) throw err;
+          if (!isConnectAuthDenied(err)) throw err;
+          if (attempt >= maxAttempts) {
+            throw new DsqlConnectDeniedError(
+              this.appId,
+              attempt,
+              Date.now() - start,
+              err,
+            );
+          }
           const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+          const refreshing = !refreshed;
+          if (refreshing) {
+            refreshed = true;
+            refreshNext = true;
+          }
           console.warn(
             `[cds] dsql connect for ${this.appId}: attempt ${attempt} refused ` +
-              `(${(err as Error).message}) at ${elapsed}s, retrying in ${(delay / 1000).toFixed(1)}s`,
+              `(${(err as Error).message}) at ${elapsed}s, ` +
+              `${refreshing ? "re-assuming the app role and retrying" : "retrying"} ` +
+              `in ${(delay / 1000).toFixed(1)}s`,
           );
-          await new Promise((r) => setTimeout(r, delay));
+          await this.sleep(delay);
           delay = Math.min(delay * 2, maxDelayMs);
         }
       }
@@ -665,7 +802,14 @@ export function __setDatabaseClientFactoryForTests(
   databaseClientFactoryOverride = factory;
 }
 
-function makeAdapters(appId: string, creds: CachedCreds) {
+/**
+ * Every adapter one request needs, bound to one app's identity.
+ *
+ * The identity arrives as a provider rather than a session, because a session
+ * can stop working mid-request and both adapters have to be able to pick up its
+ * replacement — see {@link AppDsqlClientFactory} and {@link invalidateAppCreds}.
+ */
+function makeAdapters(appId: string, credsFor: AppCredsProvider) {
   const region = process.env.AWS_REGION ?? "us-east-1";
   const auroraEndpoint = process.env.AURORA_ENDPOINT;
   const s3Bucket = process.env.S3_BUCKET;
@@ -675,7 +819,7 @@ function makeAdapters(appId: string, creds: CachedCreds) {
   if (!s3Bucket) throw new Error("S3_BUCKET env var is required");
 
   const clientFactory: DatabaseClientFactory =
-    databaseClientFactoryOverride ?? new AppDsqlClientFactory(appId, creds, stackPrefix);
+    databaseClientFactoryOverride ?? new AppDsqlClientFactory(appId, credsFor, stackPrefix);
 
   const db = new AuroraDsqlDatabaseAdapter(
     { hostname: auroraEndpoint, region },
@@ -685,10 +829,18 @@ function makeAdapters(appId: string, creds: CachedCreds) {
   const storage = new S3ObjectStorageAdapter({
     bucketName: s3Bucket,
     region,
-    credentials: {
-      accessKeyId: creds.accessKeyId,
-      secretAccessKey: creds.secretAccessKey,
-      sessionToken: creds.sessionToken,
+    // The provider, not the snapshot. A request whose DSQL connect had to
+    // re-assume the app role (see {@link AppDsqlClientFactory}) is holding a
+    // session that has already been replaced, and signing S3 with the one it
+    // started with would fail the blob half of the same request for the reason
+    // the database half just repaired.
+    credentialProvider: async () => {
+      const current = await credsFor();
+      return {
+        accessKeyId: current.accessKeyId,
+        secretAccessKey: current.secretAccessKey,
+        sessionToken: current.sessionToken,
+      };
     },
   });
 
@@ -1909,11 +2061,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // record custody. Availability is a fact about shared blobs, so Drive is
     // already the role that may write it, and the Lambda's own execution role
     // deliberately has no data-plane access of its own.
-    const creds = await getAppCreds(
-      DRIVE_APP_ID,
-      getAccountId(context.invokedFunctionArn),
-    );
-    const { db, storage } = makeAdapters(DRIVE_APP_ID, creds);
+    const driveAccountId = getAccountId(context.invokedFunctionArn);
+    const driveCredsFor: AppCredsProvider = (opts) =>
+      getAppCreds(DRIVE_APP_ID, driveAccountId, opts);
+    const { db, storage } = makeAdapters(DRIVE_APP_ID, driveCredsFor);
     try {
       const result = await handleS3Availability(
         event as unknown as S3EventEnvelope,
@@ -2073,8 +2224,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     const accountId = getAccountId(context.invokedFunctionArn);
-    const creds = await getAppCreds(appId, accountId);
-    const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
+    const credsFor: AppCredsProvider = (opts) => getAppCreds(appId, accountId, opts);
+    // Fetched eagerly as well as passed as a provider: `clampPresignExpiresIn`
+    // below caps a presigned URL's lifetime against the session's, and it needs
+    // the expiry rather than the ability to get one.
+    const creds = await credsFor();
+    const { db, storage, clientFactory, auroraEndpoint, region } =
+      makeAdapters(appId, credsFor);
 
     await db.init();
     toClose.push(() => db.close());
@@ -3728,6 +3884,21 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (isAccessDenied(e)) {
       console.warn("Handler access denied:", (e as Error).message);
       return clientErr("AccessDenied", 403);
+    }
+    // DSQL refused this app's login for the whole retry budget. Answer 503 and
+    // say so, because the caller has something to do about it and a bare 500
+    // gives it nothing: a sync engine reads 500 as "the cloud is broken" and
+    // retries forever, while "DSQL is refusing this app's login" names an
+    // install-side condition an operator can repair. The condition is
+    // per-container and usually clears on the next request now that the first
+    // refusal re-assumes the role, so it is a temporary failure, not a fault.
+    if (e instanceof DsqlConnectDeniedError) {
+      console.error("Handler DSQL login refused:", (e as Error).message);
+      return clientErr(
+        `DSQL refused this app's login. Its IAM-to-PG mapping may need to be `
+        + `rebound — re-run the app's cloud install.`,
+        503,
+      );
     }
     console.error("Handler error:", e);
     return {
