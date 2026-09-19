@@ -10,7 +10,9 @@
 
 export { defineCloudJourney, type CloudJourneyOptions } from "./journey.js";
 export {
+  appBlobsFromManifest,
   type JourneyApp,
+  type JourneyAppBlobs,
   type JourneyContext,
   type JourneyLabelKeys,
   type JourneyAppTable,

@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { defineCloudJourney } from "./journey.js";
 import { APP_DIR } from "./env.js";
 import { probeApp } from "./probe-app.js";
+import { appBlobsFromManifest } from "./journey-app.js";
 import type { JourneyApp } from "./journey-app.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -103,6 +104,10 @@ function configuredApp(dir: string): JourneyApp {
       row: (recordId) => ({ [table.columns[0]!.name]: recordId, [valueColumn]: marker }),
       expectInBody: marker,
     },
+    // Read out of the manifest beside everything else, because the drop half of
+    // the blob-plane step asserts the opposite outcome for an app that declares
+    // its private blobs re-derivable, and only the app can say which it is.
+    blobs: appBlobsFromManifest(manifest),
     jwtRoute: {
       method: jwtRoute[0]!,
       path: jwtRoute[1]!,

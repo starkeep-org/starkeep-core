@@ -26,6 +26,11 @@ export const probeApp: JourneyApp = {
     row: (recordId) => ({ record_id: recordId, note: "tier-3 note" }),
     expectInBody: "tier-3 note",
   },
+  // Probe's manifest declares `"files": true`, the short spelling of "not
+  // re-derivable", so the blob-plane step takes the durability-gated branch:
+  // a drop before the bytes reach the cloud must be refused, and the drop
+  // after must carry a confirmed replica.
+  blobs: { regenerable: false },
   jwtRoute: {
     path: "/api/echo",
     method: "POST",

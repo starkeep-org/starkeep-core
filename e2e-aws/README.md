@@ -80,20 +80,29 @@ registry database, which must not land in a checkout you do not own.
 19. The app's JWT-gated route on the gateway **and** through CloudFront (proving
     `Authorization` survives the edge).
 20. An app-private row through the cloud `/app-data` plane.
-21. Part A: shell + `_immutable` assets through the CloudFront distribution (edge hit).
+21. An app-private **blob** through real S3: write it with `putAppFile` (presign,
+    PUT, record), refuse the drop before any round ships it, sync, then read the
+    broker's `/files/<key>/stat` and assert S3 reports the checksum the broker
+    pinned. Then the residency page, the drop the confirmed replica now allows,
+    and the fetch that brings the bytes back. This is the only place the pinned
+    checksum on an `apps/*` key, the per-app role's read of its own prefix, and
+    the presigned round trip in both directions run against real
+    infrastructure. An app declaring `appSpecificSyncable.files.regenerable`
+    drops without proof, and the step asserts that instead.
+22. Part A: shell + `_immutable` assets through the CloudFront distribution (edge hit).
     Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected,
     `apps/*` isolated.
-22. The app's own steps (`extraSteps`), if it has any.
-23. Uninstall with no flag; assert the app plane is gone and shared records survive.
-24. Reinstall; assert the app-private row written in step 20 reads back — the
+23. The app's own steps (`extraSteps`), if it has any.
+24. Uninstall with no flag; assert the app plane is gone and shared records survive.
+25. Reinstall; assert the app-private row written in step 20 reads back — the
     DSQL schema and the S3 prefix survived the uninstall, which is what makes a
     major-version replacement an upgrade.
-25. Write an app-private row locally, sync it up, then drop this node's copy
+26. Write an app-private row locally, sync it up, then drop this node's copy
     (`DELETE /admin/apps/<id>/node-copy`) and assert the cloud's rows do not
     move: a node-local removal writes no tombstone and reaches no peer.
-26. Reinstall on this node and assert it refills from the cloud — empty first,
+27. Reinstall on this node and assert it refills from the cloud — empty first,
     then complete, which is what clearing the node's sync watermark buys.
-27. Uninstall with `--delete-data`; assert the app plane is gone and shared
+28. Uninstall with `--delete-data`; assert the app plane is gone and shared
     records survive that too.
 
 ## Environment contract (`src/env.ts`)
@@ -168,3 +177,10 @@ disposable test stack.
   would fail the same way but silently.
 - **`/sync/now` needs an app signature** — it is not one of the LDS's
   loopback-exempt paths.
+- **The node boots with a retention policy.** `server.ts` builds the residency
+  manager only when one is configured, so a policy-free node reports an empty
+  residency plane and answers every drop `refused` — step 21 cannot reach its
+  subject without one. The journey passes the policy in its boot config rather
+  than through `PUT /residency/policy`, which restarts the daemon. Budgets sit
+  far above anything the run writes, so every earlier step sees the same "fetch"
+  decision it saw before the policy existed.

@@ -36,6 +36,20 @@ export interface JourneyAppTable {
   readonly expectInBody: string;
 }
 
+/**
+ * What the app claims about the bytes in its own private prefix.
+ *
+ * The drop half of the blob-plane step asserts the outcome the app asked for.
+ * An app declaring `regenerable: true` may let go of its last local copy with
+ * no proof that a replica exists, and an app that says nothing may not — so the
+ * same operation is correct with two opposite results, and the journey has to
+ * know which one it is looking at.
+ */
+export interface JourneyAppBlobs {
+  /** `appSpecificSyncable.files.regenerable`, as the manifest normalizes it. */
+  readonly regenerable: boolean;
+}
+
 /** A route of the app's own, behind the gateway's Cognito JWT authorizer. */
 export interface JourneyJwtRoute {
   /** App-relative path, e.g. "/api/echo". */
@@ -67,6 +81,18 @@ export interface JourneyApp {
   readonly labelKeys: JourneyLabelKeys;
   /** The app-private table the app-data step writes to. */
   readonly appTable: JourneyAppTable;
+  /**
+   * What the manifest declares about the app's private blobs.
+   *
+   * Optional, and absent means "read it from the manifest": the value is
+   * derivable from the app's own `starkeep.manifest.json`, so a profile that
+   * does not spell it out gets {@link appBlobsFromManifest} run over the
+   * manifest at {@link appDir} rather than a guessed default. A profile written
+   * before this field existed therefore keeps asserting the right outcome, and
+   * a profile that does spell it out cannot drift from the manifest without the
+   * step failing loudly.
+   */
+  readonly blobs?: JourneyAppBlobs;
   /** A JWT-gated route of the app's own, for the CloudFront Bearer step. */
   readonly jwtRoute: JourneyJwtRoute;
   /** Present when the app serves a browser UI the journey should drive. */
@@ -140,4 +166,26 @@ export interface JourneyContext {
   dataDir(): string;
   /** Sign in through the app's own session route; returns the `Cookie` header. */
   signInToApp(appId: string): Promise<string>;
+}
+
+/**
+ * Read an app's blob claim out of its parsed manifest.
+ *
+ * The manifest schema accepts two spellings and normalizes the short one:
+ * `"files": true` means `{ enabled: true, regenerable: false }`, because the
+ * two mistakes are not symmetric — calling regenerable bytes precious costs
+ * disk, and calling precious bytes regenerable loses them. This mirrors that
+ * normalization rather than re-deciding it, so the journey expects exactly what
+ * the node will do.
+ */
+export function appBlobsFromManifest(manifest: unknown): JourneyAppBlobs {
+  const files = (
+    manifest as {
+      infraRequirements?: { appSpecificSyncable?: { files?: unknown } };
+    }
+  )?.infraRequirements?.appSpecificSyncable?.files;
+  if (typeof files === "object" && files !== null) {
+    return { regenerable: (files as { regenerable?: unknown }).regenerable === true };
+  }
+  return { regenerable: false };
 }

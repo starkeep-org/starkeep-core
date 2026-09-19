@@ -29,7 +29,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chromium, watchPageProblems, signInWithBrowser } from "./browser.js";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import {
@@ -37,6 +37,8 @@ import {
   driveCreds,
   createRecordWithBytes,
   eventually,
+  putAppFile,
+  readAppFile,
   solidPng,
   type LdsApp,
 } from "@starkeep/e2e";
@@ -55,9 +57,45 @@ import {
   type TestStackConfig,
   type AdminCredentials,
 } from "./run-state.js";
-import type { JourneyApp, JourneyContext } from "./journey-app.js";
+import { appBlobsFromManifest } from "./journey-app.js";
+import type { JourneyApp, JourneyAppBlobs, JourneyContext } from "./journey-app.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+
+const GB = 1024 ** 3;
+
+/**
+ * The retention policy the journey boots its node with, shaped like the one
+ * admin-web seeds for a node that has never had one.
+ *
+ * It exists because `server.ts` builds the residency manager only when a policy
+ * is configured, and without one the residency page reports an empty plane and
+ * every drop answers `refused`. The app-private blob step cannot reach its
+ * subject on a policy-free node.
+ *
+ * The budgets are generous on purpose rather than by accident. This policy has
+ * to turn the residency surface on without changing what any earlier step
+ * observes, and a node whose budgets sit far above anything the journey writes
+ * decides "fetch" everywhere the policy-free node decided "fetch". Three things
+ * keep the blast radius small: `runEviction` has no production caller, so
+ * nothing deletes in the background; the journey runs one node, so no step
+ * depends on a blob arriving elided; and app blobs are `prefetch: false` but
+ * the app writes its own, so the only elision in the run is the one the blob
+ * step creates deliberately.
+ *
+ * `apps` is empty, which is the ordinary state right after installing
+ * something: the app under test is measured against `appFallback`, and the blob
+ * step asserts exactly that.
+ */
+const JOURNEY_RETENTION = {
+  platform: {
+    rows: {},
+    fallback: { prefetch: true, share: 10 },
+    budgetBytes: 50 * GB,
+  },
+  apps: {},
+  appFallback: { budgetBytes: 8 * GB },
+} as const;
 
 export interface CloudJourneyOptions {
   /**
@@ -68,6 +106,58 @@ export interface CloudJourneyOptions {
    * put one repository's cloud credentials inside another's working tree.
    */
   runStateDir?: string;
+}
+
+/**
+ * `fetch` with a deadline and one retry on a transport failure.
+ *
+ * Node's `fetch` sets no read deadline, so a socket that dies without a FIN —
+ * a keep-alive connection reclaimed by a NAT or load balancer between two of
+ * this journey's steps — is written into and then waited on until the OS gives
+ * up. That took 13 and 21 minutes in two consecutive Tier-3 runs, both times at
+ * the `/api/local-data` proxy step, and both times consumed most of the
+ * 30-minute `testTimeout` before failing with `read ETIMEDOUT`. CloudWatch shows
+ * no invocation for either attempt, and the gateway's integration timeout is 30
+ * seconds, so the request never reached AWS: the stall is entirely client-side.
+ *
+ * The retry fires only on a transport-level failure, never on an HTTP status, so
+ * no assertion in this file changes meaning — a 401 stays a 401 and a negative
+ * test still observes exactly one response. A dead pooled socket is not reused
+ * twice in a row, so the second attempt goes out on a fresh connection.
+ *
+ * `signedFetch` (the broker calls made through `cloudApp`) comes from
+ * `@starkeep/e2e` and does not route through here, so a stall on that path would
+ * still hang.
+ */
+const HTTP_DEADLINE_MS = 60_000;
+
+function isTransportFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  // Node wraps connection errors as `TypeError: fetch failed` with the real
+  // errno on `cause`; an AbortSignal.timeout rejects as a TimeoutError.
+  if (err.name === "TimeoutError") return true;
+  const code = (err.cause as { code?: string } | undefined)?.code;
+  return (
+    code === "ETIMEDOUT" ||
+    code === "ECONNRESET" ||
+    code === "ECONNREFUSED" ||
+    code === "EPIPE" ||
+    code === "UND_ERR_SOCKET" ||
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_BODY_TIMEOUT"
+  );
+}
+
+async function http(input: string | URL, init?: RequestInit): Promise<Response> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await fetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(HTTP_DEADLINE_MS) });
+    } catch (err) {
+      if (attempt === 2 || !isTransportFailure(err)) throw err;
+      console.log(`[e2e-aws] transport failure on ${String(input)}; retrying once: ${String(err)}`);
+    }
+  }
+  throw new Error("unreachable: http retry");
 }
 
 /**
@@ -87,6 +177,9 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   let drive: LdsApp;
   let appUnderTest: LdsApp;
   let syncedRecordId: string;
+  // What the app says about its own private blobs, resolved in `beforeAll` from
+  // the profile or, when the profile is silent, from the manifest itself.
+  let appBlobs: JourneyAppBlobs = app.blobs ?? { regenerable: false };
   // What the real browser uploads through the cloud-served UI: its bytes enter
   // the cloud via browser→proxy→broker→S3, never touching the local data
   // server. Captured here so the later cloud→local sync step can assert the
@@ -165,7 +258,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
    * authentication; everything the session gates is reached with what it returns.
    */
   async function signInToApp(appId: string): Promise<string> {
-    const res = await fetch(
+    const res = await http(
       `${config.apiGatewayUrl}/apps/${encodeURIComponent(appId)}/api/session/sign-in`,
       {
         method: "POST",
@@ -183,6 +276,47 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
     );
     expect(jar).toContain("sk_token=");
     return jar;
+  }
+
+  /**
+   * What this node holds of an app's private plane, and against what ceiling.
+   *
+   * The read half of an advisory budget: the platform reports an overrun and
+   * never acts on one, so this page is how the app — and this journey — finds
+   * out what is actually here.
+   */
+  async function residencyOf(
+    who: LdsApp,
+  ): Promise<{
+    budgetBytes: number | null;
+    heldBytes: number;
+    entries: Array<{ subKey: string; sizeBytes: number; resident: boolean }>;
+  }> {
+    const res = await who.fetch("/app-data/residency");
+    expect(res.status).toBe(200);
+    return (await res.json()) as {
+      budgetBytes: number | null;
+      heldBytes: number;
+      entries: Array<{ subKey: string; sizeBytes: number; resident: boolean }>;
+    };
+  }
+
+  /**
+   * Whether this node still holds an app blob's bytes.
+   *
+   * Deliberately not `readAppFile`: a dropped blob keeps its row, so the
+   * resolve route hands back a URL and the bytes behind it are gone. That is a
+   * throw for a helper asking "read this file" and the answer itself for a step
+   * asking "are the bytes here" — which is the question a drop and a fetch are
+   * both about.
+   */
+  async function appBlobIsHere(who: LdsApp, subKey: string): Promise<boolean> {
+    const res = await who.fetch(`/app-data/files/${subKey}`);
+    if (!res.ok) return false;
+    const { url } = (await res.json()) as { url: string };
+    const bytes = await http(url);
+    await bytes.arrayBuffer();
+    return bytes.status === 200;
   }
 
   /** `Set-Cookie` response headers → the `Cookie` request header they produce. */
@@ -204,7 +338,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   async function pollForEdgeHit(url: string, attempts = 8): Promise<string> {
     let last = "";
     for (let i = 0; i < attempts; i++) {
-      const res = await fetch(url);
+      const res = await http(url);
       // Drain the body so the connection is reusable and the fetch fully completes.
       await res.arrayBuffer();
       last = res.headers.get("x-cache") ?? "";
@@ -226,10 +360,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
 
   /** Retry a fetch until it stops returning a propagation-time 5xx, or give up. */
   async function fetchWhenReady(url: string, init?: RequestInit, attempts = 15): Promise<Response> {
-    let res = await fetch(url, init);
+    let res = await http(url, init);
     for (let i = 0; i < attempts && res.status >= 500; i++) {
       await new Promise((r) => setTimeout(r, 4000));
-      res = await fetch(url, init);
+      res = await http(url, init);
     }
     return res;
   }
@@ -287,13 +421,19 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
               "starkeep.manifest.json. appDir must be the app's own source directory.",
           );
         }
-        const declaredId = (JSON.parse(readFileSync(manifestPath, "utf-8")) as { id?: string }).id;
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as { id?: string };
+        const declaredId = manifest.id;
         if (declaredId !== app.appId) {
           throw new Error(
             `${app.appDir} declares id "${declaredId}", but the profile calls it ` +
               `"${app.appId}". The install CLI resolves the app by the manifest id.`,
           );
         }
+        // A profile that names its own blob claim is taken at its word; one
+        // that does not gets the manifest read for it, so a profile written
+        // before the field existed still asserts what its app actually
+        // declared rather than a default that happens to match.
+        appBlobs = app.blobs ?? appBlobsFromManifest(manifest);
 
         // The app's own refusal to start, before the first AWS call. A machine
         // state that would take the run down — a dev server already holding the
@@ -374,7 +514,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(config.apiGatewayUrl).toMatch(/^https:\/\//);
         expect(config.auroraEndpoint).toBeTruthy();
 
-        const health = await fetch(`${config.apiGatewayUrl}/health`);
+        const health = await http(`${config.apiGatewayUrl}/health`);
         expect(health.status).toBe(200);
 
         // Defense in depth: a warm kept-up stack means the broker Lambda from a
@@ -425,7 +565,14 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
 
         lds = await startLocalDataServer({
           starkeepDir: paths.dataDir,
-          config: { ...config } as Record<string, unknown>,
+          // The policy goes in the boot config rather than through
+          // `PUT /residency/policy`, which validates, writes config.json and
+          // then restarts the process — `server.ts` builds the residency
+          // manager at boot and nothing rebuilds it in place. That route is
+          // worth covering live on its own terms; coupling the blob step to it
+          // would make a straightforward assertion depend on process
+          // choreography mid-journey.
+          config: { ...config, retention: JOURNEY_RETENTION } as Record<string, unknown>,
         });
         drive = await driveCreds(lds.url);
       });
@@ -438,7 +585,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // real path here rather than pre-seeding auth.json, so the handoff —
         // Cognito sign-in → /auth/tokens → STS exchange → supervisor startup — has
         // end-to-end coverage against real AWS.
-        const res = await fetch(`${lds!.url}/auth/tokens`, {
+        const res = await http(`${lds!.url}/auth/tokens`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -451,7 +598,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // The daemon now reports cloud config loaded and an authenticated session
         // backed by credentials it minted itself (not the test's out-of-band
         // signInAdmin exchange).
-        const status = await fetch(`${lds!.url}/auth/status`);
+        const status = await http(`${lds!.url}/auth/status`);
         expect(status.status).toBe(200);
         const auth = (await status.json()) as {
           configLoaded: boolean;
@@ -544,7 +691,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const urlRes = await cloudApp(drive).fetch(`/data/records/${syncedRecordId}/file-url`);
         expect(urlRes.status).toBe(200);
         const { url } = (await urlRes.json()) as { url: string };
-        const blob = await fetch(url);
+        const blob = await http(url);
         expect(blob.status).toBe(200);
         expect(Buffer.from(await blob.arrayBuffer()).equals(photoBytes)).toBe(true);
       });
@@ -724,7 +871,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // The app root, spelled the way the platform can actually register it.
         // `/` is declared public and becomes `ANY /apps/<appId>`; the manifest's
         // reach is real here rather than aspirational.
-        const res = await fetch(`${config.apiGatewayUrl}/apps/${app.appId}`);
+        const res = await http(`${config.apiGatewayUrl}/apps/${app.appId}`);
         expect(res.status).toBe(200);
         expect(await res.text()).toContain("<");
       });
@@ -742,7 +889,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // redirected to sign-in and a signed-in one is let through — so no user
         // meets this. It is pinned here so that if the routing ever changes, the
         // change is deliberate and visible rather than silent.
-        const withSlash = await fetch(`${config.apiGatewayUrl}/apps/${app.appId}/`);
+        const withSlash = await http(`${config.apiGatewayUrl}/apps/${app.appId}/`);
         expect(withSlash.status).toBe(401);
       });
 
@@ -766,7 +913,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const cookie = await signInToApp(app.appId);
         const proxyBase = `${config.apiGatewayUrl}/apps/${app.appId}/api/local-data`;
 
-        const listRes = await fetch(`${proxyBase}/data/records?limit=500`, {
+        const listRes = await http(`${proxyBase}/data/records?limit=500`, {
           headers: { cookie },
         });
         expect(listRes.status).toBe(200);
@@ -775,7 +922,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
 
         // A write verb through the proxy — guards the GET-only manifest regression
         // (the catch-all must be ANY, or every POST 404s at the gateway).
-        const metaRes = await fetch(`${proxyBase}/data/records/${syncedRecordId}/metadata`, {
+        const metaRes = await http(`${proxyBase}/data/records/${syncedRecordId}/metadata`, {
           method: "POST",
           headers: { "Content-Type": "application/json", cookie },
           body: JSON.stringify({ typeId: "image", metadata: { width: 1, height: 1 } }),
@@ -890,7 +1037,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // than only the first path that answered.
         const statuses: number[] = [];
         for (const probe of probes) {
-          const res = await fetch(probe.url, probe.init);
+          const res = await http(probe.url, probe.init);
           statuses.push(res.status);
         }
         const summary = probes.map((p, i) => `${p.label}: ${statuses[i]}`).join("; ");
@@ -975,11 +1122,11 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const REFUSED = [401, 403];
         const url = `${config.apiGatewayUrl}/apps/${app.appId}/api/local-data/data/records?limit=1`;
 
-        const anonymous = await fetch(url);
+        const anonymous = await http(url);
         expect(REFUSED).toContain(anonymous.status);
 
         const cookie = await signInToApp(app.appId);
-        const authenticated = await fetch(url, { headers: { cookie } });
+        const authenticated = await http(url, { headers: { cookie } });
         expect(authenticated.status).toBe(200);
 
         // Sign-out clears the browser's copy of both cookies. It does not revoke
@@ -987,7 +1134,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // rather than something a page can trigger — so what is asserted here is
         // what sign-out actually promises: the browser is told to drop them, and
         // a request carrying what is left is refused.
-        const out = await fetch(`${config.apiGatewayUrl}/apps/${app.appId}/api/session/sign-out`, {
+        const out = await http(`${config.apiGatewayUrl}/apps/${app.appId}/api/session/sign-out`, {
           method: "POST",
           headers: { cookie },
         });
@@ -996,7 +1143,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(cleared.filter((c) => /^sk_(session|token)=;/.test(c))).toHaveLength(2);
         for (const c of cleared) expect(c).toContain("Max-Age=0");
 
-        const afterSignOut = await fetch(url, { headers: { cookie: cookiesToHeader(cleared) } });
+        const afterSignOut = await http(url, { headers: { cookie: cookiesToHeader(cleared) } });
         expect(REFUSED).toContain(afterSignOut.status);
         expect(afterSignOut.status, "a signed-out caller was served").not.toBe(200);
       });
@@ -1121,7 +1268,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           const urlRes = await appUnderTest.fetch(`/data/records/${localRecord!.id}/file-url`);
           expect(urlRes.status).toBe(200);
           const { url } = (await urlRes.json()) as { url: string };
-          const blob = await fetch(url);
+          const blob = await http(url);
           expect(blob.status).toBe(200);
           expect(Buffer.from(await blob.arrayBuffer()).equals(browserUploadBytes)).toBe(true);
         },
@@ -1184,6 +1331,147 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const body = await query.text();
         expect(body).toContain(table.expectInBody);
       });
+
+      it("an app-private blob through real S3: pinned checksum, durability gate, drop and fetch back", async () => {
+        // The one step that writes an app-private blob to real S3. Everything
+        // below runs at Tier 1 against a fake cloud, which was taught to mirror
+        // the shape of the two facts the durability gate rests on and proves
+        // neither: that real S3 stores and reports the checksum the broker
+        // pinned for an `apps/<appId>/syncable/...` key it cannot derive a hash
+        // from, and that the broker's assumed per-app role reads that prefix
+        // past the files bucket's DenyCrossAppPrefixAccess statement.
+        //
+        // Both the key and the payload are unique per run. The stack is kept up
+        // between runs, so a constant key would find last run's object already
+        // in S3 — and the refusal below, which is precisely "the cloud has
+        // never seen these bytes", would pass or fail on run order.
+        const subKey = `tier-3/blob-${randomBytes(6).toString("hex")}.bin`;
+        const payload = `tier-3 app-private blob ${randomBytes(8).toString("hex")}`;
+        const payloadBytes = Buffer.from(payload);
+        const expectedChecksum = createHash("sha256").update(payloadBytes).digest("base64");
+
+        // Presign, PUT to the returned URL, record the index row — the only
+        // supported way to write one of these, and the first time this journey
+        // has driven it.
+        const { key } = await putAppFile(appUnderTest, subKey, payload);
+        expect(key).toBe(`apps/${app.appId}/syncable/${subKey}`);
+
+        if (!appBlobs.regenerable) {
+          // Bytes that have not been shipped yet are the last copy, and this is
+          // the moment the app most wants to be told no. The refusal has to come
+          // from a real store answering "no such object" rather than from a node
+          // with no probe at all — that is the distinction the old zero-probe
+          // coverage could not make.
+          //
+          // What makes this a real probe rather than a node with nothing to ask
+          // is the drop further down: the same app, the same key and the same
+          // probe, answering `confirmedReplicas: 1` once the bytes are up. A
+          // node with no peer would refuse both times.
+          //
+          // Raced against the push debounce (500 ms from the row write) plus a
+          // real S3 PUT, with one loopback request to make in that window. The
+          // assertion is single-shot deliberately: retrying it would be waiting
+          // for the answer to change, which is the opposite of what it claims.
+          const early = await appUnderTest.fetch(`/app-data/files/${subKey}/blob`, {
+            method: "DELETE",
+          });
+          expect(early.status).toBe(409);
+          expect(await early.json()).toMatchObject({
+            dropped: false,
+            reason: "not-durable",
+            confirmedReplicas: 0,
+          });
+        }
+
+        // The assertion the whole durability gate rests on: real S3 reports the
+        // checksum the broker pinned at presign time, read back through the
+        // app's own identity — the same route, the same credential and the same
+        // facts `assessDurability` probes with.
+        const facts = await eventually(
+          async () => {
+            const round = await appUnderTest.fetch("/sync/now", { method: "POST" });
+            expect(round.status).toBe(200);
+            // The key is sent undecoded: API Gateway normalizes %2F back to "/"
+            // before the broker sees it, and the HMAC covers the path as sent,
+            // so signing and fetching the same logical form is what makes the
+            // two agree.
+            const stat = await cloudApp(appUnderTest).fetch(`/files/${key}/stat`);
+            expect(stat.status, `stat ${key} answered ${stat.status}`).toBe(200);
+            return (await stat.json()) as {
+              sizeBytes: number;
+              checksumSha256: string | null;
+              storageClass: string | null;
+              availability: { state: string };
+            };
+          },
+          { timeoutMs: 120_000, intervalMs: 2_000 },
+        );
+        expect(facts.sizeBytes).toBe(payloadBytes.length);
+        expect(
+          facts.checksumSha256,
+          "S3 must report the checksum the broker pinned — without it every " +
+            "probe reads as present-unverified and no drop is ever allowed",
+        ).toBe(expectedChecksum);
+        expect(facts.availability.state).toBe("instant");
+
+        // The node's own accounting of the same bytes: listed under the app's
+        // namespace, resident here, and charged against the fallback budget the
+        // boot policy gives an app nobody has configured.
+        const before = await residencyOf(appUnderTest);
+        const entryBefore = before.entries.find((e) => e.subKey === subKey);
+        expect(entryBefore, `${subKey} is missing from the residency page`).toBeDefined();
+        expect(entryBefore!.resident).toBe(true);
+        expect(entryBefore!.sizeBytes).toBe(payloadBytes.length);
+        expect(before.budgetBytes).toBe(JOURNEY_RETENTION.appFallback.budgetBytes);
+        expect(before.heldBytes).toBeGreaterThanOrEqual(entryBefore!.sizeBytes);
+
+        // The same drop, after the round that shipped the bytes. This is what
+        // makes 409 the right status for the refusal above: the request was
+        // well-formed and the caller entitled to make it, and the only thing
+        // that changed is that a second copy now exists and can be seen.
+        const dropped = await appUnderTest.fetch(`/app-data/files/${subKey}/blob`, {
+          method: "DELETE",
+        });
+        expect(dropped.status).toBe(200);
+        const dropBody = (await dropped.json()) as {
+          dropped: boolean;
+          reason: string;
+          confirmedReplicas?: number;
+        };
+        expect(dropBody).toMatchObject({ dropped: true, reason: "dropped" });
+        if (appBlobs.regenerable) {
+          // No probe ran, so there is no count to report. An app that declares
+          // its blobs re-derivable drops its last copy on its own say-so.
+          expect(dropBody.confirmedReplicas).toBeUndefined();
+        } else {
+          expect(dropBody.confirmedReplicas).toBeGreaterThanOrEqual(1);
+        }
+
+        // The file survives the bytes: the row is still here and still the
+        // app's, and only the local copy is gone.
+        const after = await residencyOf(appUnderTest);
+        const entryAfter = after.entries.find((e) => e.subKey === subKey);
+        expect(entryAfter, `${subKey} left the residency page when its bytes did`).toBeDefined();
+        expect(entryAfter!.resident).toBe(false);
+        expect(await appBlobIsHere(appUnderTest, subKey)).toBe(false);
+
+        // And back down: a presigned GET against real S3, which is the other
+        // half of the transfer the drop-and-fetch contract depends on.
+        const back = await appUnderTest.fetch(`/app-data/files/${subKey}/fetch`, {
+          method: "POST",
+        });
+        expect(back.status).toBe(200);
+        expect(await back.json()).toMatchObject({ landed: true, reason: "landed" });
+        expect(await readAppFile(appUnderTest, subKey)).toBe(payload);
+
+        // Asking again costs one existence check rather than a second download,
+        // and says so.
+        const again = await appUnderTest.fetch(`/app-data/files/${subKey}/fetch`, {
+          method: "POST",
+        });
+        expect(again.status).toBe(200);
+        expect(await again.json()).toMatchObject({ landed: true, reason: "already-here" });
+      }, 300_000);
 
       it("Part A: SPA + immutable assets served through the CloudFront distribution (edge hit)", async () => {
         // The whole point of Part A: browser-facing traffic goes to the CloudFront
@@ -1287,12 +1575,12 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // Tampered signature → 403: CloudFront enforces the key-group signature.
         const tampered = new URL(url);
         tampered.searchParams.set("Signature", tamperSignature(signature!));
-        const bad = await fetch(tampered.toString());
+        const bad = await http(tampered.toString());
         expect(bad.status).toBe(403);
 
         // No signature on the shared/* behavior → 403 (Missing Key): the S3 origin
         // is signature-gated, never openly readable through the distribution.
-        const unsigned = await fetch(`${base}${signed.pathname}`);
+        const unsigned = await http(`${base}${signed.pathname}`);
         expect(unsigned.status).toBe(403);
 
         // apps/* is unreachable through the S3 files origin: the distribution has
@@ -1300,7 +1588,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // bucket policy's OAC Allow is scoped to shared/*). So an apps/* path
         // routes to the GATEWAY origin (default shell behavior) and can never
         // serve app-private S3 bytes. Prove it lands on the gateway, not S3.
-        const appsProbe = await fetch(
+        const appsProbe = await http(
           `${base}/apps/${app.appId}/syncable/does-not-exist-${Date.now()}.bin`,
         );
         // Identified by `apigw-requestid`, which only API Gateway sets. This used
@@ -1417,7 +1705,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // Drop this machine's copy. The route is the local-data-server's, not
         // admin-web's — this suite has no admin-web, and the proxy in front of
         // it is covered at Tier 2.
-        const removed = await fetch(
+        const removed = await http(
           `${lds!.url}/admin/apps/${encodeURIComponent(app.appId)}/node-copy`,
           { method: "DELETE" },
         );
@@ -1451,16 +1739,41 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(fresh.status).toBe(200);
         expect(await fresh.text()).not.toContain(nodeCopyRowId);
 
-        await eventually(
-          async () => {
-            const sync = await appUnderTest.fetch("/sync/now", { method: "POST" });
-            expect(sync.status).toBe(200);
-            const rows = await appUnderTest.fetch(`/app-data/db/${app.appTable.name}`);
-            expect(rows.status).toBe(200);
-            expect(await rows.text()).toContain(nodeCopyRowId);
-          },
-          { timeoutMs: 120_000, intervalMs: 2_000 },
-        );
+        // Asserted on `errors` as well as on the rows, because the two failures
+        // look identical from the row side and only one of them is this step's.
+        // A channel whose every round throws reports `applied: 0` and a 200, so
+        // a wait that only watches the table fails as a bare timeout quoting an
+        // empty result — which is exactly how a broker answering 500 to every
+        // exchange was read as a sync-protocol problem for a whole session. See
+        // `findings-step27-refill-from-cloud-2026-09-19.md`.
+        try {
+          await eventually(
+            async () => {
+              const sync = await appUnderTest.fetch("/sync/now", { method: "POST" });
+              expect(sync.status).toBe(200);
+              const round = (await sync.json()) as {
+                errors: Array<{ appId: string; error: string }>;
+              };
+              expect(
+                round.errors,
+                "the pull itself is failing — this is not a refill problem",
+              ).toEqual([]);
+              const rows = await appUnderTest.fetch(`/app-data/db/${app.appTable.name}`);
+              expect(rows.status).toBe(200);
+              expect(await rows.text()).toContain(nodeCopyRowId);
+            },
+            { timeoutMs: 120_000, intervalMs: 2_000 },
+          );
+        } catch (err) {
+          // The supervisor logs a per-engine failure and answers 200 anyway, so
+          // its own log is the only place the reason survives a round that the
+          // response could not carry.
+          console.error(
+            `[journey] refill never arrived. Local data server log follows:\n`
+              + `${lds?.logs() ?? "(no local data server)"}`,
+          );
+          throw err;
+        }
       });
 
       it(`uninstalls ${app.appId} with --delete-data: the app plane and its data both go`, async () => {
