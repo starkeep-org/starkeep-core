@@ -47,7 +47,12 @@ import {
   deleteAppCredsParameter,
   putAppCredsParameter,
 } from "./app-creds";
-import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
+import {
+  runAppInstallDdl,
+  runAppUninstallDdl,
+  revokeAppDsqlMapping,
+  type DsqlDdlOptions,
+} from "./dsql-ddl";
 import {
   putAppKeepFile,
   uploadAppBundle,
@@ -496,10 +501,16 @@ async function uninstallAppInner(
     );
   }
 
-  // The two data-destroying steps, and the temporary DDL policy that exists
-  // only to bracket the second of them. All three run only under `deleteData`:
-  // granting an install-DDL policy and taking it away again around work that
-  // will not run is privilege for no purpose.
+  // Both branches below bracket their DDL with the temporary install-DDL policy,
+  // and both run before `delete_iam_role`, so the app's IAM role still exists
+  // while DSQL is told to stop authorizing it.
+  //
+  // `deleteData` destroys the app's data and takes the whole uninstall DDL,
+  // which revokes the mapping on its way to dropping the PG role. The keep-data
+  // branch keeps every row and revokes only the mapping. Neither branch is
+  // optional: the mapping is about which principal may connect, not about data,
+  // and a mapping left naming the IAM role this uninstall is about to delete is
+  // a standing grant to whoever next creates a role by that name.
   if (deleteData) {
     // Files-bucket cleanup runs under the app's role (its runtime policy +
     // permissions boundary scope it to apps/<appId>/*).
@@ -523,6 +534,28 @@ async function uninstallAppInner(
         credentials: ddlCreds,
       };
       await runAppUninstallDdl(dsqlOpts, appId, ir.fileAccess, ir.fileAccessAll);
+    });
+
+    await runStep(registry, appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>
+      detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+    );
+  } else {
+    await runStep(registry, appId, "uninstall", "attach_temp_install_ddl_policy", done, () =>
+      attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+    );
+
+    await runStep(registry, appId, "uninstall", "revoke_dsql_mapping", done, async () => {
+      const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
+      await revokeAppDsqlMapping(
+        {
+          hostname: config.dsqlHostname,
+          region: config.region,
+          stackPrefix: config.stackPrefix,
+          accountId: config.accountId,
+          credentials: ddlCreds,
+        },
+        appId,
+      );
     });
 
     await runStep(registry, appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>
@@ -556,6 +589,20 @@ async function uninstallAppInner(
       awsCreds: managerCreds,
     }),
   );
+
+  // Last, and deliberately not a `runStep`: recording this would write the very
+  // row it just deleted. Clearing the ledger is what makes a *second* uninstall
+  // run its steps instead of skipping them, so it has to happen after the final
+  // step rather than in `delete_app_registry` where it used to live. Clearing
+  // there emptied the ledger mid-operation, the four steps after it wrote fresh
+  // `done` rows, and nothing ever cleared those — so the next uninstall skipped
+  // the registry delete, both IAM-role deletions and the creds parameter, and
+  // left an "uninstalled" app registered in the cloud with a working identity
+  // and a working HMAC secret.
+  //
+  // A failure before this point leaves the ledger intact, which is what lets a
+  // re-run resume rather than redo.
+  await registry.clearInstallSteps(appId);
 }
 
 /**

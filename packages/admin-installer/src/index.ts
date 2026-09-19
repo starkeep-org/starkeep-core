@@ -1,7 +1,7 @@
 export { installApp, uninstallApp } from "./orchestrator";
 export type { InstallerConfig, InstallInput, UninstallInput, InstallResult } from "./orchestrator";
 
-export { runAppInstallDdl, runAppUninstallDdl } from "./dsql-ddl";
+export { runAppInstallDdl, runAppUninstallDdl, revokeAppDsqlMapping } from "./dsql-ddl";
 export type { DsqlDdlOptions } from "./dsql-ddl";
 
 export {

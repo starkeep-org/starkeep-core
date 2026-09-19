@@ -551,8 +551,25 @@ export async function initializeSharedSchema(
     // This is the only IAM-to-PG mapping the schema initializer sets up; the
     // per-app mappings are added by run_dsql_ddl during install.
     //
-    // Probe sys.iam_pg_role_mappings first — AWS IAM GRANT is not idempotent
-    // in DSQL (re-granting an existing mapping errors).
+    // Rebound rather than skipped when a row is already present, for the reason
+    // spelled out at the matching site in dsql-ddl.ts: a row proves only that
+    // some principal once held this ARN, and a recreated role carries the same
+    // ARN with a new principal id that DSQL will not authorize. The stakes are
+    // higher here than for a per-app mapping — teardown-bootstrap.sh deletes
+    // `<prefix>-app-admin-role` and skips a deletion-protected cluster, so a
+    // cluster that outlives the admin role would leave the orchestrator unable
+    // to open its registry connection at all, and therefore unable to run the
+    // install that would fix it.
+    //
+    // The probe stays because AWS IAM GRANT is not idempotent in DSQL
+    // (re-granting an existing mapping errors), so a present row needs the
+    // revoke first and an absent one must not attempt it.
+    //
+    // The rebind cannot cut the connection running it: this session is `admin`
+    // via dsql:DbConnectAdmin, not `<prefix>_installer`. A registry connection
+    // open elsewhere during the gap between the two statements sees 28000 or an
+    // OCC conflict, both of which registry.ts's withRetry already reopens or
+    // replays on.
     const adminAppRoleArn =
       `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-admin-role`;
     const existingMapping = await sql<{ exists: boolean }>`
@@ -561,11 +578,14 @@ export async function initializeSharedSchema(
         WHERE pg_role_name = ${installer} AND arn = ${adminAppRoleArn}
       ) AS exists
     `.execute(db);
-    if (!existingMapping.rows[0]?.exists) {
+    if (existingMapping.rows[0]?.exists) {
       await sql
-        .raw(`AWS IAM GRANT "${installer}" TO '${adminAppRoleArn}'`)
+        .raw(`AWS IAM REVOKE "${installer}" FROM '${adminAppRoleArn}'`)
         .execute(db);
     }
+    await sql
+      .raw(`AWS IAM GRANT "${installer}" TO '${adminAppRoleArn}'`)
+      .execute(db);
   } finally {
     await db.destroy();
   }

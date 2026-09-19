@@ -60,6 +60,20 @@ export interface Registry {
   getCompletedSteps(appId: string, operation: Operation): Promise<Set<string>>;
   registerApp(manifest: AppManifest, appId: string): Promise<void>;
   deleteAppRegistryEntry(appId: string): Promise<void>;
+  /**
+   * Drop every step-ledger row for the app, for both operations.
+   *
+   * Separate from {@link deleteAppRegistryEntry} because the ledger must not be
+   * cleared while the operation writing it is still running. `delete_app_registry`
+   * is not the last uninstall step, so clearing there left the steps after it
+   * ({@link Operation} `uninstall`: the two IAM-role deletions and the creds
+   * parameter) writing `done` rows into an emptied ledger. Nothing cleared those
+   * again — the only thing that cleared them was `delete_app_registry`, itself
+   * skipped on the next run for being `done` — so every uninstall after the first
+   * silently skipped its last four steps and left the app registered with a live
+   * IAM role and a live HMAC secret.
+   */
+  clearInstallSteps(appId: string): Promise<void>;
   listInstalledApps(): Promise<InstalledApp[]>;
   close(): Promise<void>;
 }
@@ -217,6 +231,11 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
     async deleteAppRegistryEntry(appId) {
       await withRetry(async (k) => {
         await k.deleteFrom("shared.app_registry").where("app_id", "=", appId).execute();
+      });
+    },
+
+    async clearInstallSteps(appId) {
+      await withRetry(async (k) => {
         await k.deleteFrom("shared.app_install_steps").where("app_id", "=", appId).execute();
       });
     },

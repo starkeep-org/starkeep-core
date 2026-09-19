@@ -22,10 +22,16 @@ interface LedgerEntry {
 }
 
 const ledger: LedgerEntry[] = [];
+// Append-only mirror of every recorded step. `ledger` is what the orchestrator
+// reads to decide what to skip, so `clearInstallSteps` empties it exactly as the
+// real registry does; `history` keeps the sequence so a test can still assert
+// what a completed operation actually ran.
+const history: LedgerEntry[] = [];
 
 const fakeRegistry = {
   async recordStep(appId: string, operation: string, step: string, status: string, error?: string) {
     ledger.push({ appId, operation, step, status, error });
+    history.push({ appId, operation, step, status, error });
   },
   async getCompletedSteps(appId: string, operation: string) {
     return new Set(
@@ -33,6 +39,13 @@ const fakeRegistry = {
         .filter((e) => e.appId === appId && e.operation === operation && e.status === "done")
         .map((e) => e.step),
     );
+  },
+  // Mirrors the real registry: drops the app's rows for BOTH operations, which
+  // is what lets a second uninstall re-run its steps instead of skipping them.
+  async clearInstallSteps(appId: string) {
+    for (let i = ledger.length - 1; i >= 0; i--) {
+      if (ledger[i]!.appId === appId) ledger.splice(i, 1);
+    }
   },
   registerApp: vi.fn(async () => {}),
   deleteAppRegistryEntry: vi.fn(async () => {}),
@@ -74,6 +87,7 @@ vi.mock("../src/app-creds", () => ({
 vi.mock("../src/dsql-ddl", () => ({
   runAppInstallDdl: vi.fn(async () => {}),
   runAppUninstallDdl: vi.fn(async () => {}),
+  revokeAppDsqlMapping: vi.fn(async () => {}),
 }));
 
 vi.mock("../src/s3", () => ({
@@ -93,10 +107,11 @@ import {
   createAppRole,
   attachTempInstallInfraPolicy,
   detachTempInstallInfraPolicy,
+  deleteAppRoleWithPolicies,
 } from "../src/iam";
 import { putAppCredsParameter } from "../src/app-creds";
 import { putAppKeepFile, uploadAppBundle, deleteAppFilesObjects } from "../src/s3";
-import { runAppUninstallDdl } from "../src/dsql-ddl";
+import { runAppUninstallDdl, revokeAppDsqlMapping } from "../src/dsql-ddl";
 import { installComputeStack } from "../src/compute-stack";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import { readFileSync as rf } from "node:fs";
@@ -155,6 +170,7 @@ function seedLocalRegistry(appId: string, hmacSecret: string): void {
 
 beforeEach(() => {
   ledger.length = 0;
+  history.length = 0;
   vi.clearAllMocks();
   dataDir = mkdtempSync(join(tmpdir(), "orchestrator-test-"));
   // The creds dir and the data.db both resolve from STARKEEP_DIR (via
@@ -173,7 +189,7 @@ function doneSteps(operation: string): string[] {
   // "done" on every drive, so a resumed install legitimately logs them twice.
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const e of ledger) {
+  for (const e of history) {
     if (e.operation === operation && e.status === "done" && !seen.has(e.step)) {
       seen.add(e.step);
       out.push(e.step);
@@ -540,6 +556,9 @@ describe("uninstall", () => {
       "uninstall_compute_stack",
       "delete_s3_artifacts",
       "detach_temp_uninstall_infra_policy",
+      "attach_temp_install_ddl_policy",
+      "revoke_dsql_mapping",
+      "detach_temp_install_ddl_policy",
       "delete_app_registry",
       "delete_iam_role",
       "delete_iam_exec_role",
@@ -549,6 +568,13 @@ describe("uninstall", () => {
     // so the two calls that would remove them never happen.
     expect(vi.mocked(deleteAppFilesObjects)).not.toHaveBeenCalled();
     expect(vi.mocked(runAppUninstallDdl)).not.toHaveBeenCalled();
+    // The login binding is not data. It goes on both paths, because the
+    // uninstall deletes the IAM role the mapping names and a mapping left
+    // pointing at a deleted role is a standing grant to whoever recreates it.
+    expect(vi.mocked(revokeAppDsqlMapping)).toHaveBeenCalledWith(
+      expect.objectContaining({ stackPrefix: config.stackPrefix }),
+      "photos",
+    );
     // The app itself still goes.
     expect(fakeRegistry.deleteAppRegistryEntry).toHaveBeenCalledWith("photos");
   });
@@ -563,5 +589,59 @@ describe("uninstall", () => {
     });
     expect(vi.mocked(deleteAppFilesObjects)).not.toHaveBeenCalled();
     expect(vi.mocked(runAppUninstallDdl)).not.toHaveBeenCalled();
+    expect(vi.mocked(revokeAppDsqlMapping)).toHaveBeenCalled();
+  });
+
+  it("revokes the mapping before deleting the IAM role it names", async () => {
+    // AWS IAM REVOKE resolves the ARN, so the role has to outlive the revoke.
+    await uninstallApp({
+      appId: "photos",
+      manifest: photosManifest,
+      config,
+      registryCredentials,
+    });
+    const steps = doneSteps("uninstall");
+    expect(steps.indexOf("revoke_dsql_mapping")).toBeLessThan(steps.indexOf("delete_iam_role"));
+  });
+
+  // The ledger clear used to live inside `delete_app_registry`, which is not the
+  // last uninstall step. Emptying the ledger there left the four steps after it
+  // writing `done` rows that nothing ever cleared, because the only thing that
+  // cleared them was `delete_app_registry` — itself skipped next time for being
+  // `done`. A second uninstall therefore skipped the registry delete, both IAM
+  // role deletions and the creds parameter, leaving an "uninstalled" app
+  // registered in the cloud with a working identity and a working HMAC secret.
+  it("a second uninstall runs every step again rather than skipping the tail", async () => {
+    const args = {
+      appId: "photos",
+      manifest: photosManifest,
+      config,
+      registryCredentials,
+    } as const;
+    await uninstallApp({ ...args });
+    const first = doneSteps("uninstall");
+    expect(first).toContain("delete_app_creds_parameter");
+
+    // A completed uninstall leaves no skip-decision rows behind.
+    expect(ledger).toHaveLength(0);
+
+    vi.mocked(deleteAppRoleWithPolicies).mockClear();
+    history.length = 0;
+    await uninstallApp({ ...args });
+    expect(doneSteps("uninstall")).toEqual(first);
+    expect(vi.mocked(deleteAppRoleWithPolicies)).toHaveBeenCalled();
+  });
+
+  it("deleteData: true revokes inside the full uninstall DDL, not separately", async () => {
+    await uninstallApp({
+      appId: "photos",
+      manifest: photosManifest,
+      config,
+      registryCredentials,
+      deleteData: true,
+    });
+    expect(vi.mocked(runAppUninstallDdl)).toHaveBeenCalled();
+    expect(vi.mocked(revokeAppDsqlMapping)).not.toHaveBeenCalled();
+    expect(doneSteps("uninstall")).not.toContain("revoke_dsql_mapping");
   });
 });

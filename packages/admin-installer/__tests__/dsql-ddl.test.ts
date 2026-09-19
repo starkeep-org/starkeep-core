@@ -56,7 +56,12 @@ vi.mock("pg", () => {
   return { default: { Pool: FakePool }, Pool: FakePool };
 });
 
-import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "../src/dsql-ddl";
+import {
+  runAppInstallDdl,
+  runAppUninstallDdl,
+  revokeAppDsqlMapping,
+  type DsqlDdlOptions,
+} from "../src/dsql-ddl";
 import { validateManifest } from "@starkeep/admin-manifest";
 import { FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
 import { pgColumnType } from "@starkeep/protocol-primitives";
@@ -118,15 +123,38 @@ describe("install DDL for the photos manifest", () => {
     expect(s).toContain(
       `AWS IAM GRANT "starkeep_app_photos" TO 'arn:aws:iam::111122223333:role/starkeep-app-photos-role'`,
     );
+    // Nothing to revoke on a cold install, and AWS IAM REVOKE errors when the
+    // mapping is absent.
+    expect(s.some((t) => t.startsWith("AWS IAM REVOKE"))).toBe(false);
   });
 
-  it("skips CREATE ROLE and AWS IAM GRANT when the probes report existing", async () => {
+  it("skips CREATE ROLE when the pg_roles probe reports the role existing", async () => {
+    state.pgRoleExists = true;
+    await installPhotos();
+    expect(stmts().some((t) => t.startsWith("CREATE ROLE"))).toBe(false);
+  });
+
+  // The keep-data reinstall requirement: an existing mapping row proves only
+  // that some principal once held this ARN. A keep-data uninstall deletes the
+  // app's IAM role and leaves the row, and the reinstall recreates the role with
+  // the same ARN and a new principal id, so a skipped grant leaves the app unable
+  // to reach data that is still sitting in its schema. The catalog exposes no
+  // principal id to distinguish the cases, so the install rebinds unconditionally.
+  it("rebinds the IAM mapping when the probe reports a row already present", async () => {
     state.pgRoleExists = true;
     state.iamMappingExists = true;
     await installPhotos();
     const s = stmts();
-    expect(s.some((t) => t.startsWith("CREATE ROLE"))).toBe(false);
-    expect(s.some((t) => t.startsWith("AWS IAM GRANT"))).toBe(false);
+    const arn = "arn:aws:iam::111122223333:role/starkeep-app-photos-role";
+    const revokeIdx = s.indexOf(`AWS IAM REVOKE "starkeep_app_photos" FROM '${arn}'`);
+    const grantIdx = s.indexOf(`AWS IAM GRANT "starkeep_app_photos" TO '${arn}'`);
+    expect(revokeIdx).toBeGreaterThanOrEqual(0);
+    expect(grantIdx).toBeGreaterThan(revokeIdx);
+    // The rebind must not reach the data: DSQL rejects the pair inside one
+    // transaction, so the only ordering guarantee available is that the grant
+    // follows the revoke and that nothing drops the role or its schema.
+    expect(s.some((t) => t.startsWith("DROP ROLE"))).toBe(false);
+    expect(s.some((t) => t.includes("DROP SCHEMA"))).toBe(false);
   });
 
   it("creates the private schema with ownership and default privileges", async () => {
@@ -370,6 +398,32 @@ describe("the label-key registry", () => {
     );
     expect(deletes.length).toBeGreaterThan(0);
     expect(deletes.every((t) => t.includes('where "app_id" ='))).toBe(true);
+  });
+});
+
+describe("revoke-only DSQL mapping (keep-data uninstall)", () => {
+  it("revokes the mapping and touches nothing else", async () => {
+    state.pgRoleExists = true;
+    state.iamMappingExists = true;
+    await revokeAppDsqlMapping(opts, "photos");
+    const s = stmts();
+    expect(s).toContain(
+      `AWS IAM REVOKE "starkeep_app_photos" FROM 'arn:aws:iam::111122223333:role/starkeep-app-photos-role'`,
+    );
+    // The whole point of not reusing runAppUninstallDdl: a keep-data uninstall
+    // keeps the PG role, the app schema and every row in it. Only the login
+    // binding goes.
+    expect(s.some((t) => t.startsWith("DROP ROLE"))).toBe(false);
+    expect(s.some((t) => t.includes("DROP SCHEMA"))).toBe(false);
+    expect(s.some((t) => t.startsWith("REVOKE ALL"))).toBe(false);
+    expect(s.some((t) => t.includes("delete from"))).toBe(false);
+  });
+
+  it("skips the revoke when no mapping row is present", async () => {
+    await revokeAppDsqlMapping(opts, "photos");
+    // AWS IAM REVOKE errors on an absent mapping, so a replay after a transient
+    // DSQL drop has to be a no-op rather than a failure.
+    expect(stmts().some((t) => t.startsWith("AWS IAM REVOKE"))).toBe(false);
   });
 });
 

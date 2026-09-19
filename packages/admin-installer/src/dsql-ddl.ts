@@ -212,8 +212,35 @@ export async function runAppInstallDdl(
       // log in as which PG role, separate from PG-level membership. Without this
       // grant the app's runtime sts:DbConnect attempts fail with an opaque
       // FATAL 28000 ("unable to accept connection, access denied", no hint).
-      // Probe sys.iam_pg_role_mappings first because AWS IAM GRANT is not
-      // idempotent in DSQL — re-granting an existing mapping errors.
+      //
+      // An existing row is rebound rather than trusted. A row proves only that
+      // some principal once held this ARN, not that the ARN still resolves to a
+      // live one: a keep-data uninstall deletes the app's IAM role and leaves the
+      // row, and the reinstall recreates the role with the same ARN and a new
+      // principal id that DSQL will not authorize. Skipping there leaves the app
+      // permanently unable to reach data still sitting in its own schema, which
+      // is the one thing a keep-data reinstall has to deliver. The catalog offers
+      // no way to tell the cases apart — it exposes pg_role_name, arn and
+      // grantor_pg_role_name, and no principal id — so this asserts the binding
+      // rather than inspecting it, like every other statement in this body.
+      //
+      // The probe stays because AWS IAM GRANT is not idempotent in DSQL: a
+      // present row needs the revoke first, an absent one must not attempt it.
+      //
+      // Measured by `pnpm -F @starkeep/admin-installer debug:dsql-revoke-live-session`:
+      // the revoke succeeds with sessions live under the mapping, and DSQL rejects
+      // the pair inside one transaction (0A000), so the gap between the two
+      // statements cannot be closed. In that gap a live session's next query fails
+      // once with a retryable 40001/OC001 and recovers on the query after the
+      // grant, while new connections get FATAL 28000.
+      //
+      // The gap is small: polling the app's own identity after a rebind of a real
+      // app mapping had it effective in 0.8s with no refusal in ten consecutive
+      // attempts. Note what that does and does not say. It bounds the rebind's own
+      // cost; it is not a claim that api-handler.ts's ~15-second 28000 budget is
+      // adequate in general, and a live Tier-3 run has since shown that budget
+      // exhausted by an unrelated concurrency-correlated refusal while five
+      // sibling invocations connected in the same second.
       const appRoleArn = `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-${appId}-role`;
       const existingMapping = await sql<{ exists: boolean }>`
       SELECT EXISTS (
@@ -221,9 +248,10 @@ export async function runAppInstallDdl(
         WHERE pg_role_name = ${pgRole} AND arn = ${appRoleArn}
       ) AS exists
     `.execute(db);
-      if (!existingMapping.rows[0]?.exists) {
-        await sql.raw(`AWS IAM GRANT "${pgRole}" TO '${appRoleArn}'`).execute(db);
+      if (existingMapping.rows[0]?.exists) {
+        await sql.raw(`AWS IAM REVOKE "${pgRole}" FROM '${appRoleArn}'`).execute(db);
       }
+      await sql.raw(`AWS IAM GRANT "${pgRole}" TO '${appRoleArn}'`).execute(db);
 
       // App-private schema
       await sql`
@@ -518,6 +546,50 @@ export async function runAppUninstallDdl(
     `.execute(db);
       if (existingRole.rows[0]?.exists) {
         await sql.raw(`DROP ROLE "${pgRole}"`).execute(db);
+      }
+    } finally {
+      await db.destroy().catch(() => {});
+    }
+  });
+}
+
+/**
+ * Revoke only the app's DSQL-side IAM-to-PG mapping, leaving the PG role, the
+ * app-private schema and every row in it untouched.
+ *
+ * This is the uninstall half of the keep-data reinstall requirement, and it is
+ * deliberately not {@link runAppUninstallDdl} with a flag: that function drops
+ * the app schema CASCADE and deletes the app's registry rows, which is exactly
+ * the data a keep-data uninstall promises to keep.
+ *
+ * The reason to revoke at all on a path that keeps everything else is that the
+ * uninstall deletes the app's IAM role. A mapping left naming a deleted role
+ * names an ARN that anyone holding iam:CreateRole can claim, and
+ * `${stackPrefix}-app-<appId>-role` is fully predictable, so whoever creates it
+ * inherits this PG role along with its private schema and its shared.records
+ * grants. The install-side rebind in {@link runAppInstallDdl} is what guarantees
+ * a later reinstall can reach the data; this is what closes the window in
+ * between.
+ */
+export async function revokeAppDsqlMapping(
+  opts: DsqlDdlOptions,
+  appId: string,
+): Promise<void> {
+  const pgRole = appIdToPgRole(opts.stackPrefix, appId);
+  const appRoleArn = `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-${appId}-role`;
+  // Probe-then-act, so a replay after a transient DSQL drop is a no-op rather
+  // than an error: AWS IAM REVOKE fails when the mapping is already absent.
+  await retryOnTransientDbError(`revoke dsql mapping ${appId}`, async () => {
+    const db = await makeDb(opts);
+    try {
+      const existingMapping = await sql<{ exists: boolean }>`
+        SELECT EXISTS (
+          SELECT 1 FROM sys.iam_pg_role_mappings
+          WHERE pg_role_name = ${pgRole} AND arn = ${appRoleArn}
+        ) AS exists
+      `.execute(db);
+      if (existingMapping.rows[0]?.exists) {
+        await sql.raw(`AWS IAM REVOKE "${pgRole}" FROM '${appRoleArn}'`).execute(db);
       }
     } finally {
       await db.destroy().catch(() => {});
