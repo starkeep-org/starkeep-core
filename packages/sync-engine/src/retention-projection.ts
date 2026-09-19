@@ -33,7 +33,7 @@
 import {
   budgetBytesFor,
   budgetLineFor,
-  namespaceRetentionFor,
+  namespaceBudgetBytes,
   parseSizeClass,
   retentionRowFor,
   PLATFORM_NAMESPACE,
@@ -204,7 +204,7 @@ export function projectPolicy(
 
   const namespaces: NamespaceProjection[] = [...byNamespace.entries()].map(
     ([namespace, group]) => {
-      const totalBudgetBytes = namespaceRetentionFor(policy, namespace).budgetBytes;
+      const totalBudgetBytes = namespaceBudgetBytes(policy, namespace);
       const selectedBytes = group.reduce((sum, r) => sum + r.selectedBytes, 0);
       const rowProjectedBytes = group.reduce((sum, r) => sum + r.projectedBytes, 0);
       return {

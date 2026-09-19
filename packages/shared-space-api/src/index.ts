@@ -41,6 +41,14 @@ export {
   createAppSpecificFactory,
   type AppSpecificFactoryOptions,
 } from "./app-syncable/factory.js";
+export type {
+  AppBlobPlane,
+  AppBlobEntry,
+  AppBlobIdentity,
+  AppBlobResidencyPage,
+  AppBlobDropResult,
+  AppBlobFetchResult,
+} from "./app-syncable/blob-plane.js";
 export { quoteIdent, validateTableName, RESERVED_COLUMN_NAMES } from "./app-syncable/validation.js";
 export {
   FILE_RECORDS_TABLE,

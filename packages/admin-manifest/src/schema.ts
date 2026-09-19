@@ -335,13 +335,50 @@ export const syncableTableSchema = z
       `never leave the node that made them.`,
   });
 
+/**
+ * How an app opts into the `apps/<appId>/syncable/` object-storage prefix, and
+ * what it says about the bytes it puts there.
+ *
+ * Two spellings, and the short one is the conservative one. `true` means
+ * `{ "regenerable": false }`, so every manifest written before this field
+ * existed keeps behaving exactly as it did: the node may drop those bytes only
+ * once a replica is confirmed. An app whose private blobs are derived from
+ * something it still holds says so explicitly.
+ *
+ * `regenerable` is a claim about the *app*, not about any one blob. A node
+ * reads it to answer one question — may this node let go of the last copy? —
+ * and the two mistakes are not symmetric: calling regenerable bytes precious
+ * costs disk, while calling precious bytes regenerable loses them. Hence the
+ * default.
+ *
+ * The third arm carries `enabled` so a parsed manifest survives a round trip
+ * through the schema. The registry stores manifests as parsed JSON, and a
+ * normalized `{ enabled, regenerable }` re-validated against a boolean-only
+ * union would come back as the wrong opt-in. It is not a spelling an app
+ * author needs.
+ */
+const appSyncableFilesSchema = z
+  .union([
+    z.boolean(),
+    z.object({
+      enabled: z.boolean().optional(),
+      regenerable: z.boolean().default(false),
+    }),
+  ])
+  .default(false)
+  .transform((declared) =>
+    typeof declared === "boolean"
+      ? { enabled: declared, regenerable: false }
+      : { enabled: declared.enabled ?? true, regenerable: declared.regenerable },
+  );
+
 export const appSpecificSyncableSchema = z.object({
   tables: z.array(syncableTableSchema).default([]),
   // Opt-in for apps/<appId>/syncable/ object-storage prefix. App-specific
   // (private) data is not necessarily file-backed — apps with row-only
   // app-specific data leave this false. (Shared data is always file-backed
   // and is not controlled by this flag.)
-  files: z.boolean().default(false),
+  files: appSyncableFilesSchema,
 });
 
 export const infraRequirementsSchema = z.object({
@@ -425,3 +462,6 @@ export type LocalRun = z.infer<typeof localRunSchema>;
 export type PermissionEntry = z.infer<typeof permissionEntrySchema>;
 export type InfraRequirements = z.infer<typeof infraRequirementsSchema>;
 export type AppManifest = z.infer<typeof appManifestSchema>;
+
+/** The normalized form of `appSpecificSyncable.files` — what every consumer reads. */
+export type AppSyncableFiles = z.infer<typeof appSyncableFilesSchema>;

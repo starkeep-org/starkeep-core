@@ -8,6 +8,7 @@ import {
   resolveSizeClass,
   retentionRowFor,
   validateRetentionPolicy,
+  APP_BLOB_ROW,
   FALLBACK_RUNG,
   PLATFORM_NAMESPACE,
   type BlobCandidate,
@@ -31,24 +32,31 @@ const row = (over: Partial<SizeClassRetention> = {}): SizeClassRetention => ({
   ...over,
 });
 
-const app = (over: Partial<NamespaceRetention> = {}): NamespaceRetention => ({
+const namespace = (over: Partial<NamespaceRetention> = {}): NamespaceRetention => ({
   rows: {},
   fallback: row(),
   budgetBytes: 1_000_000,
   ...over,
 });
 
-/** Rows under one app namespace — the ordinary case for a derived record. */
+/**
+ * Rows under the platform namespace, which is the only namespace with rows.
+ *
+ * An app namespace carries one advisory ceiling and nothing else: which rungs
+ * exist and what each is worth is the app's own table. Every share, prefetch
+ * and fallback case below is therefore a platform case, and the app-namespace
+ * block at the end covers the other side.
+ */
 const policy = (
   rows: Record<string, SizeClassRetention>,
   over: Partial<NamespaceRetention> = {},
 ): NodeRetentionPolicy => ({
-  platform: app(),
-  apps: { appA: app({ rows, ...over }) },
-  appFallback: app(),
+  platform: namespace({ rows, ...over }),
+  apps: { appA: { budgetBytes: 1_000_000 } },
+  appFallback: { budgetBytes: 1_000_000 },
 });
 
-const CLASS_A = resolveSizeClass("appA", "classA");
+const CLASS_A = resolveSizeClass(PLATFORM_NAMESPACE, "classA");
 
 const candidate = (over: Partial<BlobCandidate> = {}): BlobCandidate => ({
   recordId: "r1",
@@ -68,7 +76,7 @@ function decide(
     candidate?: Partial<BlobCandidate>;
     sizeClass?: ResolvedSizeClass | null;
     rows?: Record<string, SizeClassRetention>;
-    appOver?: Partial<NamespaceRetention>;
+    platformOver?: Partial<NamespaceRetention>;
     deniedHere?: boolean;
     pinned?: boolean;
     used?: number;
@@ -80,7 +88,7 @@ function decide(
   return decideResidency({
     candidate: candidate(over.candidate),
     sizeClass: over.sizeClass === undefined ? CLASS_A : over.sizeClass,
-    policy: policy(over.rows ?? { classA: row() }, over.appOver),
+    policy: policy(over.rows ?? { classA: row() }, over.platformOver),
     constraints: { deniedHere: over.deniedHere ?? false },
     overrides: { pinned: over.pinned ?? false },
     usage: () => over.used ?? 0,
@@ -270,18 +278,11 @@ describe("budget lines", () => {
   // namespace is inside that namespace, so there is nothing left for a
   // second, namespace-wide pass to catch.
   it("divides a namespace's budget exactly across its lines", () => {
-    const p: NodeRetentionPolicy = {
-      platform: app(),
-      apps: {
-        appA: app({
-          rows: { a: row({ share: 1 }), b: row({ share: 2 }), c: row({ share: 4 }) },
-          fallback: row({ share: 1 }),
-          budgetBytes: 8000,
-        }),
-      },
-      appFallback: app(),
-    };
-    const lines = budgetLinesOf(p).filter((l) => l.namespace === "appA");
+    const p = policy(
+      { a: row({ share: 1 }), b: row({ share: 2 }), c: row({ share: 4 }) },
+      { fallback: row({ share: 1 }), budgetBytes: 8000 },
+    );
+    const lines = budgetLinesOf(p).filter((l) => l.namespace === PLATFORM_NAMESPACE);
     const sum = lines.reduce((total, l) => total + budgetBytesFor(p, l), 0);
     expect(sum).toBe(8000);
   });
@@ -303,15 +304,15 @@ describe("budget lines", () => {
   // to exist to bound it.
   it("pools every unrecognised rung of a namespace onto one line", () => {
     const p = policy({ classA: row() });
-    const one = budgetLineFor(p, resolveSizeClass("appA", "invented-1"));
-    const two = budgetLineFor(p, resolveSizeClass("appA", "invented-2"));
+    const one = budgetLineFor(p, resolveSizeClass(PLATFORM_NAMESPACE, "invented-1"));
+    const two = budgetLineFor(p, resolveSizeClass(PLATFORM_NAMESPACE, "invented-2"));
     expect(one.key).toBe(two.key);
     expect(one.rung).toBe(FALLBACK_RUNG);
   });
 
   it("keeps a declared rung on its own line", () => {
     const p = policy({ classA: row() });
-    expect(budgetLineFor(p, CLASS_A).key).toBe("appA:classA");
+    expect(budgetLineFor(p, CLASS_A).key).toBe(`${PLATFORM_NAMESPACE}:classA`);
   });
 
   // An unresolvable class has no namespace to belong to, and guessing one would
@@ -323,26 +324,88 @@ describe("budget lines", () => {
 
   // An app nobody has budgeted for is not unbounded — that would be the hole
   // every other bound here is trying to close.
+  /**
+   * "This app gets no disk on this node", which an app namespace has nowhere
+   * else to say now.
+   *
+   * The platform refuses a zero budget and says so with `share: 0` per rung
+   * instead, because a zero total there is a prohibition written where nobody
+   * reading the rows would find it. An app has no rows, so its budget is the
+   * only place the statement can live and reads exactly as it means.
+   */
+  it("accepts a zero budget for an app, where the platform refuses one", () => {
+    const zeroed: NodeRetentionPolicy = {
+      platform: namespace(),
+      apps: { appA: { budgetBytes: 0 } },
+      appFallback: { budgetBytes: 1024 },
+    };
+    expect(validateRetentionPolicy(zeroed)).toEqual([]);
+    expect(budgetBytesFor(zeroed, budgetLineFor(zeroed, resolveSizeClass("appA", "x")))).toBe(0);
+  });
+
   it("bounds an app the policy has no entry for, using appFallback", () => {
     const p: NodeRetentionPolicy = {
-      platform: app(),
+      platform: namespace(),
       apps: {},
-      appFallback: app({ budgetBytes: 2000 }),
+      appFallback: { budgetBytes: 2000 },
     };
     const line = budgetLineFor(p, resolveSizeClass("never-configured", "someRung"));
     expect(budgetBytesFor(p, line)).toBe(2000);
   });
 
-  it("enumerates every declared line plus each namespace's fallback", () => {
+  it("enumerates every platform line plus one line per configured app", () => {
     const keys = budgetLinesOf(policy({ classA: row(), classB: row() })).map((l) => l.key);
-    expect(keys).toEqual(
-      expect.arrayContaining([
-        `${PLATFORM_NAMESPACE}:${FALLBACK_RUNG}`,
-        "appA:classA",
-        "appA:classB",
-        `appA:${FALLBACK_RUNG}`,
-      ]),
+    expect(keys.sort()).toEqual([
+      `appA:${FALLBACK_RUNG}`,
+      `${PLATFORM_NAMESPACE}:${FALLBACK_RUNG}`,
+      `${PLATFORM_NAMESPACE}:classA`,
+      `${PLATFORM_NAMESPACE}:classB`,
+    ].sort());
+  });
+});
+
+/**
+ * An app namespace is one line holding one number.
+ *
+ * The collapse, stated from the policy's side. Everything an app puts on a node
+ * — its private blobs, and every rung it labels a derived record with — charges
+ * that one line, and the rule governing it is fixed by the platform rather than
+ * written by anybody.
+ */
+describe("an app namespace", () => {
+  const p = policy({ classA: row() });
+
+  it("sends every rung of an app to the same line", () => {
+    const declared = budgetLineFor(p, resolveSizeClass("appA", "classA"));
+    const invented = budgetLineFor(p, resolveSizeClass("appA", "anything-at-all"));
+    expect(declared.key).toBe("appA:*");
+    expect(invented.key).toBe(declared.key);
+  });
+
+  it("gives that line the app's whole budget, undivided", () => {
+    expect(budgetBytesFor(p, budgetLineFor(p, resolveSizeClass("appA", "classA")))).toBe(
+      1_000_000,
     );
+  });
+
+  // Not `unclassified`. An app's one line *is* the line its classes belong to,
+  // so none of them is an unrecognised remainder the way an unnamed platform
+  // rung is — the platform placed it, from structure the app cannot choose.
+  it("reports a request that fits as within-budget rather than unclassified", () => {
+    const v = decide({
+      sizeClass: resolveSizeClass("appA", "whatever"),
+      trigger: "request",
+    });
+    expect(v).toMatchObject({ decision: "fetch", reason: "within-budget" });
+  });
+
+  // A round applies an app's rows and leaves its bytes alone: what an app wants
+  // resident is a decision the app makes from its own table.
+  it("never prefetches, whatever the policy says elsewhere", () => {
+    for (const trigger of ["round", "acquisition"] as const) {
+      const v = decide({ sizeClass: resolveSizeClass("appA", "whatever"), trigger });
+      expect(v).toMatchObject({ decision: "elide", reason: "not-prefetched" });
+    }
   });
 });
 
@@ -356,27 +419,28 @@ describe("decideResidency — unclassified records", () => {
     expect(v.budgetLine?.key).toBe(`${PLATFORM_NAMESPACE}:${FALLBACK_RUNG}`);
   });
 
-  it("uses the app's fallback for a rung the policy has no row for", () => {
-    const v = decide({ sizeClass: resolveSizeClass("appA", "unknown-rung") });
+  it("uses the platform's fallback for a rung the policy has no row for", () => {
+    const v = decide({ sizeClass: resolveSizeClass(PLATFORM_NAMESPACE, "unknown-rung") });
     expect(v).toMatchObject({ decision: "fetch", reason: "unclassified" });
   });
 
   // An unconfigured app must not inherit the rule written for originals: the
-  // platform fallback is generous on purpose, and applying it to an app nobody
+  // platform budget is generous on purpose, and applying it to an app nobody
   // has budgeted for would hand that generosity to anything newly installed.
-  it("uses appFallback rather than the platform fallback for an unknown app", () => {
+  it("uses appFallback rather than the platform's budget for an unknown app", () => {
     const v = decideResidency({
       candidate: candidate(),
       sizeClass: resolveSizeClass("never-configured", "someRung"),
       policy: {
-        platform: app({ fallback: row({ share: 1 }) }),
+        platform: namespace({ fallback: row({ share: 1 }) }),
         apps: {},
-        appFallback: app({ fallback: row({ share: 0 }) }),
+        appFallback: { budgetBytes: 0 },
       },
       constraints: { deniedHere: false },
       overrides: { pinned: false },
       usage: () => 0,
       displaces: () => false,
+      trigger: "request",
     });
     expect(v).toMatchObject({ decision: "elide", reason: "class-disabled" });
   });
@@ -429,8 +493,19 @@ describe("retentionRowFor", () => {
 
   it("reads the fallback for a pooled line", () => {
     const p = policy({ classA: row() }, { fallback: row({ prefetch: false, share: 2 }) });
-    const line = budgetLineFor(p, resolveSizeClass("appA", "invented"));
+    const line = budgetLineFor(p, resolveSizeClass(PLATFORM_NAMESPACE, "invented"));
     expect(retentionRowFor(p, line)).toMatchObject({ prefetch: false, share: 2 });
+  });
+
+  // No policy writes this row and no operator edits it. `prefetch: false` is
+  // the substantive half — a round applies an app's rows and leaves its bytes
+  // alone — and the share is arithmetic, since one line takes the whole of one
+  // ceiling whatever number it carries.
+  it("reads the platform's fixed row for an app line, whatever the policy says", () => {
+    const p = policy({ classA: row() }, { fallback: row({ prefetch: true, share: 2 }) });
+    const line = budgetLineFor(p, resolveSizeClass("appA", "anything"));
+    expect(retentionRowFor(p, line)).toEqual(APP_BLOB_ROW);
+    expect(APP_BLOB_ROW.prefetch).toBe(false);
   });
 });
 
@@ -510,16 +585,16 @@ describe("validateRetentionPolicy", () => {
 
   it("validates the fallback row too", () => {
     const problems = validateRetentionPolicy({
-      platform: app({ fallback: row({ share: -1 }) }),
+      platform: namespace({ fallback: row({ share: -1 }) }),
       apps: {},
-      appFallback: app(),
+      appFallback: namespace(),
     });
     expect(problems[0]).toMatch(/^starkeep \(fallback\)/);
   });
 
   it("names the offending row with its full class", () => {
     const problems = validateRetentionPolicy(policy({ classA: row({ share: -1 }) }));
-    expect(problems[0]).toMatch(/^appA:classA/);
+    expect(problems[0]).toMatch(/^starkeep:classA/);
   });
 
   // `*` names the pooled line, so a rung called that would write a row nothing
@@ -534,11 +609,28 @@ describe("validateRetentionPolicy", () => {
   // entry would sit there being ignored rather than doing what it says.
   it("rejects an app namespace that collides with the platform's", () => {
     const problems = validateRetentionPolicy({
-      platform: app(),
-      apps: { [PLATFORM_NAMESPACE]: app({ rows: { classA: row() } }) },
-      appFallback: app(),
+      platform: namespace(),
+      apps: { [PLATFORM_NAMESPACE]: { budgetBytes: 1024 } },
+      appFallback: { budgetBytes: 1024 },
     });
     expect(problems.some((p) => /is the platform namespace/.test(p))).toBe(true);
+  });
+
+  /**
+   * An app entry still carrying rows is refused rather than ignored.
+   *
+   * Silently dropping them would let an operator (or a UI that has not caught
+   * up) believe a per-rung rule is in force when the app's own table is the
+   * only thing deciding that now — which is the difference between "I budgeted
+   * thumbnails generously" and "that field does nothing".
+   */
+  it("rejects an app entry that still divides its budget into rows", () => {
+    const problems = validateRetentionPolicy({
+      platform: namespace(),
+      apps: { photos: { rows: { thumb: row() }, budgetBytes: 1024 } },
+      appFallback: { budgetBytes: 1024 },
+    } as unknown as NodeRetentionPolicy);
+    expect(problems[0]).toMatch(/^apps\.photos\.rows: an app namespace carries budgetBytes alone/);
   });
 
   // A policy is JSON from a config file or a PUT body, so the type is a claim,
@@ -547,7 +639,7 @@ describe("validateRetentionPolicy", () => {
   // trace rather than saying which part of its policy is missing.
   it("reports a missing section rather than throwing", () => {
     const problems = validateRetentionPolicy({
-      platform: app(),
+      platform: namespace(),
       apps: {},
     } as unknown as NodeRetentionPolicy);
     expect(problems).toEqual(["appFallback: missing or not an object"]);
@@ -555,11 +647,11 @@ describe("validateRetentionPolicy", () => {
 
   it("reports a malformed app entry rather than throwing", () => {
     const problems = validateRetentionPolicy({
-      platform: app(),
+      platform: namespace(),
       apps: { photos: "not a policy" },
-      appFallback: app(),
+      appFallback: { budgetBytes: 1024 },
     } as unknown as NodeRetentionPolicy);
-    expect(problems[0]).toMatch(/^photos: missing or malformed rows/);
+    expect(problems[0]).toMatch(/^apps\.photos: missing or not an object/);
   });
 
   // The structural guard covers the sections but not the `fallback` inside
@@ -568,29 +660,29 @@ describe("validateRetentionPolicy", () => {
   it.each([
     [
       "platform.fallback",
-      { platform: { rows: {}, budgetBytes: 1024 }, apps: {}, appFallback: app() },
+      { platform: { rows: {}, budgetBytes: 1024 }, apps: {}, appFallback: { budgetBytes: 1024 } },
       /^starkeep \(fallback\): missing or not an object/,
     ],
     [
-      "an app's fallback",
+      "an app's budget",
       {
-        platform: app(),
-        apps: { photos: { rows: {}, budgetBytes: 1024 } },
-        appFallback: app(),
+        platform: namespace(),
+        apps: { photos: {} },
+        appFallback: { budgetBytes: 1024 },
       },
-      /^photos \(fallback\): missing or not an object/,
+      /^apps\.photos: budgetBytes must be a finite number of bytes/,
     ],
     [
-      "appFallback's fallback",
-      { platform: app(), apps: {}, appFallback: { rows: {}, budgetBytes: 1024 } },
-      /^\(unconfigured apps\) \(fallback\): missing or not an object/,
+      "appFallback's budget",
+      { platform: namespace(), apps: {}, appFallback: {} },
+      /^appFallback: budgetBytes must be a finite number of bytes/,
     ],
     [
       "a null row",
       {
         platform: { rows: { "original:image": null }, fallback: row(), budgetBytes: 1024 },
         apps: {},
-        appFallback: app(),
+        appFallback: { budgetBytes: 1024 },
       },
       /^starkeep:original:image: missing or not an object/,
     ],

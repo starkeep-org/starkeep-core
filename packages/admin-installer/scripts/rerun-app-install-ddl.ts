@@ -134,7 +134,7 @@ async function main(): Promise<void> {
   console.log(`fileAccess:    ${ir.fileAccess.length} entries`);
   console.log(`fileAccessAll: ${ir.fileAccessAll}`);
   console.log(
-    `syncable:      ${ir.appSpecificSyncable.tables.length} tables, files=${ir.appSpecificSyncable.files}`,
+    `syncable:      ${ir.appSpecificSyncable.tables.length} tables, files=${ir.appSpecificSyncable.files.enabled} regenerable=${ir.appSpecificSyncable.files.regenerable}`,
   );
   console.log(`labelKeys:     ${ir.labelKeys.length}`);
 
@@ -174,7 +174,7 @@ async function main(): Promise<void> {
       ir.fileAccess,
       ir.fileAccessAll,
       ir.appSpecificSyncable.tables,
-      ir.appSpecificSyncable.files,
+      ir.appSpecificSyncable.files.enabled,
       ir.labelKeys,
     );
     console.log("install DDL complete.");

@@ -3567,6 +3567,56 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         }
       }
 
+      // GET /app-data/residency — mirrors the local route so one app code path
+      // works against either backend.
+      //
+      // The cloud is the durable replica: no budget, no eviction, and every
+      // byte it has a row for is here. `budgetBytes: null` says exactly that
+      // rather than reporting a ceiling nothing enforces.
+      if (subPath === "/app-data/residency" && method === "GET") {
+        try {
+          return ok(await view.blobResidency(query["cursor"] ?? null));
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+      }
+
+      // The three per-blob operations, matched before the bare
+      // `/app-data/files/<subKey>` route below — a subKey may contain slashes,
+      // so that pattern would otherwise read the suffix as part of the key.
+      const blobOpMatch = subPath.match(/^\/app-data\/files\/(.+)\/(blob|touch|fetch)$/);
+      if (blobOpMatch) {
+        const subKey = decodeURIComponent(blobOpMatch[1]!);
+        const operation = blobOpMatch[2]!;
+        try {
+          if (operation === "blob" && method === "DELETE") {
+            // Always refused here, and the view is what refuses: the cloud is
+            // where a dropped blob is fetched back *from*, so dropping its
+            // bytes while keeping a row that points at them makes a file
+            // nothing can ever open again. `deleteFile` is how an app deletes
+            // a file it means to delete.
+            const outcome = await view.dropBlob(subKey);
+            // The outcome body rather than an `error` string, because the
+            // caller reads `reason` to decide what to do next and a refusal
+            // that only says so in prose forces it to parse English.
+            return ok(outcome, outcome.dropped ? 200 : 409);
+          }
+          if (operation === "touch" && method === "POST") {
+            // Accepted and recorded nowhere. There is no eviction order here to
+            // record into, and an app should not have to know which kind of
+            // node it is talking to before saying it opened something.
+            await view.touchBlob(subKey);
+            return ok({ ok: true });
+          }
+          if (operation === "fetch" && method === "POST") {
+            return ok(await view.fetchBlob(subKey));
+          }
+          return clientErr("Method not allowed", 405);
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+      }
+
       const fileMatch = subPath.match(/^\/app-data\/files\/(.+)$/);
       if (fileMatch) {
         const subKey = decodeURIComponent(fileMatch[1]!);

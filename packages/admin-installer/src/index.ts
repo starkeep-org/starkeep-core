@@ -67,6 +67,7 @@ export type {
 export {
   listAppRegistry,
   sizeClassKeysByApp,
+  regenerableBlobApps,
   appRegistryRow,
   updateAppRegistryManifest,
   listInstallSteps,

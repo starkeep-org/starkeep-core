@@ -876,10 +876,21 @@ export interface SyncEngine {
    *   - `"failed"`   — wanted, and did not arrive. The queue row stays and the
    *     next tick retries; this is the retry path a watermark that has already
    *     advanced cannot provide.
+   *
+   * `trigger` says which of two speculations this is, and it changes one rule.
+   * `"acquisition"`, the default, honours `prefetch`: a background pass may not
+   * pull a class this node has said it only wants on demand. `"request"` does
+   * not, because something asked — the app-private fetch operation is the
+   * caller, and every app blob is `prefetch: false` now, so without it that
+   * route could never land a byte. Both remain subject to the budget, which is
+   * what separates them from {@link fetchBlob}: a request may pull a class this
+   * node does not prefetch, and may not pull into a namespace the operator has
+   * budgeted to nothing.
    */
   acquireBlob(
     manifest: FileSyncManifest,
     candidate: BlobCandidate,
+    trigger?: Extract<ResidencyTrigger, "acquisition" | "request">,
   ): Promise<AcquireResult>;
 
   readonly changeNotifier: ChangeNotifier;

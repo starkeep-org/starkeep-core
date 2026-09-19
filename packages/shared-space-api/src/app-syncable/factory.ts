@@ -19,6 +19,21 @@ import type {
 } from "../query/types.js";
 import { validateTableName } from "./validation.js";
 import { FILE_RECORDS_TABLE, RESERVED_TABLE_NAMES } from "./reserved.js";
+import type {
+  AppBlobDropResult,
+  AppBlobFetchResult,
+  AppBlobIdentity,
+  AppBlobPlane,
+  AppBlobResidencyPage,
+} from "./blob-plane.js";
+
+/**
+ * Rows in one page of {@link AppSpecificOperations.blobResidency}.
+ *
+ * Matches the resident set's own page size, so a caller walking either
+ * implementation takes the same number of round trips.
+ */
+const BLOB_PAGE_ROWS = 200;
 
 export interface AppSpecificFactoryOptions {
   namespace: AppSyncableNamespaceStore;
@@ -38,6 +53,17 @@ export interface AppSpecificFactoryOptions {
    * wake the sync loop (e.g. cloud-server use where there is no supervisor).
    */
   changeNotifier?: ChangeNotifier;
+  /**
+   * The node-local half of the app-private blob plane — what this node holds,
+   * what it may let go of, and how it gets bytes back.
+   *
+   * Optional, and its absence is an ordinary configuration rather than a
+   * degraded one: the cloud has no budget and no eviction, so it holds every
+   * byte it has a row for. The operations below answer that case from the file
+   * index alone, which is what lets one app code path work against either
+   * backend.
+   */
+  blobPlane?: AppBlobPlane;
 }
 
 /**
@@ -52,7 +78,8 @@ export interface AppSpecificFactoryOptions {
 export function createAppSpecificFactory(
   options: AppSpecificFactoryOptions,
 ): (subject: ApiSubject) => AppSpecificOperations | null {
-  const { namespace, applier, fileStorage, buildFileUrl, clock, changeNotifier } = options;
+  const { namespace, applier, fileStorage, buildFileUrl, clock, changeNotifier, blobPlane } =
+    options;
 
   return (subject) => {
     if (subject.subjectType !== "app") return null;
@@ -235,6 +262,79 @@ export function createAppSpecificFactory(
       await applier.apply(entry);
     }
 
+    /**
+     * The file row's own account of a blob — key, hash, size, type.
+     *
+     * Every blob-plane operation needs it and none of them can derive it. An
+     * app-private key does not encode its content hash the way a shared one
+     * does, because the app names the key; the row is the only place the hash
+     * exists, and a durability probe with nothing to check against cannot tell
+     * a correct replica from an object that merely occupies the key.
+     */
+    async function blobIdentity(subKey: string): Promise<AppBlobIdentity | null> {
+      const key = appSyncableObjectKey(appId, subKey);
+      const row = await readFileRecord(key);
+      if (!row) return null;
+      return {
+        objectStorageKey: key,
+        contentHash: (row["content_hash"] as string) ?? "",
+        sizeBytes: Number(row["size_bytes"] ?? 0),
+        mimeType: (row["mime_type"] as string) ?? "application/octet-stream",
+      };
+    }
+
+    /**
+     * The residency answer for a node that has no residency plane.
+     *
+     * Every live file row, resident, with no ceiling — which is the literal
+     * truth about the cloud rather than a stand-in for it. Paged over the index
+     * rather than over storage, for the reason `statFile` reads the index too:
+     * the row is the authoritative existence signal and a listing that walked
+     * the bucket would answer a different question more slowly.
+     */
+    async function residencyFromIndex(cursor: string | null): Promise<AppBlobResidencyPage> {
+      const prefix = appSyncableObjectKey(appId, "");
+      const result = await requireQueryCapable().runQuery(appId, FILE_RECORDS_TABLE, {
+        mode: "rows",
+        table: FILE_RECORDS_TABLE,
+        select: null,
+        where:
+          cursor === null
+            ? []
+            : [{ column: "id", predicate: { op: "gt", value: cursor } }],
+        order: [{ column: "id", direction: "asc", nulls: "last" }],
+        limit: BLOB_PAGE_ROWS,
+        pageToken: null,
+        include: [],
+      });
+      const rows = result.mode === "rows" ? result.rows : [];
+      let heldBytes = 0;
+      const entries = rows.map((row) => {
+        const key = (row["object_storage_key"] as string) ?? (row["id"] as string) ?? "";
+        const sizeBytes = Number(row["size_bytes"] ?? 0);
+        heldBytes += sizeBytes;
+        return {
+          subKey: key.startsWith(prefix) ? key.slice(prefix.length) : key,
+          sizeBytes,
+          resident: true,
+          lastOpenedAtMs: null,
+        };
+      });
+      return {
+        budgetBytes: null,
+        // This page's bytes, not the app's whole plane. A node with no budget
+        // has nothing to measure a total against, and summing the index one
+        // page at a time to produce a number nobody compares to anything would
+        // be a full-table scan per request.
+        heldBytes,
+        entries,
+        nextCursor:
+          rows.length === BLOB_PAGE_ROWS
+            ? ((rows[rows.length - 1]!["id"] as string) ?? null)
+            : null,
+      };
+    }
+
     function ensureFilesEnabled(): void {
       if (!ns!.filesEnabled) {
         throw new Error(`App "${appId}" did not opt in to syncable files`);
@@ -320,6 +420,16 @@ export function createAppSpecificFactory(
         ensureFilesEnabled();
         const key = appSyncableObjectKey(appId, subKey);
         await upsertFileRecord(key, meta);
+        // Charge it to the app's budget. The bytes went straight to storage
+        // through the presign URL, so this is the only point on the write path
+        // that knows they are here — without it the node holding the files
+        // reports holding nothing.
+        await blobPlane?.noteWritten(appId, {
+          objectStorageKey: key,
+          contentHash: meta.contentHash,
+          sizeBytes: meta.sizeBytes,
+          mimeType: meta.mimeType,
+        });
         emitLocalChange();
         return { key };
       },
@@ -367,6 +477,47 @@ export function createAppSpecificFactory(
         const mimeType = (row["mime_type"] as string) ?? "application/octet-stream";
         const expiresIn = opts?.expiresIn ?? 3600;
         return buildFileUrl ? buildFileUrl(key, mimeType, expiresIn) : null;
+      },
+
+      async blobResidency(cursor?: string | null): Promise<AppBlobResidencyPage> {
+        ensureFilesEnabled();
+        const from = cursor ?? null;
+        return blobPlane ? blobPlane.residency(appId, from) : residencyFromIndex(from);
+      },
+
+      async touchBlob(subKey: string): Promise<void> {
+        ensureFilesEnabled();
+        const blob = await blobIdentity(subKey);
+        if (!blob) throw new Error("File not found");
+        // A node with no residency plane keeps no eviction order, so there is
+        // nothing to record into. Accepted rather than refused: an open is a
+        // statement of fact, and a caller should not have to know which kind of
+        // node it is talking to before making one.
+        await blobPlane?.touch(appId, blob, Date.now());
+      },
+
+      async dropBlob(subKey: string): Promise<AppBlobDropResult> {
+        ensureFilesEnabled();
+        const blob = await blobIdentity(subKey);
+        if (!blob) throw new Error("File not found");
+        if (!blobPlane) {
+          // The cloud is what a dropped blob is fetched back *from*. Letting an
+          // app delete the bytes there while keeping a row that points at them
+          // manufactures a file nothing can ever open again — and `deleteFile`
+          // already exists for deleting a file properly.
+          return { dropped: false, reason: "refused" };
+        }
+        return blobPlane.drop(appId, blob);
+      },
+
+      async fetchBlob(subKey: string): Promise<AppBlobFetchResult> {
+        ensureFilesEnabled();
+        const blob = await blobIdentity(subKey);
+        if (!blob) throw new Error("File not found");
+        // A live row on a node that holds every byte it has a row for is the
+        // whole answer. Nothing to fetch, and nowhere to fetch it from.
+        if (!blobPlane) return { landed: false, reason: "already-here" };
+        return blobPlane.fetch(appId, blob);
       },
     };
   };

@@ -77,7 +77,10 @@ import {
   budgetLinesOf,
   createSqliteResidentSetIndex,
   decideResidency,
+  appRetentionFor,
+  assessDurability,
   evictLine,
+  isAppLine,
   isPlatformClass,
   parseSizeClass,
   previewBudgetReduction,
@@ -88,6 +91,8 @@ import {
   type BlobCandidate,
   type BudgetLine,
   type DurabilityPolicy,
+  type DurabilityQuery,
+  type DurabilityVerdict,
   type EvictionOutcome,
   type NodeRetentionPolicy,
   type ReductionPreview,
@@ -100,7 +105,7 @@ import {
   type ResidentSetIndex,
   type ResolvedSizeClass,
 } from "./index.js";
-import { getCategory, typeCategory } from "@starkeep/protocol-primitives";
+import { appSyncableObjectKey, getCategory, typeCategory } from "@starkeep/protocol-primitives";
 import type { StarkeepId } from "@starkeep/protocol-primitives";
 
 /** Label namespace for platform-level record constraints. */
@@ -135,6 +140,16 @@ export function originalClassFor(type: string | null): ResolvedSizeClass {
  * because both land in the same app's namespace and the same budget either way.
  */
 export const UNCLASSIFIED_RUNG = "unclassified";
+
+/**
+ * Rows in one page of {@link ResidencyManager.appBlobResidency}.
+ *
+ * An app's private plane is thousands of blobs once renditions live on it, and
+ * a caller reading it is deciding what to give up rather than rendering a list —
+ * so the page is sized to keep a request small and let the walk be resumable,
+ * not to fit a screen.
+ */
+const APP_BLOB_PAGE_ROWS = 200;
 
 /** The shape both callers of {@link pickLadderLabel} have. */
 export interface LadderLabel {
@@ -210,6 +225,25 @@ export interface ResidencyManagerOptions {
    */
   readonly sizeClassKeys: Readonly<Record<string, string>>;
   /**
+   * Which installed apps declare their app-private blobs re-derivable, from
+   * `appSpecificSyncable.files.regenerable` in each manifest.
+   *
+   * The one question it answers is whether this node may drop the last copy of
+   * one of that app's private files. Photos' renditions can be made again from
+   * an original the platform still holds; Memo's recordings cannot be made
+   * again from anything.
+   *
+   * A set rather than a flag on the policy because it is a fact about the app,
+   * not a decision about this machine — an operator editing a retention table
+   * must not be able to make Memo's audio deletable. Read from the app registry
+   * for the same reason {@link ResidencyManagerOptions.sizeClassKeys} is, and
+   * mutated in place by the host as apps come and go.
+   *
+   * Absent means no app is regenerable, which is exactly how every node behaved
+   * before the bit existed.
+   */
+  readonly regenerableBlobApps?: ReadonlySet<string>;
+  /**
    * Per-record overrides expressed as rules over labels. Node-local, like pins.
    *
    * Empty by default so a node that has never configured any behaves exactly as
@@ -224,6 +258,47 @@ export interface ResidencyManagerOptions {
   readonly isCloudNode: boolean;
   readonly policy: NodeRetentionPolicy;
   readonly durability: DurabilityPolicy;
+}
+
+/** One blob of an app's private plane, as the app sees it. */
+export interface AppBlobEntry {
+  /** The app-relative key — what the app addresses the file by. */
+  readonly subKey: string;
+  readonly sizeBytes: number;
+  /** Whether the bytes are on this node now. */
+  readonly resident: boolean;
+  /** Epoch ms this blob was last opened here, or null if never. */
+  readonly lastOpenedAtMs: number | null;
+}
+
+/** One page of {@link ResidencyManager.appBlobResidency}. */
+export interface AppBlobResidency {
+  /**
+   * The ceiling this app may hold on this node.
+   *
+   * Advisory: the platform reports an overrun and never acts on one. Reported
+   * anyway, and reported to the app rather than only to the operator, because
+   * the app is the party that can do something about it.
+   */
+  readonly budgetBytes: number;
+  /** What the app is holding here now, across every one of its blobs. */
+  readonly heldBytes: number;
+  readonly entries: readonly AppBlobEntry[];
+  /** Pass back as `cursor` for the next page. Null at the end. */
+  readonly nextCursor: string | null;
+}
+
+/** Why a drop went through, or did not. */
+export interface DropBlobOutcome {
+  readonly dropped: boolean;
+  /**
+   * `not-held` — the row names bytes this node does not have, so there is
+   * nothing to drop. `not-durable` — this app's blobs are not re-derivable and
+   * no confirmed replica was found, so dropping would be losing.
+   */
+  readonly reason: "dropped" | "not-held" | "not-durable";
+  /** The durability verdict, where one was needed. Null for a regenerable app. */
+  readonly durability: DurabilityVerdict | null;
 }
 
 export interface ResidencyManager {
@@ -321,6 +396,46 @@ export interface ResidencyManager {
   usageByClass(): Record<string, number>;
   /** Bytes held per namespace — what each app's total is being measured against. */
   usageByNamespace(): Record<string, number>;
+  /**
+   * What one app is holding on this node, and against what ceiling.
+   *
+   * The read half of the advisory budget. Nothing here deletes anything: the
+   * eviction pass skips app namespaces, so an app that has gone past its number
+   * finds out by asking and decides for itself what to give up.
+   */
+  appBlobResidency(appId: string, cursor: string | null): AppBlobResidency;
+  /**
+   * Record that an app opened one of its own blobs, so the drop order knows.
+   *
+   * Addressed by object key rather than by record id, because an app-private
+   * blob's "record" is the file row and one key is one blob — the fan-out
+   * {@link markOpened} does across a record's renditions has nothing to do
+   * here.
+   */
+  touchAppBlob(objectStorageKey: string, atMs: number): void;
+  /**
+   * Delete one app-private blob's bytes and keep its row.
+   *
+   * The operation `deleteFile` cannot express. A delete tombstones the row, and
+   * the tombstone travels — so an app that wanted to reclaim disk on *this*
+   * machine would lose the file everywhere. This drops the bytes, marks the row
+   * departed in the resident set, and writes nothing that any peer will see.
+   *
+   * Subject to the durability rule the eviction pass would have applied: an app
+   * that declared its private blobs re-derivable may drop the last copy, and an
+   * app that did not must show a confirmed replica first. That is where the
+   * protection the skipped eviction pass used to provide actually lives.
+   *
+   * `blob` carries the content hash and size from the app's own file row. An
+   * app-private key does not encode its hash the way a shared one does — the
+   * app names the key — so the only place a probe's answer can be checked
+   * against is the row, and the caller is what has read it.
+   */
+  dropAppBlob(
+    appId: string,
+    blob: DurabilityQuery,
+    probes: readonly ReplicaProbe[],
+  ): Promise<DropBlobOutcome>;
   runEviction(probes: readonly ReplicaProbe[]): Promise<EvictionOutcome[]>;
   previewReduction(
     budgetLineKey: string,
@@ -349,6 +464,7 @@ export function createResidencyManager(
     databaseAdapter,
     localObjectStorage,
     sizeClassKeys,
+    regenerableBlobApps = new Set<string>(),
     overrideRules = [],
     isCloudNode,
     policy,
@@ -611,9 +727,16 @@ export function createResidencyManager(
    *
    * An app-syncable blob is the case that makes the namespace alone wrong. It
    * is one app's own bytes, so it belongs in that app's namespace and against
-   * that app's total — but it is not derived from anything, and this node may
-   * hold the only copy. Reading proof off the namespace would have made every
-   * app's own files freely deletable.
+   * that app's total — but the platform cannot see what it is derived from, and
+   * this node may hold the only copy. Reading proof off the namespace would
+   * have made every app's own files freely deletable.
+   *
+   * So the app says. `appSpecificSyncable.files.regenerable` is the app's claim
+   * that it can make these bytes again from something it still has — Photos'
+   * renditions from an original, and nothing of Memo's from anything. An app
+   * that says nothing keeps the refusal it has always had, which is why the
+   * default is the conservative one and why this is a manifest declaration
+   * rather than a retention setting an operator can get wrong.
    *
    * ## What it means that only arrivals reach this
    *
@@ -627,8 +750,20 @@ export function createResidencyManager(
    * count.
    */
   function requiresProof(candidate: BlobCandidate, cls: ResolvedSizeClass): boolean {
-    if (candidate.appId !== null) return true;
+    if (candidate.appId !== null) return appBlobRequiresProof(candidate.appId);
     return candidate.parentId === null || isPlatformClass(cls);
+  }
+
+  /**
+   * The same question for one app, asked without a blob in hand.
+   *
+   * Read live from the registry-derived set rather than from the row the index
+   * stamped on arrival. Regenerability is a property of the app, and an app
+   * that has just declared it should not have to wait for every blob it already
+   * holds to be re-fetched before the declaration means anything.
+   */
+  function appBlobRequiresProof(appId: string): boolean {
+    return !regenerableBlobApps.has(appId);
   }
 
   async function decide(
@@ -881,7 +1016,7 @@ export function createResidencyManager(
     },
 
     /**
-     * One pass per budget line, and that is the whole of it.
+     * One pass per platform budget line, and that is the whole of it.
      *
      * There used to be a second sweep over whole namespaces, because an app
      * could sit inside every one of its rows and still breach a separately
@@ -889,9 +1024,23 @@ export function createResidencyManager(
      * lines of a namespace sum to it exactly and the second sweep could only
      * ever find what the first had already dealt with.
      *
+     * ## App namespaces are skipped, and their budget is advisory because of it
+     *
+     * The platform does not delete an app's private bytes. It cannot know what
+     * they are for: a rendition is disposable and a recording is the only copy
+     * of something somebody said, and both arrive here as an opaque blob in an
+     * app's prefix. What the platform can do is *measure* — an app's usage is
+     * still summed, still reported against its ceiling, and still visible to the
+     * operator — and then leave the decision with the only party that knows.
+     *
+     * The app acts on it through the app-private drop operation, which is
+     * subject to the durability rule this pass would have applied. So a
+     * regenerable blob is droppable there as the last copy and a Memo recording
+     * is not, without the platform ever choosing which of an app's files goes.
+     *
      * Lines come from the policy **and** from what is actually held. The policy
      * alone would miss a line an operator has since deleted the rows of — whose
-     * bytes are still on disk and now pooled into a fallback — and the index
+     * bytes are still on disk and now pooled into the fallback — and the index
      * alone would miss nothing today but would silently stop covering a line
      * the moment one emptied and refilled between passes.
      */
@@ -908,9 +1057,16 @@ export function createResidencyManager(
       };
 
       const lines = new Map<string, BudgetLine>();
-      for (const budgetLine of budgetLinesOf(policy)) lines.set(budgetLine.key, budgetLine);
+      for (const budgetLine of budgetLinesOf(policy)) {
+        if (isAppLine(budgetLine)) continue;
+        lines.set(budgetLine.key, budgetLine);
+      }
       for (const sizeClass of Object.keys(index.usageByClass())) {
         const budgetLine = budgetLineFor(policy, parseSizeClass(sizeClass));
+        // Filtered here as well as above, because this is the half that draws
+        // its lines from bytes on disk — an app blob reaches it whether or not
+        // any policy ever named the app.
+        if (isAppLine(budgetLine)) continue;
         lines.set(budgetLine.key, budgetLine);
       }
 
@@ -918,6 +1074,79 @@ export function createResidencyManager(
         outcomes.push(await evictLine({ ...shared, budgetLine }));
       }
       return outcomes;
+    },
+
+    appBlobResidency(appId: string, cursor: string | null): AppBlobResidency {
+      const prefix = appSyncableObjectKey(appId, "");
+      const entries = index.entriesOfNamespace({
+        namespace: appId,
+        after: cursor,
+        limit: APP_BLOB_PAGE_ROWS,
+      });
+      return {
+        budgetBytes: appRetentionFor(policy, appId).budgetBytes,
+        // The namespace roll-up rather than a sum of this page: the number an
+        // app is measured against is everything it holds, and a caller reading
+        // page one must not be told it is inside its ceiling on the strength of
+        // the first hundred blobs.
+        heldBytes: index.usageByNamespace()[appId] ?? 0,
+        entries: entries.map((entry) => ({
+          subKey: entry.objectStorageKey.startsWith(prefix)
+            ? entry.objectStorageKey.slice(prefix.length)
+            : entry.objectStorageKey,
+          sizeBytes: entry.sizeBytes,
+          resident: entry.resident,
+          lastOpenedAtMs: entry.lastOpenedAtMs,
+        })),
+        // A full page means there may be more; a short one is the end. Cheaper
+        // than counting, and a spurious extra page that comes back empty is a
+        // wasted round trip rather than a wrong answer.
+        nextCursor:
+          entries.length === APP_BLOB_PAGE_ROWS
+            ? entries[entries.length - 1]!.objectStorageKey
+            : null,
+      };
+    },
+
+    touchAppBlob(objectStorageKey: string, atMs: number): void {
+      index.markOpened(objectStorageKey, atMs);
+    },
+
+    async dropAppBlob(
+      appId: string,
+      blob: DurabilityQuery,
+      probes: readonly ReplicaProbe[],
+    ): Promise<DropBlobOutcome> {
+      // Nothing to drop is not a failure. An app walking its own residency page
+      // and dropping what it finds races the sync engine, another window, and
+      // its own last pass; all three end here, and none of them is an error.
+      const entry = index.get(blob.objectStorageKey);
+      if (entry !== null && !entry.resident) {
+        return { dropped: false, reason: "not-held", durability: null };
+      }
+      if (!(await localObjectStorage.has(blob.objectStorageKey))) {
+        // The index can be behind storage — a crash between a delete and the
+        // row update leaves exactly this. Correct it rather than reporting a
+        // drop of bytes that were already gone.
+        index.markDeparted(blob.objectStorageKey);
+        return { dropped: false, reason: "not-held", durability: null };
+      }
+
+      let verdict: DurabilityVerdict | null = null;
+      if (appBlobRequiresProof(appId)) {
+        verdict = await assessDurability(blob, probes, durability);
+        if (!verdict.durable) {
+          return { dropped: false, reason: "not-durable", durability: verdict };
+        }
+      }
+
+      // Bytes first, row second — the same order the eviction pass uses, and
+      // for the same reason: a row that outlives its bytes is a lie `reconcile`
+      // can find and correct, while bytes that outlive their row are invisible
+      // to every budget.
+      await localObjectStorage.delete(blob.objectStorageKey);
+      index.markDeparted(blob.objectStorageKey);
+      return { dropped: true, reason: "dropped", durability: verdict };
     },
 
     previewReduction(

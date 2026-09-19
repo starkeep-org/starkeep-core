@@ -301,7 +301,7 @@ async function installAppInner(
       ir.fileAccess,
       ir.fileAccessAll,
       ir.appSpecificSyncable.tables,
-      ir.appSpecificSyncable.files,
+      ir.appSpecificSyncable.files.enabled,
       ir.labelKeys,
     );
   });

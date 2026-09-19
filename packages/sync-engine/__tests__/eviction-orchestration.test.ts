@@ -81,7 +81,7 @@ function policyWith(over: Partial<NodeRetentionPolicy> = {}): NodeRetentionPolic
   return {
     platform: { rows: { "original:image": keepAll }, fallback: keepAll, budgetBytes: 100 * MB },
     apps: {},
-    appFallback: { rows: {}, fallback: keepAll, budgetBytes: 100 * MB },
+    appFallback: { budgetBytes: 100 * MB },
     ...over,
   };
 }
@@ -195,33 +195,31 @@ describe("which lines runEviction runs over", () => {
    * sum to it and a node inside every line is inside its namespace. One kind of
    * pass, no ordering constraint between passes, and one less way to be wrong.
    */
-  it("runs one pass per budget line and no namespace pass at all", async () => {
+  it("runs one pass per platform budget line and no namespace pass at all", async () => {
     const built = await build({
       policy: policyWith({
-        apps: {
-          photos: {
-            rows: { thumb: keepAll, medium: keepAll },
-            fallback: keepAll,
-            budgetBytes: 100 * MB,
-          },
+        platform: {
+          rows: { "original:image": keepAll, "original:video": keepAll },
+          fallback: keepAll,
+          budgetBytes: 100 * MB,
         },
+        apps: { photos: { budgetBytes: 100 * MB } },
       }),
     });
     const peer = await newPeer();
     await landBlobs(built, { count: 2, size: 100, sizeClass: "photos:thumb", peer, salt: 1 });
-    await landBlobs(built, { count: 2, size: 100, sizeClass: "photos:medium", peer, salt: 2 });
+    await landBlobs(built, { count: 2, size: 100, sizeClass: "starkeep:original:image", peer, salt: 2 });
 
     const keys = (await built.manager.runEviction([{ nodeId: "peer", storage: peer }]))
       .map((o) => o.budgetLine.key)
       .sort();
-    // Every line the policy declares, plus each namespace's pooled fallback.
-    // No entry names a namespace, because a namespace is no longer a budget.
+    // Every line the platform declares, plus its pooled fallback. No entry
+    // names a namespace, because a namespace is no longer a budget — and no
+    // entry names an app, because the pass does not delete an app's bytes.
     expect(keys).toEqual([
-      "photos:*",
-      "photos:medium",
-      "photos:thumb",
       "starkeep:*",
       "starkeep:original:image",
+      "starkeep:original:video",
     ]);
   });
 
@@ -255,29 +253,45 @@ describe("which lines runEviction runs over", () => {
     expect(keys).toContain("starkeep:original:image");
   });
 
-  it("sweeps every app's lines, and each only once", async () => {
+  /**
+   * The claim the advisory budget rests on.
+   *
+   * An app that has gone past its ceiling is *reported* and nothing of its is
+   * deleted, because the platform cannot tell a disposable rendition from the
+   * only recording of something somebody said — both reach this pass as an
+   * opaque blob in an app's prefix. The ceiling is still measured: an app's
+   * usage is summed and an operator sees the overrun.
+   *
+   * Asserted with the budget deliberately below what the apps hold, since a
+   * pass that skipped them and a pass that found nothing to do would otherwise
+   * be indistinguishable.
+   */
+  it("sweeps no app's lines and deletes none of an app's bytes, over budget or not", async () => {
     const built = await build({
       policy: policyWith({
         apps: {
-          photos: { rows: {}, fallback: keepAll, budgetBytes: 100 * MB },
-          sketcher: { rows: {}, fallback: keepAll, budgetBytes: 100 * MB },
+          photos: { budgetBytes: 100 },
+          sketcher: { budgetBytes: 100 },
         },
       }),
     });
     const peer = await newPeer();
-    // Two invented rungs of one app, which pool onto a single line — so a loop
-    // that keyed off the class rather than the line would run it twice and
-    // report the second pass against bytes the first had already freed.
-    await landBlobs(built, { count: 1, size: 100, sizeClass: "photos:thumb", peer, salt: 1 });
-    await landBlobs(built, { count: 1, size: 100, sizeClass: "photos:medium", peer, salt: 4 });
-    await landBlobs(built, { count: 1, size: 100, sizeClass: "sketcher:preview", peer, salt: 2 });
+    // Well past 100 bytes each, and re-derivable besides — the combination that
+    // would have made these the first things an eviction pass reached for.
+    await landBlobs(built, { count: 4, size: 100, sizeClass: "photos:thumb", peer, salt: 1 });
+    await landBlobs(built, { count: 4, size: 100, sizeClass: "photos:medium", peer, salt: 4 });
+    await landBlobs(built, { count: 4, size: 100, sizeClass: "sketcher:preview", peer, salt: 2 });
+    const before = built.manager.usageByNamespace();
 
     const keys = (await built.manager.runEviction([{ nodeId: "peer", storage: peer }])).map(
       (o) => o.budgetLine.key,
     );
-    expect(new Set(keys).size).toBe(keys.length);
-    expect(keys).toContain("photos:*");
-    expect(keys).toContain("sketcher:*");
+    expect(keys.some((key) => key.startsWith("photos:"))).toBe(false);
+    expect(keys.some((key) => key.startsWith("sketcher:"))).toBe(false);
+    // Still summed, and still over. Reporting is the whole of what the platform
+    // does about it.
+    expect(built.manager.usageByNamespace()).toEqual(before);
+    expect(before["photos"]).toBeGreaterThan(100);
   });
 });
 

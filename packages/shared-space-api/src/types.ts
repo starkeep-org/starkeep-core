@@ -2,6 +2,11 @@ import type { HLCClock } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { ChangeEvent, ChangeNotifier } from "@starkeep/sync-engine";
 import type { ParsedQueryResult, QueryParams } from "./query/types.js";
+import type {
+  AppBlobDropResult,
+  AppBlobFetchResult,
+  AppBlobResidencyPage,
+} from "./app-syncable/blob-plane.js";
 
 export interface ApiEndpointDefinition {
   readonly namespace: string;
@@ -94,6 +99,35 @@ export interface AppSpecificOperations {
   ): Promise<{ mimeType: string; sizeBytes: number; contentHash: string } | null>;
   deleteFile(subKey: string): Promise<void>;
   fileUrl(subKey: string, opts?: { expiresIn?: number }): Promise<string | null>;
+
+  /**
+   * What this node is holding of the app's private plane, and against what
+   * ceiling.
+   *
+   * The app's own accounting, because the platform stopped doing it: an app
+   * namespace carries one advisory budget and the eviction pass does not run
+   * over it. An overrun is reported here and the app decides what to give up.
+   */
+  blobResidency(cursor?: string | null): Promise<AppBlobResidencyPage>;
+  /**
+   * Note that the app opened one of its own blobs, so the order it gives them
+   * up in reflects use rather than age.
+   */
+  touchBlob(subKey: string): Promise<void>;
+  /**
+   * Let the bytes go and keep the file.
+   *
+   * What {@link deleteFile} cannot express: a delete tombstones the row and the
+   * tombstone travels, so an app reclaiming disk on one machine would lose the
+   * file on every machine. This drops the bytes here, leaves the row alone, and
+   * writes nothing a peer will ever see.
+   *
+   * Refused where the bytes would be the last copy and the app has not declared
+   * its private blobs re-derivable.
+   */
+  dropBlob(subKey: string): Promise<AppBlobDropResult>;
+  /** Bring the bytes back from a peer for a file row whose blob is not here. */
+  fetchBlob(subKey: string): Promise<AppBlobFetchResult>;
 }
 
 export interface ApiContext {

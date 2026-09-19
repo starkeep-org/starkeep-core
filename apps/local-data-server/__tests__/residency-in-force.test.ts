@@ -54,11 +54,7 @@ const keepEverything = {
     budgetBytes: 10 * GB,
   },
   apps: {},
-  appFallback: {
-    rows: {},
-    fallback: { prefetch: true, share: 1 },
-    budgetBytes: GB,
-  },
+  appFallback: { budgetBytes: GB },
 };
 
 /** The same policy with one row changed — the change under test. */

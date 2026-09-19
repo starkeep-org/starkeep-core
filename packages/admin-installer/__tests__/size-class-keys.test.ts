@@ -18,6 +18,7 @@ import {
   deleteAppRegistry,
   insertAppRegistry,
   setAppStatus,
+  regenerableBlobApps,
   sizeClassKeysByApp,
 } from "../src/local/registry.js";
 
@@ -108,5 +109,73 @@ describe("sizeClassKeysByApp", () => {
 
   it("is empty on a node with nothing installed", () => {
     expect(sizeClassKeysByApp(db)).toEqual({});
+  });
+});
+
+/**
+ * Which apps may drop their own last copy.
+ *
+ * The same derivation as the map above and the same reason for it: the claim
+ * lives in the manifest, and a denormalized copy is a second thing that can
+ * disagree with the first. What it decides is sharper, though — a node reads it
+ * to answer whether it may delete the only copy of an app's bytes, so every
+ * spelling that does not explicitly say "re-derivable" has to come out absent.
+ */
+describe("regenerableBlobApps", () => {
+  function registerFiles(appId: string, files: unknown): void {
+    insertAppRegistry(
+      db,
+      appId,
+      {
+        id: appId,
+        name: appId,
+        version: "1.0.0",
+        tier: "official",
+        // Stored as the schema normalizes it, which is what the installer
+        // writes: the registry holds a parsed manifest, not raw JSON.
+        infraRequirements: { appSpecificSyncable: { tables: [], files } },
+      } as unknown as AppManifest,
+      "secret",
+    );
+  }
+
+  it("reports an app that declared its private blobs re-derivable", () => {
+    registerFiles("photos", { enabled: true, regenerable: true });
+    expect(regenerableBlobApps(db)).toEqual(new Set(["photos"]));
+  });
+
+  it("leaves out an app that opted into files and claimed nothing", () => {
+    registerFiles("memo", { enabled: true, regenerable: false });
+    expect(regenerableBlobApps(db)).toEqual(new Set());
+  });
+
+  // A claim about bytes an app does not have is not a claim worth honouring,
+  // and reading it as one would put an app id in the set on the strength of a
+  // field nothing else acts on.
+  it("leaves out an app that claimed re-derivability without opting into files", () => {
+    registerFiles("odd", { enabled: false, regenerable: true });
+    expect(regenerableBlobApps(db)).toEqual(new Set());
+  });
+
+  // Every manifest written before the field existed, and the direction the
+  // asymmetry demands: calling precious bytes re-derivable loses them.
+  it("leaves out an app whose manifest predates the field", () => {
+    insertAppRegistry(
+      db,
+      "old",
+      {
+        id: "old",
+        name: "old",
+        version: "1.0.0",
+        tier: "official",
+        infraRequirements: {},
+      } as unknown as AppManifest,
+      "secret",
+    );
+    expect(regenerableBlobApps(db)).toEqual(new Set());
+  });
+
+  it("is empty on a node with nothing installed", () => {
+    expect(regenerableBlobApps(db)).toEqual(new Set());
   });
 });

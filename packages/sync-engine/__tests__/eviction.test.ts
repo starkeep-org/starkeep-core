@@ -38,7 +38,7 @@ function entry(over: Partial<ResidentEntry> & { objectStorageKey: string; sizeBy
     // here for a declared rung; the pooled-fallback suite below is where they
     // deliberately do not.
     budgetLineKey: over.sizeClass ?? CLASS_A,
-    namespace: "appA",
+    namespace: "starkeep",
     pinned: false,
     protectedLocally: false,
     requiresDurabilityProof: true,
@@ -63,24 +63,24 @@ function entry(over: Partial<ResidentEntry> & { objectStorageKey: string; sizeBy
  * Shares divide one namespace budget, so a suite that wants a class capped at a
  * number has to say what else is claiming a share. `classA` takes it all unless
  * a case widens the fallback — which is what the pooled-line suite does.
+ *
+ * **Platform classes, because the pass is a platform pass.** An app namespace
+ * carries one advisory ceiling and `runEviction` skips it outright, so a suite
+ * exercising what the pass deletes has to exercise it where it runs. The rungs
+ * are named `classA` / `classB` rather than `original:image` to keep the cases
+ * about budgets and durability rather than about what a category is.
  */
 const policy = (
   budgetBytes: number,
   fallbackShare = 0,
 ): NodeRetentionPolicy => ({
-  platform: { rows: {}, fallback: { prefetch: true, share: 1 }, budgetBytes: budgetBytes || 1 },
-  apps: {
-    appA: {
-      rows: { classA: { prefetch: true, share: 1 } },
-      fallback: { prefetch: true, share: fallbackShare },
-      budgetBytes: budgetBytes * (1 + fallbackShare) || 1,
-    },
+  platform: {
+    rows: { classA: { prefetch: true, share: 1 } },
+    fallback: { prefetch: true, share: fallbackShare },
+    budgetBytes: budgetBytes * (1 + fallbackShare) || 1,
   },
-  appFallback: {
-    rows: {},
-    fallback: { prefetch: true, share: 1 },
-    budgetBytes: budgetBytes || 1,
-  },
+  apps: {},
+  appFallback: { budgetBytes: budgetBytes || 1 },
 });
 
 /** The budget line a stored class name resolves to, under a given policy. */
@@ -88,10 +88,10 @@ const lineOf = (p: NodeRetentionPolicy, sizeClass: string) =>
   budgetLineFor(p, parseSizeClass(sizeClass));
 
 /** Class names are stored fully qualified; the row key is only the rung. */
-const CLASS_A = "appA:classA";
-const CLASS_B = "appA:classB";
-/** Where every rung `appA` has not declared is pooled. */
-const FALLBACK_LINE = "appA:*";
+const CLASS_A = "starkeep:classA";
+const CLASS_B = "starkeep:classB";
+/** Where every rung the platform has not declared is pooled. */
+const FALLBACK_LINE = "starkeep:*";
 
 describe("resident-set index", () => {
   let db: DatabaseSync;
@@ -529,10 +529,10 @@ describe("the pooled fallback line", () => {
           lastOpenedAtMs: i,
           // Two rung names the policy has never heard of. Different classes for
           // reporting, one budget line between them.
-          sizeClass: i % 2 === 0 ? "appA:invented-one" : "appA:invented-two",
+          sizeClass: i % 2 === 0 ? "starkeep:invented-one" : "starkeep:invented-two",
           budgetLineKey: FALLBACK_LINE,
-          // Renditions: everything in an app namespace has a parent by
-          // construction.
+          // Renditions — something with a parent, which is the only thing the
+          // pass may drop without proof.
           requiresDurabilityProof: false,
         }),
       );
@@ -548,7 +548,7 @@ describe("the pooled fallback line", () => {
 
   /** `classA` at 1000 bytes, and the fallback line at the same again. */
   const pooling = policy(1000, 1);
-  const fallbackLine = lineOf(pooling, "appA:anything-undeclared");
+  const fallbackLine = lineOf(pooling, "starkeep:anything-undeclared");
 
   it("does nothing while the pooled line is under budget", async () => {
     const seeded = await seedInventedRungs(5, 100);
@@ -593,9 +593,7 @@ describe("the pooled fallback line", () => {
     const seeded = await seedInventedRungs(20, 100);
     const broken: NodeRetentionPolicy = {
       ...pooling,
-      apps: {
-        appA: { ...pooling.apps.appA!, budgetBytes: undefined as unknown as number },
-      },
+      platform: { ...pooling.platform, budgetBytes: undefined as unknown as number },
     };
     const outcome = await evictLine({ ...seeded, budgetLine: fallbackLine, policy: broken });
     expect(outcome.triggered).toBe(false);
@@ -609,9 +607,7 @@ describe("the pooled fallback line", () => {
     const seeded = await seedInventedRungs(20, 100);
     const off: NodeRetentionPolicy = {
       ...pooling,
-      apps: {
-        appA: { ...pooling.apps.appA!, fallback: { prefetch: true, share: 0 } },
-      },
+      platform: { ...pooling.platform, fallback: { prefetch: true, share: 0 } },
     };
     const outcome = await evictLine({ ...seeded, budgetLine: fallbackLine, policy: off });
     expect(outcome.triggered).toBe(true);

@@ -168,6 +168,33 @@ export function sizeClassKeysByApp(db: RawDatabase): Record<string, string> {
   return out;
 }
 
+/**
+ * Which registered apps declare their app-private blobs re-derivable.
+ *
+ * Read by the residency manager to answer one question — may this node drop the
+ * last copy of one of this app's private files? Derived from the stored
+ * manifests for the same reason {@link sizeClassKeysByApp} is: the declaration
+ * lives in the manifest, and a denormalized second copy is a second thing that
+ * can disagree with the first.
+ *
+ * Absence means non-regenerable, which is what every manifest written before
+ * the field existed says and is the conservative direction. Calling precious
+ * bytes re-derivable loses them; calling re-derivable bytes precious costs
+ * disk.
+ *
+ * Every registered app counts, whatever its install status, for the same reason
+ * `sizeClassKeysByApp` counts them: a half-removed app's blobs are exactly the
+ * ones whose durability question is about to be asked.
+ */
+export function regenerableBlobApps(db: RawDatabase): Set<string> {
+  const out = new Set<string>();
+  for (const app of listAppRegistry(db)) {
+    const files = app.manifest.infraRequirements?.appSpecificSyncable?.files;
+    if (files?.enabled && files.regenerable) out.add(app.appId);
+  }
+  return out;
+}
+
 function toRegisteredApp(row: RegisteredAppRow): RegisteredApp {
   return {
     appId: row.app_id,

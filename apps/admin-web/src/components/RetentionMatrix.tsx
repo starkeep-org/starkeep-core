@@ -82,10 +82,24 @@ interface NamespaceRetention {
   budgetBytes: number;
 }
 
+/**
+ * An app namespace: a ceiling, and nothing else.
+ *
+ * Which rungs an app has and what each is worth is the app's own table now, so
+ * there is no per-rung row here to edit. What is left is the one field an
+ * operator actually came here to set — "Photos may use 20 GB" — and it is
+ * advisory: the platform reports an overrun and never deletes an app's bytes,
+ * because it cannot tell a disposable rendition from the one recording of
+ * something somebody said.
+ */
+interface AppRetention {
+  budgetBytes: number;
+}
+
 interface Policy {
   platform: NamespaceRetention;
-  apps: Record<string, NamespaceRetention>;
-  appFallback: NamespaceRetention;
+  apps: Record<string, AppRetention>;
+  appFallback: AppRetention;
 }
 
 interface ProjectionResponse {
@@ -99,6 +113,15 @@ interface ProjectionResponse {
     overBudgetClasses: string[];
     overTotalNamespaces: string[];
   };
+  /**
+   * Bytes this node is holding per namespace, right now.
+   *
+   * Distinct from the projection, which says what a policy *would* allow
+   * against the whole library. An advisory ceiling is only worth showing beside
+   * what is actually being measured against it — the number the platform
+   * reports and declines to act on.
+   */
+  heldByNamespace?: Record<string, number>;
   error?: string;
   offline?: boolean;
 }
@@ -154,11 +177,7 @@ const DEFAULT_ROW: RetentionRow = { prefetch: true, share: 10 };
  */
 const DEFAULT_APP_TOTAL = 8 * GB;
 
-const DEFAULT_APP: NamespaceRetention = {
-  rows: {},
-  fallback: { prefetch: false, share: 5 },
-  budgetBytes: DEFAULT_APP_TOTAL,
-};
+const DEFAULT_APP: AppRetention = { budgetBytes: DEFAULT_APP_TOTAL };
 
 const DEFAULT_PLATFORM_TOTAL = 50 * GB;
 
@@ -183,9 +202,10 @@ function seedPolicy(census: CensusRow[]): Policy {
       policy.platform.rows[rung] = { ...DEFAULT_ROW };
       continue;
     }
-    const app = policy.apps[namespace] ?? { ...DEFAULT_APP, rows: {} };
-    app.rows[rung] = { ...DEFAULT_ROW };
-    policy.apps[namespace] = app;
+    // One entry per app, whatever rungs its classes name — an app namespace is
+    // one ceiling, so seeding a row per rung would write fields the daemon
+    // refuses and an operator cannot act on.
+    policy.apps[namespace] ??= { ...DEFAULT_APP };
   }
   return policy;
 }
@@ -205,6 +225,7 @@ export function RetentionMatrix() {
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [rules, setRules] = useState<OverrideRule[]>([]);
   const [projection, setProjection] = useState<ProjectionResponse["projection"]>();
+  const [held, setHeld] = useState<Record<string, number>>({});
   const [problems, setProblems] = useState<string[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "offline" | "saving" | "saved">(
     "loading",
@@ -230,6 +251,7 @@ export function RetentionMatrix() {
         setPolicy(seeded);
         setRules(body.overrideRules ?? []);
         setProjection(body.projection);
+        setHeld(body.heldByNamespace ?? {});
         setStatus("ready");
       })
       .catch(() => {
@@ -261,39 +283,27 @@ export function RetentionMatrix() {
     }, 250);
   }, []);
 
+  /**
+   * Edit one platform rung's rule.
+   *
+   * Platform only, because the platform's rungs are the only ones a policy
+   * still describes. An app's rungs are its own table's business.
+   */
   const update = useCallback(
     (sizeClass: string, patch: Partial<RetentionRow>) => {
-      const { namespace, rung } = splitClass(sizeClass);
+      const { rung } = splitClass(sizeClass);
       setPolicy((current) => {
         if (!current) return current;
-        let next: Policy;
-        if (namespace === PLATFORM_NAMESPACE) {
-          next = {
-            ...current,
-            platform: {
-              ...current.platform,
-              rows: {
-                ...current.platform.rows,
-                [rung]: { ...(current.platform.rows[rung] ?? DEFAULT_ROW), ...patch },
-              },
+        const next: Policy = {
+          ...current,
+          platform: {
+            ...current.platform,
+            rows: {
+              ...current.platform.rows,
+              [rung]: { ...(current.platform.rows[rung] ?? DEFAULT_ROW), ...patch },
             },
-          };
-        } else {
-          // An app the policy has never named starts from the fallback that is
-          // already governing it, not from a blank row — otherwise editing one
-          // rung would silently change every other rung's rule.
-          const app = current.apps[namespace] ?? { ...current.appFallback, rows: {} };
-          next = {
-            ...current,
-            apps: {
-              ...current.apps,
-              [namespace]: {
-                ...app,
-                rows: { ...app.rows, [rung]: { ...(app.rows[rung] ?? DEFAULT_ROW), ...patch } },
-              },
-            },
-          };
-        }
+          },
+        };
         project(next, rules);
         return next;
       });
@@ -314,16 +324,7 @@ export function RetentionMatrix() {
         const next: Policy =
           namespace === PLATFORM_NAMESPACE
             ? { ...current, platform: { ...current.platform, budgetBytes } }
-            : {
-                ...current,
-                apps: {
-                  ...current.apps,
-                  [namespace]: {
-                    ...(current.apps[namespace] ?? { ...current.appFallback, rows: {} }),
-                    budgetBytes,
-                  },
-                },
-              };
+            : { ...current, apps: { ...current.apps, [namespace]: { budgetBytes } } };
         project(next, rules);
         return next;
       });
@@ -399,15 +400,10 @@ export function RetentionMatrix() {
       const section = sectionFor(PLATFORM_NAMESPACE);
       if (!section.has(sizeClass)) section.set(sizeClass, { sizeClass, recordCount: 0, totalBytes: 0 });
     }
-    for (const [appId, app] of Object.entries(policy?.apps ?? {})) {
-      // An app entry with no rows still gets a section: its total is editable
-      // there, and the total is the budget that emptied it.
-      const section = sectionFor(appId);
-      for (const rung of Object.keys(app.rows ?? {})) {
-        const sizeClass = `${appId}:${rung}`;
-        if (!section.has(sizeClass)) section.set(sizeClass, { sizeClass, recordCount: 0, totalBytes: 0 });
-      }
-    }
+    // An app gets a section whether or not it is holding anything: the budget
+    // is editable there, and a budget of nothing is the reason a section is
+    // empty.
+    for (const appId of Object.keys(policy?.apps ?? {})) sectionFor(appId);
     return [...grouped.entries()]
       .map(
         ([namespace, entries]) =>
@@ -469,6 +465,7 @@ export function RetentionMatrix() {
                     : ((policy?.apps[namespace] ?? policy?.appFallback)?.budgetBytes ??
                       DEFAULT_APP_TOTAL)
                 }
+                heldBytes={held[namespace]}
                 configured={
                   namespace === PLATFORM_NAMESPACE || policy?.apps[namespace] !== undefined
                 }
@@ -476,14 +473,31 @@ export function RetentionMatrix() {
               />
               {entries.map((c) => {
               const { namespace: ns, rung } = splitClass(c.sizeClass);
-              const row =
-                (ns === PLATFORM_NAMESPACE
-                  ? policy?.platform.rows[rung]
-                  : policy?.apps[ns]?.rows[rung]) ?? DEFAULT_ROW;
+              // An app's rungs carry no rule a policy writes, so the row below
+              // shows what the class contains and offers nothing to edit. The
+              // placeholder keeps the arithmetic in the shared cells honest
+              // rather than standing for a rule anybody set.
+              const isApp = ns !== PLATFORM_NAMESPACE;
+              const row = (isApp ? undefined : policy?.platform.rows[rung]) ?? DEFAULT_ROW;
               const proj = byClass.get(c.sizeClass);
-              const nsShares = shareTotal(
-                ns === PLATFORM_NAMESPACE ? policy?.platform : policy?.apps[ns],
-              );
+              const nsShares = isApp ? 0 : shareTotal(policy?.platform);
+              if (isApp) {
+                return (
+                  <tr key={c.sizeClass} className="border-b last:border-0">
+                    <td className="py-2 pr-4 pl-4 font-mono text-xs">{rung}</td>
+                    <td className="py-2 pr-4 text-right tabular-nums text-muted-foreground">
+                      {formatBytes(c.totalBytes)}
+                      <span className="ml-1 text-xs">({c.recordCount.toLocaleString()})</span>
+                    </td>
+                    <td className="py-2 pr-4 text-xs text-muted-foreground" colSpan={3}>
+                      the app decides what to keep of this
+                    </td>
+                    <td className="py-2 text-right tabular-nums">
+                      {proj ? formatBytes(proj.projectedBytes) : "—"}
+                    </td>
+                  </tr>
+                );
+              }
               return (
                 <tr key={c.sizeClass} className="border-b last:border-0">
                   <td className="py-2 pr-4 pl-4 font-mono text-xs">{rung}</td>
@@ -633,6 +647,7 @@ function NamespaceHeader({
   namespace,
   projection,
   budgetBytes,
+  heldBytes,
   configured,
   onBudgetChange,
 }: {
@@ -644,10 +659,13 @@ function NamespaceHeader({
    * the input to it would make the field fight whoever is typing in it.
    */
   budgetBytes: number;
+  /** What this node is holding for the namespace right now. Undefined: nothing. */
+  heldBytes: number | undefined;
   configured: boolean;
   onBudgetChange: (bytes: number) => void;
 }) {
   const isPlatform = namespace === PLATFORM_NAMESPACE;
+  const overBudget = !isPlatform && (heldBytes ?? 0) > budgetBytes;
   return (
     <tr className="border-b bg-muted/30">
       <td className="py-2 pr-4 font-medium" colSpan={2}>
@@ -668,7 +686,24 @@ function NamespaceHeader({
         )}
       </td>
       <td className="py-2 pr-4 text-xs text-muted-foreground" colSpan={2}>
-        {isPlatform ? "Disk for originals" : "Disk for this app"}
+        {isPlatform ? (
+          "Disk for originals"
+        ) : (
+          <>
+            {/* The ceiling is advisory, so what it is being measured against is
+                the whole of what "reported" means. Without this number an
+                operator sets a limit and never learns it was passed. */}
+            Holding {formatBytes(heldBytes ?? 0)}
+            {overBudget && (
+              <span
+                className="ml-2 text-amber-600"
+                title={`${namespace} is holding more than its budget. Starkeep reports this and does not delete an app's data — only the app can tell what of its own is disposable. Raise the budget, or ask the app to give something up.`}
+              >
+                over budget — reported, not enforced
+              </span>
+            )}
+          </>
+        )}
       </td>
       <td className="py-2 pr-4 text-right">
         <input

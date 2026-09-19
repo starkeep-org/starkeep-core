@@ -71,7 +71,7 @@ function policyWith(over: Partial<NodeRetentionPolicy> = {}): NodeRetentionPolic
       budgetBytes: 100 * MB,
     },
     apps: {},
-    appFallback: { rows: {}, fallback: keepAll, budgetBytes: 100 * MB },
+    appFallback: { budgetBytes: 100 * MB },
     ...over,
   };
 }
@@ -317,26 +317,74 @@ describe("usage is read from the index the manager owns", () => {
   });
 
   /**
-   * What used to need a second, independently-checked namespace total.
+   * Every rung of an app charges the app's one line.
    *
-   * Three rungs the policy has never heard of, each escaping into the app's
-   * fallback. Under per-rung absolute budgets that bought three budgets, which
-   * is exactly why a namespace-wide cap had to exist to bound it. They now share
-   * one pooled line, so the third is declined by the *same* budget check as the
-   * first two rather than by a separate gate with its own failure mode and its
-   * own eviction pass.
+   * This used to be a statement about rung *invention*: a per-rung fallback
+   * handed out one budget per invented name, and only a namespace-wide cap
+   * bounded it. Pooling closed that. The collapse makes the same property
+   * structural rather than defended — an app namespace has exactly one line, so
+   * there is no rung to invent an escape into and no declared row to be
+   * different from the fallback.
+   *
+   * A round elides all three anyway, which is the other half of the change and
+   * the next case.
    */
-  it("pools every unrecognised rung of an app onto one budget", async () => {
-    const manager = build({
-      policy: policyWith({
-        apps: {
-          photos: {
-            rows: {},
-            fallback: { prefetch: true, share: 1 },
-            budgetBytes: 2500,
-          },
-        },
-      }),
+  it("charges every rung of an app to the app's one line", async () => {
+    const manager = appManager(2500);
+
+    for (const id of ["a", "b"]) {
+      const c = appCandidate(id);
+      await manager.noteArrival(c, await manager.decide(c, "request"));
+    }
+
+    const verdict = await manager.decide(appCandidate("c"), "request");
+    expect(verdict.reason).toBe("budget-exhausted");
+    expect(verdict.budgetLine?.key).toBe("photos:*");
+    expect(manager.usageByNamespace()["photos"]).toBe(2000);
+  });
+
+  /**
+   * A round applies an app's rows and leaves its bytes alone.
+   *
+   * What an app wants resident is a decision the app makes from its own table:
+   * Photos knows which rungs a phone should carry and the platform does not.
+   * So the app line is `prefetch: false`, a round and the acquisition pass both
+   * decline it, and something that actually asked is the only thing that lands
+   * an app blob.
+   */
+  it("elides an app's bytes on a round and lands them on a request", async () => {
+    const manager = appManager(100 * MB);
+    for (const trigger of ["round", "acquisition"] as const) {
+      const verdict = await manager.decide(appCandidate("a"), trigger);
+      expect(verdict.decision).toBe("elide");
+      expect(verdict.reason).toBe("not-prefetched");
+    }
+    const asked = await manager.decide(appCandidate("a"), "request");
+    expect(asked.decision).toBe("fetch");
+  });
+
+  /**
+   * The ceiling is still a ceiling for an acquisition it does not veto.
+   *
+   * `prefetch` is the one rule a request sets aside. An operator who has
+   * budgeted an app to nothing has said something the app does not get to
+   * overrule by asking, and `class-disabled` is where that is enforced.
+   */
+  it("refuses a request into an app budgeted to nothing", async () => {
+    const manager = appManager(0);
+    const verdict = await manager.decide(appCandidate("a"), "request");
+    expect(verdict.decision).toBe("elide");
+    expect(verdict.reason).toBe("class-disabled");
+  });
+
+  /**
+   * Three derived records labelled with three different rungs of Photos' own
+   * ladder, so each resolves into the `photos` namespace by a different class
+   * name and they can only agree on a budget line by pooling.
+   */
+  function appManager(budgetBytes: number): ResidencyManager {
+    return build({
+      policy: policyWith({ apps: { photos: { budgetBytes } } }),
       labels: {
         a: [{ appId: "photos", key: "rendition", value: "one" }],
         b: [{ appId: "photos", key: "rendition", value: "two" }],
@@ -344,21 +392,15 @@ describe("usage is read from the index the manager owns", () => {
       },
       records: { p: { type: "image/jpeg" } },
     });
+  }
 
-    for (const id of ["a", "b"]) {
-      const c = candidate({ recordId: id, objectStorageKey: `key-${id}`, sizeBytes: 1000, parentId: "p" });
-      await manager.noteArrival(c, await manager.decide(c));
-    }
-
-    const verdict = await manager.decide(
-      candidate({ recordId: "c", sizeBytes: 1000, parentId: "p" }),
-    );
-    expect(verdict.reason).toBe("budget-exhausted");
-    // Three different class names, one budget line between them — which is the
-    // property that makes inventing rung names cheap instead of free.
-    expect(verdict.budgetLine?.key).toBe("photos:*");
-    expect(manager.usageByNamespace()["photos"]).toBe(2000);
-  });
+  const appCandidate = (id: string): BlobCandidate =>
+    candidate({
+      recordId: id,
+      objectStorageKey: `key-${id}`,
+      sizeBytes: 1000,
+      parentId: "p",
+    });
 
   it("frees the budget again once the bytes depart", async () => {
     const manager = build({ policy: smallClass });

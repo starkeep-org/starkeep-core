@@ -44,7 +44,7 @@ function policyHolding(blobs: number, over: { prefetch?: boolean } = {}): NodeRe
       budgetBytes: blobs * BLOB_BYTES,
     },
     apps: {},
-    appFallback: { rows: {}, fallback: { prefetch: true, share: 1 }, budgetBytes: 1024 * KB },
+    appFallback: { budgetBytes: 1024 * KB },
   };
 }
 

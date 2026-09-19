@@ -223,12 +223,49 @@ export interface NamespaceRetention {
 }
 
 /**
- * A node's whole retention policy: platform classes, then one namespace per app.
+ * One app namespace: a ceiling, and nothing else.
+ *
+ * An app used to carry the same `rows`/`fallback`/`budgetBytes` shape the
+ * platform does, and every one of those rows was the platform holding an
+ * opinion about a ladder it does not own. The app owns the ladder now — which
+ * rungs exist, which are worth fetching, and how its ceiling divides between
+ * them — so what is left here is the one number the operator sets and the app
+ * cannot: how much of this machine's disk it may use.
+ *
+ * **The number is advisory.** The eviction pass does not run over app
+ * namespaces, so nothing here deletes an app's bytes. An overrun is reported
+ * and the app is expected to act on it; see {@link APP_BLOB_ROW} for the half
+ * of the rule the platform does still enforce.
+ */
+export interface AppNamespaceRetention {
+  /** Every byte this app may hold on this node. Advisory — see above. */
+  readonly budgetBytes: number;
+}
+
+/**
+ * The rule governing every app blob, which no policy writes and no operator
+ * edits.
+ *
+ * `prefetch: false` is the substantive half. A sync round applies an app's rows
+ * and leaves its bytes alone, because what an app wants resident is a decision
+ * the app makes from its own table — Photos knows which rungs a phone should
+ * carry and the platform does not. An explicit request still lands the bytes,
+ * which is what {@link ResidencyTrigger} `"request"` is for and what the
+ * app-private fetch operation calls.
+ *
+ * `share: 1` is arithmetic rather than policy: an app namespace has exactly one
+ * line, so it takes the whole of {@link AppNamespaceRetention.budgetBytes} and
+ * any positive share resolves to the same number.
+ */
+export const APP_BLOB_ROW: SizeClassRetention = { prefetch: false, share: 1 };
+
+/**
+ * A node's whole retention policy: platform classes, then one ceiling per app.
  *
  * Two levels rather than one flat table because the requirement is a budget
- * *per app* and a division within the app, and a flat table can only express
- * the second. It also puts the one boundary that matters — platform versus app
- * — in the structure rather than in a naming convention.
+ * *per app* and a division within the platform's own classes, and a flat table
+ * can only express the second. It also puts the one boundary that matters —
+ * platform versus app — in the structure rather than in a naming convention.
  *
  * `Full`/`Library`/`Browse`-style presets may front this in the UI, but they
  * **write** these rows rather than being stored — nothing here records which
@@ -241,13 +278,13 @@ export interface NodeRetentionPolicy {
    * label. Keyed `original:<category>`.
    */
   readonly platform: NamespaceRetention;
-  /** Per-app namespaces, keyed by appId. */
-  readonly apps: Readonly<Record<string, NamespaceRetention>>;
+  /** Per-app ceilings, keyed by appId. */
+  readonly apps: Readonly<Record<string, AppNamespaceRetention>>;
   /**
    * Applied to an app with no entry above — one the operator has never
    * configured, which is the ordinary state right after installing something.
    */
-  readonly appFallback: NamespaceRetention;
+  readonly appFallback: AppNamespaceRetention;
 }
 
 /**
@@ -266,20 +303,34 @@ export interface BudgetLine {
   readonly key: string;
 }
 
-export function namespaceRetentionFor(
+/** The ceiling governing one app namespace, configured or not. */
+export function appRetentionFor(
   policy: NodeRetentionPolicy,
-  namespace: string,
-): NamespaceRetention {
-  if (namespace === PLATFORM_NAMESPACE) return policy.platform;
-  return policy.apps[namespace] ?? policy.appFallback;
+  appId: string,
+): AppNamespaceRetention {
+  return policy.apps[appId] ?? policy.appFallback;
+}
+
+/** Every byte a namespace may hold, whichever side of the boundary it is on. */
+export function namespaceBudgetBytes(policy: NodeRetentionPolicy, namespace: string): number {
+  return namespace === PLATFORM_NAMESPACE
+    ? policy.platform.budgetBytes
+    : appRetentionFor(policy, namespace).budgetBytes;
 }
 
 /**
  * Which budget line a class spends from.
  *
- * A class the policy names spends from its own line. Everything else — an
- * unrecognised rung, a ladder respecified on another node, a class name from
- * before namespacing — spends from its namespace's pooled fallback line.
+ * **An app namespace has exactly one line.** Every rung an app names, and every
+ * blob of its app-private plane, charges {@link FALLBACK_RUNG} of that app —
+ * which is what "one number per app" means in the structure rather than in a
+ * convention. The pooling that rung already stood for is now the whole of the
+ * namespace, so nothing had to be invented for it.
+ *
+ * On the platform side the old rule stands: a class the policy names spends
+ * from its own line, and everything else — an unrecognised rung, a ladder
+ * respecified on another node, a class name from before namespacing — spends
+ * from the platform's pooled fallback line.
  *
  * A class that will not parse has no namespace to belong to, and guessing one
  * would charge somebody's budget for it. It goes to the platform's fallback,
@@ -291,20 +342,37 @@ export function budgetLineFor(
   sizeClass: ResolvedSizeClass | null,
 ): BudgetLine {
   if (sizeClass === null) return line(PLATFORM_NAMESPACE, FALLBACK_RUNG);
-  const namespace = namespaceRetentionFor(policy, sizeClass.namespace);
-  return namespace.rows[sizeClass.rung] !== undefined
-    ? line(sizeClass.namespace, sizeClass.rung)
-    : line(sizeClass.namespace, FALLBACK_RUNG);
+  if (sizeClass.namespace !== PLATFORM_NAMESPACE) {
+    return line(sizeClass.namespace, FALLBACK_RUNG);
+  }
+  return policy.platform.rows[sizeClass.rung] !== undefined
+    ? line(PLATFORM_NAMESPACE, sizeClass.rung)
+    : line(PLATFORM_NAMESPACE, FALLBACK_RUNG);
 }
 
 function line(namespace: string, rung: string): BudgetLine {
   return { namespace, rung, key: `${namespace}:${rung}` };
 }
 
-/** Whether the policy names this exact class, as opposed to pooling it. */
+/** Whether this line is one app's single budget line. */
+export function isAppLine(budgetLine: BudgetLine): boolean {
+  return budgetLine.namespace !== PLATFORM_NAMESPACE;
+}
+
+/**
+ * Whether the policy names this exact class, as opposed to pooling it.
+ *
+ * True for every app class, and that is not a shortcut: an app's one line *is*
+ * the line its classes belong to, so none of them is an unrecognised remainder
+ * the way an unnamed platform rung is. The distinction exists so the residency
+ * inspector can say `unclassified` about a blob nobody could place, and an app
+ * blob is placed — in its app's namespace, by the platform, from structure the
+ * app cannot choose.
+ */
 export function hasRowFor(policy: NodeRetentionPolicy, sizeClass: ResolvedSizeClass | null): boolean {
   if (sizeClass === null) return false;
-  return namespaceRetentionFor(policy, sizeClass.namespace).rows[sizeClass.rung] !== undefined;
+  if (sizeClass.namespace !== PLATFORM_NAMESPACE) return true;
+  return policy.platform.rows[sizeClass.rung] !== undefined;
 }
 
 /** The row governing one budget line. */
@@ -312,10 +380,12 @@ export function retentionRowFor(
   policy: NodeRetentionPolicy,
   budgetLine: BudgetLine,
 ): SizeClassRetention {
-  const namespace = namespaceRetentionFor(policy, budgetLine.namespace);
+  // An app line's rule is fixed by the platform rather than written by anyone.
+  // See APP_BLOB_ROW.
+  if (isAppLine(budgetLine)) return APP_BLOB_ROW;
   return budgetLine.rung === FALLBACK_RUNG
-    ? namespace.fallback
-    : namespace.rows[budgetLine.rung] ?? namespace.fallback;
+    ? policy.platform.fallback
+    : policy.platform.rows[budgetLine.rung] ?? policy.platform.fallback;
 }
 
 /**
@@ -332,11 +402,14 @@ export function retentionRowFor(
  * than by it.
  */
 export function budgetBytesFor(policy: NodeRetentionPolicy, budgetLine: BudgetLine): number {
-  const namespace = namespaceRetentionFor(policy, budgetLine.namespace);
+  // An app namespace is one line, so there is nothing to divide: the line is
+  // the ceiling. Answered before the share arithmetic rather than by giving
+  // APP_BLOB_ROW a denominator to be the numerator of.
+  if (isAppLine(budgetLine)) return appRetentionFor(policy, budgetLine.namespace).budgetBytes;
   const row = retentionRowFor(policy, budgetLine);
-  const total = totalShares(namespace);
+  const total = totalShares(policy.platform);
   if (total <= 0 || row.share <= 0) return 0;
-  return Math.floor((namespace.budgetBytes * row.share) / total);
+  return Math.floor((policy.platform.budgetBytes * row.share) / total);
 }
 
 function totalShares(namespace: NamespaceRetention): number {
@@ -360,14 +433,13 @@ function shareOf(row: SizeClassRetention | undefined): number {
  */
 export function budgetLinesOf(policy: NodeRetentionPolicy): BudgetLine[] {
   const out: BudgetLine[] = [];
-  const namespaces: Array<[string, NamespaceRetention]> = [
-    [PLATFORM_NAMESPACE, policy.platform],
-    ...Object.entries(policy.apps),
-  ];
-  for (const [namespace, retention] of namespaces) {
-    for (const rung of Object.keys(retention.rows)) out.push(line(namespace, rung));
-    out.push(line(namespace, FALLBACK_RUNG));
-  }
+  for (const rung of Object.keys(policy.platform.rows)) out.push(line(PLATFORM_NAMESPACE, rung));
+  out.push(line(PLATFORM_NAMESPACE, FALLBACK_RUNG));
+  // One line per configured app, and no more: an app namespace has no rungs of
+  // its own here any more. An app the policy has never named still has a line —
+  // `appFallback` governs it — but it is not enumerable from the policy, which
+  // is why every caller that walks lines also walks what is actually held.
+  for (const appId of Object.keys(policy.apps)) out.push(line(appId, FALLBACK_RUNG));
   return out;
 }
 
@@ -725,7 +797,7 @@ export function validateRetentionPolicy(policy: NodeRetentionPolicy): string[] {
   for (const [name, present] of [
     ["platform", isObject(policy?.platform) && isObject(policy.platform.rows)],
     ["apps", isObject(policy?.apps)],
-    ["appFallback", isObject(policy?.appFallback) && isObject(policy.appFallback.rows)],
+    ["appFallback", isObject(policy?.appFallback)],
   ] as const) {
     if (!present) problems.push(`${name}: missing or not an object`);
   }
@@ -734,8 +806,8 @@ export function validateRetentionPolicy(policy: NodeRetentionPolicy): string[] {
   problems.push(...validateNamespace(PLATFORM_NAMESPACE, policy.platform));
 
   for (const [appId, app] of Object.entries(policy.apps)) {
-    problems.push(...validateNamespace(appId, app));
-    // An app id that collides with the platform namespace would write rows
+    problems.push(...validateAppNamespace(`apps.${appId}`, app));
+    // An app id that collides with the platform namespace would write a ceiling
     // nothing can ever read: the resolution above sends every platform class to
     // `policy.platform`, so this whole entry would sit there being ignored.
     if (appId === PLATFORM_NAMESPACE) {
@@ -744,9 +816,47 @@ export function validateRetentionPolicy(policy: NodeRetentionPolicy): string[] {
       );
     }
   }
-  problems.push(...validateNamespace("(unconfigured apps)", policy.appFallback));
+  problems.push(...validateAppNamespace("appFallback", policy.appFallback));
 
   return problems;
+}
+
+/**
+ * An app namespace is one number, so this checks one number.
+ *
+ * Rows and a fallback are refused rather than ignored. An operator (or a UI)
+ * still writing them has written a division of a budget that nothing divides,
+ * and silently dropping it would let them believe a per-rung rule is in force
+ * when the app's own table is the only thing deciding that now.
+ */
+function validateAppNamespace(label: string, retention: AppNamespaceRetention): string[] {
+  if (!isObject(retention)) return [`${label}: missing or not an object`];
+  const problems: string[] = [];
+  for (const field of ["rows", "fallback"] as const) {
+    if ((retention as unknown as Record<string, unknown>)[field] !== undefined) {
+      problems.push(
+        `${label}.${field}: an app namespace carries budgetBytes alone — which rungs exist and what each is worth is the app's own table, not this policy's`,
+      );
+    }
+  }
+  // Zero is accepted here and refused on the platform namespace, and the
+  // difference is not an inconsistency. A zero platform budget is a prohibition
+  // on every rung stated in the one place an operator reading the rows will not
+  // look, so the rows are where it belongs — `share: 0`, per rung. An app has no
+  // rows to read: its budget is the only thing the policy says about it, so
+  // "this app gets no disk on this node" has nowhere else to be written and
+  // reads exactly as it means.
+  if (!isFiniteBudget(retention.budgetBytes)) {
+    problems.push(
+      `${label}: budgetBytes must be a finite number of bytes, zero or more (got ${String(retention.budgetBytes)}) — it is the whole of what this policy says about the app`,
+    );
+  }
+  return problems;
+}
+
+/** {@link isUsableBudget}, admitting the zero an app namespace may legitimately carry. */
+function isFiniteBudget(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 function isObject(value: unknown): boolean {

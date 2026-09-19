@@ -23,7 +23,7 @@ import {
 const GB = 1024 ** 3;
 
 const census = (over: Partial<SizeClassCensus> = {}): SizeClassCensus => ({
-  sizeClass: "photos:image-large",
+  sizeClass: "starkeep:image-large",
   recordCount: 1000,
   totalBytes: 100 * GB,
   ...over,
@@ -36,45 +36,51 @@ const row = (over: Partial<SizeClassRetention> = {}): SizeClassRetention => ({
 });
 
 /**
- * A policy with one app namespace.
+ * A policy whose platform namespace declares these rungs.
+ *
+ * The rungs belong to the platform because that is the only namespace with
+ * rungs left: an app namespace is one advisory ceiling, and which rungs exist
+ * and what each is worth is the app's own table. Every share case below is
+ * therefore a platform case, and the app-namespace block at the end says what
+ * the other side projects as now.
  *
  * The fallback takes no share unless a case says otherwise, so the declared
  * rows divide the whole budget between them and the arithmetic in each test is
  * about the thing the test is checking.
  */
-const withApp = (
+const withRungs = (
   rows: Record<string, SizeClassRetention>,
   budgetBytes = 100 * GB,
   fallback: SizeClassRetention = row({ share: 0 }),
 ): NodeRetentionPolicy => {
   const namespace: NamespaceRetention = { rows, fallback, budgetBytes };
   return {
-    platform: { rows: {}, fallback: row(), budgetBytes: 900 * GB },
-    apps: { photos: namespace },
-    appFallback: { rows: {}, fallback: row(), budgetBytes: 8 * GB },
+    platform: namespace,
+    apps: { photos: { budgetBytes: 8 * GB } },
+    appFallback: { budgetBytes: 8 * GB },
   };
 };
 
 describe("a row's budget is its share of the namespace", () => {
-  const policy = withApp({
+  const policy = withRungs({
     "image-thumb": row({ share: 1 }),
     "image-large": row({ share: 9 }),
   });
   const library = [
-    census({ sizeClass: "photos:image-thumb", totalBytes: 2 * GB }),
-    census({ sizeClass: "photos:image-large", totalBytes: 100 * GB }),
+    census({ sizeClass: "starkeep:image-thumb", totalBytes: 2 * GB }),
+    census({ sizeClass: "starkeep:image-large", totalBytes: 100 * GB }),
   ];
 
   it("divides the namespace budget by share", () => {
     const projection = projectPolicy(policy, library);
     const byClass = new Map(projection.rows.map((r) => [r.sizeClass, r]));
-    expect(byClass.get("photos:image-thumb")!.budgetBytes).toBe(10 * GB);
-    expect(byClass.get("photos:image-large")!.budgetBytes).toBe(90 * GB);
+    expect(byClass.get("starkeep:image-thumb")!.budgetBytes).toBe(10 * GB);
+    expect(byClass.get("starkeep:image-large")!.budgetBytes).toBe(90 * GB);
   });
 
   it("holds what the class contains when it fits", () => {
     const thumb = projectPolicy(policy, library).rows.find(
-      (r) => r.sizeClass === "photos:image-thumb",
+      (r) => r.sizeClass === "starkeep:image-thumb",
     )!;
     expect(thumb.projectedBytes).toBe(2 * GB);
     expect(thumb.overBudget).toBe(false);
@@ -85,18 +91,18 @@ describe("a row's budget is its share of the namespace", () => {
   // sentence from "this class fits".
   it("caps at the budget and flags the class", () => {
     const large = projectPolicy(policy, library).rows.find(
-      (r) => r.sizeClass === "photos:image-large",
+      (r) => r.sizeClass === "starkeep:image-large",
     )!;
     expect(large.selectedBytes).toBe(100 * GB);
     expect(large.projectedBytes).toBe(90 * GB);
     expect(large.overBudget).toBe(true);
-    expect(projectPolicy(policy, library).overBudgetClasses).toEqual(["photos:image-large"]);
+    expect(projectPolicy(policy, library).overBudgetClasses).toEqual(["starkeep:image-large"]);
   });
 
   it("holds nothing for a class whose share is zero", () => {
-    const off = withApp({ "image-thumb": row(), "image-large": row({ share: 0 }) });
+    const off = withRungs({ "image-thumb": row(), "image-large": row({ share: 0 }) });
     const large = projectPolicy(off, library).rows.find(
-      (r) => r.sizeClass === "photos:image-large",
+      (r) => r.sizeClass === "starkeep:image-large",
     )!;
     expect(large.budgetBytes).toBe(0);
     expect(large.projectedBytes).toBe(0);
@@ -106,7 +112,7 @@ describe("a row's budget is its share of the namespace", () => {
   // projection that reported the budget instead would promise a number the
   // engine has already been told it may not deliver.
   it("holds pinned bytes even past the budget", () => {
-    const off = withApp({ "image-large": row({ share: 0 }) });
+    const off = withRungs({ "image-large": row({ share: 0 }) });
     const projected = projectPolicy(off, [census({ pinnedBytes: 12 * GB })]).rows[0]!;
     expect(projected.projectedBytes).toBe(12 * GB);
     expect(projected.pinnedBytes).toBe(12 * GB);
@@ -118,24 +124,24 @@ describe("prefetch shows as a floor rather than a settled figure", () => {
   // the other direction: nothing is pulled proactively, so the number an
   // operator should read is "grows toward the budget as you browse".
   it("flags an unprefetched class as demand-driven", () => {
-    const p = projectPolicy(withApp({ "image-large": row({ prefetch: false }) }), [census()]);
+    const p = projectPolicy(withRungs({ "image-large": row({ prefetch: false }) }), [census()]);
     expect(p.rows[0]!.demandDriven).toBe(true);
   });
 
   it("does not flag a prefetched class", () => {
-    const p = projectPolicy(withApp({ "image-large": row() }), [census()]);
+    const p = projectPolicy(withRungs({ "image-large": row() }), [census()]);
     expect(p.rows[0]!.demandDriven).toBe(false);
   });
 });
 
 describe("projecting a whole policy", () => {
-  const policy = withApp({
+  const policy = withRungs({
     "image-thumb": row({ share: 1 }),
     "image-large": row({ share: 9 }),
   });
   const library = [
-    census({ sizeClass: "photos:image-thumb", totalBytes: 2 * GB }),
-    census({ sizeClass: "photos:image-large", totalBytes: 100 * GB }),
+    census({ sizeClass: "starkeep:image-thumb", totalBytes: 2 * GB }),
+    census({ sizeClass: "starkeep:image-large", totalBytes: 100 * GB }),
   ];
 
   it("totals the rows", () => {
@@ -145,24 +151,24 @@ describe("projecting a whole policy", () => {
   // A projection that quietly ignored unlisted classes would under-report
   // exactly the disk use nobody planned for.
   it("pools classes the policy does not mention onto the fallback line", () => {
-    const withFallback = withApp(
+    const withFallback = withRungs(
       { "image-thumb": row({ share: 1 }), "image-large": row({ share: 8 }) },
       100 * GB,
       row({ share: 1 }),
     );
     const extra = [
       ...library,
-      census({ sizeClass: "photos:video-720p", totalBytes: 80 * GB }),
-      census({ sizeClass: "photos:video-1080p", totalBytes: 80 * GB }),
+      census({ sizeClass: "starkeep:video-720p", totalBytes: 80 * GB }),
+      census({ sizeClass: "starkeep:video-1080p", totalBytes: 80 * GB }),
     ];
     const projection = projectPolicy(withFallback, extra);
-    const pooled = projection.rows.filter((r) => r.budgetLineKey === "photos:*");
+    const pooled = projection.rows.filter((r) => r.budgetLineKey === "starkeep:*");
 
     // Both appear in the table, which is the point: the operator can see the
     // classes exist and how much of them survives.
     expect(pooled.map((r) => r.sizeClass).sort()).toEqual([
-      "photos:video-1080p",
-      "photos:video-720p",
+      "starkeep:video-1080p",
+      "starkeep:video-720p",
     ]);
     // And they share the line's 10 GB rather than getting 10 GB each — the
     // over-report that made rung invention free in the first place.
@@ -180,27 +186,15 @@ describe("projecting a whole policy", () => {
    */
   it("never projects a namespace past its budget except by pins", () => {
     const projection = projectPolicy(policy, library);
-    const photos = projection.namespaces.find((n) => n.namespace === "photos")!;
-    expect(photos.projectedBytes).toBeLessThanOrEqual(photos.totalBudgetBytes);
+    const platform = projection.namespaces.find((n) => n.namespace === "starkeep")!;
+    expect(platform.projectedBytes).toBeLessThanOrEqual(platform.totalBudgetBytes);
     expect(projection.overTotalNamespaces).toEqual([]);
   });
 
   it("flags a namespace held past its budget by pins", () => {
-    const off = withApp({ "image-large": row({ share: 0 }) }, 10 * GB);
+    const off = withRungs({ "image-large": row({ share: 0 }) }, 10 * GB);
     const projection = projectPolicy(off, [census({ pinnedBytes: 40 * GB })]);
-    expect(projection.overTotalNamespaces).toEqual(["photos"]);
-  });
-
-  // The platform used to be the exception — rows with absolute budgets and no
-  // total — which only ever bought a `number | null` every consumer had to
-  // branch on, and an operator with no way to say how much disk originals get.
-  it("gives the platform namespace a budget like any other", () => {
-    const projection = projectPolicy(policy, [
-      census({ sizeClass: "starkeep:original:image", totalBytes: 9000 * GB }),
-    ]);
-    const platform = projection.namespaces.find((n) => n.namespace === "starkeep")!;
-    expect(platform.totalBudgetBytes).toBe(900 * GB);
-    expect(platform.projectedBytes).toBe(900 * GB);
+    expect(projection.overTotalNamespaces).toEqual(["starkeep"]);
   });
 
   // A class name from before namespacing has no namespace to group under, and
@@ -210,6 +204,59 @@ describe("projecting a whole policy", () => {
       census({ sizeClass: "image-medium", totalBytes: GB }),
     ]);
     expect(projection.rows[0]!.budgetLineKey).toBe("starkeep:*");
+  });
+});
+
+/**
+ * An app namespace projects as one line holding one number.
+ *
+ * Which is the whole visible consequence of the collapse: an operator looking
+ * at the matrix sees a ceiling for the app and what the library would put in
+ * it, and no per-rung row, because the platform has no opinion about an app's
+ * rungs any more. The rows are still listed — an operator can see the classes
+ * exist — they simply all charge one budget.
+ */
+describe("an app namespace", () => {
+  const policy = withRungs({ "image-large": row() });
+  const appLibrary = [
+    census({ sizeClass: "photos:image-thumb", totalBytes: 2 * GB }),
+    census({ sizeClass: "photos:image-large", totalBytes: 100 * GB }),
+  ];
+
+  it("charges every one of its classes to one line", () => {
+    const rows = projectPolicy(policy, appLibrary).rows;
+    expect(new Set(rows.map((r) => r.budgetLineKey))).toEqual(new Set(["photos:*"]));
+  });
+
+  it("caps the whole namespace at the one number the policy gives it", () => {
+    const projection = projectPolicy(policy, appLibrary);
+    const photos = projection.namespaces.find((n) => n.namespace === "photos")!;
+    expect(photos.totalBudgetBytes).toBe(8 * GB);
+    // Not exactly the ceiling: the two classes share one line and split its
+    // budget by what each holds, and each split floors. The residue is the
+    // rounding, and it is a byte rather than a policy.
+    expect(photos.projectedBytes).toBeGreaterThan(8 * GB - appLibrary.length);
+    expect(photos.projectedBytes).toBeLessThanOrEqual(8 * GB);
+  });
+
+  // Nothing prefetches an app's blobs. A round applies the app's rows and
+  // leaves the bytes alone, so what the line holds is whatever has been asked
+  // for — and presenting that as a settled figure is how an operator budgets a
+  // disk for a number that then grows.
+  it("reads as demand-driven, because nothing prefetches an app blob", () => {
+    const rows = projectPolicy(policy, appLibrary).rows;
+    expect(rows.every((r) => r.demandDriven)).toBe(true);
+  });
+
+  // An app the operator has never budgeted is governed by `appFallback`, and
+  // that number has to reach the projection — otherwise a freshly installed app
+  // shows a ceiling of zero and reads as prohibited.
+  it("uses the unconfigured-app ceiling for an app the policy never names", () => {
+    const projection = projectPolicy(policy, [
+      census({ sizeClass: "sketcher:preview", totalBytes: 50 * GB }),
+    ]);
+    const sketcher = projection.namespaces.find((n) => n.namespace === "sketcher")!;
+    expect(sketcher.totalBudgetBytes).toBe(8 * GB);
   });
 });
 
@@ -243,11 +290,11 @@ describe("a policy the validator accepted always projects to a number", () => {
     [census()],
     [
       census(),
-      census({ sizeClass: "photos:video-720p", totalBytes: 80 * GB }),
+      census({ sizeClass: "starkeep:video-720p", totalBytes: 80 * GB }),
       census({ sizeClass: "starkeep:original:image", totalBytes: 900 * GB }),
       // A class the census measured at zero — an ordinary state of a young
       // library, and the one that divides by it.
-      census({ sizeClass: "photos:image-thumb", totalBytes: 0 }),
+      census({ sizeClass: "starkeep:image-thumb", totalBytes: 0 }),
       census({ sizeClass: "photos:invented-a", totalBytes: 0 }),
       census({ sizeClass: "photos:invented-b", totalBytes: 0 }),
     ],
@@ -263,10 +310,8 @@ describe("a policy the validator accepted always projects to a number", () => {
       for (const library of libraries) {
         const policy: NodeRetentionPolicy = {
           platform: { rows: { "original:image": rule }, fallback: rule, budgetBytes: 100 * GB },
-          apps: {
-            photos: { rows: { "image-large": rule }, fallback: rule, budgetBytes: 100 * GB },
-          },
-          appFallback: { rows: {}, fallback: rule, budgetBytes: 100 * GB },
+          apps: { photos: { budgetBytes: 100 * GB } },
+          appFallback: { budgetBytes: 100 * GB },
         };
         // The pairing that makes this a property and not a sample: if the
         // validator would refuse the policy, the projection owes it nothing.
@@ -294,7 +339,7 @@ describe("a policy the validator accepted always projects to a number", () => {
     const policy: NodeRetentionPolicy = {
       platform: { rows: {}, fallback: row({ share: 0 }), budgetBytes: 100 * GB },
       apps: {},
-      appFallback: { rows: {}, fallback: row({ share: 0 }), budgetBytes: 100 * GB },
+      appFallback: { budgetBytes: 100 * GB },
     };
     expect(validateRetentionPolicy(policy).length).toBeGreaterThan(0);
     const projection = projectPolicy(policy, [census({ sizeClass: "starkeep:original:image" })]);

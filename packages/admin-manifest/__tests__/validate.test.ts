@@ -35,7 +35,13 @@ describe("photos fixture (full real manifest)", () => {
     expect(m.protocolMinVersion).toBe("1.0.0");
     expect(m.infraRequirements.fileAccessAll).toBe(false);
     expect(m.infraRequirements.brokerPower).toBe(false);
-    expect(m.infraRequirements.appSpecificSyncable.files).toBe(true);
+    // `files: true` is the short spelling of `{ regenerable: false }`, and it
+    // normalizes to that — so a manifest written before the field existed keeps
+    // the refusal it has always had.
+    expect(m.infraRequirements.appSpecificSyncable.files).toEqual({
+      enabled: true,
+      regenerable: false,
+    });
     expect(m.infraRequirements.appSpecificSyncable.tables).toHaveLength(1);
     expect(m.localRun?.cwd).toBe(".");
     // Handler defaults: runtime + auth on the api handler (auth unspecified → jwt)
@@ -110,6 +116,65 @@ describe("id-bound privilege flags", () => {
   it("allows the @starkeep/ id prefix for official apps", () => {
     const result = validateManifest(minimal({ id: "@starkeep/blessed", tier: "official" }));
     expect(result.valid).toBe(true);
+  });
+});
+
+/**
+ * `appSpecificSyncable.files` — the opt-in, and the claim about what is in it.
+ *
+ * Every case here is about one asymmetry. A node reads `regenerable` to decide
+ * whether it may drop the last copy of an app's private bytes, and the two
+ * mistakes are not equal: calling Memo's recordings re-derivable loses them,
+ * while calling Photos' renditions precious costs disk. So every spelling that
+ * does not say otherwise has to come out non-regenerable.
+ */
+describe("the app-private files declaration", () => {
+  const filesOf = (files: unknown) => {
+    const result = validateManifest(
+      minimal({ infraRequirements: { appSpecificSyncable: { files } } }),
+    );
+    expect(result.valid).toBe(true);
+    return (result.manifest as AppManifest).infraRequirements.appSpecificSyncable.files;
+  };
+
+  it("reads `true` as opted in and not re-derivable", () => {
+    expect(filesOf(true)).toEqual({ enabled: true, regenerable: false });
+  });
+
+  it("reads `false` as not opted in at all", () => {
+    expect(filesOf(false)).toEqual({ enabled: false, regenerable: false });
+  });
+
+  it("defaults to not opted in when the field is absent", () => {
+    const result = validateManifest(minimal({ infraRequirements: { appSpecificSyncable: {} } }));
+    expect(result.valid).toBe(true);
+    expect(
+      (result.manifest as AppManifest).infraRequirements.appSpecificSyncable.files,
+    ).toEqual({ enabled: false, regenerable: false });
+  });
+
+  it("takes the object form as opting in, with the claim it makes", () => {
+    expect(filesOf({ regenerable: true })).toEqual({ enabled: true, regenerable: true });
+    expect(filesOf({ regenerable: false })).toEqual({ enabled: true, regenerable: false });
+  });
+
+  // An object that says nothing about regenerability is opting in and making no
+  // claim, which is the same thing `true` says.
+  it("takes an empty object as opting in and making no claim", () => {
+    expect(filesOf({})).toEqual({ enabled: true, regenerable: false });
+  });
+
+  // The registry stores manifests as parsed JSON. A normalized value that came
+  // back as the wrong opt-in on re-validation would silently take an app's file
+  // plane away from it.
+  it("round-trips its own normalized form", () => {
+    for (const files of [
+      { enabled: true, regenerable: true },
+      { enabled: true, regenerable: false },
+      { enabled: false, regenerable: false },
+    ]) {
+      expect(filesOf(files)).toEqual(files);
+    }
   });
 });
 

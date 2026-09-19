@@ -46,7 +46,7 @@ const row = { prefetch: true as const, share: 1 };
 const policy: NodeRetentionPolicy = {
   platform: { rows: { "original:image": row }, fallback: row, budgetBytes: 100 * MB },
   apps: {},
-  appFallback: { rows: {}, fallback: row, budgetBytes: 100 * MB },
+  appFallback: { budgetBytes: 100 * MB },
 };
 
 /**
@@ -266,12 +266,16 @@ describe("namespace resolution", () => {
 });
 
 describe("durability proof follows what can be re-derived, not the class name", () => {
-  function build(labels: Record<string, Array<{ appId: string; key: string; value: string }>> = {}) {
+  function build(
+    labels: Record<string, Array<{ appId: string; key: string; value: string }>> = {},
+    regenerableBlobApps?: ReadonlySet<string>,
+  ) {
     return createResidencyManager({
       localDb: new DatabaseSync(":memory:") as never,
       databaseAdapter: adapterWithLabels(labels),
       localObjectStorage: new MockObjectStorageAdapter(),
       sizeClassKeys: { photos: "rendition" },
+      ...(regenerableBlobApps ? { regenerableBlobApps } : {}),
       isCloudNode: false,
       policy,
       durability: { minimumReplicas: 1 },
@@ -327,6 +331,29 @@ describe("durability proof follows what can be re-derived, not the class name", 
   it("requires proof for a derivative whose origin is unknown", async () => {
     const manager = build();
     const c = candidate({ parentId: "parent", originAppId: null });
+    await manager.noteArrival(c, landedAs(await manager.classOf(c)));
+    expect(manager.index.get(c.objectStorageKey)!.requiresDurabilityProof).toBe(true);
+  });
+
+  /**
+   * The app's own declaration is the only thing that lifts the refusal.
+   *
+   * The platform cannot look at an app-private blob and tell a rendition from a
+   * recording, so it asks the app — once, in the manifest, where an operator
+   * editing a retention table cannot reach it. An app that says nothing keeps
+   * the refusal, which is what every manifest written before the field existed
+   * says.
+   */
+  it("drops the proof requirement for an app that declared its blobs re-derivable", async () => {
+    const manager = build({}, new Set(["photos"]));
+    const c = candidate({ appId: "photos", parentId: null });
+    await manager.noteArrival(c, landedAs(await manager.classOf(c)));
+    expect(manager.index.get(c.objectStorageKey)!.requiresDurabilityProof).toBe(false);
+  });
+
+  it("keeps it for every other app on the same node", async () => {
+    const manager = build({}, new Set(["photos"]));
+    const c = candidate({ appId: "memo", parentId: null });
     await manager.noteArrival(c, landedAs(await manager.classOf(c)));
     expect(manager.index.get(c.objectStorageKey)!.requiresDurabilityProof).toBe(true);
   });

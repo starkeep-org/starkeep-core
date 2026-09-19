@@ -28,7 +28,7 @@ const validPolicy = {
     budgetBytes: 10 * GB,
   },
   apps: {},
-  appFallback: { rows: {}, fallback: { prefetch: false, share: 1 }, budgetBytes: GB },
+  appFallback: { budgetBytes: GB },
 };
 
 beforeAll(async () => {

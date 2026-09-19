@@ -106,6 +106,16 @@ export interface SyncSupervisorOptions {
 interface EngineEntry {
   readonly appId: string;
   readonly engine: SyncEngine;
+  /**
+   * This channel's view of the cloud's object store, signed as this app.
+   *
+   * Held on the entry rather than rebuilt on demand because it is the app's
+   * *identity* that matters, not the URL: a probe built any other way would
+   * either carry the human operator's credentials, which the files bucket
+   * denies on `apps/*`, or invent a second place that knows how to sign as an
+   * app.
+   */
+  readonly remoteStorage: ObjectStorageAdapter;
   /** This channel's persisted sync positions — watermarks and repair floors. */
   readonly syncState: SyncStateStore;
   /** Idle tick timer — fires every exchangeIntervalMs unless nudged earlier. */
@@ -207,6 +217,33 @@ export interface SyncSupervisor {
    * awaits this first.
    */
   stopAppAndDrain(appId: string): Promise<void>;
+  /**
+   * One app's running engine, or null when it has none.
+   *
+   * The app-private fetch operation needs it: getting a blob back for a row
+   * whose bytes are not here is a transfer over the app's own channel, and the
+   * engine is what holds that channel's remote storage and its residency hooks.
+   *
+   * Null is an ordinary state, not a failure — a node with no cloud configured
+   * runs no engines at all, and there is genuinely nowhere to fetch from.
+   */
+  engineFor(appId: string): SyncEngine | null;
+  /**
+   * One app's channel to the cloud's object store, or null when it has none.
+   *
+   * The durability question a drop asks — "does the cloud still hold these
+   * bytes?" — is a question about an app-private key, and the only identity
+   * entitled to an answer is the app's own. The node's S3 adapter carries the
+   * human operator's STS credentials, which the files bucket denies on
+   * `apps/*`, and `S3ObjectStorageAdapter.stat` maps that denial to null: the
+   * refusal would read as *absence*, so a non-regenerable app could never drop
+   * a blob anywhere, however many copies existed.
+   *
+   * Null is an ordinary state: a node with no cloud configured runs no engines,
+   * and a node that cannot ask has no evidence — which is the fail-closed
+   * direction a drop already treats as a refusal.
+   */
+  remoteStorageFor(appId: string): ObjectStorageAdapter | null;
 }
 
 /**
@@ -325,6 +362,7 @@ export function createSyncSupervisor(
     engine: SyncEngine,
     syncState: SyncStateStore,
     baseUrl: string,
+    remoteStorage: ObjectStorageAdapter,
   ): void {
     // Each engine emits pull-side events (local-data-synced) on its own
     // internal notifier; forward them onto the SDK's unified notifier so the
@@ -338,6 +376,7 @@ export function createSyncSupervisor(
       appId,
       engine,
       syncState,
+      remoteStorage,
       tickTimer: null,
       nudgeTimer: null,
       unsubscribeForwarding,
@@ -389,7 +428,7 @@ export function createSyncSupervisor(
       ...(residency ? { residency } : {}),
       // No appSyncableSource: the Drive channel never carries app-specific rows.
     });
-    makeEngineEntry(DRIVE_APP_ID, engine, syncState, baseUrl);
+    makeEngineEntry(DRIVE_APP_ID, engine, syncState, baseUrl, remoteStorage);
   }
 
   function startEngineFor(appId: string): void {
@@ -436,7 +475,7 @@ export function createSyncSupervisor(
       },
     });
 
-    makeEngineEntry(appId, engine, syncState, perAppBaseUrl);
+    makeEngineEntry(appId, engine, syncState, perAppBaseUrl, remoteStorage);
   }
 
   function stopEngineFor(appId: string): void {
@@ -806,6 +845,14 @@ export function createSyncSupervisor(
     },
 
     rescan,
+
+    engineFor(appId: string): SyncEngine | null {
+      return engines.get(appId)?.engine ?? null;
+    },
+
+    remoteStorageFor(appId: string): ObjectStorageAdapter | null {
+      return engines.get(appId)?.remoteStorage ?? null;
+    },
 
     async stopAppAndDrain(appId: string): Promise<void> {
       const entry = engines.get(appId);

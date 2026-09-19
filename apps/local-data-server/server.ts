@@ -21,6 +21,7 @@ import {
   appRegistryRow,
   listAppRegistry,
   sizeClassKeysByApp,
+  regenerableBlobApps,
   listInstallSteps,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
@@ -80,6 +81,7 @@ import { sha256HexToBase64, loadVariantsForPage, loadVariantCandidatesForPage } 
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import type { NodeRetentionPolicy, OverrideRule } from "../../packages/sync-engine/src/index.js";
 import { createResidencyManager, residencyHooks, originalClassFor } from "../../packages/sync-engine/src/index.js";
+import { createAppBlobPlane } from "./app-blob-plane.js";
 import { buildCensus } from "./census.js";
 import {
   createStarkeepId,
@@ -759,12 +761,28 @@ async function main() {
   // this object at construction, so a fresh object would leave it reading the
   // boot-time map forever.
   const sizeClassKeys: Record<string, string> = sizeClassKeysByApp(localDb);
-  function refreshSizeClassKeys(): void {
+  // The same treatment, and for the same reason: an app that declares its
+  // private blobs re-derivable must be readable as such the moment it is
+  // installed, and this set is mutated in place because the residency manager
+  // closes over it.
+  const regenerableApps: Set<string> = regenerableBlobApps(localDb);
+  /**
+   * Re-read both manifest-derived facts the residency manager holds.
+   *
+   * Called on install and on removal, neither of which restarts this process.
+   * Read once at boot instead and a freshly installed app's derivatives land
+   * under `<app>:unclassified` rather than its declared rungs, and its
+   * regenerable declaration does not take effect until an unrelated restart.
+   */
+  function refreshAppFactsFromRegistry(): void {
     const next = sizeClassKeysByApp(localDb);
     for (const appId of Object.keys(sizeClassKeys)) {
       if (!(appId in next)) delete sizeClassKeys[appId];
     }
     Object.assign(sizeClassKeys, next);
+    const nextRegenerable = regenerableBlobApps(localDb);
+    regenerableApps.clear();
+    for (const appId of nextRegenerable) regenerableApps.add(appId);
   }
 
   const residencyManager = starkeepConfig.retention
@@ -776,6 +794,12 @@ async function main() {
         // plumbing never names `photos/rendition`, so a ladder can be
         // respecified — and a second app can own one — without a change here.
         sizeClassKeys,
+        // Which apps may drop their own last copy, from each manifest's
+        // `appSpecificSyncable.files.regenerable`. Read from the registry
+        // rather than configured here, because it is a claim the app makes
+        // about its own bytes and not a decision an operator should be able to
+        // get wrong on Memo's behalf.
+        regenerableBlobApps: regenerableApps,
         // The local data server is never the cloud node. `starkeep/no-cloud`
         // is a constraint about cloud storage; a laptop holding such a record
         // is the intended outcome, not a violation.
@@ -805,6 +829,12 @@ async function main() {
   // emit on the same notifier without an originAppId (Drive owns them).
   const changeNotifier = createChangeNotifier();
 
+  // Declared before the factory because the blob plane's fetch operation needs
+  // an app's engine and the supervisor is built below. Read through a closure
+  // rather than captured, so an engine that starts after this line is still
+  // reachable.
+  let supervisor: SyncSupervisor | null = null;
+
   const appSpecificFactory = createAppSpecificFactory({
     namespace: namespaceStore,
     applier: appApplier,
@@ -815,6 +845,18 @@ async function main() {
     },
     clock,
     changeNotifier,
+    // What this node can say about an app's own bytes: what it holds, what it
+    // may let go of, and how it gets them back. The platform no longer decides
+    // any of that for an app — see `app-blob-plane.ts`.
+    blobPlane: createAppBlobPlane({
+      residency: residencyManager,
+      // The app's own channel, not `remoteAdapter`. `remoteAdapter` signs as
+      // the human operator, whose credentials the files bucket denies on
+      // `apps/*` — and the denial reads as absence, so every durability
+      // question about an app-private key came back "no copy here".
+      remoteStorageFor: (appId) => supervisor?.remoteStorageFor(appId) ?? null,
+      engineFor: (appId) => supervisor?.engineFor(appId) ?? null,
+    }),
   });
 
   const sdk = await createStarkeepSdk({
@@ -848,7 +890,6 @@ async function main() {
 
   // Sync supervisor: owns N SyncEngine instances, one per installed app.
   // Without a cloud URL or sync state store there's no sync — leave it null.
-  let supervisor: SyncSupervisor | null = null;
   if (CLOUD_URL && syncStateStore) {
     supervisor = createSyncSupervisor({
       sdk,
@@ -2485,6 +2526,75 @@ async function main() {
           }
         }
 
+        // GET /app-data/residency — what this node holds of the app's private
+        // plane, and against what ceiling.
+        //
+        // The read half of an advisory budget. The platform reports the overrun
+        // and never acts on one, so this is the only way an app finds out it
+        // has gone past its number — and the app is the only party that can
+        // tell a disposable rendition from the one recording of something
+        // somebody said.
+        if (path === "/app-data/residency" && req.method === "GET") {
+          try {
+            const page = await view.blobResidency(url.searchParams.get("cursor"));
+            json(res, page);
+            return;
+          } catch (err) {
+            res.writeHead(400);
+            json(res, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+        }
+
+        // The three per-blob operations, matched before the bare
+        // `/app-data/files/<subKey>` route below — a subKey may contain slashes,
+        // so that pattern would otherwise swallow the suffix and read it as
+        // part of the key.
+        const blobOpMatch = path.match(/^\/app-data\/files\/(.+)\/(blob|touch|fetch)$/);
+        if (blobOpMatch) {
+          const subKey = decodeURIComponent(blobOpMatch[1]!);
+          const operation = blobOpMatch[2]!;
+          try {
+            // DELETE .../blob — let the bytes go and keep the file. Refused
+            // where they would be the last copy of something the app has not
+            // declared re-derivable.
+            if (operation === "blob" && req.method === "DELETE") {
+              const outcome = await view.dropBlob(subKey);
+              if (!outcome.dropped && outcome.reason === "not-durable") {
+                // 409, not 403. The request is well-formed and the caller is
+                // entitled to make it; the node simply cannot see a second copy
+                // right now, and it may be able to after the next sync.
+                res.writeHead(409);
+              }
+              json(res, outcome);
+              return;
+            }
+            if (operation === "touch" && req.method === "POST") {
+              await view.touchBlob(subKey);
+              json(res, { ok: true });
+              return;
+            }
+            // POST .../fetch — bring the bytes back for a row whose blob is not
+            // here. A round applies the app's rows and leaves its blobs alone
+            // now, so this is how they arrive at all.
+            if (operation === "fetch" && req.method === "POST") {
+              const outcome = await view.fetchBlob(subKey);
+              if (!outcome.landed && outcome.reason === "unavailable") {
+                res.writeHead(503);
+              }
+              json(res, outcome);
+              return;
+            }
+            res.writeHead(405);
+            json(res, { error: "Method not allowed" });
+            return;
+          } catch (err) {
+            res.writeHead(400);
+            json(res, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+        }
+
         const fileMatch = path.match(/^\/app-data\/files\/(.+)$/);
         if (fileMatch) {
           const subKey = decodeURIComponent(fileMatch[1]!);
@@ -2818,6 +2928,13 @@ async function main() {
           configured: true,
           census,
           projection: projectPolicy(starkeepConfig.retention, census),
+          // What this node is actually holding per namespace, which the
+          // projection cannot supply: a projection is what a policy *would*
+          // allow against the library, and an app's advisory ceiling is only
+          // meaningful beside the bytes it is being measured against. The
+          // platform reports an app's overrun and never acts on one, so this
+          // number is the whole of what "reported" means.
+          heldByNamespace: residencyManager?.usageByNamespace() ?? {},
           // Echoed back so an editor can seed itself from what is actually in
           // force. Without it the UI would have to keep its own copy of the
           // policy and could drift from the daemon's.
@@ -3474,7 +3591,7 @@ async function main() {
           // And make its ladder legible before it writes anything, so its
           // derivatives are classified by the rungs it declares rather than
           // landing in `<app>:unclassified` until the next restart.
-          refreshSizeClassKeys();
+          refreshAppFactsFromRegistry();
           json(res, { appId: result.appId, hmacSecret: result.hmacSecret });
         } catch (err) {
           if (err instanceof ManifestValidationError) {
@@ -3513,7 +3630,7 @@ async function main() {
           clearSyncState: () => deletePerAppSyncState(localDb, targetAppId),
         });
         supervisor?.rescan();
-        refreshSizeClassKeys();
+        refreshAppFactsFromRegistry();
         json(res, { ok: true, appId: targetAppId });
         return;
       }
@@ -3538,7 +3655,7 @@ async function main() {
         });
         // Tear down the per-app sync loop, and drop its ladder key with it.
         supervisor?.rescan();
-        refreshSizeClassKeys();
+        refreshAppFactsFromRegistry();
         json(res, { ok: true, appId: targetAppId, deleteData });
         return;
       }

@@ -126,6 +126,7 @@ import {
 } from "./round-cut.js";
 import type {
   BlobCandidate,
+  ResidencyTrigger,
   ResidencyVerdict,
   ResolvedSizeClass,
 } from "./residency-policy.js";
@@ -792,7 +793,18 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             // Only `budget-exhausted`. `not-prefetched` classes exist precisely
             // so nothing acquires them speculatively; `class-disabled` and
             // `record-constraint` are standing refusals.
-            if (verdict.reason === "budget-exhausted" && residency.defer) {
+            //
+            // An app blob is the exception, and for a reason that is about the
+            // *row* rather than the queue. Every app blob elides as
+            // `not-prefetched`, and an app namespace has no acquisition pass at
+            // all — `acquirableLines` filters it out structurally — so the row
+            // this writes is a listing entry and nothing else. Without it
+            // `GET /app-data/residency` omits the file entirely, and an app has
+            // no way to learn from the platform that there are bytes it could
+            // ask for. That is the whole plane: the platform stopped deciding,
+            // so it owes the app the inventory to decide from.
+            const listable = candidate.appId !== null;
+            if ((verdict.reason === "budget-exhausted" || listable) && residency.defer) {
               // Never `failed`. A queue write is an optimisation over a
               // catalogue scan that would find the same blob anyway, and
               // letting it hold a watermark would make an optional index a
@@ -1385,15 +1397,18 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
      * verdict's reason, because the pass reads it as a control signal — a full
      * line ends the walk, a disabled class ends the row.
      *
-     * `decide` is called with the `acquisition` trigger, i.e. as a speculative
-     * arrival that respects `prefetch`. This path is subject to the policy in a
-     * way `fetchBlob` deliberately is not, so a pass working through forty
-     * thousand queued blobs stops at the budget instead of emptying the cloud
-     * onto the phone.
+     * `decide` is called with the `acquisition` trigger by default, i.e. as a
+     * speculative arrival that respects `prefetch`. This path is subject to the
+     * policy in a way `fetchBlob` deliberately is not, so a pass working through
+     * forty thousand queued blobs stops at the budget instead of emptying the
+     * cloud onto the phone. A caller answering something that actually asked
+     * passes `"request"` instead, which sets `prefetch` aside and leaves every
+     * other rule in force.
      */
     async acquireBlob(
       manifest: FileSyncManifest,
       candidate: BlobCandidate,
+      trigger: Extract<ResidencyTrigger, "acquisition" | "request"> = "acquisition",
     ): Promise<AcquireResult> {
       let verdict: ResidencyVerdict | null = null;
       if (residency) {
@@ -1401,7 +1416,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           // The queue is best-first, so displacement here swaps in the best
           // blob the node is missing rather than whatever the change log
           // reached next — which is the whole reason the round gives it up.
-          verdict = await residency.decide(candidate, "acquisition");
+          verdict = await residency.decide(candidate, trigger);
         } catch (err) {
           console.warn(
             `[sync] residency decide failed while acquiring ${manifest.objectStorageKey}: ${(err as Error).message}`,

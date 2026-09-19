@@ -22,6 +22,7 @@ export {
   type AppComputeRoute,
   type AppComputeHandler,
   type AppSpecificSyncable,
+  type AppSyncableFiles,
   type SyncableTable,
   type SyncableTableColumn,
   type InfraRequirements,

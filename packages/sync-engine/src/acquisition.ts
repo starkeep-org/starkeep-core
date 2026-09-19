@@ -202,6 +202,11 @@ function acquirableLines(
     lines.set(budgetLine.key, budgetLine);
   }
 
+  // An app's line never survives this filter, and that is the rule rather than
+  // an accident: every app blob is `prefetch: false`, because what an app wants
+  // resident is a decision the app makes from its own table. The app asks for
+  // bytes through the app-private fetch operation instead, which carries the
+  // `request` trigger and is the only thing that sets `prefetch` aside.
   return [...lines.values()].filter(
     (budgetLine) =>
       retentionRowFor(policy, budgetLine).prefetch &&

@@ -105,7 +105,7 @@ describe("with a retention policy configured", () => {
             budgetBytes: 1024,
           },
           apps: {},
-          appFallback: { rows: {}, fallback: { prefetch: false, share: 1 }, budgetBytes: 1024 },
+          appFallback: { budgetBytes: 1024 },
         },
       },
     });

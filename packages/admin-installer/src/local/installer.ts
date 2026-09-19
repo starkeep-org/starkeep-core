@@ -139,7 +139,7 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
     done,
     () => {
       createAppSyncableTables(db, appId, syncable.tables);
-      if (syncable.files) {
+      if (syncable.files.enabled) {
         createReservedFileRecordsTable(db, appId);
       }
     },
@@ -151,10 +151,10 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
     // the DSQL side: the query parser validates a filter value against its
     // column, and it runs in the data server, which never sees a manifest.
     const declaredTables = syncable.tables.map((t) => appSyncableTableInfo(t.name, t.columns));
-    const tables = syncable.files
+    const tables = syncable.files.enabled
       ? [...declaredTables, FILE_RECORDS_TABLE_INFO]
       : declaredTables;
-    upsertAppSyncableNamespace(db, appId, tables, syncable.files);
+    upsertAppSyncableNamespace(db, appId, tables, syncable.files.enabled);
   }, alwaysRun);
 
   runStep(db, appId, "install", "mark_active", done, () => {

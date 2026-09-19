@@ -204,6 +204,15 @@ export interface ReconcileReport {
  */
 export type ResidentArrival = Omit<ResidentEntry, "resident" | "reserved" | "heldEver">;
 
+/** One page of a namespace's entries, keyed by object storage key. */
+export interface NamespaceEntryQuery {
+  /** `ResolvedSizeClass.namespace` — an app id, or the platform namespace. */
+  readonly namespace: string;
+  /** Return keys strictly greater than this one. Null starts at the beginning. */
+  readonly after: string | null;
+  readonly limit: number;
+}
+
 /** One page of the acquisition queue for a budget line. */
 export interface DeferredCandidateQuery {
   /** `BudgetLine.key` — the line whose queue this is. */
@@ -382,6 +391,21 @@ export interface ResidentSetIndex {
   /** Every entry of a class, for a budget-reduction impact preview. */
   entriesOf(sizeClass: string): ResidentEntry[];
   /**
+   * One page of a namespace's entries, ordered by object key.
+   *
+   * What an app reads to find out what it is holding on this node and what it
+   * has already let go of, so it can decide which of its own blobs to drop
+   * against a ceiling the platform reports and does not enforce.
+   *
+   * Ordered by key rather than by eviction rank because this is a *listing*,
+   * not a queue: a caller walking it wants each blob exactly once, and the
+   * eviction order moves under it every time somebody opens something. Departed
+   * and deferred rows are included — "this node had these bytes and let them
+   * go" is the answer to half the questions an app asks here, and `resident`
+   * on each entry says which it is.
+   */
+  entriesOfNamespace(query: NamespaceEntryQuery): ResidentEntry[];
+  /**
    * Every held blob belonging to one record — an original and its renditions
    * are separate rows here. Pinning or opening a record touches all of them,
    * and doing that by scanning would make a UI action O(library).
@@ -480,15 +504,27 @@ export function createSqliteResidentSetIndex(options: {
       .compile().sql,
   );
   // Reporting only — the census and the storage report group by class, and
-  // neither is on a decision path. There is deliberately no namespace index:
-  // the one query that groups by namespace is a whole-table roll-up for a UI
-  // header, which an index would not help.
+  // neither is on a decision path.
   db.exec(
     qb.schema
       .createIndex(`${TABLE}_by_class`)
       .ifNotExists()
       .on(TABLE)
       .columns(["size_class"])
+      .compile().sql,
+  );
+  // One app's own listing of what this node holds for it, paged by key. The
+  // ordering column follows the equality column, so the index *is* the sort and
+  // a page costs its own rows rather than a scan of every namespace's.
+  //
+  // The namespace roll-up that groups for a UI header is still a whole-table
+  // aggregate and still does not need an index; this is the query that does.
+  db.exec(
+    qb.schema
+      .createIndex(`${TABLE}_by_namespace_key`)
+      .ifNotExists()
+      .on(TABLE)
+      .columns(["namespace", "object_storage_key"])
       .compile().sql,
   );
   // Pinning or opening a record updates every rendition of it, and that has to
@@ -564,10 +600,26 @@ export function createSqliteResidentSetIndex(options: {
           // held, and the eviction record it becomes on the way out depends on
           // saying so.
           held_ever: eb.ref("excluded.held_ever"),
-          // pinned and last_opened_at_ms are deliberately NOT overwritten: they
-          // are node-local user state, and a re-arrival of the same bytes (a
-          // re-sync, a re-derivation) is not a reason to forget that someone
-          // pinned this or opened it yesterday.
+          // Taken from the arrival when the arrival carries one, and otherwise
+          // left alone. Both halves matter. An arrival with nothing to say
+          // about opens must not erase a real one — a re-sync or a
+          // re-derivation of the same bytes is no reason to forget that
+          // somebody opened this yesterday — but an arrival that *was* told
+          // when the blob was opened is the only thing that knows.
+          //
+          // A blanket refusal to overwrite lost exactly that. `reserve` writes
+          // the row first with a null here, so the value an on-demand fetch
+          // carries (`lastOpenedAtMs: Date.now()` — the request *is* the open)
+          // landed on a row that already existed and was discarded. Every blob
+          // that arrived through a reservation ranked never-opened, which is
+          // the front of the queue to be given up again: the node dropped
+          // precisely what had just been asked for.
+          last_opened_at_ms: sql.raw(
+            `coalesce(excluded.last_opened_at_ms, ${TABLE}.last_opened_at_ms)`,
+          ),
+          // `pinned` is deliberately NOT overwritten: it is node-local user
+          // state with no per-arrival value to carry, so an arrival has nothing
+          // to say about it.
         })),
       )
       .compile().sql,
@@ -635,6 +687,27 @@ export function createSqliteResidentSetIndex(options: {
   // is where that intent has to land, because there is nowhere else.
   const entriesOfRecordStmt = db.prepare(
     qb.selectFrom(TABLE).selectAll().where("record_id", "=", sql.raw("?")).compile().sql,
+  );
+  // Two statements rather than one with an `OR key > ''`, because the first
+  // page and the rest are different queries and SQLite plans them as such.
+  const namespacePageStmt = db.prepare(
+    qb
+      .selectFrom(TABLE)
+      .selectAll()
+      .where("namespace", "=", sql.raw("?"))
+      .orderBy("object_storage_key", "asc")
+      .limit(sql.raw("?") as unknown as number)
+      .compile().sql,
+  );
+  const namespacePageAfterStmt = db.prepare(
+    qb
+      .selectFrom(TABLE)
+      .selectAll()
+      .where("namespace", "=", sql.raw("?"))
+      .where("object_storage_key", ">", sql.raw("?"))
+      .orderBy("object_storage_key", "asc")
+      .limit(sql.raw("?") as unknown as number)
+      .compile().sql,
   );
   const unevictableStmt = db.prepare(
     qb
@@ -1092,6 +1165,14 @@ export function createSqliteResidentSetIndex(options: {
 
     entriesOfRecord(recordId: string): ResidentEntry[] {
       return (entriesOfRecordStmt.all(recordId) as unknown as Row[]).map(toEntry);
+    },
+
+    entriesOfNamespace(query: NamespaceEntryQuery): ResidentEntry[] {
+      const rows =
+        query.after === null
+          ? namespacePageStmt.all(query.namespace, query.limit)
+          : namespacePageAfterStmt.all(query.namespace, query.after, query.limit);
+      return (rows as unknown as Row[]).map(toEntry);
     },
   };
 }

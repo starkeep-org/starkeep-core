@@ -316,6 +316,14 @@ and show only the originals. Guidance:
   `image_enriched` table (caption, title, date override).
 - `files: true` — opt into an `apps/<appId>/syncable/` object-storage prefix for
   app-private blobs. Leave false for row-only apps.
+- `files: { "regenerable": true }` — the same opt-in, plus a claim that your app
+  can make these bytes again from something it still holds. `true` alone means
+  `{ "regenerable": false }`, which is the conservative reading and what every
+  manifest written before the field existed says. The node reads the bit to
+  answer one question: may this machine drop the last copy of one of your
+  private files? Photos' renditions can be rebuilt from an original the platform
+  still holds and say so; Memo's recordings cannot be rebuilt from anything and
+  do not.
 - `indexes[]` on a table — an ordered column list, e.g.
   `{"columns": ["deck_id", "due"]}`. Declare one for every filter and grouping
   your app actually issues. Without a matching index a filter is a full scan
@@ -340,7 +348,37 @@ a database constraint. A flag has **no ordering**, so `lt`, `lte`, `gt`, `gte`,
 `min`, `max` and `order` all refuse a boolean column; use `is`, equality and
 `ne`, which is every question a flag answers.
 
-### 6a. Querying your app's tables
+### 6a. Spending your app's disk
+
+The platform gives your app one byte ceiling per node and does not enforce it.
+It cannot: your private blobs are opaque to it, and it has no way to tell a
+rendition it could rebuild from a recording that exists nowhere else. So it
+measures, reports, and leaves the decision with you. Nothing evicts your bytes,
+and a sync round applies your rows without pulling your blobs — an app blob
+arrives only when something asks for it.
+
+Four routes make that workable, and each is scoped to the calling app the way
+every `/app-data/` route is.
+
+| route | what it does |
+|---|---|
+| `GET /app-data/residency?cursor=` | Your ceiling, what this node holds against it, and a page of `{ subKey, sizeBytes, resident, lastOpenedAtMs }`. `budgetBytes` is null where there is no ceiling — the cloud. |
+| `POST /app-data/files/<subKey>/touch` | Record that you opened this blob, so the order you give blobs up in reflects use rather than age. |
+| `DELETE /app-data/files/<subKey>/blob` | Let the bytes go and keep the file. |
+| `POST /app-data/files/<subKey>/fetch` | Bring the bytes back for a file whose blob is not here. |
+
+**Dropping is not deleting, and the difference is the point.** `DELETE
+/app-data/files/<subKey>` tombstones the row and the tombstone travels, so an
+app reclaiming disk on a laptop would lose the file on every device. Dropping
+the blob leaves the row alone and writes nothing any peer will see: the file
+survives everywhere, and only this machine's copy of the bytes goes.
+
+A drop is refused with 409 and `reason: "not-durable"` when the bytes would be
+the last copy and your manifest has not declared `files: { "regenerable": true }`.
+That refusal is the whole of what protects app data nothing can rebuild, so it
+is deliberately not something an operator can switch off.
+
+### 6b. Querying your app's tables
 
 `GET /app-data/db/<table>` takes a query grammar. Every top-level parameter
 name below is reserved, which is what lets filters live under `where` with no
@@ -692,7 +730,7 @@ Things worth knowing before you design around them:
 
 ### 9a. Querying metadata and labels
 
-The same grammar §6a describes over your own tables also answers two shared
+The same grammar §6b describes over your own tables also answers two shared
 tables. Every parameter means what it means there — `where`, `select`, `order`,
 `limit`, `page_token` and `aggregate` — and the response is the same
 `{rows, truncated, page_token}` or `{groups, truncated}`.

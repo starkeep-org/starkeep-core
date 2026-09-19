@@ -1784,6 +1784,93 @@ describe("/app-data routes", () => {
     expect(gone.statusCode).toBe(404);
   });
 
+  // ---- The app-private blob plane, as the cloud answers it ----
+  //
+  // The cloud is the durable replica: no budget, no eviction, and every byte it
+  // has a row for is here. The routes exist anyway, and answer that, so one app
+  // code path works against either backend instead of branching on which kind
+  // of node it is talking to.
+  describe("the app-private blob plane", () => {
+    it("reports every live file as resident, under no ceiling", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, [fileRow]),
+      );
+      const res = await handler(
+        signedEvent({ appId: "appdata1", method: "GET", subPath: "/app-data/residency" }),
+        context,
+      );
+      expect(res.statusCode).toBe(200);
+      const body = bodyOf(res);
+      // Null, not a number. A ceiling the cloud reported and did not enforce
+      // would be a limit an app could read and act on for no reason.
+      expect(body["budgetBytes"]).toBeNull();
+      expect(body["entries"]).toEqual([
+        { subKey: "cover", sizeBytes: 21, resident: true, lastOpenedAtMs: null },
+      ]);
+    });
+
+    /**
+     * The refusal, and why it is unconditional here.
+     *
+     * The cloud is what a dropped blob is fetched back *from*. Letting an app
+     * delete the bytes there while keeping a row pointing at them makes a file
+     * nothing can ever open again — and `deleteFile` already exists for
+     * deleting a file the app means to delete.
+     */
+    it("refuses to drop bytes, because it is the copy everything else fetches from", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, [fileRow]),
+      );
+      const res = await handler(
+        signedEvent({ appId: "appdata1", method: "DELETE", subPath: "/app-data/files/cover/blob" }),
+        context,
+      );
+      expect(res.statusCode).toBe(409);
+      expect(bodyOf(res)).toMatchObject({ dropped: false, reason: "refused" });
+    });
+
+    // Accepted and recorded nowhere: there is no eviction order here to record
+    // into, and an app should not have to know which kind of node it is talking
+    // to before saying it opened something.
+    it("accepts an open it has nowhere to record", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, [fileRow]),
+      );
+      const res = await handler(
+        signedEvent({ appId: "appdata1", method: "POST", subPath: "/app-data/files/cover/touch" }),
+        context,
+      );
+      expect(res.statusCode).toBe(200);
+    });
+
+    it("answers a fetch with already-here, because the bytes never left", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, [fileRow]),
+      );
+      const res = await handler(
+        signedEvent({ appId: "appdata1", method: "POST", subPath: "/app-data/files/cover/fetch" }),
+        context,
+      );
+      expect(res.statusCode).toBe(200);
+      expect(bodyOf(res)).toMatchObject({ landed: false, reason: "already-here" });
+    });
+
+    // A subKey may contain slashes, so the bare file route would otherwise read
+    // `/blob` as part of the key and answer a presigned URL for a file called
+    // `cover/blob`.
+    it("does not let the per-file route swallow an operation suffix", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, []),
+      );
+      const res = await handler(
+        signedEvent({ appId: "appdata1", method: "POST", subPath: "/app-data/files/cover/touch" }),
+        context,
+      );
+      expect(res.statusCode).toBe(400);
+      expect(bodyOf(res)["error"]).toMatch(/File not found/);
+    });
+  });
+
   // ---- Batch playback URLs ----
   //
   // The per-file GET above costs one request per file. A client that needs
