@@ -316,16 +316,20 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         // it into the signature, so omitting it is not a thing a client can get
         // away with), and the body must hash to it.
         const expected = contentHashFromDataRecordObjectKey(key);
-        if (expected) {
-          const supplied = req.headers["x-amz-checksum-sha256"];
-          if (typeof supplied !== "string") {
-            sendJson(res, 400, {
-              error: `missing x-amz-checksum-sha256 for content-addressed key ${key}`,
-            });
-            return;
-          }
+        const supplied = req.headers["x-amz-checksum-sha256"];
+        if (expected && typeof supplied !== "string") {
+          sendJson(res, 400, {
+            error: `missing x-amz-checksum-sha256 for content-addressed key ${key}`,
+          });
+          return;
+        }
+        // Whatever checksum header arrives is checked, on any key — which is
+        // what S3 does, and what lets an app-private object be stored with a
+        // digest the store itself verified. A content-addressed key is held to
+        // the stricter rule as well: the header must also be the key's own hash.
+        if (typeof supplied === "string") {
           const actual = createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64");
-          if (actual !== supplied || supplied !== sha256HexToBase64(expected)) {
+          if (actual !== supplied || (expected && supplied !== sha256HexToBase64(expected))) {
             sendJson(res, 400, {
               error: `BadDigest: body ${actual} vs declared ${supplied} for key ${key}`,
             });
@@ -334,7 +338,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         }
         await objectStorage.put(key, bytes, {
           contentType: typeof contentType === "string" ? contentType : undefined,
-          ...(expected ? { checksumSha256: sha256HexToBase64(expected) } : {}),
+          ...(typeof supplied === "string" ? { checksumSha256: supplied } : {}),
         });
         res.writeHead(200);
         res.end();
@@ -427,14 +431,24 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         sendJson(res, 500, { error: "injected blob-put failure" });
         return;
       }
-      const { key } = JSON.parse(rawBody.toString("utf8")) as { key: string };
+      const { key, contentSha256 } = JSON.parse(rawBody.toString("utf8")) as {
+        key: string;
+        contentSha256?: string;
+      };
       // Mirror the real broker: derive the expected checksum from the
       // content-addressed key and pin it. The /__blob/ stand-in below enforces
       // it, so a client that forgets the header fails here exactly as it would
       // against S3 — which is the only reason a round-trip test of the verified
       // upload path proves anything.
+      //
+      // An app-private key carries no derivable digest, so the uploader's
+      // declared one is pinned instead — again as the broker does. Without
+      // this the fake stores app bytes with no checksum and reports none at
+      // stat, and a node asking whether the cloud holds an app's exact bytes
+      // could only ever be told "something of the right size is here".
       const contentHash = contentHashFromDataRecordObjectKey(key);
-      const checksumSha256 = contentHash ? sha256HexToBase64(contentHash) : undefined;
+      const pinnedHash = contentHash ?? contentSha256 ?? null;
+      const checksumSha256 = pinnedHash ? sha256HexToBase64(pinnedHash) : undefined;
       sendJson(res, 200, {
         url: blobUrl(key),
         ...(checksumSha256 ? { checksumSha256 } : {}),

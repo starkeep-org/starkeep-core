@@ -2797,6 +2797,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         key?: string;
         contentType?: string;
         intent?: string;
+        contentSha256?: string;
       };
       if (!body.key) return clientErr("key is required", 400);
       const check = parseObjectKey(appId, body.key, grants, "write");
@@ -2821,13 +2822,32 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // storing it, which is what turns "the upload returned 200" into
       // "S3 confirmed these bytes are the bytes this key names".
       //
-      // App-syncable keys are deliberately not content-addressed, so they get
-      // no pin; the helper returns null for them.
+      // App-syncable keys are deliberately not content-addressed, so the helper
+      // returns null for them and the uploader's declared `contentSha256` is
+      // the pin instead. The guarantee is one step weaker than the shared
+      // plane's and still worth having: the store confirms the object holds
+      // the bytes the app's own file row names, which is exactly the question
+      // a node asks before dropping its last local copy.
       const noCloud = await keyIsCloudExcluded(db, body.key);
       if (noCloud) return clientErr(NO_CLOUD_REFUSAL, 403);
 
+      // An app-private key is named by the app rather than by its content, so
+      // the only party that knows the digest is the uploader. Refusing a
+      // malformed one rather than dropping it: an uploader that meant to be
+      // verified and was quietly not is the exact failure this pin exists to
+      // remove, and it would be invisible until a drop somewhere refused for
+      // reasons nobody could see.
+      if (body.contentSha256 !== undefined && !/^[a-f0-9]{64}$/.test(body.contentSha256)) {
+        return clientErr("contentSha256 must be a lowercase hex sha256", 400);
+      }
       const contentHash = contentHashFromDataRecordObjectKey(body.key);
-      const checksumSha256 = contentHash ? sha256HexToBase64(contentHash) : undefined;
+      // The key wins wherever it carries a hash. A content-addressed key *is*
+      // its digest, so an uploader has no say in what it may write there and
+      // sending a different `contentSha256` changes nothing — the pin below
+      // still comes from the key, and S3 still rejects a body that hashes to
+      // anything else.
+      const pinnedHash = contentHash ?? body.contentSha256 ?? null;
+      const checksumSha256 = pinnedHash ? sha256HexToBase64(pinnedHash) : undefined;
       const tagging = tagsForIntent(intent);
       const url = await storage.getSignedPutUrl!(body.key, {
         expiresIn: 3600,

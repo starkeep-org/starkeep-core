@@ -2,14 +2,32 @@ import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink, readlink, a
 import { createReadStream, createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import { verifyingStream } from "@starkeep/storage-adapter";
+import { verifyingStream, sha256HexToBase64 } from "@starkeep/storage-adapter";
 import type { ByteRange, PutOptions, PutStreamOptions, GetResult, ListOptions, ListResult, ObjectFacts } from "@starkeep/storage-adapter";
 
 export interface FsObjectStorageAdapterOptions {
   basePath: string;
+}
+
+/**
+ * What the `.meta.json` beside an object carries.
+ *
+ * `checksumSha256` is the one field that is a claim about *provenance* rather
+ * than a copy of what the caller said. It is written only where this adapter
+ * verified the bytes as it stored them — a `put` whose supplied digest was
+ * recomputed here, or a `putStream` whose verifying stream would have failed
+ * the write — so `stat` reporting it means the same thing S3 reporting it
+ * means. Anything written without a digest leaves it absent, and `stat` then
+ * answers null, which callers read as "unknown".
+ */
+interface ObjectSidecar {
+  contentType?: string;
+  metadata?: Record<string, string>;
+  tags?: Record<string, string>;
+  checksumSha256?: string;
 }
 
 export class FsObjectStorageAdapter implements ObjectStorageAdapter {
@@ -45,13 +63,40 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
 
   async put(key: string, data: Buffer | Uint8Array, options?: PutOptions): Promise<void> {
     const filePath = this.keyToPath(key);
+    // Verified before a byte is written, the way a store that was handed a
+    // checksum verifies it: a mismatched body is rejected rather than stored.
+    // The digest is recomputed here rather than trusted, which is what makes
+    // recording it in the sidecar a statement this adapter is entitled to make.
+    if (options?.checksumSha256) {
+      const actual = createHash("sha256").update(data as unknown as Uint8Array).digest("base64");
+      if (actual !== options.checksumSha256) {
+        throw new Error(
+          `BadDigest: body hashes to ${actual}, caller declared ${options.checksumSha256} for key ${key}`,
+        );
+      }
+    }
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, data);
-    if (options?.contentType || options?.metadata) {
-      await writeFile(
-        `${filePath}.meta.json`,
-        JSON.stringify({ contentType: options.contentType, metadata: options.metadata }),
-      );
+    await this.writeSidecar(filePath, {
+      ...(options?.contentType ? { contentType: options.contentType } : {}),
+      ...(options?.metadata ? { metadata: options.metadata } : {}),
+      ...(options?.checksumSha256 ? { checksumSha256: options.checksumSha256 } : {}),
+    });
+  }
+
+  /** Write the sidecar when there is anything to say, and not otherwise. */
+  private async writeSidecar(filePath: string, sidecar: ObjectSidecar): Promise<void> {
+    if (Object.keys(sidecar).length === 0) return;
+    await writeFile(`${filePath}.meta.json`, JSON.stringify(sidecar));
+  }
+
+  /** The sidecar beside an object, or an empty one where there is none. */
+  private async readSidecar(filePath: string): Promise<ObjectSidecar> {
+    try {
+      return JSON.parse(await readFile(`${filePath}.meta.json`, "utf8")) as ObjectSidecar;
+    } catch {
+      // No sidecar — a symlinked file, or one written before sidecars existed.
+      return {};
     }
   }
 
@@ -110,28 +155,24 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
       throw err;
     }
 
-    if (options?.contentType || options?.metadata) {
-      await writeFile(
-        `${filePath}.meta.json`,
-        JSON.stringify({ contentType: options.contentType, metadata: options.metadata }),
-      );
-    }
+    await this.writeSidecar(filePath, {
+      ...(options?.contentType ? { contentType: options.contentType } : {}),
+      ...(options?.metadata ? { metadata: options.metadata } : {}),
+      // The verifying stream above fails the write on a mismatch, so a stored
+      // object that was given an expected hash is an object whose bytes this
+      // adapter checked. Recorded in S3's encoding, because that is what
+      // `ObjectFacts.checksumSha256` is defined to carry.
+      ...(options?.expectedSha256Hex
+        ? { checksumSha256: sha256HexToBase64(options.expectedSha256Hex) }
+        : {}),
+    });
   }
 
   async get(key: string): Promise<GetResult | null> {
     const filePath = this.keyToPath(key);
     try {
       const data = await readFile(filePath);
-      let contentType: string | undefined;
-      let metadata: Record<string, string> | undefined;
-      try {
-        const metaRaw = await readFile(`${filePath}.meta.json`, "utf8");
-        const meta = JSON.parse(metaRaw) as { contentType?: string; metadata?: Record<string, string> };
-        contentType = meta.contentType;
-        metadata = meta.metadata;
-      } catch {
-        // No sidecar — older put() call or symlinked file. Leave contentType undefined.
-      }
+      const { contentType, metadata } = await this.readSidecar(filePath);
       return { data, contentType, metadata, size: data.length };
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -160,26 +201,16 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
       throw error;
     }
 
-    let contentType: string | undefined;
-    let metadata: Record<string, string> | undefined;
-    try {
-      const meta = JSON.parse(await readFile(`${filePath}.meta.json`, "utf8")) as {
-        contentType?: string;
-        metadata?: Record<string, string>;
-      };
-      contentType = meta.contentType;
-      metadata = meta.metadata;
-    } catch {
-      // No sidecar — symlinked or written before sidecars. Not an error.
-    }
+    const { contentType, metadata, checksumSha256 } = await this.readSidecar(filePath);
 
     return {
       sizeBytes: fileStat.size,
-      // A local filesystem verifies nothing at write time. Reporting null here
-      // is the honest answer and callers must read it as "unknown" — hashing
-      // the file to synthesize a value would be a lie about *provenance*: it
-      // would say the store confirmed these bytes when nothing did.
-      checksumSha256: null,
+      // Reported only where this adapter verified the bytes on the way in —
+      // see {@link ObjectSidecar}. A write that carried no digest leaves this
+      // null, and callers must read null as "unknown": hashing the file here
+      // to synthesize a value would be a lie about *provenance*, saying the
+      // store confirmed these bytes when nothing did.
+      checksumSha256: checksumSha256 ?? null,
       storageClass: null,
       // Bytes on a local disk are readable or absent; there is no third state.
       availability: { state: "instant" },
@@ -194,16 +225,8 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     // questions a cloud node can, and so a test can assert what was written
     // without a cloud.
     const filePath = this.keyToPath(key);
-    let existing: { contentType?: string; metadata?: Record<string, string> } = {};
-    try {
-      existing = JSON.parse(await readFile(`${filePath}.meta.json`, "utf8")) as typeof existing;
-    } catch {
-      // No sidecar yet.
-    }
-    await writeFile(
-      `${filePath}.meta.json`,
-      JSON.stringify({ ...existing, tags }),
-    );
+    const existing = await this.readSidecar(filePath);
+    await writeFile(`${filePath}.meta.json`, JSON.stringify({ ...existing, tags }));
   }
 
   async restoreObject(

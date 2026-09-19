@@ -164,16 +164,53 @@ describe("FsObjectStorageAdapter", () => {
       });
     });
 
-    // A local filesystem verifies nothing at write time, so it has nothing
-    // truthful to say here. Hashing the file at stat() time would be a lie
-    // about provenance — it would report "the store confirmed these bytes"
-    // when nothing did — and the durability predicate keys on exactly that
-    // distinction before it deletes anything.
-    it("reports an unknown checksum rather than synthesizing one", async () => {
-      await adapter.put("k", Buffer.from("bytes"), {
-        checksumSha256: "irrelevant-locally",
-      });
+    // Nothing was verified on the way in, so there is nothing truthful to say
+    // here. Hashing the file at stat() time would be a lie about provenance —
+    // it would report "the store confirmed these bytes" when nothing did — and
+    // the durability predicate keys on exactly that distinction before it
+    // deletes anything.
+    it("reports an unknown checksum for a write that carried no digest", async () => {
+      await adapter.put("k", Buffer.from("bytes"));
       expect((await adapter.stat("k"))?.checksumSha256).toBeNull();
+    });
+
+    // And the other half of the same rule: a digest the adapter *checked* is a
+    // fact it may report. This is what lets an app-private object stored here
+    // answer "does this hold exactly these bytes" rather than only "something
+    // of this size is here" — the question a node asks before dropping its
+    // last local copy.
+    it("reports a digest it verified at write time", async () => {
+      const bytes = Buffer.from("bytes");
+      const digest = createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64");
+      await adapter.put("k", bytes, { checksumSha256: digest });
+      expect((await adapter.stat("k"))?.checksumSha256).toBe(digest);
+    });
+
+    it("rejects a write whose body disagrees with the digest", async () => {
+      await expect(
+        adapter.put("k", Buffer.from("bytes"), {
+          checksumSha256: createHash("sha256").update("other bytes").digest("base64"),
+        }),
+      ).rejects.toThrow(/BadDigest/);
+      expect(await adapter.stat("k")).toBeNull();
+    });
+
+    it("reports the digest a verified stream was written under", async () => {
+      const bytes = Buffer.from("streamed bytes");
+      const hex = createHash("sha256").update(bytes as unknown as Uint8Array).digest("hex");
+      await adapter.putStream(
+        "streamed",
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(bytes));
+            controller.close();
+          },
+        }),
+        { expectedSha256Hex: hex },
+      );
+      expect((await adapter.stat("streamed"))?.checksumSha256).toBe(
+        createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64"),
+      );
     });
 
     it("has no storage classes and is always instantly readable", async () => {

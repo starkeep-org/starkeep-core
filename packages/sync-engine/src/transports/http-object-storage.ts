@@ -9,7 +9,7 @@ import type {
   ObjectFacts,
   PutStreamOptions,
 } from "@starkeep/storage-adapter";
-import { FileUriTransferRefused, verifyingStream } from "@starkeep/storage-adapter";
+import { FileUriTransferRefused, sha256Base64ToHex, verifyingStream } from "@starkeep/storage-adapter";
 
 /**
  * What the server hands back when it signs an upload.
@@ -217,8 +217,23 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
    * every write path — the three of them must not drift in what they send, or a
    * PUT signed one way and issued another fails as `SignatureDoesNotMatch`.
    */
-  private async presignPut(key: string, contentType?: string): Promise<PresignResponse> {
-    const presignBody = JSON.stringify({ key, contentType });
+  private async presignPut(
+    key: string,
+    contentType?: string,
+    contentSha256?: string,
+  ): Promise<PresignResponse> {
+    // `contentSha256` is the uploader's declaration of what these bytes hash
+    // to, and the server pins it only for keys whose hash it cannot derive on
+    // its own — an app-private key, which the app names rather than the
+    // content. A shared key *is* its hash, so the server ignores anything sent
+    // here and pins the key's own digest, which is why this can never widen
+    // what an uploader may write at a content-addressed key.
+    //
+    // Sending it is what lets an app-private object be *confirmed* rather than
+    // merely present: S3 stores the pinned digest and reports it at stat time,
+    // so a node asking "does the cloud hold these exact bytes" gets an answer
+    // instead of a size.
+    const presignBody = JSON.stringify({ key, contentType, contentSha256 });
     const presignRes = await this.fetchImpl(`${this.apiBase()}/files/presign`, {
       method: "POST",
       headers: this.headers("POST", "/files/presign", presignBody, {
@@ -244,7 +259,11 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     fileUri: string,
     options?: PutStreamOptions,
   ): Promise<void> {
-    const presigned = await this.presignPut(key, options?.contentType);
+    const presigned = await this.presignPut(
+      key,
+      options?.contentType,
+      options?.expectedSha256Hex,
+    );
 
     // The one refusal, raised here — after the presign round trip and before a
     // single byte moves, which is exactly where the contract permits it.
@@ -286,6 +305,10 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     const { url, checksumSha256, storageClass, tagging } = await this.presignPut(
       key,
       options?.contentType,
+      // Hex on the wire, base64 in the header. `PutOptions` carries the header
+      // encoding because that is what the store wants; the presign request
+      // speaks the encoding the rest of Starkeep speaks.
+      options?.checksumSha256 ? sha256Base64ToHex(options.checksumSha256) ?? undefined : undefined,
     );
 
     // Upload directly to S3 — presigned URL carries credentials, no auth header needed.
@@ -403,6 +426,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     const { url, checksumSha256, storageClass, tagging } = await this.presignPut(
       key,
       options?.contentType,
+      options?.expectedSha256Hex,
     );
 
     // Hash on the way past and fail the stream on a mismatch, which aborts the
