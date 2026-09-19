@@ -639,7 +639,7 @@ describe("restart durability", () => {
     const quiet = await syncNow(driveB);
     // Watermarks/HLC came back from the SQLite state store: nothing re-ships,
     // nothing re-applies.
-    expect(quiet).toEqual({ applied: 0, shipped: 0, complete: true });
+    expect(quiet).toEqual({ applied: 0, shipped: 0, complete: true, errors: [] });
     expect(
       cloud.exchangeLog.filter((e) => e.appId === "starkeep-drive" && e.inRecords > 0),
     ).toEqual([]);

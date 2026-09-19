@@ -179,7 +179,24 @@ export interface SyncSupervisor {
    * finishes is a request that times out. Honours pause, so `/sync/pause`
    * stops one already in flight.
    */
-  exchangeAll(): Promise<{ applied: number; shipped: number; complete: boolean }>;
+  exchangeAll(): Promise<{
+    applied: number;
+    shipped: number;
+    complete: boolean;
+    /**
+     * Every channel whose round threw, named.
+     *
+     * A per-engine failure is caught so one broken channel cannot stop the
+     * others, and for a long time that was the whole of it: the caller got
+     * `applied: 0` and a 200 and no way to tell "nothing was owed" from "every
+     * round threw". A live run spent two minutes waiting for rows the cloud
+     * already held while the broker answered 500 to every exchange, and the
+     * only trace was a line in the server's own log — see
+     * `findings-step27-refill-from-cloud-2026-09-19.md`. `complete: false` says
+     * the sync is not finished; this says which channel and why.
+     */
+    errors: Array<{ appId: string; error: string }>;
+  }>;
   /**
    * Compare row counts with the cloud on every channel and arm repairs.
    *
@@ -729,6 +746,7 @@ export function createSyncSupervisor(
       let applied = 0;
       let shipped = 0;
       let complete = true;
+      const errors: Array<{ appId: string; error: string }> = [];
       for (const entry of engines.values()) {
         try {
           // Bounded, and cancellable by /sync/pause. A round is deliberately
@@ -758,10 +776,11 @@ export function createSyncSupervisor(
         } catch (err) {
           entry.lastError = (err as Error).message;
           complete = false;
+          errors.push({ appId: entry.appId, error: (err as Error).message });
           console.error(`[sync] exchangeAll failed for app=${entry.appId}:`, err);
         }
       }
-      return { applied, shipped, complete };
+      return { applied, shipped, complete, errors };
     },
 
     /**

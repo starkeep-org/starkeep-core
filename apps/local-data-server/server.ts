@@ -1325,6 +1325,15 @@ async function main() {
         return;
       }
 
+      // POST /sync/now — drive every channel once, bounded.
+      //
+      // Answers 200 whenever the supervisor ran, including when a channel's
+      // round threw: one broken channel is not a reason to fail a request that
+      // drove the others. What the round actually did is in the body —
+      // `complete: false` when work remains, and `errors` naming every channel
+      // that failed and why. A caller polling for rows to arrive should read
+      // `errors`, because a channel that throws every round is indistinguishable
+      // from an idle one by the counts alone.
       if (path === "/sync/now" && req.method === "POST") {
         if (!supervisor) {
           res.writeHead(400);

@@ -301,7 +301,7 @@ describe("auth gate (no id token)", () => {
     // Manual trigger is a clean no-op, not a 401 storm.
     const now = await drive.fetch("/sync/now", { method: "POST" });
     expect(now.status).toBe(200);
-    expect(await now.json()).toEqual({ applied: 0, shipped: 0, complete: true });
+    expect(await now.json()).toEqual({ applied: 0, shipped: 0, complete: true, errors: [] });
     expect(cloud.exchangeLog).toEqual([]);
   });
 
@@ -410,6 +410,48 @@ describe("concurrent triggers on one engine", () => {
 
     expect(cloud.peakConcurrentExchanges("starkeep-drive")).toBe(1);
     expect(cloud.peakConcurrentExchanges("testapp")).toBe(1);
+  }, 30_000);
+
+  it("names the channel whose rounds are failing instead of reporting a quiet success", async () => {
+    // The failure this exists for: the cloud answers every exchange with a 500,
+    // the supervisor catches it per channel so the others keep running, and the
+    // response used to carry only `applied: 0`. A caller polling for rows to
+    // arrive then cannot tell a channel that is throwing from one with nothing
+    // to do, and waits out its timeout on a condition the server already knew
+    // about. A live Tier-3 run spent two minutes doing exactly that; see
+    // `findings-step27-refill-from-cloud-2026-09-19.md`.
+    cloud.latency.exchangeDelayMs = 0;
+    cloud.clearExchangeLog();
+    cloud.failures.allExchanges = true;
+    try {
+      const res = await app.fetch("/sync/now", { method: "POST" });
+      // Still 200: the request drove the supervisor, and one channel's failure
+      // is not a reason to fail a call that drove the others.
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        complete: boolean;
+        errors: Array<{ appId: string; error: string }>;
+      };
+      expect(body.complete).toBe(false);
+      expect(new Set(body.errors.map((e) => e.appId))).toEqual(
+        new Set(["starkeep-drive", "testapp"]),
+      );
+      // And why, not merely that. The message is the transport's, so it carries
+      // the status the cloud answered with.
+      for (const failure of body.errors) expect(failure.error).toMatch(/500/);
+    } finally {
+      cloud.failures.allExchanges = false;
+    }
+
+    // Recovered: a healthy round reports no errors at all.
+    const healthy = await eventually(async () => {
+      const res = await app.fetch("/sync/now", { method: "POST" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { errors: Array<{ appId: string }> };
+      expect(body.errors).toEqual([]);
+      return body;
+    });
+    expect(healthy.errors).toEqual([]);
   }, 30_000);
 
   it("reports the job unfinished, and finishes it on the next call", async () => {
