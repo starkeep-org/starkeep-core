@@ -1750,6 +1750,41 @@ describe("/app-data routes", () => {
     expect(db.calls(FILE_RECORDS_INSERT)).toHaveLength(1);
   });
 
+  it("refuses a local-only file: the cloud is nobody's private plane", async () => {
+    // A `local/` key and `localMetadata` are how a node keeps an encoding of
+    // its own beside the one another node published — an index beside the
+    // bytes, outside the synchronized file table. The cloud has no such index
+    // and no node behind it, so it refuses both spellings rather than writing a
+    // row whose meaning it cannot honour.
+    const db = fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_INSERT, []);
+    setDbFactory(db);
+    const withMetadata = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "POST",
+        subPath: "/app-data/files/cover/record",
+        body: { contentHash: "c".repeat(64), mimeType: "image/png", sizeBytes: 21,
+          localMetadata: { parent_record_id: "p", size_class: "image-thumb" } },
+      }),
+      context,
+    );
+    expect(withMetadata.statusCode).toBe(400);
+    expect(bodyOf(withMetadata)["error"]).toMatch(/local host/i);
+
+    const localKey = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "POST",
+        subPath: "/app-data/files/local/cover/record",
+        body: { contentHash: "c".repeat(64), mimeType: "image/png", sizeBytes: 21 },
+      }),
+      context,
+    );
+    expect(localKey.statusCode).toBe(400);
+    // Neither attempt wrote anything: the refusal comes before the insert.
+    expect(db.calls(FILE_RECORDS_INSERT)).toHaveLength(0);
+  });
+
   it("400s register without the required metadata", async () => {
     setDbFactory(fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]));
     const res = await handler(
