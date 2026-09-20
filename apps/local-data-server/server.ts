@@ -837,6 +837,7 @@ async function main() {
   let supervisor: SyncSupervisor | null = null;
 
   const appSpecificFactory = createAppSpecificFactory({
+    allowLocalFiles: true,
     namespace: namespaceStore,
     applier: appApplier,
     fileStorage: localAdapter,
@@ -2446,6 +2447,11 @@ async function main() {
           }
         }
 
+        if (path === "/app-data/local-files" && req.method === "GET") {
+          json(res, await view.localFiles?.(url.searchParams.get("cursor"), url.searchParams.get("prefix") ?? "") ?? { files: [], nextCursor: null });
+          return;
+        }
+
         // POST /app-data/files/<subKey>/record — register a file uploaded
         // out-of-band via the presign flow, writing the index row without the
         // server holding the bytes.
@@ -2458,6 +2464,7 @@ async function main() {
               mimeType?: string;
               sizeBytes?: number;
               originalFilename?: string | null;
+              localMetadata?: Record<string, unknown>;
             };
             if (!body.contentHash || !body.mimeType || typeof body.sizeBytes !== "number") {
               res.writeHead(400);
@@ -2469,6 +2476,7 @@ async function main() {
               mimeType: body.mimeType,
               sizeBytes: body.sizeBytes,
               originalFilename: body.originalFilename ?? null,
+              ...(body.localMetadata ? { localMetadata: body.localMetadata } : {}),
             });
             json(res, result);
             return;

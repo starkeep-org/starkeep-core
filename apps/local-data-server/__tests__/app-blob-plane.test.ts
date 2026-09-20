@@ -327,3 +327,28 @@ describe("fetching bytes back", () => {
     expect(res.status).toBe(400);
   });
 });
+
+// Local alternatives share the app's budget but never enter its sync stream.
+describe("local files", () => {
+  it("registers, serves, accounts, drops and removes a local alternative without a synchronized row", async () => {
+    const subKey = "local/renditions/parent/thumb/hash.avif";
+    const presign = await derived.fetch("/app-data/files/presign", { method: "POST",
+      body: JSON.stringify({ subKey, contentType: "image/avif" }), headers: { "Content-Type": "application/json" } });
+    expect(presign.status).toBe(200);
+    const { url } = await presign.json() as { url: string };
+    expect((await fetch(url, { method: "PUT", body: "local bytes" })).ok).toBe(true);
+    const registered = await derived.fetch(`/app-data/files/${subKey}/record`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contentHash: "hash", mimeType: "image/avif",
+        sizeBytes: 11, localMetadata: { parent_record_id: "parent", size_class: "thumb" } }) });
+    expect(registered.status).toBe(200);
+    expect(await bytesReadable(derived, subKey)).toBe(true);
+    expect(entryFor(await residency(derived), subKey)?.resident).toBe(true);
+    const files = await derived.fetch("/app-data/local-files?prefix=local%2Frenditions%2Fparent%2F");
+    expect((await files.json() as { files: unknown[] }).files).toHaveLength(1);
+    expect((await precious.fetch("/app-data/local-files").then(r => r.json()) as { files: unknown[] }).files).toEqual([]);
+    expect((await drop(derived, subKey)).ok).toBe(true);
+    expect(await bytesReadable(derived, subKey)).toBe(false);
+    expect((await derived.fetch(`/app-data/files/${subKey}`, { method: "DELETE" })).ok).toBe(true);
+    expect((await derived.fetch("/app-data/local-files").then(r => r.json()) as { files: unknown[] }).files).toEqual([]);
+  });
+});

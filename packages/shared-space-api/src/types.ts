@@ -88,8 +88,10 @@ export interface AppSpecificOperations {
       mimeType: string;
       sizeBytes: number;
       originalFilename?: string | null;
+      localMetadata?: Record<string, unknown>;
     },
   ): Promise<{ key: string }>;
+  localFiles?(cursor?: string | null, prefix?: string): Promise<{ files: Array<{ subKey: string; metadata: Record<string, unknown> }>; nextCursor: string | null }>;
   getFile(subKey: string): Promise<{ bytes: Uint8Array; mimeType: string } | null>;
   /**
    * Existence + metadata from the index row alone — no S3 call, no byte

@@ -65,6 +65,8 @@ export interface AppSpecificFactoryOptions {
    * backend.
    */
   blobPlane?: AppBlobPlane;
+  /** Only local hosts may retain files outside the synchronized file index. */
+  allowLocalFiles?: boolean;
 }
 
 /**
@@ -88,6 +90,28 @@ export function createAppSpecificFactory(
     const ns = namespace.get(appId);
     if (!ns) return null;
 
+
+    const localIndexPrefix = appSyncableObjectKey(appId, "_local-index/");
+    function localIndexKey(key: string) { return localIndexPrefix + key.slice(appSyncableObjectKey(appId, "").length) + ".json"; }
+    async function readLocalFile(key: string): Promise<Record<string, unknown> | null> {
+      if (!options.allowLocalFiles || !key.startsWith(appSyncableObjectKey(appId, "local/"))) return null;
+      const file = await fileStorage.get(localIndexKey(key));
+      if (!file) return null;
+      return JSON.parse(new TextDecoder().decode(file.data instanceof Uint8Array ? file.data : new Uint8Array(file.data as ArrayBuffer)));
+    }
+    async function localFiles(cursor: string | null = null, prefix = "") {
+      ensureFilesEnabled();
+      if (!options.allowLocalFiles) return { files: [], nextCursor: null };
+      const checkedPrefix = appSyncableObjectKey(appId, prefix).slice(appSyncableObjectKey(appId, "").length);
+      const page = await fileStorage.list(localIndexPrefix + checkedPrefix, { cursor: cursor ?? undefined, limit: BLOB_PAGE_ROWS });
+      const files: Array<{ subKey: string; metadata: Record<string, unknown> }> = [];
+      for (const item of page.keys) {
+        const key = appSyncableObjectKey(appId, item.slice(localIndexPrefix.length, -5));
+        const row = await readLocalFile(key);
+        if (row) files.push({ subKey: key.slice(appSyncableObjectKey(appId, "").length), metadata: row });
+      }
+      return { files, nextCursor: page.nextCursor ?? null };
+    }
     function emitLocalChange(): void {
       changeNotifier?.emit({
         eventType: "local-change-recorded",
@@ -234,6 +258,8 @@ export function createAppSpecificFactory(
     async function readFileRecord(
       key: string,
     ): Promise<Record<string, unknown> | null> {
+      const local = await readLocalFile(key);
+      if (local) return local;
       const result = await requireQueryCapable().runQuery(appId, FILE_RECORDS_TABLE, {
         mode: "rows",
         table: FILE_RECORDS_TABLE,
@@ -308,19 +334,29 @@ export function createAppSpecificFactory(
         pageToken: null,
         include: [],
       });
-      const rows = result.mode === "rows" ? result.rows : [];
+      let rows = result.mode === "rows" ? [...result.rows] : [];
+      if (options.allowLocalFiles) {
+        let localCursor: string | null = null;
+        do {
+          const page = await localFiles(localCursor);
+          for (const file of page.files) {
+            if (cursor === null || String(file.metadata.id) > cursor) rows.push(file.metadata);
+          }
+          localCursor = page.nextCursor;
+        } while (localCursor);
+        rows = rows.sort((a, b) => String(a.id).localeCompare(String(b.id))).slice(0, BLOB_PAGE_ROWS);
+      }
       let heldBytes = 0;
-      const entries = rows.map((row) => {
+      const entries = await Promise.all(rows.map(async (row) => {
         const key = (row["object_storage_key"] as string) ?? (row["id"] as string) ?? "";
         const sizeBytes = Number(row["size_bytes"] ?? 0);
-        heldBytes += sizeBytes;
+        const resident = options.allowLocalFiles ? await fileStorage.has(key) : true;
+        if (resident) heldBytes += sizeBytes;
         return {
           subKey: key.startsWith(prefix) ? key.slice(prefix.length) : key,
-          sizeBytes,
-          resident: true,
-          lastOpenedAtMs: null,
+          sizeBytes, resident, lastOpenedAtMs: null,
         };
-      });
+      }));
       return {
         budgetBytes: null,
         // This page's bytes, not the app's whole plane. A node with no budget
@@ -353,7 +389,7 @@ export function createAppSpecificFactory(
         out.push({
           subKey: key,
           sizeBytes: Number(row["size_bytes"] ?? 0),
-          resident: true,
+          resident: options.allowLocalFiles ? await fileStorage.has(key) : true,
           lastOpenedAtMs: null,
         });
       }
@@ -367,6 +403,7 @@ export function createAppSpecificFactory(
     }
 
     return {
+      localFiles,
       async insertRow(table, row) {
         resolveTable(table);
         const checked = validateRow(table, row);
@@ -437,6 +474,7 @@ export function createAppSpecificFactory(
           mimeType: string;
           sizeBytes: number;
           originalFilename?: string | null;
+          localMetadata?: Record<string, unknown>;
         },
       ) {
         // Records the index row for bytes already uploaded out-of-band (the
@@ -444,7 +482,16 @@ export function createAppSpecificFactory(
         // and cross-channel sync without the server ever holding the bytes.
         ensureFilesEnabled();
         const key = appSyncableObjectKey(appId, subKey);
-        await upsertFileRecord(key, meta);
+        if (meta.localMetadata) {
+          if (!options.allowLocalFiles || !subKey.startsWith("local/")) throw new Error("Local files require a local host and a local/ key");
+          if (!await fileStorage.has(key)) throw new Error("Local file bytes are absent");
+          const row = { ...meta.localMetadata, id: key, object_storage_key: key,
+            content_hash: meta.contentHash, mime_type: meta.mimeType, size_bytes: meta.sizeBytes };
+          await fileStorage.put(localIndexKey(key), new TextEncoder().encode(JSON.stringify(row)), { contentType: "application/json" });
+        } else {
+          if (subKey.startsWith("local/")) throw new Error("Local keys require local metadata");
+          await upsertFileRecord(key, meta);
+        }
         // Charge it to the app's budget. The bytes went straight to storage
         // through the presign URL, so this is the only point on the write path
         // that knows they are here — without it the node holding the files
@@ -455,7 +502,7 @@ export function createAppSpecificFactory(
           sizeBytes: meta.sizeBytes,
           mimeType: meta.mimeType,
         });
-        emitLocalChange();
+        if (!meta.localMetadata) emitLocalChange();
         return { key };
       },
 
@@ -489,8 +536,8 @@ export function createAppSpecificFactory(
         ensureFilesEnabled();
         const key = appSyncableObjectKey(appId, subKey);
         await fileStorage.delete(key);
-        await tombstoneFileRecord(key);
-        emitLocalChange();
+        if (await readLocalFile(key)) await fileStorage.delete(localIndexKey(key));
+        else { await tombstoneFileRecord(key); emitLocalChange(); }
       },
 
       async fileUrl(subKey, opts) {

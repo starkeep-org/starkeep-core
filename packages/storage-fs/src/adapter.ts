@@ -269,33 +269,36 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
   async list(prefix: string, options?: ListOptions): Promise<ListResult> {
     const allKeys: string[] = [];
 
-    try {
-      const dirs = await readdir(this.basePath);
-      for (const dir of dirs) {
-        if (dir.startsWith(".")) continue;
-        try {
-          const dirPath = join(this.basePath, dir);
-          const dirStat = await stat(dirPath);
-          if (!dirStat.isDirectory()) continue;
-          const files = await readdir(dirPath);
-          for (const file of files) {
-            if (file.endsWith(".meta.json")) continue;
-            if (file.startsWith(prefix) || prefix === "") {
-              allKeys.push(file);
-            }
-          }
-        } catch {
-          // Skip unreadable dirs
-        }
+    const walk = async (directory: string, relativePath: string): Promise<void> => {
+      let entries;
+      try { entries = await readdir(directory, { withFileTypes: true }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
       }
-    } catch {
-      return { keys: [], nextCursor: null, hasMore: false };
-    }
+      for (const entry of entries) {
+        if (entry.name.startsWith(".") || entry.name.endsWith(".meta.json")) continue;
+        const relativeKey = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          await walk(join(directory, entry.name), relativeKey);
+          continue;
+        }
+        // Legacy flat keys use a two-character shard directory. Hierarchical
+        // app and shared keys retain their whole path.
+        const key = /^[^/]{2}$/.test(relativePath) && entry.name.startsWith(relativePath)
+          ? entry.name : relativeKey;
+        if (key.startsWith(prefix)) allKeys.push(key);
+      }
+    };
+    const start = prefix.includes("/") ? prefix.slice(0, prefix.lastIndexOf("/") + 1) : "";
+    if (start.split("/").includes("..") || start.startsWith("/")) throw new Error("Invalid object prefix");
+    await walk(join(this.basePath, start), start.replace(/\/$/, ""));
 
     allKeys.sort();
 
     const limit = options?.limit ?? allKeys.length;
-    const cursorIndex = options?.cursor ? allKeys.indexOf(options.cursor) + 1 : 0;
+    const cursorIndex = options?.cursor ? allKeys.findIndex(key => key > options.cursor!) : 0;
+    if (cursorIndex === -1) return { keys: [], nextCursor: null, hasMore: false };
     const keys = allKeys.slice(cursorIndex, cursorIndex + limit);
     const hasMore = cursorIndex + limit < allKeys.length;
 

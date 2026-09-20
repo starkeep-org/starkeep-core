@@ -105,6 +105,17 @@ describe("FsObjectStorageAdapter", () => {
   });
 
   describe("list", () => {
+    it("lists nested app files and advances past a deleted cursor", async () => {
+      const first = "apps/photos/syncable/local/renditions/p/thumb/a.avif";
+      const second = "apps/photos/syncable/local/renditions/p/thumb/b.avif";
+      await adapter.put(first, Buffer.from("a"));
+      await adapter.put(second, Buffer.from("b"));
+      const page = await adapter.list("apps/photos/", { limit: 1 });
+      expect(page.keys).toEqual([first]);
+      await adapter.delete(first);
+      expect((await adapter.list("apps/photos/", { cursor: page.nextCursor! })).keys).toEqual([second]);
+      expect((await adapter.list("")).keys).toEqual([second]);
+    });
     it("should list all keys", async () => {
       await adapter.put("aa-file1", Buffer.from(""));
       await adapter.put("bb-file2", Buffer.from(""));

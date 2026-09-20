@@ -3657,6 +3657,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           if (!body.contentHash || !body.mimeType || typeof body.sizeBytes !== "number") {
             return clientErr("contentHash, mimeType, and sizeBytes are required", 400);
           }
+          if ((body as { localMetadata?: unknown }).localMetadata || subKey.startsWith("local/")) {
+            return clientErr("Local files require a local host", 400);
+          }
           const result = await view.registerFile(subKey, {
             contentHash: body.contentHash,
             mimeType: body.mimeType,
