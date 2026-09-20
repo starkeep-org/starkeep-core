@@ -197,3 +197,5 @@ export {
   type ResidencyManager,
   type ResidencyManagerOptions,
 } from "./residency-manager.js";
+
+export { createPerAppSyncStateStore, deletePerAppSyncState, perAppSyncStateKeys } from "./per-app-sync-state-store.js";

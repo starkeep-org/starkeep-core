@@ -16,3 +16,6 @@ export {
 } from "./app-syncable/namespace.js";
 export type { AppSyncableNamespace, AppSyncableTableInfo } from "./app-syncable/namespace.js";
 export { SqliteAppSyncableApplier } from "./app-syncable/apply.js";
+
+export { createAppSyncableTables, createReservedFileRecordsTable, type DeclaredSyncableTable } from "./app-syncable/schema.js";
+export { appSyncableTableInfo, withFileRecordsTable } from "@starkeep/shared-space-api";

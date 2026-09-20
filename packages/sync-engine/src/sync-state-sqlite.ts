@@ -12,7 +12,7 @@ import type { SyncStateStore, Watermarks } from "./types.js";
 // Compile-only Kysely instance (DummyDriver never executes); statements run
 // synchronously through node:sqlite's prepare().
 type DB = Record<string, Record<string, unknown>>;
-const qb = new Kysely<DB>({
+export const syncStateCompiler = new Kysely<DB>({
   dialect: {
     createAdapter: () => new SqliteAdapter(),
     createDriver: () => new DummyDriver(),
@@ -20,6 +20,8 @@ const qb = new Kysely<DB>({
     createQueryCompiler: () => new SqliteQueryCompiler(),
   },
 });
+
+const qb = syncStateCompiler;
 
 const WATERMARKS = "watermarks";
 const REPAIR_FLOORS = "repair_floors";
