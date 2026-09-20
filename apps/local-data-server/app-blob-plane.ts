@@ -126,15 +126,21 @@ export function createAppBlobPlane(options: AppBlobPlaneOptions): AppBlobPlane {
   }
 
   return {
-    async residency(appId: string, cursor: string | null): Promise<AppBlobResidencyPage> {
-      // No policy means no ceiling and no eviction, so this node holds what it
-      // has been given — the same truth the cloud reports, reached a different
-      // way. The factory's index-only answer covers the no-plane case; this one
-      // covers a node that has a plane and no budget.
-      if (residency === null) {
-        return { budgetBytes: null, heldBytes: 0, entries: [], nextCursor: null };
-      }
+    async residency(appId: string, cursor: string | null): Promise<AppBlobResidencyPage | null> {
+      // No policy means no ceiling, no eviction, and a round that pulls every
+      // blob it is offered — so this node holds what it has rows for, which is
+      // the answer the file index already gives. Declining rather than
+      // reporting an empty plane: an app reading "nothing of mine is here" for
+      // every file it owns would re-derive its whole library on every pass.
+      if (residency === null) return null;
       return residency.appBlobResidency(appId, cursor);
+    },
+
+    async lookup(appId: string, objectStorageKeys: readonly string[]) {
+      // Declined for the reason `residency` above declines: no resident set
+      // means the file index is the truth, and the caller reads it.
+      if (residency === null) return null;
+      return residency.appBlobResidencyOf(appId, objectStorageKeys);
     },
 
     async noteWritten(appId: string, blob: AppBlobIdentity): Promise<void> {

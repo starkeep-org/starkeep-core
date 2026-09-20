@@ -5,6 +5,7 @@ import type { ParsedQueryResult, QueryParams } from "./query/types.js";
 import type {
   AppBlobDropResult,
   AppBlobFetchResult,
+  AppBlobEntry,
   AppBlobResidencyPage,
 } from "./app-syncable/blob-plane.js";
 
@@ -109,6 +110,18 @@ export interface AppSpecificOperations {
    * over it. An overrun is reported here and the app decides what to give up.
    */
   blobResidency(cursor?: string | null): Promise<AppBlobResidencyPage>;
+  /**
+   * The same answer for blobs the caller can already name.
+   *
+   * A read path resolving a page of records knows exactly which sub-keys it is
+   * about to paint and needs one fact about each: are the bytes here. Paging
+   * the whole plane to find out is O(everything the app holds) for a question
+   * whose answer is O(the page).
+   *
+   * Sub-keys with no live row are omitted, so absence from the result is
+   * absence of the file.
+   */
+  blobResidencyOf(subKeys: readonly string[]): Promise<readonly AppBlobEntry[]>;
   /**
    * Note that the app opened one of its own blobs, so the order it gives them
    * up in reflects use rather than age.

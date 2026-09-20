@@ -25,6 +25,15 @@
  * no-residency case from the file index alone.
  */
 
+/**
+ * How many sub-keys one targeted residency lookup may name.
+ *
+ * Matches the query grammar's `in`-list cap, because the cloud answers this
+ * question with one, and a caller allowed to ask for more here would get a
+ * parse error there instead of an answer.
+ */
+export const MAX_RESIDENCY_LOOKUP_KEYS = 500;
+
 /** One blob of an app's private plane, as the app sees it. */
 export interface AppBlobEntry {
   /** The app-relative key the app addresses the file by. */
@@ -90,7 +99,34 @@ export interface AppBlobFetchResult {
 }
 
 export interface AppBlobPlane {
-  residency(appId: string, cursor: string | null): Promise<AppBlobResidencyPage>;
+  /**
+   * What this node holds of the app's plane, or null when it keeps no
+   * accounting of that at all.
+   *
+   * Null is a node with no retention policy, which is the ordinary laptop: it
+   * has no ceiling, evicts nothing, and pulls every blob a round offers it. It
+   * genuinely holds what it has rows for, and the caller answers from the file
+   * index rather than reporting an empty plane — which is what an app would
+   * otherwise read as "none of my bytes are here" for every file it owns.
+   */
+  residency(appId: string, cursor: string | null): Promise<AppBlobResidencyPage | null>;
+  /**
+   * The same answer as {@link residency}, for blobs the caller can already
+   * name.
+   *
+   * The paged listing answers "what am I holding here", which is the question
+   * an app asks when it is deciding what to give up. A read path asks the
+   * opposite one — "of these forty blobs I am about to paint, which are
+   * here" — and walking a plane of three hundred thousand renditions to learn
+   * the state of forty is the wrong shape by five orders of magnitude.
+   *
+   * Keys with no row are omitted rather than reported absent, so a caller
+   * reads presence off the result the way it reads it off a file listing.
+   */
+  lookup(
+    appId: string,
+    objectStorageKeys: readonly string[],
+  ): Promise<readonly AppBlobEntry[] | null>;
   /**
    * Charge bytes the app just wrote here to the app's budget.
    *

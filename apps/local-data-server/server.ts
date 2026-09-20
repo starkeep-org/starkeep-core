@@ -35,6 +35,7 @@ import {
 } from "../../packages/storage-sqlite/src/index.js";
 import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
 import { queryParamsFrom } from "../../packages/shared-space-api/src/query/params.js";
+import { MAX_RESIDENCY_LOOKUP_KEYS } from "../../packages/shared-space-api/src/app-syncable/blob-plane.js";
 import {
   planLabelQuery,
   planMetadataQuery,
@@ -2547,6 +2548,41 @@ async function main() {
           try {
             const page = await view.blobResidency(url.searchParams.get("cursor"));
             json(res, page);
+            return;
+          } catch (err) {
+            res.writeHead(400);
+            json(res, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+        }
+
+        // POST /app-data/residency/lookup — the same facts for blobs the
+        // caller can name. A read path about to paint forty renditions needs
+        // one bit about each, and the paged listing above answers the other
+        // question: what am I holding, all of it, in eviction-order terms.
+        if (path === "/app-data/residency/lookup" && req.method === "POST") {
+          try {
+            const body = JSON.parse(await readBody(req)) as { subKeys?: unknown };
+            if (
+              !Array.isArray(body.subKeys) ||
+              body.subKeys.length === 0 ||
+              !body.subKeys.every((k) => typeof k === "string" && k.length > 0)
+            ) {
+              res.writeHead(400);
+              json(res, { error: "subKeys must be a non-empty array of strings" });
+              return;
+            }
+            if (body.subKeys.length > MAX_RESIDENCY_LOOKUP_KEYS) {
+              res.writeHead(400);
+              json(res, {
+                error: `subKeys must contain at most ${MAX_RESIDENCY_LOOKUP_KEYS} entries`,
+              });
+              return;
+            }
+            const entries = await view.blobResidencyOf([
+              ...new Set(body.subKeys as string[]),
+            ]);
+            json(res, { entries });
             return;
           } catch (err) {
             res.writeHead(400);

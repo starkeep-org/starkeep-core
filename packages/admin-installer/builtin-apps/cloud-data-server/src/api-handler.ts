@@ -103,6 +103,7 @@ import {
   planMetadataQuery,
   planRecordQuery,
   queryParamsFrom,
+  MAX_RESIDENCY_LOOKUP_KEYS,
   ApiError,
   type RecordQueryPlan,
   type SharedQueryPlan,
@@ -3732,6 +3733,35 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (subPath === "/app-data/residency" && method === "GET") {
         try {
           return ok(await view.blobResidency(query["cursor"] ?? null));
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+      }
+
+      // POST /app-data/residency/lookup — the same facts for blobs the caller
+      // can name, so a read path resolving a page of records asks one question
+      // rather than walking the app's whole plane.
+      if (subPath === "/app-data/residency/lookup" && method === "POST") {
+        try {
+          const raw = event.isBase64Encoded && event.body
+            ? Buffer.from(event.body, "base64").toString("utf8")
+            : (event.body ?? "{}");
+          const body = JSON.parse(raw) as { subKeys?: unknown };
+          if (
+            !Array.isArray(body.subKeys) ||
+            body.subKeys.length === 0 ||
+            !body.subKeys.every((k) => typeof k === "string" && k.length > 0)
+          ) {
+            return clientErr("subKeys must be a non-empty array of strings", 400);
+          }
+          if (body.subKeys.length > MAX_RESIDENCY_LOOKUP_KEYS) {
+            return clientErr(
+              `subKeys must contain at most ${MAX_RESIDENCY_LOOKUP_KEYS} entries`,
+              400,
+            );
+          }
+          const entries = await view.blobResidencyOf([...new Set(body.subKeys as string[])]);
+          return ok({ entries });
         } catch (err) {
           return clientErr(err instanceof Error ? err.message : String(err), 400);
         }

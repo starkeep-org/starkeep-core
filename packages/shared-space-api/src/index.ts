@@ -49,6 +49,7 @@ export type {
   AppBlobDropResult,
   AppBlobFetchResult,
 } from "./app-syncable/blob-plane.js";
+export { MAX_RESIDENCY_LOOKUP_KEYS } from "./app-syncable/blob-plane.js";
 export { quoteIdent, validateTableName, RESERVED_COLUMN_NAMES } from "./app-syncable/validation.js";
 export {
   FILE_RECORDS_TABLE,

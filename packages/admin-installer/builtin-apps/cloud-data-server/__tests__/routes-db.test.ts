@@ -1855,6 +1855,49 @@ describe("/app-data routes", () => {
       expect(bodyOf(res)).toMatchObject({ landed: false, reason: "already-here" });
     });
 
+    // The read path's question: these forty keys, are the bytes there. Answered
+    // from the index here, which is the cloud's whole truth — it holds what it
+    // has a row for.
+    it("answers a named lookup for the rows it has, and omits the rest", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants()
+          .on(NS_SELECT, [filesNamespace])
+          .on(FILE_RECORDS_SELECT, (q: { values: unknown[] }) => {
+            const wanted = q.values.find((v) => typeof v === "string" && String(v).startsWith("apps/"));
+            return wanted === fileRow.id ? [fileRow] : [];
+          }),
+      );
+      const res = await handler(
+        signedEvent({
+          appId: "appdata1",
+          method: "POST",
+          subPath: "/app-data/residency/lookup",
+          body: { subKeys: ["cover", "never-written"] },
+        }),
+        context,
+      );
+      expect(res.statusCode).toBe(200);
+      expect(bodyOf(res)["entries"]).toEqual([
+        { subKey: "cover", sizeBytes: 21, resident: true, lastOpenedAtMs: null },
+      ]);
+    });
+
+    it("refuses a lookup that names nothing", async () => {
+      setDbFactory(
+        fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, []),
+      );
+      const res = await handler(
+        signedEvent({
+          appId: "appdata1",
+          method: "POST",
+          subPath: "/app-data/residency/lookup",
+          body: { subKeys: [] },
+        }),
+        context,
+      );
+      expect(res.statusCode).toBe(400);
+    });
+
     // A subKey may contain slashes, so the bare file route would otherwise read
     // `/blob` as part of the key and answer a presigned URL for a file called
     // `cover/blob`.

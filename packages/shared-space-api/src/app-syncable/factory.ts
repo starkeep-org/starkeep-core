@@ -21,6 +21,7 @@ import { validateTableName } from "./validation.js";
 import { FILE_RECORDS_TABLE, RESERVED_TABLE_NAMES } from "./reserved.js";
 import type {
   AppBlobDropResult,
+  AppBlobEntry,
   AppBlobFetchResult,
   AppBlobIdentity,
   AppBlobPlane,
@@ -335,6 +336,30 @@ export function createAppSpecificFactory(
       };
     }
 
+    /**
+     * The targeted residency answer for a node with no residency plane.
+     *
+     * A live row means the bytes are there, which is the same claim
+     * {@link residencyFromIndex} makes and true for the same reason: the cloud
+     * is the durable replica and holds what it is given.
+     */
+    async function residencyOfFromIndex(
+      objectStorageKeys: readonly string[],
+    ): Promise<readonly AppBlobEntry[]> {
+      const out: AppBlobEntry[] = [];
+      for (const key of objectStorageKeys) {
+        const row = await readFileRecord(key);
+        if (!row) continue;
+        out.push({
+          subKey: key,
+          sizeBytes: Number(row["size_bytes"] ?? 0),
+          resident: true,
+          lastOpenedAtMs: null,
+        });
+      }
+      return out;
+    }
+
     function ensureFilesEnabled(): void {
       if (!ns!.filesEnabled) {
         throw new Error(`App "${appId}" did not opt in to syncable files`);
@@ -482,7 +507,25 @@ export function createAppSpecificFactory(
       async blobResidency(cursor?: string | null): Promise<AppBlobResidencyPage> {
         ensureFilesEnabled();
         const from = cursor ?? null;
-        return blobPlane ? blobPlane.residency(appId, from) : residencyFromIndex(from);
+        // A plane that declines to answer is a node that keeps no resident set,
+        // which holds what it has rows for — the same truth the index states,
+        // and the same one the cloud reports.
+        return (await blobPlane?.residency(appId, from)) ?? residencyFromIndex(from);
+      },
+
+      async blobResidencyOf(subKeys: readonly string[]): Promise<readonly AppBlobEntry[]> {
+        ensureFilesEnabled();
+        const prefix = appSyncableObjectKey(appId, "");
+        const keys = subKeys.map((subKey) => appSyncableObjectKey(appId, subKey));
+        const entries =
+          (await blobPlane?.lookup(appId, keys)) ?? (await residencyOfFromIndex(keys));
+        // Back to the app's own spelling. A caller that asked about
+        // `renditions/x/image-thumb/ab.avif` must be able to look the answer up
+        // under the name it used.
+        return entries.map((entry) => ({
+          ...entry,
+          subKey: entry.subKey.startsWith(prefix) ? entry.subKey.slice(prefix.length) : entry.subKey,
+        }));
       },
 
       async touchBlob(subKey: string): Promise<void> {

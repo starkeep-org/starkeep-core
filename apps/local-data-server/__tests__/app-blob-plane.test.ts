@@ -145,6 +145,63 @@ describe("reading what this node holds", () => {
   });
 });
 
+describe("asking about blobs by name", () => {
+  /**
+   * The read path's question, which is the opposite of the listing's.
+   *
+   * A page of records about to be painted knows exactly which sub-keys it is
+   * about, and paging a plane of three hundred thousand renditions to learn the
+   * state of forty is the wrong shape by five orders of magnitude.
+   */
+  const lookup = async (app: InstalledApp, subKeys: string[]) => {
+    const res = await app.fetch("/app-data/residency/lookup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subKeys }),
+    });
+    return { status: res.status, body: (await res.json()) as { entries?: ResidencyPage["entries"]; error?: string } };
+  };
+
+  it("answers for the keys it was given and no others", async () => {
+    await putAppFile(precious, "named/one.bin", "0123456789");
+    await putAppFile(precious, "named/two.bin", "01234");
+
+    const { status, body } = await lookup(precious, ["named/one.bin"]);
+
+    expect(status).toBe(200);
+    expect(body.entries).toEqual([
+      { subKey: "named/one.bin", sizeBytes: 10, resident: true, lastOpenedAtMs: null },
+    ]);
+  });
+
+  // Absence from the answer is absence of the file. A caller reading presence
+  // off the result must never be handed a fabricated row for a key nothing has
+  // recorded.
+  it("omits a key this node knows nothing about", async () => {
+    const { body } = await lookup(precious, ["named/one.bin", "never/written.bin"]);
+    expect(body.entries!.map((e) => e.subKey)).toEqual(["named/one.bin"]);
+  });
+
+  it("reports a blob whose bytes have been dropped as not resident", async () => {
+    await putAppFile(derived, "named/droppable.bin", "0123456789");
+    expect((await drop(derived, "named/droppable.bin")).status).toBe(200);
+
+    const { body } = await lookup(derived, ["named/droppable.bin"]);
+    expect(body.entries![0]).toMatchObject({ subKey: "named/droppable.bin", resident: false });
+  });
+
+  it("keeps one app's plane out of another's", async () => {
+    const { body } = await lookup(precious, ["named/droppable.bin"]);
+    expect(body.entries).toEqual([]);
+  });
+
+  it("refuses a request that names nothing, and one that names too much", async () => {
+    expect((await lookup(precious, [])).status).toBe(400);
+    const tooMany = Array.from({ length: 501 }, (_, i) => `k${i}`);
+    expect((await lookup(precious, tooMany)).status).toBe(400);
+  });
+});
+
 describe("noting an open", () => {
   it("records the open against the blob it names", async () => {
     await putAppFile(precious, "touched.bin", "abc");

@@ -405,6 +405,18 @@ export interface ResidencyManager {
    */
   appBlobResidency(appId: string, cursor: string | null): AppBlobResidency;
   /**
+   * The residency of blobs the caller can already name.
+   *
+   * Same facts as {@link appBlobResidency} and a different question. The page
+   * serves a walk of everything an app holds; this serves a read path that
+   * knows its forty keys and needs one bit about each. Keys with no row are
+   * omitted: an app-private blob nothing has ever recorded is not here.
+   */
+  appBlobResidencyOf(
+    appId: string,
+    objectStorageKeys: readonly string[],
+  ): readonly AppBlobEntry[];
+  /**
    * Record that an app opened one of its own blobs, so the drop order knows.
    *
    * Addressed by object key rather than by record id, because an app-private
@@ -1106,6 +1118,30 @@ export function createResidencyManager(
             ? entries[entries.length - 1]!.objectStorageKey
             : null,
       };
+    },
+
+    appBlobResidencyOf(
+      appId: string,
+      objectStorageKeys: readonly string[],
+    ): readonly AppBlobEntry[] {
+      const prefix = appSyncableObjectKey(appId, "");
+      const out: AppBlobEntry[] = [];
+      for (const key of objectStorageKeys) {
+        // Scoped to the asking app's own prefix. The caller builds these keys
+        // from its own sub-keys, so a key outside the prefix is a caller bug
+        // rather than an attack — but answering one would still be reporting
+        // another app's holdings.
+        if (!key.startsWith(prefix)) continue;
+        const entry = index.get(key);
+        if (entry === null) continue;
+        out.push({
+          subKey: key.slice(prefix.length),
+          sizeBytes: entry.sizeBytes,
+          resident: entry.resident,
+          lastOpenedAtMs: entry.lastOpenedAtMs,
+        });
+      }
+      return out;
     },
 
     touchAppBlob(objectStorageKey: string, atMs: number): void {
