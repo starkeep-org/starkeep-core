@@ -12,8 +12,9 @@
  * covered in the sync engine's `stand-in-residency.test.ts`.
  */
 import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import {
   startLocalDataServer,
   startFakeCloud,
@@ -178,6 +179,47 @@ describe("what a desktop receives against its ceiling", () => {
     for (const id of [a.original, b.original]) expect(await holds(serverB, driveB, id)).toBe(true);
   });
 
+  // Every failure leaves the desktop as it was and says so, rather than
+  // handing out a URL that cannot work.
+  describe("when the cloud cannot hand over the bytes", () => {
+    afterEach(() => {
+      cloud.failures.blobGets = 0;
+    });
+
+    it("answers file-url with 502", async () => {
+      const f = await family(driveA);
+      await converge();
+      cloud.failures.blobGets = 1000;
+      const res = await driveB.fetch(`/data/records/${f.original}/file-url`);
+      expect(res.status).toBe(502);
+      expect(await holds(serverB, driveB, f.original)).toBe(false);
+    });
+
+    it("answers content-url with no URL and says the bytes are not here", async () => {
+      const f = await family(driveA);
+      await converge();
+      cloud.failures.blobGets = 1000;
+      const { status, body } = await contentUrl(driveB, f.original, "canonical");
+      expect(status).toBe(200);
+      expect(body).toMatchObject({ record_id: f.canonical, available_here: false, url: null });
+    });
+
+    it("leaves a failed id out of a batch and still serves the rest", async () => {
+      const f = await family(driveA);
+      await converge();
+      cloud.failures.blobGets = 1000;
+      const res = await driveB.fetch("/data/records/file-urls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [f.original, f.medium] }),
+      });
+      expect(res.status).toBe(200);
+      const { urls } = (await res.json()) as { urls: Record<string, unknown> };
+      // The 1280 stand-in is here already; the original needed a fetch that failed.
+      expect(Object.keys(urls)).toEqual([f.medium]);
+    });
+  });
+
   it("describes where each size sits on each node", async () => {
     const f = await family(driveA);
     await converge();
@@ -310,6 +352,30 @@ describe("a node that keeps originals", () => {
     expect(body.libraryOriginals.image!.count).toBeGreaterThanOrEqual(2);
     expect(body.libraryOriginals.image!.bytes).toBeGreaterThanOrEqual(2 * BIG);
     expect(body.libraryOriginals.video).toEqual({ count: 0, bytes: 0 });
+  });
+});
+
+describe("a desktop that syncs with no cloud", () => {
+  let lone: LocalDataServer;
+  let driveL: InstalledApp;
+
+  beforeAll(async () => {
+    lone = await startLocalDataServer();
+    driveL = await builtinAppCreds(lone, "starkeep-drive");
+  }, 60_000);
+
+  afterAll(async () => {
+    await lone?.stop();
+  });
+
+  it("answers file-url with 404 for bytes that are not here, since nothing could fetch them", async () => {
+    const id = await create(driveL, { type: "image/jpeg", sizeBytes: 64, fileName: `gone-${Math.random()}.jpg` });
+    const res = await driveL.fetch(`/data/records/${id}`);
+    const path = ((await res.json()) as { record: { path: string } }).record.path;
+    await rm(path);
+    const url = await driveL.fetch(`/data/records/${id}/file-url`);
+    expect(url.status).toBe(404);
+    expect(((await url.json()) as { error: string }).error).toMatch(/does not sync with a cloud/);
   });
 });
 

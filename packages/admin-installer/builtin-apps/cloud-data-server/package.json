@@ -15,7 +15,6 @@
     "@aws-sdk/client-sts": "^3.700.0",
     "@aws-sdk/cloudfront-signer": "^3.700.0",
     "@aws-sdk/dsql-signer": "^3.700.0",
-    "@aws-sdk/lib-storage": "^3.700.0",
     "@aws-sdk/s3-request-presigner": "^3.700.0",
     "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",

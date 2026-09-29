@@ -112,6 +112,7 @@ import {
   resolveContentRead,
   planRecordDelete,
   applyRecordDelete,
+  keepCanonicalOfArchivedOriginal,
   evaluateArchiving,
   applyArchiveEvaluation,
   archiveTriggersFor,
@@ -1240,6 +1241,11 @@ function archivedReadRefusal(availability: RecordAvailability) {
  * without a URL rather than being silently omitted, which would read as "this
  * record has no variant that size".
  */
+/** A lowercase hex SHA-256, as record content hashes are written. */
+function isSha256Hex(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
 /**
  * Re-decide archiving for the originals an event touched.
  *
@@ -1288,26 +1294,6 @@ async function runArchiveTriggers(
       console.warn(`[archive] could not re-decide ${trigger.originalId}: ${(err as Error).message}`);
     }
   }
-}
-
-/**
- * Whether a synced tombstone must be refused: the canonical stand-in of an
- * archived original is all the person can see until a restore, so the cloud
- * keeps it. A tombstone that arrives with its original's own tombstone in the
- * same exchange is a delete of the whole item, and passes.
- */
-async function keepCanonicalOfArchivedOriginal(
-  db: DatabaseAdapter,
-  current: DataRecord,
-  request: { records?: ReadonlyArray<{ id: string; deletedAt: unknown }> },
-): Promise<boolean> {
-  if (current.standInRole !== "canonical" || !current.parentId) return false;
-  const parentId = current.parentId;
-  if ((request.records ?? []).some((r) => r.id === parentId && r.deletedAt)) return false;
-  const original = await db.get(parentId);
-  if (!original || original.deletedAt || !original.objectStorageKey) return false;
-  const row = (await db.getAvailability([original.objectStorageKey])).get(original.objectStorageKey);
-  return row?.state === "archived" || row?.state === "restoring";
 }
 
 /**
@@ -2988,6 +2974,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         key?: string;
         contentType?: string;
         intent?: string;
+        contentHash?: string;
       };
       if (!body.key) return clientErr("key is required", 400);
       const check = parseObjectKey(appId, body.key, grants, "write");
@@ -3012,13 +2999,26 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // storing it, which is what turns "the upload returned 200" into
       // "S3 confirmed these bytes are the bytes this key names".
       //
-      // App-syncable keys are deliberately not content-addressed, so they get
-      // no pin; the helper returns null for them.
+      // App-syncable keys are deliberately not content-addressed, so the
+      // uploader declares the hash it already holds, and it is pinned the
+      // same way. Every object carries a whole-object SHA-256: it is what lets
+      // a node prove the cloud holds a file before letting its own copy go.
       const noCloud = await keyIsCloudExcluded(db, body.key);
       if (noCloud) return clientErr(NO_CLOUD_REFUSAL, 403);
 
-      const contentHash = contentHashFromDataRecordObjectKey(body.key);
-      const checksumSha256 = contentHash ? sha256HexToBase64(contentHash) : undefined;
+      const keyHash = contentHashFromDataRecordObjectKey(body.key);
+      const declared = body.contentHash;
+      if (declared !== undefined && !isSha256Hex(declared)) {
+        return clientErr("contentHash must be a lowercase hex SHA-256", 400);
+      }
+      if (keyHash && declared !== undefined && declared !== keyHash) {
+        return clientErr(`contentHash disagrees with the hash ${body.key} names`, 400);
+      }
+      const contentHash = keyHash ?? declared;
+      if (!contentHash) {
+        return clientErr("contentHash is required for a key that does not name its own hash", 400);
+      }
+      const checksumSha256 = sha256HexToBase64(contentHash);
       const tagging = tagsForIntent(intent);
       const url = await storage.getSignedPutUrl!(body.key, {
         expiresIn: 3600,
@@ -3692,17 +3692,26 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           const raw = event.isBase64Encoded && event.body
             ? Buffer.from(event.body, "base64").toString("utf8")
             : (event.body ?? "{}");
-          const body = JSON.parse(raw) as { subKey?: string; contentType?: string };
+          const body = JSON.parse(raw) as { subKey?: string; contentType?: string; contentHash?: string };
           if (!body.subKey) return clientErr("subKey is required", 400);
           // statFile enforces filesEnabled + the per-app key prefix; we only
           // use it here to surface a clear manifest error before signing.
           await view.statFile(body.subKey);
+          // The hash the upload must carry, pinned into the signature so S3
+          // rejects any other body and stores a whole-object SHA-256. The app
+          // holds the hash already: it registers the file by it next.
+          if (!body.contentHash || !isSha256Hex(body.contentHash)) {
+            return clientErr("contentHash (a lowercase hex SHA-256 of the bytes) is required", 400);
+          }
           const key = appSyncableObjectKey(appId, body.subKey);
+          const checksumSha256 = sha256HexToBase64(body.contentHash);
           const url = await storage.getSignedPutUrl!(key, {
             expiresIn: clampPresignExpiresIn(3600),
             ...(body.contentType ? { contentType: body.contentType } : {}),
+            checksumSha256,
           });
-          return ok({ url, key });
+          // Returned so the uploader sends the header the signature binds.
+          return ok({ url, key, checksumSha256 });
         } catch (err) {
           return clientErr(err instanceof Error ? err.message : String(err), 400);
         }
