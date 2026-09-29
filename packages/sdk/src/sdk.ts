@@ -23,7 +23,12 @@ async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
 }
 import { createUnifiedIndex } from "@starkeep/query-orchestrator";
 import { createChangeNotifier } from "@starkeep/sync-engine";
-import { createSharedSpaceApi } from "@starkeep/shared-space-api";
+import {
+  createSharedSpaceApi,
+  planRecordDelete,
+  applyRecordDelete,
+  ApiError,
+} from "@starkeep/shared-space-api";
 import type { SyncStateStore } from "@starkeep/sync-engine";
 import type {
   StarkeepSdk,
@@ -329,23 +334,21 @@ export async function createStarkeepSdk(
 
       async delete(recordId) {
         const existing = await databaseAdapter.get(recordId);
-        if (!existing) return;
-        const ts = clock.now();
-        await databaseAdapter.delete(recordId, ts);
-        await databaseAdapter.deleteMetadata(existing.type, recordId);
-        // Cascade to labels by hand — no FK backs record_id on either
-        // backend. Crosses app namespaces deliberately: the record is going
-        // away, so every app's assertions about it go with it. Tombstones
-        // rather than hard-deletes, so the cascade itself syncs; a record
-        // with 8 labels is 9 rows, nowhere near any transaction limit.
-        await databaseAdapter.tombstoneLabelsForRecord(recordId, ts);
-        const tombstone: DataRecord = {
-          ...existing,
-          updatedAt: ts,
-          deletedAt: ts,
-          version: existing.version + 1,
-        };
-        logChange(tombstone);
+        if (!existing || existing.deletedAt) return;
+        // The record, its stand-ins and derived records, and every label on
+        // any of them — see `stand-ins/delete.ts` in shared-space-api, which
+        // both data servers' delete routes use too. Labels cascade by hand
+        // because no FK backs record_id on either backend, and they cross app
+        // namespaces deliberately: the record is going away, so every app's
+        // assertions about it go with it. Tombstones rather than hard-deletes,
+        // so the cascade itself syncs.
+        const plan = await planRecordDelete(databaseAdapter, existing);
+        if (!plan.ok) {
+          throw new ApiError(String(plan.body.detail ?? plan.body.error), plan.status);
+        }
+        for (const tombstone of await applyRecordDelete(databaseAdapter, plan, clock)) {
+          logChange(tombstone);
+        }
       },
 
       async query(params) {

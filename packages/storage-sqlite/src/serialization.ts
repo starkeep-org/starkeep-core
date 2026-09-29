@@ -3,7 +3,13 @@ import type {
   MetadataRow,
   StarkeepId,
 } from "@starkeep/protocol-primitives";
-import { serializeHLC, deserializeHLC, createStarkeepId } from "@starkeep/protocol-primitives";
+import {
+  serializeHLC,
+  deserializeHLC,
+  createStarkeepId,
+  isStandInRole,
+  standInSlot,
+} from "@starkeep/protocol-primitives";
 
 export interface SqliteRow {
   id: string;
@@ -21,6 +27,14 @@ export interface SqliteRow {
   original_filename: string | null;
   origin_app_id: string;
   parent_id: string | null;
+  stand_in_role: string | null;
+  fidelity: number | null;
+  /**
+   * Derived from the three columns above and `deleted_at` on every write — see
+   * `standInSlot`. Never read back into a record: it exists only so one
+   * ordinary unique index can carry both stand-in uniqueness rules.
+   */
+  stand_in_slot: string | null;
 }
 
 export function recordToRow(record: DataRecord): SqliteRow {
@@ -39,6 +53,9 @@ export function recordToRow(record: DataRecord): SqliteRow {
     original_filename: record.originalFilename,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
+    stand_in_role: record.standInRole,
+    fidelity: record.fidelity,
+    stand_in_slot: standInSlot(record),
   };
 }
 
@@ -58,6 +75,10 @@ export function rowToRecord(row: SqliteRow): DataRecord {
     originalFilename: row.original_filename,
     originAppId: row.origin_app_id,
     parentId: row.parent_id ? createStarkeepId(row.parent_id) : null,
+    standInRole: isStandInRole(row.stand_in_role) ? row.stand_in_role : null,
+    // DSQL returns a bigint column as a string; the value is small, so a
+    // Number is exact.
+    fidelity: row.fidelity === null || row.fidelity === undefined ? null : Number(row.fidelity),
   };
 }
 

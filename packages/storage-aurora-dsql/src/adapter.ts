@@ -208,7 +208,9 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     await this.run(
       compiler
         .updateTable("shared.records")
-        .set({ deleted_at: ts, updated_at: ts, node_id: hlc.nodeId })
+        // A tombstone frees its stand-in slot, the same rule `standInSlot`
+      // applies on a full-row write.
+      .set({ deleted_at: ts, updated_at: ts, node_id: hlc.nodeId, stand_in_slot: null })
         .where("id", "=", id)
         .compile(),
     );

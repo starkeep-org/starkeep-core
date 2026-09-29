@@ -215,6 +215,37 @@ describe("every table in `shared` is granted to something", () => {
   });
 });
 
+describe("shared.records stand-in columns", () => {
+  it("declares the role, the fidelity and the slot in CREATE TABLE", async () => {
+    const create = find(await init(), 'create table if not exists "shared"."records"')!;
+    expect(create).toMatch(/"stand_in_role" text check \(stand_in_role IN \('canonical', 'smaller'\)\)/);
+    expect(create).toContain('"fidelity" integer');
+    expect(create).toContain('"stand_in_slot" text');
+  });
+
+  it("adds each column to an existing table before the index names it", async () => {
+    const statements = await init();
+    const index = statements.findIndex((s) => s.includes("uq_records_stand_in_slot"));
+    expect(index).toBeGreaterThan(-1);
+    for (const column of ["stand_in_role", "fidelity", "stand_in_slot"]) {
+      const add = statements.findIndex((s) =>
+        s.includes(`ALTER TABLE shared.records ADD COLUMN IF NOT EXISTS ${column}`),
+      );
+      expect(add, column).toBeGreaterThan(-1);
+      expect(add, column).toBeLessThan(index);
+    }
+  });
+
+  it("keys the slot index on (parent_id, stand_in_slot) with NULLs distinct", async () => {
+    const idx = find(await init(), "uq_records_stand_in_slot")!;
+    expect(idx).toContain("CREATE UNIQUE INDEX ASYNC IF NOT EXISTS");
+    expect(idx).toContain("ON shared.records (parent_id, stand_in_slot)");
+    // NULLS NOT DISTINCT would make every ordinary record under one parent
+    // collide, because their slot is null.
+    expect(idx).not.toMatch(/NULLS NOT DISTINCT/i);
+  });
+});
+
 describe("DSQL constraints the whole file lives inside", () => {
   it("issues every DDL statement separately", async () => {
     // Multiple DDL statements in one transaction is SQLSTATE 0A000 on DSQL,

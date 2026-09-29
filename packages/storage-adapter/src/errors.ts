@@ -43,3 +43,18 @@ export class FileUriTransferRefused extends StorageError {
     this.name = "FileUriTransferRefused";
   }
 }
+
+/**
+ * Whether a write failed on the stand-in slot index — a second live canonical
+ * stand-in for one original, or a second live stand-in at one size.
+ *
+ * Matched on the column name, which both engines put in the message: SQLite
+ * reports `UNIQUE constraint failed: shared_records.parent_id,
+ * shared_records.stand_in_slot`, and Postgres names the index
+ * `uq_records_stand_in_slot`, which carries the same words. No driver
+ * dependency, the same trade the duplicate-file check makes.
+ */
+export function isStandInSlotConflict(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("stand_in_slot");
+}

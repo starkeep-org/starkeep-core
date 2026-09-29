@@ -50,6 +50,35 @@ describe("record ↔ row serialization", () => {
   });
 });
 
+describe("stand-in columns", () => {
+  const parentId = createStarkeepId("0123456789abcdefghjkmnpqrs");
+
+  it("round-trips a stand-in's role and fidelity", () => {
+    const record = sampleRecord({ parentId, standInRole: "smaller", fidelity: 640 });
+    expect(rowToRecord(recordToRow(record))).toEqual(record);
+  });
+
+  it("reads a fidelity DSQL returns as a string back as a number", () => {
+    const row = { ...recordToRow(sampleRecord({ fidelity: 4000 })), fidelity: "4000" as unknown as number };
+    expect(rowToRecord(row).fidelity).toBe(4000);
+  });
+
+  it("derives the slot from the role, the fidelity and liveness", () => {
+    expect(recordToRow(sampleRecord({ parentId, standInRole: "canonical", fidelity: 4272 })).stand_in_slot).toBe(
+      "canonical",
+    );
+    expect(recordToRow(sampleRecord({ parentId, standInRole: "smaller", fidelity: 640 })).stand_in_slot).toBe(
+      "640",
+    );
+    expect(recordToRow(sampleRecord({ fidelity: 6000 })).stand_in_slot).toBeNull();
+    const clock = createHLCClock({ nodeId: "node-a" });
+    expect(
+      recordToRow(sampleRecord({ parentId, standInRole: "smaller", fidelity: 640, deletedAt: clock.now() }))
+        .stand_in_slot,
+    ).toBeNull();
+  });
+});
+
 describe("columnsToMetadataRow", () => {
   it("copies columns and drops the redundant record_id key", () => {
     const id = createStarkeepId("0123456789abcdefghjkmnpqrs");

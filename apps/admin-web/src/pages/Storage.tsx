@@ -1,6 +1,6 @@
 import { Link } from "react-router";
 import { Badge } from "@/components/ui/badge";
-import { RetentionMatrix } from "../components/RetentionMatrix";
+import { StandInsSection } from "../components/StandInsSection";
 
 export function StoragePage() {
   return (
@@ -13,14 +13,15 @@ export function StoragePage() {
         <Badge variant="outline" className="text-xs">Experimental</Badge>
       </div>
       <p className="text-sm text-muted-foreground mb-6">
-        What this machine keeps, and what it would cost. Projected from a count of the
-        library rather than an estimate, so the numbers move when the library does.
+        This machine keeps every file, except photos, videos and audio larger than its
+        ceiling, which it fetches when you open them. Nothing is removed unless you free
+        up space.
       </p>
       <div className="rounded-lg border p-6">
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">
-          Retention &amp; budgets
+          Photos, videos &amp; audio
         </h2>
-        <RetentionMatrix />
+        <StandInsSection />
       </div>
     </div>
   );

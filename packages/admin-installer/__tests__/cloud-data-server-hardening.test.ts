@@ -6,6 +6,7 @@
  *   - ephemeral e2e installs (ephemeral=true) skip all of that and make the
  *     bucket self-emptying so repeated teardown isn't wedged.
  */
+import { DEFAULT_STAND_IN_STANDARDS, STAND_IN_CATEGORIES } from "@starkeep/protocol-primitives";
 import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -254,6 +255,11 @@ describe("the archive lifecycle rule (media plan item 18)", () => {
     // Deep Archive bills a 40 KB per-object overhead and a 180-day minimum, so
     // below ~1 MB an archived object is both dearer and slower. Strictly worse.
     expect(filter.and.objectSizeGreaterThan).toBeGreaterThanOrEqual(1024 * 1024);
+    // The same floor the platform's archiving decision applies per category;
+    // a disagreement would tag objects the rule then ignores.
+    for (const category of STAND_IN_CATEGORIES) {
+      expect(DEFAULT_STAND_IN_STANDARDS[category].sizeFloorBytes).toBe(filter.and.objectSizeGreaterThan);
+    }
     const transitions = rule.transitions as Array<{ storageClass: string; days: number }>;
     expect(transitions).toHaveLength(1);
     expect(transitions[0]!.storageClass).toBe("DEEP_ARCHIVE");

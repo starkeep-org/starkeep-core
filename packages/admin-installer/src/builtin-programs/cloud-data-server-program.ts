@@ -23,6 +23,7 @@ import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import * as tls from "@pulumi/tls";
 import {
+  ARCHIVE_SIZE_FLOOR_BYTES,
   INTENT_TAG_KEY,
   LADDER_TAG_KEY,
   LADDER_TAG_COMPLETE,
@@ -106,9 +107,10 @@ export interface CloudDataServerProgramContext {
  * Deep Archive bills a 40 KB per-object overhead and a 180-day minimum
  * duration, so a small object is both more expensive and slower to read once
  * frozen. Strictly worse on both axes, which is why this is a floor rather than
- * a tuning knob.
+ * a tuning knob. The stand-in standards' size floor, so the platform never
+ * tags an object this rule then ignores.
  */
-const ARCHIVE_MIN_OBJECT_BYTES = 1024 * 1024;
+const ARCHIVE_MIN_OBJECT_BYTES = ARCHIVE_SIZE_FLOOR_BYTES;
 
 const DEFAULT_ARCHIVE_HOLD_DAYS = 7;
 

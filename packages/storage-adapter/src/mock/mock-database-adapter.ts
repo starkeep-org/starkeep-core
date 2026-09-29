@@ -9,6 +9,7 @@ import {
   compareHLC,
   isKnownType,
   serializeHLC,
+  standInSlot,
   typeCategory,
   METADATA_DISCRIMINANT_COLUMN,
 } from "@starkeep/protocol-primitives";
@@ -84,6 +85,22 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
   }
 
   async put(record: DataRecord): Promise<void> {
+    // The stand-in slot index, as the real engines enforce it: one live
+    // canonical stand-in per original, one live stand-in per size.
+    const slot = standInSlot(record);
+    if (slot !== null) {
+      for (const other of this.store.values()) {
+        if (
+          other.id !== record.id &&
+          other.parentId === record.parentId &&
+          standInSlot(other) === slot
+        ) {
+          throw new Error(
+            "UNIQUE constraint failed: shared_records.parent_id, shared_records.stand_in_slot",
+          );
+        }
+      }
+    }
     this.store.set(record.id, structuredClone(record));
   }
 
@@ -805,5 +822,8 @@ function recordToRow(record: DataRecord): Record<string, unknown> {
     original_filename: record.originalFilename,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
+    stand_in_role: record.standInRole,
+    fidelity: record.fidelity,
+    stand_in_slot: standInSlot(record),
   };
 }

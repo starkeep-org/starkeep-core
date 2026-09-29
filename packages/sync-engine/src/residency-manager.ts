@@ -1,66 +1,31 @@
 /**
- * Host-side residency: everything the platform deliberately refuses to know.
+ * Host-side residency: the facts the residency decision needs that only the
+ * node running it knows.
  *
- * `@starkeep/sync-engine` owns the *shape* of the residency decision — the
- * resolution order, the keep rules, the budgets, the durability predicate —
- * and knows nothing about what a size class is or which node it is running on.
- * This module supplies both, because they are host facts:
- *
- *   - **Which class a record belongs to.** A namespace and a rung: the host
- *     knows which apps are installed and which label key each one uses for its
- *     ladder, so it can read every app's rungs at once. Nothing here hard-codes
- *     a class name, so a ladder can be respecified without touching this file.
  *   - **Which node this is.** `starkeep/no-cloud` forbids the cloud and says
  *     nothing about a laptop, so only the host can turn a record constraint
  *     into "denied here".
+ *   - **This node's ceilings.** The person sets them per node.
  *   - **Pins.** Node-local, deliberately not a label: a pin shared as a label
  *     would let one device's preference silently rewrite every other device's
- *     cache policy. That is the expensive mistake available in this area.
+ *     residency.
+ *
+ * A node holds every file no stand-in can replace, every stand-in at or below
+ * its ceiling, and whatever someone asked for. It removes nothing on its own;
+ * "Free up space" is the one path that removes a file.
  *
  * ## Why this lives in the sync engine rather than beside a server
  *
- * It used to live in `apps/local-data-server`, which was fine while exactly one
- * node made residency decisions. The phone makes them too, and it makes them
- * against the same rules — so the choice was between moving this or growing a
- * second copy, and a second copy of "which bytes may this node hold" is how two
+ * The local data server and the phone both make these decisions, against the
+ * same rules, and a second copy of "which bytes may this node hold" is how two
  * nodes come to disagree about what they have.
- *
- * It moved unchanged: every dependency was already a package and there was not
- * one Node-specific import in it. That it was portable all along is the reason
- * the move is safe, and the reason it should have started here.
- *
- * ## How a namespace is chosen, and why an app cannot choose its own
- *
- * {@link resolveClass} below is the whole of it, and every branch answers from
- * something the writing app does not control:
- *
- * | the candidate is | namespace | rung |
- * |---|---|---|
- * | an app-syncable row | the owning app | a reserved rung |
- * | a record with no parent | the platform | `original:<category>` |
- * | a record with a parent, labelled | the **label row's** app | the label's value |
- * | a record with a parent, unlabelled | the record's origin app | a reserved rung |
- *
- * `parentId` is a column, `origin_app_id` is set from the authenticated writer,
- * and a label row's `app_id` is server-set with no way to express another app's
- * namespace. So an app can say which rung of *its own* ladder something is, and
- * nothing else. It cannot promote an original into a cheap rung, demote a
- * rendition into the protected tier, or spend a neighbour's budget.
- *
- * The last row of that table is the one worth watching: a derivative nobody
- * labelled. It is charged to whoever created the record, which is the honest
- * answer, and where even that is unknown it falls to the platform namespace and
- * is treated as an original — the fail-closed direction, since the cost of
- * wrongly calling something re-derivable is that it is deleted.
  */
 
-import {
-  evaluateOverrides,
-  NO_OVERRIDES,
-  type OverrideRule,
-  type OverrideVerdict,
-} from "./index.js";
-import type { RawDatabase } from "@starkeep/storage-adapter";
+import type {
+  DatabaseAdapter,
+  ObjectStorageAdapter,
+  RawDatabase,
+} from "@starkeep/storage-adapter";
 import {
   DummyDriver,
   Kysely,
@@ -69,264 +34,146 @@ import {
   SqliteQueryCompiler,
   sql,
 } from "kysely";
-import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import type { AcquisitionConsideration } from "./acquisition-scan.js";
 import {
-  budgetBytesFor,
-  budgetLineFor,
-  budgetLinesOf,
-  createSqliteResidentSetIndex,
+  ceilingPlacement,
+  standardsFor,
+  DEFAULT_STAND_IN_STANDARDS,
+  type CeilingPlacement,
+  type StandInStandards,
+  type StarkeepId,
+  type SyncDownCeilings,
+} from "@starkeep/protocol-primitives";
+import type { AcquisitionConsideration } from "./acquisition-scan.js";
+import type { DurabilityPolicy, ReplicaProbe } from "./durability.js";
+import { freeUpSpaceOn } from "./free-up-space.js";
+import {
   decideResidency,
-  evictLine,
-  isPlatformClass,
-  parseSizeClass,
-  previewBudgetReduction,
-  resolveSizeClass,
-  retentionRowFor,
-  validateRetentionPolicy,
-  PLATFORM_NAMESPACE,
   type BlobCandidate,
-  type BudgetLine,
-  type DurabilityPolicy,
-  type EvictionOutcome,
-  type NodeRetentionPolicy,
-  type ReductionPreview,
-  type ReplicaProbe,
   type ResidencyTrigger,
   type ResidencyVerdict,
+} from "./residency-policy.js";
+import {
+  createSqliteResidentSetIndex,
   type ReconcileReport,
   type ResidentArrival,
   type ResidentEntry,
   type ResidentSetIndex,
-  type ResolvedSizeClass,
-} from "./index.js";
-import { getCategory, typeCategory } from "@starkeep/protocol-primitives";
-import type { StarkeepId } from "@starkeep/protocol-primitives";
+} from "./resident-set.js";
 
 /** Label namespace for platform-level record constraints. */
 export const STARKEEP_LABEL_APP_ID = "starkeep";
 /** Record label forbidding these bytes from reaching cloud storage. */
 export const NO_CLOUD_LABEL_KEY = "no-cloud";
 
-/**
- * Class prefix for records that are not a derived rendition — i.e. the thing
- * itself.
- *
- * Split by media category, because one 4K clip is worth hundreds of stills in
- * bytes and under a pooled budget one silently starves the other depending on
- * ingest order. Every other class gets the split for free from its own name.
- */
-export const ORIGINAL_CLASS_PREFIX = "original";
-
-/** The platform class for the thing itself — `starkeep:original:image`. */
-export function originalClassFor(type: string | null): ResolvedSizeClass {
-  return resolveSizeClass(
-    PLATFORM_NAMESPACE,
-    `${ORIGINAL_CLASS_PREFIX}:${type === null ? "other" : typeCategory(type)}`,
-  );
-}
-
-/**
- * The rung given to an app's own bytes that carry no ladder label: its
- * app-syncable files, and any derived record it never classified.
- *
- * Reserved in the sense that the platform assigns it, not that an app is
- * prevented from naming a rung the same thing — that collision is harmless,
- * because both land in the same app's namespace and the same budget either way.
- */
-export const UNCLASSIFIED_RUNG = "unclassified";
-
-/** The shape both callers of {@link pickLadderLabel} have. */
-export interface LadderLabel {
-  readonly appId: string;
-  readonly key: string;
-  readonly value: string;
-}
-
-/**
- * Which of a record's labels names its size class, when more than one app has
- * labelled it.
- *
- * Two apps labelling one derivative is not a corner case — it is the case
- * app-namespaced classes were introduced to support, and both places that
- * classify a record have to answer it the *same* way. The census promises "this
- * is what saying yes would cost", which it can only keep if the class it counts
- * a record under is the class the manager will charge it to.
- *
- * So the choice is a rule rather than whichever row the database happened to
- * return first:
- *
- * 1. **The record's origin app wins.** It made the record; its ladder is the one
- *    that describes what these bytes are. Another app's label is an annotation
- *    on someone else's file.
- * 2. **Otherwise the lowest app id**, and within one app the lowest value — an
- *    arbitrary rule, but a *stable* one, which is the property that matters.
- *    An unstable choice moves a record between namespaces on re-resolution, and
- *    the byte it moves is charged to two budgets and evicted by neither.
- */
-export function pickLadderLabel<T extends LadderLabel>(
-  labels: readonly T[],
-  sizeClassKeys: Readonly<Record<string, string>>,
-  originAppId: string | null,
-): T | undefined {
-  let best: T | undefined;
-  for (const label of labels) {
-    if (sizeClassKeys[label.appId] !== label.key || label.value === "") continue;
-    if (best === undefined || beats(label, best, originAppId)) best = label;
-  }
-  return best;
-}
-
-function beats(a: LadderLabel, b: LadderLabel, originAppId: string | null): boolean {
-  if (a.appId !== b.appId) {
-    if (a.appId === originAppId) return true;
-    if (b.appId === originAppId) return false;
-    return a.appId < b.appId;
-  }
-  // One app, two rungs on the same key: keys are set-valued, so this is legal.
-  // Either answer is as good as the other; picking the same one every time is
-  // not optional.
-  return a.value < b.value;
-}
+/** The resident-set group of a file no stand-in can replace. */
+export const KEPT_GROUP = "kept";
 
 export interface ResidencyManagerOptions {
   readonly localDb: RawDatabase;
   readonly databaseAdapter: DatabaseAdapter;
   readonly localObjectStorage: ObjectStorageAdapter;
   /**
-   * Which label key each installed app uses to name its ladder rungs, keyed by
-   * app id — `{ photos: "rendition" }` on a node with Photos installed.
-   *
-   * A map rather than one configured `{ appId, key }` because a single entry
-   * made exactly one app's ladder legible: every other app's derivatives matched
-   * nothing, fell to the original class, and were then treated as irreplaceable
-   * last copies of user content. A host that knows which apps are installed
-   * knows all of these, so installing an app makes its ladder legible with no
-   * operator step.
-   *
-   * An app with no entry is not an error — it declares no size-class key, so it
-   * produces no rungs, and anything it does derive lands in its own namespace
-   * under {@link UNCLASSIFIED_RUNG}.
-   */
-  readonly sizeClassKeys: Readonly<Record<string, string>>;
-  /**
-   * Per-record overrides expressed as rules over labels. Node-local, like pins.
-   *
-   * Empty by default so a node that has never configured any behaves exactly as
-   * it did before rules existed.
-   */
-  readonly overrideRules?: readonly OverrideRule[];
-  /**
    * True when this process is the node that `starkeep/no-cloud` forbids. False
    * for a laptop or phone, which may hold no-cloud records freely — that is the
    * entire point of the flag.
    */
   readonly isCloudNode: boolean;
-  readonly policy: NodeRetentionPolicy;
   readonly durability: DurabilityPolicy;
+  /**
+   * This node's sync-down ceilings — the largest fidelity per stand-in
+   * category it receives without being asked. The local data server passes
+   * the desktop row of `DEFAULT_SYNC_DOWN_CEILINGS` unless the person changed
+   * it, and the phone passes the phone row.
+   */
+  readonly ceilings: SyncDownCeilings;
+  /** The stand-in standards the ceiling rule reads. Defaults to the platform's. */
+  readonly standards?: StandInStandards;
+  /**
+   * Whether `localObjectStorage` answers for these bytes without holding them —
+   * a phone's camera-roll alias, whose bytes belong to the device's media
+   * store. Removing such a key frees nothing and loses the alias, so "Free up
+   * space" skips it. Absent: every key the store has is held here.
+   */
+  readonly borrowsBytes?: (objectStorageKey: string) => boolean;
+}
+
+/** What "Free up space" is asked to reclaim. */
+export interface FreeUpSpaceRequest {
+  /** Bytes to free. The pass stops as soon as it has freed at least this many. */
+  readonly bytes: number;
+  /**
+   * `originals`: only originals (never a self-canonical original at or below
+   * the ceiling). `originals-and-above-ceiling`: those plus every stand-in
+   * above the ceiling, canonical stand-ins included.
+   */
+  readonly scope: "originals" | "originals-and-above-ceiling";
+  /** Where the cloud copies are proved. Without a probe nothing is removed. */
+  readonly probes: readonly ReplicaProbe[];
+  /** Prove and total, but remove nothing — the estimate a person sees first. */
+  readonly dryRun?: boolean;
+}
+
+export interface FreeUpSpaceItem {
+  readonly recordId: string;
+  readonly objectStorageKey: string;
+  readonly sizeBytes: number;
+  readonly kind: "original" | "stand-in";
+}
+
+export interface FreeUpSpaceRefusal extends FreeUpSpaceItem {
+  readonly reason: "not-durable" | "no-canonical" | "record-missing";
+  readonly detail: string;
+}
+
+export interface FreeUpSpaceReport {
+  readonly requestedBytes: number;
+  /** Removed, or — on a dry run — would be removed. */
+  readonly freedBytes: number;
+  readonly removed: readonly FreeUpSpaceItem[];
+  readonly refused: readonly FreeUpSpaceRefusal[];
+  /** Every eligible byte this node holds in the scope, whether or not proved. */
+  readonly eligibleBytes: number;
+  readonly dryRun: boolean;
 }
 
 export interface ResidencyManager {
   readonly index: ResidentSetIndex;
-  /**
-   * The fetch-time decision, ready to hand to `createSyncEngine`.
-   *
-   * `trigger` says what is asking, and two of the policy's rules turn on it —
-   * whether `prefetch` applies, and whether the line may displace what it
-   * already holds. Defaults to `"round"`, the most restrictive of the three.
-   * See {@link ResidencyTrigger}.
-   */
-  decide(
-    candidate: BlobCandidate,
-    trigger?: ResidencyTrigger,
-  ): Promise<ResidencyVerdict>;
-  /**
-   * Record that a blob landed. Called after a successful transfer, so byte
-   * accounting reflects what is actually on disk rather than what was intended.
-   *
-   * Takes the whole verdict rather than just its class, because the verdict is
-   * the only place the *resolved* pin exists — `decide` honours the pins table
-   * and any `effect: "pin"` override rule, and this used to re-read the table
-   * alone. See {@link ResidencyVerdict.pinned}.
-   */
-  noteArrival(candidate: BlobCandidate, verdict: ResidencyVerdict | null): Promise<void>;
-  /**
-   * Record that a blob this node wants could not be taken right now.
-   *
-   * The queue write behind {@link ResidencyHooks.defer}, and the reason the
-   * queue is worth having at all: `decide` has already resolved this
-   * candidate's rank — including the parent walk a rendition needs for its
-   * capture date — so deferring writes down an answer that has just been
-   * computed. A pass that instead re-derived rank from the catalogue would
-   * repeat that join over the whole library on every tick, forever.
-   *
-   * The row it writes is a hint and is allowed to be stale. Nothing is fetched
-   * on its authority: the acquisition pass re-runs the real decision against
-   * the current policy before it spends a byte.
-   */
-  noteDeferred(candidate: BlobCandidate, verdict: ResidencyVerdict): Promise<void>;
-  /**
-   * One page of a budget line's acquisition queue, best-first.
-   *
-   * The mirror of the eviction pass's candidate query, and deliberately the
-   * same shape: the pass walks it in order and stops at the first candidate the
-   * policy declines for want of room, because a best-first queue means nothing
-   * behind that one can win either.
-   */
-  deferredCandidates(budgetLineKey: string, limit: number): ResidentEntry[];
-  /**
-   * Forget a queued blob the acquisition pass established can never win — a
-   * class the node has since disabled, a record constraint that now forbids it.
-   *
-   * Never touches a departed row; see {@link ResidentSetIndex.dropDeferred}.
-   */
-  dropDeferred(objectStorageKey: string): void;
-  /**
-   * Would this node want these bytes if there were room — and if so, queue
-   * them. The catalogue scan's per-record step.
-   *
-   * Deliberately *not* the residency decision. See the implementation.
-   */
-  considerForAcquisition(candidate: BlobCandidate): Promise<AcquisitionConsideration>;
-  /**
-   * Charge a budget for bytes that are about to be fetched.
-   *
-   * Called between the decision and the transfer, and undone by
-   * {@link releaseReservation} if the transfer does not happen. See
-   * {@link ResidentSetIndex.reserve} for why the accounting has to move early in
-   * this one case: the supervisor hands one index to several engines that tick
-   * independently, so without it each of them sees the same room and lands into
-   * it.
-   */
-  reserve(candidate: BlobCandidate, verdict: ResidencyVerdict): void;
-  /** Undo a reservation whose transfer failed or was declined. */
-  releaseReservation(objectStorageKey: string): void;
+  /** The fetch-time decision, ready to hand to `createSyncEngine`. */
+  decide(candidate: BlobCandidate, trigger?: ResidencyTrigger): Promise<ResidencyVerdict>;
+  /** Record that a blob landed. Called after a successful transfer. */
+  noteArrival(candidate: BlobCandidate): Promise<void>;
+  /** Record that this node's bytes for a key are gone. */
   noteDeparture(objectStorageKey: string): void;
   /**
-   * Reconcile the index against what this node's object storage actually holds,
-   * correcting rows the index believed and storage does not have.
-   *
-   * Returns keys storage holds that the index has never seen — locally imported
-   * originals and derived renditions, which arrived by a route that never
-   * touched `noteArrival` and are therefore invisible to every budget. Resolving
-   * those needs the record row, which is the host's to join.
+   * The catalogue scan's per-record step: adopt bytes already here, queue
+   * bytes this node wants and lacks, and skip the rest.
+   */
+  considerForAcquisition(candidate: BlobCandidate): Promise<AcquisitionConsideration>;
+  /** Wanted blobs this node lacks, oldest first. */
+  deferredCandidates(limit: number): ResidentEntry[];
+  /** Stop wanting a queued blob the acquisition pass found unwanted or gone. */
+  dropDeferred(objectStorageKey: string): void;
+  /**
+   * Reconcile the index against what this node's object storage actually
+   * holds, correcting rows the index believed and storage does not have.
    */
   reconcile(): Promise<ReconcileReport>;
   /** Whether this node held these bytes and let them go. */
   wasEvicted(objectStorageKey: string): boolean;
   isPinned(recordId: string): boolean;
   setPinned(recordId: string, pinned: boolean): void;
-  markOpened(recordId: string, atMs: number): void;
-  classOf(candidate: BlobCandidate): Promise<ResolvedSizeClass>;
-  usageByClass(): Record<string, number>;
-  /** Bytes held per namespace — what each app's total is being measured against. */
-  usageByNamespace(): Record<string, number>;
-  runEviction(probes: readonly ReplicaProbe[]): Promise<EvictionOutcome[]>;
-  previewReduction(
-    budgetLineKey: string,
-    newBudgetBytes: number,
-    probes: readonly ReplicaProbe[],
-  ): Promise<ReductionPreview>;
+  /** Bytes held per resident-set group. See {@link ResidentEntry.group}. */
+  usageByGroup(): Record<string, number>;
+  /**
+   * The person's "Free up space": remove originals — and, in the wider scope,
+   * stand-ins above the ceiling — largest first, until the requested bytes are
+   * free. Each removal first proves complete cloud copies of the file, of its
+   * original and of the original's canonical stand-in. Nothing runs it on its
+   * own.
+   */
+  freeUpSpace(request: FreeUpSpaceRequest): Promise<FreeUpSpaceReport>;
+  /** Where a candidate sits against this node's ceiling. */
+  ceilingOf(candidate: BlobCandidate): CeilingPlacement;
 }
 
 type DB = Record<string, Record<string, unknown>>;
@@ -341,27 +188,16 @@ const qb = new Kysely<DB>({
 
 const PINS_TABLE = "local_pins";
 
-export function createResidencyManager(
-  options: ResidencyManagerOptions,
-): ResidencyManager {
+export function createResidencyManager(options: ResidencyManagerOptions): ResidencyManager {
   const {
     localDb,
     databaseAdapter,
     localObjectStorage,
-    sizeClassKeys,
-    overrideRules = [],
     isCloudNode,
-    policy,
     durability,
+    ceilings,
+    standards = DEFAULT_STAND_IN_STANDARDS,
   } = options;
-
-  const problems = validateRetentionPolicy(policy);
-  if (problems.length > 0) {
-    // Refused here rather than absorbed, because every problem this catches
-    // manifests as blobs quietly not arriving — which looks like a network
-    // fault, not a configuration error, and is diagnosed accordingly.
-    throw new Error(`Invalid retention policy:\n  ${problems.join("\n  ")}`);
-  }
 
   const index = createSqliteResidentSetIndex({ db: localDb });
 
@@ -394,617 +230,155 @@ export function createResidencyManager(
     return pinGet.get(recordId) !== undefined;
   }
 
-  /**
-   * Both label-derived inputs come from one read.
-   *
-   * `getLabel` can't serve either of them: `value` is part of a label's primary
-   * key (keys are set-valued), and the whole point here is that we don't know
-   * the value — we're asking what it is. So this reads the record's labels once
-   * and answers both questions from the same result, which also keeps the
-   * per-blob cost at one query rather than two.
-   */
-  async function labelInputs(
-    candidate: BlobCandidate,
-  ): Promise<{ sizeClass: ResolvedSizeClass; deniedHere: boolean; overrides: OverrideVerdict }> {
-    // App-syncable blobs carry no shared-record labels, so there is nothing to
-    // read — but they are unambiguously one app's own bytes, so they belong in
-    // that app's namespace and against that app's total rather than in a
-    // node-wide fallback that nobody's budget describes.
-    if (candidate.appId !== null) {
-      return {
-        sizeClass: resolveSizeClass(candidate.appId, UNCLASSIFIED_RUNG),
-        deniedHere: false,
-        overrides: NO_OVERRIDES,
-      };
-    }
+  /** App-syncable rows are an app's own files, which no stand-in replaces. */
+  function ceilingOf(candidate: BlobCandidate): CeilingPlacement {
+    if (candidate.appId !== null || candidate.type === null) return "keep";
+    return ceilingPlacement(
+      {
+        type: candidate.type,
+        parentId: candidate.parentId,
+        standInRole: candidate.standInRole ?? null,
+        fidelity: candidate.fidelity ?? null,
+        sizeBytes: candidate.sizeBytes,
+      },
+      ceilings,
+      standards,
+    );
+  }
 
-    // BlobCandidate carries ids as plain strings — the sync engine normalizes
-    // shared records and app-syncable rows into one shape, and only the former
-    // have StarkeepIds.
-    const recordId = candidate.recordId as StarkeepId;
-    const byRecord = await databaseAdapter.getLabelsByRecordIds([recordId]);
-    const labels = (byRecord.get(recordId) ?? []).filter((l) => !l.deletedAt);
+  function groupOf(candidate: BlobCandidate): string {
+    const category =
+      candidate.type === null ? null : standardsFor(candidate.type, standards)?.category ?? null;
+    if (category === null || ceilingOf(candidate) === "keep") return KEPT_GROUP;
+    return `${candidate.standInRole ? "stand-in" : "original"}:${category}`;
+  }
 
+  function arrivalOf(candidate: BlobCandidate): ResidentArrival {
     return {
-      // Evaluated from the same label read, not a second query. Rules are the
-      // scalable form of a pin — "keep every photo of my daughter" is one
-      // sentence and five thousand records, and pinning ids would freeze that
-      // intent at pin time so every later photo silently falls outside it.
-      overrides: evaluateOverrides(overrideRules, labels),
-      sizeClass: resolveClass(candidate, labels),
-      // A laptop or phone may hold a no-cloud record freely — the constraint is
-      // about the cloud, and reading it as "nobody may hold this" would turn a
-      // privacy preference into data loss.
-      deniedHere:
-        isCloudNode &&
-        labels.some(
-          (l) => l.appId === STARKEEP_LABEL_APP_ID && l.key === NO_CLOUD_LABEL_KEY,
-        ),
+      recordId: candidate.recordId,
+      objectStorageKey: candidate.objectStorageKey,
+      sizeBytes: candidate.sizeBytes,
+      group: groupOf(candidate),
+      addedAtMs: Date.now(),
     };
   }
 
   /**
-   * Namespace and rung for a shared record, from its structure and its labels.
-   *
-   * Total by construction — every branch returns a class — because the
-   * alternative was a null that {@link decideResidency} then had to interpret,
-   * and "unclassified" is a decision about someone's disk that deserves to be
-   * made here, once, where the evidence is.
+   * Whether a record constraint forbids these bytes here. Only the cloud node
+   * has one to honour: a laptop or phone may hold a no-cloud record freely,
+   * and reading it as "nobody may hold this" would turn a privacy preference
+   * into data loss.
    */
-  function resolveClass(
-    candidate: BlobCandidate,
-    labels: readonly { appId: string; key: string; value: string }[],
-  ): ResolvedSizeClass {
-    // No parent means this *is* the thing itself. Decided from the column, not
-    // from the absence of a label: a record whose ladder label failed to write
-    // is still a rendition, and calling it an original would charge it to the
-    // protected budget and refuse to evict it.
-    if (candidate.parentId === null) return originalClassFor(candidate.type);
-
-    // A derivative. The namespace comes from whichever app's *own* declared key
-    // this label was written under, and `appId` on a label row is server-set —
-    // there is no way for an app to express another app's namespace here.
-    // Where several apps have labelled it, the tie-break is a rule shared with
-    // the census rather than the order the label read returned.
-    const rung = pickLadderLabel(labels, sizeClassKeys, candidate.originAppId);
-    if (rung !== undefined) return resolveSizeClass(rung.appId, rung.value);
-
-    // Derived, but nobody labelled it — the app declares no size-class key, or
-    // it failed to label this one. Charge it to whoever created the record.
-    if (candidate.originAppId !== null) {
-      return resolveSizeClass(candidate.originAppId, UNCLASSIFIED_RUNG);
-    }
-
-    // Derived, and we cannot say by whom. Treated as an original: it is the
-    // only branch here with no evidence at all, and the two mistakes are not
-    // symmetric — calling an original re-derivable gets it deleted, while
-    // calling a rendition irreplaceable only costs disk.
-    return originalClassFor(candidate.type);
-  }
-
-  async function classOf(candidate: BlobCandidate): Promise<ResolvedSizeClass> {
-    return (await labelInputs(candidate)).sizeClass;
-  }
-
-  /**
-   * The two dates that place a blob in the eviction order, which only the host
-   * can answer.
-   *
-   * These used to feed a *policy axis* — `recent-only` with a window in days —
-   * and that axis is gone, because a hand-written date cutoff was a prediction
-   * of what the eviction pass computes anyway. What is left is the pass's own
-   * ordering, and these are its two terms, so they matter as much as they ever
-   * did and in a more direct way: a null here does not fail open, it collapses
-   * a tier of the sort into a tie.
-   *
-   * Read here rather than pushed down into the engine because it is a host fact
-   * in exactly the sense the module header describes: the platform must not
-   * learn that a photograph has a capture date. Widening a query this function
-   * already makes per candidate, rather than adding a new one to the hot path.
-   */
-  async function recencyInputs(
-    candidate: BlobCandidate,
-  ): Promise<{ recencyAtMs: number | null; lastOpenedAtMs: number | null }> {
-    // Whatever the caller already knew wins. `MobileNode.fetchBlob` passes
-    // `lastOpenedAtMs: Date.now()` because opening a photo is the event, and it
-    // knows that better than any row does.
-    const lastOpenedAtMs =
-      candidate.lastOpenedAtMs ?? lastOpenedFromIndex(candidate.recordId);
-    if (candidate.recencyAtMs !== null) {
-      return { recencyAtMs: candidate.recencyAtMs, lastOpenedAtMs };
-    }
-    return { recencyAtMs: await capturedAtMs(candidate), lastOpenedAtMs };
-  }
-
-  /** The most recent open across every blob this node holds for the record. */
-  function lastOpenedFromIndex(recordId: string): number | null {
-    let latest: number | null = null;
-    for (const entry of index.entriesOfRecord(recordId)) {
-      if (entry.lastOpenedAtMs === null) continue;
-      if (latest === null || entry.lastOpenedAtMs > latest) latest = entry.lastOpenedAtMs;
-    }
-    return latest;
-  }
-
-  /**
-   * Capture time in epoch ms from the record's per-category metadata, or null.
-   *
-   * Null on every uncertainty — an app-syncable row (no shared-record metadata
-   * exists for one), a category with no `captured_at` column, a missing row, an
-   * unparseable value, a table that would not read. Unknown must not read as
-   * "ancient": under the eviction ordering an undated blob already sorts to the
-   * front, and inventing a date to avoid that would be guessing with somebody's
-   * photographs.
-   *
-   * ## Derived records read their parent's date
-   *
-   * A rendition's metadata write is `{ width, height }` — there is no
-   * `captured_at` on one, and there should not be, because a denormalized copy
-   * drifts the moment anything backfills or corrects EXIF. So a record with a
-   * parent asks the parent, which is where the date authoritatively lives.
-   *
-   * Without this, every rendition ranked null and the ordering's last tier was
-   * dead across the entire ladder — which is most of the rows in any library.
-   * It was previously worse than that: the same gap made `recent-only` behave
-   * as "keep everything" on every rendition class, silently, because the census
-   * computed recency the same way and therefore agreed. That rule is gone; the
-   * ordering it fed is not.
-   *
-   * A parent that cannot be read returns null and the blob sorts as undated.
-   * That is the same direction every other branch here takes, and it is the one
-   * that matters most: the alternative is a metadata gap deciding which
-   * photographs get deleted.
-   *
-   * Deliberately **not** falling back to the record's `createdAt`. That column
-   * holds a serialized HLC, not a date, and reading it as a timestamp yields a
-   * number that is meaningless and — worse — plausible.
-   */
-  async function capturedAtMs(candidate: BlobCandidate): Promise<number | null> {
-    if (candidate.appId !== null) return null;
-    if (candidate.parentId !== null) return capturedAtOfRecord(candidate.parentId);
-    return candidate.type === null ? null : capturedAtOf(candidate.recordId, candidate.type);
-  }
-
-  /** The same question about a record we hold only an id for — a parent. */
-  async function capturedAtOfRecord(recordId: string): Promise<number | null> {
-    try {
-      const record = await databaseAdapter.get(recordId as StarkeepId);
-      if (!record?.type) return null;
-      return capturedAtOf(recordId, record.type);
-    } catch (err) {
-      console.warn(
-        `[residency] could not read parent ${recordId} for a capture time; treating it as unknown: ${(err as Error).message}`,
-      );
-      return null;
-    }
-  }
-
-  async function capturedAtOf(recordId: string, type: string): Promise<number | null> {
-    // Asked of the type system rather than hard-coded to image and video: which
-    // categories carry a capture date is the core type table's business, and a
-    // category gaining one should start working here without an edit.
-    const category = getCategory(typeCategory(type));
-    if (!category?.metadataColumns.some((c) => c.name === CAPTURED_AT_COLUMN)) {
-      return null;
-    }
-    try {
-      const id = recordId as StarkeepId;
-      const rows = await databaseAdapter.getMetadataByIds(type, [id]);
-      return parseCapturedAt(rows.get(id)?.[CAPTURED_AT_COLUMN]);
-    } catch (err) {
-      console.warn(
-        `[residency] could not read capture time for ${recordId}; treating it as unknown: ${(err as Error).message}`,
-      );
-      return null;
-    }
-  }
-
-  /**
-   * Whether these bytes may only be dropped once a replica is confirmed.
-   *
-   * The question is "can this be made again?", and only one fact answers it:
-   * a derivative can be re-derived from its parent, and nothing else can. So
-   * the test is `parentId`, with the namespace as a second gate for the case
-   * where the parent is present but we could not say whose derivative it is —
-   * `resolveClass` sends that to the platform namespace deliberately, and this
-   * has to agree or the fail-closed branch is fail-open two lines later.
-   *
-   * An app-syncable blob is the case that makes the namespace alone wrong. It
-   * is one app's own bytes, so it belongs in that app's namespace and against
-   * that app's total — but it is not derived from anything, and this node may
-   * hold the only copy. Reading proof off the namespace would have made every
-   * app's own files freely deletable.
-   *
-   * ## What it means that only arrivals reach this
-   *
-   * Answered on `reserve` and `noteArrival` — the inbound paths — so the
-   * question is asked only about bytes the index knows about. Bytes it does not
-   * know about are not *unprotected*, they are **invisible**: the eviction pass
-   * draws its candidates from this table, so a blob with no row is never offered
-   * for deletion at all. The direction of that gap is the safe one — it costs
-   * disk, not data — and `reconcile` is what surfaces those keys so a host can
-   * charge them to a budget deliberately rather than have them quietly not
-   * count.
-   */
-  function requiresProof(candidate: BlobCandidate, cls: ResolvedSizeClass): boolean {
-    if (candidate.appId !== null) return true;
-    return candidate.parentId === null || isPlatformClass(cls);
+  async function deniedHere(candidate: BlobCandidate): Promise<boolean> {
+    if (!isCloudNode || candidate.appId !== null) return false;
+    const recordId = candidate.recordId as StarkeepId;
+    const byRecord = await databaseAdapter.getLabelsByRecordIds([recordId]);
+    return (byRecord.get(recordId) ?? []).some(
+      (l) => !l.deletedAt && l.appId === STARKEEP_LABEL_APP_ID && l.key === NO_CLOUD_LABEL_KEY,
+    );
   }
 
   async function decide(
     candidate: BlobCandidate,
     trigger?: ResidencyTrigger,
   ): Promise<ResidencyVerdict> {
-    const { sizeClass, deniedHere, overrides } = await labelInputs(candidate);
-    // The ordering terms the engine cannot know. Without them every candidate
-    // ranks identically and the displacement check below can never say yes —
-    // see {@link recencyInputs}.
-    const enriched: BlobCandidate = { ...candidate, ...(await recencyInputs(candidate)) };
     return decideResidency({
-      candidate: enriched,
-      sizeClass,
-      policy,
-      // An `exclude` rule is a *constraint*, not a negative pin. Routing it
-      // here rather than through `overrides` is what makes it beat a pin —
-      // decideResidency checks constraints first, in the fixed §6.1 order, and
-      // restrictive winning is exactly the intent.
-      constraints: { deniedHere: deniedHere || overrides.excluded },
-      overrides: { pinned: isPinned(candidate.recordId) || overrides.pinned },
-      usage: (budgetLine) => index.usageOf(budgetLine.key),
-      displaces: (budgetLine, rank, bytesNeeded) =>
-        index.displaceableBytes(budgetLine.key, rank, bytesNeeded),
+      constraints: { deniedHere: await deniedHere(candidate) },
+      overrides: { pinned: isPinned(candidate.recordId) },
+      placement: ceilingOf(candidate),
       ...(trigger === undefined ? {} : { trigger }),
     });
-  }
-
-  /**
-   * The resident-set row for a candidate, as either an arrival or a deferral.
-   *
-   * One function because the two calls describe the *same blob* — same class,
-   * same budget line, same rank, same durability question — and differ only in
-   * whether the bytes are here. Building the row twice is how the queue would
-   * come to disagree with the index it writes into: a deferred row ordered by
-   * one reading of recency and a landed row by another would make the
-   * acquisition pass and the eviction pass rank the same photograph differently.
-   */
-  async function rowFor(
-    candidate: BlobCandidate,
-    resolved: { sizeClass: ResolvedSizeClass | null; pinned?: boolean },
-  ): Promise<ResidentArrival> {
-    // A null class means the caller had no residency decision to hand over —
-    // the conservative reading is the thing itself, which is what an
-    // unclassified arrival has always been charged as.
-    const cls = resolved.sizeClass ?? originalClassFor(candidate.type);
-    // Resolved again rather than carried from the decision, because there is
-    // no decision on every path here — `fetchBlob` lands bytes without one.
-    // The row's `recency_at_ms` is the eviction pass's third ordering term, so
-    // a null here is not cosmetic: it collapses "oldest first" into whatever
-    // order the index happens to return.
-    const dates = await recencyInputs(candidate);
-    return {
-      recordId: candidate.recordId,
-      objectStorageKey: candidate.objectStorageKey,
-      sizeBytes: candidate.sizeBytes,
-      sizeClass: cls.qualified,
-      // Resolved from the policy now, so a class that has gained or lost a row
-      // of its own is charged to the line it belongs to today rather than the
-      // one it landed on last time.
-      budgetLineKey: budgetLineFor(policy, cls).key,
-      namespace: cls.namespace,
-      // The pin the *decision* resolved, which is the only one that saw both
-      // sources. Falling back to the table alone — as this used to do
-      // unconditionally — dropped every rule-derived pin on the floor, so a
-      // record a rule had just made this node fetch past its budget landed
-      // with `pinned = 0` and was evictable by the very pass the rule existed
-      // to survive. The fallback remains for `fetchBlob`, which synthesizes a
-      // verdict it never asked the policy for.
-      pinned: resolved.pinned ?? isPinned(candidate.recordId),
-      // Set by the derivation work (item 7), which is what knows whether
-      // these bytes are still needed as an input here. Until then nothing is
-      // marked protected, and the durability predicate is what stands
-      // between the eviction pass and a last copy.
-      //
-      // That used to be a load-bearing dependency between two unfinished
-      // things: `protectedLocally` waits on item 7, *and* the pass skipped the
-      // durability check for renditions on the grounds that item 7 could remake
-      // them. Both halves assumed a capability nobody had.
-      // `EvictionRequest.canRederive` now defaults false, so the missing
-      // derivation makes the pass more careful rather than silently less, and
-      // this field can stay honest about being unimplemented.
-      protectedLocally: false,
-      // A rendition can be re-derived; nothing else here can. Decided from
-      // the record's structure rather than by testing the class name for an
-      // `original:` prefix, as this once did — the prefix test was a naming
-      // convention standing in for a structural fact, and the failure mode of
-      // a class rename breaking it is that originals silently become
-      // evictable.
-      requiresDurabilityProof: requiresProof(candidate, cls),
-      recencyAtMs: dates.recencyAtMs,
-      lastOpenedAtMs: dates.lastOpenedAtMs,
-      addedAtMs: Date.now(),
-    };
   }
 
   return {
     index,
     decide,
-    classOf,
     isPinned,
+    ceilingOf,
 
-    async noteArrival(
-      candidate: BlobCandidate,
-      verdict: ResidencyVerdict | null,
-    ): Promise<void> {
-      index.add(
-        await rowFor(candidate, {
-          sizeClass: verdict?.sizeClass ?? null,
-          ...(verdict?.pinned === undefined ? {} : { pinned: verdict.pinned }),
-        }),
-      );
+    async noteArrival(candidate) {
+      index.add(arrivalOf(candidate));
     },
 
-    async noteDeferred(candidate: BlobCandidate, verdict: ResidencyVerdict): Promise<void> {
-      // The same row an arrival would write, minus the claim that the bytes are
-      // here. `index.defer` is what refuses to overwrite anything that is —
-      // this function deliberately does not check first, because the interesting
-      // case is a race and a guard in SQL cannot lose one.
-      index.defer(
-        await rowFor(candidate, {
-          sizeClass: verdict.sizeClass,
-          ...(verdict.pinned === undefined ? {} : { pinned: verdict.pinned }),
-        }),
-      );
-    },
-
-    /**
-     * The catalogue scan's per-record step: would this node want these bytes if
-     * there were room, and if so, queue them.
-     *
-     * ## Why this is not `decide()`
-     *
-     * A blob worth queueing *is* `budget-exhausted` — that is what it means for
-     * the queue to have anything in it — so a scan gated on `decide()` saying
-     * `fetch` would filter out exactly the population it exists to find. The
-     * test here is therefore the structural one: does this class get prefetched
-     * at all, and does its line have a share to spend. The real question is
-     * asked later, once, per candidate the acquisition pass actually reaches.
-     *
-     * ## The cheap filter is a row lookup, not a storage probe
-     *
-     * `index.get` is a primary-key hit; `localStorage.has` is a filesystem call,
-     * and the whole reason this index exists is that one of those per record is
-     * 300k+ of them. A row this scan wrongly believes resident is corrected by
-     * `reconcile`, which is the mechanism for that disagreement — it does not
-     * need a second one here.
-     */
-    async considerForAcquisition(candidate: BlobCandidate): Promise<AcquisitionConsideration> {
-      const existing = index.get(candidate.objectStorageKey);
-      // Resident, reserved, or resident-and-departed are all "not a question
-      // for the scan": the first two are here or arriving, and a departed row
-      // is already in the queue by virtue of being non-resident, with an
-      // eviction record `defer` must not overwrite.
-      if (existing !== null && (existing.resident || existing.heldEver)) return "held";
-
-      const { sizeClass, deniedHere, overrides } = await labelInputs(candidate);
-      const budgetLine = budgetLineFor(policy, sizeClass);
-      const row = retentionRowFor(policy, budgetLine);
-      // A standing refusal, in each of the three forms it takes. None of them
-      // is contention, so none of them belongs in a queue whose entire meaning
-      // is "wanted, no room right now".
-      if (deniedHere || overrides.excluded) return "unwanted";
-      if (!row.prefetch || budgetBytesFor(policy, budgetLine) <= 0) return "unwanted";
-
-      index.defer(
-        await rowFor(candidate, {
-          sizeClass,
-          pinned: isPinned(candidate.recordId) || overrides.pinned,
-        }),
-      );
-      return "queued";
-    },
-
-    deferredCandidates(budgetLineKey: string, limit: number): ResidentEntry[] {
-      return index.deferredCandidates({ budgetLineKey, limit });
-    },
-
-    dropDeferred(objectStorageKey: string): void {
-      index.dropDeferred(objectStorageKey);
-    },
-
-    reserve(candidate: BlobCandidate, verdict: ResidencyVerdict): void {
-      const cls = verdict.sizeClass ?? originalClassFor(candidate.type);
-      index.reserve({
-        recordId: candidate.recordId,
-        objectStorageKey: candidate.objectStorageKey,
-        sizeBytes: candidate.sizeBytes,
-        sizeClass: cls.qualified,
-        budgetLineKey: (verdict.budgetLine ?? budgetLineFor(policy, cls)).key,
-        namespace: cls.namespace,
-        pinned: verdict.pinned ?? isPinned(candidate.recordId),
-        protectedLocally: false,
-        requiresDurabilityProof: requiresProof(candidate, cls),
-        // Deliberately not resolved here. A reservation exists for a few seconds
-        // and is replaced by `noteArrival`, which reads them properly; spending
-        // a metadata query per in-flight blob to populate a row that is about to
-        // be overwritten would put a read on the hot path for nothing.
-        recencyAtMs: null,
-        lastOpenedAtMs: null,
-        addedAtMs: Date.now(),
-      });
-    },
-
-    releaseReservation(objectStorageKey: string): void {
-      index.release(objectStorageKey);
-    },
-
-    reconcile(): Promise<ReconcileReport> {
-      return index.reconcile(localObjectStorage);
-    },
-
-    wasEvicted(objectStorageKey: string): boolean {
-      return index.wasEvicted(objectStorageKey);
-    },
-
-    noteDeparture(objectStorageKey: string): void {
-      // Departed, not forgotten — same reason as the eviction pass. "This node
-      // let these bytes go" and "this node never had them" are different facts,
-      // and only the first one tells `residencyOf` that no sync round will bring
-      // them back.
+    noteDeparture(objectStorageKey) {
       index.markDeparted(objectStorageKey);
     },
 
-    setPinned(recordId: string, pinned: boolean): void {
+    async considerForAcquisition(candidate) {
+      const existing = index.get(candidate.objectStorageKey);
+      if (existing?.resident) return "held";
+      // Bytes that arrived by a route that never passed through a round — a
+      // local import, a derived stand-in, a watcher — are adopted here, once,
+      // so the next scan answers from the index rather than from storage.
+      if (existing === null && (await localObjectStorage.has(candidate.objectStorageKey))) {
+        index.add(arrivalOf(candidate));
+        return "held";
+      }
+      const verdict = await decide(candidate, "background");
+      if (verdict.decision !== "fetch") {
+        if (existing?.wanted) index.dropDeferred(candidate.objectStorageKey);
+        return "unwanted";
+      }
+      index.defer(arrivalOf(candidate));
+      return "queued";
+    },
+
+    deferredCandidates(limit) {
+      return index.deferredCandidates(limit);
+    },
+
+    dropDeferred(objectStorageKey) {
+      index.dropDeferred(objectStorageKey);
+    },
+
+    reconcile() {
+      return index.reconcile(localObjectStorage);
+    },
+
+    wasEvicted(objectStorageKey) {
+      return index.wasEvicted(objectStorageKey);
+    },
+
+    setPinned(recordId, pinned) {
       if (pinned) pinInsert.run(recordId, Date.now());
       else pinDelete.run(recordId);
-      // Mirror onto every held blob of this record so the eviction pass sees
-      // the pin without a join. The pins table is the durable answer (it
-      // outlives eviction and covers records whose bytes aren't here yet); the
-      // index rows are the pass's working set. A record's original and each of
-      // its renditions are separate rows, and a pin means all of them.
-      for (const entry of index.entriesOfRecord(recordId)) {
-        index.setPinned(entry.objectStorageKey, pinned);
-      }
     },
 
-    markOpened(recordId: string, atMs: number): void {
-      for (const entry of index.entriesOfRecord(recordId)) {
-        index.markOpened(entry.objectStorageKey, atMs);
-      }
+    usageByGroup() {
+      return index.usageByGroup();
     },
 
-    usageByClass(): Record<string, number> {
-      return index.usageByClass();
-    },
-
-    usageByNamespace(): Record<string, number> {
-      return index.usageByNamespace();
-    },
-
-    /**
-     * One pass per budget line, and that is the whole of it.
-     *
-     * There used to be a second sweep over whole namespaces, because an app
-     * could sit inside every one of its rows and still breach a separately
-     * configured total. Rows are shares of one namespace budget now, so the
-     * lines of a namespace sum to it exactly and the second sweep could only
-     * ever find what the first had already dealt with.
-     *
-     * Lines come from the policy **and** from what is actually held. The policy
-     * alone would miss a line an operator has since deleted the rows of — whose
-     * bytes are still on disk and now pooled into a fallback — and the index
-     * alone would miss nothing today but would silently stop covering a line
-     * the moment one emptied and refilled between passes.
-     */
-    async runEviction(probes: readonly ReplicaProbe[]): Promise<EvictionOutcome[]> {
-      const outcomes: EvictionOutcome[] = [];
-      const shared = {
-        index,
-        policy,
-        localStorage: localObjectStorage,
-        probes,
-        durability,
-        contentHashOf: (entry: { objectStorageKey: string }) =>
-          contentHashOfKey(entry.objectStorageKey),
-      };
-
-      const lines = new Map<string, BudgetLine>();
-      for (const budgetLine of budgetLinesOf(policy)) lines.set(budgetLine.key, budgetLine);
-      for (const sizeClass of Object.keys(index.usageByClass())) {
-        const budgetLine = budgetLineFor(policy, parseSizeClass(sizeClass));
-        lines.set(budgetLine.key, budgetLine);
-      }
-
-      for (const budgetLine of lines.values()) {
-        outcomes.push(await evictLine({ ...shared, budgetLine }));
-      }
-      return outcomes;
-    },
-
-    previewReduction(
-      budgetLineKey: string,
-      newBudgetBytes: number,
-      probes: readonly ReplicaProbe[],
-    ): Promise<ReductionPreview> {
-      return previewBudgetReduction({
-        budgetLineKey,
-        newBudgetBytes,
-        index,
-        probes,
-        durability,
-        contentHashOf: (entry) => contentHashOfKey(entry.objectStorageKey),
-      });
+    async freeUpSpace(request) {
+      return freeUpSpaceOn(
+        {
+          databaseAdapter,
+          localObjectStorage,
+          durability,
+          ceilingOf,
+          standards,
+          ...(options.borrowsBytes ? { borrowsBytes: options.borrowsBytes } : {}),
+          isPinned: async (recordId) => isPinned(recordId),
+          noteRemoved: async (candidate) => {
+            if (index.get(candidate.objectStorageKey) === null) index.add(arrivalOf(candidate));
+            index.markDeparted(candidate.objectStorageKey);
+          },
+        },
+        request,
+      );
     },
   };
 }
 
 /**
- * Adapt a manager into the hooks the sync engine takes.
- *
- * Separate from the manager so the engine's surface stays two functions —
- * decide, and account for what landed — rather than the whole management API.
+ * Adapt a manager into the hooks the sync engine takes: decide, and record
+ * what landed.
  */
 export function residencyHooks(manager: ResidencyManager): {
   decide(candidate: BlobCandidate, trigger: ResidencyTrigger): Promise<ResidencyVerdict>;
-  onLanded(candidate: BlobCandidate, verdict: ResidencyVerdict): Promise<void>;
-  reserve(candidate: BlobCandidate, verdict: ResidencyVerdict): void;
-  release(objectStorageKey: string): void;
-  classOf(candidate: BlobCandidate): Promise<ResolvedSizeClass>;
-  defer(candidate: BlobCandidate, verdict: ResidencyVerdict): Promise<void>;
+  onLanded(candidate: BlobCandidate): Promise<void>;
 } {
   return {
-    // The trigger travels through untouched. The engine is the only thing that
-    // knows whether a decision came from a round or from the acquisition pass,
-    // and it is the difference between the two that bounds a cold sync.
     decide: (candidate, trigger) => manager.decide(candidate, trigger),
-    onLanded: (candidate, verdict) => manager.noteArrival(candidate, verdict),
-    // The other half of a decision. A round that declines a blob for want of
-    // room says so here, and the acquisition pass is what comes back for it.
-    defer: (candidate, verdict) => manager.noteDeferred(candidate, verdict),
-    // The pair that makes one budget bind across several engines sharing this
-    // manager, rather than each of them landing into the same apparent room.
-    reserve: (candidate, verdict) => manager.reserve(candidate, verdict),
-    release: (objectStorageKey) => manager.releaseReservation(objectStorageKey),
-    // Class without decision, for the on-demand fetch: it must charge the right
-    // budget without asking a policy that is not entitled to refuse it.
-    classOf: (candidate) => manager.classOf(candidate),
+    onLanded: (candidate) => manager.noteArrival(candidate),
   };
-}
-
-/** The per-category metadata column holding a record's own date. */
-const CAPTURED_AT_COLUMN = "captured_at";
-
-/**
- * A stored `captured_at` as epoch ms, or null for anything unusable.
- *
- * The column is a SQL `timestamp`, which SQLite hands back as a string with no
- * zone. `Date.parse` reads a bare `2024-01-01T10:00:00` as *local* time while
- * the census's `strftime('%s', ...)` reads the same string as UTC, so the two
- * would disagree by the operator's offset — up to fourteen hours, which is
- * enough to move a record across a day boundary at the edge of a recency
- * window. A zone is appended when none is present so both read it the same way.
- */
-function parseCapturedAt(value: unknown): number | null {
-  if (value instanceof Date) {
-    return Number.isFinite(value.getTime()) ? value.getTime() : null;
-  }
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value !== "string" || value.trim() === "") return null;
-  const text = value.trim().replace(" ", "T");
-  const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text}Z`;
-  const parsed = Date.parse(zoned);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-/**
- * The content hash a shared key names. Read off the key rather than the record
- * row: the durability check runs against keys this node holds, and a key that
- * isn't in the canonical content-addressed shape has no hash to verify a
- * replica against — so it returns null and the eviction pass refuses.
- */
-function contentHashOfKey(objectStorageKey: string): string | null {
-  const segments = objectStorageKey.split("/");
-  if (segments.length !== 4 || segments[0] !== "shared") return null;
-  const hash = segments[3]!;
-  if (!/^[a-f0-9]{64}$/.test(hash) || segments[2] !== hash.slice(0, 2)) return null;
-  return hash;
 }

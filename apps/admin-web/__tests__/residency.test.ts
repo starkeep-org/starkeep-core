@@ -1,17 +1,15 @@
 /**
- * /api/residency and /api/residency/policy — the daemon's residency projection,
- * proxied so the loopback assumption stays true.
+ * /api/residency/stand-ins and /api/residency/free-up-space — the daemon's
+ * residency routes, proxied so the loopback assumption stays true.
  *
  * The daemon's `/residency/*` routes answer any caller on 127.0.0.1 and nobody
  * else, which is the gate that lets them be served without an app identity. A
  * browser fetch would come from the page's origin, so the proxy is what keeps
  * that gate load-bearing rather than accidental.
  *
- * Two behaviors carry the page. A daemon that is not running is the ordinary
- * state of a fresh machine, so it answers 503 with `offline: true` and the page
- * renders an offline state from it. And a PUT that saves a policy restarts the
- * daemon, so the response arrives just before the connection drops — a dropped
- * connection after a 200 is the normal case here, not a failure.
+ * A daemon that is not running is the ordinary state of a fresh machine, so
+ * every route answers 503 with `offline: true` and the page renders an offline
+ * state from it.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { jsonRequest, makeDataDir, startStubServer, type StubServer } from "./helpers";
@@ -19,9 +17,7 @@ import { jsonRequest, makeDataDir, startStubServer, type StubServer } from "./he
 let daemon: StubServer;
 let reply: { status: number; body: string } = { status: 200, body: "{}" };
 
-let residencyGET: () => Promise<Response>;
-let policyPOST: (req: Request) => Promise<Response>;
-let policyPUT: (req: Request) => Promise<Response>;
+let standIns: typeof import("../src/routes/stand-ins");
 
 beforeAll(async () => {
   process.env.STARKEEP_DIR = makeDataDir("adminweb-residency-");
@@ -35,70 +31,47 @@ beforeAll(async () => {
     getRuntimeConfig: async () => ({ localDataServerUrl: daemon.url, driveUrl: daemon.url }),
   }));
 
-  ({ GET: residencyGET } = await import("../src/routes/residency"));
-  const policy = await import("../src/routes/residency-policy");
-  policyPOST = policy.POST as unknown as typeof policyPOST;
-  policyPUT = policy.PUT as unknown as typeof policyPUT;
+  standIns = await import("../src/routes/stand-ins");
 });
 
 afterAll(async () => {
   await daemon.stop();
 });
 
-describe("GET /api/residency", () => {
-  it("asks the daemon for its projection and passes it through", async () => {
-    reply = { status: 200, body: JSON.stringify({ classes: [{ id: "originals" }] }) };
-    const res = await residencyGET();
+describe("/api/residency/stand-ins and /api/residency/free-up-space", () => {
+  it("reads this node's ceilings from the daemon", async () => {
+    reply = { status: 200, body: JSON.stringify({ nodeKind: "desktop", ceilings: { image: 2560 } }) };
+    const res = await standIns.GET();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ classes: [{ id: "originals" }] });
-    expect(daemon.seen.at(-1)!.url).toBe("/residency/projection");
+    expect(await res.json()).toEqual({ nodeKind: "desktop", ceilings: { image: 2560 } });
+    expect(daemon.seen.at(-1)!).toMatchObject({ method: "GET", url: "/residency/stand-ins" });
   });
 
-  it("passes a daemon refusal through with its own status", async () => {
-    reply = { status: 500, body: "boom" };
-    const res = await residencyGET();
-    expect(res.status).toBe(500);
-    expect(((await res.json()) as { error: string }).error).toContain("500");
-  });
-});
-
-describe("POST /api/residency/policy — the dry run", () => {
-  it("forwards the body verbatim and returns the daemon's status", async () => {
-    reply = { status: 200, body: JSON.stringify({ projected: { originals: 12 } }) };
-    const res = await policyPOST(
-      jsonRequest("/api/residency/policy", { classes: { originals: "keep" } }),
+  it("saves ceilings verbatim and carries a refusal's status", async () => {
+    reply = { status: 422, body: JSON.stringify({ problems: ["image: a ceiling is a positive whole fidelity"] }) };
+    const res = await standIns.PUT(
+      jsonRequest("/api/residency/stand-ins", { ceilings: { image: -1 } }, "PUT"),
     );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ projected: { originals: 12 } });
+    expect(res.status).toBe(422);
     const sent = daemon.seen.at(-1)!;
-    expect(sent.method).toBe("POST");
-    expect(sent.url).toBe("/residency/projection");
-    expect(JSON.parse(sent.body)).toEqual({ classes: { originals: "keep" } });
+    expect(sent).toMatchObject({ method: "PUT", url: "/residency/stand-ins" });
+    expect(JSON.parse(sent.body)).toEqual({ ceilings: { image: -1 } });
   });
 
-  it("carries a rejection's status, so a bad policy is not reported as saved", async () => {
-    reply = { status: 400, body: JSON.stringify({ error: "unknown class" }) };
-    const res = await policyPOST(jsonRequest("/api/residency/policy", { classes: {} }));
-    expect(res.status).toBe(400);
-  });
-});
-
-describe("PUT /api/residency/policy — the save", () => {
-  it("forwards the body to the daemon's policy route", async () => {
-    reply = { status: 200, body: JSON.stringify({ saved: true }) };
-    const res = await policyPUT(
-      jsonRequest("/api/residency/policy", { classes: { originals: "evict" } }, "PUT"),
+  it("forwards a Free up space request to the daemon", async () => {
+    reply = { status: 200, body: JSON.stringify({ dryRun: true, freedBytes: 10 }) };
+    const res = await standIns.POST_FREE_UP_SPACE(
+      jsonRequest("/api/residency/free-up-space", { bytes: 10, scope: "originals", dryRun: true }),
     );
     expect(res.status).toBe(200);
     const sent = daemon.seen.at(-1)!;
-    expect(sent.method).toBe("PUT");
-    expect(sent.url).toBe("/residency/policy");
-    expect(JSON.parse(sent.body)).toEqual({ classes: { originals: "evict" } });
+    expect(sent).toMatchObject({ method: "POST", url: "/residency/free-up-space" });
+    expect(JSON.parse(sent.body)).toEqual({ bytes: 10, scope: "originals", dryRun: true });
   });
 });
 
 describe("when the daemon is not running", () => {
-  it("answers 503 with offline: true on every one of the three routes", async () => {
+  it("answers 503 with offline: true on every one of the routes", async () => {
     // Not a stack trace and not a 500: the page renders an offline state from
     // this, and a fresh machine reaches it before anything is wrong.
     vi.resetModules();
@@ -109,17 +82,12 @@ describe("when the daemon is not running", () => {
         driveUrl: "http://127.0.0.1:1",
       }),
     }));
-    const down = await import("../src/routes/residency");
-    const downPolicy = await import("../src/routes/residency-policy");
+    const downStandIns = await import("../src/routes/stand-ins");
 
     const calls: Array<Promise<Response>> = [
-      down.GET(),
-      (downPolicy.POST as unknown as typeof policyPOST)(
-        jsonRequest("/api/residency/policy", {}),
-      ),
-      (downPolicy.PUT as unknown as typeof policyPUT)(
-        jsonRequest("/api/residency/policy", {}, "PUT"),
-      ),
+      downStandIns.GET(),
+      downStandIns.PUT(jsonRequest("/api/residency/stand-ins", {}, "PUT")),
+      downStandIns.POST_FREE_UP_SPACE(jsonRequest("/api/residency/free-up-space", {})),
     ];
     for (const call of calls) {
       const res = await call;

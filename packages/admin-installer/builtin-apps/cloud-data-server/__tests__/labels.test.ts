@@ -15,7 +15,7 @@ import { signRequest } from "@starkeep/app-client";
 import { installUserTokenFixture } from "./user-token.js";
 import { serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
-import { fakeDsqlWithGrants, recordRow, type FakeDsql } from "./fake-dsql.js";
+import { CHILDREN_OF, fakeDsqlWithGrants, recordRow, type FakeDsql } from "./fake-dsql.js";
 
 const ssmMock = mockClient(SSMClient);
 const stsMock = mockClient(STSClient);
@@ -785,6 +785,7 @@ describe("DELETE /data/records/:id cascades to labels", () => {
     // DSQL has no foreign keys, so nothing cascades for us — the delete path
     // has to do it by hand or the labels outlive their record as orphans.
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
+      .on(CHILDREN_OF, [])
       .on(RECORDS_SELECT, [recordRow({ id: "rec1", type: "image/jpeg" })])
       .on(RECORDS_UPDATE, [])
       .on(LABELS_UPDATE, []);
