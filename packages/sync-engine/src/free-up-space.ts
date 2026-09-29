@@ -33,7 +33,7 @@ import {
   type StandInStandards,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, Filter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import { assessDurability, type DurabilityPolicy } from "./durability.js";
+import { assessDurability } from "./durability.js";
 import { blobCandidateForRecord } from "./sync-engine.js";
 import type {
   FreeUpSpaceItem,
@@ -46,11 +46,8 @@ import type { BlobCandidate } from "./residency-policy.js";
 export interface FreeUpSpaceDeps {
   readonly databaseAdapter: DatabaseAdapter;
   readonly localObjectStorage: ObjectStorageAdapter;
-  readonly durability: DurabilityPolicy;
   readonly ceilingOf: (candidate: BlobCandidate) => CeilingPlacement;
   readonly standards: StandInStandards;
-  /** Whether this node pins a record. */
-  readonly isPinned: (recordId: string) => Promise<boolean>;
   /**
    * Record that bytes left, so residency reports them evicted rather than
    * never held. Writes the resident-set row first when the bytes arrived by a
@@ -154,8 +151,6 @@ async function eligible(deps: FreeUpSpaceDeps, scope: FreeUpSpaceRequest["scope"
         // Only files above the ceiling: a stand-in at or below it, and a
         // self-canonical original at or below it, are never evicted.
         if (deps.ceilingOf(candidate) !== "above") continue;
-        // A pin is this node insisting on the bytes.
-        if (await deps.isPinned(record.id)) continue;
         // Borrowed bytes cost this node nothing, and deleting the key would
         // drop the alias rather than free space.
         if (deps.borrowsBytes?.(record.objectStorageKey)) continue;
@@ -181,7 +176,7 @@ async function proveCloudCopies(
   candidate: Candidate,
   probes: FreeUpSpaceRequest["probes"],
 ): Promise<Proof> {
-  const { databaseAdapter, durability, standards } = deps;
+  const { databaseAdapter, standards } = deps;
   const original =
     candidate.kind === "original"
       ? candidate.record
@@ -223,13 +218,12 @@ async function proveCloudCopies(
         sizeBytes: record.sizeBytes,
       },
       probes,
-      durability,
     );
     if (!verdict.durable) {
       return {
         ok: false,
         reason: "not-durable",
-        detail: `no complete cloud copy of ${record.id} is confirmed (${verdict.confirmedReplicas} of ${verdict.minimumRequired})`,
+        detail: `no complete cloud copy of ${record.id} is confirmed`,
       };
     }
   }

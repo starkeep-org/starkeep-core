@@ -13,13 +13,14 @@ export function StoragePage() {
         <Badge variant="outline" className="text-xs">Experimental</Badge>
       </div>
       <p className="text-sm text-muted-foreground mb-6">
-        This machine keeps every file, except photos, videos and audio larger than its
-        ceiling, which it fetches when you open them. Nothing is removed unless you free
-        up space.
+        This machine keeps a copy of every file, except photo and video originals, which it
+        downloads when you open one. It also keeps photo and video previews up to its
+        ceiling. Turn on &quot;Keep originals here&quot; to keep every original too. Nothing is
+        removed unless you free up space.
       </p>
       <div className="rounded-lg border p-6">
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">
-          Photos, videos &amp; audio
+          Photos &amp; videos
         </h2>
         <StandInsSection />
       </div>

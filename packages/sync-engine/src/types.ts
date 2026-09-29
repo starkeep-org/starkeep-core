@@ -19,8 +19,8 @@ import type { StreamTruncation } from "./round-cut.js";
 
 /**
  * The fetch-time residency decision for background work: a sync round, or the
- * acquisition pass. Async because a real implementation reads the node's pins
- * and, on the cloud node, the record's labels. A direct request skips it —
+ * acquisition pass. Async because a real implementation reads, on the cloud
+ * node, the record's labels. A direct request skips it —
  * see {@link SyncEngine.fetchBlob}.
  */
 export type ResidencyDecider = (

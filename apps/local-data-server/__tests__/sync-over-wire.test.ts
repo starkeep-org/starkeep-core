@@ -44,7 +44,7 @@ const PAGE_LIMIT = 5;
  * A record in a category the sync-down ceiling does not govern.
  *
  * This suite is about replication itself — every blob reaching every node.
- * Image, video and audio originals no longer do that by design: a node
+ * Image and video originals no longer do that by design: a node
  * receives them only on demand, and receives their stand-ins up to its
  * ceiling. `stand-ins-sync.test.ts` covers that behaviour; here a document
  * keeps the question this suite asks unchanged.

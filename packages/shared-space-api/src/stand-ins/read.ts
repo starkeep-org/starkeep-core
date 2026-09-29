@@ -35,6 +35,8 @@ export interface WireStandInSummary {
   readonly status: StandInSummary["status"];
   readonly top: number | null;
   readonly sizes: readonly WireStandInSize[];
+  /** Where the original's own bytes sit on the node that answered. */
+  readonly original_placement: SizePlacement;
 }
 
 /**
@@ -64,6 +66,7 @@ export async function renderStandInSummary(
         };
       }),
     ),
+    original_placement: summary.originalPlacement,
   };
 }
 

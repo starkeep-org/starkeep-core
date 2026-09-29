@@ -12,25 +12,19 @@ import userEvent from "@testing-library/user-event";
 import { StandInsSection } from "../src/components/StandInsSection";
 
 const STAND_INS = {
-  nodeKind: "desktop",
-  ceilings: { image: 2560, video: null, audio: null },
+  ceilings: { image: 2560, video: null },
   configured: {},
-  defaults: {
-    phone: { image: 1280, video: null, audio: null },
-    desktop: { image: 2560, video: null, audio: null },
-  },
-  standardSizes: { image: [320, 640, 1280, 2560], video: [1280], audio: [64] },
-  canonicalThresholds: { image: 4272, video: 1920, audio: 128 },
+  defaults: { image: 2560, video: null },
+  standardSizes: { image: [320, 640, 1280, 2560], video: [1280] },
+  canonicalThresholds: { image: 4272, video: 1920 },
   heldBytes: {
     image: { originals: 3 * 1024 ** 3, standIns: 200 * 1024 ** 2 },
     video: { originals: 0, standIns: 0 },
-    audio: { originals: 0, standIns: 0 },
   },
   keepOriginals: false,
   libraryOriginals: {
     image: { count: 1000, bytes: 8 * 1024 ** 3 },
     video: { count: 0, bytes: 0 },
-    audio: { count: 0, bytes: 0 },
   },
   backlog: {
     "missing-canonical": { count: 42, complete: true },
@@ -118,23 +112,21 @@ describe("the stand-in section", () => {
     ]);
   });
 
-  it("starts a different kind of node from its defaults, and saves what is shown", async () => {
+  it("offers a ceiling for photos and videos only, and saves what is shown", async () => {
     const user = userEvent.setup();
     render(<StandInsSection />);
     const save = await screen.findByRole("button", { name: "Save ceilings" });
     expect((save as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByLabelText("Kind of node")).toBeNull();
+    expect(screen.queryByLabelText("Ceiling for Audio")).toBeNull();
 
-    await user.selectOptions(screen.getByLabelText("Kind of node"), "phone");
-    expect((screen.getByLabelText("Ceiling for Photos") as HTMLSelectElement).value).toBe("1280");
+    await user.selectOptions(screen.getByLabelText("Ceiling for Photos"), "1280");
     await user.selectOptions(screen.getByLabelText("Ceiling for Videos"), "1280");
     await user.click(save);
 
     await screen.findByText(/restarts to apply/);
     const put = calls.find((c) => c.method === "PUT")!;
-    expect(put.body).toEqual({
-      nodeKind: "phone",
-      ceilings: { image: 1280, video: 1280, audio: null },
-    });
+    expect(put.body).toEqual({ ceilings: { image: 1280, video: 1280 } });
   });
 
   it("estimates what keeping originals downloads, and saves only that setting", async () => {

@@ -37,7 +37,13 @@ interface WireRecord {
   id: string;
   stand_in_role: string | null;
   fidelity: number | null;
-  stand_ins?: { status: string; top: number | null; fidelity: number | null; sizes: WireSize[] };
+  stand_ins?: {
+    status: string;
+    top: number | null;
+    fidelity: number | null;
+    sizes: WireSize[];
+    original_placement: string;
+  };
 }
 
 async function list(query: string): Promise<WireRecord[]> {
@@ -170,6 +176,15 @@ describe("the size summary", () => {
     await rm(path);
     const summary = await summaryOf(parent);
     expect(summary.sizes.find((s) => s.fidelity === 320)!.placement).toBe("cloud");
+  });
+
+  it("says where the original's own bytes sit", async () => {
+    const parent = await original({ fidelity: 6000 });
+    expect((await summaryOf(parent)).original_placement).toBe("here");
+    const res = await app.fetch(`/data/records/${parent}`);
+    const path = ((await res.json()) as { record: { path: string } }).record.path;
+    await rm(path);
+    expect((await summaryOf(parent)).original_placement).toBe("cloud");
   });
 
   it("carries URLs for resident sizes with include=stand-in-urls", async () => {

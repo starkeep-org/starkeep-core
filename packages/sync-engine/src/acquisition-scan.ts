@@ -5,9 +5,9 @@
  * blob advances the watermark. The scan finds every blob this node wants and
  * lacks, whatever the round decided at the time:
  *
- *   1. **stand-ins a raised ceiling now covers,** which rounds declined;
- *   2. **records someone pinned** after their round elided them;
- *   3. **blobs whose bytes went away locally** — on a phone, a camera-roll
+ *   1. **stand-ins a raised ceiling now covers,** which rounds declined,
+ *      and originals "Keep originals here" now covers;
+ *   2. **blobs whose bytes went away locally** — on a phone, a camera-roll
  *      asset the person deleted — which no round will resend.
  *
  * It also adopts bytes already here that the index has never seen, such as a
@@ -29,7 +29,7 @@ import type { BlobCandidate } from "./residency-policy.js";
 
 /**
  * What the scan does with one record. Supplied by the host, because deciding
- * whether a node wants these bytes needs the node's ceilings and pins.
+ * whether a node wants these bytes needs the node's ceilings.
  *
  * See `ResidencyManager.considerForAcquisition`.
  */

@@ -22,7 +22,7 @@
  *
  * The host resolves where a file sits against the ceiling (`ceilingPlacement`
  * in protocol-primitives); this module only orders that answer against the
- * record's constraints and the node's pins.
+ * record's constraints.
  */
 
 import type { CeilingPlacement, StandInRole } from "@starkeep/protocol-primitives";
@@ -43,15 +43,6 @@ export interface RecordConstraints {
    * refusal.
    */
   readonly deniedHere: boolean;
-}
-
-/** Node-local per-record state. Travels with nothing. */
-export interface LocalOverrides {
-  /**
-   * This node keeps these bytes: it fetches them even above its ceiling, and
-   * "Free up space" skips them.
-   */
-  readonly pinned: boolean;
 }
 
 /** Normalized view of the thing whose blob is about to move. */
@@ -78,14 +69,8 @@ export type ResidencyDecision = "fetch" | "elide";
 /** Why a decision came out the way it did — for the residency inspector. */
 export interface ResidencyVerdict {
   readonly decision: ResidencyDecision;
-  /**
-   * Whether this node pins the record. Optional because
-   * `SyncEngine.fetchBlob` synthesizes a verdict it never asked the policy for.
-   */
-  readonly pinned?: boolean;
   readonly reason:
     | "record-constraint"
-    | "pinned"
     // No stand-in can replace this file, so every node keeps it.
     | "kept"
     // A stand-in, or a self-canonical original, at or below the node's
@@ -104,7 +89,6 @@ export interface ResidencyVerdict {
 
 export interface DecideResidencyInputs {
   readonly constraints: RecordConstraints;
-  readonly overrides: LocalOverrides;
   /** Where the candidate sits against this node's ceiling, resolved by the host. */
   readonly placement: CeilingPlacement;
 }
@@ -114,26 +98,13 @@ export interface DecideResidencyInputs {
  * queue — in a fixed order. A direct request never comes here:
  * `SyncEngine.fetchBlob` fetches whatever it is asked for.
  *
- * The order matters because two of the inputs
- * pull in opposite directions: a record constraint says "nobody may hold this
- * here" and a pin says "this node insists on holding it". Restrictive wins,
- * and it wins first.
+ * A record constraint comes first: "nobody may hold this here" outranks the
+ * ceiling.
  */
 export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict {
-  const { constraints, overrides, placement } = inputs;
-  const pinned = overrides.pinned;
-
-  if (constraints.deniedHere) {
-    return { decision: "elide", reason: "record-constraint", pinned };
-  }
-  if (pinned) {
-    return { decision: "fetch", reason: "pinned", pinned };
-  }
-  if (placement === "above") {
-    return { decision: "elide", reason: "above-ceiling", pinned };
-  }
-  if (placement === "within") {
-    return { decision: "fetch", reason: "within-ceiling", pinned };
-  }
-  return { decision: "fetch", reason: "kept", pinned };
+  const { constraints, placement } = inputs;
+  if (constraints.deniedHere) return { decision: "elide", reason: "record-constraint" };
+  if (placement === "above") return { decision: "elide", reason: "above-ceiling" };
+  if (placement === "within") return { decision: "fetch", reason: "within-ceiling" };
+  return { decision: "fetch", reason: "kept" };
 }

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
  * Stand-ins on this machine: the sync-down ceilings, "Keep originals here",
  * the backlog, and "Free up space".
  *
- * Photographs, videos and audio are the platform's stand-in categories. This
+ * Photographs and videos are the platform's stand-in categories. This
  * node receives every stand-in up to its ceiling, and every self-canonical
  * original up to it, for the whole library; anything larger arrives only when
  * something asks for it. Every other file arrives on every node. Nothing
@@ -13,9 +13,8 @@ import { Button } from "@/components/ui/button";
  * proves cloud copies first.
  */
 
-type Category = "image" | "video" | "audio";
+type Category = "image" | "video";
 type Ceilings = Record<Category, number | null>;
-type NodeKind = "phone" | "desktop";
 
 interface BacklogCount {
   count: number;
@@ -23,10 +22,10 @@ interface BacklogCount {
 }
 
 interface StandInsResponse {
-  nodeKind: NodeKind;
   ceilings: Ceilings;
   configured: Partial<Ceilings>;
-  defaults: Record<NodeKind, Ceilings>;
+  /** This machine's defaults: admin-web always runs on a desktop. */
+  defaults: Ceilings;
   standardSizes: Record<Category, number[]>;
   canonicalThresholds: Record<Category, number>;
   heldBytes: Record<Category, { originals: number; standIns: number }>;
@@ -57,19 +56,17 @@ interface FreeUpSpaceReport {
   error?: string;
 }
 
-const CATEGORIES: readonly Category[] = ["image", "video", "audio"];
+const CATEGORIES: readonly Category[] = ["image", "video"];
 
 const CATEGORY_LABELS: Record<Category, string> = {
   image: "Photos",
   video: "Videos",
-  audio: "Audio",
 };
 
 /** What a ceiling's number measures, per category. */
 const FIDELITY_UNITS: Record<Category, string> = {
   image: "px",
   video: "px",
-  audio: "kbps",
 };
 
 const GIB = 1024 ** 3;
@@ -108,7 +105,6 @@ export function StandInsSection() {
   const [status, setStatus] = useState<"loading" | "ready" | "offline" | "saving" | "saved">(
     "loading",
   );
-  const [nodeKind, setNodeKind] = useState<NodeKind>("desktop");
   const [ceilings, setCeilings] = useState<Ceilings | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
 
@@ -123,7 +119,6 @@ export function StandInsSection() {
           return;
         }
         setState(body);
-        setNodeKind(body.nodeKind);
         setCeilings(body.ceilings);
         setStatus("ready");
       })
@@ -138,19 +133,7 @@ export function StandInsSection() {
   const dirty =
     state !== null &&
     ceilings !== null &&
-    (nodeKind !== state.nodeKind ||
-      CATEGORIES.some((c) => ceilings[c] !== state.ceilings[c]));
-
-  const changeKind = useCallback(
-    (kind: NodeKind) => {
-      setNodeKind(kind);
-      // A different kind of node starts from that kind's defaults. The
-      // operator edits from there rather than from the other kind's numbers.
-      if (state) setCeilings({ ...state.defaults[kind] });
-      setStatus("ready");
-    },
-    [state],
-  );
+    CATEGORIES.some((c) => ceilings[c] !== state.ceilings[c]);
 
   const save = useCallback(async () => {
     if (!ceilings) return;
@@ -158,7 +141,7 @@ export function StandInsSection() {
     const res = await fetch("/api/residency/stand-ins", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nodeKind, ceilings }),
+      body: JSON.stringify({ ceilings }),
     });
     const body = (await res.json()) as { problems?: string[]; error?: string };
     if (!res.ok) {
@@ -167,9 +150,9 @@ export function StandInsSection() {
       return;
     }
     setProblems([]);
-    setState((current) => (current ? { ...current, nodeKind, ceilings } : current));
+    setState((current) => (current ? { ...current, ceilings } : current));
     setStatus("saved");
-  }, [ceilings, nodeKind]);
+  }, [ceilings]);
 
   if (status === "loading") {
     return <p className="text-sm text-muted-foreground">Reading this machine&apos;s ceilings…</p>;
@@ -190,18 +173,6 @@ export function StandInsSection() {
           This machine receives every size up to its ceiling for the whole library. Larger sizes
           and originals above the ceiling arrive only when something opens them.
         </p>
-        <label className="flex items-center gap-2 text-sm">
-          <span className="text-muted-foreground">This machine is a</span>
-          <select
-            aria-label="Kind of node"
-            className="rounded border bg-transparent px-2 py-1 text-xs"
-            value={nodeKind}
-            onChange={(e) => changeKind(e.target.value as NodeKind)}
-          >
-            <option value="desktop">desktop</option>
-            <option value="phone">phone</option>
-          </select>
-        </label>
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b text-left text-muted-foreground">
@@ -240,7 +211,7 @@ export function StandInsSection() {
                         ),
                       )}
                     </select>
-                    {ceilings[category] === state.defaults[nodeKind][category] && (
+                    {ceilings[category] === state.defaults[category] && (
                       <span className="ml-2 text-xs text-muted-foreground">default</span>
                     )}
                   </td>
@@ -434,8 +405,8 @@ function FreeUpSpace() {
       <h3 className="text-sm font-medium">Free up space</h3>
       <p className="text-sm text-muted-foreground">
         Removes files from this machine, largest first, only after proving the cloud holds the
-        file, its original and the original&apos;s canonical stand-in. Nothing else removes a photo,
-        video or audio file.
+        file, its original and the original&apos;s canonical stand-in. Nothing else removes a photo
+        or video.
       </p>
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <label className="flex items-center gap-2">

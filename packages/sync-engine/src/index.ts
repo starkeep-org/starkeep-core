@@ -44,7 +44,6 @@ export {
 export {
   decideResidency,
   type RecordConstraints,
-  type LocalOverrides,
   type BlobCandidate,
   type ResidencyDecision,
   type ResidencyVerdict,
@@ -64,7 +63,6 @@ export {
   type ReplicaProbe,
   type ReplicaState,
   type ReplicaReport,
-  type DurabilityPolicy,
   type DurabilityVerdict,
   type DurabilityQuery,
 } from "./durability.js";

@@ -106,7 +106,7 @@ describe("the storage page", () => {
     renderAt("/storage");
     expect(await screen.findByRole("heading", { name: "Storage" })).toBeTruthy();
     expect(screen.getByText("Experimental")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: /Photos, videos & audio/i })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /Photos & videos/i })).toBeTruthy();
   });
 
   it("links back to the dashboard", async () => {

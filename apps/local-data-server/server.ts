@@ -89,7 +89,6 @@ import {
   STAND_IN_CATEGORIES,
   STAND_IN_MIME_TYPES,
   standardsFor,
-  type NodeKind,
   type StandInCategory,
   type StandInSize,
   type SyncDownCeilings,
@@ -328,13 +327,8 @@ interface StarkeepConfig {
   /** Item cap for one exchange round (sync-engine `maxItems`). Default 1000. */
   syncMaxItems?: number;
   /**
-   * What kind of node this is, for its default sync-down ceilings. A local
-   * data server runs on a desktop or laptop, so `desktop` unless set.
-   */
-  nodeKind?: NodeKind;
-  /**
    * This node's sync-down ceiling per stand-in category, overriding the
-   * default for its kind. A number is the largest fidelity the node receives
+   * desktop default. A local data server always runs on a desktop or laptop. A number is the largest fidelity the node receives
    * without being asked; `null` receives none of that category by default.
    * Changed by the person, per node, from admin-web.
    */
@@ -345,18 +339,6 @@ interface StarkeepConfig {
    * the person turns it on, per node, from admin-web.
    */
   keepOriginals?: boolean;
-  /**
-   * How many confirmed replicas elsewhere before "Free up space" may remove a
-   * file from this node. Default 1.
-   *
-   * Raise it for a `no-cloud`-heavy library: excluding the cloud moves the
-   * single-copy risk onto the device, and this number is the only thing that
-   * keeps that from being a data-loss feature.
-   *
-   * Anything below 1 — including a `0` someone typed to mean "don't require
-   * proof" — is refused by {@link clampMinimumReplicas} rather than honoured.
-   */
-  minimumReplicas?: number;
   // Cloud fields — populated by the admin wizard's PATCH /config, absent
   // until then. nodeId stands alone so cloud-disabled installs still get a
   // stable replica identity.
@@ -397,14 +379,13 @@ function isDuplicateFileError(err: unknown): boolean {
 }
 
 /**
- * This node's ceilings: the defaults for its kind, with the person's
+ * This node's ceilings: the desktop defaults, with the person's
  * per-category changes on top. A malformed configured value is ignored with a
  * warning rather than trusted — the PUT route refuses one, so only a
  * hand-edited config file can carry it.
  */
-function resolveCeilings(config: Pick<StarkeepConfig, "nodeKind" | "standInCeilings">): SyncDownCeilings {
-  const kind: NodeKind = config.nodeKind === "phone" ? "phone" : "desktop";
-  const out: Record<StandInCategory, number | null> = { ...DEFAULT_SYNC_DOWN_CEILINGS[kind] };
+function resolveCeilings(config: Pick<StarkeepConfig, "standInCeilings">): SyncDownCeilings {
+  const out: Record<StandInCategory, number | null> = { ...DEFAULT_SYNC_DOWN_CEILINGS.desktop };
   for (const category of STAND_IN_CATEGORIES) {
     const configured = config.standInCeilings?.[category];
     if (configured === undefined) continue;
@@ -454,16 +435,12 @@ function originalBytesByCategory(db: RawDatabase): Record<StandInCategory, { cou
 }
 
 function ceilingProblems(body: {
-  nodeKind?: unknown;
   ceilings?: Record<string, unknown>;
   keepOriginals?: unknown;
 }): string[] {
   const problems: string[] = [];
   if (body.keepOriginals !== undefined && typeof body.keepOriginals !== "boolean") {
     problems.push("keepOriginals must be true or false");
-  }
-  if (body.nodeKind !== undefined && body.nodeKind !== "phone" && body.nodeKind !== "desktop") {
-    problems.push(`nodeKind must be "phone" or "desktop"`);
   }
   for (const [category, value] of Object.entries(body.ceilings ?? {})) {
     if (!(STAND_IN_CATEGORIES as readonly string[]).includes(category)) {
@@ -473,32 +450,6 @@ function ceilingProblems(body: {
     }
   }
   return problems;
-}
-
-/**
- * The durability threshold this node will actually enforce.
- *
- * A config value below 1 — a `0`, a missing field, a string that arrived from
- * hand-edited JSON — is refused rather than honoured, and refused *loudly*
- * because the operator is entitled to know their setting did not take. There is
- * no coherent reading of "delete my only copy once zero other copies are
- * confirmed": at zero the predicate `counted >= minimumReplicas` is true for a
- * blob nothing was even asked about.
- *
- * `assessDurability` clamps as well. That is not redundancy for its own sake:
- * this one exists so the refusal is *visible*, and that one exists so the
- * guarantee does not depend on every future host remembering to call this.
- */
-function clampMinimumReplicas(configured: number | undefined): number {
-  if (configured === undefined) return 1;
-  if (typeof configured !== "number" || !Number.isFinite(configured) || configured < 1) {
-    console.warn(
-      `[residency] minimumReplicas=${String(configured)} is not a usable threshold; using 1. ` +
-        `Below 1 authorizes deleting a last copy with no evidence at all.`,
-    );
-    return 1;
-  }
-  return Math.floor(configured);
 }
 
 function regionFromUserPoolId(userPoolId: string): string {
@@ -868,14 +819,6 @@ async function main() {
         isCloudNode: false,
         ceilings,
         keepOriginals: starkeepConfig.keepOriginals === true,
-        // Clamped, not passed through. The predicate is
-        // `counted >= minimumReplicas`, so a config value of `0` makes every
-        // file durable with zero probes and zero evidence — every removal
-        // authorized, no questions asked. `assessDurability` clamps too; this
-        // is the one that can tell the operator their setting was refused.
-        durability: {
-          minimumReplicas: clampMinimumReplicas(starkeepConfig.minimumReplicas),
-        },
       });
 
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
@@ -3033,8 +2976,9 @@ async function main() {
       // GET /residency/stand-ins — this node's sync-down ceilings, and what it
       // holds against them.
       //
-      // Operator information about this node: the ceiling per stand-in category, where it came from, and the defaults for
-      // each kind of node so an editor can offer them.
+      // Operator information about this node: the ceiling per stand-in
+      // category, where it came from, and the desktop defaults so an editor
+      // can mark them.
       if (path === "/residency/stand-ins" && req.method === "GET") {
         const usage = residencyManager.usageByGroup();
         // The operator's view of the backlog, across every type: why storage
@@ -3049,12 +2993,11 @@ async function main() {
           ),
         );
         json(res, {
-          nodeKind: starkeepConfig.nodeKind ?? "desktop",
           ceilings,
           configured: starkeepConfig.standInCeilings ?? {},
           keepOriginals: starkeepConfig.keepOriginals === true,
           libraryOriginals: originalBytesByCategory(localDb),
-          defaults: DEFAULT_SYNC_DOWN_CEILINGS,
+          defaults: DEFAULT_SYNC_DOWN_CEILINGS.desktop,
           standardSizes: Object.fromEntries(
             STAND_IN_CATEGORIES.map((c) => [c, DEFAULT_STAND_IN_STANDARDS[c].standardSizes]),
           ),
@@ -3084,7 +3027,6 @@ async function main() {
       // acquisition pass after each Drive-channel drain.
       if (path === "/residency/stand-ins" && req.method === "PUT") {
         const body = JSON.parse(await readBody(req)) as {
-          nodeKind?: unknown;
           ceilings?: Record<string, unknown>;
           keepOriginals?: unknown;
         };
@@ -3095,7 +3037,6 @@ async function main() {
           return;
         }
         const patch: Partial<StarkeepConfig> = {
-          ...(body.nodeKind ? { nodeKind: body.nodeKind as NodeKind } : {}),
           ...(body.ceilings ? { standInCeilings: body.ceilings as StarkeepConfig["standInCeilings"] } : {}),
           ...(typeof body.keepOriginals === "boolean" ? { keepOriginals: body.keepOriginals } : {}),
         };
