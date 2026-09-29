@@ -47,8 +47,6 @@ import {
   appSyncableObjectKey,
   contentHashFromDataRecordObjectKey,
   dataRecordObjectKey,
-  parseVariantLongEdges,
-  resolveVariants,
   isRetrievalIntent,
   tagsForIntent,
   observationFor,
@@ -56,8 +54,6 @@ import {
   reconcileAvailability,
   vanishedObservation,
   INTENT_TAG_KEY,
-  LADDER_TAG_KEY,
-  LADDER_TAG_COMPLETE,
   estimateRestore,
   DEFAULT_AVAILABILITY,
   DEFAULT_RETRIEVAL_INTENT,
@@ -71,6 +67,8 @@ import {
   planLabelRetractions,
   labelValueSetKey,
   parseLabelRef,
+  DEFAULT_STAND_IN_STANDARDS,
+  STAND_IN_MIME_TYPES,
 } from "@starkeep/protocol-primitives";
 import type {
   Category,
@@ -82,7 +80,6 @@ import type {
   AvailabilityEventKind,
   InventoryRow,
   RecordAvailability,
-  ResolvedVariant,
   RetrievalIntent,
   VariantCandidate,
 } from "@starkeep/protocol-primitives";
@@ -104,8 +101,28 @@ import {
   planRecordQuery,
   queryParamsFrom,
   ApiError,
+  liveStandIn,
+  planFidelityReport,
+  planOriginalFidelity,
+  planStandInWrite,
+  reconcileReportedFidelity,
+  recordOriginalFidelity,
+  standInExists,
+  renderStandInSummary,
+  resolveContentRead,
+  planRecordDelete,
+  applyRecordDelete,
+  evaluateArchiving,
+  applyArchiveEvaluation,
+  archiveTriggersFor,
+  pageBacklog,
+  BACKLOG_KINDS,
+  type ArchiveTrigger,
+  type BacklogKind,
   type RecordQueryPlan,
   type SharedQueryPlan,
+  type StandInWriteError,
+  type WireStandInSummary,
 } from "@starkeep/shared-space-api";
 import type { AppSpecificOperations } from "@starkeep/shared-space-api";
 import type {
@@ -116,7 +133,8 @@ import type {
 import type { Filter, DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import {
   sha256HexToBase64,
-  loadVariantsForPage,
+  isStandInSlotConflict,
+  loadStandInSummariesForPage,
   loadVariantCandidatesForPage,
   labelPageFrom,
   LABEL_QUERY_TARGET,
@@ -966,9 +984,9 @@ function recordToResponse(
   record: DataRecord,
   metadata?: MetadataRow | null,
   labels?: RecordLabel[],
-  variants?: Record<string, ResolvedVariant & { url?: string }>,
   availability?: RecordAvailability,
-  variantCandidates?: Array<ResolvedVariant & { labelValue: string; url?: string }>,
+  variantCandidates?: SignedCandidate[],
+  standIns?: WireStandInSummary,
 ) {
   return {
     id: record.id,
@@ -984,6 +1002,12 @@ function recordToResponse(
     original_filename: record.originalFilename,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
+    stand_in_role: record.standInRole,
+    fidelity: record.fidelity,
+    // The original's sizes and where each sits. Present on every original in
+    // a stand-in category, because the listing collapses stand-ins into
+    // their original and this is the only place a reader learns what exists.
+    ...(standIns !== undefined ? { stand_ins: standIns } : {}),
     ...(metadata !== undefined ? { metadata } : {}),
     // `[]` rather than null when a record has none: absence of labels is an
     // empty set, not an unknown — the opposite of the metadata case above,
@@ -1004,38 +1028,8 @@ function recordToResponse(
     // which is what makes archiving safe by construction rather than by every
     // call site remembering not to touch an original.
     ...(availability !== undefined ? { availability } : {}),
-    // Keyed by the requested pixel size, carrying the *actual* dimensions of
-    // what was chosen. A client that wants to reason about what it got can —
-    // it just never has to ask in those terms.
-    ...(variants !== undefined
-      ? {
-          variants: Object.fromEntries(
-            Object.entries(variants).map(([target, v]) => [
-              target,
-              {
-                id: v.id,
-                type: v.type,
-                object_storage_key: v.objectStorageKey,
-                width: v.width,
-                height: v.height,
-                long_edge: v.longEdge,
-                ...(v.url ? { url: v.url } : {}),
-                ...(v.url
-                  ? {
-                      url_lifetime: {
-                        kind: "expires" as const,
-                        expires_at: new Date(Date.now() + VARIANT_URL_TTL_SECONDS * 1000).toISOString(),
-                      },
-                    }
-                  : {}),
-              },
-            ]),
-          ),
-        }
-      : {}),
-    // The unnarrowed form, ascending by long edge: every derived child the
-    // record has. What a caller asked for decides which of the two shapes it
-    // gets; they are never both present.
+    // Every derived child the record carries under the asked-for label,
+    // ascending by long edge.
     ...(variantCandidates !== undefined
       ? {
           variant_candidates: variantCandidates.map((v) => ({
@@ -1089,42 +1083,10 @@ async function loadLabelsForPage(
   return filtered;
 }
 
-/**
- * Below this, archiving costs more than not archiving.
- *
- * Deep Archive bills a 40 KB per-object overhead and a 180-day minimum
- * duration, so a small object frozen is both dearer and slower to read.
- * Strictly worse on both axes — a floor, not a tuning knob. Mirrors the
- * lifecycle rule's own `objectSizeGreaterThan`, and both are asserted, because
- * a disagreement between them would tag objects the rule then ignores (a
- * confusing no-op) or, if the rule's floor were the lower one, freeze things
- * this gate meant to protect.
- */
-const ARCHIVE_MIN_OBJECT_BYTES = 1024 * 1024;
+/** Why a stand-in takes no metadata row. Both metadata doors answer with it. */
+const STAND_IN_METADATA_REFUSAL =
+  "a stand-in carries no per-category metadata: its fidelity is its size, and the original's row describes the item, so metadata queries show one row per original";
 
-/**
- * The archive gate: mark an original eligible for the Deep Archive transition.
- *
- * ## Why the decision is split
- *
- * The **app** asserts its derived ladder is complete, because only it knows
- * what a complete ladder is — the platform must never learn what
- * `image-medium` means, and a platform-side check would have to.
- *
- * The **platform** independently applies the floors and refuses to tag if they
- * fail. So neither side alone can freeze anything: an app that is wrong about
- * its ladder still cannot archive a 200 KB file, and a platform that wanted to
- * be clever still cannot archive a record whose renditions do not exist.
- *
- * ## Why this is a gate rather than an age rule
- *
- * Archiving on age alone would eventually freeze an original whose derivation
- * never succeeded — HEIC on a node with no decoder, say — and that original is
- * the *only* readable form of the record. Gating on confirmed durability
- * instead is also what makes the cloud derivation fallback guaranteed
- * thaw-free: an incomplete original is, by construction, still instantly
- * readable.
- */
 /**
  * How long a thawed copy stays readable before lapsing back.
  *
@@ -1278,59 +1240,159 @@ function archivedReadRefusal(availability: RecordAvailability) {
  * without a URL rather than being silently omitted, which would read as "this
  * record has no variant that size".
  */
-async function signVariantsForPage(
+/**
+ * Re-decide archiving for the originals an event touched.
+ *
+ * The platform decides and performs archiving, so the tags are written as
+ * Starkeep Drive — the standing identity for shared-record custody, the same
+ * one the availability handler writes as — rather than as whichever app's
+ * request happened to complete a condition. A read-only app that asks for
+ * `do-not-archive` must be able to take an original out of the archive path
+ * without holding any power over the bytes itself.
+ *
+ * Never fails the request that triggered it: the write it follows has
+ * committed, and every decision here is re-derived on the next event about the
+ * same original. A failure is logged with the original's id.
+ */
+async function runArchiveTriggers(
+  db: DatabaseAdapter,
+  platformStorage: () => Promise<ObjectStorageAdapter>,
+  triggers: readonly ArchiveTrigger[],
+): Promise<void> {
+  if (triggers.length === 0) return;
+  let storage: ObjectStorageAdapter;
+  try {
+    storage = await platformStorage();
+  } catch (err) {
+    console.warn(`[archive] no platform storage for ${triggers.length} original(s): ${(err as Error).message}`);
+    return;
+  }
+  const isArchived = async (key: string): Promise<boolean> => {
+    const row = (await db.getAvailability([key])).get(key);
+    return row?.state === "archived" || row?.state === "restoring";
+  };
+  for (const trigger of triggers) {
+    try {
+      const evaluation = await evaluateArchiving(
+        db,
+        storage,
+        trigger.originalId,
+        DEFAULT_STAND_IN_STANDARDS,
+      );
+      const action = await applyArchiveEvaluation(storage, evaluation, {
+        mayUntag: trigger.mayUntag,
+        isArchived,
+      });
+      if (action !== "unchanged") console.log(`[archive] ${action} ${trigger.originalId}`);
+    } catch (err) {
+      console.warn(`[archive] could not re-decide ${trigger.originalId}: ${(err as Error).message}`);
+    }
+  }
+}
+
+/**
+ * Whether a synced tombstone must be refused: the canonical stand-in of an
+ * archived original is all the person can see until a restore, so the cloud
+ * keeps it. A tombstone that arrives with its original's own tombstone in the
+ * same exchange is a delete of the whole item, and passes.
+ */
+async function keepCanonicalOfArchivedOriginal(
+  db: DatabaseAdapter,
+  current: DataRecord,
+  request: { records?: ReadonlyArray<{ id: string; deletedAt: unknown }> },
+): Promise<boolean> {
+  if (current.standInRole !== "canonical" || !current.parentId) return false;
+  const parentId = current.parentId;
+  if ((request.records ?? []).some((r) => r.id === parentId && r.deletedAt)) return false;
+  const original = await db.get(parentId);
+  if (!original || original.deletedAt || !original.objectStorageKey) return false;
+  const row = (await db.getAvailability([original.objectStorageKey])).get(original.objectStorageKey);
+  return row?.state === "archived" || row?.state === "restoring";
+}
+
+/**
+ * Where a record's bytes sit, as the cloud answers for a size summary. Every
+ * record the cloud holds is in the cloud; the cloud has no "here" apart from
+ * that, and archived stand-ins do not exist — stand-ins never archive.
+ */
+async function cloudPlacementOf(): Promise<"cloud"> {
+  return "cloud";
+}
+
+/**
+ * The rendered size summaries of a page, with a signed URL on each entry when
+ * the caller asked for `include=stand-in-urls`.
+ *
+ * Signed through `signSharedCloudFrontUrl` like every other shared read, so
+ * the pre-sign revalidation chokepoint sees each key against the caller's
+ * grants.
+ */
+async function standInSummariesForPage(
+  db: DatabaseAdapter,
   appId: string,
   grants: AccessGrants,
-  byRecord: Map<StarkeepId, Record<string, ResolvedVariant>>,
-): Promise<Map<StarkeepId, Record<string, ResolvedVariant & { url?: string }>>> {
-  const out = new Map<StarkeepId, Record<string, ResolvedVariant & { url?: string }>>();
-  // One signature per distinct variant, not per (record, target) pair —
-  // progressive presentation asks for several sizes and they frequently
-  // resolve to the same child.
-  const urlByKey = new Map<string, string>();
-  for (const [recordId, resolved] of byRecord) {
-    const withUrls: Record<string, ResolvedVariant & { url?: string }> = {};
-    for (const [target, variant] of Object.entries(resolved)) {
-      let url = urlByKey.get(variant.objectStorageKey);
-      if (url === undefined) {
-        const signed = await signSharedCloudFrontUrl(
-          appId,
-          variant.objectStorageKey,
-          grants,
-          VARIANT_URL_TTL_SECONDS,
-        );
-        if (signed.ok) {
-          url = signed.url;
-          urlByKey.set(variant.objectStorageKey, url);
-        }
-      }
-      withUrls[target] = url === undefined ? variant : { ...variant, url };
-    }
-    out.set(recordId, withUrls);
+  records: readonly DataRecord[],
+  withUrls: boolean,
+): Promise<Map<StarkeepId, WireStandInSummary>> {
+  const summaries = await loadStandInSummariesForPage(
+    db,
+    records,
+    DEFAULT_STAND_IN_STANDARDS,
+    cloudPlacementOf,
+  );
+  const out = new Map<StarkeepId, WireStandInSummary>();
+  for (const [id, summary] of summaries) {
+    out.set(
+      id,
+      await renderStandInSummary(
+        summary,
+        withUrls
+          ? async (size) => {
+              if (!size.objectStorageKey) return undefined;
+              const signed = await signSharedCloudFrontUrl(
+                appId,
+                size.objectStorageKey,
+                grants,
+                VARIANT_URL_TTL_SECONDS,
+              );
+              return signed.ok ? signed.url : undefined;
+            }
+          : undefined,
+      ),
+    );
   }
   return out;
 }
 
+/** A derived child with its dimensions known, and a signed URL when one could be minted. */
+interface SignedCandidate {
+  readonly id: StarkeepId;
+  readonly objectStorageKey: string;
+  readonly type: string;
+  readonly labelValue: string;
+  readonly width: number;
+  readonly height: number;
+  readonly longEdge: number;
+  readonly url?: string;
+}
+
 /**
- * The unnarrowed form: sign every derived child of the page.
+ * Sign every derived child of the page.
  *
- * More signatures than {@link signVariantsForPage} does — a 500-record page of
- * fully-derived photos is up to 2,500 rather than at most 1,000 — and worth
- * noting rather than solving now. The hop is in-region, and the signatures are
- * microseconds. If it ever does matter, the fix needs no new design: return the
- * candidates unsigned and let the app server mint URLs for the one or two rungs
- * it actually chose, through the existing batch endpoint.
+ * The hop is in-region, and the signatures are microseconds. If the count ever
+ * does matter, the fix needs no new design: return the candidates unsigned and
+ * let the app server mint URLs for the one or two it chose, through the
+ * existing batch endpoint.
  *
  * Candidates with no stored dimensions are dropped rather than sent with nulls.
- * They cannot be ordered, so there is nothing a caller could do with one, and
- * resolution excludes them for the same reason.
+ * They cannot be ordered, so there is nothing a caller could do with one.
  */
 async function signCandidatesForPage(
   appId: string,
   grants: AccessGrants,
   byRecord: Map<StarkeepId, VariantCandidate[]>,
-): Promise<Map<StarkeepId, Array<ResolvedVariant & { labelValue: string; url?: string }>>> {
-  const out = new Map<StarkeepId, Array<ResolvedVariant & { labelValue: string; url?: string }>>();
+): Promise<Map<StarkeepId, SignedCandidate[]>> {
+  const out = new Map<StarkeepId, SignedCandidate[]>();
   const urlByKey = new Map<string, string>();
   // Dropping a dimensionless candidate is indistinguishable, from the client's
   // side, from the record having no renditions at all — which is what sent
@@ -1340,7 +1402,7 @@ async function signCandidatesForPage(
   // hand-written data-plane probe.
   let dropped = 0;
   for (const [recordId, candidates] of byRecord) {
-    const signed: Array<ResolvedVariant & { labelValue: string; url?: string }> = [];
+    const signed: SignedCandidate[] = [];
     for (const candidate of candidates) {
       if (!candidate.width || !candidate.height) {
         dropped += 1;
@@ -2075,6 +2137,16 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const accountId = getAccountId(context.invokedFunctionArn);
     const creds = await getAppCreds(appId, accountId);
     const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
+    // Storage as Starkeep Drive, for the platform's own acts on shared blobs —
+    // archiving. Built only when an event needs it, and reused within the
+    // request.
+    let platformStoragePromise: Promise<ObjectStorageAdapter> | null = null;
+    const platformStorage = (): Promise<ObjectStorageAdapter> =>
+      appId === DRIVE_APP_ID
+        ? Promise.resolve(storage)
+        : (platformStoragePromise ??= getAppCreds(DRIVE_APP_ID, accountId).then(
+            (driveCreds) => makeAdapters(DRIVE_APP_ID, driveCreds).storage,
+          ));
 
     await db.init();
     toClose.push(() => db.close());
@@ -2225,7 +2297,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
       const labelApps = plan.labelApps;
       const variantLabel = plan.variant?.label;
-      const variantTargets = plan.variant?.targets ?? [];
 
       // The reverse-label query is its own access path, over its own table and
       // in its own order; hydration and rendering below are shared.
@@ -2275,16 +2346,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const labelsById = plan.includeLabels
           ? await loadLabelsForPage(db, labelled, labelApps)
           : null;
-        const variantsById =
-          variantLabel && variantTargets.length > 0
-            ? await signVariantsForPage(
-                appId,
-                grants,
-                await loadVariantsForPage(db, labelled, variantLabel, variantTargets),
-              )
-            : null;
         const candidatesById =
-          variantLabel && variantTargets.length === 0
+          variantLabel
             ? await signCandidatesForPage(
                 appId,
                 grants,
@@ -2292,15 +2355,22 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               )
             : null;
         const availabilityById = await loadAvailabilityForPage(db, labelled);
+        const standInsById = await standInSummariesForPage(
+          db,
+          appId,
+          grants,
+          labelled,
+          plan.includeStandInUrls,
+        );
         return ok({
           records: labelled.map((r) =>
             recordToResponse(
               r,
               metaById ? metaById.get(r.id) ?? null : undefined,
               labelsById ? labelsById.get(r.id) ?? [] : undefined,
-              variantsById ? variantsById.get(r.id) ?? {} : undefined,
               availabilityById.get(r.id) ?? DEFAULT_AVAILABILITY,
               candidatesById ? candidatesById.get(r.id) ?? [] : undefined,
+              standInsById.get(r.id),
             ),
           ),
           hasMore: found.hasMore,
@@ -2321,16 +2391,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const labelsById = plan.includeLabels
         ? await loadLabelsForPage(db, records, labelApps)
         : null;
-      const variantsById =
-        variantLabel && variantTargets.length > 0
-          ? await signVariantsForPage(
-              appId,
-              grants,
-              await loadVariantsForPage(db, records, variantLabel, variantTargets),
-            )
-          : null;
       const candidatesById =
-        variantLabel && variantTargets.length === 0
+        variantLabel
           ? await signCandidatesForPage(
               appId,
               grants,
@@ -2338,15 +2400,22 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             )
           : null;
       const availabilityById = await loadAvailabilityForPage(db, records);
+      const standInsById = await standInSummariesForPage(
+        db,
+        appId,
+        grants,
+        records,
+        plan.includeStandInUrls,
+      );
       return ok({
         records: records.map((r) =>
           recordToResponse(
             r,
             metadataById ? metadataById.get(r.id) ?? null : undefined,
             labelsById ? labelsById.get(r.id) ?? [] : undefined,
-            variantsById ? variantsById.get(r.id) ?? {} : undefined,
             availabilityById.get(r.id) ?? DEFAULT_AVAILABILITY,
             candidatesById ? candidatesById.get(r.id) ?? [] : undefined,
+            standInsById.get(r.id),
           ),
         ),
         hasMore: result.hasMore,
@@ -2421,6 +2490,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
       const hlc = clock.now();
       await db.upsertLabels(plan.writes.map((w) => ({ ...w, appId, hlc })));
+      await runArchiveTriggers(
+        db,
+        platformStorage,
+        archiveTriggersFor([], plan.writes.map((w) => ({ ...w, deletedAt: null }))),
+      );
       return ok({ written: plan.writes.length });
     }
 
@@ -2512,6 +2586,19 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           hlc,
         })),
       );
+      await runArchiveTriggers(
+        db,
+        platformStorage,
+        archiveTriggersFor(
+          [],
+          [
+            ...sets
+              .filter((e) => e.values.length > 0)
+              .map((e) => ({ recordId: e.recordId, key: e.key, deletedAt: null })),
+            ...clearPlan.writes.map((e) => ({ recordId: e.recordId, key: e.key, deletedAt: hlc })),
+          ],
+        ),
+      );
       return ok({ replaced: normalized.length });
     }
 
@@ -2544,6 +2631,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
       const hlc = clock.now();
       await db.retractLabels(plan.writes.map((r) => ({ ...r, appId, hlc })));
+      await runArchiveTriggers(
+        db,
+        platformStorage,
+        archiveTriggersFor([], plan.writes.map((r) => ({ ...r, deletedAt: hlc }))),
+      );
       return ok({ retracted: plan.writes.length });
     }
 
@@ -2568,6 +2660,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         parentId?: string;
         labels?: Array<{ key: string; value?: string }>;
         metadata?: Record<string, unknown>;
+        /** `{ role, fidelity }` when this record is a stand-in for `parentId`. */
+        standIn?: unknown;
+        /** A stand-in write's report of the original's fidelity. */
+        parentFidelity?: unknown;
+        /** An original's report of its own fidelity. */
+        fidelity?: unknown;
       };
       if (!body.type) return clientErr("type is required", 400);
       if (!isKnownType(body.type)) return clientErr(`Unknown type id: ${body.type}`, 400);
@@ -2615,6 +2713,41 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         if (!checked.ok) return clientErr(checked.message, 400);
       }
 
+      // Fidelity, checked before anything is written. Same shapes and same
+      // messages as the local-data-server, from the same planners.
+      const isStandInWrite = body.standIn !== undefined && body.standIn !== null;
+      if (isStandInWrite && inlineMetadata !== undefined) {
+        return ok({ error: "StandInMetadata", detail: STAND_IN_METADATA_REFUSAL }, 400);
+      }
+      if (isStandInWrite && body.fidelity !== undefined) {
+        return ok(
+          {
+            error: "InvalidStandIn",
+            code: "fidelity-on-stand-in",
+            detail:
+              "a stand-in reports its own fidelity in standIn.fidelity and the original's in parentFidelity",
+          },
+          400,
+        );
+      }
+      if (!isStandInWrite && body.parentFidelity !== undefined) {
+        return ok(
+          {
+            error: "InvalidFidelity",
+            code: "parent-fidelity-without-stand-in",
+            detail:
+              "parentFidelity accompanies a stand-in; an original reports its own fidelity in fidelity",
+          },
+          400,
+        );
+      }
+      const originalFidelity = planOriginalFidelity({
+        type: body.type,
+        parentId: body.parentId,
+        fidelity: body.fidelity,
+      });
+      if (!originalFidelity.ok) return ok(originalFidelity.body, originalFidelity.status);
+
       const contentHash = body.contentHash;
       const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
       const sizeBytes = body.sizeBytes;
@@ -2632,7 +2765,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // fresh id/timestamp on each attempt cannot leave a duplicate behind.
       // `created` distinguishes a fresh insert (201) from returning an existing
       // duplicate (200).
-      const { record, created } = await withOccRetry("POST /data/records", async () => {
+      type CreateOutcome =
+        | { record: DataRecord; created: boolean; touched: DataRecord[]; refused?: undefined }
+        | { refused: { status: number; body: StandInWriteError } };
+      const outcome = await withOccRetry("POST /data/records", async (): Promise<CreateOutcome> => {
         // Record-level dedup on the uniqueness key,
         // `(parent_id, original_filename, content_hash)` — the columns
         // `uq_records_parent_filename_hash` names and the columns
@@ -2672,7 +2808,44 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         ];
         const dup = await db.query({ filters: dupFilters, limit: 1 });
         const existing = dup.records[0];
-        if (existing) return { record: existing, created: false };
+        if (existing) {
+          // An original's reported fidelity lands even when another app
+          // registered the bytes first.
+          const reconciled = reconcileReportedFidelity(existing, originalFidelity.fidelity);
+          if (!reconciled.ok) return { refused: reconciled };
+          if (reconciled.write !== null && !isStandInWrite) {
+            const updated = await recordOriginalFidelity(db, existing, reconciled.write, clock);
+            return { record: updated, created: false, touched: [updated] };
+          }
+          return { record: existing, created: false, touched: [] };
+        }
+
+        // A stand-in: checked against the standards and its original, with the
+        // original's fidelity recorded first when this write is the first to
+        // report it. Inside the OCC unit, so a retry re-reads the original and
+        // the slot.
+        let standInFields: { standInRole: "canonical" | "smaller"; fidelity: number } | null = null;
+        const touched: DataRecord[] = [];
+        if (isStandInWrite) {
+          const plan = await planStandInWrite(
+            db,
+            grants,
+            {
+              type: body.type!,
+              parentId: body.parentId,
+              standIn: body.standIn,
+              parentFidelity: body.parentFidelity,
+            },
+            DEFAULT_STAND_IN_STANDARDS,
+          );
+          if (!plan.ok) return { refused: plan };
+          if (plan.recordParentFidelity !== null) {
+            touched.push(
+              await recordOriginalFidelity(db, plan.parent, plan.recordParentFidelity, clock),
+            );
+          }
+          standInFields = { standInRole: plan.role, fidelity: plan.fidelity };
+        }
 
         // Built through the shared builder rather than assembled here, because
         // the id is content-addressed and the whole point of that is that this
@@ -2688,10 +2861,23 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             sizeBytes,
             originalFilename: body.fileName ?? null,
             parentId: (body.parentId as DataRecord["parentId"]) ?? null,
+            ...(standInFields ?? { fidelity: originalFidelity.fidelity }),
           },
           clock,
         );
-        await db.put(fresh);
+        try {
+          await db.put(fresh);
+        } catch (err) {
+          if (!standInFields || !isStandInSlotConflict(err)) throw err;
+          // Another writer took the slot between the plan and the write.
+          const occupant = await liveStandIn(
+            db,
+            fresh.parentId!,
+            standInFields.standInRole,
+            standInFields.standInRole === "smaller" ? standInFields.fidelity : undefined,
+          );
+          return { refused: standInExists(occupant?.id ?? "") };
+        }
         // In the same OCC unit as the record row, so a sync scan never sees
         // the record without its metadata. Only on the created path: a dedup
         // hit is somebody else's record and rewriting its derived columns
@@ -2702,8 +2888,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             ...inlineMetadata,
           });
         }
-        return { record: fresh, created: true };
+        return { record: fresh, created: true, touched: [...touched, fresh] };
       });
+      if (outcome.refused) return ok(outcome.refused.body, outcome.refused.status);
+      const { record, created } = outcome;
+      // A canonical stand-in, an original, or an original's fidelity may each
+      // complete an archiving condition.
+      await runArchiveTriggers(db, platformStorage, archiveTriggersFor(outcome.touched, []));
 
       // Optional labels, written in the same request as the record but NOT the
       // same transaction — see the local-data-server's equivalent for why a
@@ -2921,6 +3112,30 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // `metadataWrite` on `image` alone could post `typeId: "image"` at a video
     // record and write every column the two categories share. `other` has no
     // metadata table. See the matching route in the local data server.
+    // POST /apps/{appId}/data/records/:id/fidelity — report an existing
+    // original's fidelity, gated like a metadata write. The same planner as the
+    // local server; an arriving fidelity may complete an archiving condition.
+    const fidelityMatch = subPath.match(/^\/data\/records\/([^/]+)\/fidelity$/);
+    if (fidelityMatch && method === "POST") {
+      const rawBody = event.isBase64Encoded && event.body
+        ? Buffer.from(event.body, "base64").toString("utf8")
+        : (event.body ?? "{}");
+      const body = JSON.parse(rawBody) as { fidelity?: unknown };
+      const plan = await planFidelityReport(
+        db,
+        decodeURIComponent(fidelityMatch[1]!),
+        body.fidelity,
+        (type) => canRead(grants, type) && canWriteCategory(grants, typeCategory(type)),
+      );
+      if (!plan.ok) return ok(plan.body, plan.status);
+      const record =
+        plan.write === null ? plan.record : await recordOriginalFidelity(db, plan.record, plan.write, clock);
+      if (plan.write !== null) {
+        await runArchiveTriggers(db, platformStorage, archiveTriggersFor([record], []));
+      }
+      return ok({ id: record.id, fidelity: record.fidelity, recorded: plan.write !== null });
+    }
+
     const metadataWriteMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata$/);
     if (metadataWriteMatch && method === "POST") {
       const recordId = decodeURIComponent(metadataWriteMatch[1]!) as StarkeepId;
@@ -2938,6 +3153,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // the checks have a type to run against.
       const subject = await db.get(recordId);
       if (!subject || subject.deletedAt) return clientErr("Record not found", 404);
+      if (subject.standInRole) {
+        return ok({ error: "StandInMetadata", detail: STAND_IN_METADATA_REFUSAL }, 400);
+      }
       const category = typeCategory(subject.type);
       if (!canWriteCategory(grants, category)) return clientErr("Forbidden", 403);
       if (category === "other") {
@@ -3102,64 +3320,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return ok({ urls, expiresIn: requestedExpiresIn });
     }
 
-    // GET /apps/{appId}/data/records/:id/file-url
-    // POST /apps/{appId}/data/records/:id/archive-gate
-    //
-    // Body: { ladderComplete: boolean }. The caller asserts its derived ladder
-    // is complete; this applies the platform's own floors and tags the object
-    // only if both agree. Idempotent — re-tagging an already-tagged object is a
-    // no-op, which is what makes it safe to call after every derivation pass.
-    const archiveGateMatch = subPath.match(/^\/data\/records\/([^/]+)\/archive-gate$/);
-    if (archiveGateMatch && method === "POST") {
-      const id = decodeURIComponent(archiveGateMatch[1]!) as StarkeepId;
-      const record = await db.get(id);
-      if (!record || record.deletedAt) return clientErr("Record not found", 404);
-      // Write access, not read: this changes how the object is stored, and an
-      // app that may only read a record has no business deciding it can be
-      // slow to read for everyone else.
-      if (!canWrite(grants, record.type)) return clientErr("Forbidden", 403);
-      if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
-
-      const body = event.body
-        ? (JSON.parse(
-            event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body,
-          ) as { ladderComplete?: boolean })
-        : {};
-
-      const refusals: string[] = [];
-      if (body.ladderComplete !== true) {
-        refusals.push(
-          "the caller did not assert ladderComplete — an original whose derived " +
-            "ladder is incomplete is still the only readable form of the record",
-        );
-      }
-      if (record.sizeBytes <= ARCHIVE_MIN_OBJECT_BYTES) {
-        refusals.push(
-          `object is ${record.sizeBytes} bytes, at or below the ${ARCHIVE_MIN_OBJECT_BYTES}-byte ` +
-            "floor: Deep Archive's per-object overhead and minimum duration make archiving it " +
-            "both dearer and slower than leaving it",
-        );
-      }
-      // A record marked no-cloud has no cloud bytes to archive, and tagging one
-      // would be asserting something about an object that should not exist.
-      if (await keyIsCloudExcluded(db, record.objectStorageKey)) {
-        refusals.push("record is marked starkeep/no-cloud");
-      }
-
-      if (refusals.length > 0) {
-        return ok({ archived: false, refusals });
-      }
-
-      await storage.setTags(record.objectStorageKey, {
-        [INTENT_TAG_KEY]: "archive",
-        [LADDER_TAG_KEY]: LADDER_TAG_COMPLETE,
-      });
-      // Tagged, not transitioned. The lifecycle rule performs the transition
-      // after `archiveHoldDays`, which buys a week to catch a derivation bug
-      // before the input is behind a 48-hour thaw.
-      return ok({ archived: false, tagged: true, refusals: [] });
-    }
-
     // POST /apps/{appId}/data/records/:id/restore
     //
     // Restoring is a real feature, not an error path — and it is the *only* way
@@ -3253,6 +3413,92 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       });
     }
 
+    // GET /apps/{appId}/data/stand-ins/backlog?kind=missing-canonical|missing-fidelity
+    //
+    // Originals waiting on an app. On the cloud, "missing a canonical
+    // stand-in" means none in the cloud — the question archiving asks. Same
+    // planner and same paging contract as the local server.
+    if (method === "GET" && subPath === "/data/stand-ins/backlog") {
+      const kind = query["kind"] ?? "missing-canonical";
+      if (!(BACKLOG_KINDS as readonly string[]).includes(kind)) {
+        return clientErr(`kind must be one of ${BACKLOG_KINDS.join(", ")}`, 400);
+      }
+      const limit = Number(query["limit"] ?? "100");
+      const page = await pageBacklog(
+        db,
+        grants,
+        {
+          kind: kind as BacklogKind,
+          limit: Number.isFinite(limit) ? limit : 100,
+          ...(query["page_token"] ? { cursor: query["page_token"] } : {}),
+        },
+        DEFAULT_STAND_IN_STANDARDS,
+      );
+      return ok({
+        kind,
+        records: page.records.map((r) => ({
+          id: r.id,
+          type: r.type,
+          fidelity: r.fidelity,
+          size_bytes: r.sizeBytes,
+          original_filename: r.originalFilename,
+        })),
+        nextCursor: page.nextCursor,
+      });
+    }
+
+    // GET /apps/{appId}/data/records/:id/content-url?size=<n|canonical>
+    //
+    // The content read at a chosen size, naming the file actually served —
+    // usually a stand-in in another format than the listed original. The same
+    // resolution as the local server's; only the URL differs, signed here
+    // through the shared-read chokepoint.
+    const contentUrlMatch = subPath.match(/^\/data\/records\/([^/]+)\/content-url$/);
+    if (contentUrlMatch && method === "GET") {
+      const outcome = await resolveContentRead(
+        db,
+        grants,
+        decodeURIComponent(contentUrlMatch[1]!),
+        query["size"],
+        DEFAULT_STAND_IN_STANDARDS,
+        cloudPlacementOf,
+      );
+      if (!outcome.ok) return ok(outcome.body, outcome.status);
+      const { size } = outcome;
+      const served =
+        size.recordId === outcome.original.id
+          ? outcome.original
+          : await db.get(size.recordId as StarkeepId);
+      if (!served || !served.objectStorageKey) {
+        return ok({ error: "NotFound", detail: "the record that answers this size has no file" }, 404);
+      }
+      // A self-canonical original can be the answer, and an original can be
+      // archived; a stand-in never is. Refused the same way a file-url read
+      // of archived bytes is, rather than implicitly thawed.
+      const availability = toRecordAvailability(
+        (await db.getAvailability([served.objectStorageKey])).get(served.objectStorageKey),
+      );
+      const refusal = archivedReadRefusal(availability);
+      if (refusal) return ok(refusal.body, refusal.status);
+      const expiresIn = Math.min(
+        Math.max(parseInt(query["expiresIn"] ?? "3600", 10) || 3600, 60),
+        VARIANT_URL_TTL_SECONDS,
+      );
+      const signed = await signSharedCloudFrontUrl(appId, served.objectStorageKey, grants, expiresIn);
+      if (!signed.ok) return clientErr(signed.message, signed.status);
+      return ok({
+        record_id: served.id,
+        type: served.type,
+        mime_type: served.mimeType ?? STAND_IN_MIME_TYPES[served.type] ?? "application/octet-stream",
+        fidelity: size.fidelity,
+        role: size.role,
+        size_bytes: served.sizeBytes,
+        available_here: true,
+        url: signed.url,
+        expires_in: expiresIn,
+      });
+    }
+
     const fileUrlMatch = subPath.match(/^\/data\/records\/([^/]+)\/file-url$/);
     if (fileUrlMatch && method === "GET") {
       const id = decodeURIComponent(fileUrlMatch[1]!) as StarkeepId;
@@ -3301,13 +3547,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           ? await loadMetadataForPage(db, grants, [record])
           : null;
         const detailAvailability = await loadAvailabilityForPage(db, [record]);
+        const detailStandIns = await standInSummariesForPage(db, appId, grants, [record], false);
         return ok({
           record: recordToResponse(
             record,
             detailMeta ? detailMeta.get(record.id) ?? null : undefined,
             detailLabels ? detailLabels.get(record.id) ?? [] : undefined,
-            undefined,
             detailAvailability.get(record.id) ?? DEFAULT_AVAILABILITY,
+            undefined,
+            detailStandIns.get(record.id),
           ),
         });
       }
@@ -3351,16 +3599,17 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           const existing = await db.get(id);
           if (!existing || existing.deletedAt) return clientErr("Record not found", 404);
           if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
-          const hlc = clock.now();
-          await db.delete(id, hlc);
-          // Cascade to labels by hand: DSQL has no foreign keys, so nothing
-          // does this for us. Crosses app namespaces on purpose — the record
-          // is going away, so every app's assertions about it go with it.
-          // This is a platform operation riding on the record delete, not an
-          // app write, which is why it isn't gated on the caller owning those
-          // labels.
-          await db.tombstoneLabelsForRecord(id, hlc);
-          return ok({ deleted: true });
+          // The record, its stand-ins and derived records, and every label on
+          // any of them, by hand: DSQL has no foreign keys, so nothing does
+          // this for us. Crosses app namespaces and types on purpose — the
+          // item is going away, so everything describing it goes with it. A
+          // platform operation riding on the delete, not an app write, which
+          // is why it isn't gated on the caller's grants over the children.
+          // The same planner the local server and the SDK use.
+          const plan = await planRecordDelete(db, existing);
+          if (!plan.ok) return ok(plan.body, plan.status);
+          const deleted = await applyRecordDelete(db, plan, clock);
+          return ok({ deleted: true, ids: deleted.map((r) => r.id) });
         });
       }
     }
@@ -3619,6 +3868,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           clock,
           objectStorage: storage,
           syncSharedRecords: true,
+          keepLiveOnTombstone: (current, _incoming, exchange) =>
+            keepCanonicalOfArchivedOriginal(db, current, exchange),
+          // The Drive channel is where most stand-ins, originals and labels
+          // reach the cloud, and its storage is already Drive's.
+          onApplied: ({ records, labels }) =>
+            runArchiveTriggers(db, async () => storage, archiveTriggersFor(records, labels)),
         });
       } else {
         const source = await getAppSyncableSource();

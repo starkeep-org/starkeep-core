@@ -21,7 +21,7 @@ import { appSyncableTableInfo, FILE_RECORDS_TABLE_INFO } from "@starkeep/shared-
 import { installUserTokenFixture } from "./user-token.js";
 import { dataRecordObjectKey, serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
-import { fakeDsqlWithGrants, recordRow } from "./fake-dsql.js";
+import { CHILDREN_OF, STAND_INS_OF_PAGE, fakeDsqlWithGrants, recordRow } from "./fake-dsql.js";
 
 const ssmMock = mockClient(SSMClient);
 const stsMock = mockClient(STSClient);
@@ -1027,6 +1027,7 @@ describe("per-record routes honor read/write grants", () => {
 
   it("DELETE tombstones a writable record and 403s otherwise", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
+      .on(CHILDREN_OF, [])
       .on(/from "shared"\."records" where "id" =/, [recordRow({ id: "d1", type: "image/jpeg" })])
       .on(/update "shared"\."records" set "deleted_at"/, []);
     setDbFactory(db);
@@ -1035,7 +1036,7 @@ describe("per-record routes honor read/write grants", () => {
       context,
     );
     expect(res.statusCode).toBe(200);
-    expect(bodyOf(res)).toEqual({ deleted: true });
+    expect(bodyOf(res)).toEqual({ deleted: true, ids: ["d1"] });
     expect(db.calls(/update "shared"\."records" set "deleted_at"/)).toHaveLength(1);
 
     const dbRo = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
@@ -2043,122 +2044,26 @@ describe("GET /data/records filters", () => {
   });
 });
 
-// ---- The archive gate (media plan item 17) ----
+// ---- The archive gate is gone ----
 //
-// The property under test is the *split*: the app asserts its ladder is
-// complete because only it knows what a complete ladder is, and the platform
-// independently applies its own floors. Neither side alone can freeze anything,
-// and each test below removes one side's contribution and checks nothing gets
-// tagged.
+// Apps used to assert `ladderComplete` here. The platform now decides
+// archiving from the stand-in columns it can check itself — see
+// `stand-ins.test.ts` — so the route must not answer: an app still calling it
+// is asking for something that no longer happens.
 describe("POST /data/records/:id/archive-gate", () => {
-  const grants = [{ type_id: "image/jpeg", access: "readwrite" }];
-  const bigKey = `shared/image/aa/${"a".repeat(64)}`;
-  const TAGGING = /PutObjectTagging/;
-
-  function dbWith(sizeBytes: number, labelRows: Array<Record<string, unknown>> = []) {
-    return fakeDsqlWithGrants(grants)
-      .on(RECORDS_SELECT, [
-        recordRow({
-          id: "rec-1",
-          type: "image/jpeg",
-          object_storage_key: bigKey,
-          size_bytes: sizeBytes,
-        }),
-      ])
-      .on(/from "shared"\."record_labels" where "record_id" in/, labelRows);
-  }
-
-  async function gate(body: Record<string, unknown>) {
-    return handler(
+  it("no longer exists", async () => {
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]));
+    const res = await handler(
       signedEvent({
         appId: "app1",
         method: "POST",
         subPath: "/data/records/rec-1/archive-gate",
-        body,
+        body: { ladderComplete: true },
       }),
       context,
     );
-  }
-
-  it("tags an object when the app asserts a complete ladder and the floors pass", async () => {
-    setDbFactory(dbWith(50 * 1024 * 1024));
-    s3Mock.on(PutObjectTaggingCommand).resolves({});
-    const res = await gate({ ladderComplete: true });
-
-    expect(res.statusCode).toBe(200);
-    expect(bodyOf(res)["tagged"]).toBe(true);
-    const call = s3Mock.commandCalls(PutObjectTaggingCommand)[0]!;
-    const tagSet = (call.args[0].input.Tagging as { TagSet: Array<{ Key: string; Value: string }> })
-      .TagSet;
-    const tags = Object.fromEntries(tagSet.map((t) => [t.Key, t.Value]));
-    // Both tags, because the lifecycle rule requires both. Either alone would
-    // either do nothing or freeze something it should not.
-    expect(tags["starkeep:intent"]).toBe("archive");
-    expect(tags["starkeep:ladder"]).toBe("complete");
-  });
-
-  // Tagged, not transitioned. The hold period is what buys a week to catch a
-  // derivation bug before the input is behind a 48-hour thaw.
-  it("does not itself transition anything", async () => {
-    setDbFactory(dbWith(50 * 1024 * 1024));
-    s3Mock.on(PutObjectTaggingCommand).resolves({});
-    const res = await gate({ ladderComplete: true });
-    expect(bodyOf(res)["archived"]).toBe(false);
-  });
-
-  // The app's half of the split removed.
-  it("refuses when the app does not assert a complete ladder", async () => {
-    setDbFactory(dbWith(50 * 1024 * 1024));
-    s3Mock.on(PutObjectTaggingCommand).resolves({});
-    const res = await gate({});
-    expect(bodyOf(res)["tagged"]).toBeUndefined();
-    expect(String((bodyOf(res)["refusals"] as string[])[0])).toMatch(/ladderComplete/);
+    expect(res.statusCode).toBe(404);
     expect(s3Mock.commandCalls(PutObjectTaggingCommand)).toHaveLength(0);
-  });
-
-  // The platform's half. An app that is wrong about its ladder still cannot
-  // archive a small file — which is the entire point of checking independently.
-  it("refuses a small object even when the app says the ladder is complete", async () => {
-    setDbFactory(dbWith(200 * 1024));
-    s3Mock.on(PutObjectTaggingCommand).resolves({});
-    const res = await gate({ ladderComplete: true });
-    expect(bodyOf(res)["tagged"]).toBeUndefined();
-    expect(String((bodyOf(res)["refusals"] as string[])[0])).toMatch(/floor/);
-    expect(s3Mock.commandCalls(PutObjectTaggingCommand)).toHaveLength(0);
-  });
-
-  it("refuses a record marked starkeep/no-cloud", async () => {
-    setDbFactory(
-      dbWith(50 * 1024 * 1024, [
-        {
-          record_id: "rec-1",
-          app_id: "starkeep",
-          key: "no-cloud",
-          value: "",
-          record_type: "image/jpeg",
-          created_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
-          updated_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
-          node_id: "n",
-          deleted_at: null,
-        },
-      ]),
-    );
-    s3Mock.on(PutObjectTaggingCommand).resolves({});
-    const res = await gate({ ladderComplete: true });
-    expect(String((bodyOf(res)["refusals"] as string[]).join(" "))).toMatch(/no-cloud/);
-    expect(s3Mock.commandCalls(PutObjectTaggingCommand)).toHaveLength(0);
-  });
-
-  // A read grant is not enough: this changes how the object is stored, and an
-  // app that may only read has no business making it slow for everyone else.
-  it("requires write access, not merely read", async () => {
-    setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(RECORDS_SELECT, [
-        recordRow({ id: "rec-1", type: "image/jpeg", object_storage_key: bigKey, size_bytes: 5e7 }),
-      ]),
-    );
-    const res = await gate({ ladderComplete: true });
-    expect(res.statusCode).toBe(403);
   });
 });
 
@@ -2504,7 +2409,7 @@ describe("GET /files/{key}/presign — the sync download path", () => {
 // that is malformed must be refused rather than answered as though it were
 // valid, because a caller that asked in pixels precisely so it would not have
 // to reason about size classes has no way to notice a silently-empty answer.
-describe("GET /data/records variant resolution", () => {
+describe("GET /data/records derived children", () => {
   const grants = [{ type_id: "image/jpeg", access: "readwrite" }];
 
   async function request(query: Record<string, string>) {
@@ -2515,38 +2420,24 @@ describe("GET /data/records variant resolution", () => {
     );
   }
 
-  it("accepts a variant label and a list of pixel sizes", async () => {
-    const res = await request({ variant: "photos/rendition", variantLongEdge: "400,1280" });
+  // `variant` lists every derived child of the record, with its dimensions.
+  it("accepts a variant label, and answers with candidates", async () => {
+    const res = await request({ variant: "photos/derived" });
     expect(res.statusCode).toBe(200);
   });
 
-  // `variant` alone asks a different question rather than an incomplete one:
-  // every derived child of the record, with its dimensions. That is what an app
-  // owning a ladder needs, because narrowing to a pixel target hides whether a
-  // rung is missing or was never going to exist for this record.
-  it("accepts a variant label with no pixel size, and answers with candidates", async () => {
-    const res = await request({ variant: "photos/rendition" });
-    expect(res.statusCode).toBe(200);
-  });
-
-  it("rejects variantLongEdge without variant", async () => {
-    const res = await request({ variantLongEdge: "400" });
+  // A size of the original is a content read at a size, answered from its
+  // stand-ins, so the listing no longer takes one.
+  it("refuses variantLongEdge, which is no longer a parameter", async () => {
+    const res = await request({ variant: "photos/derived", variantLongEdge: "400" });
     expect(res.statusCode).toBe(400);
+    expect(String(bodyOf(res)["error"])).toMatch(/"variantLongEdge" is not a parameter/);
   });
 
   it("rejects a malformed variant label", async () => {
-    const res = await request({ variant: "no-slash", variantLongEdge: "400" });
+    const res = await request({ variant: "no-slash" });
     expect(res.statusCode).toBe(400);
     expect(String(bodyOf(res)["error"])).toMatch(/variant must be of the form/);
-  });
-
-  // "400px" is what you get from string-concatenating a CSS value, and
-  // parseInt would happily accept it.
-  it("rejects sizes that are not whole pixel counts", async () => {
-    for (const bad of ["400px", "12abc", "400.5", "-400", "0"]) {
-      const res = await request({ variant: "photos/rendition", variantLongEdge: bad });
-      expect(res.statusCode, bad).toBe(400);
-    }
   });
 
   // The behaviour this whole metadata-over-sync change exists to restore.
@@ -2604,18 +2495,9 @@ describe("GET /data/records variant resolution", () => {
     });
   });
 
-  it("caps how many sizes one request may ask for", async () => {
-    const res = await request({
-      variant: "photos/rendition",
-      variantLongEdge: "100,200,300,400,500",
-    });
-    expect(res.statusCode).toBe(400);
-    expect(String(bodyOf(res)["error"])).toMatch(/at most/);
-  });
-
-  // Omitting the parameters entirely must not start resolving variants — the
-  // extra child query is not free, and every existing caller passes neither.
-  it("does no variant work when neither parameter is present", async () => {
+  // Omitting the parameter must not start listing children — the extra child
+  // query is not free, and most callers do not pass it.
+  it("does no variant work when the parameter is absent", async () => {
     const db = fakeDsqlWithGrants(grants).on(RECORDS_SELECT, [
       recordRow({ id: "rec-1", type: "image/jpeg" }),
     ]);
@@ -2626,9 +2508,10 @@ describe("GET /data/records variant resolution", () => {
     );
     expect(res.statusCode).toBe(200);
     const body = bodyOf(res) as { records: Array<Record<string, unknown>> };
-    expect(body.records[0]!["variants"]).toBeUndefined();
-    // One records query, not two: no child lookup happened.
-    expect(db.calls(RECORDS_SELECT)).toHaveLength(1);
+    expect(body.records[0]!["variant_candidates"]).toBeUndefined();
+    // One records query besides the size summary's stand-in lookup: no
+    // variant child lookup happened.
+    expect(db.calls(RECORDS_SELECT).filter((q) => !STAND_INS_OF_PAGE.test(q.text))).toHaveLength(1);
   });
 });
 

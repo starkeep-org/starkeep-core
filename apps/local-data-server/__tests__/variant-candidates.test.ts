@@ -1,17 +1,10 @@
 /**
- * The unnarrowed variant list.
+ * The derived-children list: `variant=<app>/<key>`.
  *
- * `variant=<app>/<key>&variantLongEdge=…` answers "which derived child best
- * fits this many pixels", which is the right question for a client that just
- * wants an image. It is the wrong question for the app that owns the ladder,
- * because the answer throws away the two facts that app needs next: whether the
- * rung it did not get is missing or was never going to exist for this record,
- * and what smaller rung it could paint while the right one derives.
- *
- * So `variant` alone returns the whole set. What matters in these assertions is
- * that it stays app-agnostic — the server orders by long edge and names no
- * class — and that the two forms remain distinct answers rather than one
- * silently degrading into the other.
+ * Returns every live child carrying the label, with its dimensions, and lets
+ * the app that owns the label choose. What matters in these assertions is that
+ * it stays app-agnostic — the server orders by long edge and names no class.
+ * Choosing a size of the original is a content read at a size, not this.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
@@ -55,7 +48,7 @@ const list = async (query: string) => {
   );
   expect(res.status).toBe(200);
   const body = (await res.json()) as {
-    records: Array<{ id: string; variant_candidates?: Candidate[]; variants?: Record<string, unknown> }>;
+    records: Array<{ id: string; variant_candidates?: Candidate[] }>;
   };
   return body.records.find((r) => r.id === parentId)!;
 };
@@ -125,17 +118,12 @@ describe("asking for the whole set", () => {
   }, 30_000);
 });
 
-describe("the two forms stay distinct", () => {
-  it("returns resolved variants, and no candidate list, when a size is named", async () => {
-    const record = await list(`variant=${encodeURIComponent(LABEL)}&variantLongEdge=500`);
-    expect(record.variants).toBeDefined();
-    expect(record.variant_candidates).toBeUndefined();
-    // Round-up resolution, unchanged: the smallest rung that reaches 500.
-    expect(Object.values(record.variants!)).toHaveLength(1);
-  }, 30_000);
-
-  it("still rejects a pixel size with nothing to resolve it against", async () => {
-    const res = await app.fetch(`/data/records?variantLongEdge=500`);
+describe("choosing a size", () => {
+  it("is not a parameter of the listing any more", async () => {
+    // A size of the original is `GET /data/records/:id/content-url?size=`,
+    // answered from its stand-ins.
+    const res = await app.fetch(`/data/records?variant=${encodeURIComponent(LABEL)}&variantLongEdge=500`);
     expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/"variantLongEdge" is not a parameter/);
   }, 30_000);
 });

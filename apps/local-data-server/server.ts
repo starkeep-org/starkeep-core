@@ -19,7 +19,6 @@ import {
 import {
   appRegistryRow,
   listAppRegistry,
-  sizeClassKeysByApp,
   listInstallSteps,
 } from "../../packages/admin-installer/src/local/registry.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
@@ -49,7 +48,7 @@ import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import type { Filter } from "../../packages/storage-adapter/src/database/types.js";
 import { createNodeClock, createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
-import { createSqliteSyncStateStore, createChangeNotifier, projectPolicy, validateRetentionPolicy, validateOverrideRules } from "../../packages/sync-engine/src/index.js";
+import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
 import { setHashFactory } from "@starkeep/storage-adapter";
 import {
   labelPageFrom,
@@ -73,18 +72,53 @@ import {
 } from "../../packages/protocol-primitives/src/access/grants.js";
 import { deserializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
 import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
-import { INTENT_TAG_KEY, LADDER_TAG_KEY, LADDER_TAG_COMPLETE } from "../../packages/protocol-primitives/src/storage/retrieval-intent.js";
-import { sha256HexToBase64, loadVariantsForPage, loadVariantCandidatesForPage } from "@starkeep/storage-adapter";
+import { sha256HexToBase64, loadVariantCandidatesForPage } from "@starkeep/storage-adapter";
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
-import type { NodeRetentionPolicy, OverrideRule } from "../../packages/sync-engine/src/index.js";
-import { createResidencyManager, residencyHooks, originalClassFor } from "../../packages/sync-engine/src/index.js";
-import { buildCensus } from "./census.js";
+import {
+  createResidencyManager,
+  residencyHooks,
+  runAcquisition,
+  scanForAcquirable,
+} from "../../packages/sync-engine/src/index.js";
+import type { SyncEngine } from "../../packages/sync-engine/src/index.js";
 import {
   createStarkeepId,
   planLabelWrites,
   planLabelRetractions,
   labelValueSetKey,
+  DEFAULT_STAND_IN_STANDARDS,
+  DEFAULT_SYNC_DOWN_CEILINGS,
+  STAND_IN_CATEGORIES,
+  STAND_IN_MIME_TYPES,
+  type NodeKind,
+  type StandInCategory,
+  type StandInSize,
+  type SyncDownCeilings,
 } from "@starkeep/protocol-primitives";
+import {
+  liveStandIn,
+  planFidelityReport,
+  planOriginalFidelity,
+  planStandInWrite,
+  reconcileReportedFidelity,
+  recordOriginalFidelity,
+  standInExists,
+} from "../../packages/shared-space-api/src/stand-ins/write.js";
+import {
+  applyRecordDelete,
+  planRecordDelete,
+} from "../../packages/shared-space-api/src/stand-ins/delete.js";
+import {
+  BACKLOG_KINDS,
+  countBacklog,
+  pageBacklog,
+  type BacklogKind,
+} from "../../packages/shared-space-api/src/stand-ins/backlog.js";
+import { isStandInSlotConflict, loadStandInSummariesForPage } from "@starkeep/storage-adapter";
+import {
+  renderStandInSummary,
+  resolveContentRead,
+} from "../../packages/shared-space-api/src/stand-ins/read.js";
 import type { RecordLabel, DataRecord } from "@starkeep/protocol-primitives";
 import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import { starkeepDir } from "@starkeep/app-client";
@@ -295,27 +329,20 @@ interface StarkeepConfig {
   /** Item cap for one exchange round (sync-engine `maxItems`). Default 1000. */
   syncMaxItems?: number;
   /**
-   * Per-size-class retention for *this node*. Absent means the node keeps
-   * everything, which is the right default for a laptop and preserves the
-   * pre-residency behaviour exactly.
-   *
-   * One budget per namespace, with rows carrying *shares* of it — so the rows
-   * cannot add up to something other than the number the operator set.
-   *
-   * Note what is *not* here: there is no residency-class enum. `Full` /
-   * `Library` / `Browse`-style presets may front this in the UI, but they write
-   * these rows rather than being stored, so nothing downstream can condition on
-   * "which preset is this".
+   * What kind of node this is, for its default sync-down ceilings. A local
+   * data server runs on a desktop or laptop, so `desktop` unless set.
    */
-  retention?: NodeRetentionPolicy;
+  nodeKind?: NodeKind;
   /**
-   * Per-record residency overrides as rules over labels. Node-local, like pins
-   * — this config file is never synced.
+   * This node's sync-down ceiling per stand-in category, overriding the
+   * default for its kind. A number is the largest fidelity the node receives
+   * without being asked; `null` receives none of that category by default.
+   * Changed by the person, per node, from admin-web.
    */
-  overrideRules?: OverrideRule[];
+  standInCeilings?: Partial<Record<StandInCategory, number | null>>;
   /**
-   * How many confirmed replicas elsewhere before this node may evict a blob it
-   * cannot re-derive. Default 1.
+   * How many confirmed replicas elsewhere before "Free up space" may remove a
+   * file from this node. Default 1.
    *
    * Raise it for a `no-cloud`-heavy library: excluding the cloud moves the
    * single-copy risk onto the device, and this number is the only thing that
@@ -362,6 +389,42 @@ function isDuplicateFileError(err: unknown): boolean {
     message.includes("uq_shared_records_parent_filename_hash") ||
     message.includes("uq_records_parent_filename_hash")
   );
+}
+
+/**
+ * This node's ceilings: the defaults for its kind, with the person's
+ * per-category changes on top. A malformed configured value is ignored with a
+ * warning rather than trusted — the PUT route refuses one, so only a
+ * hand-edited config file can carry it.
+ */
+function resolveCeilings(config: Pick<StarkeepConfig, "nodeKind" | "standInCeilings">): SyncDownCeilings {
+  const kind: NodeKind = config.nodeKind === "phone" ? "phone" : "desktop";
+  const out: Record<StandInCategory, number | null> = { ...DEFAULT_SYNC_DOWN_CEILINGS[kind] };
+  for (const category of STAND_IN_CATEGORIES) {
+    const configured = config.standInCeilings?.[category];
+    if (configured === undefined) continue;
+    if (configured === null || (Number.isInteger(configured) && configured > 0)) {
+      out[category] = configured;
+    } else {
+      console.warn(`[residency] ignoring standInCeilings.${category} = ${String(configured)}; keeping ${out[category]}`);
+    }
+  }
+  return out;
+}
+
+function ceilingProblems(body: { nodeKind?: unknown; ceilings?: Record<string, unknown> }): string[] {
+  const problems: string[] = [];
+  if (body.nodeKind !== undefined && body.nodeKind !== "phone" && body.nodeKind !== "desktop") {
+    problems.push(`nodeKind must be "phone" or "desktop"`);
+  }
+  for (const [category, value] of Object.entries(body.ceilings ?? {})) {
+    if (!(STAND_IN_CATEGORIES as readonly string[]).includes(category)) {
+      problems.push(`${category} is not a stand-in category (${STAND_IN_CATEGORIES.join(", ")})`);
+    } else if (value !== null && !(typeof value === "number" && Number.isInteger(value) && value > 0)) {
+      problems.push(`${category}: a ceiling is a positive whole fidelity, or null for none`);
+    }
+  }
+  return problems;
 }
 
 /**
@@ -632,6 +695,25 @@ async function main() {
     basePath: objectsBasePath,
   });
 
+  /** Where a record's bytes sit, as this node answers for a size summary. */
+  const localPlacementOf = async (record: DataRecord): Promise<"here" | "cloud"> =>
+    record.objectStorageKey && (await localAdapter.has(record.objectStorageKey)) ? "here" : "cloud";
+
+  /**
+   * A summary entry's URL: a local file token for bytes on this disk, and none
+   * for bytes only the cloud holds. A cloud URL per entry would be a cloud
+   * round trip per size per record on every page; `content-url` answers the
+   * one a reader actually wants.
+   */
+  const localStandInUrl = async (size: StandInSize): Promise<string | undefined> => {
+    if (size.placement !== "here" || !size.objectStorageKey) return undefined;
+    return `http://127.0.0.1:${PORT}/data/files/${createFileToken(
+      size.objectStorageKey,
+      mimeForStandIn(size.type ?? ""),
+      VARIANT_URL_TTL_SECONDS,
+    )}`;
+  };
+
   // Load runtime config from ~/.starkeep/config.json. nodeId is guaranteed
   // present (generated and persisted on first boot inside loadStarkeepConfig).
   const starkeepConfig = await loadStarkeepConfig();
@@ -741,57 +823,28 @@ async function main() {
   // tables (registry, grants) that have no adapter wrapper.
   const localDb = databaseAdapter.getRawDatabase();
 
-  // Residency: only constructed when this node has actually been given a
-  // retention policy. Without one there is no budget to enforce and no class to
-  // resolve, so the engine runs without the hook and every blob is wanted —
-  // exactly the pre-residency behaviour, which is the right default for a
-  // laptop and means an unconfigured node cannot silently start declining data.
-  // Rebuilt whenever the registry changes, which is on install and uninstall —
-  // neither of which restarts this process (they call `supervisor.rescan()` and
-  // nothing more). Read once at boot instead and a freshly installed app's
-  // derivatives land under `<app>:unclassified` rather than its declared rungs,
-  // for however long it is until an unrelated restart — and those rows keep that
-  // class permanently, since nothing reclassifies a resident-set row.
-  //
-  // Mutated in place rather than reassigned: the residency manager closes over
-  // this object at construction, so a fresh object would leave it reading the
-  // boot-time map forever.
-  const sizeClassKeys: Record<string, string> = sizeClassKeysByApp(localDb);
-  function refreshSizeClassKeys(): void {
-    const next = sizeClassKeysByApp(localDb);
-    for (const appId of Object.keys(sizeClassKeys)) {
-      if (!(appId in next)) delete sizeClassKeys[appId];
-    }
-    Object.assign(sizeClassKeys, next);
-  }
-
-  const residencyManager = starkeepConfig.retention
-    ? createResidencyManager({
+  // The node's residency: every file no stand-in can replace, every stand-in
+  // at or below this node's ceilings, and whatever someone asks for. Nothing
+  // is removed except through "Free up space".
+  const ceilings = resolveCeilings(starkeepConfig);
+  const residencyManager = createResidencyManager({
         localDb,
         databaseAdapter,
         localObjectStorage: localAdapter,
-        // Read from what is installed, not configured here: the platform-side
-        // plumbing never names `photos/rendition`, so a ladder can be
-        // respecified — and a second app can own one — without a change here.
-        sizeClassKeys,
         // The local data server is never the cloud node. `starkeep/no-cloud`
         // is a constraint about cloud storage; a laptop holding such a record
         // is the intended outcome, not a violation.
         isCloudNode: false,
-        policy: starkeepConfig.retention,
-        overrideRules: starkeepConfig.overrideRules ?? [],
+        ceilings,
         // Clamped, not passed through. The predicate is
         // `counted >= minimumReplicas`, so a config value of `0` makes every
-        // blob durable with zero probes and zero evidence — every deletion
-        // authorized, no questions asked. The field's own documentation says
-        // this number "is the only thing that keeps that from being a data-loss
-        // feature", and nothing validated it. `assessDurability` clamps too;
-        // this is the one that can tell the operator their setting was refused.
+        // file durable with zero probes and zero evidence — every removal
+        // authorized, no questions asked. `assessDurability` clamps too; this
+        // is the one that can tell the operator their setting was refused.
         durability: {
           minimumReplicas: clampMinimumReplicas(starkeepConfig.minimumReplicas),
         },
-      })
-    : null;
+      });
 
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
   const appApplier = new SqliteAppSyncableApplier(localDb, namespaceStore);
@@ -847,12 +900,49 @@ async function main() {
   // Sync supervisor: owns N SyncEngine instances, one per installed app.
   // Without a cloud URL or sync state store there's no sync — leave it null.
   let supervisor: SyncSupervisor | null = null;
+
+  // Files a round declined that this node now wants. A ceiling change restarts
+  // this process, so one catalogue scan per process finds every file a raised
+  // ceiling now covers, along with any bytes that went missing here — the scan
+  // starts by reconciling the index against the disk. The acquisition pass
+  // then fetches the queue after each Drive-channel drain.
+  let scanCursor: string | null = null;
+  let scanComplete = false;
+  async function acquireWanted(
+    engine: SyncEngine,
+    signal: { readonly aborted: boolean },
+  ): Promise<void> {
+    if (!scanComplete && scanCursor === null) await residencyManager.reconcile();
+    while (!scanComplete && !signal.aborted) {
+      const scan = await scanForAcquirable({
+        databaseAdapter,
+        consider: (candidate) => residencyManager.considerForAcquisition(candidate),
+        cursor: scanCursor,
+        maxRecords: 2_000,
+      });
+      scanCursor = scan.nextCursor;
+      scanComplete = scan.nextCursor === null;
+    }
+    while (!signal.aborted) {
+      const pass = await runAcquisition({
+        engine,
+        manager: residencyManager,
+        databaseAdapter,
+        maxBytes: starkeepConfig.syncMaxBytes ?? 25 * 1024 * 1024,
+      });
+      // A page that neither landed nor dropped anything holds only failures,
+      // which the next drain retries.
+      if (pass.landed === 0 && pass.dropped === 0) break;
+    }
+  }
+
   if (CLOUD_URL && syncStateStore) {
     supervisor = createSyncSupervisor({
       sdk,
       databaseAdapter,
       localObjectStorage: localAdapter,
-      ...(residencyManager ? { residency: residencyHooks(residencyManager) } : {}),
+      residency: residencyHooks(residencyManager),
+      afterDriveDrain: acquireWanted,
       localDb: databaseAdapter.getRawDatabase(),
       cloudUrl: CLOUD_URL,
       // Outbound auth is both: the per-request HMAC identifies the app, and
@@ -1019,13 +1109,15 @@ async function main() {
       /^\/admin(\/|$)/,
       /^\/watches(\/|$)/,
       /^\/events$/,
-      // This node's own disk accounting, for the operator's retention matrix.
-      // Loopback-gated rather than app-gated on purpose: it is a fact about the
-      // machine, not about anybody's library, and an app has no business
-      // asking. It reports aggregate byte counts per size class and no record
-      // ids, filenames or content — so what a loopback caller learns is roughly
-      // what `du` would already tell them.
-      /^\/residency\/(projection|policy)$/,
+      // This node's sync-down ceilings and the person's "Free up space".
+      // Operator controls over this machine's disk, loopback-gated rather than
+      // app-gated: they are facts about the machine, not about anybody's
+      // library, and the report carries aggregate byte counts and no record
+      // ids, filenames or content. "Free up space" deletes local bytes, so a loopback caller can use it to
+      // empty this node's copies — but only of files whose original, canonical
+      // stand-in and own bytes are proved in the cloud, which leaves nothing
+      // unrecoverable, and never of a file at or below the ceiling.
+      /^\/residency\/(stand-ins|free-up-space)$/,
     ];
     const TOKEN_AUTHORIZED_PATTERNS = [
       /^\/data\/files\/upload\/[^/]+$/,
@@ -1542,7 +1634,6 @@ async function main() {
         const includeLabels = plan.includeLabels;
         const labelApps = plan.labelApps ?? null;
         const variantLabel = plan.variant?.label;
-        const variantTargets = plan.variant?.targets ?? [];
 
         // Two ways to select a page. The reverse-label query is its own
         // access path, over its own table and in its own order; everything
@@ -1667,16 +1758,12 @@ async function main() {
           }
         }
 
-        // Variant resolution, when asked for. Generic over child records, a
+        // The page's derived children, when asked for: every child carrying
+        // the named label, with its dimensions. Generic over child records, a
         // label key and the width/height columns, so this server never learns
-        // what any particular size class is — the same resolver the cloud
-        // broker uses, in @starkeep/protocol-primitives.
-        const variantsById =
-          variantLabel && variantTargets.length > 0
-            ? await loadVariantsForPage(databaseAdapter, readable, variantLabel, variantTargets)
-            : null;
+        // what any particular derived kind is.
         const candidatesById =
-          variantLabel && variantTargets.length === 0
+          variantLabel
             ? await loadVariantCandidatesForPage(databaseAdapter, readable, variantLabel)
             : null;
         const candidateAvailability = new Map<string, boolean>();
@@ -1713,6 +1800,17 @@ async function main() {
           }
         }
 
+        // Each original's sizes, and where each sits on this node. Always
+        // present on an original in a stand-in category: the listing collapses
+        // stand-ins into their original, so this is the only place a reader
+        // learns which sizes exist without a second query.
+        const standInSummaries = await loadStandInSummariesForPage(
+          databaseAdapter,
+          readable,
+          DEFAULT_STAND_IN_STANDARDS,
+          localPlacementOf,
+        );
+
         const records = await Promise.all(
           readable.map(async r => ({
             id: r.id,
@@ -1732,6 +1830,8 @@ async function main() {
             size_bytes: r.sizeBytes,
             original_filename: r.originalFilename,
             parent_id: r.parentId,
+            stand_in_role: r.standInRole,
+            fidelity: r.fidelity,
             availability: availabilityByRecord.get(r.id) ?? { state: "instant" },
             path: r.objectStorageKey
               ? await localAdapter.resolvePath(r.objectStorageKey)
@@ -1753,47 +1853,17 @@ async function main() {
                   })),
                 }
               : {}),
-            // Keyed by the requested pixel size, carrying the *actual*
-            // dimensions of what was chosen, so a client that wants to reason
-            // about what it got can — it just never has to ask in those terms.
-            ...(variantsById
+            ...(standInSummaries.has(r.id)
               ? {
-                  variants: Object.fromEntries(
-                    Object.entries(variantsById.get(r.id) ?? {}).map(([target, v]) => [
-                      target,
-                      {
-                        id: v.id,
-                        type: v.type,
-                        object_storage_key: v.objectStorageKey,
-                        width: v.width,
-                        height: v.height,
-                        long_edge: v.longEdge,
-                        // Long-lived on purpose: keys are content-addressed, so a longer
-                        // TTL saves a client re-listing records just to refresh
-                        // links while a user scrolls.
-                        // The variant's own type, not application/octet-stream.
-                        // A browser will sniff its way to displaying an <img>
-                        // regardless, but <video> is strict: served as
-                        // octet-stream a perfectly good MP4 simply refuses to
-                        // play, with nothing in the console to say why.
-                        url: `http://127.0.0.1:${PORT}/data/files/${createFileToken(
-                          v.objectStorageKey,
-                          v.type,
-                          VARIANT_URL_TTL_SECONDS,
-                        )}`,
-                        url_lifetime: {
-                          kind: "expires",
-                          expires_at: new Date(Date.now() + VARIANT_URL_TTL_SECONDS * 1000).toISOString(),
-                        },
-                      },
-                    ]),
+                  stand_ins: await renderStandInSummary(
+                    standInSummaries.get(r.id)!,
+                    plan.includeStandInUrls ? localStandInUrl : undefined,
                   ),
                 }
               : {}),
-            // The unnarrowed form. Candidates with no stored dimensions are
-            // dropped rather than sent with nulls: they cannot be ordered, so
-            // there is nothing a caller could do with one, and resolution
-            // excludes them for the same reason.
+            // Candidates with no stored dimensions are dropped rather than
+            // sent with nulls: they cannot be ordered, so there is nothing a
+            // caller could do with one.
             ...(candidatesById
               ? {
                   variant_candidates: (candidatesById.get(r.id) ?? [])
@@ -1852,6 +1922,9 @@ async function main() {
           parentId,
           labels,
           metadata,
+          standIn,
+          parentFidelity,
+          fidelity,
         } = JSON.parse(body) as {
           type?: string;
           fileName?: string;
@@ -1862,6 +1935,12 @@ async function main() {
           parentId?: StarkeepId;
           labels?: Array<{ key: string; value?: string }>;
           metadata?: Record<string, unknown>;
+          /** `{ role, fidelity }` when this record is a stand-in for `parentId`. */
+          standIn?: unknown;
+          /** A stand-in write's report of the original's fidelity. */
+          parentFidelity?: unknown;
+          /** An original's report of its own fidelity. */
+          fidelity?: unknown;
         };
         if (!type) {
           res.writeHead(400);
@@ -1941,6 +2020,42 @@ async function main() {
           }
         }
 
+        // Fidelity, checked before anything is written. A stand-in reports its
+        // own in `standIn` and the original's in `parentFidelity`; an original
+        // reports its own in `fidelity`. The two shapes do not mix, because a
+        // top-level `fidelity` on a stand-in would be ambiguous about which
+        // record it describes.
+        const isStandInWrite = standIn !== undefined && standIn !== null;
+        if (isStandInWrite && metadata !== undefined) {
+          res.writeHead(400);
+          json(res, { error: "StandInMetadata", detail: STAND_IN_METADATA_REFUSAL });
+          return;
+        }
+        if (isStandInWrite && fidelity !== undefined) {
+          res.writeHead(400);
+          json(res, {
+            error: "InvalidStandIn",
+            code: "fidelity-on-stand-in",
+            detail: "a stand-in reports its own fidelity in standIn.fidelity and the original's in parentFidelity",
+          });
+          return;
+        }
+        if (!isStandInWrite && parentFidelity !== undefined) {
+          res.writeHead(400);
+          json(res, {
+            error: "InvalidFidelity",
+            code: "parent-fidelity-without-stand-in",
+            detail: "parentFidelity accompanies a stand-in; an original reports its own fidelity in fidelity",
+          });
+          return;
+        }
+        const originalFidelity = planOriginalFidelity({ type, parentId, fidelity });
+        if (!originalFidelity.ok) {
+          res.writeHead(originalFidelity.status);
+          json(res, originalFidelity.body);
+          return;
+        }
+
         // Render a record into the API response shape. Used for both the
         // freshly-created and dedup-existing paths.
         const renderRecord = async (r: {
@@ -1953,6 +2068,8 @@ async function main() {
           objectStorageKey: string | null;
           originalFilename: string | null;
           parentId: string | null;
+          standInRole: string | null;
+          fidelity: number | null;
         }) => ({
           id: r.id,
           type: r.type,
@@ -1963,6 +2080,8 @@ async function main() {
           object_storage_key: r.objectStorageKey,
           original_filename: r.originalFilename,
           parent_id: r.parentId,
+          stand_in_role: r.standInRole,
+          fidelity: r.fidelity,
           path: r.objectStorageKey ? await localAdapter.resolvePath(r.objectStorageKey) : null,
         });
 
@@ -2014,9 +2133,46 @@ async function main() {
           });
           const existing = dup.records[0];
           if (existing) {
-            json(res, { record: await renderRecord(existing), deduped: true });
+            // Another app registered these bytes first. An original's reported
+            // fidelity still lands, because "the app that writes the original
+            // reports the value when it knows it" should not depend on who got
+            // there first.
+            const reconciled = reconcileReportedFidelity(existing, originalFidelity.fidelity);
+            if (!reconciled.ok) {
+              res.writeHead(reconciled.status);
+              json(res, reconciled.body);
+              return;
+            }
+            const current =
+              reconciled.write !== null && !isStandInWrite
+                ? await recordOriginalFidelity(databaseAdapter, existing, reconciled.write, clock)
+                : existing;
+            json(res, { record: await renderRecord(current), deduped: true });
             return;
           }
+        }
+
+        // A stand-in: check it against the standards and the original, and
+        // record the original's fidelity if this write is the first to report
+        // it. See `stand-ins/write.ts` in shared-space-api, which the cloud
+        // calls too.
+        let standInFields: { standInRole: "canonical" | "smaller"; fidelity: number } | null = null;
+        if (isStandInWrite) {
+          const plan = await planStandInWrite(
+            databaseAdapter,
+            appGrants(localDb, appId!),
+            { type, parentId, standIn, parentFidelity },
+            DEFAULT_STAND_IN_STANDARDS,
+          );
+          if (!plan.ok) {
+            res.writeHead(plan.status);
+            json(res, plan.body);
+            return;
+          }
+          if (plan.recordParentFidelity !== null) {
+            await recordOriginalFidelity(databaseAdapter, plan.parent, plan.recordParentFidelity, clock);
+          }
+          standInFields = { standInRole: plan.role, fidelity: plan.fidelity };
         }
 
         let record;
@@ -2024,6 +2180,7 @@ async function main() {
           type,
           originAppId: appId!,
           parentId: parentId ?? null,
+          ...(standInFields ?? { fidelity: originalFidelity.fidelity }),
           // Written by the SDK in the same call as the record row, so the
           // record is never visible to a sync scan without it. Not atomic —
           // see `DataPutInput.metadata` — but the window is a pair of adjacent
@@ -2062,6 +2219,19 @@ async function main() {
               json(res, { error: "Duplicate file" });
               return;
             }
+            if (standInFields && isStandInSlotConflict(err)) {
+              // Another writer took the slot between the plan and the write.
+              const occupant = await liveStandIn(
+                databaseAdapter,
+                parentId!,
+                standInFields.standInRole,
+                standInFields.standInRole === "smaller" ? standInFields.fidelity : undefined,
+              );
+              const conflict = standInExists(occupant?.id ?? "");
+              res.writeHead(conflict.status);
+              json(res, conflict.body);
+              return;
+            }
             throw err;
           }
         } else {
@@ -2079,6 +2249,19 @@ async function main() {
             if (isDuplicateFileError(err)) {
               res.writeHead(409);
               json(res, { error: "Duplicate file" });
+              return;
+            }
+            if (standInFields && isStandInSlotConflict(err)) {
+              // Another writer took the slot between the plan and the write.
+              const occupant = await liveStandIn(
+                databaseAdapter,
+                parentId!,
+                standInFields.standInRole,
+                standInFields.standInRole === "smaller" ? standInFields.fidelity : undefined,
+              );
+              const conflict = standInExists(occupant?.id ?? "");
+              res.writeHead(conflict.status);
+              json(res, conflict.body);
               return;
             }
             throw err;
@@ -2569,84 +2752,98 @@ async function main() {
         return;
       }
 
-      // POST /data/records/:id/archive-gate
+      // GET /data/stand-ins/backlog?kind=missing-canonical|missing-fidelity
       //
-      // Body: { ladderComplete: boolean }. The app asserts its derived ladder
-      // is complete; this applies the platform's own floors and tags the object
-      // only if both agree. Idempotent, so it is safe to call after every
-      // derivation pass.
-      //
-      // ## Why this exists here and not only in the cloud
-      //
-      // It was a cloud-only route, and every local derivation logged a 404
-      // against it. That was tolerable while the cloud did the deriving. It is
-      // not any more: the node that completes a ladder is the one that asserts
-      // the gate, and derivation is moving to the machine that holds the bytes.
-      // Without this route the archive transition is simply unreachable for a
-      // locally-derived library.
-      //
-      // ## The two ways this differs from the cloud's copy
-      //
-      // `starkeep/no-cloud` is not a refusal here. That label is a constraint
-      // about *cloud* storage, and a laptop holding such a record is the
-      // intended outcome rather than a violation — the same reasoning the
-      // residency manager is constructed with (`isCloudNode: false`).
-      //
-      // Tagging a filesystem is inert, because a filesystem has no lifecycle
-      // rules. It is still written rather than skipped: the assertion is a
-      // durable fact about the record that survives a restart, the local store
-      // may be S3-backed, and a node that cannot record the claim cannot ever
-      // hand it on.
-      const archiveGateMatch = path.match(/^\/data\/records\/([^/]+)\/archive-gate$/);
-      if (archiveGateMatch && req.method === "POST") {
-        const record = await sdk.data.get(createStarkeepId(decodeURIComponent(archiveGateMatch[1]!)));
-        if (!record || record.deletedAt) {
-          res.writeHead(404);
-          json(res, { error: "Record not found" });
+      // Originals waiting on an app: those that take a canonical stand-in and
+      // have none, and those nobody has reported a fidelity for. Apps read it
+      // to find work; nothing here asks the platform to do any. Restricted to
+      // the caller's readable types, and paged — a page can come back short,
+      // so page until nextCursor is null.
+      if (path === "/data/stand-ins/backlog" && req.method === "GET") {
+        const kind = url.searchParams.get("kind") ?? "missing-canonical";
+        if (!(BACKLOG_KINDS as readonly string[]).includes(kind)) {
+          res.writeHead(400);
+          json(res, { error: `kind must be one of ${BACKLOG_KINDS.join(", ")}` });
           return;
         }
-        // Write access, not read: this changes how the object is stored, and an
-        // app that may only read a record has no business deciding it can be
-        // slow to read for everyone else.
-        if (!appCanWrite(localDb, appId!, record.type)) {
-          res.writeHead(403);
-          json(res, { error: "Forbidden" });
-          return;
-        }
-        if (!record.objectStorageKey) {
-          res.writeHead(404);
-          json(res, { error: "Record has no attached file" });
-          return;
-        }
-
-        const gateBody = JSON.parse((await readBody(req)) || "{}") as { ladderComplete?: boolean };
-        const refusals: string[] = [];
-        if (gateBody.ladderComplete !== true) {
-          refusals.push(
-            "the caller did not assert ladderComplete — an original whose derived " +
-              "ladder is incomplete is still the only readable form of the record",
-          );
-        }
-        if (record.sizeBytes <= ARCHIVE_MIN_OBJECT_BYTES) {
-          refusals.push(
-            `object is ${record.sizeBytes} bytes, at or below the ${ARCHIVE_MIN_OBJECT_BYTES}-byte ` +
-              "floor: Deep Archive's per-object overhead and minimum duration make archiving it " +
-              "both dearer and slower than leaving it",
-          );
-        }
-        if (refusals.length > 0) {
-          json(res, { archived: false, tagged: false, refusals });
-          return;
-        }
-
-        await localAdapter.setTags(record.objectStorageKey, {
-          [INTENT_TAG_KEY]: "archive",
-          [LADDER_TAG_KEY]: LADDER_TAG_COMPLETE,
+        const limit = Number(url.searchParams.get("limit") ?? "100");
+        const cursor = url.searchParams.get("page_token") ?? undefined;
+        const page = await pageBacklog(
+          databaseAdapter,
+          appGrants(localDb, appId!),
+          { kind: kind as BacklogKind, limit: Number.isFinite(limit) ? limit : 100, ...(cursor ? { cursor } : {}) },
+          DEFAULT_STAND_IN_STANDARDS,
+        );
+        json(res, {
+          kind,
+          records: page.records.map((r) => ({
+            id: r.id,
+            type: r.type,
+            fidelity: r.fidelity,
+            size_bytes: r.sizeBytes,
+            original_filename: r.originalFilename,
+          })),
+          nextCursor: page.nextCursor,
         });
-        // Tagged, not transitioned. Where a lifecycle rule exists it performs
-        // the transition after the hold period, which buys a week to catch a
-        // derivation bug before the input is behind a 48-hour thaw.
-        json(res, { archived: false, tagged: true, refusals: [] });
+        return;
+      }
+
+      // GET /data/records/:id/content-url?size=<n|canonical> — the content read
+      // at a chosen size.
+      //
+      // Names the file actually served, because a listing describes the
+      // original and a read at a size usually answers with a stand-in in
+      // another format: a HEIC original yields AVIF stand-ins, and an app that
+      // took the content type from the listing would label AVIF bytes as HEIC.
+      // A missing standard size is a 404 carrying the summary, so the app can
+      // choose its own fallback; this never substitutes a far larger file.
+      const contentUrlMatch = path.match(/^\/data\/records\/([^/]+)\/content-url$/);
+      if (contentUrlMatch && req.method === "GET") {
+        const outcome = await resolveContentRead(
+          databaseAdapter,
+          appGrants(localDb, appId!),
+          decodeURIComponent(contentUrlMatch[1]!),
+          url.searchParams.get("size"),
+          DEFAULT_STAND_IN_STANDARDS,
+          localPlacementOf,
+        );
+        if (!outcome.ok) {
+          res.writeHead(outcome.status);
+          json(res, outcome.body);
+          return;
+        }
+        const { size } = outcome;
+        const served = size.recordId === outcome.original.id
+          ? outcome.original
+          : await databaseAdapter.get(size.recordId as StarkeepId);
+        if (!served || !served.objectStorageKey) {
+          res.writeHead(404);
+          json(res, { error: "NotFound", detail: "the record that answers this size has no file" });
+          return;
+        }
+        const expiresIn = parseInt(url.searchParams.get("expiresIn") || "3600", 10);
+        const availableHere = await localAdapter.has(served.objectStorageKey);
+        let fileUrl: string | null = null;
+        if (availableHere) {
+          fileUrl = `http://127.0.0.1:${PORT}/data/files/${createFileToken(
+            served.objectStorageKey,
+            served.mimeType ?? mimeForStandIn(served.type),
+            expiresIn,
+          )}`;
+        } else if (remoteAdapter?.getSignedUrl) {
+          fileUrl = await remoteAdapter.getSignedUrl(served.objectStorageKey, { expiresIn });
+        }
+        json(res, {
+          record_id: served.id,
+          type: served.type,
+          mime_type: served.mimeType ?? mimeForStandIn(served.type),
+          fidelity: size.fidelity,
+          role: size.role,
+          size_bytes: served.sizeBytes,
+          available_here: availableHere,
+          url: fileUrl,
+          expires_in: expiresIn,
+        });
         return;
       }
 
@@ -2783,127 +2980,111 @@ async function main() {
       // is the whole reason keys are declared in a manifest rather than
       // counted at runtime — app B's developer (and app B's code) has to be
       // able to enumerate what app A publishes.
-      // GET /residency/projection — the retention matrix's data.
+      // GET /residency/stand-ins — this node's sync-down ceilings, and what it
+      // holds against them.
       //
-      // Census and projection in one response, because they are only ever
-      // useful together: the census alone says what the library holds, the
-      // projection alone has nothing to project against, and two round trips
-      // would let a UI render a projection against a census it no longer
-      // matches.
-      //
-      // Deliberately not app-scoped. This is operator information about *this
-      // node's* disk, not library data — an app has no business asking, and the
-      // operator UI is not an app.
-      if (path === "/residency/projection" && req.method === "GET") {
-        const census = buildCensus(localDb, {
-          sizeClassKeys,
-          originalClassFor,
-        });
-        if (!starkeepConfig.retention) {
-          // No policy configured means every blob is wanted — so the honest
-          // projection is the whole library, and saying "no policy" lets the
-          // UI offer to create one rather than showing an empty table that
-          // reads as "nothing here".
-          json(res, {
-            configured: false,
-            census,
-            totalLibraryBytes: census.reduce((sum, c) => sum + c.totalBytes, 0),
-            overrideRules: starkeepConfig.overrideRules ?? [],
-          });
-          return;
-        }
+      // Operator information about this node: the ceiling per stand-in category, where it came from, and the defaults for
+      // each kind of node so an editor can offer them.
+      if (path === "/residency/stand-ins" && req.method === "GET") {
+        const usage = residencyManager.usageByGroup();
+        // The operator's view of the backlog, across every type: why storage
+        // costs have not dropped yet, and which originals no app has measured.
+        const everything = buildAccessGrants([], { allAccess: true });
+        const backlog = Object.fromEntries(
+          await Promise.all(
+            BACKLOG_KINDS.map(
+              async (kind) =>
+                [kind, await countBacklog(databaseAdapter, everything, kind, DEFAULT_STAND_IN_STANDARDS)] as const,
+            ),
+          ),
+        );
         json(res, {
-          configured: true,
-          census,
-          projection: projectPolicy(starkeepConfig.retention, census),
-          // Echoed back so an editor can seed itself from what is actually in
-          // force. Without it the UI would have to keep its own copy of the
-          // policy and could drift from the daemon's.
-          retention: starkeepConfig.retention,
-          overrideRules: starkeepConfig.overrideRules ?? [],
+          nodeKind: starkeepConfig.nodeKind ?? "desktop",
+          ceilings,
+          configured: starkeepConfig.standInCeilings ?? {},
+          defaults: DEFAULT_SYNC_DOWN_CEILINGS,
+          standardSizes: Object.fromEntries(
+            STAND_IN_CATEGORIES.map((c) => [c, DEFAULT_STAND_IN_STANDARDS[c].standardSizes]),
+          ),
+          canonicalThresholds: Object.fromEntries(
+            STAND_IN_CATEGORIES.map((c) => [c, DEFAULT_STAND_IN_STANDARDS[c].canonicalThreshold]),
+          ),
+          heldBytes: Object.fromEntries(
+            STAND_IN_CATEGORIES.map((c) => [
+              c,
+              {
+                originals: usage[`original:${c}`] ?? 0,
+                standIns: usage[`stand-in:${c}`] ?? 0,
+              },
+            ]),
+          ),
+          backlog,
         });
         return;
       }
 
-      // POST /residency/projection — project a *candidate* policy without
-      // saving it.
+      // PUT /residency/stand-ins — change this node's ceilings.
       //
-      // This is what makes the matrix editable. Every other shape of this
-      // feature is worse: saving on each keystroke restarts the daemon
-      // repeatedly, and projecting client-side would duplicate the rules that
-      // decide residency, so the preview could disagree with what actually
-      // happens — which is the one thing a preview must never do.
-      if (path === "/residency/projection" && req.method === "POST") {
+      // Validated, saved, and applied by restart: the residency manager is
+      // built from config at boot. A raised ceiling reaches files earlier
+      // rounds declined through the catalogue scan the restart runs and the
+      // acquisition pass after each Drive-channel drain.
+      if (path === "/residency/stand-ins" && req.method === "PUT") {
         const body = JSON.parse(await readBody(req)) as {
-          retention?: NodeRetentionPolicy;
-          overrideRules?: OverrideRule[];
+          nodeKind?: unknown;
+          ceilings?: Record<string, unknown>;
         };
-        if (!body.retention) {
-          res.writeHead(400);
-          json(res, { error: "retention policy required" });
-          return;
-        }
-        const problems = [
-          ...validateRetentionPolicy(body.retention),
-          ...validateOverrideRules(body.overrideRules ?? []),
-        ];
-        const census = buildCensus(localDb, {
-          sizeClassKeys,
-          originalClassFor,
-        });
-        // Projected even when invalid, deliberately. An operator mid-edit has a
-        // policy that does not yet validate more often than not, and blanking
-        // the numbers while they fix it removes the very feedback they are
-        // editing against. The problems ride alongside.
-        json(res, { problems, census, projection: projectPolicy(body.retention, census) });
-        return;
-      }
-
-      // PUT /residency/policy — validate and save.
-      //
-      // Separate from PATCH /config, which writes whatever it is given. The
-      // policy has rules that are harmful to get wrong — a namespace whose
-      // shares are all zero divides a real budget into nothing, and a missing
-      // budget is not an unbounded one — and `validateRetentionPolicy` existed
-      // while nothing on the write path called it.
-      if (path === "/residency/policy" && req.method === "PUT") {
-        const body = JSON.parse(await readBody(req)) as {
-          retention?: NodeRetentionPolicy;
-          overrideRules?: OverrideRule[];
-        };
-        if (!body.retention) {
-          res.writeHead(400);
-          json(res, { error: "retention policy required" });
-          return;
-        }
-        const problems = [
-          ...validateRetentionPolicy(body.retention),
-          ...validateOverrideRules(body.overrideRules ?? []),
-        ];
+        const problems = ceilingProblems(body);
         if (problems.length > 0) {
-          // Refused rather than saved-with-warnings. These are not style
-          // preferences; each one names a policy that will not do what it
-          // appears to say.
           res.writeHead(422);
-          json(res, { error: "policy is not valid", problems });
+          json(res, { error: "ceilings are not valid", problems });
           return;
         }
-        const updated: StarkeepConfig = {
-          ...starkeepConfig,
-          retention: body.retention,
-          ...(body.overrideRules ? { overrideRules: body.overrideRules } : {}),
+        const patch: Partial<StarkeepConfig> = {
+          ...(body.nodeKind ? { nodeKind: body.nodeKind as NodeKind } : {}),
+          ...(body.ceilings ? { standInCeilings: body.ceilings as StarkeepConfig["standInCeilings"] } : {}),
         };
+        const updated: StarkeepConfig = { ...starkeepConfig, ...patch };
         await writeFile(STARKEEP_CONFIG_PATH, JSON.stringify(updated, null, 2), "utf8");
-        Object.assign(starkeepConfig, {
-          retention: body.retention,
-          ...(body.overrideRules ? { overrideRules: body.overrideRules } : {}),
-        });
-        json(res, { ok: true });
-        // The residency manager is built at boot from this config, so a restart
-        // is how the new policy takes effect. Deferred so the response lands
-        // first — otherwise the caller sees a dropped connection rather than
-        // the confirmation it was waiting for.
+        Object.assign(starkeepConfig, patch);
+        json(res, { ok: true, ceilings: resolveCeilings(updated) });
         setTimeout(restartProcess, 200);
+        return;
+      }
+
+      // POST /residency/free-up-space — the person's "Free up space".
+      //
+      // Body: { bytes, scope: "originals" | "originals-and-above-ceiling",
+      // dryRun? }. Removes originals — and, in the wider scope, stand-ins above
+      // this node's ceiling — largest first until `bytes` are free, each only
+      // after proving complete cloud copies of it, its original and the
+      // original's canonical stand-in. Nothing else on this node removes a
+      // file. A dry run proves and totals without
+      // removing, which is the estimate the person confirms.
+      if (path === "/residency/free-up-space" && req.method === "POST") {
+        const body = JSON.parse((await readBody(req)) || "{}") as {
+          bytes?: unknown;
+          scope?: unknown;
+          dryRun?: unknown;
+        };
+        if (typeof body.bytes !== "number" || !Number.isFinite(body.bytes) || body.bytes < 0) {
+          res.writeHead(400);
+          json(res, { error: "bytes must be a non-negative number" });
+          return;
+        }
+        if (body.scope !== "originals" && body.scope !== "originals-and-above-ceiling") {
+          res.writeHead(400);
+          json(res, { error: 'scope must be "originals" or "originals-and-above-ceiling"' });
+          return;
+        }
+        const probe = supervisor?.cloudReplicaProbe() ?? null;
+        const report = await residencyManager.freeUpSpace({
+          bytes: body.bytes,
+          scope: body.scope,
+          probes: probe ? [probe] : [],
+          dryRun: body.dryRun === true,
+        });
+        json(res, { ...report, cloudReachable: probe !== null });
         return;
       }
 
@@ -3161,6 +3342,39 @@ async function main() {
       // Photos' viewer posting image metadata against a clip produced
       // `table shared_record_video_metadata has no column named exif_present`
       // as a 500, where it is a 400 about the caller's own request.
+      // POST /data/records/:id/fidelity — report an existing original's
+      // fidelity. Body: { fidelity }. Recorded once by the platform; a
+      // disagreeing report answers 409. See `planFidelityReport` in
+      // shared-space-api, which the cloud calls too.
+      const fidelityMatch = path.match(/^\/data\/records\/([^/]+)\/fidelity$/);
+      if (fidelityMatch && req.method === "POST") {
+        const body = JSON.parse((await readBody(req)) || "{}") as { fidelity?: unknown };
+        const plan = await planFidelityReport(
+          databaseAdapter,
+          decodeURIComponent(fidelityMatch[1]!),
+          body.fidelity,
+          (type) => appCanRead(localDb, appId!, type) && appCanWriteMetadataCategory(localDb, appId!, typeCategory(type)),
+        );
+        if (!plan.ok) {
+          res.writeHead(plan.status);
+          json(res, plan.body);
+          return;
+        }
+        const record =
+          plan.write === null
+            ? plan.record
+            : await recordOriginalFidelity(databaseAdapter, plan.record, plan.write, clock);
+        if (plan.write !== null) {
+          changeNotifier.emit({
+            eventType: "local-change-recorded",
+            recordIds: [record.id],
+            timestamp: record.updatedAt,
+          });
+        }
+        json(res, { id: record.id, fidelity: record.fidelity, recorded: plan.write !== null });
+        return;
+      }
+
       const metadataWriteMatch = path.match(/^\/data\/records\/([^/]+)\/metadata$/);
       if (metadataWriteMatch && req.method === "POST") {
         const recordId = metadataWriteMatch[1]!;
@@ -3184,6 +3398,11 @@ async function main() {
         if (!subject || subject.deletedAt) {
           res.writeHead(404);
           json(res, { error: "Record not found" });
+          return;
+        }
+        if (subject.standInRole) {
+          res.writeHead(400);
+          json(res, { error: "StandInMetadata", detail: STAND_IN_METADATA_REFUSAL });
           return;
         }
         const category = typeCategory(subject.type);
@@ -3313,6 +3532,8 @@ async function main() {
             size_bytes: record.sizeBytes,
             original_filename: record.originalFilename,
             parent_id: record.parentId,
+            stand_in_role: record.standInRole,
+            fidelity: record.fidelity,
             path: record.kind === "data" && record.objectStorageKey
               ? await localAdapter.resolvePath(record.objectStorageKey)
               : null,
@@ -3329,8 +3550,53 @@ async function main() {
                     .map((l) => ({ app_id: l.appId, key: l.key, value: l.value })),
                 }
               : {}),
+            ...(await (async () => {
+              const summary = (
+                await loadStandInSummariesForPage(
+                  databaseAdapter,
+                  [record],
+                  DEFAULT_STAND_IN_STANDARDS,
+                  localPlacementOf,
+                )
+              ).get(record.id);
+              return summary ? { stand_ins: await renderStandInSummary(summary) } : {};
+            })()),
           },
         });
+        return;
+      }
+
+      // DELETE /data/records/:id — delete the item a listing shows.
+      //
+      // Cascades to the record's stand-ins and derived records, and to every
+      // label on any of them, through the same planner the cloud's delete and
+      // the SDK use. A canonical stand-in whose original is live is refused on
+      // its own; deleting the original deletes both.
+      if (recordMatch && req.method === "DELETE") {
+        const record = await databaseAdapter.get(createStarkeepId(decodeURIComponent(recordMatch[1]!)));
+        if (!record || record.deletedAt || !appCanRead(localDb, appId!, record.type)) {
+          res.writeHead(404);
+          json(res, { error: "Record not found" });
+          return;
+        }
+        if (!appCanWrite(localDb, appId!, record.type)) {
+          res.writeHead(403);
+          json(res, { error: "Forbidden" });
+          return;
+        }
+        const plan = await planRecordDelete(databaseAdapter, record);
+        if (!plan.ok) {
+          res.writeHead(plan.status);
+          json(res, plan.body);
+          return;
+        }
+        const deleted = await applyRecordDelete(databaseAdapter, plan, clock);
+        changeNotifier.emit({
+          eventType: "local-change-recorded",
+          recordIds: deleted.map((r) => r.id),
+          timestamp: deleted[deleted.length - 1]!.updatedAt,
+        });
+        json(res, { deleted: true, ids: deleted.map((r) => r.id) });
         return;
       }
 
@@ -3469,10 +3735,6 @@ async function main() {
           const result = installLocal(localDb, body);
           // Bring up a sync loop for the freshly-installed app.
           supervisor?.rescan();
-          // And make its ladder legible before it writes anything, so its
-          // derivatives are classified by the rungs it declares rather than
-          // landing in `<app>:unclassified` until the next restart.
-          refreshSizeClassKeys();
           json(res, { appId: result.appId, hmacSecret: result.hmacSecret });
         } catch (err) {
           if (err instanceof ManifestValidationError) {
@@ -3503,9 +3765,8 @@ async function main() {
             await rm(target, { recursive: true, force: true });
           },
         });
-        // Tear down the per-app sync loop, and drop its ladder key with it.
+        // Tear down the per-app sync loop.
         supervisor?.rescan();
-        refreshSizeClassKeys();
         json(res, { ok: true, appId: targetAppId });
         return;
       }
@@ -3657,17 +3918,6 @@ function isPeerGoneError(err: unknown): boolean {
   );
 }
 
-/**
- * The smallest object worth archiving.
- *
- * Deep Archive charges per-object overhead and a minimum storage duration, so
- * below this the transition costs more than it saves and adds a 48-hour thaw to
- * a file that was cheap to keep hot. Kept identical to the cloud handler's
- * floor deliberately: a record that one node considers archivable and the other
- * does not is a record whose storage class depends on which node saw it last.
- */
-const ARCHIVE_MIN_OBJECT_BYTES = 1024 * 1024;
-
 function json(res: import("node:http").ServerResponse, body: unknown) {
   if (!res.headersSent) res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
@@ -3678,6 +3928,19 @@ function json(res: import("node:http").ServerResponse, body: unknown) {
  * call site.
  */
 const VARIANT_URL_TTL_SECONDS = 6 * 60 * 60;
+
+/** Why a stand-in takes no metadata row. Both metadata doors answer with it. */
+const STAND_IN_METADATA_REFUSAL =
+  "a stand-in carries no per-category metadata: its fidelity is its size, and the original's row describes the item, so metadata queries show one row per original";
+
+/**
+ * The MIME a stand-in's bytes are served as when its record carries none.
+ * Other types fall back to octet-stream, which is what the file route has
+ * always done for a record with no MIME.
+ */
+function mimeForStandIn(type: string): string {
+  return STAND_IN_MIME_TYPES[type] ?? "application/octet-stream";
+}
 
 /**
  * The granularity a read token's expiry is rounded up to.

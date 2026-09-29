@@ -116,9 +116,12 @@ export {
 } from "./database/label-find.js";
 
 export {
-  loadVariantsForPage,
   loadVariantCandidatesForPage,
 } from "./database/variant-queries.js";
+export {
+  loadStandInsForPage,
+  loadStandInSummariesForPage,
+} from "./database/stand-in-queries.js";
 
 export {
   loadMetadataForRecords,
@@ -212,6 +215,7 @@ export {
   TransactionError,
   ObjectNotFoundError,
   FileUriTransferRefused,
+  isStandInSlotConflict,
 } from "./errors.js";
 
 export { MockDatabaseAdapter } from "./mock/mock-database-adapter.js";

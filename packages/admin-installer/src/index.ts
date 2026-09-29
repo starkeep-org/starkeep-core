@@ -61,7 +61,6 @@ export {
 export type { InstallLocalResult, UninstallLocalOptions } from "./local/installer";
 export {
   listAppRegistry,
-  sizeClassKeysByApp,
   appRegistryRow,
   updateAppRegistryManifest,
   listInstallSteps,

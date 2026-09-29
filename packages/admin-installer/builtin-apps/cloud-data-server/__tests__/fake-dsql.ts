@@ -27,6 +27,19 @@ export class FakeDsql implements DatabaseClientFactory {
     return this;
   }
 
+  /**
+   * A route consulted only after every `on(...)` route has missed.
+   *
+   * For defaults a helper wants to supply without shadowing what a test
+   * registers later — `on` routes match in registration order, so a default
+   * registered by a helper would otherwise win over the test's own answer.
+   */
+  otherwise(match: RegExp, rows: Rows | ((q: LoggedQuery) => Rows)): this {
+    this.fallbacks.push({ match, rows: typeof rows === "function" ? rows : () => rows });
+    return this;
+  }
+  private readonly fallbacks: Array<{ match: RegExp; rows: (q: LoggedQuery) => Rows }> = [];
+
   /** Logged queries whose SQL matches. */
   calls(match: RegExp): LoggedQuery[] {
     return this.log.filter((q) => match.test(q.text));
@@ -37,7 +50,7 @@ export class FakeDsql implements DatabaseClientFactory {
       query: async (text, values) => {
         const q: LoggedQuery = { text, values: values ?? [] };
         this.log.push(q);
-        for (const route of this.routes) {
+        for (const route of [...this.routes, ...this.fallbacks]) {
           if (route.match.test(text)) return { rows: route.rows(q) };
         }
         throw new Error(`FakeDsql: unscripted SQL: ${text}`);
@@ -113,8 +126,25 @@ export function fakeDsqlWithGrants(
     // since DSQL has no foreign keys to do it. Returns no rows; tests that
     // assert on the cascade read `db.calls(...)`, which logs every statement
     // regardless of which route answered it.
-    .on(/update "shared"\."record_labels" set "deleted_at"/, []);
+    .on(/update "shared"\."record_labels" set "deleted_at"/, [])
+    // A record delete drops the record's metadata row, in whichever category
+    // table holds it. No rows either way.
+    .on(/delete from "shared"\."record_\w+_metadata"/, [])
+    // Every listing of originals in a stand-in category asks for the page's
+    // stand-ins, to build each item's size summary. None by default; a test
+    // about stand-ins answers with `on(STAND_INS_OF_PAGE, …)`, which wins.
+    .otherwise(STAND_INS_OF_PAGE, []);
 }
+
+/** The page-wide stand-in lookup behind every listing's size summary. */
+export const STAND_INS_OF_PAGE = /from "shared"\."records" where "parent_id" in \(.*\) and "stand_in_role" in/;
+
+/**
+ * The children lookup a delete makes to find what cascades. Tests register it
+ * ahead of any broader `select * from "shared"."records"` route, which would
+ * otherwise answer it with the record itself.
+ */
+export const CHILDREN_OF = /from "shared"\."records" where "parent_id" = \$1 and "deleted_at" is null/;
 
 const TEST_HLC = serializeHLC({ wallTime: Date.UTC(2026, 0, 1), counter: 0, nodeId: "test" });
 
@@ -134,6 +164,9 @@ export function recordRow(
     original_filename: null,
     origin_app_id: "some-app",
     parent_id: null,
+    stand_in_role: null,
+    fidelity: null,
+    stand_in_slot: null,
     ...partial,
   };
 }

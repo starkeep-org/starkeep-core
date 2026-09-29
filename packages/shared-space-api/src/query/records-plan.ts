@@ -13,9 +13,8 @@
  *     anti-join no filter grammar expresses, and `updated_after` compares
  *     against a serialized HLC, which the parser refuses in `where` on purpose.
  *     Each one is the server's predicate rather than the caller's.
- *   - **Post-page hydration** — `include`, `labelApps`, `variant` and
- *     `variantLongEdge` — runs over the page after it is cut and filters
- *     nothing.
+ *   - **Post-page hydration** — `include`, `labelApps` and `variant` — runs
+ *     over the page after it is cut and filters nothing.
  *
  * ## Why this compiles to `Query` rather than running through `queryShared`
  *
@@ -32,7 +31,6 @@
  */
 
 import {
-  parseVariantLongEdges,
   serializeHLC,
   type AccessGrants,
 } from "@starkeep/protocol-primitives";
@@ -54,11 +52,14 @@ import { QueryParseError, type QueryParams } from "./types.js";
 /** Where a parameter's value comes from, whatever transport carried it. */
 export type ParamSource = (name: string) => string | undefined;
 
-/** `?variant=<appId>/<key>` and the pixel sizes to resolve against it. */
+/**
+ * `?variant=<appId>/<key>`: every derived child carrying that label, with its
+ * dimensions. Choosing a size is not asked here any more — a content read at a
+ * size (`GET /data/records/:id/content-url?size=`) answers that from the
+ * original's stand-ins.
+ */
 export interface RecordVariantRequest {
   readonly label: { readonly appId: string; readonly key: string };
-  /** Empty asks the unnarrowed question: every candidate, with its dimensions. */
-  readonly targets: readonly number[];
 }
 
 /** Everything `GET /data/records` needs, decided once. */
@@ -101,7 +102,22 @@ export interface RecordQueryPlan {
   readonly includeLabels: boolean;
   readonly labelApps: string | undefined;
   readonly variant: RecordVariantRequest | null;
+  /**
+   * `include=stand-ins`: the uncollapsed view, where each stand-in is its own
+   * row. Off by default — a listing shows one item per original, and the
+   * original carries a summary of its sizes instead.
+   */
+  readonly includeStandIns: boolean;
+  /** `include=stand-in-urls`: a URL on every size summary entry readable now. */
+  readonly includeStandInUrls: boolean;
 }
+
+/**
+ * The two `include` edges this route answers itself rather than handing to
+ * the grammar. Neither is a join the records schema declares: one widens the
+ * page, the other decorates the size summary.
+ */
+const ROUTE_INCLUDES = ["stand-ins", "stand-in-urls"] as const;
 
 /**
  * Every parameter this route accepts.
@@ -129,7 +145,6 @@ const RECORD_PARAMS: readonly string[] = [
   // Hydration.
   "labelApps",
   "variant",
-  "variantLongEdge",
 ];
 
 /**
@@ -153,6 +168,8 @@ const SORT_FIELD_OF: Record<string, string> = {
   original_filename: "originalFilename",
   origin_app_id: "originAppId",
   parent_id: "parentId",
+  stand_in_role: "standInRole",
+  fidelity: "fidelity",
   node_id: "node_id",
   captured_at: "capturedAt",
 };
@@ -201,10 +218,21 @@ export function planRecordQuery(
     );
   }
 
+  // Split the route's own `include` edges off before the grammar sees the
+  // list, so an aggregate can ask for the uncollapsed view too — the one place
+  // a storage-level question ("how many bytes do I store") needs it most.
+  const includeParam = get("include");
+  const includeEdges = includeParam === undefined ? [] : includeParam.split(",").map((e) => e.trim());
+  const includeStandIns = includeEdges.includes("stand-ins");
+  const includeStandInUrls = includeEdges.includes("stand-in-urls");
+  const grammarIncludes = includeEdges.filter(
+    (e) => e !== "" && !(ROUTE_INCLUDES as readonly string[]).includes(e),
+  );
+
   const params: QueryParams = {
     where: whereParam,
     order: get("order"),
-    include: get("include"),
+    include: grammarIncludes.length > 0 ? grammarIncludes.join(",") : undefined,
     limit: String(boundedLimit(get("limit"), options.defaultLimit)),
     ...(aggregateParam === undefined ? {} : { aggregate: aggregateParam }),
     ...(selectParam === undefined ? {} : { select: selectParam }),
@@ -223,6 +251,15 @@ export function planRecordQuery(
     : [{ column: "type", predicate: { op: "in", values: readableTypes } }];
 
   const include = parsed.mode === "rows" ? parsed.include : [];
+
+  // Collapse: stand-ins are left out unless the caller asks for them, either
+  // with `include=stand-ins` or by naming `stand_in_role` in `where` — a
+  // caller filtering on the role is plainly asking about stand-ins, and
+  // silently ANDing "is not a stand-in" onto that would answer nothing.
+  const collapse = !includeStandIns && !parsed.where.some((c) => c.column === "stand_in_role");
+  const collapseClause: WhereClause[] = collapse
+    ? [{ column: "stand_in_role", predicate: { op: "is", value: null } }]
+    : [];
   const labelParam = get("label");
   const labelValue = get("labelValue");
   if (labelValue !== undefined && labelParam === undefined) {
@@ -244,10 +281,11 @@ export function planRecordQuery(
         throw new QueryParseError(`"${name}" selects or hydrates rows, and an aggregate holds none`);
       }
     }
+    const aggregate = withUpdatedAfter(parsed, get("updated_after"));
     return {
       mode: "aggregate",
       query: {},
-      aggregate: withUpdatedAfter(parsed, get("updated_after")),
+      aggregate: { ...aggregate, where: [...aggregate.where, ...collapseClause] },
       serverWhere,
       empty,
       labelPath: null,
@@ -255,6 +293,8 @@ export function planRecordQuery(
       includeLabels: false,
       labelApps: undefined,
       variant: null,
+      includeStandIns,
+      includeStandInUrls: false,
     };
   }
 
@@ -265,7 +305,7 @@ export function planRecordQuery(
 
   const query: Query = {
     filters,
-    where: [...rows.where, ...serverWhere],
+    where: [...rows.where, ...collapseClause, ...serverWhere],
     ...(rows.order.length > 0 ? { sort: sortFor(rows) } : {}),
     limit: rows.limit,
     ...(pageTokenParam === undefined ? {} : { cursor: pageTokenParam }),
@@ -299,7 +339,9 @@ export function planRecordQuery(
     includeMetadata: include.includes("metadata"),
     includeLabels: include.includes("labels"),
     labelApps: get("labelApps"),
-    variant: variantRequest(get("variant"), get("variantLongEdge")),
+    variant: variantRequest(get("variant")),
+    includeStandIns,
+    includeStandInUrls,
   };
 }
 
@@ -441,20 +483,7 @@ function withUpdatedAfter(query: AggregateQuery, raw: string | undefined): Aggre
   };
 }
 
-function variantRequest(
-  variant: string | undefined,
-  longEdge: string | undefined,
-): RecordVariantRequest | null {
-  if (variant === undefined) {
-    if (longEdge === undefined) return null;
-    // A pixel size with nothing to resolve it against is meaningless, and
-    // answering it as though it were valid returns no variants — which reads as
-    // "this record has none" rather than "you asked wrongly".
-    throw new ApiError("variantLongEdge requires variant", 400);
-  }
-  const label = labelRef("variant", variant);
-  if (longEdge === undefined) return { label, targets: [] };
-  const parsed = parseVariantLongEdges(longEdge);
-  if (!parsed.ok) throw new ApiError(parsed.message, 400);
-  return { label, targets: parsed.targets };
+function variantRequest(variant: string | undefined): RecordVariantRequest | null {
+  if (variant === undefined) return null;
+  return { label: labelRef("variant", variant) };
 }

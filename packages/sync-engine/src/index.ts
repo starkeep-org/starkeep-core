@@ -43,33 +43,12 @@ export {
 
 export {
   decideResidency,
-  validateRetentionPolicy,
-  resolveSizeClass,
-  parseSizeClass,
-  isPlatformClass,
-  retentionRowFor,
-  hasRowFor,
-  namespaceRetentionFor,
-  budgetLineFor,
-  budgetBytesFor,
-  budgetLinesOf,
-  compareEvictionRank,
-  PLATFORM_NAMESPACE,
-  FALLBACK_RUNG,
-  type SizeClassRetention,
-  type NamespaceRetention,
-  type NodeRetentionPolicy,
-  type BudgetLine,
-  type EvictionRank,
-  type ResolvedSizeClass,
   type RecordConstraints,
   type LocalOverrides,
   type BlobCandidate,
   type ResidencyDecision,
   type ResidencyTrigger,
   type ResidencyVerdict,
-  type LineUsageLookup,
-  type DisplacementLookup,
   type DecideResidencyInputs,
 } from "./residency-policy.js";
 
@@ -79,8 +58,6 @@ export {
   type ResidentArrival,
   type ResidentEntry,
   type ResidentSetIndex,
-  type EvictionCandidateQuery,
-  type DeferredCandidateQuery,
 } from "./resident-set.js";
 
 export {
@@ -92,18 +69,6 @@ export {
   type DurabilityVerdict,
   type DurabilityQuery,
 } from "./durability.js";
-
-export {
-  evictLine,
-  previewBudgetReduction,
-  shedLoad,
-  SHED_ORDER,
-  type RetentionReason,
-  type EvictionOutcome,
-  type EvictionRequest,
-  type ReductionPreview,
-  type ShedStep,
-} from "./eviction.js";
 
 export {
   scanForAcquirable,
@@ -162,34 +127,21 @@ export {
 } from "./exchange-request.js";
 
 export {
-  projectPolicy,
-  formatBytes,
-  type SizeClassCensus,
-  type RowProjection,
-  type NamespaceProjection,
-  type PolicyProjection,
-} from "./retention-projection.js";
-
-export {
-  evaluateOverrides,
-  validateOverrideRules,
-  NO_OVERRIDES,
-  type OverrideRule,
-  type OverrideEffect,
-  type OverrideVerdict,
-  type RecordLabel,
-} from "./override-rules.js";
-
-export {
   createResidencyManager,
   residencyHooks,
-  originalClassFor,
-  pickLadderLabel,
-  UNCLASSIFIED_RUNG,
-  type LadderLabel,
-  ORIGINAL_CLASS_PREFIX,
+  KEPT_GROUP,
   STARKEEP_LABEL_APP_ID,
   NO_CLOUD_LABEL_KEY,
   type ResidencyManager,
   type ResidencyManagerOptions,
+  type FreeUpSpaceRequest,
+  type FreeUpSpaceReport,
+  type FreeUpSpaceItem,
+  type FreeUpSpaceRefusal,
 } from "./residency-manager.js";
+export {
+  slotOccupant,
+  tombstoneOf,
+  admitIncomingStandIn,
+  yieldSlotToIncoming,
+} from "./stand-in-slots.js";

@@ -2,6 +2,7 @@ import type { StarkeepId } from "../identifiers/types.js";
 import type { HLCClock } from "../hlc/types.js";
 import { contentAddressedId } from "../identifiers/content-id.js";
 import { type DataRecord } from "./types.js";
+import type { StandInRole } from "../stand-ins/rules.js";
 
 export interface CreateDataRecordInput {
   type: string;
@@ -13,6 +14,8 @@ export interface CreateDataRecordInput {
   sizeBytes: number;
   originalFilename?: string | null;
   parentId?: StarkeepId | null;
+  standInRole?: StandInRole | null;
+  fidelity?: number | null;
 }
 
 export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock): DataRecord {
@@ -42,5 +45,7 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     originalFilename,
     originAppId: input.originAppId,
     parentId: input.parentId ?? null,
+    standInRole: input.standInRole ?? null,
+    fidelity: input.fidelity ?? null,
   };
 }

@@ -275,7 +275,9 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     const ts = serializeHLC(hlc);
     const query = qb
       .updateTable("shared_records")
-      .set({ deleted_at: ts, updated_at: ts, node_id: hlc.nodeId })
+      // A tombstone frees its stand-in slot, the same rule `standInSlot`
+      // applies on a full-row write.
+      .set({ deleted_at: ts, updated_at: ts, node_id: hlc.nodeId, stand_in_slot: null })
       .where("id", "=", id)
       .compile();
     this.runStmt(query.sql, ...query.parameters);

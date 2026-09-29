@@ -19,7 +19,7 @@
  *
  * The rule has a reporting half, stated on
  * `SyncExchangeResponse.responderWatermarks`: what a node advertises as
- * coverage is coverage over **rows**, and a node with a retention budget can
+ * coverage is coverage over **rows**, and a node with a sync-down ceiling can
  * honestly advertise records whose blobs it declined. The two halves are one
  * rule — *a timestamp is never evidence about bytes* — and they are written
  * down in both places because each is separately easy to "simplify" into a

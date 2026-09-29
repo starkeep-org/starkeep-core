@@ -84,6 +84,12 @@ const SHARED_RECORD_COLUMNS: readonly AppColumnInfo[] = [
   text("original_filename", false),
   text("origin_app_id", true),
   text("parent_id", false),
+  // A stand-in's role, and the reported fidelity — the stand-in's own on a
+  // stand-in, the original's on an original. See `stand-ins/rules.ts` in
+  // protocol-primitives. `stand_in_slot` is deliberately absent: it is an
+  // index key the stores derive, not a fact a caller asks about.
+  text("stand_in_role", false),
+  { name: "fidelity", type: "integer", notNull: false, primaryKey: false },
 ];
 
 /**

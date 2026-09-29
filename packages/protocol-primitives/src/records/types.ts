@@ -1,5 +1,6 @@
 import type { StarkeepId } from "../identifiers/types.js";
 import type { HLCTimestamp } from "../hlc/types.js";
+import type { StandInRole } from "../stand-ins/rules.js";
 
 export interface BaseRecord {
   readonly id: StarkeepId;
@@ -51,6 +52,24 @@ export interface DataRecord extends BaseRecord {
    * type; cross-type parent links are permitted.
    */
   parentId: StarkeepId | null;
+  /**
+   * `canonical` or `smaller` when this record is a stand-in for its parent — a
+   * lower-fidelity file that can replace the original for the person. Null on
+   * every other record, including derived records such as poster frames, which
+   * have a parent but cannot replace it. See `stand-ins/rules.ts`.
+   */
+  standInRole: StandInRole | null;
+  /**
+   * Reported fidelity on the category's axis — the long edge in pixels for
+   * images and video, the bitrate in kbps for audio.
+   *
+   * Two readings, told apart by {@link standInRole}. On a stand-in it is the
+   * stand-in's own fidelity, reported by the app that wrote it. On an original
+   * it is the original's fidelity, reported by the app that wrote the original
+   * or, failing that, by the first app to write a stand-in — and written by the
+   * platform, so no app edits another app's record. Null when nobody has said.
+   */
+  fidelity: number | null;
 }
 
 /**

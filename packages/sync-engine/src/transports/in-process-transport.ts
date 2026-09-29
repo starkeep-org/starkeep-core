@@ -1,8 +1,10 @@
 import {
   compareHLC,
+  type DataRecord,
   type HLCClock,
   type RecordLabel,
 } from "@starkeep/protocol-primitives";
+import { admitIncomingStandIn } from "../stand-in-slots.js";
 import {
   applyRecordMetadata,
   deleteRecordMetadata,
@@ -90,6 +92,34 @@ export interface InProcessTransportOptions {
    * `SyncEngineOptions.syncSharedRecords` on the requester side.
    */
   readonly syncSharedRecords?: boolean;
+  /**
+   * Asked before a synced tombstone replaces a live row this side holds. True
+   * refuses the tombstone: the live row is re-written under this side's clock,
+   * so the same response carries it back and the sender's copy comes back to
+   * life by ordinary last-writer-wins.
+   *
+   * The cloud uses it for the one row it must never lose: the canonical
+   * stand-in of an archived original, which is all the person can see until a
+   * restore. A sync apply cannot answer "no" any other way — a thrown apply
+   * stops the channel.
+   */
+  readonly keepLiveOnTombstone?: (
+    current: DataRecord,
+    incoming: DataRecord,
+    request: SyncExchangeRequest,
+  ) => Promise<boolean>;
+  /**
+   * Called once per exchange, after every incoming row has been applied and
+   * before the reply is scanned, with the records and labels this side
+   * actually stored. The cloud decides archiving from it.
+   *
+   * A failure here is logged and never fails the exchange: the rows are
+   * already stored, and the work it drives is re-derivable.
+   */
+  readonly onApplied?: (applied: {
+    readonly records: readonly DataRecord[];
+    readonly labels: readonly RecordLabel[];
+  }) => Promise<void>;
 }
 
 /**
@@ -106,7 +136,14 @@ export interface InProcessTransportOptions {
 export function createInProcessSyncTransport(
   options: InProcessTransportOptions,
 ): SyncTransport {
-  const { databaseAdapter, clock, appSyncableSource, syncSharedRecords = true } = options;
+  const {
+    databaseAdapter,
+    clock,
+    appSyncableSource,
+    syncSharedRecords = true,
+    keepLiveOnTombstone,
+    onApplied,
+  } = options;
 
   return {
     async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
@@ -176,6 +213,8 @@ export function createInProcessSyncTransport(
       //    (Records are also applied entirely before labels rather than merged
       //    per author in HLC order, unlike the requester's inbound loop. Same
       //    argument, same dependency: safe only while the halt rule is a throw.)
+      const appliedRecords: DataRecord[] = [];
+      const appliedLabels: RecordLabel[] = [];
       if (syncSharedRecords) {
         for (const item of request.records ?? []) {
           if (haltedNodes.has(item.updatedAt.nodeId)) continue;
@@ -187,7 +226,30 @@ export function createInProcessSyncTransport(
             current !== null && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
           if (!rowAlreadyApplied) {
             clock.receive(snapshot.updatedAt);
-            await databaseAdapter.put(snapshot);
+            let row: DataRecord = snapshot;
+            if (
+              snapshot.deletedAt &&
+              current !== null &&
+              !current.deletedAt &&
+              keepLiveOnTombstone &&
+              (await keepLiveOnTombstone(current, snapshot, request))
+            ) {
+              // Refused: the live row goes back out under this side's clock.
+              row = { ...current, updatedAt: clock.now(), version: current.version + 1 };
+            } else if (!snapshot.deletedAt) {
+              // Two stand-ins for one slot: the one this side already holds
+              // won, and the incoming one is stored as this side's tombstone so
+              // the reply carries the verdict back. See `stand-in-slots.ts`.
+              const admitted = await admitIncomingStandIn(databaseAdapter, snapshot, clock);
+              if (admitted.lostTo) {
+                console.warn(
+                  `[sync] stand-in ${snapshot.id} lost its slot to ${admitted.lostTo}; storing it as a tombstone`,
+                );
+              }
+              row = admitted.row;
+            }
+            await databaseAdapter.put(row);
+            appliedRecords.push(row);
           }
           // **Outside** the LWW guard: an equal or older record row can still
           // carry columns this side lacks, and the record's clock does not move
@@ -240,11 +302,20 @@ export function createInProcessSyncTransport(
           clock.receive(incoming.updatedAt);
           // Snapshot write: an inbound retraction must stay retracted.
           await databaseAdapter.putLabel(incoming);
+          appliedLabels.push(incoming);
         }
       } else if ((request.labels?.length ?? 0) > 0) {
         console.warn(
           `[sync] in-process transport dropped ${request.labels?.length ?? 0} record label(s) on a per-app channel (syncSharedRecords=false)`,
         );
+      }
+
+      if (onApplied && (appliedRecords.length > 0 || appliedLabels.length > 0)) {
+        try {
+          await onApplied({ records: appliedRecords, labels: appliedLabels });
+        } catch (err) {
+          console.warn(`[sync] in-process transport onApplied failed: ${(err as Error).message}`);
+        }
       }
 
       // 3. Scan what the caller hasn't seen — records, then labels, then

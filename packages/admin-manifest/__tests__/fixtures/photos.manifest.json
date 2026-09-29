@@ -61,7 +61,6 @@
     "labelKeys": [
       {
         "key": "rendition",
-        "sizeClass": true,
         "description": "Which rung of the derived size ladder this record is (image-thumb, image-medium, video-720p, ...). Single-valued and written through the set-valued endpoint, so a respec replaces the rung rather than leaving two. Its presence is what marks a record as derived rather than something the user added, so other image apps can filter renditions out of a library view; its value is an implementation detail of Photos' ladder and consumers should ask for a pixel size instead."
       },
       {

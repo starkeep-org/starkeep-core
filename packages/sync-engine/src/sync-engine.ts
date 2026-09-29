@@ -1,3 +1,4 @@
+import { yieldSlotToIncoming } from "./stand-in-slots.js";
 import {
   compareHLC,
   isCategoryId,
@@ -124,11 +125,7 @@ import {
   type RoundItem,
   type StreamTruncation,
 } from "./round-cut.js";
-import type {
-  BlobCandidate,
-  ResidencyVerdict,
-  ResolvedSizeClass,
-} from "./residency-policy.js";
+import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
 
 /**
  * What the outbound backlog check found.
@@ -769,10 +766,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           // transient SQLite error takes down the whole round rather than
           // holding one author's watermark for one tick.
           try {
-            // A round, and the trigger says so: a walk in change-log order may
-            // not displace what this line already holds, because oldest-first
-            // means every arrival outranks all of it. See `ResidencyTrigger`.
-            verdict = await residency.decide(candidate, "round");
+            verdict = await residency.decide(candidate, "background");
           } catch (err) {
             console.warn(
               `[sync] residency decide failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
@@ -781,45 +775,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           }
           if (verdict.decision === "elide") {
             elidedCount += 1;
-            // A full line is contention, not a refusal, so it goes on the
-            // acquisition queue rather than simply being dropped. The round's
-            // own behaviour is unchanged — still elided, watermark still
-            // advances — and that is what bounds the transfer: a round pulls
-            // inline while the line has room and defers once it is full, so a
-            // cold sync moves one budget's worth per line instead of the
-            // library.
-            //
-            // Only `budget-exhausted`. `not-prefetched` classes exist precisely
-            // so nothing acquires them speculatively; `class-disabled` and
-            // `record-constraint` are standing refusals.
-            if (verdict.reason === "budget-exhausted" && residency.defer) {
-              // Never `failed`. A queue write is an optimisation over a
-              // catalogue scan that would find the same blob anyway, and
-              // letting it hold a watermark would make an optional index a
-              // correctness dependency of the sync protocol.
-              try {
-                await residency.defer(candidate, verdict);
-              } catch (err) {
-                console.warn(
-                  `[sync] residency defer failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
-                );
-              }
-            }
             return "elided";
-          }
-          // Charge the budget now, and undo it below if the bytes do not come.
-          // The accounting properly moves on arrival, and still does — this is a
-          // provisional row that `onLanded` replaces. It exists because the
-          // budget is shared across engines that tick independently, so between
-          // this decision and its arrival another engine can make the same
-          // decision against the same apparent room. See `ResidencyHooks.reserve`.
-          try {
-            await residency.reserve?.(candidate, verdict);
-          } catch (err) {
-            console.warn(
-              `[sync] residency reserve failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
-            );
-            return "failed";
           }
         }
         const ok = await transferBlobSafe(
@@ -830,20 +786,14 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           "download",
           itemId,
         );
-        if (!ok) {
-          await releaseQuietly(candidate);
-          return "failed";
-        }
-        // Accounting moves only once the bytes are here. Crediting a decision
-        // rather than an arrival would let a node with a flaky link slowly
-        // convince itself it is full of things it doesn't have.
+        if (!ok) return "failed";
+        // Recorded only once the bytes are here, so the node's record of what
+        // it holds describes the disk.
         //
         // A failure here reports `failed` even though the bytes did arrive, and
         // that is the right way round: the watermark holds, the next round finds
         // the blob already present (`transferFile` short-circuits on
-        // `destination.has`), and the accounting is retried. The opposite —
-        // calling it landed — leaves bytes on disk that no budget knows about,
-        // which is R2's defect arriving through the error path.
+        // `destination.has`), and the record is retried.
         if (residency?.onLanded && candidate && verdict) {
           try {
             await residency.onLanded(candidate, verdict);
@@ -851,33 +801,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             console.warn(
               `[sync] residency accounting failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
             );
-            // The reservation goes too. Leaving it would charge the budget for
-            // bytes nothing will ever claim as landed — a permanent phantom that
-            // only a reconcile could clear.
-            await releaseQuietly(candidate);
             return "failed";
           }
         }
         return "landed";
-      }
-
-      /**
-       * Drop a reservation, never letting that failure become the round's.
-       *
-       * Called on paths that are already reporting a failure, where a second one
-       * has nothing to add: the transfer did not happen, the caller is about to
-       * hold the watermark, and the worst case of a lost release is a budget
-       * that overstates until the next reconcile.
-       */
-      async function releaseQuietly(candidate: BlobCandidate | null): Promise<void> {
-        if (!residency?.release || !candidate) return;
-        try {
-          await residency.release(candidate.objectStorageKey);
-        } catch (err) {
-          console.warn(
-            `[sync] residency release failed for ${candidate.objectStorageKey}: ${(err as Error).message}`,
-          );
-        }
       }
 
       // Authors whose inbound run broke — a blob that would not download, a row
@@ -920,6 +847,13 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             try {
               if (!rowAlreadyApplied) {
                 clock.receive(snapshot.updatedAt);
+                // A stand-in from the cloud already won its slot there. A local
+                // stand-in holding the same slot lost, and is tombstoned before
+                // the winner lands — see `stand-in-slots.ts`.
+                if (!snapshot.deletedAt) {
+                  const loser = await yieldSlotToIncoming(localDatabaseAdapter, snapshot, clock);
+                  if (loser) appliedIds.push(loser.id);
+                }
                 await localDatabaseAdapter.put(snapshot);
               }
 
@@ -1276,27 +1210,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       };
   }
 
-  /**
-   * Drop a reservation an acquisition did not use, never letting that failure
-   * become the acquisition's.
-   *
-   * The closure-level twin of `exchange`'s `releaseQuietly`, which lives inside
-   * the round because it also has a candidate that may be null. Same reasoning:
-   * the caller is already reporting a failure and a second one has nothing to
-   * add, so the worst case of a lost release is a budget that overstates until
-   * the next reconcile.
-   */
-  async function releaseAcquisition(candidate: BlobCandidate): Promise<void> {
-    if (!residency?.release) return;
-    try {
-      await residency.release(candidate.objectStorageKey);
-    } catch (err) {
-      console.warn(
-        `[sync] residency release failed for ${candidate.objectStorageKey}: ${(err as Error).message}`,
-      );
-    }
-  }
-
   return {
     exchange,
 
@@ -1306,35 +1219,15 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
      * fetch for a key a round is currently moving joins that transfer rather
      * than being told it failed.
      *
-     * Byte accounting fires on arrival, exactly as it does for a round's pull —
-     * a budget that does not see an on-demand fetch is a budget that stops
-     * describing the disk.
+     * The arrival is recorded exactly as a round's pull records one.
      */
     async fetchBlob(
       manifest: FileSyncManifest,
       candidate?: BlobCandidate,
     ): Promise<boolean> {
-      // `classOf`, never `decide`. The accounting needs the class so the bytes
-      // land against the right budget, and resolving it is the host's job — but
-      // the *decision* must not be asked for, because this path is not subject
-      // to it. Calling `decide` here would both let a policy refuse a photo
-      // somebody just opened and record a second decision that never happened.
+      // Never `decide`: this path answers a direct request and is not subject
+      // to the policy.
       const forAccounting = candidate ?? candidateForManifest(manifest);
-      // Caught, and unlike the round's pull this does **not** abandon the
-      // operation: someone is waiting to see their photo, and refusing to fetch
-      // it because a class could not be resolved would trade a visible failure
-      // for an accounting detail. A null class is already a defined input —
-      // `noteArrival` charges it as the thing itself, the conservative reading.
-      let sizeClass: ResolvedSizeClass | null = null;
-      if (residency?.classOf) {
-        try {
-          sizeClass = await residency.classOf(forAccounting);
-        } catch (err) {
-          console.warn(
-            `[sync] residency classOf failed for ${manifest.objectStorageKey}; charging it as an original: ${(err as Error).message}`,
-          );
-        }
-      }
 
       const ok = await transferBlobSafe(
         manifest,
@@ -1346,23 +1239,15 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       );
       if (!ok) return false;
 
-      // On arrival, not on decision — an on-demand fetch that failed must not
-      // move the byte accounting any more than a round's pull may. An
-      // over-budget class is the intended outcome here, not a bug: refusing to
-      // show someone their own photo to stay under a cache budget is not a
-      // defensible behaviour, so this can push a class over and let eviction
-      // sort it out later.
       if (residency?.onLanded) {
-        // Same asymmetry as `classOf` above: the bytes are on disk and the
-        // caller's question — "can I show this photo?" — is answered yes. An
-        // accounting write that failed leaves the budget understating this
-        // node's disk until the index is rebuilt, which is a real cost and a
-        // smaller one than telling someone their photo did not arrive when it
-        // did.
+        // The bytes are on disk and the caller's question — "can I show this
+        // photo?" — is answered yes. A record write that failed leaves the
+        // index behind the disk until the next catalogue scan adopts the
+        // bytes, which is a smaller cost than telling someone their photo did
+        // not arrive.
         try {
           await residency.onLanded(forAccounting, {
             decision: "fetch",
-            sizeClass,
             reason: "explicit-request",
           });
         } catch (err) {
@@ -1377,19 +1262,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     /**
      * See {@link SyncEngine.acquireBlob}.
      *
-     * The same sequence `pullBlob` runs — decide, reserve, transfer, account —
-     * with two differences, and both are deliberate. It is reached from a
-     * background pass rather than from a round, so nothing here touches a
-     * watermark: a failure is the caller's to retry from its queue, which is
-     * the whole reason the queue outlives the round. And it reports the
-     * verdict's reason, because the pass reads it as a control signal — a full
-     * line ends the walk, a disabled class ends the row.
-     *
-     * `decide` is called with the `acquisition` trigger, i.e. as a speculative
-     * arrival that respects `prefetch`. This path is subject to the policy in a
-     * way `fetchBlob` deliberately is not, so a pass working through forty
-     * thousand queued blobs stops at the budget instead of emptying the cloud
-     * onto the phone.
+     * The same sequence `pullBlob` runs — decide, transfer, record — reached
+     * from a background pass rather than from a round, so nothing here touches
+     * a watermark: a failure is the caller's to retry from its queue. This
+     * path is subject to the policy in a way `fetchBlob` deliberately is not,
+     * so a stale queue row above the ceiling is declined rather than fetched.
      */
     async acquireBlob(
       manifest: FileSyncManifest,
@@ -1398,10 +1275,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       let verdict: ResidencyVerdict | null = null;
       if (residency) {
         try {
-          // The queue is best-first, so displacement here swaps in the best
-          // blob the node is missing rather than whatever the change log
-          // reached next — which is the whole reason the round gives it up.
-          verdict = await residency.decide(candidate, "acquisition");
+          verdict = await residency.decide(candidate, "background");
         } catch (err) {
           console.warn(
             `[sync] residency decide failed while acquiring ${manifest.objectStorageKey}: ${(err as Error).message}`,
@@ -1410,17 +1284,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
         if (verdict.decision === "elide") {
           // Not an error and not a retry: the pass asked whether this node
-          // still wants these bytes and was told no. The reason is what says
-          // whether that is "not now" or "not ever".
+          // still wants these bytes and was told no.
           return { outcome: "declined", reason: verdict.reason };
-        }
-        try {
-          await residency.reserve?.(candidate, verdict);
-        } catch (err) {
-          console.warn(
-            `[sync] residency reserve failed while acquiring ${manifest.objectStorageKey}: ${(err as Error).message}`,
-          );
-          return { outcome: "failed", reason: null };
         }
       }
 
@@ -1432,10 +1297,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         "download",
         candidate.recordId,
       );
-      if (!ok) {
-        await releaseAcquisition(candidate);
-        return { outcome: "failed", reason: null };
-      }
+      if (!ok) return { outcome: "failed", reason: null };
 
       if (residency?.onLanded && verdict) {
         try {
@@ -1444,10 +1306,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           console.warn(
             `[sync] residency accounting failed while acquiring ${manifest.objectStorageKey}: ${(err as Error).message}`,
           );
-          // Same reasoning as the round's pull: bytes on disk that no budget
-          // knows about are worse than a retry. The reservation goes too, or it
-          // charges the line forever for something nothing will claim.
-          await releaseAcquisition(candidate);
+          // Same reasoning as the round's pull: bytes on disk the index does
+          // not know about are worse than a retry.
           return { outcome: "failed", reason: null };
         }
       }
@@ -1948,17 +1808,6 @@ function outboundManifest(item: OutboundItem): FileSyncManifest | null {
 
 /**
  * Normalize a shared record into the shape the residency decision reads.
- *
- * Deliberately carries no size class: the sync engine must not learn what
- * `image-medium` is. The host's decider resolves the class from the record's
- * labels, so class names and maxima can move without touching the platform.
- *
- * `recencyAtMs` is left null here because capture time lives in the
- * per-category metadata table, not on the record row, and this function has
- * only the row. Null is the eviction order's "undated", which is a real answer
- * rather than a guess — inventing a date would be guessing with somebody's
- * photographs. A host that can do better (it has the metadata join) overrides
- * it in its decider.
  */
 export function blobCandidateForRecord(record: AnyRecord): BlobCandidate | null {
   if (!record.objectStorageKey) return null;
@@ -1969,9 +1818,10 @@ export function blobCandidateForRecord(record: AnyRecord): BlobCandidate | null 
     type: record.type,
     parentId: record.parentId,
     appId: null,
-    originAppId: record.originAppId,
-    recencyAtMs: null,
-    lastOpenedAtMs: null,
+    // Columns, so the ceiling decision needs no second read — see
+    // `ceilingPlacement` in protocol-primitives.
+    standInRole: record.standInRole ?? null,
+    fidelity: record.fidelity ?? null,
   };
 }
 
@@ -1986,16 +1836,13 @@ export function blobCandidateForRecord(record: AnyRecord): BlobCandidate | null 
  * ## Two known weaknesses, so nobody has to rediscover them
  *
  * `recordId` is the object storage key, because a manifest has no record id.
- * The resident-set row that results is therefore filed under a name
- * `entriesOfRecord(realRecordId)` will never match, so pinning or opening that
- * record will not reach it.
  *
  * `type` is derived from a MIME type, which is a *different vocabulary* from a
  * Starkeep type id even though the two coincide for the common cases —
  * `image/jpeg` reads identically as both. {@link starkeepTypeForMimeType}
  * converts explicitly rather than relying on that coincidence, because the
  * coincidence is one respec away from ending and the failure would be silent:
- * an original charged to the wrong platform budget.
+ * an original decided under the wrong type.
  *
  * **A caller holding the record row should pass the real candidate**, which
  * fixes both. `MobileNode.fetchBlob` does.
@@ -2008,9 +1855,6 @@ function candidateForManifest(manifest: FileSyncManifest): BlobCandidate {
     type: starkeepTypeForMimeType(manifest.mimeType),
     parentId: null,
     appId: null,
-    originAppId: null,
-    recencyAtMs: null,
-    lastOpenedAtMs: null,
   };
 }
 
@@ -2025,10 +1869,8 @@ function candidateForManifest(manifest: FileSyncManifest): BlobCandidate {
  * right answer for the wrong reason.
  *
  * Where the top level is not a Starkeep category (`application/pdf`,
- * `text/csv`), this returns null rather than guessing. Null reads as "unknown"
- * and lands the bytes in `starkeep:original:other`, which is exactly where
- * `typeCategory` was sending them anyway — but now because this function said
- * so, rather than because a fallback in a different module happened to.
+ * `text/csv`), this returns null rather than guessing. Null reads as
+ * "unknown", and the node keeps the bytes.
  */
 function starkeepTypeForMimeType(mimeType: string | undefined): string | null {
   if (!mimeType) return null;
@@ -2052,11 +1894,6 @@ function candidateForAppRow(entry: AppSyncableRowEntry): BlobCandidate | null {
     type: null,
     parentId: null,
     appId: entry.appId,
-    // Same app either way for an app-syncable row, but `appId` is what the
-    // namespace is taken from — this is only here to keep the shape total.
-    originAppId: entry.appId,
-    recencyAtMs: null,
-    lastOpenedAtMs: null,
   };
 }
 

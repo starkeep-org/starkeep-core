@@ -15,91 +15,29 @@ import type {
   BlobCandidate,
   ResidencyTrigger,
   ResidencyVerdict,
-  ResolvedSizeClass,
 } from "./residency-policy.js";
 import type { StreamTruncation } from "./round-cut.js";
 
 /**
  * The fetch-time residency decision. Async because a real implementation reads
- * the node's byte accounting and the record's labels.
+ * the node's pins and, on the cloud node, the record's labels.
  *
- * `trigger` names what is asking, because two of the policy's rules turn on it
- * and a decider that could not tell a round from a background pass would have
- * to apply the same one to both. See {@link ResidencyTrigger}: a round may not
- * displace already-held bytes, and only a direct request ignores `prefetch`.
- *
- * Passed as an argument rather than split into two hooks because it is a
- * property of the *occasion*, not an authority the caller is claiming — the one
- * thing this codebase does insist on naming at the call site is the right to
- * bypass the policy, and none of these three do.
+ * `trigger` names what is asking, because only a direct request lands a file
+ * above the node's ceiling. See {@link ResidencyTrigger}.
  */
 export type ResidencyDecider = (
   candidate: BlobCandidate,
   trigger: ResidencyTrigger,
 ) => Promise<ResidencyVerdict> | ResidencyVerdict;
 
-/**
- * The decision and the accounting that follows from it, together — because a
- * budget that isn't updated when bytes land is a budget that never binds. The
- * two were split in an earlier draft and the split let a node decide "yes,
- * room for this" forever.
- */
+/** The decision, and the record of what landed. */
 export interface ResidencyHooks {
   decide: ResidencyDecider;
   /**
    * Called after a blob has actually landed locally, not when it was decided
-   * on. A transfer that fails must not move the byte accounting, or the node
-   * slowly convinces itself it is full of things it doesn't have.
+   * on, so the node's record of what it holds describes the disk.
    */
   onLanded?(candidate: BlobCandidate, verdict: ResidencyVerdict): void | Promise<void>;
-  /**
-   * Charge the budget for bytes a `fetch` verdict is about to pull, before they
-   * arrive; `release` undoes it when they do not.
-   *
-   * The pair exists for one situation and is a no-op everywhere else: several
-   * engines sharing one host's byte accounting. The supervisor hands the same
-   * hooks to the Drive engine and to every per-app engine, each with its own
-   * timer, so two ticking at once each read the usage, each see room for a
-   * 400 MB video, and each land it. Within a single engine the inbound loop is
-   * sequential and no reservation is needed — which is why this is optional and
-   * why a host without the problem can leave both out.
-   */
-  reserve?(candidate: BlobCandidate, verdict: ResidencyVerdict): void | Promise<void>;
-  release?(objectStorageKey: string): void | Promise<void>;
-  /**
-   * Which size class this candidate belongs to, without deciding anything.
-   *
-   * Exists for {@link SyncEngine.fetchBlob}, which must charge an arrival to the
-   * right budget while **not** consulting {@link decide} — the fetch answers a
-   * direct request, and asking the decider would let a policy refuse a photo
-   * somebody just opened, or record a second decision that never happened.
-   *
-   * Resolving the class is the host's job either way: the sync engine must not
-   * learn what `image-medium` is.
-   */
-  classOf?(
-    candidate: BlobCandidate,
-  ): Promise<ResolvedSizeClass | null> | ResolvedSizeClass | null;
-  /**
-   * Write down a blob this round wanted and could not take, so something can
-   * come back for it.
-   *
-   * Called for exactly one verdict — `elide` with `budget-exhausted` — and the
-   * narrowness is the point. The other elide reasons are standing refusals:
-   * `not-prefetched` classes exist *precisely* so they are not acquired
-   * speculatively, and queueing them would make `prefetch: false` mean nothing;
-   * `class-disabled` and `record-constraint` are the node saying no rather than
-   * saying not now.
-   *
-   * A round that defers keeps its own behaviour otherwise: the blob is still
-   * elided, the watermark still advances. What changes is that the record is no
-   * longer only reachable through a user tapping it — which is what made a
-   * budget on a phone a one-way door.
-   *
-   * Optional, and a host without a queue simply omits it. It must also never be
-   * allowed to fail a round: see the call site in `pullBlob`.
-   */
-  defer?(candidate: BlobCandidate, verdict: ResidencyVerdict): void | Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -447,10 +385,10 @@ export interface SyncExchangeResponse {
    * handset — and it is the one place the "every node is just a peer" symmetry
    * is not true today. It must not be allowed to leak: concluding "the photo is
    * safe on that node" from a watermark would be wrong the first time a node
-   * with a retention budget answers a pull.
+   * with a sync-down ceiling answers a pull.
    *
    * `durability.ts` states the same rule from the consuming side and refuses to
-   * accept a watermark as evidence of a blob anywhere in the eviction path —
+   * accept a watermark as evidence of a blob anywhere in "Free up space" —
    * the path where being wrong destroys data. This is the reporting side of
    * that rule. Blob presence is a **per-object** fact: ask
    * `assessDurability` for proof, or `shared_object_availability` for what a
@@ -586,15 +524,11 @@ export interface FileSyncEngine {
    *
    * This exists because eliding **advances the watermark**: the peer will not
    * re-ship the record, so nothing in a sync round will ever bring those bytes
-   * down again. Without an explicit path, `prefetch: false` would mean "never",
-   * and raising a budget would not backfill anything.
+   * down again. Without an explicit path, a file above the ceiling could never
+   * be opened.
    *
    * Deliberately bypasses `decideResidency` — it is the answer to a direct
-   * request ("the user opened this photo"), not a policy question. Byte
-   * accounting still sees the arrival, so an on-demand fetch can push a class
-   * over budget and be evicted later; that is the intended shape, because
-   * refusing to show someone their own photo to stay under a cache budget is
-   * not a defensible behaviour.
+   * request ("the user opened this photo"), not a policy question.
    */
   fetchBlobOnDemand(
     manifest: FileSyncManifest,
@@ -833,9 +767,8 @@ export interface SyncEngine {
    * The reversal half of eliding, and the reason eliding is safe at all. An
    * elided record **advances the watermark** — that is what makes it a terminal
    * state rather than a permanent retry — so the peer will never offer those
-   * bytes again and no sync round can bring them back. Without this,
-   * `prefetch: false` would mean "never", and raising a budget would backfill
-   * nothing.
+   * bytes again and no sync round can bring them back. Without this, a file
+   * above the ceiling could never be opened.
    *
    * On the engine rather than on `FileSyncEngine` for two reasons. It saves
    * every caller from re-deriving which storage is local and which is remote,
@@ -844,11 +777,8 @@ export interface SyncEngine {
    * joins that transfer instead of racing it.
    *
    * Deliberately bypasses the residency decision: this is the answer to a direct
-   * request ("the user opened this photo"), not a policy question. Byte
-   * accounting still sees the arrival, so an on-demand fetch can push a class
-   * over budget and be evicted later — the intended shape, because refusing to
-   * show someone their own photo to stay under a cache budget is not a
-   * defensible behaviour.
+   * request ("the user opened this photo"), not a policy question. The node
+   * still records the arrival, so it knows what it holds.
    */
   fetchBlob(manifest: FileSyncManifest, candidate?: BlobCandidate): Promise<boolean>;
 
@@ -860,19 +790,18 @@ export interface SyncEngine {
    * rather than a flag on it. `fetchBlob` answers a direct request ("the user
    * opened this photo") and bypasses the residency decision on purpose; this
    * answers a background pass working through a queue, and the decision is
-   * exactly what it must respect — a pass that ignored the budget would fetch
-   * the whole library back the moment the queue existed.
+   * exactly what it must respect — a pass that ignored the ceiling would fetch
+   * every original back onto the node.
    *
    * Passing the difference as a boolean would put those two authorities on the
    * same call, which is the mistake `file-sync-engine.ts` already names: the
    * right to override a policy is named at the call site, never handed over as
    * an argument.
    *
-   * Three outcomes, and the middle one is what makes a pass cheap:
-   *   - `"landed"`   — the bytes are here and charged to their budget.
-   *   - `"declined"` — the policy said no. The verdict's reason rides on
-   *     {@link AcquireResult.reason}, because `budget-exhausted` means "stop
-   *     walking this line" while `class-disabled` means "drop this row".
+   * Three outcomes:
+   *   - `"landed"`   — the bytes are here.
+   *   - `"declined"` — the policy said no, and the verdict's reason rides on
+   *     {@link AcquireResult.reason}. The queue drops the row.
    *   - `"failed"`   — wanted, and did not arrive. The queue row stays and the
    *     next tick retries; this is the retry path a watermark that has already
    *     advanced cannot provide.
@@ -889,8 +818,7 @@ export interface SyncEngine {
 export interface AcquireResult {
   readonly outcome: "landed" | "declined" | "failed";
   /**
-   * The verdict's reason when the policy declined, so the caller can tell
-   * "this line is full" from "this node will never want this".
+   * The verdict's reason when the policy declined.
    *
    * Null on `landed` and on `failed` — a transfer that did not happen has no
    * policy reason attached, and inventing one would let a network fault read as
@@ -1075,10 +1003,7 @@ export interface SyncEngineOptions {
    *
    * Omitting this preserves the pre-residency behaviour exactly: every blob is
    * wanted, and a missing one is a failure that holds the watermark. That is
-   * the right default for the cloud node and for any node that has not been
-   * given a retention policy, because the failure mode of over-fetching is a
-   * full disk and the failure mode of under-fetching is data that quietly
-   * isn't anywhere.
+   * the right default for the cloud node, which holds everything.
    *
    * Fetch-time only. It cannot stop an *outbound* push, so a constraint that
    * must hold cloud-side (`starkeep/no-cloud`) needs a server-side refusal as

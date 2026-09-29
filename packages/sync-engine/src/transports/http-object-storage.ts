@@ -459,7 +459,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
    * did not.
    *
    * The immediate consequence was mild — `runTransfer` re-uploads on a false,
-   * which is the safe direction — but `has()` is also what an eviction pass
+   * which is the safe direction — but `has()` is also what "Free up space"
    * would reach for to ask "is it safe to drop my copy?", and there a 403
    * reading as absence is the wrong answer in the direction that destroys data.
    * (`assessDurability` deliberately uses `stat()` and treats a throw as

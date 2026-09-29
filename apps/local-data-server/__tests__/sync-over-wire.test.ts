@@ -40,6 +40,22 @@ import {
 
 const PAGE_LIMIT = 5;
 
+/**
+ * A record in a category the sync-down ceiling does not govern.
+ *
+ * This suite is about replication itself — every blob reaching every node.
+ * Image, video and audio originals no longer do that by design: a node
+ * receives them only on demand, and receives their stand-ins up to its
+ * ceiling. `stand-ins-sync.test.ts` covers that behaviour; here a document
+ * keeps the question this suite asks unchanged.
+ */
+function createGenericRecord(
+  app: InstalledApp,
+  options: Parameters<typeof createRecordWithBytes>[1] = {},
+): ReturnType<typeof createRecordWithBytes> {
+  return createRecordWithBytes(app, { type: "document/pdf", contentType: "application/pdf", ...options });
+}
+
 let cloud: FakeCloud;
 let serverA: LocalDataServer;
 let serverB: LocalDataServer;
@@ -126,7 +142,7 @@ describe("shared records across the wire", () => {
   it("a record created on A arrives on B with its blob resident, kicking B's /events", { timeout: 30_000 }, async () => {
     const sseB = openSse(`${serverB.url}/events`);
     try {
-      const { record } = await createRecordWithBytes(driveA, {
+      const { record } = await createGenericRecord(driveA, {
         bytes: "wire-bytes-1",
         fileName: "wire-1.jpg",
       });
@@ -188,7 +204,7 @@ describe("shared records across the wire", () => {
     cloud.clearExchangeLog();
     const created: string[] = [];
     for (let i = 0; i < count; i++) {
-      const { record } = await createRecordWithBytes(driveA, {
+      const { record } = await createGenericRecord(driveA, {
         bytes: `page-bytes-${i}`,
         fileName: `page-${i}.jpg`,
       });
@@ -252,8 +268,8 @@ describe("two nodes producing the same file", () => {
     const fileName = "collision.jpg";
 
     // Independently, with no sync in between — the race the bug needs.
-    const { record: onA } = await createRecordWithBytes(driveA, { bytes, fileName });
-    const { record: onB } = await createRecordWithBytes(driveB, { bytes, fileName });
+    const { record: onA } = await createGenericRecord(driveA, { bytes, fileName });
+    const { record: onB } = await createGenericRecord(driveB, { bytes, fileName });
 
     // Same file, same id, without either node having heard of the other. This
     // is the property the whole fix rests on; everything below is what it buys.
@@ -282,7 +298,7 @@ describe("two nodes producing the same file", () => {
     // The collision's cost was never the one record — it was that every later
     // round died at the same place. A record created after the collision has to
     // still cross the wire.
-    const { record } = await createRecordWithBytes(driveA, {
+    const { record } = await createGenericRecord(driveA, {
       bytes: "after-the-collision",
       fileName: "after-collision.jpg",
     });
@@ -311,22 +327,22 @@ describe("two nodes producing the same file", () => {
     const derivedBytes = "one-rendition-either-way";
     const derivedName = "thumb_copy.jpg";
 
-    const { record: copyOne } = await createRecordWithBytes(driveA, {
+    const { record: copyOne } = await createGenericRecord(driveA, {
       bytes: originalBytes,
       fileName: "copy-one.jpg",
     });
-    const { record: copyTwo } = await createRecordWithBytes(driveA, {
+    const { record: copyTwo } = await createGenericRecord(driveA, {
       bytes: originalBytes,
       fileName: "copy-two.jpg",
     });
     expect(copyTwo.id).not.toBe(copyOne.id);
 
-    const { record: fromOne } = await createRecordWithBytes(driveA, {
+    const { record: fromOne } = await createGenericRecord(driveA, {
       bytes: derivedBytes,
       fileName: derivedName,
       parentId: copyOne.id,
     });
-    const { record: fromTwo } = await createRecordWithBytes(driveA, {
+    const { record: fromTwo } = await createGenericRecord(driveA, {
       bytes: derivedBytes,
       fileName: derivedName,
       parentId: copyTwo.id,
@@ -368,7 +384,7 @@ describe("two nodes producing the same file", () => {
    * because the parent id does.
    */
   it("still converges when two nodes derive one rendition from one parent", { timeout: 30_000 }, async () => {
-    const { record: parent } = await createRecordWithBytes(driveA, {
+    const { record: parent } = await createGenericRecord(driveA, {
       bytes: "the-shared-original",
       fileName: "shared-original.jpg",
     });
@@ -376,12 +392,12 @@ describe("two nodes producing the same file", () => {
 
     const derived = "the-same-rendition";
     const derivedName = "thumb_shared-original.jpg";
-    const { record: onA } = await createRecordWithBytes(driveA, {
+    const { record: onA } = await createGenericRecord(driveA, {
       bytes: derived,
       fileName: derivedName,
       parentId: parent.id,
     });
-    const { record: onB } = await createRecordWithBytes(driveB, {
+    const { record: onB } = await createGenericRecord(driveB, {
       bytes: derived,
       fileName: derivedName,
       parentId: parent.id,
@@ -496,7 +512,7 @@ describe("app-specific files across the wire", () => {
 
 describe("blob staging across the wire", () => {
   it("a one-shot blob failure stages the record on B and the next round repairs it", async () => {
-    const { record } = await createRecordWithBytes(driveA, {
+    const { record } = await createGenericRecord(driveA, {
       bytes: "staged-bytes",
       fileName: "staged.jpg",
     });
@@ -570,7 +586,7 @@ describe("verification and repair across the wire", () => {
     // to reach the SQLite state store and come back out on the next tick.
     const created = [];
     for (let i = 0; i < 3; i += 1) {
-      const { record } = await createRecordWithBytes(driveA, {
+      const { record } = await createGenericRecord(driveA, {
         bytes: `verify-bytes-${i}`,
         fileName: `verify-${i}.jpg`,
       });
@@ -645,7 +661,7 @@ describe("restart durability", () => {
     ).toEqual([]);
 
     // And new writes still converge after the restart.
-    const { record } = await createRecordWithBytes(driveA, {
+    const { record } = await createGenericRecord(driveA, {
       bytes: "post-restart-bytes",
       fileName: "post-restart.jpg",
     });
