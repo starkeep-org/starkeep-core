@@ -211,8 +211,8 @@ describe("a node at the phone's ceiling", () => {
     await serverC?.stop();
   });
 
-  // No stand-in can replace either, so every node keeps both.
-  it("keeps a derived record and a document, whatever its ceiling", async () => {
+  // No stand-in can replace any of these, so every node keeps them.
+  it("keeps a derived record, a document and an audio file, whatever its ceiling", async () => {
     const f = await family(driveA);
     const poster = await create(driveA, {
       type: "image/webp",
@@ -227,9 +227,16 @@ describe("a node at the phone's ceiling", () => {
       fileName: `doc-${Math.random()}.pdf`,
       sizeBytes: BIG,
     });
+    const song = await create(driveA, {
+      type: "audio/mp3",
+      contentType: "audio/mpeg",
+      fileName: `song-${Math.random()}.mp3`,
+      sizeBytes: BIG,
+    });
     await converge([driveA, driveC]);
     expect(await holds(serverC, driveC, poster)).toBe(true);
     expect(await holds(serverC, driveC, pdf)).toBe(true);
+    expect(await holds(serverC, driveC, song)).toBe(true);
     expect((await placements(driveC, f.original))[2560]).toBe("cloud");
   }, 60_000);
 
@@ -311,11 +318,10 @@ describe("the ceiling routes", () => {
     const res = await fetch(`${serverB.url}/residency/stand-ins`);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
-      nodeKind: "desktop",
-      ceilings: { image: 2560, video: null, audio: null },
-      defaults: { phone: { image: 1280 }, desktop: { image: 2560 } },
+      ceilings: { image: 2560, video: null },
+      defaults: { image: 2560, video: null },
       standardSizes: { image: [320, 640, 1280, 2560] },
-      canonicalThresholds: { image: 4272, video: 1920, audio: 128 },
+      canonicalThresholds: { image: 4272, video: 1920 },
       keepOriginals: false,
     });
   });
@@ -336,11 +342,13 @@ describe("the ceiling routes", () => {
     const res = await fetch(`${serverB.url}/residency/stand-ins`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ceilings: { image: -3, model3d: 5 }, nodeKind: "fridge", keepOriginals: "yes" }),
+      // Audio is not a stand-in category, so it has no ceiling to set.
+      body: JSON.stringify({ ceilings: { image: -3, audio: 128 }, keepOriginals: "yes" }),
     });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { problems: string[] };
-    expect(body.problems).toHaveLength(4);
+    expect(body.problems).toHaveLength(3);
+    expect(body.problems.join("\n")).toMatch(/audio is not a stand-in category/);
   });
 });
 

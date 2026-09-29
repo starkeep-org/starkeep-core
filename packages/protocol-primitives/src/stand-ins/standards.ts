@@ -32,8 +32,15 @@
 
 import type { Category } from "../types/core-types.js";
 
-/** The media categories that support stand-ins. */
-export const STAND_IN_CATEGORIES = ["image", "video", "audio"] as const;
+/**
+ * The media categories that support stand-ins.
+ *
+ * Audio is not one, though a stand-in could replace an audio file in
+ * principle: no app derives audio stand-ins, and a category with standards but
+ * no deriver would keep every audio file off every node with nothing to stand
+ * in for it. Audio returns here together with the app that fills it.
+ */
+export const STAND_IN_CATEGORIES = ["image", "video"] as const;
 
 export type StandInCategory = (typeof STAND_IN_CATEGORIES)[number];
 
@@ -45,11 +52,9 @@ export function isStandInCategory(category: Category | string): category is Stan
  * What a category's fidelity value measures.
  *
  * Images and video use the long edge rather than a vertical resolution, so a
- * portrait 1080p clip and a landscape one rank the same. Audio uses the
- * nominal bitrate, which is the whole of an Opus file's fidelity once the
- * codec is fixed.
+ * portrait 1080p clip and a landscape one rank the same.
  */
-export type FidelityAxis = "long-edge-px" | "bitrate-kbps";
+export type FidelityAxis = "long-edge-px";
 
 /** The minimum encoder setting, on the codec's own scale. */
 export interface MinimumQuality {
@@ -66,10 +71,10 @@ export interface CategoryStandards {
   /**
    * The Starkeep types a stand-in in this category may take. One codec per
    * category, because quality settings and bitrates do not compare across
-   * codecs: 64 kbps Opus sounds about as good as 128 kbps MP3.
+   * codecs: AVIF at quality 60 and JPEG at quality 60 are different pictures.
    */
   readonly allowedTypes: readonly string[];
-  /** Null where the fidelity axis already is the quality (audio bitrate). */
+  /** Null when the category sets no minimum. */
   readonly minimumQuality: MinimumQuality | null;
   /**
    * The fidelity of the canonical stand-in, and the line between an original
@@ -129,30 +134,19 @@ export const DEFAULT_STAND_IN_STANDARDS: StandInStandards = {
     sizeFloorBytes: ARCHIVE_SIZE_FLOOR_BYTES,
     selfCanonicalAllowed: false,
   },
-  audio: {
-    category: "audio",
-    fidelityAxis: "bitrate-kbps",
-    allowedTypes: ["audio/opus"],
-    minimumQuality: null,
-    canonicalThreshold: 128,
-    standardSizes: [64],
-    sizeFloorBytes: ARCHIVE_SIZE_FLOOR_BYTES,
-    selfCanonicalAllowed: true,
-  },
 };
 
 /**
  * The MIME type each allowed stand-in type is served as.
  *
  * A stand-in's record usually carries the MIME its writer sent, and this is the
- * fallback when it does not. `<video>` and `<audio>` refuse bytes served as
+ * fallback when it does not. `<video>` refuses bytes served as
  * `application/octet-stream`, so the fallback has to be right rather than
  * generic.
  */
 export const STAND_IN_MIME_TYPES: Readonly<Record<string, string>> = {
   "image/avif": "image/avif",
   "video/webm": "video/webm",
-  "audio/opus": "audio/ogg; codecs=opus",
 };
 
 /** The kinds of node that carry a default sync-down ceiling. */
@@ -167,13 +161,13 @@ export type SyncDownCeilings = Readonly<Record<StandInCategory, number | null>>;
 
 /**
  * A phone screen rarely benefits from more than 1280 pixels, and a desktop
- * fullscreen view needs 2560. Neither kind of node receives video or audio
- * stand-ins by default; a video's poster frame is a derived record rather than
+ * fullscreen view needs 2560. Neither kind of node receives video stand-ins
+ * by default; a video's poster frame is a derived record rather than
  * a stand-in, so it syncs regardless.
  */
 export const DEFAULT_SYNC_DOWN_CEILINGS: Readonly<Record<NodeKind, SyncDownCeilings>> = {
-  phone: { image: 1280, video: null, audio: null },
-  desktop: { image: 2560, video: null, audio: null },
+  phone: { image: 1280, video: null },
+  desktop: { image: 2560, video: null },
 };
 
 /**

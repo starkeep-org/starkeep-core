@@ -54,7 +54,7 @@ export interface RecordResidencyState {
  * `decide` distinguishes the ways a blob can be missing. Without it every
  * blobless row reads as `staged`, i.e. "still owed". It is **re-evaluated**
  * rather than stored, matching the sync engine's no-persisted-status design:
- * elided-ness is a function of the node's current ceiling and pins, so raising
+ * elided-ness is a function of the node's current ceiling, so raising
  * a ceiling makes a record staged again on its own, with no migration and no
  * stale flag.
  *

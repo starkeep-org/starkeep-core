@@ -3,8 +3,8 @@
  *
  * A sync round decides each blob as the change log offers it, and an elided
  * blob advances the watermark, so no round offers it again. Some of those
- * blobs become wanted later: the person raises this node's ceiling, pins a
- * record, or the bytes go missing locally. The catalogue scan writes those
+ * blobs become wanted later: the person raises this node's ceiling, turns on
+ * "Keep originals here", or the bytes go missing locally. The catalogue scan writes those
  * down (`scanForAcquirable`), and this pass fetches them, oldest first, until
  * the tick's byte cap runs out.
  *

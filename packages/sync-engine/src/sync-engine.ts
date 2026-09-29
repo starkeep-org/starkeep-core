@@ -757,7 +757,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         let verdict: ResidencyVerdict | null = null;
         if (residency && candidate) {
           // Both residency hooks are caught, because both are *host callbacks
-          // doing real I/O* — `decide` runs a label query plus a pin lookup,
+          // doing real I/O* — `decide` runs a label query on the cloud node,
           // `onLanded` writes a row — and they were the one fallible operation
           // in this file with no catch. Every comparable one is folded into the
           // contiguous-prefix rule instead: `scanSince`, `bucketDigest`, the

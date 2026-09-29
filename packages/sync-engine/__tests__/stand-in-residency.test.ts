@@ -50,7 +50,7 @@ const hashOf = (b: Buffer) => createHash("sha256").update(b as unknown as Uint8A
 const b64Of = (b: Buffer) => createHash("sha256").update(b as unknown as Uint8Array).digest("base64");
 
 describe("decideResidency", () => {
-  const base = { constraints: { deniedHere: false }, overrides: { pinned: false } };
+  const base = { constraints: { deniedHere: false } };
   it("fetches a file within the ceiling", () => {
     expect(decideResidency({ ...base, placement: "within" })).toMatchObject({
       decision: "fetch",
@@ -72,18 +72,10 @@ describe("decideResidency", () => {
     });
   });
 
-  it("lets a pin beat the ceiling, and a record constraint beat both", () => {
+  it("lets a record constraint beat the ceiling", () => {
     expect(
-      decideResidency({ ...base, placement: "above", overrides: { pinned: true } }),
-    ).toMatchObject({ decision: "fetch", reason: "pinned" });
-    expect(
-      decideResidency({
-        ...base,
-        placement: "keep",
-        constraints: { deniedHere: true },
-        overrides: { pinned: true },
-      }),
-    ).toMatchObject({ decision: "elide", reason: "record-constraint", pinned: true });
+      decideResidency({ ...base, placement: "keep", constraints: { deniedHere: true } }),
+    ).toMatchObject({ decision: "elide", reason: "record-constraint" });
   });
 });
 
@@ -101,7 +93,6 @@ describe("starkeep/no-cloud, evaluated against this node's identity", () => {
       databaseAdapter: adapter,
       localObjectStorage: new MockObjectStorageAdapter(),
       isCloudNode,
-      durability: { minimumReplicas: 1 },
       ceilings: DEFAULT_SYNC_DOWN_CEILINGS.desktop,
     });
   }
@@ -155,7 +146,6 @@ describe("a residency manager", () => {
       databaseAdapter: db,
       localObjectStorage: local,
       isCloudNode: false,
-      durability: { minimumReplicas: 1 },
       ceilings,
       ...(borrowsBytes ? { borrowsBytes } : {}),
       ...(keepOriginals === undefined ? {} : { keepOriginals }),
@@ -248,6 +238,15 @@ describe("a residency manager", () => {
 
   // No stand-in can replace either, so a phone with the tightest ceiling still
   // takes both, whatever their size.
+  it("applies changed ceilings to the next decision", async () => {
+    const { screen } = await family();
+    const candidate = blobCandidateForRecord(screen)!;
+    manager.setCeilings(DEFAULT_SYNC_DOWN_CEILINGS.phone);
+    expect((await manager.decide(candidate)).reason).toBe("above-ceiling");
+    manager.setCeilings(DEFAULT_SYNC_DOWN_CEILINGS.desktop);
+    expect((await manager.decide(candidate)).reason).toBe("within-ceiling");
+  });
+
   it("keeps a document and a derived record on every node", async () => {
     const phone = makeManager(DEFAULT_SYNC_DOWN_CEILINGS.phone);
     const pdf = await file({ type: "document/pdf", size: 64 * MB }, { here: false, cloud: true });
@@ -272,15 +271,6 @@ describe("a residency manager", () => {
     };
     expect(manager.ceilingOf(own)).toBe("keep");
     expect((await manager.decide(own)).reason).toBe("kept");
-  });
-
-  it("fetches a pinned original above the ceiling, and stops once unpinned", async () => {
-    const original = await file({ fidelity: 6000 }, { here: false, cloud: true });
-    const candidate = blobCandidateForRecord(original)!;
-    manager.setPinned(original.id, true);
-    expect(await manager.decide(candidate)).toMatchObject({ decision: "fetch", reason: "pinned" });
-    manager.setPinned(original.id, false);
-    expect((await manager.decide(candidate)).reason).toBe("above-ceiling");
   });
 
   describe("a node that keeps originals", () => {
@@ -357,12 +347,27 @@ describe("a residency manager", () => {
     });
 
     it("stops wanting a queued file once the node no longer wants it", async () => {
+      // One node's disk under two ceilings: the desktop's queues the 2560
+      // stand-in, and a lowered ceiling finds it unwanted and drops the row.
+      const localDb = new DatabaseSync(":memory:") as never;
+      const at = (ceilings: typeof DEFAULT_SYNC_DOWN_CEILINGS.desktop) =>
+        createResidencyManager({
+          localDb,
+          databaseAdapter: db,
+          localObjectStorage: local,
+          isCloudNode: false,
+          ceilings,
+        });
       const original = await file({ fidelity: 6000 }, { here: false, cloud: true });
-      manager.setPinned(original.id, true);
-      expect(await manager.considerForAcquisition(blobCandidateForRecord(original)!)).toBe("queued");
-      manager.setPinned(original.id, false);
-      expect(await manager.considerForAcquisition(blobCandidateForRecord(original)!)).toBe("unwanted");
-      expect(manager.deferredCandidates(10)).toEqual([]);
+      const screen = await file(
+        { type: "image/avif", parentId: original.id, standInRole: "smaller", fidelity: 2560 },
+        { here: false, cloud: true },
+      );
+      const candidate = blobCandidateForRecord(screen)!;
+      expect(await at(DEFAULT_SYNC_DOWN_CEILINGS.desktop).considerForAcquisition(candidate)).toBe("queued");
+      const lowered = at(DEFAULT_SYNC_DOWN_CEILINGS.phone);
+      expect(await lowered.considerForAcquisition(candidate)).toBe("unwanted");
+      expect(lowered.deferredCandidates(10)).toEqual([]);
     });
 
     it("wants a freed file again without forgetting that it was freed", async () => {
@@ -456,13 +461,6 @@ describe("a residency manager", () => {
       const report = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals-and-above-ceiling", probes });
       expect(report.eligibleBytes).toBe(0);
       expect(await local.has(own.objectStorageKey)).toBe(true);
-    });
-
-    it("keeps a pinned original", async () => {
-      const { original } = await family();
-      manager.setPinned(original.id, true);
-      const report = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals", probes });
-      expect(report.removed).toEqual([]);
     });
 
     it("frees an original this node wrote itself, which never passed through the index", async () => {
@@ -567,8 +565,7 @@ describe("a round and the acquisition pass, against a ceiling", () => {
         databaseAdapter: localDb,
         localObjectStorage: localStorage,
         isCloudNode: false,
-        durability: { minimumReplicas: 1 },
-        ceilings,
+          ceilings,
       });
       const engine = createSyncEngine({
         localDatabaseAdapter: localDb,

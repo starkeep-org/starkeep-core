@@ -127,8 +127,7 @@ function recordingHooks(decision: ResidencyVerdict["decision"]): ResidencyHooks 
       asked.push(candidate);
       return {
         decision,
-        pinned: false,
-        reason: decision === "fetch" ? "kept" : "above-ceiling",
+          reason: decision === "fetch" ? "kept" : "above-ceiling",
       };
     },
     onLanded: async (candidate) => {

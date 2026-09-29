@@ -31,8 +31,9 @@
  * restore state in one call. Our keys *are* the SHA-256, so a replica is
  * `confirmed` only when the store reports a checksum matching the record's
  * content hash. A merely-present object of the right size is
- * `present-unverified`: real evidence, but not proof, and by default it does
- * not count — see {@link DurabilityPolicy.countUnverified}.
+ * `present-unverified`: real evidence, but not proof, and it does not count.
+ * A node whose peers cannot report checksums refuses to let a file go rather
+ * than guess.
  *
  * ## Durable is not the same as readable
  *
@@ -77,50 +78,6 @@ export interface ReplicaReport {
   readonly detail?: string;
 }
 
-/**
- * The floor under {@link DurabilityPolicy.minimumReplicas}, and the reason this
- * module has one at all.
- *
- * The predicate is `counted >= policy.minimumReplicas`. At zero that is true for
- * every blob with **zero probes and zero evidence** — every deletion authorized,
- * no questions asked — and the number arrives from a JSON config file
- * (`starkeepConfig.minimumReplicas ?? 1`, passed straight through) where nothing
- * validated it. The field's own documentation says this number "is the only
- * thing that keeps that from being a data-loss feature", which is exactly the
- * kind of claim that should not depend on every caller remembering to clamp.
- *
- * Clamped here as well as where the config is read. Two places for one rule
- * looks redundant and is not: the config clamp is what tells an operator their
- * setting was refused, and this one is what holds when a caller is constructed
- * some other way — a test, a future host, a policy assembled in code.
- */
-export const MINIMUM_REPLICAS_FLOOR = 1;
-
-export interface DurabilityPolicy {
-  /**
-   * How many confirmed replicas elsewhere before this node may drop its copy.
-   * One is the minimum that is arithmetically defensible and still leaves no
-   * margin for a second failure; the plan's `no-cloud` mode is precisely the
-   * case where the operator should raise it.
-   *
-   * Values below {@link MINIMUM_REPLICAS_FLOOR} are raised to it rather than
-   * honoured. There is no coherent reading of "delete my only copy once zero
-   * other copies are confirmed".
-   */
-  readonly minimumReplicas: number;
-  /**
-   * Whether `present-unverified` replicas count toward the minimum.
-   *
-   * Default **false**, deliberately. The consequence is that a node whose
-   * peers cannot report checksums will refuse to evict rather than guess —
-   * which is the plan's stated stance ("a reduction that would evict originals
-   * must refuse rather than proceed, and say so"). Turning this on trades that
-   * refusal for a weaker guarantee, and it should be a decision someone makes
-   * on purpose.
-   */
-  readonly countUnverified?: boolean;
-}
-
 export interface DurabilityVerdict {
   /** True when this node may drop its copy. */
   readonly durable: boolean;
@@ -128,7 +85,6 @@ export interface DurabilityVerdict {
   /** Of the confirmed replicas, how many could be read right now. */
   readonly instantReplicas: number;
   readonly unverifiedReplicas: number;
-  readonly minimumRequired: number;
   /**
    * Set when any probe reported a checksum or size disagreement. This is not a
    * "not durable enough" condition — it is evidence that a copy somewhere is
@@ -147,7 +103,9 @@ export interface DurabilityQuery {
 }
 
 /**
- * Ask every probe about a key and decide whether this node may let go of it.
+ * Ask every probe about a key and decide whether this node may let go of it:
+ * yes when at least one replica is confirmed. On a phone or a desktop the one
+ * probe is the cloud, so this is "the cloud holds a verified copy".
  *
  * Probes are queried independently and a failure in one never masks another —
  * a thrown probe yields `probe-failed`, which counts as nothing rather than as
@@ -157,7 +115,6 @@ export interface DurabilityQuery {
 export async function assessDurability(
   query: DurabilityQuery,
   probes: readonly ReplicaProbe[],
-  policy: DurabilityPolicy,
 ): Promise<DurabilityVerdict> {
   const replicas = await Promise.all(
     probes.map((probe) => probeReplica(query, probe)),
@@ -169,28 +126,11 @@ export async function assessDurability(
     (r) => r.state === "checksum-mismatch" || r.state === "size-mismatch",
   );
 
-  const counted = confirmed.length + (policy.countUnverified ? unverified.length : 0);
-  // See MINIMUM_REPLICAS_FLOOR. A zero here makes `counted >= minimum` true for
-  // a blob nothing was asked about, which is the one arithmetic in this file
-  // that turns "fail closed" into "delete everything".
-  //
-  // Non-finite is checked explicitly rather than left to `Math.max`, which
-  // returns `NaN` for one. The verdict was still safe — every comparison against
-  // a NaN is false, so `durable` came out false — but safe *by accident*, in
-  // exactly the way the note above objects to: the guarantee emerged from
-  // arithmetic somewhere else rather than from the clamp that claims to provide
-  // it. And it was reported dishonestly, since `minimumRequired: NaN` tells a
-  // caller inspecting the verdict nothing about the threshold actually applied.
-  const minimumRequired = Number.isFinite(policy.minimumReplicas)
-    ? Math.max(policy.minimumReplicas, MINIMUM_REPLICAS_FLOOR)
-    : MINIMUM_REPLICAS_FLOOR;
-
   return {
-    durable: counted >= minimumRequired,
+    durable: confirmed.length >= 1,
     confirmedReplicas: confirmed.length,
     instantReplicas: confirmed.filter((r) => r.readableNow).length,
     unverifiedReplicas: unverified.length,
-    minimumRequired,
     corruptionSuspected,
     replicas,
   };

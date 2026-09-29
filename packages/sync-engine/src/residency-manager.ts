@@ -7,9 +7,6 @@
  *     into "denied here".
  *   - **This node's ceilings, and whether it keeps originals.** The person
  *     sets both per node.
- *   - **Pins.** Node-local, deliberately not a label: a pin shared as a label
- *     would let one device's preference silently rewrite every other device's
- *     residency.
  *
  * A node holds every file no stand-in can replace, every stand-in at or below
  * its ceiling, every original when it keeps originals, and whatever someone
@@ -29,14 +26,6 @@ import type {
   RawDatabase,
 } from "@starkeep/storage-adapter";
 import {
-  DummyDriver,
-  Kysely,
-  SqliteAdapter,
-  SqliteIntrospector,
-  SqliteQueryCompiler,
-  sql,
-} from "kysely";
-import {
   ceilingPlacement,
   standardsFor,
   DEFAULT_STAND_IN_STANDARDS,
@@ -46,7 +35,7 @@ import {
   type SyncDownCeilings,
 } from "@starkeep/protocol-primitives";
 import type { AcquisitionConsideration } from "./acquisition-scan.js";
-import type { DurabilityPolicy, ReplicaProbe } from "./durability.js";
+import type { ReplicaProbe } from "./durability.js";
 import { freeUpSpaceOn } from "./free-up-space.js";
 import {
   decideResidency,
@@ -79,7 +68,6 @@ export interface ResidencyManagerOptions {
    * entire point of the flag.
    */
   readonly isCloudNode: boolean;
-  readonly durability: DurabilityPolicy;
   /**
    * This node's sync-down ceilings — the largest fidelity per stand-in
    * category it receives without being asked. The local data server passes
@@ -168,8 +156,6 @@ export interface ResidencyManager {
   reconcile(): Promise<ReconcileReport>;
   /** Whether this node held these bytes and let them go. */
   wasEvicted(objectStorageKey: string): boolean;
-  isPinned(recordId: string): boolean;
-  setPinned(recordId: string, pinned: boolean): void;
   /** Bytes held per resident-set group. See {@link ResidentEntry.group}. */
   usageByGroup(): Record<string, number>;
   /**
@@ -182,19 +168,15 @@ export interface ResidencyManager {
   freeUpSpace(request: FreeUpSpaceRequest): Promise<FreeUpSpaceReport>;
   /** Where a candidate sits against this node's ceiling. */
   ceilingOf(candidate: BlobCandidate): CeilingPlacement;
+  /**
+   * Change this node's ceilings from now on. Removes nothing: a lowered ceiling
+   * only makes the files above it removable by "Free up space". A raised one
+   * reaches files earlier rounds declined through the next catalogue scan, so
+   * a host that changes ceilings restarts its scan.
+   */
+  setCeilings(next: SyncDownCeilings): void;
 }
 
-type DB = Record<string, Record<string, unknown>>;
-const qb = new Kysely<DB>({
-  dialect: {
-    createAdapter: () => new SqliteAdapter(),
-    createDriver: () => new DummyDriver(),
-    createIntrospector: (db) => new SqliteIntrospector(db),
-    createQueryCompiler: () => new SqliteQueryCompiler(),
-  },
-});
-
-const PINS_TABLE = "local_pins";
 
 export function createResidencyManager(options: ResidencyManagerOptions): ResidencyManager {
   const {
@@ -202,42 +184,13 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
     databaseAdapter,
     localObjectStorage,
     isCloudNode,
-    durability,
-    ceilings,
     keepOriginals = false,
     standards = DEFAULT_STAND_IN_STANDARDS,
   } = options;
 
   const index = createSqliteResidentSetIndex({ db: localDb });
 
-  // Pins live in their own table rather than on the resident-set row because a
-  // pin is meaningful *before* the bytes arrive — pinning is how you ask for
-  // something you don't have yet.
-  localDb.exec(
-    qb.schema
-      .createTable(PINS_TABLE)
-      .ifNotExists()
-      .addColumn("record_id", "text", (c) => c.primaryKey())
-      .addColumn("pinned_at_ms", "integer", (c) => c.notNull())
-      .compile().sql,
-  );
-  const pinInsert = localDb.prepare(
-    qb
-      .insertInto(PINS_TABLE)
-      .values({ record_id: sql.raw("?"), pinned_at_ms: sql.raw("?") })
-      .onConflict((oc) => oc.column("record_id").doNothing())
-      .compile().sql,
-  );
-  const pinDelete = localDb.prepare(
-    qb.deleteFrom(PINS_TABLE).where("record_id", "=", sql.raw("?")).compile().sql,
-  );
-  const pinGet = localDb.prepare(
-    qb.selectFrom(PINS_TABLE).select("record_id").where("record_id", "=", sql.raw("?")).compile().sql,
-  );
-
-  function isPinned(recordId: string): boolean {
-    return pinGet.get(recordId) !== undefined;
-  }
+  let ceilings: SyncDownCeilings = options.ceilings;
 
   /** App-syncable rows are an app's own files, which no stand-in replaces. */
   function ceilingOf(candidate: BlobCandidate): CeilingPlacement {
@@ -294,7 +247,6 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
   async function decide(candidate: BlobCandidate): Promise<ResidencyVerdict> {
     return decideResidency({
       constraints: { deniedHere: await deniedHere(candidate) },
-      overrides: { pinned: isPinned(candidate.recordId) },
       placement: ceilingOf(candidate),
     });
   }
@@ -302,8 +254,11 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
   return {
     index,
     decide,
-    isPinned,
     ceilingOf,
+
+    setCeilings(next) {
+      ceilings = next;
+    },
 
     async noteArrival(candidate) {
       index.add(arrivalOf(candidate));
@@ -348,11 +303,6 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
       return index.wasEvicted(objectStorageKey);
     },
 
-    setPinned(recordId, pinned) {
-      if (pinned) pinInsert.run(recordId, Date.now());
-      else pinDelete.run(recordId);
-    },
-
     usageByGroup() {
       return index.usageByGroup();
     },
@@ -362,11 +312,9 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
         {
           databaseAdapter,
           localObjectStorage,
-          durability,
           ceilingOf,
           standards,
           ...(options.borrowsBytes ? { borrowsBytes: options.borrowsBytes } : {}),
-          isPinned: async (recordId) => isPinned(recordId),
           noteRemoved: async (candidate) => {
             if (index.get(candidate.objectStorageKey) === null) index.add(arrivalOf(candidate));
             index.markDeparted(candidate.objectStorageKey);

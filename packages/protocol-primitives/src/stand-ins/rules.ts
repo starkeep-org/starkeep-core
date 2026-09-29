@@ -71,7 +71,7 @@ export function standardsFor(
  * - `archivable`: past the size floor, fidelity reported and above the
  *   threshold (or any fidelity, for video). Needs a canonical stand-in and
  *   archives once one exists in the cloud.
- * - `self-canonical`: an image or audio original at or below the threshold, or
+ * - `self-canonical`: an image original at or below the threshold, or
  *   at or below the size floor. Takes the canonical stand-in's place
  *   everywhere and never archives.
  * - `video-below-floor`: a video original too small to archive. Video is never
@@ -417,6 +417,13 @@ export interface StandInSummary {
   readonly top: number | null;
   /** Every size that exists or should exist, ascending. */
   readonly sizes: readonly StandInSize[];
+  /**
+   * Where the original's own bytes sit on the node that answered: `here` or
+   * `cloud`. A reader that must not download the original — a background
+   * sweep, say — can tell from this alone, since any read of a file the node
+   * lacks fetches it.
+   */
+  readonly originalPlacement: SizePlacement;
 }
 
 export interface SummaryStandIn extends StandInFacts {
@@ -474,6 +481,7 @@ export function summarizeStandIns(
     status,
     top,
     sizes: [...bySize.values()].sort((a, b) => a.fidelity - b.fidelity),
+    originalPlacement: placementOf(original),
   };
 }
 

@@ -76,7 +76,7 @@ describe("the default standards", () => {
   it("refuse an allowed type outside its category", () => {
     const broken: StandInStandards = {
       ...STD,
-      audio: { ...STD.audio, allowedTypes: ["video/webm"] },
+      video: { ...STD.video, allowedTypes: ["image/avif"] },
     };
     expect(validateStandInStandards(broken).join("\n")).toMatch(/outside the category/);
   });
@@ -94,8 +94,8 @@ describe("originalStatus", () => {
     ["video above the floor at 720p", { type: "video/mp4", fidelity: 1280 }, "archivable"],
     ["video below the floor", { type: "video/mov", fidelity: 1280, sizeBytes: SMALL }, "video-below-floor"],
     ["video with no fidelity", { type: "video/mp4", fidelity: null }, "fidelity-unknown"],
-    ["lossless audio", { type: "audio/flac", fidelity: 900 }, "archivable"],
-    ["128 kbps AAC", { type: "audio/aac", fidelity: 128 }, "self-canonical"],
+    // Audio has no stand-in standards, so it is an ordinary file like a document.
+    ["lossless audio", { type: "audio/flac", fidelity: 900 }, null],
     ["a document", { type: "document/pdf", fidelity: null }, null],
   ];
   for (const [name, over, expected] of cases) {
@@ -317,6 +317,13 @@ describe("summarizeStandIns", () => {
       [2560, "smaller", "missing"],
       [4272, "canonical", "cloud"],
     ]);
+  });
+
+  it("says where the original's own bytes sit", () => {
+    const o = original();
+    const onlyStandInsHere = (r: { id: string }) => (r.id === o.id ? "cloud" : "here");
+    expect(summarizeStandIns(o, [], STD, onlyStandInsHere)!.originalPlacement).toBe("cloud");
+    expect(summarizeStandIns(o, [], STD, here)!.originalPlacement).toBe("here");
   });
 
   it("lists a missing canonical stand-in at the expected fidelity", () => {
