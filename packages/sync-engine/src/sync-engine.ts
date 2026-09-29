@@ -766,7 +766,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           // transient SQLite error takes down the whole round rather than
           // holding one author's watermark for one tick.
           try {
-            verdict = await residency.decide(candidate, "background");
+            verdict = await residency.decide(candidate);
           } catch (err) {
             console.warn(
               `[sync] residency decide failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
@@ -1275,7 +1275,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       let verdict: ResidencyVerdict | null = null;
       if (residency) {
         try {
-          verdict = await residency.decide(candidate, "background");
+          verdict = await residency.decide(candidate);
         } catch (err) {
           console.warn(
             `[sync] residency decide failed while acquiring ${manifest.objectStorageKey}: ${(err as Error).message}`,

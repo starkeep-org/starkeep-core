@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 
 /**
- * Stand-ins on this machine: the sync-down ceilings, the backlog, and "Free up
- * space".
+ * Stand-ins on this machine: the sync-down ceilings, "Keep originals here",
+ * the backlog, and "Free up space".
  *
  * Photographs, videos and audio are the platform's stand-in categories. This
  * node receives every stand-in up to its ceiling, and every self-canonical
@@ -30,6 +30,9 @@ interface StandInsResponse {
   standardSizes: Record<Category, number[]>;
   canonicalThresholds: Record<Category, number>;
   heldBytes: Record<Category, { originals: number; standIns: number }>;
+  keepOriginals: boolean;
+  /** Every original in the library, per category, whether or not it is here. */
+  libraryOriginals: Record<Category, { count: number; bytes: number }>;
   backlog: Record<"missing-canonical" | "missing-fidelity", BacklogCount>;
   offline?: boolean;
   error?: string;
@@ -271,6 +274,15 @@ export function StandInsSection() {
         </div>
       </section>
 
+      <KeepOriginals
+        initial={state.keepOriginals}
+        toDownload={CATEGORIES.reduce(
+          (sum, c) =>
+            sum + Math.max(0, state.libraryOriginals[c].bytes - state.heldBytes[c].originals),
+          0,
+        )}
+      />
+
       <section className="space-y-2">
         <h3 className="text-sm font-medium">Backlog</h3>
         <p className="text-sm text-muted-foreground">
@@ -291,6 +303,80 @@ export function StandInsSection() {
 
       <FreeUpSpace />
     </div>
+  );
+}
+
+/**
+ * "Keep originals here": this machine receives every original, as a backup
+ * machine would, and "Free up space" leaves them. The estimate is the
+ * library's originals less what this machine already holds, so the person sees
+ * roughly what turning it on downloads before saving.
+ */
+function KeepOriginals({ initial, toDownload }: { initial: boolean; toDownload: number }) {
+  const [saved, setSaved] = useState(initial);
+  const [keep, setKeep] = useState(initial);
+  const [status, setStatus] = useState<"ready" | "saving" | "saved">("ready");
+  const [error, setError] = useState<string | null>(null);
+
+  const save = useCallback(async () => {
+    setStatus("saving");
+    setError(null);
+    try {
+      const res = await fetch("/api/residency/stand-ins", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keepOriginals: keep }),
+      });
+      const body = (await res.json()) as { problems?: string[]; error?: string };
+      if (!res.ok) {
+        setError((body.problems ?? [body.error ?? "Save failed"]).join(" "));
+        setStatus("ready");
+        return;
+      }
+      setSaved(keep);
+      setStatus("saved");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus("ready");
+    }
+  }, [keep]);
+
+  return (
+    <section className="space-y-3">
+      <h3 className="text-sm font-medium">Keep originals here</h3>
+      <p className="text-sm text-muted-foreground">
+        Turn this on for a machine that should hold every original, such as a backup machine.
+        This machine then receives every original, and &quot;Free up space&quot; leaves them.
+        Larger stand-ins still follow the ceilings.
+      </p>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={keep}
+          onChange={(e) => {
+            setKeep(e.target.checked);
+            setStatus("ready");
+          }}
+        />
+        <span>Keep every original on this machine</span>
+      </label>
+      {keep && !saved && (
+        <p className="text-sm" role="status">
+          About {formatBytes(toDownload)} of originals to download.
+        </p>
+      )}
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      <div className="flex items-center gap-3">
+        <Button size="sm" disabled={keep === saved || status === "saving"} onClick={() => void save()}>
+          {status === "saving" ? "Saving…" : "Save"}
+        </Button>
+        {status === "saved" && (
+          <span className="text-xs text-muted-foreground">
+            Saved. The data server restarts to apply it.
+          </span>
+        )}
+      </div>
+    </section>
   );
 }
 

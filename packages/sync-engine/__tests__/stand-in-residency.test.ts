@@ -40,7 +40,6 @@ import { runAcquisition } from "../src/acquisition.js";
 import {
   decideResidency,
   type BlobCandidate,
-  type ResidencyTrigger,
 } from "../src/residency-policy.js";
 import { blobCandidateForRecord } from "../src/sync-engine.js";
 import type { ReplicaProbe } from "../src/durability.js";
@@ -52,32 +51,24 @@ const b64Of = (b: Buffer) => createHash("sha256").update(b as unknown as Uint8Ar
 
 describe("decideResidency", () => {
   const base = { constraints: { deniedHere: false }, overrides: { pinned: false } };
-  const triggers: ResidencyTrigger[] = ["background", "request"];
-
-  for (const trigger of triggers) {
-    it(`fetches a file within the ceiling on a ${trigger} trigger`, () => {
-      expect(decideResidency({ ...base, trigger, placement: "within" })).toMatchObject({
-        decision: "fetch",
-        reason: "within-ceiling",
-      });
+  it("fetches a file within the ceiling", () => {
+    expect(decideResidency({ ...base, placement: "within" })).toMatchObject({
+      decision: "fetch",
+      reason: "within-ceiling",
     });
+  });
 
-    it(`fetches a file no stand-in can replace on a ${trigger} trigger`, () => {
-      expect(decideResidency({ ...base, trigger, placement: "keep" })).toMatchObject({
-        decision: "fetch",
-        reason: "kept",
-      });
+  it("fetches a file no stand-in can replace", () => {
+    expect(decideResidency({ ...base, placement: "keep" })).toMatchObject({
+      decision: "fetch",
+      reason: "kept",
     });
-  }
+  });
 
-  it("declines a file above the ceiling unless it is asked for", () => {
-    expect(decideResidency({ ...base, trigger: "background", placement: "above" })).toMatchObject({
+  it("declines a file above the ceiling", () => {
+    expect(decideResidency({ ...base, placement: "above" })).toMatchObject({
       decision: "elide",
       reason: "above-ceiling",
-    });
-    expect(decideResidency({ ...base, trigger: "request", placement: "above" })).toMatchObject({
-      decision: "fetch",
-      reason: "requested",
     });
   });
 
@@ -157,6 +148,7 @@ describe("a residency manager", () => {
   function makeManager(
     ceilings = DEFAULT_SYNC_DOWN_CEILINGS.desktop,
     borrowsBytes?: (key: string) => boolean,
+    keepOriginals?: boolean,
   ): ResidencyManager {
     return createResidencyManager({
       localDb: new DatabaseSync(":memory:") as never,
@@ -166,6 +158,7 @@ describe("a residency manager", () => {
       durability: { minimumReplicas: 1 },
       ceilings,
       ...(borrowsBytes ? { borrowsBytes } : {}),
+      ...(keepOriginals === undefined ? {} : { keepOriginals }),
     });
   }
 
@@ -288,6 +281,43 @@ describe("a residency manager", () => {
     expect(await manager.decide(candidate)).toMatchObject({ decision: "fetch", reason: "pinned" });
     manager.setPinned(original.id, false);
     expect((await manager.decide(candidate)).reason).toBe("above-ceiling");
+  });
+
+  describe("a node that keeps originals", () => {
+    beforeEach(() => {
+      manager = makeManager(DEFAULT_SYNC_DOWN_CEILINGS.phone, undefined, true);
+    });
+
+    it("receives every original, and still leaves stand-ins above the ceiling on demand", async () => {
+      const original = await file({ fidelity: 6000 }, { here: false, cloud: true });
+      const unmeasured = await file({ fidelity: null }, { here: false, cloud: true });
+      const canonical = await file(
+        { type: "image/avif", parentId: original.id, standInRole: "canonical", fidelity: 4272 },
+        { here: false, cloud: true },
+      );
+      for (const r of [original, unmeasured]) {
+        expect(await manager.decide(blobCandidateForRecord(r)!)).toMatchObject({
+          decision: "fetch",
+          reason: "within-ceiling",
+        });
+        expect(await manager.considerForAcquisition(blobCandidateForRecord(r)!)).toBe("queued");
+      }
+      expect((await manager.decide(blobCandidateForRecord(canonical)!)).reason).toBe("above-ceiling");
+    });
+
+    it("still counts originals as originals", async () => {
+      const { original } = await family();
+      expect(manager.index.get(original.objectStorageKey)?.group).toBe("original:image");
+    });
+
+    it("frees no original, and frees stand-ins above the ceiling in the wider scope", async () => {
+      const { original, canonical, screen, medium } = await family();
+      const narrow = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals", probes });
+      expect(narrow.eligibleBytes).toBe(0);
+      const wide = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals-and-above-ceiling", probes });
+      expect(wide.removed.map((r) => r.recordId).sort()).toEqual([canonical.id, screen.id].sort());
+      for (const r of [original, medium]) expect(await local.has(r.objectStorageKey)).toBe(true);
+    });
   });
 
   describe("the acquisition queue", () => {

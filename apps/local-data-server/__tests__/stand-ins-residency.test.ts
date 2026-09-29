@@ -1,13 +1,18 @@
 /**
  * Node residency for the stand-in categories, over real servers: what a node
- * receives against its sync-down ceiling, the ceiling routes, and "Free up
- * space".
+ * receives against its sync-down ceiling, what a read brings on demand, the
+ * ceiling routes, "Keep originals here", and "Free up space".
+ *
+ * Every presence check reads the disk or the listing. A file or content read
+ * would itself fetch the bytes it asks about.
  *
  * The fake cloud's file store reports no checksum, so no replica there can be
  * confirmed and "Free up space" can only refuse here. That is the direction
  * that matters over the wire — the removal path, with verified replicas, is
  * covered in the sync engine's `stand-in-residency.test.ts`.
  */
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   startLocalDataServer,
@@ -36,12 +41,24 @@ async function converge(apps: InstalledApp[] = [driveA, driveB]): Promise<void> 
   }
 }
 
-/** Whether a node holds a record's bytes, as opposed to merely its row. */
-async function hasBytes(app: InstalledApp, recordId: string): Promise<boolean> {
-  const res = await app.fetch(`/data/records/${recordId}/file-url`);
-  if (!res.ok) return false;
-  const { url } = (await res.json()) as { url: string };
-  return (await fetch(url)).status === 200;
+/** Whether a node holds a record's bytes on disk, as opposed to merely its row. */
+async function holds(server: LocalDataServer, app: InstalledApp, recordId: string): Promise<boolean> {
+  const res = await app.fetch(`/data/records/${recordId}`);
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as Record<string, unknown>;
+  const record = (body.record ?? body) as { objectStorageKey?: string; object_storage_key?: string };
+  const key = record.objectStorageKey ?? record.object_storage_key;
+  expect(key, JSON.stringify(body)).toBeTruthy();
+  return existsSync(join(server.starkeepDir, "objects", key!));
+}
+
+/** Where each of an original's sizes sits on a node, by fidelity, without fetching any. */
+async function placements(app: InstalledApp, original: string): Promise<Record<number, string>> {
+  const where = encodeURIComponent(JSON.stringify({ id: original }));
+  const res = await app.fetch(`/data/records?where=${where}`);
+  const sizes = ((await res.json()) as { records: Array<{ stand_ins: { sizes: Array<{ fidelity: number; placement: string }> } }> })
+    .records[0]!.stand_ins.sizes;
+  return Object.fromEntries(sizes.map((s) => [s.fidelity, s.placement]));
 }
 
 /** Wait for a self-restarting daemon to come back on the same port. */
@@ -113,14 +130,52 @@ describe("what a desktop receives against its ceiling", () => {
     await converge();
 
     // The rows arrive everywhere; the bytes follow the ceiling.
-    expect((await contentUrl(driveB, f.original, "1280")).body.available_here).toBe(true);
-    expect((await contentUrl(driveB, f.original, "2560")).body.available_here).toBe(true);
-    expect((await contentUrl(driveB, f.original, "canonical")).body.available_here).toBe(false);
+    expect(await placements(driveB, f.original)).toMatchObject({ 1280: "here", 2560: "here", 4272: "cloud" });
+    expect(await holds(serverB, driveB, f.original)).toBe(false);
+  });
+
+  // The Drive channel carries the bytes, as it does on the phone. A presigned
+  // S3 URL would answer 403: the person's own identity cannot read `shared/`.
+  it("brings an original here when something reads it, and keeps it", async () => {
+    const f = await family(driveA);
+    await converge();
+    expect(await holds(serverB, driveB, f.original)).toBe(false);
 
     const res = await driveB.fetch(`/data/records/${f.original}/file-url`);
-    // No cloud storage is configured on this node, so an original it does not
-    // hold has nowhere to be read from here.
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { url: string; source: string };
+    expect(body.source).toBe("local");
+    expect((await fetch(body.url)).status).toBe(200);
+    expect(await holds(serverB, driveB, f.original)).toBe(true);
+
+    // A later round leaves it where it is.
+    await converge();
+    expect(await holds(serverB, driveB, f.original)).toBe(true);
+  });
+
+  it("brings the canonical stand-in here when a content read asks for it", async () => {
+    const f = await family(driveA);
+    await converge();
+    const { status, body } = await contentUrl(driveB, f.original, "canonical");
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ record_id: f.canonical, available_here: true });
+    expect((await fetch(body.url as string)).status).toBe(200);
+    expect((await placements(driveB, f.original))[4272]).toBe("here");
+  });
+
+  it("brings missing files here for a batch read", async () => {
+    const a = await family(driveA);
+    const b = await family(driveA);
+    await converge();
+    const res = await driveB.fetch("/data/records/file-urls", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [a.original, b.original, a.medium] }),
+    });
+    expect(res.status).toBe(200);
+    const { urls } = (await res.json()) as { urls: Record<string, { url: string }> };
+    expect(Object.keys(urls).sort()).toEqual([a.original, b.original, a.medium].sort());
+    for (const id of [a.original, b.original]) expect(await holds(serverB, driveB, id)).toBe(true);
   });
 
   it("describes where each size sits on each node", async () => {
@@ -173,9 +228,9 @@ describe("a node at the phone's ceiling", () => {
       sizeBytes: BIG,
     });
     await converge([driveA, driveC]);
-    expect(await hasBytes(driveC, poster)).toBe(true);
-    expect(await hasBytes(driveC, pdf)).toBe(true);
-    expect((await contentUrl(driveC, f.original, "2560")).body.available_here).toBe(false);
+    expect(await holds(serverC, driveC, poster)).toBe(true);
+    expect(await holds(serverC, driveC, pdf)).toBe(true);
+    expect((await placements(driveC, f.original))[2560]).toBe("cloud");
   }, 60_000);
 
   // No round offers the 2560 again once the watermark is past it, so the
@@ -183,8 +238,7 @@ describe("a node at the phone's ceiling", () => {
   it("receives what a raised ceiling now covers", async () => {
     const f = await family(driveA);
     await converge([driveA, driveC]);
-    expect((await contentUrl(driveC, f.original, "1280")).body.available_here).toBe(true);
-    expect((await contentUrl(driveC, f.original, "2560")).body.available_here).toBe(false);
+    expect(await placements(driveC, f.original)).toMatchObject({ 1280: "here", 2560: "cloud" });
 
     const res = await fetch(`${serverC.url}/residency/stand-ins`, {
       method: "PUT",
@@ -196,9 +250,60 @@ describe("a node at the phone's ceiling", () => {
     driveC = await builtinAppCreds(serverC, "starkeep-drive");
 
     await converge([driveC]);
-    expect((await contentUrl(driveC, f.original, "2560")).body.available_here).toBe(true);
-    expect((await contentUrl(driveC, f.original, "canonical")).body.available_here).toBe(false);
+    expect(await placements(driveC, f.original)).toMatchObject({ 2560: "here", 4272: "cloud" });
   }, 120_000);
+});
+
+describe("a node that keeps originals", () => {
+  let serverD: LocalDataServer;
+  let driveD: InstalledApp;
+
+  beforeAll(async () => {
+    serverD = await startLocalDataServer({
+      config: { ...config, keepOriginals: true },
+      auth: { idToken: fakeIdToken() },
+    });
+    driveD = await builtinAppCreds(serverD, "starkeep-drive");
+  }, 60_000);
+
+  afterAll(async () => {
+    await serverD?.stop();
+  });
+
+  it("receives every original, and leaves the canonical stand-in on demand", async () => {
+    const f = await family(driveA);
+    const unmeasured = await create(driveA, {
+      type: "image/jpeg",
+      sizeBytes: BIG,
+      fileName: `unmeasured-${Math.random()}.jpg`,
+    });
+    await converge([driveA, driveD]);
+    expect(await holds(serverD, driveD, f.original)).toBe(true);
+    expect(await holds(serverD, driveD, unmeasured)).toBe(true);
+    expect(await placements(driveD, f.original)).toMatchObject({ 2560: "here", 4272: "cloud" });
+  }, 60_000);
+
+  it("frees no original", async () => {
+    const res = await fetch(`${serverD.url}/residency/free-up-space`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bytes: 1024 * 1024 * 1024, scope: "originals", dryRun: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ eligibleBytes: 0 });
+  });
+
+  it("reports the setting and what the library's originals weigh", async () => {
+    const res = await fetch(`${serverD.url}/residency/stand-ins`);
+    const body = (await res.json()) as {
+      keepOriginals: boolean;
+      libraryOriginals: Record<string, { count: number; bytes: number }>;
+    };
+    expect(body.keepOriginals).toBe(true);
+    expect(body.libraryOriginals.image!.count).toBeGreaterThanOrEqual(2);
+    expect(body.libraryOriginals.image!.bytes).toBeGreaterThanOrEqual(2 * BIG);
+    expect(body.libraryOriginals.video).toEqual({ count: 0, bytes: 0 });
+  });
 });
 
 describe("the ceiling routes", () => {
@@ -211,6 +316,7 @@ describe("the ceiling routes", () => {
       defaults: { phone: { image: 1280 }, desktop: { image: 2560 } },
       standardSizes: { image: [320, 640, 1280, 2560] },
       canonicalThresholds: { image: 4272, video: 1920, audio: 128 },
+      keepOriginals: false,
     });
   });
 
@@ -230,11 +336,11 @@ describe("the ceiling routes", () => {
     const res = await fetch(`${serverB.url}/residency/stand-ins`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ceilings: { image: -3, model3d: 5 }, nodeKind: "fridge" }),
+      body: JSON.stringify({ ceilings: { image: -3, model3d: 5 }, nodeKind: "fridge", keepOriginals: "yes" }),
     });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { problems: string[] };
-    expect(body.problems).toHaveLength(3);
+    expect(body.problems).toHaveLength(4);
   });
 });
 

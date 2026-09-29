@@ -5,13 +5,15 @@
  *   - **Which node this is.** `starkeep/no-cloud` forbids the cloud and says
  *     nothing about a laptop, so only the host can turn a record constraint
  *     into "denied here".
- *   - **This node's ceilings.** The person sets them per node.
+ *   - **This node's ceilings, and whether it keeps originals.** The person
+ *     sets both per node.
  *   - **Pins.** Node-local, deliberately not a label: a pin shared as a label
  *     would let one device's preference silently rewrite every other device's
  *     residency.
  *
  * A node holds every file no stand-in can replace, every stand-in at or below
- * its ceiling, and whatever someone asked for. It removes nothing on its own;
+ * its ceiling, every original when it keeps originals, and whatever someone
+ * asked for. It removes nothing on its own;
  * "Free up space" is the one path that removes a file.
  *
  * ## Why this lives in the sync engine rather than beside a server
@@ -49,7 +51,6 @@ import { freeUpSpaceOn } from "./free-up-space.js";
 import {
   decideResidency,
   type BlobCandidate,
-  type ResidencyTrigger,
   type ResidencyVerdict,
 } from "./residency-policy.js";
 import {
@@ -86,6 +87,13 @@ export interface ResidencyManagerOptions {
    * it, and the phone passes the phone row.
    */
   readonly ceilings: SyncDownCeilings;
+  /**
+   * Whether this node keeps every original, as a backup machine would. An
+   * original then sits within this node's ceiling whatever its fidelity: sync
+   * receives it, and "Free up space" leaves it. Stand-ins still follow the
+   * ceilings. Absent: originals are received only on demand.
+   */
+  readonly keepOriginals?: boolean;
   /** The stand-in standards the ceiling rule reads. Defaults to the platform's. */
   readonly standards?: StandInStandards;
   /**
@@ -139,7 +147,7 @@ export interface FreeUpSpaceReport {
 export interface ResidencyManager {
   readonly index: ResidentSetIndex;
   /** The fetch-time decision, ready to hand to `createSyncEngine`. */
-  decide(candidate: BlobCandidate, trigger?: ResidencyTrigger): Promise<ResidencyVerdict>;
+  decide(candidate: BlobCandidate): Promise<ResidencyVerdict>;
   /** Record that a blob landed. Called after a successful transfer. */
   noteArrival(candidate: BlobCandidate): Promise<void>;
   /** Record that this node's bytes for a key are gone. */
@@ -196,6 +204,7 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
     isCloudNode,
     durability,
     ceilings,
+    keepOriginals = false,
     standards = DEFAULT_STAND_IN_STANDARDS,
   } = options;
 
@@ -233,7 +242,7 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
   /** App-syncable rows are an app's own files, which no stand-in replaces. */
   function ceilingOf(candidate: BlobCandidate): CeilingPlacement {
     if (candidate.appId !== null || candidate.type === null) return "keep";
-    return ceilingPlacement(
+    const placement = ceilingPlacement(
       {
         type: candidate.type,
         parentId: candidate.parentId,
@@ -244,6 +253,10 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
       ceilings,
       standards,
     );
+    // Only an original moves: a derived record is already kept, and a
+    // stand-in above the ceiling stays on demand.
+    const isOriginal = candidate.parentId === null && (candidate.standInRole ?? null) === null;
+    return keepOriginals && isOriginal && placement === "above" ? "within" : placement;
   }
 
   function groupOf(candidate: BlobCandidate): string {
@@ -278,15 +291,11 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
     );
   }
 
-  async function decide(
-    candidate: BlobCandidate,
-    trigger?: ResidencyTrigger,
-  ): Promise<ResidencyVerdict> {
+  async function decide(candidate: BlobCandidate): Promise<ResidencyVerdict> {
     return decideResidency({
       constraints: { deniedHere: await deniedHere(candidate) },
       overrides: { pinned: isPinned(candidate.recordId) },
       placement: ceilingOf(candidate),
-      ...(trigger === undefined ? {} : { trigger }),
     });
   }
 
@@ -314,7 +323,7 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
         index.add(arrivalOf(candidate));
         return "held";
       }
-      const verdict = await decide(candidate, "background");
+      const verdict = await decide(candidate);
       if (verdict.decision !== "fetch") {
         if (existing?.wanted) index.dropDeferred(candidate.objectStorageKey);
         return "unwanted";
@@ -374,11 +383,11 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
  * what landed.
  */
 export function residencyHooks(manager: ResidencyManager): {
-  decide(candidate: BlobCandidate, trigger: ResidencyTrigger): Promise<ResidencyVerdict>;
+  decide(candidate: BlobCandidate): Promise<ResidencyVerdict>;
   onLanded(candidate: BlobCandidate): Promise<void>;
 } {
   return {
-    decide: (candidate, trigger) => manager.decide(candidate, trigger),
+    decide: (candidate) => manager.decide(candidate),
     onLanded: (candidate) => manager.noteArrival(candidate),
   };
 }
