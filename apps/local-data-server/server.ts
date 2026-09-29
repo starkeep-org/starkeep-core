@@ -44,8 +44,6 @@ import {
 } from "../../packages/shared-space-api/src/query/records-plan.js";
 import { ApiError } from "../../packages/shared-space-api/src/errors.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
-import { S3ObjectStorageAdapter } from "../../packages/storage-s3/src/adapter.js";
-import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
 import type { Filter } from "../../packages/storage-adapter/src/database/types.js";
 import { createNodeClock, createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
 import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
@@ -90,6 +88,7 @@ import {
   DEFAULT_SYNC_DOWN_CEILINGS,
   STAND_IN_CATEGORIES,
   STAND_IN_MIME_TYPES,
+  standardsFor,
   type NodeKind,
   type StandInCategory,
   type StandInSize,
@@ -119,7 +118,7 @@ import {
   renderStandInSummary,
   resolveContentRead,
 } from "../../packages/shared-space-api/src/stand-ins/read.js";
-import type { RecordLabel, DataRecord } from "@starkeep/protocol-primitives";
+import type { AnyRecord, RecordLabel, DataRecord } from "@starkeep/protocol-primitives";
 import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
@@ -341,6 +340,12 @@ interface StarkeepConfig {
    */
   standInCeilings?: Partial<Record<StandInCategory, number | null>>;
   /**
+   * Whether this node keeps every original, as a backup machine would. Sync
+   * then receives every original, and "Free up space" leaves them. Off unless
+   * the person turns it on, per node, from admin-web.
+   */
+  keepOriginals?: boolean;
+  /**
    * How many confirmed replicas elsewhere before "Free up space" may remove a
    * file from this node. Default 1.
    *
@@ -412,8 +417,51 @@ function resolveCeilings(config: Pick<StarkeepConfig, "nodeKind" | "standInCeili
   return out;
 }
 
-function ceilingProblems(body: { nodeKind?: unknown; ceilings?: Record<string, unknown> }): string[] {
+/**
+ * What every original in the library weighs, per stand-in category, from the
+ * records table. With the bytes this node holds, it tells the person roughly
+ * what turning on "Keep originals here" would download.
+ */
+function originalBytesByCategory(db: RawDatabase): Record<StandInCategory, { count: number; bytes: number }> {
+  const query = qb
+    .selectFrom("shared_records")
+    .select(({ fn }) => [
+      "type",
+      fn.countAll<number>().as("count"),
+      fn.sum<number>("size_bytes").as("bytes"),
+    ])
+    .where("parent_id", "is", null)
+    .where("stand_in_role", "is", null)
+    .where("deleted_at", "is", null)
+    .where("object_storage_key", "is not", null)
+    .groupBy("type")
+    .compile();
+  const rows = db.prepare(query.sql).all(...(query.parameters as string[])) as Array<{
+    type: string;
+    count: number;
+    bytes: number | null;
+  }>;
+  const out = Object.fromEntries(
+    STAND_IN_CATEGORIES.map((c) => [c, { count: 0, bytes: 0 }]),
+  ) as Record<StandInCategory, { count: number; bytes: number }>;
+  for (const row of rows) {
+    const category = standardsFor(row.type, DEFAULT_STAND_IN_STANDARDS)?.category;
+    if (!category) continue;
+    out[category].count += row.count;
+    out[category].bytes += row.bytes ?? 0;
+  }
+  return out;
+}
+
+function ceilingProblems(body: {
+  nodeKind?: unknown;
+  ceilings?: Record<string, unknown>;
+  keepOriginals?: unknown;
+}): string[] {
   const problems: string[] = [];
+  if (body.keepOriginals !== undefined && typeof body.keepOriginals !== "boolean") {
+    problems.push("keepOriginals must be true or false");
+  }
   if (body.nodeKind !== undefined && body.nodeKind !== "phone" && body.nodeKind !== "desktop") {
     problems.push(`nodeKind must be "phone" or "desktop"`);
   }
@@ -456,13 +504,6 @@ function clampMinimumReplicas(configured: number | undefined): number {
 function regionFromUserPoolId(userPoolId: string): string {
   const parts = userPoolId.split("_");
   return parts.length > 1 ? parts[0] : "";
-}
-
-interface CloudCredentials {
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
-  expiration?: Date;
 }
 
 interface PersistedAuth {
@@ -613,31 +654,32 @@ async function loadIdToken(): Promise<string | null> {
   }
 }
 
+/**
+ * Missing files a batch file-url read fetches at once. The Drive channel moves
+ * each file whole, so a batch of originals at full width would compete with
+ * the sync round for the same link.
+ */
+const FILE_URL_FETCH_CONCURRENCY = 4;
+
+/** Run `work` over `items`, at most `limit` at a time. */
+async function forEachBounded<T>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next++]!;
+      await work(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
 async function saveCloudCredentials(creds: STSCredentials): Promise<void> {
   await mkdir(STARKEEP_DIR, { recursive: true });
   await writeFile(join(STARKEEP_DIR, "cloud-credentials.json"), JSON.stringify(creds, null, 2), "utf8");
-}
-
-/**
- * Reads STS credentials from ~/.starkeep/cloud-credentials.json on every call
- * so that credentials rotated externally are always picked up without restarting.
- */
-async function makeCloudCredentialProvider(): Promise<() => Promise<CloudCredentials>> {
-  const credentialsPath = join(STARKEEP_DIR, "cloud-credentials.json");
-  return async () => {
-    let raw: STSCredentials;
-    try {
-      raw = JSON.parse(await readFile(credentialsPath, "utf8")) as STSCredentials;
-    } catch {
-      throw new Error("No cloud credentials — sign in to continue");
-    }
-    return {
-      accessKeyId: raw.accessKeyId,
-      secretAccessKey: raw.secretAccessKey,
-      sessionToken: raw.sessionToken,
-      expiration: raw.expiration ? new Date(raw.expiration) : undefined,
-    };
-  };
 }
 
 /**
@@ -781,17 +823,6 @@ async function main() {
     );
   }
 
-  let remoteAdapter: ObjectStorageAdapter | null = null;
-  if (starkeepConfig.s3Bucket) {
-    const credentialProvider = await makeCloudCredentialProvider();
-    remoteAdapter = new S3ObjectStorageAdapter({
-      bucketName: starkeepConfig.s3Bucket,
-      region: starkeepConfig.s3Region ?? configRegion,
-      credentialProvider,
-    });
-    console.log("Remote S3 adapter initialized from cloud config");
-  }
-
   // App identities are stored in shared_app_registry; populated by the
   // installer (POST /admin/apps/install). No startup-time auto-discovery —
   // apps appear only after going through install.
@@ -836,6 +867,7 @@ async function main() {
         // is the intended outcome, not a violation.
         isCloudNode: false,
         ceilings,
+        keepOriginals: starkeepConfig.keepOriginals === true,
         // Clamped, not passed through. The predicate is
         // `counted >= minimumReplicas`, so a config value of `0` makes every
         // file durable with zero probes and zero evidence — every removal
@@ -900,6 +932,22 @@ async function main() {
   // Sync supervisor: owns N SyncEngine instances, one per installed app.
   // Without a cloud URL or sync state store there's no sync — leave it null.
   let supervisor: SyncSupervisor | null = null;
+
+  /**
+   * Whether this record's bytes are on this node, fetching them through the
+   * Drive channel when they are not. The on-demand half of residency: a read
+   * of a file above this node's ceiling brings the file here, and the file
+   * stays until "Free up space".
+   *
+   * A local read never hands out a presigned S3 URL. The person's own
+   * identity may read only `apps/admin/*`, so a presign for a `shared/` key
+   * always answers 403; only Drive's role reads shared bytes.
+   */
+  async function ensureLocalBytes(record: AnyRecord): Promise<boolean> {
+    if (!record.objectStorageKey) return false;
+    if (await localAdapter.has(record.objectStorageKey)) return true;
+    return (await supervisor?.fetchSharedBlob(record)) ?? false;
+  }
 
   // Files a round declined that this node now wants. A ceiling change restarts
   // this process, so one catalogue scan per process finds every file a raised
@@ -2728,26 +2776,26 @@ async function main() {
             ? parsed.expiresIn
             : 3600;
         const urls: Record<string, { url: string; mimeType?: string | null; sizeBytes?: number | null }> = {};
+        const readable: AnyRecord[] = [];
         for (const id of new Set(parsed.ids)) {
           const record = await sdk.data.get(createStarkeepId(id));
           if (!record?.objectStorageKey) continue;
           if (!appCanRead(localDb, appId!, record.type)) continue;
-          const mimeType = record.mimeType ?? "application/octet-stream";
-          if (await localAdapter.has(record.objectStorageKey)) {
-            const token = createFileToken(record.objectStorageKey, mimeType, expiresIn);
-            urls[record.id] = {
-              url: `http://127.0.0.1:${PORT}/data/files/${token}`,
-              mimeType: record.mimeType,
-              sizeBytes: record.sizeBytes,
-            };
-          } else if (remoteAdapter?.getSignedUrl) {
-            urls[record.id] = {
-              url: await remoteAdapter.getSignedUrl(record.objectStorageKey, { expiresIn }),
-              mimeType: record.mimeType,
-              sizeBytes: record.sizeBytes,
-            };
-          }
+          readable.push(record);
         }
+        // Missing bytes arrive through the Drive channel, a few at a time, so
+        // one batch cannot open hundreds of transfers at once. An id whose
+        // fetch fails is omitted, like any other unresolvable id.
+        await forEachBounded(readable, FILE_URL_FETCH_CONCURRENCY, async (record) => {
+          if (!(await ensureLocalBytes(record))) return;
+          const mimeType = record.mimeType ?? "application/octet-stream";
+          const token = createFileToken(record.objectStorageKey!, mimeType, expiresIn);
+          urls[record.id] = {
+            url: `http://127.0.0.1:${PORT}/data/files/${token}`,
+            mimeType: record.mimeType,
+            sizeBytes: record.sizeBytes,
+          };
+        });
         json(res, { urls, expiresIn });
         return;
       }
@@ -2822,17 +2870,14 @@ async function main() {
           return;
         }
         const expiresIn = parseInt(url.searchParams.get("expiresIn") || "3600", 10);
-        const availableHere = await localAdapter.has(served.objectStorageKey);
-        let fileUrl: string | null = null;
-        if (availableHere) {
-          fileUrl = `http://127.0.0.1:${PORT}/data/files/${createFileToken(
-            served.objectStorageKey,
-            served.mimeType ?? mimeForStandIn(served.type),
-            expiresIn,
-          )}`;
-        } else if (remoteAdapter?.getSignedUrl) {
-          fileUrl = await remoteAdapter.getSignedUrl(served.objectStorageKey, { expiresIn });
-        }
+        const availableHere = await ensureLocalBytes(served);
+        const fileUrl = availableHere
+          ? `http://127.0.0.1:${PORT}/data/files/${createFileToken(
+              served.objectStorageKey,
+              served.mimeType ?? mimeForStandIn(served.type),
+              expiresIn,
+            )}`
+          : null;
         json(res, {
           record_id: served.id,
           type: served.type,
@@ -2856,6 +2901,13 @@ async function main() {
           json(res, { error: "Record not found" });
           return;
         }
+        // Before any fetch: a read of bytes this node lacks downloads them, so
+        // an app without the grant must not reach even the download.
+        if (!appCanRead(localDb, appId!, record.type)) {
+          res.writeHead(403);
+          json(res, { error: "Forbidden" });
+          return;
+        }
         if (!record.objectStorageKey) {
           res.writeHead(404);
           json(res, { error: "Record has no attached file" });
@@ -2864,8 +2916,7 @@ async function main() {
         const expiresIn = parseInt(url.searchParams.get("expiresIn") || "3600", 10);
         const mimeType = record.mimeType ?? "application/octet-stream";
 
-        const localHit = await localAdapter.get(record.objectStorageKey).catch(() => null);
-        if (localHit) {
+        if (await ensureLocalBytes(record)) {
           const token = createFileToken(record.objectStorageKey, mimeType, expiresIn);
           json(res, {
             url: `http://127.0.0.1:${PORT}/data/files/${token}`,
@@ -2877,14 +2928,13 @@ async function main() {
           return;
         }
 
-        if (remoteAdapter?.getSignedUrl) {
-          const fileUrl = await remoteAdapter.getSignedUrl(record.objectStorageKey, { expiresIn });
-          json(res, { url: fileUrl, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
+        if (!supervisor) {
+          res.writeHead(404);
+          json(res, { error: "File not on this node, and this node does not sync with a cloud" });
           return;
         }
-
-        res.writeHead(404);
-        json(res, { error: "File not found locally and no remote storage configured" });
+        res.writeHead(502);
+        json(res, { error: "File not on this node, and the fetch from the cloud failed" });
         return;
       }
 
@@ -3002,6 +3052,8 @@ async function main() {
           nodeKind: starkeepConfig.nodeKind ?? "desktop",
           ceilings,
           configured: starkeepConfig.standInCeilings ?? {},
+          keepOriginals: starkeepConfig.keepOriginals === true,
+          libraryOriginals: originalBytesByCategory(localDb),
           defaults: DEFAULT_SYNC_DOWN_CEILINGS,
           standardSizes: Object.fromEntries(
             STAND_IN_CATEGORIES.map((c) => [c, DEFAULT_STAND_IN_STANDARDS[c].standardSizes]),
@@ -3023,7 +3075,8 @@ async function main() {
         return;
       }
 
-      // PUT /residency/stand-ins — change this node's ceilings.
+      // PUT /residency/stand-ins — change this node's ceilings, and whether it
+      // keeps every original.
       //
       // Validated, saved, and applied by restart: the residency manager is
       // built from config at boot. A raised ceiling reaches files earlier
@@ -3033,6 +3086,7 @@ async function main() {
         const body = JSON.parse(await readBody(req)) as {
           nodeKind?: unknown;
           ceilings?: Record<string, unknown>;
+          keepOriginals?: unknown;
         };
         const problems = ceilingProblems(body);
         if (problems.length > 0) {
@@ -3043,11 +3097,16 @@ async function main() {
         const patch: Partial<StarkeepConfig> = {
           ...(body.nodeKind ? { nodeKind: body.nodeKind as NodeKind } : {}),
           ...(body.ceilings ? { standInCeilings: body.ceilings as StarkeepConfig["standInCeilings"] } : {}),
+          ...(typeof body.keepOriginals === "boolean" ? { keepOriginals: body.keepOriginals } : {}),
         };
         const updated: StarkeepConfig = { ...starkeepConfig, ...patch };
         await writeFile(STARKEEP_CONFIG_PATH, JSON.stringify(updated, null, 2), "utf8");
         Object.assign(starkeepConfig, patch);
-        json(res, { ok: true, ceilings: resolveCeilings(updated) });
+        json(res, {
+          ok: true,
+          ceilings: resolveCeilings(updated),
+          keepOriginals: updated.keepOriginals === true,
+        });
         setTimeout(restartProcess, 200);
         return;
       }
@@ -3515,6 +3574,13 @@ async function main() {
         if (!record) {
           res.writeHead(404);
           json(res, { error: "Record not found" });
+          return;
+        }
+        // The same answer as the cloud: 404 for no record, 403 for a type the
+        // caller's grants do not cover.
+        if (!appCanRead(localDb, appId!, record.type)) {
+          res.writeHead(403);
+          json(res, { error: "Forbidden" });
           return;
         }
         json(res, {

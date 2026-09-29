@@ -1,6 +1,8 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
+import type { AnyRecord } from "@starkeep/protocol-primitives";
 import {
   HttpObjectStorageAdapter,
+  blobCandidateForRecord,
   createHttpSyncTransport,
   createSyncEngine,
 } from "../../packages/sync-engine/src/index.js";
@@ -213,6 +215,20 @@ export interface SyncSupervisor {
    * the stored checksum the durability predicate verifies.
    */
   cloudReplicaProbe(): ReplicaProbe | null;
+  /**
+   * Bring one shared record's bytes to this node now, through the Drive
+   * channel. The on-demand half of residency: a file above this node's
+   * ceiling arrives when something asks for it, and stays until "Free up
+   * space".
+   *
+   * The Drive channel rather than a presigned S3 URL, because only Drive's
+   * role may read `shared/` keys — the person's own identity reaches
+   * `apps/admin/*` and nothing else. The phone takes the same route.
+   *
+   * Resolves false when the Drive engine is not running, when the record has
+   * no file, or when the transfer failed.
+   */
+  fetchSharedBlob(record: AnyRecord): Promise<boolean>;
 }
 
 /**
@@ -630,6 +646,24 @@ export function createSyncSupervisor(
   return {
     cloudReplicaProbe() {
       return driveRemoteStorage ? { nodeId: "cloud", storage: driveRemoteStorage } : null;
+    },
+
+    // Not serialized behind the engine runner. The fetch writes no sync state,
+    // and a person waiting on one photo should not wait behind a drain; a
+    // fetch for a key a round is moving joins that transfer instead.
+    async fetchSharedBlob(record) {
+      const entry = engines.get(DRIVE_APP_ID);
+      const candidate = blobCandidateForRecord(record);
+      if (!entry || !candidate) return false;
+      return entry.engine.fetchBlob(
+        {
+          fileHash: record.contentHash || candidate.objectStorageKey,
+          objectStorageKey: candidate.objectStorageKey,
+          sizeBytes: record.sizeBytes,
+          ...(record.mimeType ? { mimeType: record.mimeType } : {}),
+        },
+        candidate,
+      );
     },
 
     start() {

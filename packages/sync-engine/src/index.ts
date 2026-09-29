@@ -47,7 +47,6 @@ export {
   type LocalOverrides,
   type BlobCandidate,
   type ResidencyDecision,
-  type ResidencyTrigger,
   type ResidencyVerdict,
   type DecideResidencyInputs,
 } from "./residency-policy.js";
@@ -90,7 +89,7 @@ export { createSqliteSyncStateStore } from "./sync-state-sqlite.js";
 export { createChangeNotifier } from "./change-notifier.js";
 export { advanceWatermark, mergeWatermarks, watermarkFor, selectUnseen } from "./watermarks.js";
 export { createFileSyncEngine } from "./file-sync-engine.js";
-export { createSyncEngine } from "./sync-engine.js";
+export { createSyncEngine, blobCandidateForRecord } from "./sync-engine.js";
 export {
   residencyOf,
   type RecordResidency,

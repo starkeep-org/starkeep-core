@@ -26,6 +26,12 @@ const STAND_INS = {
     video: { originals: 0, standIns: 0 },
     audio: { originals: 0, standIns: 0 },
   },
+  keepOriginals: false,
+  libraryOriginals: {
+    image: { count: 1000, bytes: 8 * 1024 ** 3 },
+    video: { count: 0, bytes: 0 },
+    audio: { count: 0, bytes: 0 },
+  },
   backlog: {
     "missing-canonical": { count: 42, complete: true },
     "missing-fidelity": { count: 7, complete: false },
@@ -129,6 +135,24 @@ describe("the stand-in section", () => {
       nodeKind: "phone",
       ceilings: { image: 1280, video: 1280, audio: null },
     });
+  });
+
+  it("estimates what keeping originals downloads, and saves only that setting", async () => {
+    const user = userEvent.setup();
+    render(<StandInsSection />);
+    const save = (await screen.findByRole("button", { name: "Save" })) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    await user.click(screen.getByLabelText("Keep every original on this machine"));
+    // 8 GiB of originals in the library, 3 GiB of them already here.
+    expect((await screen.findByRole("status")).textContent).toBe(
+      "About 5 GiB of originals to download.",
+    );
+    await user.click(save);
+
+    await screen.findByText(/restarts to apply it/);
+    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({ keepOriginals: true });
+    expect(save.disabled).toBe(true);
   });
 
   it("shows the daemon's reasons when it refuses the ceilings", async () => {

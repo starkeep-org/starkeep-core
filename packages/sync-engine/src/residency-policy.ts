@@ -92,10 +92,9 @@ export interface ResidencyVerdict {
     // sync-down ceiling: received by default, never removed.
     | "within-ceiling"
     // Above the ceiling — an archivable original, a canonical stand-in, a
-    // file whose fidelity nobody reported. Received only when asked for.
+    // file whose fidelity nobody reported. Received only when asked for,
+    // through `SyncEngine.fetchBlob`.
     | "above-ceiling"
-    // Above the ceiling, and asked for.
-    | "requested"
     // Not a decision this module made. `SyncEngine.fetchBlob` answers a direct
     // request and is deliberately not subject to the policy, but the arrival
     // is still recorded — so it reports a verdict it did not ask for, named so
@@ -103,35 +102,25 @@ export interface ResidencyVerdict {
     | "explicit-request";
 }
 
-/**
- * What occasioned this decision. Only a request lands a file above the
- * ceiling; a sync round and the acquisition pass both leave it for someone to
- * ask for.
- */
-export type ResidencyTrigger =
-  /** A sync round, or the acquisition pass working its queue. */
-  | "background"
-  /** Something actually asked for these bytes — a person opening the item. */
-  | "request";
-
 export interface DecideResidencyInputs {
   readonly constraints: RecordConstraints;
   readonly overrides: LocalOverrides;
   /** Where the candidate sits against this node's ceiling, resolved by the host. */
   readonly placement: CeilingPlacement;
-  /** What is asking. Defaults to `"background"`. */
-  readonly trigger?: ResidencyTrigger;
 }
 
 /**
- * The decision, in a fixed order. The order matters because two of the inputs
+ * The background decision — a sync round, or the acquisition pass working its
+ * queue — in a fixed order. A direct request never comes here:
+ * `SyncEngine.fetchBlob` fetches whatever it is asked for.
+ *
+ * The order matters because two of the inputs
  * pull in opposite directions: a record constraint says "nobody may hold this
  * here" and a pin says "this node insists on holding it". Restrictive wins,
  * and it wins first.
  */
 export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict {
   const { constraints, overrides, placement } = inputs;
-  const trigger: ResidencyTrigger = inputs.trigger ?? "background";
   const pinned = overrides.pinned;
 
   if (constraints.deniedHere) {
@@ -141,9 +130,7 @@ export function decideResidency(inputs: DecideResidencyInputs): ResidencyVerdict
     return { decision: "fetch", reason: "pinned", pinned };
   }
   if (placement === "above") {
-    return trigger === "request"
-      ? { decision: "fetch", reason: "requested", pinned }
-      : { decision: "elide", reason: "above-ceiling", pinned };
+    return { decision: "elide", reason: "above-ceiling", pinned };
   }
   if (placement === "within") {
     return { decision: "fetch", reason: "within-ceiling", pinned };
