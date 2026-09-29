@@ -102,11 +102,11 @@ describe("the dashboard", () => {
 });
 
 describe("the storage page", () => {
-  it("renders its heading, its experimental badge and the retention section", async () => {
+  it("renders its heading, its experimental badge and the stand-ins section", async () => {
     renderAt("/storage");
     expect(await screen.findByRole("heading", { name: "Storage" })).toBeTruthy();
     expect(screen.getByText("Experimental")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: /Retention & budgets/i })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /Photos & videos/i })).toBeTruthy();
   });
 
   it("links back to the dashboard", async () => {

@@ -1,10 +1,9 @@
 /**
- * `loadVariantsForPage` against a real database.
+ * `loadVariantCandidatesForPage` against a real database.
  *
- * The pure resolution is covered in protocol-primitives. What this covers is
- * the gathering: which children count as candidates, where their dimensions
- * come from, and the cases where a naive version quietly resolves to the wrong
- * child — a crop, a tombstoned rendition, another record's variant.
+ * Which children count as derived candidates, where their dimensions come
+ * from, and the cases where a naive version quietly lists the wrong child — a
+ * crop, a tombstoned derived record, another record's child.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
@@ -13,13 +12,13 @@ import {
   type CreateDataRecordInput,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
-import { loadVariantCandidatesForPage, loadVariantsForPage } from "@starkeep/storage-adapter";
+import { loadVariantCandidatesForPage } from "@starkeep/storage-adapter";
 import { SqliteDatabaseAdapter } from "../src/adapter.js";
 import { nodeSqliteDriver } from "../src/node-driver.js";
 
-const RENDITION = { appId: "photos", key: "rendition" };
+const DERIVED = { appId: "photos", key: "derived" };
 
-describe("loadVariantsForPage", () => {
+describe("loadVariantCandidatesForPage", () => {
   let adapter: SqliteDatabaseAdapter;
   let tick = 1000;
   const clock = createHLCClock({ nodeId: "test", wallClockFunction: () => tick++ });
@@ -56,7 +55,7 @@ describe("loadVariantsForPage", () => {
     ]);
   }
 
-  /** A derived child of `parent`, labelled as a rendition, with dimensions. */
+  /** A derived child of `parent`, labelled as derived, with dimensions. */
   async function addVariant(
     parent: StarkeepId,
     width: number,
@@ -64,143 +63,94 @@ describe("loadVariantsForPage", () => {
     value = "someclass",
   ): Promise<StarkeepId> {
     const id = await addRecord({ parentId: parent, type: "image/avif" });
-    await label(id, RENDITION.appId, RENDITION.key, value);
+    await label(id, DERIVED.appId, DERIVED.key, value);
     await adapter.putMetadata("image/jpeg", { recordId: id, width, height });
     return id;
   }
 
-  it("resolves each requested size against a record's variants", async () => {
-    const parent = await addRecord();
-    const small = await addVariant(parent, 400, 300);
-    const large = await addVariant(parent, 2560, 1920);
+  const load = (ids: StarkeepId[]) =>
+    loadVariantCandidatesForPage(adapter, ids.map((id) => ({ id })), DERIVED);
+  const idsOf = async (parent: StarkeepId) =>
+    ((await load([parent])).get(parent) ?? []).map((c) => c.id).sort();
 
-    const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400, 2000]);
-    expect(out.get(parent)!["400"]!.id).toBe(small);
-    expect(out.get(parent)!["2000"]!.id).toBe(large);
-  });
-
-  it("carries the label value that typed each unnarrowed candidate", async () => {
+  it("lists each derived child with its dimensions and label value", async () => {
     const parent = await addRecord();
-    const child = await addVariant(parent, 1280, 720, "video-720p");
-    const out = await loadVariantCandidatesForPage(adapter, [{ id: parent }], RENDITION);
+    const child = await addVariant(parent, 1280, 720, "video-poster-720p");
+    const out = await load([parent]);
     expect(out.get(parent)).toEqual([
-      expect.objectContaining({ id: child, labelValue: "video-720p" }),
+      expect.objectContaining({ id: child, labelValue: "video-poster-720p", width: 1280, height: 720 }),
     ]);
   });
 
-  it("keeps each record's variants to itself", async () => {
+  it("keeps each record's children to itself", async () => {
     const a = await addRecord();
     const b = await addRecord();
-    const aVariant = await addVariant(a, 400, 300);
+    const aChild = await addVariant(a, 400, 300);
     await addVariant(b, 400, 300);
-
-    const out = await loadVariantsForPage(adapter, [{ id: a }], RENDITION, [400]);
-    expect(out.get(a)!["400"]!.id).toBe(aVariant);
+    expect(await idsOf(a)).toEqual([aChild]);
   });
 
-  it("resolves a whole page in one pass", async () => {
+  it("answers a whole page in one pass", async () => {
     const parents = [await addRecord(), await addRecord(), await addRecord()];
     for (const p of parents) await addVariant(p, 400, 300);
-
-    const out = await loadVariantsForPage(
-      adapter,
-      parents.map((id) => ({ id })),
-      RENDITION,
-      [400],
-    );
-    expect(out.size).toBe(3);
+    expect((await load(parents)).size).toBe(3);
   });
 
-  // A crop has a parent too. Serving someone's crop when they asked for a
-  // 400 px tile is the bug that reading `parent_id` alone always had.
-  it("ignores children that are not labelled as variants", async () => {
+  // A crop has a parent too. Offering someone's crop as a poster is the bug
+  // that reading `parent_id` alone always had.
+  it("ignores children that do not carry the label", async () => {
     const parent = await addRecord();
     const crop = await addRecord({ parentId: parent, type: "image/jpeg" });
     await label(crop, "photos", "crop");
-    await adapter.putMetadata("image/jpeg", { recordId: crop, width: 400, height: 400 });
-
-    const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400]);
-    expect(out.get(parent)).toBeUndefined();
+    expect(await idsOf(parent)).toEqual([]);
   });
 
-  // A retracted rendition label means the record is no longer a rendition.
-  // Continuing to serve it would serve bytes the app has disowned.
-  it("ignores a variant whose label has been retracted", async () => {
+  // A retracted label means the record is no longer derived. Continuing to
+  // offer it would serve bytes the app has disowned.
+  it("ignores a child whose label has been retracted", async () => {
     const parent = await addRecord();
     const v = await addVariant(parent, 400, 300);
-    await adapter.retractLabels([
-      { recordId: v, appId: RENDITION.appId, key: RENDITION.key, hlc: clock.now() },
-    ]);
-
-    const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400]);
-    expect(out.get(parent)).toBeUndefined();
+    await adapter.retractLabels([{ recordId: v, appId: DERIVED.appId, key: DERIVED.key, hlc: clock.now() }]);
+    expect(await idsOf(parent)).toEqual([]);
   });
 
-  it("ignores a soft-deleted variant", async () => {
+  it("ignores a soft-deleted child", async () => {
     const parent = await addRecord();
     const gone = await addVariant(parent, 400, 300);
     const live = await addVariant(parent, 1280, 960);
     await adapter.delete(gone, clock.now());
-
-    const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400]);
-    // Rule 2 clamps to the largest that exists — which is now the 1280.
-    expect(out.get(parent)!["400"]!.id).toBe(live);
+    expect(await idsOf(parent)).toEqual([live]);
   });
 
   // Namespaces exist so two apps can use one key name for different things.
   it("is scoped to the naming app", async () => {
     const parent = await addRecord();
     const v = await addRecord({ parentId: parent, type: "image/avif" });
-    await label(v, "otherapp", "rendition", "someclass");
-    await adapter.putMetadata("image/jpeg", { recordId: v, width: 400, height: 300 });
-
-    const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400]);
-    expect(out.get(parent)).toBeUndefined();
+    await label(v, "otherapp", "derived", "someclass");
+    expect(await idsOf(parent)).toEqual([]);
   });
 
   // Dimensions come from the metadata table, which may not have been written
-  // yet. "Largest that exists" is meaningless over a set you cannot order.
-  it("omits a record whose variants have no dimensions recorded", async () => {
+  // yet. The child is still listed, with its dimensions unknown.
+  it("lists a child nothing has measured, with null dimensions", async () => {
     const parent = await addRecord();
     const v = await addRecord({ parentId: parent, type: "image/avif" });
-    await label(v, RENDITION.appId, RENDITION.key, "someclass");
-    // No putMetadata call — nothing has measured it.
-
-    const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400]);
-    expect(out.get(parent)).toBeUndefined();
+    await label(v, DERIVED.appId, DERIVED.key, "someclass");
+    expect((await load([parent])).get(parent)).toEqual([
+      expect.objectContaining({ id: v, width: null, height: null }),
+    ]);
   });
 
-  it("resolves from the measured variants when only some are measured", async () => {
+  it("returns nothing for a record with no children, or for an empty page", async () => {
     const parent = await addRecord();
-    const measured = await addVariant(parent, 1280, 960);
-    const unmeasured = await addRecord({ parentId: parent, type: "image/avif" });
-    await label(unmeasured, RENDITION.appId, RENDITION.key, "someclass");
-
-    const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400]);
-    expect(out.get(parent)!["400"]!.id).toBe(measured);
+    expect((await load([parent])).size).toBe(0);
+    expect((await load([])).size).toBe(0);
   });
 
-  it("returns nothing for a record with no children at all", async () => {
-    const parent = await addRecord();
-    const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [400]);
-    expect(out.size).toBe(0);
-  });
-
-  it("does no work when nothing was asked for", async () => {
+  // The parent is never among the candidates.
+  it("never lists the parent record itself", async () => {
     const parent = await addRecord();
     await addVariant(parent, 400, 300);
-    expect((await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [])).size).toBe(0);
-    expect((await loadVariantsForPage(adapter, [], RENDITION, [400])).size).toBe(0);
-  });
-
-  // Rule 3, at the gathering layer: the parent is never among the candidates,
-  // so no request however large can resolve to the original.
-  it("never resolves to the parent record itself", async () => {
-    const parent = await addRecord();
-    const only = await addVariant(parent, 400, 300);
-
-    const out = await loadVariantsForPage(adapter, [{ id: parent }], RENDITION, [1_000_000]);
-    expect(out.get(parent)!["1000000"]!.id).toBe(only);
-    expect(out.get(parent)!["1000000"]!.id).not.toBe(parent);
+    expect(await idsOf(parent)).not.toContain(parent);
   });
 });

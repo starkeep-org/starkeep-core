@@ -1,6 +1,8 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
+import type { AnyRecord } from "@starkeep/protocol-primitives";
 import {
   HttpObjectStorageAdapter,
+  blobCandidateForRecord,
   createHttpSyncTransport,
   createSyncEngine,
 } from "../../packages/sync-engine/src/index.js";
@@ -16,6 +18,7 @@ import type {
 } from "../../packages/sync-engine/src/types.js";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
+import type { ReplicaProbe } from "../../packages/sync-engine/src/durability.js";
 import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
 import { createEngineRunner, type EngineRunner } from "./engine-runner.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
@@ -79,14 +82,21 @@ export interface SyncSupervisorOptions {
    */
   readonly maxItems?: number;
   /**
-   * Residency decision + byte accounting, consulted before every inbound blob
-   * pull on every channel.
-   *
-   * Handed to both the Drive engine and each per-app engine, because a budget
-   * that only bound one of them wouldn't bind: app-syncable blobs and shared
-   * record blobs land on the same disk.
+   * The residency decision, consulted before every inbound blob pull on every
+   * channel, and the record of what landed. Handed to both the Drive engine
+   * and each per-app engine, because both land bytes on the same disk.
    */
   readonly residency?: ResidencyHooks;
+  /**
+   * Work that follows each successful Drive-channel drain, on the same engine
+   * and under the same exclusive use of it — the catalogue scan and the
+   * acquisition pass, which fetch files a round declined and this node now
+   * wants. A failure is logged and does not fail the drain.
+   */
+  readonly afterDriveDrain?: (
+    engine: SyncEngine,
+    signal: { readonly aborted: boolean },
+  ) => Promise<void>;
   /**
    * The current Cognito ID token, read at request time.
    *
@@ -196,6 +206,29 @@ export interface SyncSupervisor {
    * apps, stop engines for apps no longer present.
    */
   rescan(): void;
+  /**
+   * The cloud's object storage, as the Drive channel reaches it, for proving a
+   * replica before this node lets bytes go. Null until the Drive engine runs.
+   *
+   * The Drive channel's file surface rather than a direct S3 client, because
+   * it is the one every node already holds and the one whose `stat` reports
+   * the stored checksum the durability predicate verifies.
+   */
+  cloudReplicaProbe(): ReplicaProbe | null;
+  /**
+   * Bring one shared record's bytes to this node now, through the Drive
+   * channel. The on-demand half of residency: a file above this node's
+   * ceiling arrives when something asks for it, and stays until "Free up
+   * space".
+   *
+   * The Drive channel rather than a presigned S3 URL, because only Drive's
+   * role may read `shared/` keys — the person's own identity reaches
+   * `apps/admin/*` and nothing else. The phone takes the same route.
+   *
+   * Resolves false when the Drive engine is not running, when the record has
+   * no file, or when the transfer failed.
+   */
+  fetchSharedBlob(record: AnyRecord): Promise<boolean>;
 }
 
 /**
@@ -264,6 +297,7 @@ export function createSyncSupervisor(
     maxBytes,
     maxItems,
     residency,
+    afterDriveDrain,
     getIdToken,
   } = options;
 
@@ -351,6 +385,9 @@ export function createSyncSupervisor(
    * torn down by rescan() — so shared-data sync is identical before and after
    * any app's cloud install.
    */
+  /** The Drive channel's cloud storage, once its engine has started. */
+  let driveRemoteStorage: HttpObjectStorageAdapter | null = null;
+
   function startDriveEngine(): void {
     if (engines.has(DRIVE_APP_ID)) return;
     const baseUrl = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}`;
@@ -360,6 +397,7 @@ export function createSyncSupervisor(
       baseUrl: `${baseUrl}/files`,
       signRequest: driveSigner,
     });
+    driveRemoteStorage = remoteStorage;
     const syncState = createPerAppSyncStateStore(
       localDb,
       underlyingSyncStateStore,
@@ -500,6 +538,13 @@ export function createSyncSupervisor(
       entry.lastExchangeAt = new Date().toISOString();
       entry.lastError = null;
       entry.backoffMs = exchangeIntervalMs;
+      if (entry.appId === DRIVE_APP_ID && afterDriveDrain) {
+        try {
+          await afterDriveDrain(entry.engine, signalFor(entry));
+        } catch (err) {
+          console.warn(`[residency] acquisition after the Drive drain failed:`, err);
+        }
+      }
     } catch (err) {
       const message = (err as Error).message;
       const repeated = entry.lastError === message;
@@ -599,6 +644,28 @@ export function createSyncSupervisor(
   }
 
   return {
+    cloudReplicaProbe() {
+      return driveRemoteStorage ? { nodeId: "cloud", storage: driveRemoteStorage } : null;
+    },
+
+    // Not serialized behind the engine runner. The fetch writes no sync state,
+    // and a person waiting on one photo should not wait behind a drain; a
+    // fetch for a key a round is moving joins that transfer instead.
+    async fetchSharedBlob(record) {
+      const entry = engines.get(DRIVE_APP_ID);
+      const candidate = blobCandidateForRecord(record);
+      if (!entry || !candidate) return false;
+      return entry.engine.fetchBlob(
+        {
+          fileHash: record.contentHash || candidate.objectStorageKey,
+          objectStorageKey: candidate.objectStorageKey,
+          sizeBytes: record.sizeBytes,
+          ...(record.mimeType ? { mimeType: record.mimeType } : {}),
+        },
+        candidate,
+      );
+    },
+
     start() {
       // Always-on Drive channel first, then reconcile per-app channels.
       //

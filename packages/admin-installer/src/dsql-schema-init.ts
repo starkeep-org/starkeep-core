@@ -212,7 +212,28 @@ export async function initializeSharedSchema(
       .addColumn("original_filename", "text")
       .addColumn("origin_app_id", "text", (c) => c.notNull())
       .addColumn("parent_id", "text")
+      .addColumn("stand_in_role", "text", (c) =>
+        c.check(sql`stand_in_role IN ('canonical', 'smaller')`),
+      )
+      .addColumn("fidelity", "integer")
+      .addColumn("stand_in_slot", "text")
       .execute();
+
+    // The stand-in columns, for a cluster whose `shared.records` predates
+    // them. `CREATE TABLE IF NOT EXISTS` is silent about a table it does not
+    // create, so without these the index below dies with 42703 (limitation 6).
+    // An added column cannot take the CHECK the CREATE TABLE carries; the
+    // serializers only ever write the two roles, so the check is defence the
+    // fresh table has and an upgraded one does without.
+    for (const [column, type] of [
+      ["stand_in_role", "text"],
+      ["fidelity", "integer"],
+      ["stand_in_slot", "text"],
+    ] as const) {
+      await sql
+        .raw(`ALTER TABLE shared.records ADD COLUMN IF NOT EXISTS ${column} ${type}`)
+        .execute(db);
+    }
 
     await sql
       .raw(`ALTER DEFAULT PRIVILEGES IN SCHEMA shared GRANT ALL ON TABLES TO user_data_owner`)
@@ -490,6 +511,19 @@ export async function initializeSharedSchema(
       db,
       `CREATE INDEX ASYNC IF NOT EXISTS idx_records_content_hash
          ON shared.records (content_hash, parent_id, deleted_at)`,
+    );
+
+    // One live canonical stand-in per original, and one live stand-in per
+    // size. DSQL has no partial indexes, so the predicate lives in the column:
+    // the serializers compute `stand_in_slot` and leave it null on every
+    // record the rules do not cover, tombstones included. The default NULLS
+    // DISTINCT is the point — ordinary records never collide — which is why
+    // this index, unlike uq_records_parent_filename_hash, does not say NULLS
+    // NOT DISTINCT. The SQLite bootstrap holds the same index shape.
+    await ensureIndex(
+      db,
+      `CREATE UNIQUE INDEX ASYNC IF NOT EXISTS uq_records_stand_in_slot
+         ON shared.records (parent_id, stand_in_slot)`,
     );
 
     // Backs the sync responder's per-node coverage watermark

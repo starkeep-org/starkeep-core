@@ -60,6 +60,25 @@ import type { StarkeepId } from "../identifiers/types.js";
 import type { HLCTimestamp } from "../hlc/types.js";
 
 /** Max characters in a label key. */
+/**
+ * The label key that advises the platform against archiving a record.
+ *
+ * Labels live in per-app namespaces, so the platform cannot reserve one shared
+ * key every app writes. It defines this key *name* instead and honours it in
+ * any app's namespace: Photos writes `photos/do-not-archive`, another app the
+ * same key under its own id. A record stays unarchived while any namespace
+ * holds it, and each app removes only its own.
+ */
+export const DO_NOT_ARCHIVE_LABEL_KEY = "do-not-archive";
+
+/**
+ * Keys every app may write in its own namespace without declaring them in its
+ * manifest, because the platform itself gives them their meaning. They do not
+ * count against {@link LABEL_KEYS_PER_APP_MAX}: the cap bounds an app's own
+ * schema, and these are the platform's.
+ */
+export const WELL_KNOWN_LABEL_KEYS: ReadonlySet<string> = new Set([DO_NOT_ARCHIVE_LABEL_KEY]);
+
 export const LABEL_KEY_MAX_LENGTH = 64;
 /** Max distinct keys one app may declare in its manifest. */
 export const LABEL_KEYS_PER_APP_MAX = 64;
@@ -307,7 +326,7 @@ export function planLabelWrites(input: {
     const shapeError = validateLabelWrite({ key: entry.key, value });
     if (shapeError) return { ok: false, error: shapeError, status: 400 };
 
-    if (!input.declaredKeys.has(entry.key)) {
+    if (!input.declaredKeys.has(entry.key) && !WELL_KNOWN_LABEL_KEYS.has(entry.key)) {
       return {
         ok: false,
         error:

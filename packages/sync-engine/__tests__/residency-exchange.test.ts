@@ -19,7 +19,6 @@ import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { residencyOf } from "../src/residency.js";
-import { resolveSizeClass } from "../src/residency-policy.js";
 import type { BlobCandidate, ResidencyVerdict } from "../src/residency-policy.js";
 import type { FileRecordRow, SyncStateStore, Watermarks } from "../src/types.js";
 
@@ -114,11 +113,8 @@ async function setup(
   };
 }
 
-// A class is a namespace and a rung, and these come from the host — so the
-// fixture names one the way a host would rather than passing a bare string.
-const classA = resolveSizeClass("photos", "classA");
-const elide: ResidencyVerdict = { decision: "elide", sizeClass: classA, reason: "class-disabled" };
-const fetch: ResidencyVerdict = { decision: "fetch", sizeClass: classA, reason: "within-budget" };
+const elide: ResidencyVerdict = { decision: "elide", reason: "above-ceiling" };
+const fetch: ResidencyVerdict = { decision: "fetch", reason: "kept" };
 
 describe("eliding a blob", () => {
   it("applies the metadata and skips the bytes", async () => {
@@ -161,7 +157,7 @@ describe("eliding a blob", () => {
     expect(result.elided).toBe(1);
   });
 
-  it("does not credit byte accounting for bytes that never arrived", async () => {
+  it("does not record an arrival for bytes that never arrived", async () => {
     const f = await setup(() => elide);
     await f.engine.exchange();
     expect(f.landed).toHaveLength(0);
@@ -169,7 +165,7 @@ describe("eliding a blob", () => {
 });
 
 describe("fetching a blob", () => {
-  it("pulls the bytes and reports the arrival for accounting", async () => {
+  it("pulls the bytes and reports the arrival", async () => {
     const f = await setup(() => fetch);
     const result = await f.engine.exchange();
 
@@ -178,9 +174,8 @@ describe("fetching a blob", () => {
     expect(f.landed.map((c) => c.objectStorageKey)).toEqual([f.cloudRecordKey]);
   });
 
-  // Accounting must follow the bytes, not the intent. A node with a flaky link
-  // that credited decisions would slowly convince itself it was full of things
-  // it doesn't have, and then decline everything.
+  // The record must follow the bytes, not the intent: a node that recorded
+  // decisions would believe it holds files it does not.
   it("does not report an arrival when the transfer fails", async () => {
     const f = await setup(() => fetch);
     // Remove the source bytes so the pull fails.
@@ -276,7 +271,7 @@ describe("the way back from a decline", () => {
     // A repair lowers the *advertised* watermark, so the responder re-ships
     // rows the elision had already carried past. What comes back down is the
     // row, and the decision is taken again from scratch — which is what makes a
-    // budget change take effect on a library that was declined under the old
+    // ceiling change take effect on a library that was declined under the old
     // one, and what stops a repair from silently reversing a policy that has
     // not changed.
     let verdict: ResidencyVerdict = elide;
@@ -341,7 +336,7 @@ describe("residencyOf names the ways a blob can be missing", () => {
   const verdict = (
     decision: "fetch" | "elide",
     reason: ResidencyVerdict["reason"],
-  ): ResidencyVerdict => ({ decision, sizeClass: null, reason });
+  ): ResidencyVerdict => ({ decision, reason });
 
   const stateOf = async (
     decide?: (r: FileRecordRow) => ResidencyVerdict,
@@ -363,45 +358,22 @@ describe("residencyOf names the ways a blob can be missing", () => {
   // conflation that made Elided impossible.
   it("reports staged with no decider, and elided when the node declined it", async () => {
     expect(await stateOf()).toEqual({ state: "staged", reason: null });
-    expect(await stateOf(() => verdict("elide", "class-disabled"))).toEqual({
+    expect(await stateOf(() => verdict("elide", "above-ceiling"))).toEqual({
       state: "elided",
-      reason: "class-disabled",
+      reason: "above-ceiling",
     });
-    expect(await stateOf(() => verdict("fetch", "within-budget"))).toEqual({
+    expect(await stateOf(() => verdict("fetch", "kept"))).toEqual({
       state: "staged",
-      reason: "within-budget",
+      reason: "kept",
     });
   });
 
-  /**
-   * The distinction the acquisition queue introduced, and the reason `elided`
-   * is now honest.
-   *
-   * Every other elide reason is a standing statement about this node: it does
-   * not want this class and will not until a policy changes. `budget-exhausted`
-   * is contention — the node wants these bytes, the line was full at the moment
-   * it was asked, and the queue is going to come back for them. Reporting that
-   * as `elided` told a UI to stop waiting for a blob that is genuinely owed.
-   */
-  it("reports a budget-deferred blob as staged and everything else as elided", async () => {
-    expect(await stateOf(() => verdict("elide", "budget-exhausted"))).toEqual({
-      state: "staged",
-      reason: "budget-exhausted",
-    });
-    for (const reason of ["class-disabled", "not-prefetched", "record-constraint"] as const) {
-      expect(await stateOf(() => verdict("elide", reason))).toEqual({
-        state: "elided",
-        reason,
-      });
-    }
-  });
-
-  // Elided-ness is re-evaluated rather than stored, so raising a budget makes a
-  // record staged again with no migration and no stale flag to clean up.
+  // Elided-ness is re-evaluated rather than stored, so raising a ceiling makes
+  // a record staged again with no migration and no stale flag to clean up.
   it("follows current policy rather than a stored flag", async () => {
     let declining = true;
     const decide = () =>
-      declining ? verdict("elide", "class-disabled") : verdict("fetch", "within-budget");
+      declining ? verdict("elide", "above-ceiling") : verdict("fetch", "within-ceiling");
     expect((await stateOf(decide)).state).toBe("elided");
     declining = false;
     expect((await stateOf(decide)).state).toBe("staged");
@@ -409,7 +381,7 @@ describe("residencyOf names the ways a blob can be missing", () => {
 
   it("reports tombstoned regardless of the blob or the policy", async () => {
     expect(
-      await stateOf(() => verdict("elide", "class-disabled"), { deleted_at: "t" }),
+      await stateOf(() => verdict("elide", "above-ceiling"), { deleted_at: "t" }),
     ).toEqual({ state: "tombstoned", reason: null });
   });
 

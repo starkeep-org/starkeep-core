@@ -1,25 +1,17 @@
 /**
- * The data-gathering half of variant resolution.
+ * The derived children of a page of originals, for `?variant=<appId>/<key>`.
  *
- * The decision itself lives in `@starkeep/protocol-primitives`
- * (`resolveVariants`) and is pure. This is what feeds it: the child records of
- * a page, filtered to those carrying the variant label, joined to their
- * dimensions.
- *
- * It lives here rather than in either data server because both need it and the
- * two servers' record routes are otherwise near-copies of each other — a rule
- * kept in both eventually gets fixed in only one. Expressed over the
+ * Every live child carrying the variant label, with its dimensions. It lives
+ * here rather than in either data server because both need it and the two
+ * servers' record routes are otherwise near-copies of each other — a rule kept
+ * in both eventually gets fixed in only one. Expressed over the
  * `DatabaseAdapter` interface, so it works against SQLite and DSQL alike.
  *
- * Nothing here names a size class. Resolution is over child records, a label
- * key, and the width/height columns — which is what lets the ladder be
- * respecified without touching the platform.
+ * Nothing here names a size class.
  */
 
 import {
-  resolveVariants,
   typeCategory,
-  type ResolvedVariant,
   type StarkeepId,
   type VariantCandidate,
 } from "@starkeep/protocol-primitives";
@@ -35,37 +27,12 @@ import type { DatabaseAdapter } from "./adapter.js";
  */
 const MAX_CHILDREN_PER_PAGE = 10_000;
 
-export async function loadVariantsForPage(
-  db: DatabaseAdapter,
-  records: readonly { id: StarkeepId }[],
-  variantLabel: { appId: string; key: string },
-  targets: readonly number[],
-): Promise<Map<StarkeepId, Record<string, ResolvedVariant>>> {
-  const out = new Map<StarkeepId, Record<string, ResolvedVariant>>();
-  if (targets.length === 0) return out;
-
-  for (const [parentId, list] of await loadVariantCandidatesForPage(db, records, variantLabel)) {
-    const resolved = resolveVariants(list, targets);
-    if (Object.keys(resolved).length > 0) out.set(parentId, resolved);
-  }
-  return out;
-}
-
 /**
- * The same gathering, without the narrowing: every derived child of the page,
- * with its dimensions.
+ * Every derived child of the page carrying the label, with its dimensions.
  *
- * This answers one app-agnostic question — *what derived children does this
- * record have, and how big is each one?* — and it is the set
- * {@link loadVariantsForPage} computes internally before choosing among it, so
- * exposing it costs nothing and names no class.
- *
- * It exists because narrowing to a pixel target throws away the two things a
- * caller most often needs next. A client handed only the rung that answered its
- * request cannot tell a rung that is *missing* from one that the ladder never
- * had for this record, and cannot see the smaller rung it could paint while it
- * waits. Both are questions about the ladder, so both belong to whichever app
- * owns one — and that app can only answer them if it can see the whole set.
+ * Answers one app-agnostic question — *what derived children does this record
+ * have, and how big is each one?* — and leaves the choice to the app that owns
+ * the label.
  */
 export async function loadVariantCandidatesForPage(
   db: DatabaseAdapter,

@@ -29,6 +29,7 @@ const TEST_ADMIN_EMAIL = "tier3-admin@starkeep.test";
 export async function ensureAdminUser(
   paths: RunPaths,
   userPoolId: string,
+  options: { readonly resetPassword?: boolean } = {},
 ): Promise<AdminCredentials> {
   const region = regionFromUserPoolId(userPoolId);
   const client = new CognitoIdentityProviderClient({ region });
@@ -44,7 +45,17 @@ export async function ensureAdminUser(
   // "Incorrect username or password" — which is what two checkouts sharing one
   // warm stack produce, the second one carrying an `admin.json` from before the
   // first one rebuilt the stack.
-  if (exists && saved?.email === TEST_ADMIN_EMAIL && saved.userPoolId === userPoolId) {
+  //
+  // `resetPassword` covers the drift the pool id cannot see: two checkouts
+  // sharing one warm stack, each with its own run-state dir. When one resets
+  // the shared account's password, the other's saved password stops working
+  // against the same pool, and only a failed sign-in shows it.
+  if (
+    !options.resetPassword &&
+    exists &&
+    saved?.email === TEST_ADMIN_EMAIL &&
+    saved.userPoolId === userPoolId
+  ) {
     return saved;
   }
 

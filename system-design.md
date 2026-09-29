@@ -150,8 +150,8 @@ The states:
 
 - **Absent** — no row for this id on this side.
 - **Staged** — the metadata row is present and references an `objectStorageKey`, the side **wants** those bytes, and they are not here yet.
-- **Elided** — the row is present and the side has decided it does **not** want these bytes: the class is disabled, it is not prefetched, or a record constraint forbids them here. A standing statement about the node, not a queue position.
-- **Evicted** — the side held these bytes and let them go.
+- **Elided** — the row is present and the side has decided it does **not** want these bytes: the file sits above this node's sync-down ceiling, or a record constraint forbids it here. A standing statement about the node, not a queue position.
+- **Evicted** — the side held these bytes and let them go through "Free up space".
 - **Resident** — the metadata row is present AND (the record carries no blob, OR the blob is present in this side's object storage).
 - **Tombstoned** — `deletedAt` is set on the metadata row. Treated identically to Resident by the sync protocol; the tombstone propagates the same way an update does. Blob garbage collection is a separate concern not handled by sync.
 
@@ -160,13 +160,15 @@ The classification (`residencyOf`) is derived from persisted facts (plus `delete
 1. Presence of the metadata row in the appropriate records table.
 2. Presence of the blob in this side's object storage (`localObjectStorage.has(key)`).
 3. Whether the resident-set index records that this side once held these bytes.
-4. What the retention policy says about the record right now.
+4. What the node's residency rule says about the record right now.
 
-Alongside the state it reports the *reason* the policy gave, because "arriving" and "queued behind forty thousand others" are the same state and very different sentences.
+Alongside the state it reports the *reason* the rule gave, because "arriving" and "above this node's ceiling" read differently to a person.
+
+**The residency rule.** A node may go without a file only because a stand-in can replace it. The node's sync-down ceiling governs the stand-ins and the originals a stand-in can replace — parentless, non-stand-in records whose type has published stand-in standards. Every other file, including derived records, documents and app-private files, arrives on every node and stays there. A node pin fetches a file above the ceiling. Nothing removes a file automatically; "Free up space" is the one path, and it removes only what a stand-in can replace, after proving cloud copies. See `~/projects/starkeep/exploration-shared-forms-generator-2026-09-27.md`, "Residency and eviction".
 
 **Staged has two backstops, and which one applies is the whole of the distinction between it and Evicted.** For a blob an in-flight round is bringing, the backstop is the watermark: while the record is Staged this side's watermark does not advance past its `updated_at`, so the gap persists and the next exchange round surfaces the record again — no retry queue, no reconciliation pass, no `sync_status` column, and zero storage HEAD requests in steady state, because there is no gap to drive any.
 
-For a blob a round **declined for want of room**, the backstop is the acquisition queue (`resident_blobs` rows with `held_ever = 0`). A round walks the change log oldest-first, so on a node whose budget binds it fills to the budget and then defers the rest rather than displacing its way through the library; the acquisition pass comes back for them best-first, and a periodic catalogue scan finds everything no round will offer again — a library that landed before the queue existed, blobs evicted after their round completed, bytes that went away locally, and everything a raised budget newly affords. The queue is the better backstop of the two, because it survives an advanced watermark, which the watermark by construction cannot.
+For a blob a round declined and the node **now wants**, the backstop is the acquisition queue (`resident_files` rows with `wanted = 1`). A catalogue scan finds every such file — a stand-in a raised ceiling now covers, a record someone pinned, bytes that went away locally — and the acquisition pass fetches the queue. The scan starts each full sweep by reconciling the index against the disk. The queue survives an advanced watermark, which the watermark by construction cannot.
 
 Evicted is its own state precisely because neither backstop is a *round*: the bytes left long after the watermark passed, so the peer considers them delivered. The routes back are an explicit fetch and the acquisition pass.
 

@@ -34,9 +34,8 @@ import * as execDaemon from "./routes/exec-daemon";
 import * as execDaemonStatus from "./routes/exec-daemon-status";
 import * as execDeployOutputs from "./routes/exec-deploy-outputs";
 import * as execStream from "./routes/exec-stream";
-import * as residency from "./routes/residency";
-import * as residencyPolicy from "./routes/residency-policy";
 import * as runtimeConfig from "./routes/runtime-config";
+import * as standIns from "./routes/stand-ins";
 
 export const api = new Hono().basePath("/api");
 
@@ -72,11 +71,11 @@ api.post("/exec/daemon", (c) => execDaemon.POST(c.req.raw));
 api.get("/exec/daemon/status", (c) => execDaemonStatus.GET(c.req.raw));
 api.post("/exec/stream", (c) => execStream.POST(c.req.raw));
 
-// The local data server, proxied — see `routes/residency.ts` for why these go
+// The local data server, proxied — see `routes/stand-ins.ts` for why these go
 // through the server rather than straight from the browser.
-api.get("/residency", () => residency.GET());
-api.post("/residency/policy", (c) => residencyPolicy.POST(c.req.raw));
-api.put("/residency/policy", (c) => residencyPolicy.PUT(c.req.raw));
+api.get("/residency/stand-ins", () => standIns.GET());
+api.put("/residency/stand-ins", (c) => standIns.PUT(c.req.raw));
+api.post("/residency/free-up-space", (c) => standIns.POST_FREE_UP_SPACE(c.req.raw));
 
 api.get("/runtime-config", () => runtimeConfig.GET());
 

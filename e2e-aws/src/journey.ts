@@ -43,6 +43,7 @@ import {
 import { signedFetch, USER_TOKEN_HEADER, type AppCredentials } from "@starkeep/app-client";
 import { cloudDataServerBundleSha256Base64, createDsqlRegistry } from "@starkeep/admin-installer";
 import { LambdaClient, GetFunctionConfigurationCommand } from "@aws-sdk/client-lambda";
+import { S3Client, GetObjectTaggingCommand } from "@aws-sdk/client-s3";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
@@ -234,6 +235,92 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
     return res;
   }
 
+  /**
+   * Upload bytes and register a record through either data server, with any
+   * extra registration fields (`fidelity`, `parentId`, `standIn`). The two
+   * servers share the route pair, so one helper writes as a desktop or as the
+   * cloud.
+   */
+  async function writeRecord(
+    target: LdsApp,
+    options: { type: string; contentType: string; bytes: Buffer } & Record<string, unknown>,
+  ): Promise<{ status: number; body: { record?: { id: string }; deduped?: boolean; [k: string]: unknown } }> {
+    const { type, contentType, bytes, ...rest } = options;
+    const upload = await target.fetch(`/data/files?type=${encodeURIComponent(type)}`, {
+      method: "POST",
+      headers: { "Content-Type": contentType },
+      body: bytes,
+    });
+    expect(upload.status, await upload.clone().text()).toBe(200);
+    const { contentHash, sizeBytes } = (await upload.json()) as { contentHash: string; sizeBytes: number };
+    const res = await target.fetch("/data/records", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, contentType, contentHash, sizeBytes, fileName: `tier3-${contentHash.slice(0, 8)}`, ...rest }),
+    });
+    return { status: res.status, body: (await res.json()) as { record?: { id: string }; deduped?: boolean } };
+  }
+
+  /**
+   * A registration that made a new record. The two servers disagree on the
+   * status — the cloud answers 201, the local server 200 — so the body's
+   * `deduped` flag is what says the record is new.
+   */
+  function expectCreated(result: { status: number; body: { deduped?: unknown } }, message?: string): void {
+    const detail = `${message ? `${message}: ` : ""}${JSON.stringify(result.body)}`;
+    expect(result.status, detail).toBeLessThan(300);
+    expect(result.body.deduped, detail).toBeFalsy();
+  }
+
+  /** The tags on a shared object, read straight from S3 with the operator's credentials. */
+  async function objectTags(key: string): Promise<Record<string, string>> {
+    const s3 = new S3Client({ region: REGION });
+    const out = await s3.send(new GetObjectTaggingCommand({ Bucket: config.s3Bucket!, Key: key }));
+    return Object.fromEntries((out.TagSet ?? []).map((t) => [t.Key!, t.Value!]));
+  }
+
+  /** A record's object key, as a data server reports it. */
+  async function objectKeyOf(target: LdsApp, id: string): Promise<string> {
+    const res = await target.fetch(`/data/records/${id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    const record = (body.record ?? body) as { objectStorageKey?: string; object_storage_key?: string };
+    const key = record.objectStorageKey ?? record.object_storage_key;
+    expect(key, JSON.stringify(body)).toBeTruthy();
+    return key!;
+  }
+
+  /** The live canonical stand-ins of an original, as a data server lists them. */
+  async function liveCanonicals(target: LdsApp, originalId: string): Promise<string[]> {
+    const where = encodeURIComponent(JSON.stringify({ parent_id: originalId, stand_in_role: "canonical" }));
+    const res = await target.fetch(`/data/records?include=stand-ins&where=${where}`);
+    expect(res.status, await res.clone().text()).toBe(200);
+    const { records } = (await res.json()) as { records: Array<{ id: string }> };
+    return records.map((r) => r.id);
+  }
+
+  /** An archivable photograph: past the 1 MiB size floor, above the 4272 threshold. */
+  function archivableOriginal(): { type: string; contentType: string; bytes: Buffer; fidelity: number } {
+    return { type: "image/jpeg", contentType: "image/jpeg", bytes: randomBytes(1_200_000), fidelity: 6000 };
+  }
+
+  /** A canonical stand-in for `parentId`, with fresh bytes. */
+  function canonicalFor(parentId: string): Record<string, unknown> & { type: string; contentType: string; bytes: Buffer } {
+    return {
+      type: "image/avif",
+      contentType: "image/avif",
+      bytes: randomBytes(40_000),
+      parentId,
+      standIn: { role: "canonical", fidelity: 4272 },
+    };
+  }
+
+  /** One Drive-channel round from the desktop. */
+  async function syncDesktop(): Promise<void> {
+    const res = await drive.fetch("/sync/now", { method: "POST" });
+    expect(res.status).toBe(200);
+  }
+
   function runTeardownScript(script: string): void {
     const result = spawnSync(
       "bash",
@@ -358,7 +445,15 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
 
       it("admin user exists and signs in through Cognito + Identity Pool", async () => {
         admin = await ensureAdminUser(paths, outputs.userPoolId);
-        session = await signInAdmin(config, admin);
+        try {
+          session = await signInAdmin(config, admin);
+        } catch (err) {
+          // Another checkout's run against this stack set a new password. Take
+          // the account back with a fresh one, once.
+          if ((err as { name?: string }).name !== "NotAuthorizedException") throw err;
+          admin = await ensureAdminUser(paths, outputs.userPoolId, { resetPassword: true });
+          session = await signInAdmin(config, admin);
+        }
         expect(session.idToken.split(".")).toHaveLength(3);
         expect(session.awsCredentials.accessKeyId).toBeTruthy();
       });
@@ -1086,7 +1181,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       );
 
       browserSteps(
-        "cloud-origin browser upload syncs down to the local data server (record + bytes)",
+        "cloud-origin browser upload syncs down to the local data server (record, then bytes on demand)",
         async () => {
           // The reverse direction of the earlier ship test. The browser upload above
           // landed in the cloud via browser→proxy→broker→S3 and never touched the
@@ -1115,12 +1210,16 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
             "browser-uploaded photo must sync down to the local data server",
           ).toBeDefined();
 
-          // The bytes came down too: the local file-url serves the exact bytes the
-          // browser uploaded (mirrors the cloud-side byte round-trip in the ship
-          // test, but proving the cloud→local blob transfer instead).
+          // The bytes come down too, but on demand rather than by sync. Probe
+          // reports no fidelity, so this desktop counts the PNG as above its
+          // ceiling and the round leaves the bytes in the cloud. The file-url
+          // read fetches them through the Drive channel and serves a local token
+          // — the exact bytes the browser uploaded. A presigned S3 URL would
+          // answer 403, because the person's own identity cannot read `shared/`.
           const urlRes = await appUnderTest.fetch(`/data/records/${localRecord!.id}/file-url`);
           expect(urlRes.status).toBe(200);
-          const { url } = (await urlRes.json()) as { url: string };
+          const { url, source } = (await urlRes.json()) as { url: string; source: string };
+          expect(source).toBe("local");
           const blob = await fetch(url);
           expect(blob.status).toBe(200);
           expect(Buffer.from(await blob.arrayBuffer()).equals(browserUploadBytes)).toBe(true);
@@ -1318,6 +1417,153 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // And whatever it answers, it is not the object: no app-private bytes are
         // reachable through the distribution.
         expect(appsProbe.status).not.toBe(200);
+      });
+
+      // Stand-ins and archiving, live. The platform tags an original's object
+      // for the bucket's lifecycle rule once the original is archivable and its
+      // canonical stand-in's bytes are in the cloud, clears the tag when a
+      // do-not-archive label arrives, and keeps one canonical stand-in when two
+      // nodes each make one. Unit and route tests cover the rules; only a real
+      // bucket shows the tags, and only real DSQL shows the race does not wedge
+      // sync. Drive writes, because it may write every type, and Probe's grant
+      // stops at PNG and JPEG.
+      let archivedOriginal: { id: string; key: string };
+
+      it("tags an archivable original for archiving once its canonical stand-in reaches the cloud", async () => {
+        const original = await writeRecord(drive, archivableOriginal());
+        expectCreated(original);
+        const id = original.body.record!.id;
+        const key = await objectKeyOf(drive, id);
+
+        // Before the canonical stand-in: the original is in the cloud, untagged.
+        await eventually(
+          async () => {
+            await syncDesktop();
+            expect((await cloudApp(drive).fetch(`/data/records/${id}`)).status).toBe(200);
+          },
+          { timeoutMs: 60_000, intervalMs: 2_000 },
+        );
+        expect(await objectTags(key)).toEqual({});
+
+        const canonical = await writeRecord(drive, canonicalFor(id));
+        expectCreated(canonical);
+        await eventually(
+          async () => {
+            await syncDesktop();
+            expect(await objectTags(key)).toEqual({ "starkeep:intent": "archive", "starkeep:ladder": "complete" });
+          },
+          { timeoutMs: 90_000, intervalMs: 3_000 },
+        );
+        archivedOriginal = { id, key };
+      });
+
+      it("clears the archive tag when a do-not-archive label arrives", async () => {
+        expect(archivedOriginal, "the tagging step must have run first").toBeTruthy();
+        const res = await drive.fetch("/data/labels", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ labels: [{ recordId: archivedOriginal.id, key: "do-not-archive" }] }),
+        });
+        expect(res.status, await res.text()).toBeLessThan(300);
+        await eventually(
+          async () => {
+            await syncDesktop();
+            expect(await objectTags(archivedOriginal.key)).toEqual({});
+          },
+          { timeoutMs: 90_000, intervalMs: 3_000 },
+        );
+      });
+
+      it("keeps one canonical stand-in when the cloud and a desktop each make one", async () => {
+        const original = await writeRecord(drive, archivableOriginal());
+        expectCreated(original);
+        const id = original.body.record!.id;
+        await eventually(
+          async () => {
+            await syncDesktop();
+            expect((await cloudApp(drive).fetch(`/data/records/${id}`)).status).toBe(200);
+          },
+          { timeoutMs: 60_000, intervalMs: 2_000 },
+        );
+
+        // The cloud commits first; the desktop writes before any round brings
+        // the cloud's stand-in down, so both nodes accept their own. A second
+        // desktop would need its own Drive install secret, so the cloud's API
+        // plays the other node — the collision meets the same sync apply either
+        // way.
+        const inCloud = await writeRecord(cloudApp(drive), canonicalFor(id));
+        expectCreated(inCloud);
+        const onDesktop = await writeRecord(drive, canonicalFor(id));
+        expectCreated(onDesktop, "the desktop must accept its own stand-in for the race to happen");
+        const cloudWinner = inCloud.body.record!.id;
+        expect(onDesktop.body.record!.id).not.toBe(cloudWinner);
+
+        // The cloud's first commit wins, on both nodes, and sync keeps running.
+        await eventually(
+          async () => {
+            await syncDesktop();
+            expect(await liveCanonicals(cloudApp(drive), id)).toEqual([cloudWinner]);
+            expect(await liveCanonicals(drive, id)).toEqual([cloudWinner]);
+          },
+          { timeoutMs: 90_000, intervalMs: 3_000 },
+        );
+        const status = (await (await drive.fetch("/sync/status")).json()) as {
+          perApp: Array<{ appId: string; lastError: string | null }>;
+        };
+        const driveEngine = status.perApp.find((e) => e.appId === "starkeep-drive");
+        expect(driveEngine?.lastError ?? null, "the collision must not wedge the Drive channel").toBeNull();
+      });
+
+      // "Free up space" deletes a person's local copy only after proving the
+      // cloud holds the file: S3's stored whole-object SHA-256 must match the
+      // record. Every other test of that proof runs against a store that
+      // reports no checksum, or against a mock. This is the one that shows the
+      // real bucket answers the question, so a removal actually happens.
+      it("frees an original from the desktop once the cloud's copies are proven", async () => {
+        const original = await writeRecord(drive, archivableOriginal());
+        expectCreated(original);
+        const id = original.body.record!.id;
+        expectCreated(await writeRecord(drive, canonicalFor(id)));
+        await eventually(
+          async () => {
+            await syncDesktop();
+            expect(await liveCanonicals(cloudApp(drive), id)).toHaveLength(1);
+          },
+          { timeoutMs: 90_000, intervalMs: 3_000 },
+        );
+        const key = await objectKeyOf(drive, id);
+        const onDisk = join(paths.dataDir, "objects", key);
+        expect(existsSync(onDisk), "the desktop wrote the original, so it holds it").toBe(true);
+
+        // A dry run first: the estimate names this original among what it would free.
+        const free = (dryRun: boolean) =>
+          fetch(`${lds!.url}/residency/free-up-space`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ bytes: Number.MAX_SAFE_INTEGER, scope: "originals", dryRun }),
+          });
+        const estimate = (await (await free(true)).json()) as {
+          cloudReachable: boolean;
+          removed: Array<{ recordId: string }>;
+          refused: Array<{ recordId: string; reason: string; detail: string }>;
+        };
+        expect(estimate.cloudReachable).toBe(true);
+        expect(
+          estimate.removed.map((r) => r.recordId),
+          `refused: ${JSON.stringify(estimate.refused.filter((r) => r.recordId === id))}`,
+        ).toContain(id);
+        expect(existsSync(onDisk), "a dry run removes nothing").toBe(true);
+
+        const report = (await (await free(false)).json()) as { removed: Array<{ recordId: string }> };
+        expect(report.removed.map((r) => r.recordId)).toContain(id);
+        expect(existsSync(onDisk)).toBe(false);
+
+        // And the bytes come back on demand, intact.
+        const urlRes = await drive.fetch(`/data/records/${id}/file-url`);
+        expect(urlRes.status).toBe(200);
+        const { url } = (await urlRes.json()) as { url: string };
+        expect((await fetch(url)).status).toBe(200);
+        expect(existsSync(onDisk)).toBe(true);
       });
 
       // The app's own assertions, registered against the same live stack. They

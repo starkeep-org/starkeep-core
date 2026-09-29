@@ -746,7 +746,7 @@ ids.
 
 `GET /data/records` takes the same grammar, over the columns of the shared
 records table. It answers a *rendered record* rather than a row — a category, an
-availability, a resolved variant set, a hydrated metadata row — so `select` is
+availability, a stand-in summary, a hydrated metadata row — so `select` is
 the one parameter that does not apply to it, except as an aggregate's grouping
 list.
 
@@ -787,7 +787,7 @@ Five things about this route specifically:
    question, and the server converts the instant into the bound.
 5. **The access paths are not grammar and stay named parameters.** `label` and
    `labelValue` select through the reverse index, which is a join; `notLabel`
-   is an anti-join; `variant`, `variantLongEdge`, `labelApps` and `include`
+   is an anti-join; `variant`, `labelApps` and `include`
    hydrate the page after it is cut. None of them is a predicate over the
    records table, and expressing them as one would be a worse API rather than a
    more uniform one.

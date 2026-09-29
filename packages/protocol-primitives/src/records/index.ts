@@ -18,6 +18,8 @@ export {
   planLabelWrites,
   planLabelRetractions,
   dedupeLabelWrites,
+  DO_NOT_ARCHIVE_LABEL_KEY,
+  WELL_KNOWN_LABEL_KEYS,
   LABEL_KEY_MAX_LENGTH,
   LABEL_KEYS_PER_APP_MAX,
   LABEL_VALUE_MAX_BYTES,
@@ -30,11 +32,4 @@ export {
   formatLabelRef,
   parseLabelRef,
 } from "./labels.js";
-export {
-  resolveVariant,
-  resolveVariants,
-  parseVariantLongEdges,
-  MAX_VARIANT_TARGETS,
-  type VariantCandidate,
-  type ResolvedVariant,
-} from "./variants.js";
+export { type VariantCandidate } from "./variants.js";

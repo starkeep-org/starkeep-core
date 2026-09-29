@@ -269,3 +269,59 @@ export async function eventually<T>(
     }
   }
 }
+
+/** Manifest for an app that produces stand-ins for images and video. */
+export function standInAppManifest(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "standins",
+    name: "Stand-in Producer",
+    version: "1.0.0",
+    tier: "community",
+    infraRequirements: {
+      fileAccess: [
+        {
+          types: ["image/jpeg", "image/png", "image/avif", "video/mp4", "video/webm", "audio/flac", "audio/opus"],
+          access: "readwrite",
+          metadataWrite: true,
+          rationale: "test",
+        },
+      ],
+    },
+    ...over,
+  };
+}
+
+/**
+ * Upload bytes and register a record with an arbitrary body, returning the
+ * raw status and body so a test can assert a refusal.
+ */
+export async function registerWithBytes(
+  app: InstalledApp,
+  options: {
+    type: string;
+    bytes?: Buffer | string;
+    contentType?: string;
+    /** Pad the upload to this many bytes, for size-floor cases. */
+    sizeBytes?: number;
+  } & Record<string, unknown>,
+): Promise<{ status: number; body: Record<string, unknown> & { record?: { id: string; [k: string]: unknown } } }> {
+  const { type, bytes, contentType, sizeBytes: padTo, ...rest } = options;
+  let payload = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes ?? `bytes-${Math.random()}`);
+  if (padTo !== undefined && payload.length < padTo) {
+    payload = Buffer.concat([payload, Buffer.alloc(padTo - payload.length)]);
+  }
+  const mime = contentType ?? "application/octet-stream";
+  const upload = await app.fetch(`/data/files?type=${type}`, {
+    method: "POST",
+    headers: { "Content-Type": mime },
+    body: payload,
+  });
+  if (!upload.ok) throw new Error(`upload failed: ${upload.status} ${await upload.text()}`);
+  const { contentHash, sizeBytes } = (await upload.json()) as { contentHash: string; sizeBytes: number };
+  const res = await app.fetch("/data/records", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type, contentType: mime, contentHash, sizeBytes, ...rest }),
+  });
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}

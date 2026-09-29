@@ -93,6 +93,29 @@ describe("read visibility", () => {
     expect(types.types.some((t) => t.record_type === "image/jpeg")).toBe(false);
   });
 
+  // The cloud answers the same pair. Before 2026-09-29 the local server read
+  // the record, and served its bytes, to any installed app.
+  it("an ungranted type answers 403 on the single-record read and on file-url", async () => {
+    const created = await createRecordWithBytes(imageApp, { fileName: "secret-by-id.jpg" });
+    const id = created.record.id;
+
+    expect((await imageApp.fetch(`/data/records/${id}`)).status).toBe(200);
+    expect((await imageApp.fetch(`/data/records/${id}/file-url`)).status).toBe(200);
+
+    const read = await pdfReader.fetch(`/data/records/${id}`);
+    expect(read.status).toBe(403);
+    expect(await read.json()).toEqual({ error: "Forbidden" });
+    const fileUrl = await pdfReader.fetch(`/data/records/${id}/file-url`);
+    expect(fileUrl.status).toBe(403);
+    expect(await fileUrl.json()).toEqual({ error: "Forbidden" });
+  });
+
+  it("a missing record still answers 404 to an app without the grant", async () => {
+    const missing = "01NOSUCHRECORD000000000000";
+    expect((await pdfReader.fetch(`/data/records/${missing}`)).status).toBe(404);
+    expect((await pdfReader.fetch(`/data/records/${missing}/file-url`)).status).toBe(404);
+  });
+
   it("category-widening: a jpg grant permits category file ops on png bytes (pinned-intentional)", async () => {
     // imageApp declares jpg AND png; use a one-extension app to pin widening.
     const jpgOnly = await installApp(server, {
@@ -137,6 +160,8 @@ describe("all-access identities", () => {
     const fromImageApp = await createRecordWithBytes(imageApp, { fileName: "other.jpg" });
     const driveList = await listRecords(drive);
     expect(driveList.some((r) => r.id === fromImageApp.record.id)).toBe(true);
+    expect((await drive.fetch(`/data/records/${fromImageApp.record.id}`)).status).toBe(200);
+    expect((await drive.fetch(`/data/records/${fromImageApp.record.id}/file-url`)).status).toBe(200);
   });
 });
 

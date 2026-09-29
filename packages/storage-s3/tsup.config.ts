@@ -9,6 +9,5 @@ export default defineConfig({
   external: [
     "@aws-sdk/client-s3",
     "@aws-sdk/s3-request-presigner",
-    "@aws-sdk/lib-storage",
   ],
 });

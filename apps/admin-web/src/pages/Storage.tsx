@@ -1,6 +1,6 @@
 import { Link } from "react-router";
 import { Badge } from "@/components/ui/badge";
-import { RetentionMatrix } from "../components/RetentionMatrix";
+import { StandInsSection } from "../components/StandInsSection";
 
 export function StoragePage() {
   return (
@@ -13,14 +13,16 @@ export function StoragePage() {
         <Badge variant="outline" className="text-xs">Experimental</Badge>
       </div>
       <p className="text-sm text-muted-foreground mb-6">
-        What this machine keeps, and what it would cost. Projected from a count of the
-        library rather than an estimate, so the numbers move when the library does.
+        This machine keeps a copy of every file, except photo and video originals, which it
+        downloads when you open one. It also keeps photo and video previews up to its
+        ceiling. Turn on &quot;Keep originals here&quot; to keep every original too. Nothing is
+        removed unless you free up space.
       </p>
       <div className="rounded-lg border p-6">
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">
-          Retention &amp; budgets
+          Photos &amp; videos
         </h2>
-        <RetentionMatrix />
+        <StandInsSection />
       </div>
     </div>
   );

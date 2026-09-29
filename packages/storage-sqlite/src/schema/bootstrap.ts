@@ -71,6 +71,13 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
       .addColumn("original_filename", "text")
       .addColumn("origin_app_id", "text", (c) => c.notNull())
       .addColumn("parent_id", "text")
+      // Stand-ins: a role, a reported fidelity, and the derived slot the unique
+      // index below keys on. See `stand-ins/rules.ts` in protocol-primitives.
+      .addColumn("stand_in_role", "text", (c) =>
+        c.check(sql`stand_in_role IN ('canonical', 'smaller')`),
+      )
+      .addColumn("fidelity", "integer")
+      .addColumn("stand_in_slot", "text")
       .compile().sql,
   );
   const sharedRecordsIndexes = [
@@ -107,6 +114,24 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
   for (const index of sharedRecordsIndexes) {
     db.exec(index.compile().sql);
   }
+
+  // One live canonical stand-in per original, and one live stand-in per size.
+  //
+  // A plain column index rather than SQLite's partial index, so both engines
+  // hold one index shape: DSQL rejects `WHERE` on CREATE INDEX, and the
+  // serializers compute `stand_in_slot` — null on every record the rules do
+  // not cover, including tombstones — so the partial predicate lives in the
+  // column instead. NULL is distinct from NULL in a SQLite unique index, which
+  // is exactly the reading wanted here: ordinary records never collide.
+  db.exec(
+    qb.schema
+      .createIndex("uq_shared_records_stand_in_slot")
+      .ifNotExists()
+      .unique()
+      .on("shared_records")
+      .columns(["parent_id", "stand_in_slot"])
+      .compile().sql,
+  );
 
   // Duplicate-file prevention: (parent + filename + bytes) is unique among live
   // records. Tombstoned rows (deleted_at IS NOT NULL) are excluded so a

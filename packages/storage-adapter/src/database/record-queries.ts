@@ -82,6 +82,8 @@ const FIELD_MAP: Record<string, string> = {
   originAppId: "origin_app_id",
   parentId: "parent_id",
   originalFilename: "original_filename",
+  standInRole: "stand_in_role",
+  fidelity: "fidelity",
 };
 
 function mapField(field: string): string {

@@ -28,7 +28,6 @@ import { buildSide } from "./sync-test-harness/side.js";
 import { FailingObjectStorageAdapter } from "./sync-test-harness/failure-injection.js";
 import { FILE_RECORDS_TABLE } from "./sync-test-harness/mock-app-source.js";
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
-import { UNCLASSIFIED_RUNG } from "../src/residency-manager.js";
 import type {
   AppSyncableRowEntry,
   ResidencyHooks,
@@ -128,9 +127,7 @@ function recordingHooks(decision: ResidencyVerdict["decision"]): ResidencyHooks 
       asked.push(candidate);
       return {
         decision,
-        sizeClass: { namespace: APP_ID, rung: UNCLASSIFIED_RUNG, qualified: `${APP_ID}:${UNCLASSIFIED_RUNG}` },
-        pinned: false,
-        reason: decision === "fetch" ? "within-budget" : "budget-exhausted",
+          reason: decision === "fetch" ? "kept" : "above-ceiling",
       };
     },
     onLanded: async (candidate) => {

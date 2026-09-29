@@ -116,9 +116,12 @@ export {
 } from "./database/label-find.js";
 
 export {
-  loadVariantsForPage,
   loadVariantCandidatesForPage,
 } from "./database/variant-queries.js";
+export {
+  loadStandInsForPage,
+  loadStandInSummariesForPage,
+} from "./database/stand-in-queries.js";
 
 export {
   loadMetadataForRecords,
@@ -195,6 +198,7 @@ export type {
 export { sha256HexToBase64, sha256Base64ToHex } from "./object-storage/checksum.js";
 export {
   setHashFactory,
+  hashFactory,
   type HashFactory,
   type IncrementalHash,
 } from "./object-storage/stream-verify.js";
@@ -212,6 +216,7 @@ export {
   TransactionError,
   ObjectNotFoundError,
   FileUriTransferRefused,
+  isStandInSlotConflict,
 } from "./errors.js";
 
 export { MockDatabaseAdapter } from "./mock/mock-database-adapter.js";

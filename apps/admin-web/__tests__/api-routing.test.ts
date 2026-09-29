@@ -53,8 +53,7 @@ vi.mock("../src/routes/exec-daemon", () => spy("exec-daemon", ["POST"]));
 vi.mock("../src/routes/exec-daemon-status", () => spy("exec-daemon-status", ["GET"]));
 vi.mock("../src/routes/exec-deploy-outputs", () => spy("exec-deploy-outputs", ["GET"]));
 vi.mock("../src/routes/exec-stream", () => spy("exec-stream", ["POST"]));
-vi.mock("../src/routes/residency", () => spy("residency", ["GET"]));
-vi.mock("../src/routes/residency-policy", () => spy("residency-policy", ["POST", "PUT"]));
+vi.mock("../src/routes/stand-ins", () => spy("stand-ins", ["GET", "PUT", "POST_FREE_UP_SPACE"]));
 vi.mock("../src/routes/runtime-config", () => spy("runtime-config", ["GET"]));
 
 const { api } = await import("../src/api");
@@ -88,9 +87,9 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["GET", "/api/exec/daemon/status", "exec-daemon-status", "GET"],
   ["GET", "/api/exec/deploy-outputs", "exec-deploy-outputs", "GET"],
   ["POST", "/api/exec/stream", "exec-stream", "POST"],
-  ["GET", "/api/residency", "residency", "GET"],
-  ["POST", "/api/residency/policy", "residency-policy", "POST"],
-  ["PUT", "/api/residency/policy", "residency-policy", "PUT"],
+  ["GET", "/api/residency/stand-ins", "stand-ins", "GET"],
+  ["PUT", "/api/residency/stand-ins", "stand-ins", "PUT"],
+  ["POST", "/api/residency/free-up-space", "stand-ins", "POST_FREE_UP_SPACE"],
   ["GET", "/api/runtime-config", "runtime-config", "GET"],
 ];
 
@@ -131,12 +130,6 @@ describe("paths that must not collide", () => {
     await call("POST", "/api/exec/daemon");
     await call("GET", "/api/exec/daemon/status");
     expect(seen.map((s) => s.module)).toEqual(["exec-daemon", "exec-daemon-status"]);
-  });
-
-  it("keeps /residency and /residency/policy apart", async () => {
-    await call("GET", "/api/residency");
-    await call("PUT", "/api/residency/policy");
-    expect(seen.map((s) => s.module)).toEqual(["residency", "residency-policy"]);
   });
 });
 

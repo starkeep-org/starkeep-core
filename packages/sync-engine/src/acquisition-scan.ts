@@ -1,43 +1,23 @@
 /**
- * The catalogue scan — the acquisition queue's second writer, and the one that
- * makes it correct rather than merely fast.
+ * The catalogue scan — the acquisition queue's writer.
  *
- * ## Why a queue fed only by declined rounds is not enough
+ * A round decides each blob once, as the change log offers it, and an elided
+ * blob advances the watermark. The scan finds every blob this node wants and
+ * lacks, whatever the round decided at the time:
  *
- * A round that defers a blob writes down an answer it has just computed, which
- * is cheap and covers the steady state. But it knows nothing about four
- * populations, and they are the ones that matter most on any device that has
- * been running for a while:
+ *   1. **stand-ins a raised ceiling now covers,** which rounds declined,
+ *      and originals "Keep originals here" now covers;
+ *   2. **blobs whose bytes went away locally** — on a phone, a camera-roll
+ *      asset the person deleted — which no round will resend.
  *
- *   1. **the library that landed before this shipped** — the exact population a
- *      cold sync leaves behind, because those rounds elided without deferring;
- *   2. **blobs evicted after their round completed** — the watermark moved long
- *      ago, so no round will offer them again;
- *   3. **blobs whose bytes went away locally** — an evicted rung, or on a phone
- *      a camera-roll asset the user deleted, which reports `staged` today with
- *      no queue, no resident-set row and no route home;
- *   4. **everything newly affordable after a budget is raised**, which nothing
- *      has ever backfilled.
- *
- * This is the only mechanism that finds any of them, and it is one walk for all
- * four. So the scan is the correctness guarantee and the deferred row is an
- * optimisation on top of it — which is what makes deferred rows freely
- * prunable, and a stale queue harmless.
- *
- * ## The filter is structural, not `decide()`
- *
- * A blob that belongs in this queue *is* `budget-exhausted` by construction, so
- * a scan predicated on `decide() === "fetch"` would filter out precisely the
- * population it exists to find. The question asked here is therefore the
- * weaker one — "would this node want these bytes if there were room" — and the
- * real question is asked once per candidate the acquisition pass actually
- * reaches, by `acquireBlob`, against the policy as it stands at that moment.
+ * It also adopts bytes already here that the index has never seen, such as a
+ * local import, so later scans answer from the index.
  *
  * ## Bounded, resumable, and idempotent
  *
  * It walks the catalogue a page at a time and returns its cursor, so a phone
  * that is killed mid-scan resumes rather than restarting. Nothing it writes is
- * a claim about disk — the output is only ever deferred rows — so a partial run
+ * a claim about disk — the output is only ever queue rows — so a partial run
  * leaves a smaller queue rather than a wrong one, and a repeated run leaves the
  * same one.
  */
@@ -49,8 +29,7 @@ import type { BlobCandidate } from "./residency-policy.js";
 
 /**
  * What the scan does with one record. Supplied by the host, because deciding
- * whether a node would want these bytes needs the record's labels and the
- * node's policy — neither of which this walk is entitled to know about.
+ * whether a node wants these bytes needs the node's ceilings.
  *
  * See `ResidencyManager.considerForAcquisition`.
  */
@@ -61,9 +40,9 @@ export type AcquisitionCandidateSink = (
 export type AcquisitionConsideration =
   /** Written to the queue. */
   | "queued"
-  /** The bytes are already here (or already charged, or already in flight). */
+  /** The bytes are already here. */
   | "held"
-  /** This node does not want this class at all — nothing to queue. */
+  /** This node does not want these bytes — nothing to queue. */
   | "unwanted";
 
 export interface AcquisitionScanRequest {
@@ -152,13 +131,8 @@ export async function scanForAcquirable(
 }
 
 /**
- * Normalize a record the same way an inbound round does.
- *
- * Shared with `pullBlob` rather than written again here, because the two must
- * agree about namespace, parentage and origin app: a scan that resolved a
- * rendition's class differently from the round that deferred it would queue the
- * same blob onto a second budget line and the eviction pass would find it on
- * neither.
+ * Normalize a record the same way an inbound round does, so the scan and the
+ * round decide the same blob the same way.
  */
 function candidateFor(record: AnyRecord): BlobCandidate | null {
   return blobCandidateForRecord(record);

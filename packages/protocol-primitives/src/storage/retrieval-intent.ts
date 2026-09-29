@@ -72,8 +72,13 @@ export function isRetrievalIntent(value: string): value is RetrievalIntent {
 export const INTENT_TAG_KEY = "starkeep:intent";
 
 /**
- * Object tag asserting that every applicable derived class for this blob's
- * record is confirmed present in cloud storage.
+ * Object tag asserting that the record's canonical stand-in is confirmed
+ * present in the cloud's instant tier. The key keeps its original name, from
+ * when the assertion was an app's "my derived ladder is complete", because
+ * the lifecycle rule and every object already tagged spell it this way.
+ *
+ * The platform writes it now, and only when all three archiving conditions
+ * hold — see `evaluateArchiving` in shared-space-api.
  *
  * The archive lifecycle rule requires **both** this and the intent tag. That
  * conjunction is the whole safety argument for archiving originals: an original
