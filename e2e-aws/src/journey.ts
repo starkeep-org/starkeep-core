@@ -1514,6 +1514,58 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(driveEngine?.lastError ?? null, "the collision must not wedge the Drive channel").toBeNull();
       });
 
+      // "Free up space" deletes a person's local copy only after proving the
+      // cloud holds the file: S3's stored whole-object SHA-256 must match the
+      // record. Every other test of that proof runs against a store that
+      // reports no checksum, or against a mock. This is the one that shows the
+      // real bucket answers the question, so a removal actually happens.
+      it("frees an original from the desktop once the cloud's copies are proven", async () => {
+        const original = await writeRecord(drive, archivableOriginal());
+        expectCreated(original);
+        const id = original.body.record!.id;
+        expectCreated(await writeRecord(drive, canonicalFor(id)));
+        await eventually(
+          async () => {
+            await syncDesktop();
+            expect(await liveCanonicals(cloudApp(drive), id)).toHaveLength(1);
+          },
+          { timeoutMs: 90_000, intervalMs: 3_000 },
+        );
+        const key = await objectKeyOf(drive, id);
+        const onDisk = join(paths.dataDir, "objects", key);
+        expect(existsSync(onDisk), "the desktop wrote the original, so it holds it").toBe(true);
+
+        // A dry run first: the estimate names this original among what it would free.
+        const free = (dryRun: boolean) =>
+          fetch(`${lds!.url}/residency/free-up-space`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ bytes: Number.MAX_SAFE_INTEGER, scope: "originals", dryRun }),
+          });
+        const estimate = (await (await free(true)).json()) as {
+          cloudReachable: boolean;
+          removed: Array<{ recordId: string }>;
+          refused: Array<{ recordId: string; reason: string; detail: string }>;
+        };
+        expect(estimate.cloudReachable).toBe(true);
+        expect(
+          estimate.removed.map((r) => r.recordId),
+          `refused: ${JSON.stringify(estimate.refused.filter((r) => r.recordId === id))}`,
+        ).toContain(id);
+        expect(existsSync(onDisk), "a dry run removes nothing").toBe(true);
+
+        const report = (await (await free(false)).json()) as { removed: Array<{ recordId: string }> };
+        expect(report.removed.map((r) => r.recordId)).toContain(id);
+        expect(existsSync(onDisk)).toBe(false);
+
+        // And the bytes come back on demand, intact.
+        const urlRes = await drive.fetch(`/data/records/${id}/file-url`);
+        expect(urlRes.status).toBe(200);
+        const { url } = (await urlRes.json()) as { url: string };
+        expect((await fetch(url)).status).toBe(200);
+        expect(existsSync(onDisk)).toBe(true);
+      });
+
       // The app's own assertions, registered against the same live stack. They
       // come after every platform step that sets up state they might read, and
       // before uninstall takes the app plane down.

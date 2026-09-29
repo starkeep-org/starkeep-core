@@ -74,3 +74,28 @@ export async function applyRecordDelete(
   }
   return deleted;
 }
+
+/**
+ * Whether the cloud must refuse a synced tombstone of `current`.
+ *
+ * The canonical stand-in of an archived original is all a person can see of
+ * the photograph until a restore, so the cloud keeps it: the sync transport
+ * stores the live row instead and ships it back to the node that deleted it.
+ * A tombstone that arrives with its original's own tombstone in the same
+ * exchange is a delete of the whole item, and passes.
+ *
+ * `exchange` is the incoming request, read only for the original's tombstone.
+ */
+export async function keepCanonicalOfArchivedOriginal(
+  db: DatabaseAdapter,
+  current: DataRecord,
+  exchange: { records?: ReadonlyArray<{ id: string; deletedAt: unknown }> },
+): Promise<boolean> {
+  if (current.standInRole !== "canonical" || !current.parentId) return false;
+  const parentId = current.parentId;
+  if ((exchange.records ?? []).some((r) => r.id === parentId && r.deletedAt)) return false;
+  const original = await db.get(parentId);
+  if (!original || original.deletedAt || !original.objectStorageKey) return false;
+  const row = (await db.getAvailability([original.objectStorageKey])).get(original.objectStorageKey);
+  return row?.state === "archived" || row?.state === "restoring";
+}

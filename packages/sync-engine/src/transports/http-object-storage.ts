@@ -9,7 +9,19 @@ import type {
   ObjectFacts,
   PutStreamOptions,
 } from "@starkeep/storage-adapter";
-import { FileUriTransferRefused, verifyingStream } from "@starkeep/storage-adapter";
+import {
+  FileUriTransferRefused,
+  hashFactory,
+  sha256Base64ToHex,
+  verifyingStream,
+} from "@starkeep/storage-adapter";
+
+/** Lowercase-hex SHA-256 of bytes in hand, with the platform's portable hasher. */
+function hashHex(data: Uint8Array): string {
+  const hash = hashFactory()();
+  hash.update(data);
+  return hash.digestHex();
+}
 
 /**
  * What the server hands back when it signs an upload.
@@ -217,8 +229,16 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
    * every write path — the three of them must not drift in what they send, or a
    * PUT signed one way and issued another fails as `SignatureDoesNotMatch`.
    */
-  private async presignPut(key: string, contentType?: string): Promise<PresignResponse> {
-    const presignBody = JSON.stringify({ key, contentType });
+  private async presignPut(
+    key: string,
+    contentType: string | undefined,
+    contentHash: string | undefined,
+  ): Promise<PresignResponse> {
+    // The hash goes with every request that knows it. A shared key names its
+    // own hash and the server derives it; an app-syncable key does not, and
+    // the server pins what the uploader declares, so every object S3 stores
+    // carries a whole-object SHA-256.
+    const presignBody = JSON.stringify({ key, contentType, ...(contentHash ? { contentHash } : {}) });
     const presignRes = await this.fetchImpl(`${this.apiBase()}/files/presign`, {
       method: "POST",
       headers: this.headers("POST", "/files/presign", presignBody, {
@@ -244,7 +264,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     fileUri: string,
     options?: PutStreamOptions,
   ): Promise<void> {
-    const presigned = await this.presignPut(key, options?.contentType);
+    const presigned = await this.presignPut(key, options?.contentType, options?.expectedSha256Hex);
 
     // The one refusal, raised here — after the presign round trip and before a
     // single byte moves, which is exactly where the contract permits it.
@@ -283,9 +303,13 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
 
   async put(key: string, data: Uint8Array, options?: PutOptions): Promise<void> {
     // Request a presigned S3 PUT URL from the server to bypass API Gateway limits.
+    // The bytes are in hand, so the hash always is too.
+    const declared = options?.checksumSha256 ? sha256Base64ToHex(options.checksumSha256) : null;
+    const contentHash = declared ?? hashHex(data);
     const { url, checksumSha256, storageClass, tagging } = await this.presignPut(
       key,
       options?.contentType,
+      contentHash,
     );
 
     // Upload directly to S3 — presigned URL carries credentials, no auth header needed.
@@ -403,12 +427,12 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     const { url, checksumSha256, storageClass, tagging } = await this.presignPut(
       key,
       options?.contentType,
+      options?.expectedSha256Hex,
     );
 
     // Hash on the way past and fail the stream on a mismatch, which aborts the
-    // request rather than completing it. The server's pinned `checksumSha256`
-    // covers the single-part case; above the multipart threshold S3 cannot
-    // check a whole-object SHA-256 at all, so this is the only thing that does.
+    // request rather than completing it. S3 checks the pinned `checksumSha256`
+    // too; this catches a mismatch before the last byte leaves the device.
     const verified = options?.expectedSha256Hex
       ? verifyingStream(body, { key, expectedSha256Hex: options.expectedSha256Hex })
       : body;

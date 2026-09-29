@@ -1718,7 +1718,7 @@ describe("/app-data routes", () => {
         appId: "appdata1",
         method: "POST",
         subPath: "/app-data/files/presign",
-        body: { subKey: "cover", contentType: "image/png" },
+        body: { subKey: "cover", contentType: "image/png", contentHash: "c".repeat(64) },
       }),
       context,
     );
@@ -1728,10 +1728,28 @@ describe("/app-data routes", () => {
     expect(String(body["url"])).toContain("fake-bucket");
     // The broker never reads or writes bytes on the presign path.
     expect(db.calls(FILE_RECORDS_INSERT)).toHaveLength(0);
-    // No checksum is pinned for an app-syncable key: the subKey is a stable
-    // app-chosen name, not a hash, so there is nothing to derive from it.
-    // Inventing one would reject every legitimate rewrite of such a file.
-    expect(body["checksumSha256"]).toBeUndefined();
+    // The subKey is a stable app-chosen name, not a hash, so the app declares
+    // this upload's hash and it is pinned: S3 then rejects any other body and
+    // stores a whole-file SHA-256. A rewrite of the same name pins its own.
+    expect(body["checksumSha256"]).toBe(Buffer.from("c".repeat(64), "hex").toString("base64"));
+    expect(String(body["url"])).toContain("x-amz-checksum-sha256");
+  });
+
+  it("refuses an app-data presign without the upload's hash", async () => {
+    setDbFactory(fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, []));
+    for (const contentHash of [undefined, "not-a-hash", "C".repeat(64)]) {
+      const res = await handler(
+        signedEvent({
+          appId: "appdata1",
+          method: "POST",
+          subPath: "/app-data/files/presign",
+          body: { subKey: "cover", contentType: "image/png", ...(contentHash ? { contentHash } : {}) },
+        }),
+        context,
+      );
+      expect(res.statusCode, String(contentHash)).toBe(400);
+      expect(String(bodyOf(res)["error"])).toMatch(/contentHash/);
+    }
   });
 
   it("registers the index row for a presigned upload without holding bytes", async () => {
@@ -2714,6 +2732,51 @@ describe("POST /files/presign pins the expected checksum", () => {
       context,
     );
     expect(bodyOf(res)["checksumSha256"]).toBe(expectedChecksum);
+  });
+
+  it("refuses a declared hash that disagrees with the one a shared key names", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+    );
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/presign",
+        body: { key: sharedKey, contentHash: "f".repeat(64) },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(String(bodyOf(res)["error"])).toMatch(/disagrees/);
+  });
+
+  // An app-syncable key is a name, not a hash, so the uploader declares the
+  // hash and it is pinned the same way: every object carries a whole-file
+  // SHA-256, which is what a node proves a cloud copy against.
+  it("pins the declared hash for a key that does not name its own", async () => {
+    setDbFactory(fakeDsqlWithGrants().on(noRecordAtKey, []));
+    const appKey = "apps/app1/syncable/cover";
+    const declared = "d".repeat(64);
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/presign",
+        body: { key: appKey, contentHash: declared },
+      }),
+      context,
+    );
+    expect(res.statusCode, JSON.stringify(bodyOf(res))).toBe(200);
+    expect(bodyOf(res)["checksumSha256"]).toBe(Buffer.from(declared, "hex").toString("base64"));
+    expect(String(bodyOf(res)["url"])).toContain("x-amz-checksum-sha256");
+
+    const missing = await handler(
+      signedEvent({ appId: "app1", method: "POST", subPath: "/files/presign", body: { key: appKey } }),
+      context,
+    );
+    expect(missing.statusCode).toBe(400);
+    expect(String(bodyOf(missing)["error"])).toMatch(/contentHash is required/);
   });
 
 });

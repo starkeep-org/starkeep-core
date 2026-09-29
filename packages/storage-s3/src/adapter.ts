@@ -11,10 +11,14 @@ import {
 } from "@aws-sdk/client-s3";
 import type { PutObjectCommandInput } from "@aws-sdk/client-s3";
 import { getSignedUrl as awsGetSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { Upload } from "@aws-sdk/lib-storage";
+import { createHash } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import { verifyingStream } from "@starkeep/storage-adapter";
 import type {
   ByteRange,
   PutOptions,
@@ -29,15 +33,34 @@ import type {
 } from "@starkeep/storage-adapter";
 import type { S3ObjectStorageAdapterOptions } from "./types.js";
 
-const MULTIPART_THRESHOLD_BYTES = 5 * 1024 * 1024;
-
 /**
- * Part size for streamed uploads. Above ~8 MB the media plan wants multipart;
- * lib-storage switches to it automatically once a body exceeds one part, so
- * this doubles as the threshold. A smaller part size would multiply request
- * count on the multi-GB clips this path exists for.
+ * The largest object one PutObject request may carry.
+ *
+ * Every object this adapter writes goes up in one request, because only a
+ * single-request upload can carry a whole-object SHA-256. S3 stores a
+ * multipart upload's SHA-256 as a composite over the parts, suffixed
+ * `-<partCount>`, which is not the object's hash; full-object checksums for
+ * multipart exist only for the CRC algorithms. Without a whole-object SHA-256
+ * no node can prove the cloud holds a file, so "Free up space" could never
+ * free it. The presigned uploads devices use are single requests too, so this
+ * is already the largest file the system can hold.
  */
-const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
+export const MAX_SINGLE_PUT_BYTES = 5 * 1024 ** 3;
+
+function sha256Base64(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("base64");
+}
+
+function hexToBase64(hex: string): string {
+  return Buffer.from(hex, "hex").toString("base64");
+}
+
+function tooLarge(key: string, bytes: number): Error {
+  return new Error(
+    `${key} is ${bytes} bytes; S3 takes at most ${MAX_SINGLE_PUT_BYTES} in one request, ` +
+      "and only a single-request upload carries a whole-object SHA-256",
+  );
+}
 
 export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
   private readonly options: S3ObjectStorageAdapterOptions;
@@ -96,51 +119,21 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
     const resolvedKey = this.resolveKey(key);
     const contentType = options?.contentType;
 
-    if (data.byteLength > MULTIPART_THRESHOLD_BYTES) {
-      // Multipart deliberately gets NO whole-object ChecksumSHA256, and this is
-      // a property of S3, not a shortcut. Confirmed against the current S3
-      // docs (`checking-object-integrity-upload`): full-object checksums for
-      // multipart are supported *only* for the CRC algorithms (CRC64NVME,
-      // CRC32, CRC32C), because only those linearize from part checksums.
-      // SHA-256 is **composite-only** for multipart — the stored value is a
-      // digest over the part digests, suffixed `-<partCount>`, which is not
-      // the SHA-256 of the object and must never be compared against a
-      // contentHash (`sha256Base64ToHex` returns null for it, deliberately).
-      //
-      // The mechanism that does work is per-part: each UploadPart carries its
-      // own ChecksumSHA256 and S3 rejects a part that doesn't match, with the
-      // composite attesting the assembly. The uploader still has to verify the
-      // whole-object hash itself as it streams and abort on mismatch. That
-      // belongs with the streaming/multipart transfer path, not this
-      // buffer-everything convenience method — which is why the bytes here go
-      // up unverified and the caller is told so via `stat()` reporting a
-      // composite checksum.
-      const upload = new Upload({
-        client: this.getClient(),
-        params: {
-          Bucket: this.options.bucketName,
-          Key: resolvedKey,
-          Body: data,
-          ...(contentType ? { ContentType: contentType } : {}),
-        },
-      });
-      await upload.done();
-    } else {
-      await this.getClient().send(
-        new PutObjectCommand({
-          Bucket: this.options.bucketName,
-          Key: resolvedKey,
-          Body: data,
-          ...(contentType ? { ContentType: contentType } : {}),
-          // S3 rejects a body that doesn't match rather than storing it, so a
-          // 200 here means "S3 confirmed these bytes are the bytes this key
-          // names" — not merely "the request was accepted".
-          ...(options?.checksumSha256
-            ? { ChecksumSHA256: options.checksumSha256 }
-            : {}),
-        }),
-      );
-    }
+    if (data.byteLength > MAX_SINGLE_PUT_BYTES) throw tooLarge(key, data.byteLength);
+    await this.getClient().send(
+      new PutObjectCommand({
+        Bucket: this.options.bucketName,
+        Key: resolvedKey,
+        Body: data,
+        ...(contentType ? { ContentType: contentType } : {}),
+        ...(options?.metadata ? { Metadata: options.metadata } : {}),
+        // Always a whole-object SHA-256: the caller's, or one computed here
+        // from the bytes in hand. S3 rejects a body that doesn't match rather
+        // than storing it, so a 200 means "S3 confirmed these bytes", and
+        // `stat()` reports a checksum a node can prove a replica against.
+        ChecksumSHA256: options?.checksumSha256 ?? sha256Base64(data),
+      }),
+    );
   }
 
   async getStream(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
@@ -176,41 +169,67 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
     options?: PutStreamOptions,
   ): Promise<void> {
     const resolvedKey = this.resolveKey(key);
+    const base: PutObjectCommandInput = {
+      Bucket: this.options.bucketName,
+      Key: resolvedKey,
+      ...(options?.contentType ? { ContentType: options.contentType } : {}),
+      ...(options?.metadata ? { Metadata: options.metadata } : {}),
+    };
 
-    // Hash as the bytes go past and fail the stream at end-of-input on a
-    // mismatch, which aborts the upload instead of completing it. This is the
-    // only whole-object verification available above the multipart threshold —
-    // see PutStreamOptions.expectedSha256Hex.
-    const verified = options?.expectedSha256Hex
-      ? verifyingStream(body, { key, expectedSha256Hex: options.expectedSha256Hex })
-      : body;
+    // A known length streams straight through in one request. With the
+    // expected hash, S3 checks the whole object against it; without one, the
+    // SDK computes a SHA-256 as the bytes pass and S3 stores it as a
+    // whole-object checksum.
+    if (options?.sizeBytes !== undefined) {
+      if (options.sizeBytes > MAX_SINGLE_PUT_BYTES) throw tooLarge(key, options.sizeBytes);
+      await this.getClient().send(
+        new PutObjectCommand({
+          ...base,
+          Body: Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]),
+          ContentLength: options.sizeBytes,
+          ...(options.expectedSha256Hex
+            ? { ChecksumSHA256: hexToBase64(options.expectedSha256Hex) }
+            : { ChecksumAlgorithm: "SHA256" as const }),
+        }),
+      );
+      return;
+    }
 
-    const upload = new Upload({
-      client: this.getClient(),
-      params: {
-        Bucket: this.options.bucketName,
-        Key: resolvedKey,
-        // lib-storage accepts a Node Readable, not a web stream.
-        Body: Readable.fromWeb(verified as Parameters<typeof Readable.fromWeb>[0]),
-        ...(options?.contentType ? { ContentType: options.contentType } : {}),
-        ...(options?.metadata ? { Metadata: options.metadata } : {}),
-        // Per-part SHA-256: S3 validates each part on UploadPart and rejects a
-        // corrupted one, and the composite it stores attests the assembly.
-        // This is what "verify per part" means in practice — it is *not* a
-        // whole-object checksum and must never be compared against one.
-        ChecksumAlgorithm: "SHA256",
-      },
-      partSize: MULTIPART_PART_SIZE_BYTES,
-    });
-
+    // An unknown length cannot be one request, so the bytes spool to a
+    // temporary file while they hash, and go up from there with both.
+    const dir = await mkdtemp(join(tmpdir(), "starkeep-s3-put-"));
+    const path = join(dir, "body");
     try {
-      await upload.done();
-    } catch (err) {
-      // A mismatch surfaces as the stream erroring mid-upload. Abort so the
-      // multipart upload doesn't linger as billable orphaned parts — S3 charges
-      // for them until a lifecycle rule reaps them, and there is no such rule.
-      await upload.abort().catch(() => {});
-      throw err;
+      const hash = createHash("sha256");
+      let bytes = 0;
+      await pipeline(
+        Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]),
+        async function* (source: AsyncIterable<Uint8Array>) {
+          for await (const chunk of source) {
+            hash.update(chunk);
+            bytes += chunk.byteLength;
+            if (bytes > MAX_SINGLE_PUT_BYTES) throw tooLarge(key, bytes);
+            yield chunk;
+          }
+        },
+        createWriteStream(path),
+      );
+      const digest = hash.digest();
+      if (options?.expectedSha256Hex && digest.toString("hex") !== options.expectedSha256Hex) {
+        throw new Error(
+          `${key}: the streamed bytes hash to ${digest.toString("hex")}, not ${options.expectedSha256Hex}`,
+        );
+      }
+      await this.getClient().send(
+        new PutObjectCommand({
+          ...base,
+          Body: createReadStream(path),
+          ContentLength: bytes,
+          ChecksumSHA256: digest.toString("base64"),
+        }),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   }
 
