@@ -15,8 +15,8 @@ const STAND_INS = {
   ceilings: { image: 2560, video: null },
   configured: {},
   defaults: { image: 2560, video: null },
-  standardSizes: { image: [320, 640, 1280, 2560], video: [1280] },
-  canonicalThresholds: { image: 4272, video: 1920 },
+  standardSizes: { image: [320, 640, 1280, 2560], video: [2000] },
+  canonicalThresholds: { image: 4272, video: 4800 },
   heldBytes: {
     image: { originals: 3 * 1024 ** 3, standIns: 200 * 1024 ** 2 },
     video: { originals: 0, standIns: 0 },
@@ -110,6 +110,12 @@ describe("the stand-in section", () => {
       "2560 px",
       "4272 px (canonical)",
     ]);
+    const video = screen.getByLabelText("Ceiling for Videos");
+    expect(within(video).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "none — on demand only",
+      "2000 kbps",
+      "4800 kbps (canonical)",
+    ]);
   });
 
   it("offers a ceiling for photos and videos only, and saves what is shown", async () => {
@@ -121,12 +127,12 @@ describe("the stand-in section", () => {
     expect(screen.queryByLabelText("Ceiling for Audio")).toBeNull();
 
     await user.selectOptions(screen.getByLabelText("Ceiling for Photos"), "1280");
-    await user.selectOptions(screen.getByLabelText("Ceiling for Videos"), "1280");
+    await user.selectOptions(screen.getByLabelText("Ceiling for Videos"), "2000");
     await user.click(save);
 
     await screen.findByText(/restarts to apply/);
     const put = calls.find((c) => c.method === "PUT")!;
-    expect(put.body).toEqual({ ceilings: { image: 1280, video: 1280 } });
+    expect(put.body).toEqual({ ceilings: { image: 1280, video: 2000 } });
   });
 
   it("estimates what keeping originals downloads, and saves only that setting", async () => {
@@ -160,7 +166,7 @@ describe("the stand-in section", () => {
     );
     const user = userEvent.setup();
     render(<StandInsSection />);
-    await user.selectOptions(await screen.findByLabelText("Ceiling for Videos"), "1280");
+    await user.selectOptions(await screen.findByLabelText("Ceiling for Videos"), "2000");
     await user.click(screen.getByRole("button", { name: "Save ceilings" }));
     expect(await screen.findByText(/positive whole fidelity/)).toBeTruthy();
   });

@@ -387,7 +387,7 @@ describe("the ceiling routes", () => {
       ceilings: { image: 2560, video: null },
       defaults: { image: 2560, video: null },
       standardSizes: { image: [320, 640, 1280, 2560] },
-      canonicalThresholds: { image: 4272, video: 1920 },
+      canonicalThresholds: { image: 4272, video: 4800 },
       keepOriginals: false,
     });
   });

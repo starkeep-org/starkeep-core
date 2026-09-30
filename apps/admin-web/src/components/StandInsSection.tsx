@@ -66,7 +66,7 @@ const CATEGORY_LABELS: Record<Category, string> = {
 /** What a ceiling's number measures, per category. */
 const FIDELITY_UNITS: Record<Category, string> = {
   image: "px",
-  video: "px",
+  video: "kbps",
 };
 
 const GIB = 1024 ** 3;

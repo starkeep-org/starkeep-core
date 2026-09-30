@@ -113,7 +113,7 @@ export function takesCanonical(status: OriginalStatus | null): boolean {
  * The fidelity a canonical stand-in for this original must report.
  *
  * The threshold, except for a video original below it, whose canonical
- * stand-in matches the original's own long edge. Null when the original takes
+ * stand-in matches the original's own bitrate. Null when the original takes
  * no canonical stand-in.
  */
 export function expectedCanonicalFidelity(
