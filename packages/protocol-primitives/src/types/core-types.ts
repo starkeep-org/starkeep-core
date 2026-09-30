@@ -208,7 +208,11 @@ export interface CoreTypeMetadataColumn {
   nullable?: boolean;
 }
 
-/** The fixed set of categories. `other` is the terminal catch-all (last). */
+/**
+ * The fixed set of categories. `other` is the terminal catch-all (last), and
+ * `starkeep` holds the platform's own files. Both are Drive-only: see
+ * {@link isGrantableCategory} and {@link hasMetadataTable}.
+ */
 export type Category =
   | "image"
   | "video"
@@ -220,6 +224,7 @@ export type Category =
   | "archive"
   | "data"
   | "model3d"
+  | "starkeep"
   | "other";
 
 export interface CategoryDef {
@@ -371,8 +376,27 @@ export const CATEGORIES: readonly CategoryDef[] = [
   { id: "archive", description: "Compressed bundles.", metadataColumns: ARCHIVE_METADATA_COLUMNS },
   { id: "data", description: "Tabular / columnar / embedded-DB data files.", metadataColumns: DATA_METADATA_COLUMNS },
   { id: "model3d", description: "3D meshes and scenes.", metadataColumns: MODEL3D_METADATA_COLUMNS },
+  { id: "starkeep", description: "The platform's own files, such as the library's settings. Drive-only; no metadata table; no installable-app grants; no file extension maps here.", metadataColumns: [] },
   { id: "other", description: "Terminal catch-all for unmapped or extension-less files. Drive-only; no metadata table; no installable-app grants.", metadataColumns: [] },
 ];
+
+/**
+ * Categories only Starkeep Drive reaches: no installable app may be granted
+ * one, and none has a metadata table. `other` holds files nothing could type;
+ * `starkeep` holds the platform's own files, which an app must not read or
+ * rewrite.
+ */
+const DRIVE_ONLY_CATEGORIES: ReadonlySet<string> = new Set<Category>(["starkeep", "other"]);
+
+/** Whether an installable app may be granted this category. */
+export function isGrantableCategory(category: Category | string): boolean {
+  return !DRIVE_ONLY_CATEGORIES.has(category);
+}
+
+/** Whether this category has a per-category metadata table. */
+export function hasMetadataTable(category: Category | string): boolean {
+  return !DRIVE_ONLY_CATEGORIES.has(category);
+}
 
 /**
  * A canonical Starkeep type — a two-level `<category>/<format>` identifier in
@@ -400,7 +424,7 @@ export interface StarkeepTypeDef {
  * adding a format or an alias is a one-place edit.
  */
 interface TypeSpec {
-  category: Exclude<Category, "other">;
+  category: Exclude<Category, "other" | "starkeep">;
   format: string;
   /** Advisory filename extensions (lowercase, no dot) that map to this type. */
   extensions: string[];
@@ -579,13 +603,22 @@ const TYPE_SPECS: readonly TypeSpec[] = [
 export const OTHER_TYPE_ID = "other/other";
 
 /**
+ * The library's settings file: one platform-written record that syncs to every
+ * node like any other file. No extension maps to it, so only the platform ever
+ * assigns it. See `settings/user-settings.ts`.
+ */
+export const SETTINGS_TYPE_ID = "starkeep/settings";
+
+/**
  * The authoritative registry of canonical Starkeep types. Derived from
  * {@link TYPE_SPECS} plus the terminal {@link OTHER_TYPE_ID}. `other/other` is
- * Drive-only and ungrantable (see {@link APP_GRANTABLE_CATEGORIES}); every
- * other type maps to a real metadata-bearing category.
+ * Drive-only and ungrantable (see {@link APP_GRANTABLE_CATEGORIES}), and so is
+ * {@link SETTINGS_TYPE_ID}; every other type maps to a real metadata-bearing
+ * category.
  */
 export const TYPES: readonly StarkeepTypeDef[] = [
   ...TYPE_SPECS.map((s) => ({ id: `${s.category}/${s.format}`, category: s.category, format: s.format })),
+  { id: SETTINGS_TYPE_ID, category: "starkeep" as Category, format: "settings" },
   { id: OTHER_TYPE_ID, category: "other" as Category, format: "other" },
 ];
 
@@ -609,13 +642,11 @@ export const EXTENSIONS: Readonly<Record<string, string>> = Object.fromEntries(
 export const CATEGORY_IDS: readonly Category[] = CATEGORIES.map((c) => c.id);
 
 /**
- * Categories an installable app may be granted — every category a real
- * extension can map to, i.e. all categories EXCEPT `other`. Drive's all-access
- * (`fileAccessAll`) covers `other` as well, via its `shared/*` IAM ceiling.
+ * Categories an installable app may be granted — every category except the
+ * Drive-only `starkeep` and `other`. Drive's all-access (`fileAccessAll`)
+ * covers both, via its `shared/*` IAM ceiling.
  */
-export const APP_GRANTABLE_CATEGORIES: readonly Category[] = CATEGORY_IDS.filter(
-  (c) => c !== "other",
-);
+export const APP_GRANTABLE_CATEGORIES: readonly Category[] = CATEGORY_IDS.filter(isGrantableCategory);
 
 /** True if `id` is a registered canonical Starkeep type. */
 export function isKnownType(id: string): boolean {

@@ -14,6 +14,7 @@ import {
   canRead,
   checkOriginalFidelity,
   checkStandInWrite,
+  isStandInOriginal,
   stampFor,
   type AccessGrants,
   type DataRecord,
@@ -391,6 +392,43 @@ export async function recordOriginalFidelity(
   };
   await db.put(updated);
   return updated;
+}
+
+/**
+ * Stamp the originals among `records` that carry a fidelity and no stamp:
+ * the cloud's half of the stamping rule.
+ *
+ * A node that did not know the library's value recorded such an original's
+ * fidelity with a null stamp. The cloud always knows, so it stamps each one it
+ * applies, under a fresh cloud clock — which puts the stamped row above the
+ * sender's watermark, so the same exchange's reply carries it back. Returns
+ * the rows written.
+ */
+export async function stampUnstampedOriginals(
+  db: DatabaseAdapter,
+  records: readonly DataRecord[],
+  standards: StandInStandards,
+  clock: HLCClock,
+): Promise<DataRecord[]> {
+  const stamped: DataRecord[] = [];
+  for (const record of records) {
+    if (record.deletedAt || record.fidelity === null || record.canonicalThreshold !== null) continue;
+    if (!isStandInOriginal(record)) continue;
+    const stamp = stampFor(record.type, standards, true);
+    if (stamp === null) continue;
+    // Re-read: the row applied may since have been superseded in this store.
+    const current = await db.get(record.id as StarkeepId);
+    if (!current || current.deletedAt || current.canonicalThreshold !== null) continue;
+    const updated: DataRecord = {
+      ...current,
+      canonicalThreshold: stamp,
+      updatedAt: clock.now(),
+      version: current.version + 1,
+    };
+    await db.put(updated);
+    stamped.push(updated);
+  }
+  return stamped;
 }
 
 /** The live stand-in in one slot of one original, if any. */

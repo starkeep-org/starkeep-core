@@ -61,12 +61,26 @@ describe("the default standards", () => {
     expect(validateStandInStandards(STD)).toEqual([]);
   });
 
-  it("refuse a standard size at or above the threshold", () => {
-    const broken: StandInStandards = {
+  it("accept a standard size at or above the threshold, which its originals then skip", () => {
+    const lowered: StandInStandards = { ...STD, image: { ...STD.image, canonicalThreshold: 2000 } };
+    expect(validateStandInStandards(lowered)).toEqual([]);
+  });
+
+  it("refuse a threshold or an advisory long edge outside its range", () => {
+    for (const [category, threshold] of [
+      ["image", 1000],
+      ["image", 20000],
+      ["video", 500],
+      ["video", 60000],
+    ] as const) {
+      const broken: StandInStandards = { ...STD, [category]: { ...STD[category], canonicalThreshold: threshold } };
+      expect(validateStandInStandards(broken).join("\n"), `${category} ${threshold}`).toMatch(/must be from/);
+    }
+    const tiny: StandInStandards = {
       ...STD,
-      image: { ...STD.image, standardSizes: [320, 4272] },
+      video: { ...STD.video, advisoryLongEdges: { canonical: 100, bySize: { 2000: 1280 } } },
     };
-    expect(validateStandInStandards(broken).join("\n")).toMatch(/not below the canonical threshold/);
+    expect(validateStandInStandards(tiny).join("\n")).toMatch(/canonical advisory long edge must be from 320/);
   });
 
   it("refuse sizes that do not ascend", () => {

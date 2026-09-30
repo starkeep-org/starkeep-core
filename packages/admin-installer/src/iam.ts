@@ -27,7 +27,7 @@ import {
   appExecRoleName,
 } from "./temp-policies";
 import type { FileAccess } from "@starkeep/admin-manifest";
-import { APP_GRANTABLE_CATEGORIES, typeCategory } from "@starkeep/protocol-primitives";
+import { APP_GRANTABLE_CATEGORIES, typeCategory, isGrantableCategory } from "@starkeep/protocol-primitives";
 
 function makeIamClient(creds: AwsCredentials): IAMClient {
   return new IAMClient({
@@ -50,7 +50,7 @@ function categoriesOf(fileAccess: FileAccess[]): string[] {
   for (const entry of fileAccess) {
     for (const type of entry.types) {
       const category = typeCategory(type);
-      if (category !== "other") set.add(category);
+      if (isGrantableCategory(category)) set.add(category);
     }
   }
   return [...set];

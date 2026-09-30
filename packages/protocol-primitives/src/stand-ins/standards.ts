@@ -112,9 +112,10 @@ export interface CategoryStandards {
    */
   readonly canonicalThreshold: number;
   /**
-   * The sizes a smaller stand-in may take, ascending. Every one sits below the
-   * canonical threshold, so a new size can always be derived from the
-   * canonical stand-in without a thaw.
+   * The sizes a smaller stand-in may take, ascending. An original takes only
+   * the ones below its own threshold (`standardSizesOf`), so a new size can
+   * always be derived from the canonical stand-in without a thaw — and a
+   * lowered threshold drops the sizes above it without editing this list.
    */
   readonly standardSizes: readonly number[];
   /**
@@ -209,12 +210,26 @@ export const DEFAULT_SYNC_DOWN_CEILINGS: Readonly<Record<NodeKind, SyncDownCeili
 };
 
 /**
+ * The canonical thresholds the person may choose, per category: wide enough
+ * for any real screen or archive, narrow enough that a typo cannot make every
+ * original self-canonical or every stand-in huge. Provisional.
+ */
+export const CANONICAL_THRESHOLD_RANGES: Readonly<Record<StandInCategory, { min: number; max: number }>> = {
+  image: { min: 1280, max: 16384 },
+  video: { min: 1000, max: 50000 },
+};
+
+/** The advisory long edges the person may choose, in pixels. Provisional. */
+export const ADVISORY_LONG_EDGE_RANGE = { min: 320, max: 7680 } as const;
+
+/**
  * Problems with a set of standards, as sentences. Empty when the set is
  * usable.
  *
  * Checked once at load rather than trusted, because every rule downstream
- * assumes the sizes ascend and sit below the threshold, and a set that breaks
- * either would admit a smaller stand-in the canonical one cannot outrank.
+ * assumes the sizes ascend, and a set that breaks that would rank stand-ins
+ * wrongly. A size at or above the threshold is allowed: the originals judged
+ * by that threshold simply do not take it.
  */
 export function validateStandInStandards(standards: StandInStandards): string[] {
   const problems: string[] = [];
@@ -224,8 +239,11 @@ export function validateStandInStandards(standards: StandInStandards): string[] 
       problems.push(`${category}: missing`);
       continue;
     }
+    const range = CANONICAL_THRESHOLD_RANGES[category];
     if (!isPositiveInteger(s.canonicalThreshold)) {
       problems.push(`${category}: canonicalThreshold must be a positive integer`);
+    } else if (s.canonicalThreshold < range.min || s.canonicalThreshold > range.max) {
+      problems.push(`${category}: the canonical threshold must be from ${range.min} to ${range.max}`);
     }
     if (s.allowedTypes.length === 0) problems.push(`${category}: no allowed stand-in types`);
     for (const type of s.allowedTypes) {
@@ -237,19 +255,21 @@ export function validateStandInStandards(standards: StandInStandards): string[] 
     for (const size of s.standardSizes) {
       if (!isPositiveInteger(size)) problems.push(`${category}: standard size ${size} is not a positive integer`);
       if (size <= previous) problems.push(`${category}: standard sizes must ascend`);
-      if (size >= s.canonicalThreshold) {
-        problems.push(`${category}: standard size ${size} is not below the canonical threshold`);
-      }
       previous = size;
     }
     if (s.advisoryLongEdges) {
       const edges = s.advisoryLongEdges;
-      if (!isPositiveInteger(edges.canonical)) {
-        problems.push(`${category}: the canonical advisory long edge must be a positive integer`);
+      const inRange = (edge: unknown) =>
+        isPositiveInteger(edge) && edge >= ADVISORY_LONG_EDGE_RANGE.min && edge <= ADVISORY_LONG_EDGE_RANGE.max;
+      const rangeText = `from ${ADVISORY_LONG_EDGE_RANGE.min} to ${ADVISORY_LONG_EDGE_RANGE.max} pixels`;
+      if (!inRange(edges.canonical)) {
+        problems.push(`${category}: the canonical advisory long edge must be ${rangeText}`);
       }
       for (const size of s.standardSizes) {
-        if (!isPositiveInteger(edges.bySize[size])) {
+        if (edges.bySize[size] === undefined) {
           problems.push(`${category}: standard size ${size} has no advisory long edge`);
+        } else if (!inRange(edges.bySize[size])) {
+          problems.push(`${category}: the advisory long edge for ${size} must be ${rangeText}`);
         }
       }
     }

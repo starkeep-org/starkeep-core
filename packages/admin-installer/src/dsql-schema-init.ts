@@ -73,7 +73,7 @@
 import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import { CATEGORIES, pgMetadataDdl, metadataIndexDdls } from "@starkeep/protocol-primitives";
+import { CATEGORIES, pgMetadataDdl, metadataIndexDdls, hasMetadataTable } from "@starkeep/protocol-primitives";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -392,7 +392,7 @@ export async function initializeSharedSchema(
     // shared.records(id); DSQL has no FK constraints or ON DELETE CASCADE, so
     // deletes must be performed in application code (delete the metadata row
     // alongside the records row).
-    for (const c of CATEGORIES.filter((c) => c.id !== "other")) {
+    for (const c of CATEGORIES.filter((c) => hasMetadataTable(c.id))) {
       await sql.raw(pgMetadataDdl(c)).execute(db);
       // Without these every metadata predicate is a full scan, which is why
       // the `capturedAt` ordering the storage layer already implements was
