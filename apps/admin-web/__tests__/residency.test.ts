@@ -47,6 +47,23 @@ describe("/api/residency/stand-ins and /api/residency/free-up-space", () => {
     expect(daemon.seen.at(-1)!).toMatchObject({ method: "GET", url: "/residency/stand-ins" });
   });
 
+  it("reads and saves the library's standards through the daemon", async () => {
+    reply = { status: 200, body: JSON.stringify({ set: false }) };
+    const read = await standIns.GET_LIBRARY_STANDARDS();
+    expect(await read.json()).toEqual({ set: false });
+    expect(daemon.seen.at(-1)!).toMatchObject({ method: "GET", url: "/library/stand-in-standards" });
+
+    reply = { status: 422, body: JSON.stringify({ problems: ["image: the canonical threshold must be from 1280 to 16384"] }) };
+    const body = { standIns: { image: { canonicalThreshold: 100 } } };
+    const saved = await standIns.PUT_LIBRARY_STANDARDS(
+      jsonRequest("/api/library/stand-in-standards", body, "PUT"),
+    );
+    expect(saved.status).toBe(422);
+    const sent = daemon.seen.at(-1)!;
+    expect(sent).toMatchObject({ method: "PUT", url: "/library/stand-in-standards" });
+    expect(JSON.parse(sent.body)).toEqual(body);
+  });
+
   it("saves ceilings verbatim and carries a refusal's status", async () => {
     reply = { status: 422, body: JSON.stringify({ problems: ["image: a ceiling is a positive whole fidelity"] }) };
     const res = await standIns.PUT(

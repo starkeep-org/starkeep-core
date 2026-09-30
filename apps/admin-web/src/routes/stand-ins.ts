@@ -52,3 +52,20 @@ export async function POST_FREE_UP_SPACE(req: Request): Promise<Response> {
     body: await req.text(),
   });
 }
+
+/** The library's canonical thresholds and advisory resolutions, with the defaults and ranges. */
+export async function GET_LIBRARY_STANDARDS(): Promise<Response> {
+  return forward("/library/stand-in-standards", {});
+}
+
+/**
+ * Change the library's values. The daemon writes a new settings file, which
+ * the Drive channel carries to every node; no restart.
+ */
+export async function PUT_LIBRARY_STANDARDS(req: Request): Promise<Response> {
+  return forward("/library/stand-in-standards", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: await req.text(),
+  });
+}
