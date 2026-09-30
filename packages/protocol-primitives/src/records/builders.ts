@@ -16,6 +16,8 @@ export interface CreateDataRecordInput {
   parentId?: StarkeepId | null;
   standInRole?: StandInRole | null;
   fidelity?: number | null;
+  /** The platform's stamp; see `DataRecord.canonicalThreshold`. */
+  canonicalThreshold?: number | null;
 }
 
 export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock): DataRecord {
@@ -47,5 +49,7 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     parentId: input.parentId ?? null,
     standInRole: input.standInRole ?? null,
     fidelity: input.fidelity ?? null,
+    canonicalThreshold: input.canonicalThreshold ?? null,
+    selfCanonical: false,
   };
 }

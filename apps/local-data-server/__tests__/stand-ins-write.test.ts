@@ -278,19 +278,72 @@ describe("a stand-in write", () => {
     expect(((await later.json()) as { error: string }).error).toBe("StandInMetadata");
   });
 
-  it("takes a video canonical stand-in at the original's own long edge", async () => {
+  it("takes a video canonical stand-in at the original's own bitrate", async () => {
     const parent = await registerWithBytes(app, {
       type: "video/mp4",
       sizeBytes: BIG,
-      fidelity: 1280,
+      fidelity: 3000,
       fileName: "clip.mp4",
     });
     const res = await registerWithBytes(app, {
       type: "video/webm",
       parentId: parent.body.record!.id,
-      standIn: { role: "canonical", fidelity: 1280 },
+      standIn: { role: "canonical", fidelity: 3000 },
     });
     expect(res.status).toBe(200);
+  });
+
+  it("stores no canonical stand-in that is no smaller than its original, and marks the original", async () => {
+    const parent = await registerWithBytes(app, {
+      type: "video/mp4",
+      sizeBytes: BIG,
+      fidelity: 3000,
+      fileName: "low-bitrate.mp4",
+    });
+    const id = parent.body.record!.id;
+    const res = await registerWithBytes(app, {
+      type: "video/webm",
+      parentId: id,
+      sizeBytes: BIG,
+      standIn: { role: "canonical", fidelity: 3000 },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ selfCanonical: true, original: { id, self_canonical: true } });
+    expect(res.body.record).toBeUndefined();
+    expect(await getRecord(id)).toMatchObject({ self_canonical: true, fidelity: 3000 });
+
+    // It stands in for itself now, so no canonical stand-in is taken.
+    const again = await registerWithBytes(app, {
+      type: "video/webm",
+      parentId: id,
+      standIn: { role: "canonical", fidelity: 3000 },
+    });
+    expect(again.status).toBe(409);
+    expect(again.body.code).toBe("original-takes-no-canonical");
+  });
+});
+
+describe("the canonical threshold stamp", () => {
+  it("stamps an original that reports its fidelity with the threshold it is judged by", async () => {
+    const parent = await original({ fidelity: 6000 });
+    expect(await getRecord(parent)).toMatchObject({ fidelity: 6000, canonical_threshold: 4272 });
+  });
+
+  it("leaves an original with no fidelity unstamped, and stamps it with the first report", async () => {
+    const parent = await original();
+    expect((await getRecord(parent)).canonical_threshold).toBeNull();
+    await standIn(parent, "smaller", 320, { parentFidelity: 5000 });
+    expect(await getRecord(parent)).toMatchObject({ fidelity: 5000, canonical_threshold: 4272 });
+  });
+
+  it("stamps an original whose fidelity is reported after the fact", async () => {
+    const parent = await original();
+    const res = await app.fetch(`/data/records/${parent}/fidelity`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fidelity: 5000 }),
+    });
+    expect(await res.json()).toMatchObject({ fidelity: 5000, canonical_threshold: 4272, recorded: true });
   });
 });
 

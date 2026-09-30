@@ -6,7 +6,10 @@
  *   1. The original is archivable — past the size floor, its fidelity
  *      reported and above the canonical threshold (any fidelity, for video).
  *   2. No app's namespace holds a `do-not-archive` label on it.
- *   3. Its canonical stand-in exists, with bytes in the cloud's instant tier.
+ *   3. Its canonical stand-in exists, was made for the threshold the original
+ *      is judged by now, and has bytes in the cloud's instant tier. An
+ *      original whose canonical stand-in is outdated loses its tag until the
+ *      replacement reaches the cloud.
  *
  * "Archives" means tagging the object for the bucket's lifecycle rule, which
  * performs the transition after its hold period. The tag is the whole of the
@@ -27,6 +30,7 @@
  */
 
 import {
+  canonicalMatches,
   DO_NOT_ARCHIVE_LABEL_KEY,
   INTENT_TAG_KEY,
   LADDER_TAG_COMPLETE,
@@ -65,6 +69,13 @@ export interface ArchiveEvaluation {
   readonly archivable: boolean;
   /** Apps whose namespace holds `do-not-archive` on the original. */
   readonly heldBy: readonly string[];
+  /**
+   * Whether a record on the object has a canonical stand-in made for another
+   * threshold. A restamp is what causes one, and it arrives as an original
+   * rather than as a canonical stand-in going away, so this and not the
+   * trigger is what lets the tag clear.
+   */
+  readonly canonicalOutdated: boolean;
 }
 
 export async function evaluateArchiving(
@@ -75,7 +86,9 @@ export async function evaluateArchiving(
 ): Promise<ArchiveEvaluation> {
   const keep = (
     reasons: string[],
-    extra: Partial<Pick<ArchiveEvaluation, "objectStorageKey" | "archivable" | "heldBy">> = {},
+    extra: Partial<
+      Pick<ArchiveEvaluation, "objectStorageKey" | "archivable" | "heldBy" | "canonicalOutdated">
+    > = {},
   ): ArchiveEvaluation => ({
     originalId,
     decision: "keep",
@@ -83,6 +96,7 @@ export async function evaluateArchiving(
     objectStorageKey: extra.objectStorageKey ?? null,
     archivable: extra.archivable ?? false,
     heldBy: extra.heldBy ?? [],
+    canonicalOutdated: extra.canonicalOutdated ?? false,
   });
 
   const original = await db.get(originalId);
@@ -105,16 +119,18 @@ export async function evaluateArchiving(
   const reasons: string[] = [];
   const heldBy = new Set<string>();
   let archivable = true;
+  let canonicalOutdated = false;
   for (const record of records) {
     const verdict = await recordVerdict(db, storage, record, labelsById.get(record.id) ?? [], standards);
     if (!verdict.archivable) archivable = false;
+    if (verdict.canonicalOutdated) canonicalOutdated = true;
     for (const app of verdict.heldBy) heldBy.add(app);
     for (const reason of verdict.reasons) {
       reasons.push(record.id === original.id ? reason : `${record.id} shares these bytes: ${reason}`);
     }
   }
 
-  const extra = { objectStorageKey: key, archivable, heldBy: [...heldBy].sort() };
+  const extra = { objectStorageKey: key, archivable, heldBy: [...heldBy].sort(), canonicalOutdated };
   if (reasons.length > 0) return keep(reasons, extra);
   return { originalId, decision: "archive", reasons: [], ...extra };
 }
@@ -125,10 +141,15 @@ async function recordVerdict(
   record: DataRecord,
   labels: readonly RecordLabel[],
   standards: StandInStandards,
-): Promise<{ archivable: boolean; heldBy: string[]; reasons: string[] }> {
+): Promise<{ archivable: boolean; heldBy: string[]; reasons: string[]; canonicalOutdated: boolean }> {
   const reasons: string[] = [];
   if (!isStandInOriginal(record)) {
-    return { archivable: false, heldBy: [], reasons: ["it is not an original in a stand-in category"] };
+    return {
+      archivable: false,
+      heldBy: [],
+      reasons: ["it is not an original in a stand-in category"],
+      canonicalOutdated: false,
+    };
   }
   const status = originalStatus(record, standards);
   const archivable = status === "archivable";
@@ -138,7 +159,9 @@ async function recordVerdict(
         ? "nobody has reported its fidelity"
         : status === "video-below-floor"
           ? "it is a video below the size floor, which keeps its canonical stand-in and stays instant"
-          : "it is self-canonical: at or below the threshold or the size floor, it stands in for itself",
+          : record.selfCanonical
+            ? "it is self-canonical: no canonical stand-in could be made smaller than it"
+            : "it is self-canonical: at or below the threshold or the size floor, it stands in for itself",
     );
   }
 
@@ -149,15 +172,19 @@ async function recordVerdict(
     reasons.push("it is marked starkeep/no-cloud, so the cloud holds no bytes to archive");
   }
 
+  let canonicalOutdated = false;
   if (archivable) {
     const canonical = await liveStandIn(db, record.id, "canonical");
     if (!canonical) {
       reasons.push("it has no canonical stand-in yet");
+    } else if (!canonicalMatches(record, canonical, standards)) {
+      canonicalOutdated = true;
+      reasons.push("its canonical stand-in was made for a different threshold");
     } else if (!canonical.objectStorageKey || !(await storage.has(canonical.objectStorageKey))) {
       reasons.push("its canonical stand-in's bytes are not in the cloud yet");
     }
   }
-  return { archivable, heldBy, reasons };
+  return { archivable, heldBy, reasons, canonicalOutdated };
 }
 
 /** The tag set that makes the lifecycle rule transition an object. */
@@ -191,7 +218,8 @@ export async function applyArchiveEvaluation(
     await storage.setTags(key, { ...ARCHIVE_TAGS });
     return "tagged";
   }
-  if (options.mayUntag && evaluation.archivable && !(await options.isArchived(key))) {
+  const mayUntag = options.mayUntag || evaluation.canonicalOutdated;
+  if (mayUntag && evaluation.archivable && !(await options.isArchived(key))) {
     // An empty tag set rather than `intent=instant`: the lifecycle rule
     // filters on the archive tags' presence, so an untagged object is
     // structurally ineligible — see `tagsForIntent`.
@@ -214,6 +242,8 @@ export interface ArchiveTrigger {
  * - A canonical stand-in arriving may complete condition 3; one going away
  *   may break it.
  * - An original arriving, or its fidelity arriving, may complete condition 1.
+ *   A restamp arrives the same way and may break condition 3, which the
+ *   evaluation's `canonicalOutdated` rather than this trigger reports.
  * - A `do-not-archive` label arriving breaks condition 2; its retraction may
  *   complete it.
  *

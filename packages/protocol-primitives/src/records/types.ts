@@ -70,6 +70,23 @@ export interface DataRecord extends BaseRecord {
    * platform, so no app edits another app's record. Null when nobody has said.
    */
   fidelity: number | null;
+  /**
+   * The canonical threshold the platform judged this original by, stamped in
+   * the same write that records the original's fidelity. Every stand-in rule
+   * reads the original's own stamp, and falls back to the library setting only
+   * for an original with none, so a later change of the setting leaves every
+   * stamped original as it was. Null on stand-ins, on every other record, and
+   * on an original recorded by a node that did not know the library's value.
+   * See `thresholdOf` in `stand-ins/rules.ts`.
+   */
+  canonicalThreshold: number | null;
+  /**
+   * Whether this original stands in for itself because no canonical encode
+   * could make a smaller file. Set by the platform when it refuses such a
+   * canonical stand-in; cleared only by a restamp below the original's
+   * fidelity. False on every other record.
+   */
+  selfCanonical: boolean;
 }
 
 /**

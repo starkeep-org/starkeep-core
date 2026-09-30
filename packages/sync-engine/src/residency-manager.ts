@@ -202,6 +202,8 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
         standInRole: candidate.standInRole ?? null,
         fidelity: candidate.fidelity ?? null,
         sizeBytes: candidate.sizeBytes,
+        canonicalThreshold: candidate.canonicalThreshold ?? null,
+        selfCanonical: candidate.selfCanonical ?? false,
       },
       ceilings,
       standards,

@@ -77,6 +77,11 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
         c.check(sql`stand_in_role IN ('canonical', 'smaller')`),
       )
       .addColumn("fidelity", "integer")
+      // The threshold the platform judged an original by, and whether it
+      // stands in for itself because no canonical encode could shrink it.
+      // Platform-owned, like `fidelity` on an original.
+      .addColumn("canonical_threshold", "integer")
+      .addColumn("self_canonical", "integer")
       .addColumn("stand_in_slot", "text")
       .compile().sql,
   );

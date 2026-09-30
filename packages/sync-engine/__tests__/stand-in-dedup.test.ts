@@ -62,7 +62,15 @@ describe("stand-in slot collisions across nodes", () => {
   /** Blobless, so the test is about rows and not transfers. */
   async function put(
     side: Side,
-    over: { hash: string; parentId?: StarkeepId; standInRole?: StandInRole; fidelity?: number; type?: string },
+    over: {
+      hash: string;
+      parentId?: StarkeepId;
+      standInRole?: StandInRole;
+      fidelity?: number;
+      type?: string;
+      canonicalThreshold?: number;
+      sizeBytes?: number;
+    },
   ): Promise<DataRecord> {
     const record = createDataRecord(
       {
@@ -70,10 +78,11 @@ describe("stand-in slot collisions across nodes", () => {
         originAppId: "photos",
         contentHash: over.hash,
         objectStorageKey: "",
-        sizeBytes: 0,
+        sizeBytes: over.sizeBytes ?? 0,
         parentId: over.parentId ?? null,
         standInRole: over.standInRole ?? null,
         fidelity: over.fidelity ?? null,
+        canonicalThreshold: over.canonicalThreshold ?? null,
       },
       side.clock,
     );
@@ -92,11 +101,18 @@ describe("stand-in slot collisions across nodes", () => {
     return result.records.map((r) => r.id);
   }
 
-  async function withOriginalEverywhere() {
+  async function withOriginalEverywhere(canonicalThreshold?: number) {
     const s = await sides();
     const stateA = createMemorySyncStateStore();
     const stateB = createMemorySyncStateStore();
-    const original = await put(s.a, { hash: "sha256:original", type: "image/jpeg", fidelity: 6000 });
+    const original = await put(s.a, {
+      hash: "sha256:original",
+      type: "image/jpeg",
+      fidelity: 6000,
+      // Above the archive floor, so the original takes a canonical stand-in.
+      sizeBytes: 8 * 1024 * 1024,
+      ...(canonicalThreshold ? { canonicalThreshold } : {}),
+    });
     await engine(s.a, s.cloud, { syncState: stateA }).exchange();
     await engine(s.b, s.cloud, { syncState: stateB }).exchange();
     expect(await s.b.db.get(original.id)).not.toBeNull();
@@ -124,6 +140,44 @@ describe("stand-in slot collisions across nodes", () => {
       }
     });
   }
+
+  // The original is stamped at 2560: one node made its canonical stand-in under
+  // the old 4272, the other made the replacement. Whichever reaches the cloud
+  // first, the matching one survives everywhere.
+  for (const order of ["outdated first", "matching first"] as const) {
+    it(`keeps the canonical stand-in that matches the original's stamp, ${order}`, async () => {
+      const { a, b, cloud, stateA, stateB, original } = await withOriginalEverywhere(2560);
+      const [first, second] = order === "outdated first" ? [4272, 2560] : [2560, 4272];
+      const fromA = await put(a, { hash: "sha256:a", parentId: original.id, standInRole: "canonical", fidelity: first });
+      const fromB = await put(b, { hash: "sha256:b", parentId: original.id, standInRole: "canonical", fidelity: second });
+
+      await engine(a, cloud, { syncState: stateA }).exchange();
+      await engine(b, cloud, { syncState: stateB }).exchange();
+      await engine(a, cloud, { syncState: stateA }).exchange();
+
+      const matching = first === 2560 ? fromA : fromB;
+      const outdated = first === 2560 ? fromB : fromA;
+      for (const side of [a, b, cloud]) {
+        expect(await liveIn(side, original.id, "canonical"), side.nodeId).toEqual([matching.id]);
+        expect((await side.db.get(outdated.id))?.deletedAt, side.nodeId).toBeTruthy();
+      }
+    });
+  }
+
+  it("keeps a node's unshipped replacement over an outdated one it pulls", async () => {
+    const { a, b, cloud, stateA, stateB, original } = await withOriginalEverywhere(2560);
+    const outdated = await put(a, { hash: "sha256:a", parentId: original.id, standInRole: "canonical", fidelity: 4272 });
+    await engine(a, cloud, { syncState: stateA }).exchange();
+    const replacement = await put(b, { hash: "sha256:b", parentId: original.id, standInRole: "canonical", fidelity: 2560 });
+    // B pulls the outdated one before its own push lands anywhere else.
+    await engine(b, cloud, { syncState: stateB }).exchange();
+    await engine(b, cloud, { syncState: stateB }).exchange();
+    await engine(a, cloud, { syncState: stateA }).exchange();
+    for (const side of [a, b, cloud]) {
+      expect(await liveIn(side, original.id, "canonical"), side.nodeId).toEqual([replacement.id]);
+      expect((await side.db.get(outdated.id))?.deletedAt, side.nodeId).toBeTruthy();
+    }
+  });
 
   it("converges: later rounds apply and ship nothing", async () => {
     const { a, b, cloud, stateA, stateB, original } = await withOriginalEverywhere();

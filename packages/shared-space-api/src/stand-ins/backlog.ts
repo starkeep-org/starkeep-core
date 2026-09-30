@@ -11,6 +11,9 @@
  * - `missing-fidelity`: originals in a stand-in category nobody has reported a
  *   fidelity for. They never archive, and no app can make a stand-in for one
  *   without first reporting the value.
+ * - `canonical-outdated`: originals whose live canonical stand-in was made for
+ *   a threshold other than the one the original is judged by — the work a
+ *   replacement leaves. The outdated stand-in still answers reads meanwhile.
  *
  * ## Short pages are expected
  *
@@ -23,6 +26,7 @@
 
 import {
   TYPES,
+  canonicalMatches,
   canRead,
   isStandInCategory,
   originalStatus,
@@ -34,9 +38,13 @@ import {
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, Filter } from "@starkeep/storage-adapter";
 
-export type BacklogKind = "missing-canonical" | "missing-fidelity";
+export type BacklogKind = "missing-canonical" | "missing-fidelity" | "canonical-outdated";
 
-export const BACKLOG_KINDS: readonly BacklogKind[] = ["missing-canonical", "missing-fidelity"];
+export const BACKLOG_KINDS: readonly BacklogKind[] = [
+  "missing-canonical",
+  "missing-fidelity",
+  "canonical-outdated",
+];
 
 export interface BacklogPage {
   readonly records: readonly DataRecord[];
@@ -82,7 +90,7 @@ export async function pageBacklog(
   }
 
   const candidates = page.records.filter((r) => takesCanonical(originalStatus(r, standards)));
-  const withCanonical = new Set<string>();
+  const canonicalOf = new Map<string, DataRecord>();
   if (candidates.length > 0) {
     const canonicals = await db.query({
       filters: [
@@ -92,12 +100,16 @@ export async function pageBacklog(
       ],
       limit: candidates.length,
     });
-    for (const c of canonicals.records) if (c.parentId) withCanonical.add(c.parentId);
+    for (const c of canonicals.records) if (c.parentId) canonicalOf.set(c.parentId, c);
   }
-  return {
-    records: candidates.filter((r) => !withCanonical.has(r.id)),
-    nextCursor: page.hasMore ? page.nextCursor : null,
-  };
+  const records =
+    request.kind === "missing-canonical"
+      ? candidates.filter((r) => !canonicalOf.has(r.id))
+      : candidates.filter((r) => {
+          const canonical = canonicalOf.get(r.id);
+          return canonical !== undefined && !canonicalMatches(r, canonical, standards);
+        });
+  return { records, nextCursor: page.hasMore ? page.nextCursor : null };
 }
 
 /** A backlog's size, for an operator page. */
@@ -111,7 +123,8 @@ export interface BacklogCount {
  * How many originals are in one backlog, walking at most `maxScanned` of them.
  *
  * `missing-fidelity` is a plain filter and costs one count. `missing-canonical`
- * is the anti-join a count cannot express, so the pages are walked, and the
+ * and `canonical-outdated` compare each original with its canonical stand-in,
+ * which a count cannot express, so the pages are walked, and the
  * walk is bounded: admin-web asks on every page load, and a large library
  * answers with a lower bound rather than a long wait.
  */

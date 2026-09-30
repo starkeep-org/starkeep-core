@@ -8,10 +8,12 @@ import {
 } from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import {
+  markSelfCanonical,
   planStandInWrite,
   planOriginalFidelity,
   reconcileReportedFidelity,
   recordOriginalFidelity,
+  retireReplacedStandIns,
 } from "../src/stand-ins/write.js";
 
 const clock = createHLCClock({ nodeId: "test" });
@@ -54,6 +56,7 @@ describe("planStandInWrite", () => {
       grants,
       { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 } },
       STD,
+      true,
     );
     expect(plan).toMatchObject({ ok: true, role: "smaller", fidelity: 640, recordParentFidelity: null });
   });
@@ -65,12 +68,13 @@ describe("planStandInWrite", () => {
       grants,
       { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 }, parentFidelity: 5000 },
       STD,
+      true,
     );
     expect(plan).toMatchObject({ ok: true, recordParentFidelity: 5000 });
   });
 
   it("refuses a malformed standIn field", async () => {
-    const plan = await planStandInWrite(db, grants, { type: "image/avif", parentId: "x", standIn: "canonical" }, STD);
+    const plan = await planStandInWrite(db, grants, { type: "image/avif", parentId: "x", standIn: "canonical" }, STD, true);
     expect(plan).toMatchObject({ ok: false, status: 400, body: { code: "invalid-stand-in" } });
   });
 
@@ -81,6 +85,7 @@ describe("planStandInWrite", () => {
       grants,
       { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 } },
       STD,
+      true,
     );
     expect(plan).toMatchObject({ ok: false, status: 404, body: { code: "parent-not-found" } });
   });
@@ -99,6 +104,7 @@ describe("planStandInWrite", () => {
       grants,
       { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 } },
       STD,
+      true,
     );
     expect(plan).toMatchObject({ ok: false, status: 409, body: { error: "StandInExists", existing: occupant.id } });
   });
@@ -117,6 +123,7 @@ describe("planStandInWrite", () => {
       grants,
       { type: "image/avif", parentId: parent.id, standIn: { role: "canonical", fidelity: 4272 } },
       STD,
+      true,
     );
     expect(plan).toMatchObject({ ok: false, status: 409, body: { existing: occupant.id } });
   });
@@ -129,6 +136,7 @@ describe("planStandInWrite", () => {
       grants,
       { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 2560 } },
       STD,
+      true,
     );
     expect(plan).toMatchObject({ ok: false, status: 400, body: { code: "exceeds-canonical" } });
   });
@@ -142,8 +150,104 @@ describe("planStandInWrite", () => {
       grants,
       { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 } },
       STD,
+      true,
     );
     expect(plan.ok).toBe(true);
+  });
+});
+
+describe("replacing a canonical stand-in", () => {
+  const canonicalWrite = (parentId: string, fidelity: number, sizeBytes = 1000) =>
+    planStandInWrite(
+      db,
+      grants,
+      { type: "image/avif", parentId, standIn: { role: "canonical", fidelity }, sizeBytes },
+      STD,
+      true,
+    );
+
+  it("retires an outdated canonical stand-in and the smaller ones at or above the new one", async () => {
+    // Stamped at 2560 after a canonical stand-in was made at the old 4272.
+    const parent = await put({ hash: "o", fidelity: 6000, canonicalThreshold: 2560 });
+    const old = await put({ hash: "c", type: "image/avif", parentId: parent.id, standInRole: "canonical", fidelity: 4272 });
+    const at = await put({ hash: "s1", type: "image/avif", parentId: parent.id, standInRole: "smaller", fidelity: 2560 });
+    const below = await put({ hash: "s2", type: "image/avif", parentId: parent.id, standInRole: "smaller", fidelity: 1280 });
+
+    const plan = await canonicalWrite(parent.id, 2560);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.retire.map((r) => r.id).sort()).toEqual([old.id, at.id].sort());
+    expect(plan.selfCanonical).toBe(false);
+
+    await retireReplacedStandIns(db, plan, clock);
+    expect((await db.get(old.id))!.deletedAt).not.toBeNull();
+    expect((await db.get(at.id))!.deletedAt).not.toBeNull();
+    expect((await db.get(below.id))!.deletedAt).toBeNull();
+  });
+
+  it("answers StandInExists for a matching canonical stand-in, and retires nothing", async () => {
+    const parent = await put({ hash: "o", fidelity: 6000, canonicalThreshold: 4272 });
+    const current = await put({ hash: "c", type: "image/avif", parentId: parent.id, standInRole: "canonical", fidelity: 4272 });
+    const plan = await canonicalWrite(parent.id, 4272);
+    expect(plan).toMatchObject({ ok: false, status: 409, body: { error: "StandInExists", existing: current.id } });
+  });
+
+  it("marks the original self-canonical for a canonical stand-in no smaller than it", async () => {
+    const parent = await put({ hash: "o", type: "video/mp4", fidelity: 3000, canonicalThreshold: 4800 });
+    const videoGrants = buildAccessGrants(
+      [
+        { typeId: "video/mp4", access: "readwrite", metadataWrite: true },
+        { typeId: "video/webm", access: "readwrite", metadataWrite: true },
+      ],
+      { allAccess: false },
+    );
+    const plan = await planStandInWrite(
+      db,
+      videoGrants,
+      {
+        type: "video/webm",
+        parentId: parent.id,
+        standIn: { role: "canonical", fidelity: 3000 },
+        sizeBytes: parent.sizeBytes,
+      },
+      STD,
+      true,
+    );
+    expect(plan).toMatchObject({ ok: true, selfCanonical: true, retire: [] });
+    if (!plan.ok) return;
+    const marked = await markSelfCanonical(db, plan, clock);
+    expect(marked).toMatchObject({ selfCanonical: true, fidelity: 3000, version: parent.version + 1 });
+    expect((await db.get(parent.id))!.selfCanonical).toBe(true);
+
+    // From now on the original takes no canonical stand-in at all.
+    const again = await planStandInWrite(
+      db,
+      videoGrants,
+      { type: "video/webm", parentId: parent.id, standIn: { role: "canonical", fidelity: 3000 }, sizeBytes: 10 },
+      STD,
+      true,
+    );
+    expect(again).toMatchObject({ ok: false, status: 409, body: { code: "original-takes-no-canonical" } });
+  });
+
+  it("stamps a parent whose fidelity it records with the library's value, or with nothing", async () => {
+    const parent = await put({ hash: "o" });
+    const known = await planStandInWrite(
+      db,
+      grants,
+      { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 }, parentFidelity: 6000 },
+      STD,
+      true,
+    );
+    expect(known).toMatchObject({ ok: true, recordParentFidelity: 6000, parentStamp: 4272 });
+    const unknown = await planStandInWrite(
+      db,
+      grants,
+      { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 }, parentFidelity: 6000 },
+      STD,
+      false,
+    );
+    expect(unknown).toMatchObject({ ok: true, parentStamp: null });
   });
 });
 
@@ -169,9 +273,14 @@ describe("planOriginalFidelity and reconcileReportedFidelity", () => {
 describe("recordOriginalFidelity", () => {
   it("writes the fidelity under a fresh clock and keeps the origin", async () => {
     const parent = await put({ hash: "o", originAppId: "drive" });
-    const updated = await recordOriginalFidelity(db, parent, 5000, clock);
+    const updated = await recordOriginalFidelity(db, parent, 5000, clock, 4272);
     const back = await db.get(parent.id);
-    expect(back).toMatchObject({ fidelity: 5000, originAppId: "drive", version: parent.version + 1 });
+    expect(back).toMatchObject({
+      fidelity: 5000,
+      canonicalThreshold: 4272,
+      originAppId: "drive",
+      version: parent.version + 1,
+    });
     expect(updated.updatedAt.wallTime >= parent.updatedAt.wallTime).toBe(true);
     expect(back!.updatedAt).toEqual(updated.updatedAt);
   });
