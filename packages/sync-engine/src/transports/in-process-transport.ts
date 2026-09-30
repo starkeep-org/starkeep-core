@@ -1,8 +1,10 @@
 import {
   compareHLC,
+  DEFAULT_STAND_IN_STANDARDS,
   type DataRecord,
   type HLCClock,
   type RecordLabel,
+  type StandInStandards,
 } from "@starkeep/protocol-primitives";
 import { admitIncomingStandIn } from "../stand-in-slots.js";
 import {
@@ -103,6 +105,11 @@ export interface InProcessTransportOptions {
    * restore. A sync apply cannot answer "no" any other way — a thrown apply
    * stops the channel.
    */
+  /**
+   * The library's stand-in standards as this side knows them now; see
+   * `SyncEngineOptions.standards`. Defaults to the platform's defaults.
+   */
+  readonly standards?: () => StandInStandards;
   readonly keepLiveOnTombstone?: (
     current: DataRecord,
     incoming: DataRecord,
@@ -143,6 +150,7 @@ export function createInProcessSyncTransport(
     syncSharedRecords = true,
     keepLiveOnTombstone,
     onApplied,
+    standards = () => DEFAULT_STAND_IN_STANDARDS,
   } = options;
 
   return {
@@ -240,12 +248,13 @@ export function createInProcessSyncTransport(
               // Two stand-ins for one slot: the one this side already holds
               // won, and the incoming one is stored as this side's tombstone so
               // the reply carries the verdict back. See `stand-in-slots.ts`.
-              const admitted = await admitIncomingStandIn(databaseAdapter, snapshot, clock);
+              const admitted = await admitIncomingStandIn(databaseAdapter, snapshot, clock, standards());
               if (admitted.lostTo) {
                 console.warn(
                   `[sync] stand-in ${snapshot.id} lost its slot to ${admitted.lostTo}; storing it as a tombstone`,
                 );
               }
+              if (admitted.displaced) appliedRecords.push(admitted.displaced);
               row = admitted.row;
             }
             await databaseAdapter.put(row);

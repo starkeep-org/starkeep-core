@@ -824,6 +824,8 @@ function recordToRow(record: DataRecord): Record<string, unknown> {
     parent_id: record.parentId,
     stand_in_role: record.standInRole,
     fidelity: record.fidelity,
+    canonical_threshold: record.canonicalThreshold,
+    self_canonical: record.selfCanonical,
     stand_in_slot: standInSlot(record),
   };
 }

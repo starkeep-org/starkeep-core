@@ -572,8 +572,17 @@ describe("POST /data/records/:id/fidelity", () => {
     setDbFactory(db);
     const res = await handler(report("fr1", PARENT_ID, 6000), context);
     expect(res.statusCode, res.body).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({ id: PARENT_ID, fidelity: 6000, recorded: true });
-    expect(inserted(db.calls(RECORDS_INSERT)[0]!)).toMatchObject({ fidelity: 6000, origin_app_id: "drive" });
+    expect(JSON.parse(res.body)).toEqual({
+      id: PARENT_ID,
+      fidelity: 6000,
+      canonical_threshold: 4272,
+      recorded: true,
+    });
+    expect(inserted(db.calls(RECORDS_INSERT)[0]!)).toMatchObject({
+      fidelity: 6000,
+      canonical_threshold: 4272,
+      origin_app_id: "drive",
+    });
   });
 
   it("answers 409 for a disagreeing report", async () => {

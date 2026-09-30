@@ -89,6 +89,7 @@ import {
   STAND_IN_CATEGORIES,
   STAND_IN_MIME_TYPES,
   standardsFor,
+  stampFor,
   type StandInCategory,
   type StandInSize,
   type SyncDownCeilings,
@@ -100,6 +101,8 @@ import {
   planStandInWrite,
   reconcileReportedFidelity,
   recordOriginalFidelity,
+  retireReplacedStandIns,
+  markSelfCanonical,
   standInExists,
 } from "../../packages/shared-space-api/src/stand-ins/write.js";
 import {
@@ -1823,6 +1826,8 @@ async function main() {
             parent_id: r.parentId,
             stand_in_role: r.standInRole,
             fidelity: r.fidelity,
+            canonical_threshold: r.canonicalThreshold,
+            self_canonical: r.selfCanonical,
             availability: availabilityByRecord.get(r.id) ?? { state: "instant" },
             path: r.objectStorageKey
               ? await localAdapter.resolvePath(r.objectStorageKey)
@@ -2061,6 +2066,8 @@ async function main() {
           parentId: string | null;
           standInRole: string | null;
           fidelity: number | null;
+          canonicalThreshold: number | null;
+          selfCanonical: boolean;
         }) => ({
           id: r.id,
           type: r.type,
@@ -2073,6 +2080,8 @@ async function main() {
           parent_id: r.parentId,
           stand_in_role: r.standInRole,
           fidelity: r.fidelity,
+          canonical_threshold: r.canonicalThreshold,
+          self_canonical: r.selfCanonical,
           path: r.objectStorageKey ? await localAdapter.resolvePath(r.objectStorageKey) : null,
         });
 
@@ -2136,7 +2145,13 @@ async function main() {
             }
             const current =
               reconciled.write !== null && !isStandInWrite
-                ? await recordOriginalFidelity(databaseAdapter, existing, reconciled.write, clock)
+                ? await recordOriginalFidelity(
+                    databaseAdapter,
+                    existing,
+                    reconciled.write,
+                    clock,
+                    stampFor(existing.type, DEFAULT_STAND_IN_STANDARDS, true),
+                  )
                 : existing;
             json(res, { record: await renderRecord(current), deduped: true });
             return;
@@ -2152,16 +2167,36 @@ async function main() {
           const plan = await planStandInWrite(
             databaseAdapter,
             appGrants(localDb, appId!),
-            { type, parentId, standIn, parentFidelity },
+            { type, parentId, standIn, parentFidelity, sizeBytes },
             DEFAULT_STAND_IN_STANDARDS,
+            true,
           );
           if (!plan.ok) {
             res.writeHead(plan.status);
             json(res, plan.body);
             return;
           }
+          const retired = await retireReplacedStandIns(databaseAdapter, plan, clock);
+          if (plan.selfCanonical) {
+            // The canonical encode could not shrink the original, so the
+            // original stands in for itself and this stand-in is not stored.
+            const original = await markSelfCanonical(databaseAdapter, plan, clock);
+            changeNotifier.emit({
+              eventType: "local-change-recorded",
+              recordIds: [original.id, ...retired.map((r) => r.id)],
+              timestamp: original.updatedAt,
+            });
+            json(res, { selfCanonical: true, original: await renderRecord(original) });
+            return;
+          }
           if (plan.recordParentFidelity !== null) {
-            await recordOriginalFidelity(databaseAdapter, plan.parent, plan.recordParentFidelity, clock);
+            await recordOriginalFidelity(
+              databaseAdapter,
+              plan.parent,
+              plan.recordParentFidelity,
+              clock,
+              plan.parentStamp,
+            );
           }
           standInFields = { standInRole: plan.role, fidelity: plan.fidelity };
         }
@@ -2171,7 +2206,15 @@ async function main() {
           type,
           originAppId: appId!,
           parentId: parentId ?? null,
-          ...(standInFields ?? { fidelity: originalFidelity.fidelity }),
+          ...(standInFields ?? {
+            fidelity: originalFidelity.fidelity,
+            // The threshold this original is judged by, stamped with the
+            // fidelity that it judges. See `DataRecord.canonicalThreshold`.
+            canonicalThreshold:
+              originalFidelity.fidelity === null
+                ? null
+                : stampFor(type, DEFAULT_STAND_IN_STANDARDS, true),
+          }),
           // Written by the SDK in the same call as the record row, so the
           // record is never visible to a sync scan without it. Not atomic —
           // see `DataPutInput.metadata` — but the window is a pair of adjacent
@@ -2771,6 +2814,8 @@ async function main() {
             id: r.id,
             type: r.type,
             fidelity: r.fidelity,
+            canonical_threshold: r.canonicalThreshold,
+            self_canonical: r.selfCanonical,
             size_bytes: r.sizeBytes,
             original_filename: r.originalFilename,
           })),
@@ -3363,7 +3408,13 @@ async function main() {
         const record =
           plan.write === null
             ? plan.record
-            : await recordOriginalFidelity(databaseAdapter, plan.record, plan.write, clock);
+            : await recordOriginalFidelity(
+                databaseAdapter,
+                plan.record,
+                plan.write,
+                clock,
+                stampFor(plan.record.type, DEFAULT_STAND_IN_STANDARDS, true),
+              );
         if (plan.write !== null) {
           changeNotifier.emit({
             eventType: "local-change-recorded",
@@ -3371,7 +3422,12 @@ async function main() {
             timestamp: record.updatedAt,
           });
         }
-        json(res, { id: record.id, fidelity: record.fidelity, recorded: plan.write !== null });
+        json(res, {
+          id: record.id,
+          fidelity: record.fidelity,
+          canonical_threshold: record.canonicalThreshold,
+          recorded: plan.write !== null,
+        });
         return;
       }
 
@@ -3541,6 +3597,8 @@ async function main() {
             parent_id: record.parentId,
             stand_in_role: record.standInRole,
             fidelity: record.fidelity,
+            canonical_threshold: record.canonicalThreshold,
+            self_canonical: record.selfCanonical,
             path: record.kind === "data" && record.objectStorageKey
               ? await localAdapter.resolvePath(record.objectStorageKey)
               : null,

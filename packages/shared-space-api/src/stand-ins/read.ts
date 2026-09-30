@@ -34,6 +34,10 @@ export interface WireStandInSummary {
   readonly fidelity: number | null;
   readonly status: StandInSummary["status"];
   readonly top: number | null;
+  /** The fidelity a canonical stand-in should report now; see `StandInSummary`. */
+  readonly canonical_target: number | null;
+  /** True when the live canonical stand-in was made for another threshold. */
+  readonly canonical_outdated: boolean;
   readonly sizes: readonly WireStandInSize[];
   /** Where the original's own bytes sit on the node that answered. */
   readonly original_placement: SizePlacement;
@@ -52,6 +56,8 @@ export async function renderStandInSummary(
     fidelity: summary.fidelity,
     status: summary.status,
     top: summary.top,
+    canonical_target: summary.canonicalTarget,
+    canonical_outdated: summary.canonicalOutdated,
     sizes: await Promise.all(
       summary.sizes.map(async (size) => {
         const url = urlFor && size.recordId ? await urlFor(size) : undefined;

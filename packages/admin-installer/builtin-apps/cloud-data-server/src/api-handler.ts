@@ -69,6 +69,7 @@ import {
   parseLabelRef,
   DEFAULT_STAND_IN_STANDARDS,
   STAND_IN_MIME_TYPES,
+  stampFor,
 } from "@starkeep/protocol-primitives";
 import type {
   Category,
@@ -107,6 +108,8 @@ import {
   planStandInWrite,
   reconcileReportedFidelity,
   recordOriginalFidelity,
+  retireReplacedStandIns,
+  markSelfCanonical,
   standInExists,
   renderStandInSummary,
   resolveContentRead,
@@ -1005,6 +1008,8 @@ function recordToResponse(
     parent_id: record.parentId,
     stand_in_role: record.standInRole,
     fidelity: record.fidelity,
+    canonical_threshold: record.canonicalThreshold,
+    self_canonical: record.selfCanonical,
     // The original's sizes and where each sits. Present on every original in
     // a stand-in category, because the listing collapses stand-ins into
     // their original and this is the only place a reader learns what exists.
@@ -2752,7 +2757,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // `created` distinguishes a fresh insert (201) from returning an existing
       // duplicate (200).
       type CreateOutcome =
-        | { record: DataRecord; created: boolean; touched: DataRecord[]; refused?: undefined }
+        | {
+            record: DataRecord;
+            created: boolean;
+            touched: DataRecord[];
+            refused?: undefined;
+            selfCanonical?: undefined;
+          }
+        | { selfCanonical: DataRecord; touched: DataRecord[]; refused?: undefined }
         | { refused: { status: number; body: StandInWriteError } };
       const outcome = await withOccRetry("POST /data/records", async (): Promise<CreateOutcome> => {
         // Record-level dedup on the uniqueness key,
@@ -2800,7 +2812,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           const reconciled = reconcileReportedFidelity(existing, originalFidelity.fidelity);
           if (!reconciled.ok) return { refused: reconciled };
           if (reconciled.write !== null && !isStandInWrite) {
-            const updated = await recordOriginalFidelity(db, existing, reconciled.write, clock);
+            const updated = await recordOriginalFidelity(
+              db,
+              existing,
+              reconciled.write,
+              clock,
+              stampFor(existing.type, DEFAULT_STAND_IN_STANDARDS, true),
+            );
             return { record: updated, created: false, touched: [updated] };
           }
           return { record: existing, created: false, touched: [] };
@@ -2821,13 +2839,28 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               parentId: body.parentId,
               standIn: body.standIn,
               parentFidelity: body.parentFidelity,
+              sizeBytes,
             },
             DEFAULT_STAND_IN_STANDARDS,
+            true,
           );
           if (!plan.ok) return { refused: plan };
+          // In the same OCC unit as the insert below, so the swap of an
+          // outdated canonical stand-in commits whole or not at all.
+          touched.push(...(await retireReplacedStandIns(db, plan, clock)));
+          if (plan.selfCanonical) {
+            const original = await markSelfCanonical(db, plan, clock);
+            return { selfCanonical: original, touched: [...touched, original] };
+          }
           if (plan.recordParentFidelity !== null) {
             touched.push(
-              await recordOriginalFidelity(db, plan.parent, plan.recordParentFidelity, clock),
+              await recordOriginalFidelity(
+                db,
+                plan.parent,
+                plan.recordParentFidelity,
+                clock,
+                plan.parentStamp,
+              ),
             );
           }
           standInFields = { standInRole: plan.role, fidelity: plan.fidelity };
@@ -2847,7 +2880,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             sizeBytes,
             originalFilename: body.fileName ?? null,
             parentId: (body.parentId as DataRecord["parentId"]) ?? null,
-            ...(standInFields ?? { fidelity: originalFidelity.fidelity }),
+            ...(standInFields ?? {
+              fidelity: originalFidelity.fidelity,
+              canonicalThreshold:
+                originalFidelity.fidelity === null
+                  ? null
+                  : stampFor(body.type!, DEFAULT_STAND_IN_STANDARDS, true),
+            }),
           },
           clock,
         );
@@ -2877,6 +2916,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         return { record: fresh, created: true, touched: [...touched, fresh] };
       });
       if (outcome.refused) return ok(outcome.refused.body, outcome.refused.status);
+      if (outcome.selfCanonical) {
+        // The canonical encode could not shrink the original, so the original
+        // stands in for itself and no stand-in was stored.
+        await runArchiveTriggers(db, platformStorage, archiveTriggersFor(outcome.touched, []));
+        return ok({ selfCanonical: true, original: recordToResponse(outcome.selfCanonical) });
+      }
       const { record, created } = outcome;
       // A canonical stand-in, an original, or an original's fidelity may each
       // complete an archiving condition.
@@ -3129,11 +3174,24 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       );
       if (!plan.ok) return ok(plan.body, plan.status);
       const record =
-        plan.write === null ? plan.record : await recordOriginalFidelity(db, plan.record, plan.write, clock);
+        plan.write === null
+          ? plan.record
+          : await recordOriginalFidelity(
+              db,
+              plan.record,
+              plan.write,
+              clock,
+              stampFor(plan.record.type, DEFAULT_STAND_IN_STANDARDS, true),
+            );
       if (plan.write !== null) {
         await runArchiveTriggers(db, platformStorage, archiveTriggersFor([record], []));
       }
-      return ok({ id: record.id, fidelity: record.fidelity, recorded: plan.write !== null });
+      return ok({
+        id: record.id,
+        fidelity: record.fidelity,
+        canonical_threshold: record.canonicalThreshold,
+        recorded: plan.write !== null,
+      });
     }
 
     const metadataWriteMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata$/);
@@ -3440,6 +3498,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           id: r.id,
           type: r.type,
           fidelity: r.fidelity,
+          canonical_threshold: r.canonicalThreshold,
+          self_canonical: r.selfCanonical,
           size_bytes: r.sizeBytes,
           original_filename: r.originalFilename,
         })),
@@ -3878,7 +3938,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           objectStorage: storage,
           syncSharedRecords: true,
           keepLiveOnTombstone: (current, _incoming, exchange) =>
-            keepCanonicalOfArchivedOriginal(db, current, exchange),
+            keepCanonicalOfArchivedOriginal(db, current, exchange, DEFAULT_STAND_IN_STANDARDS),
           // The Drive channel is where most stand-ins, originals and labels
           // reach the cloud, and its storage is already Drive's.
           onApplied: ({ records, labels }) =>

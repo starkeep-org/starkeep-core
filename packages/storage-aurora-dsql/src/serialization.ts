@@ -33,6 +33,9 @@ export interface PostgresRow {
   parent_id: string | null;
   stand_in_role: string | null;
   fidelity: number | null;
+  canonical_threshold: number | null;
+  /** Null on a row written before the column existed, which reads as false. */
+  self_canonical: boolean | null;
   /**
    * Derived from the three columns above and `deleted_at` on every write — see
    * `standInSlot`. Never read back into a record: it exists only so one
@@ -59,6 +62,8 @@ export function recordToRow(record: DataRecord): PostgresRow {
     parent_id: record.parentId,
     stand_in_role: record.standInRole,
     fidelity: record.fidelity,
+    canonical_threshold: record.canonicalThreshold,
+    self_canonical: record.selfCanonical,
     stand_in_slot: standInSlot(record),
   };
 }
@@ -83,6 +88,11 @@ export function rowToRecord(row: PostgresRow): DataRecord {
     // DSQL returns a bigint column as a string; the value is small, so a
     // Number is exact.
     fidelity: row.fidelity === null || row.fidelity === undefined ? null : Number(row.fidelity),
+    canonicalThreshold:
+      row.canonical_threshold === null || row.canonical_threshold === undefined
+        ? null
+        : Number(row.canonical_threshold),
+    selfCanonical: row.self_canonical === true,
   };
 }
 
