@@ -38,6 +38,8 @@ export interface WireStandInSummary {
   readonly canonical_target: number | null;
   /** True when the live canonical stand-in was made for another threshold. */
   readonly canonical_outdated: boolean;
+  /** The library's advisory long edges, for video; null for images. */
+  readonly advisory_long_edges: { readonly canonical: number; readonly by_size: Readonly<Record<string, number>> } | null;
   readonly sizes: readonly WireStandInSize[];
   /** Where the original's own bytes sit on the node that answered. */
   readonly original_placement: SizePlacement;
@@ -58,6 +60,14 @@ export async function renderStandInSummary(
     top: summary.top,
     canonical_target: summary.canonicalTarget,
     canonical_outdated: summary.canonicalOutdated,
+    advisory_long_edges: summary.advisoryLongEdges
+      ? {
+          canonical: summary.advisoryLongEdges.canonical,
+          by_size: Object.fromEntries(
+            Object.entries(summary.advisoryLongEdges.bySize).map(([size, edge]) => [size, edge]),
+          ),
+        }
+      : null,
     sizes: await Promise.all(
       summary.sizes.map(async (size) => {
         const url = urlFor && size.recordId ? await urlFor(size) : undefined;

@@ -22,6 +22,7 @@
 import { typeCategory } from "../types/core-types.js";
 import {
   isStandInCategory,
+  type AdvisoryLongEdges,
   type CategoryStandards,
   type StandInCategory,
   type StandInStandards,
@@ -545,6 +546,11 @@ export interface StandInSummary {
    * It still answers reads; an app replaces it with one at `canonicalTarget`.
    */
   readonly canonicalOutdated: boolean;
+  /**
+   * The library's advisory long edges for the category's stand-in sizes, for
+   * a category whose fidelity is not itself a long edge. Null otherwise.
+   */
+  readonly advisoryLongEdges: AdvisoryLongEdges | null;
   /** Every size that exists or should exist, ascending. */
   readonly sizes: readonly StandInSize[];
   /**
@@ -615,6 +621,7 @@ export function summarizeStandIns(
     top,
     canonicalTarget,
     canonicalOutdated,
+    advisoryLongEdges: s.advisoryLongEdges,
     sizes: [...bySize.values()].sort((a, b) => a.fidelity - b.fidelity),
     originalPlacement: placementOf(original),
   };
