@@ -78,6 +78,7 @@ api.put("/residency/stand-ins", (c) => standIns.PUT(c.req.raw));
 api.post("/residency/free-up-space", (c) => standIns.POST_FREE_UP_SPACE(c.req.raw));
 api.get("/library/stand-in-standards", () => standIns.GET_LIBRARY_STANDARDS());
 api.put("/library/stand-in-standards", (c) => standIns.PUT_LIBRARY_STANDARDS(c.req.raw));
+api.post("/library/stand-in-standards/impact", (c) => standIns.POST_LIBRARY_STANDARDS_IMPACT(c.req.raw));
 
 api.get("/runtime-config", () => runtimeConfig.GET());
 

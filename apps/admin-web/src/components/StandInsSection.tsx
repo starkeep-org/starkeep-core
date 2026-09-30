@@ -32,7 +32,17 @@ interface StandInsResponse {
   keepOriginals: boolean;
   /** Every original in the library, per category, whether or not it is here. */
   libraryOriginals: Record<Category, { count: number; bytes: number }>;
-  backlog: Record<"missing-canonical" | "missing-fidelity", BacklogCount>;
+  backlog: Record<"missing-canonical" | "missing-fidelity" | "canonical-outdated", BacklogCount>;
+  /** "Replace existing canonical stand-ins": the running or last job. */
+  restamp?: {
+    running: boolean;
+    categories: Category[];
+    total: number;
+    restamped: number;
+    promoted: number;
+  } | null;
+  /** Originals keeping a threshold other than the library's, per category. */
+  earlierThreshold?: Record<Category, number>;
   offline?: boolean;
   error?: string;
 }
@@ -269,11 +279,45 @@ export function StandInsSection() {
             <span className="tabular-nums">{formatCount(state.backlog["missing-fidelity"])}</span>{" "}
             with no reported fidelity
           </li>
+          {state.backlog["canonical-outdated"] && (
+            <li>
+              <span className="tabular-nums">{formatCount(state.backlog["canonical-outdated"])}</span>{" "}
+              waiting for a replacement canonical stand-in
+            </li>
+          )}
         </ul>
+        {state.restamp && <RestampLine restamp={state.restamp} />}
+        {state.earlierThreshold &&
+          CATEGORIES.filter((c) => (state.earlierThreshold?.[c] ?? 0) > 0).map((c) => (
+            <p key={c} className="text-sm text-muted-foreground">
+              {state.earlierThreshold![c].toLocaleString()} {CATEGORY_LABELS[c].toLowerCase()} keep the
+              archived quality they were saved with
+              {state.restamp && !state.restamp.running && state.restamp.categories.includes(c)
+                ? ", because the cloud had already archived them."
+                : "."}
+            </p>
+          ))}
       </section>
 
       <FreeUpSpace />
     </div>
+  );
+}
+
+function RestampLine({ restamp }: { restamp: NonNullable<StandInsResponse["restamp"]> }) {
+  if (restamp.running) {
+    return (
+      <p className="text-sm" role="status">
+        Replacing canonical stand-ins: {restamp.restamped.toLocaleString()} of{" "}
+        {restamp.total.toLocaleString()} originals updated.
+      </p>
+    );
+  }
+  return (
+    <p className="text-sm text-muted-foreground" role="status">
+      Last replacement updated {restamp.restamped.toLocaleString()} originals
+      {restamp.promoted > 0 ? `, ${restamp.promoted.toLocaleString()} of them from an existing smaller stand-in` : ""}.
+    </p>
   );
 }
 
