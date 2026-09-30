@@ -152,11 +152,11 @@ describe("the size summary", () => {
   });
 
   it("describes a video original, which always takes a canonical stand-in", async () => {
-    const parent = await create({ type: "video/mp4", sizeBytes: BIG, fidelity: 3840, fileName: "v.mp4" });
+    const parent = await create({ type: "video/mp4", sizeBytes: BIG, fidelity: 12000, fileName: "v.mp4" });
     const summary = await summaryOf(parent);
     expect(summary.sizes.map((s) => [s.fidelity, s.role])).toEqual([
-      [1280, "smaller"],
-      [1920, "canonical"],
+      [2000, "smaller"],
+      [4800, "canonical"],
     ]);
   });
 

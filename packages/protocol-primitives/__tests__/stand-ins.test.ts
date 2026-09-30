@@ -73,6 +73,22 @@ describe("the default standards", () => {
     expect(validateStandInStandards(broken).join("\n")).toMatch(/ascend/);
   });
 
+  it("refuse a standard size with no advisory long edge", () => {
+    const broken: StandInStandards = {
+      ...STD,
+      video: { ...STD.video, standardSizes: [1000, 2000] },
+    };
+    expect(validateStandInStandards(broken).join("\n")).toMatch(/standard size 1000 has no advisory long edge/);
+  });
+
+  it("publish video in kbps with 1080p and 720p advisory long edges", () => {
+    expect(STD.video.fidelityAxis).toBe("kbps");
+    expect(STD.video.canonicalThreshold).toBe(4800);
+    expect(STD.video.standardSizes).toEqual([2000]);
+    expect(STD.video.advisoryLongEdges).toEqual({ canonical: 1920, bySize: { 2000: 1280 } });
+    expect(STD.image.advisoryLongEdges).toBeNull();
+  });
+
   it("refuse an allowed type outside its category", () => {
     const broken: StandInStandards = {
       ...STD,
@@ -90,9 +106,9 @@ describe("originalStatus", () => {
     ["image below the floor, even when huge", { fidelity: 9000, sizeBytes: SMALL }, "self-canonical"],
     ["image below the floor with no fidelity", { fidelity: null, sizeBytes: SMALL }, "self-canonical"],
     ["image with no fidelity", { fidelity: null }, "fidelity-unknown"],
-    ["video above the floor at 1080p", { type: "video/mp4", fidelity: 1920 }, "archivable"],
-    ["video above the floor at 720p", { type: "video/mp4", fidelity: 1280 }, "archivable"],
-    ["video below the floor", { type: "video/mov", fidelity: 1280, sizeBytes: SMALL }, "video-below-floor"],
+    ["video above the threshold", { type: "video/mp4", fidelity: 12000 }, "archivable"],
+    ["video below the threshold", { type: "video/mp4", fidelity: 3000 }, "archivable"],
+    ["video below the floor", { type: "video/mov", fidelity: 3000, sizeBytes: SMALL }, "video-below-floor"],
     ["video with no fidelity", { type: "video/mp4", fidelity: null }, "fidelity-unknown"],
     // Audio has no stand-in standards, so it is an ordinary file like a document.
     ["lossless audio", { type: "audio/flac", fidelity: 900 }, null],
@@ -110,9 +126,9 @@ describe("expectedCanonicalFidelity and topFidelity", () => {
     expect(expectedCanonicalFidelity(original(), STD)).toBe(4272);
   });
 
-  it("is the original's own long edge for a video below the threshold", () => {
-    expect(expectedCanonicalFidelity(original({ type: "video/mp4", fidelity: 1280 }), STD)).toBe(1280);
-    expect(expectedCanonicalFidelity(original({ type: "video/mp4", fidelity: 3840 }), STD)).toBe(1920);
+  it("is the original's own bitrate for a video below the threshold", () => {
+    expect(expectedCanonicalFidelity(original({ type: "video/mp4", fidelity: 3000 }), STD)).toBe(3000);
+    expect(expectedCanonicalFidelity(original({ type: "video/mp4", fidelity: 12000 }), STD)).toBe(4800);
   });
 
   it("is null for a self-canonical original, whose own fidelity is the top", () => {
@@ -239,17 +255,17 @@ describe("checkStandInWrite", () => {
     expect(codes(check({ role: "canonical", fidelity: 4000 }))).toEqual(["canonical-fidelity-wrong"]);
   });
 
-  it("takes a video canonical stand-in at the original's own long edge below the threshold", () => {
-    const parent = original({ type: "video/mp4", fidelity: 1280 });
-    expect(check({ type: "video/webm", role: "canonical", fidelity: 1280, parent }).refusals).toEqual([]);
-    expect(codes(check({ type: "video/webm", role: "canonical", fidelity: 1920, parent }))).toEqual([
+  it("takes a video canonical stand-in at the original's own bitrate below the threshold", () => {
+    const parent = original({ type: "video/mp4", fidelity: 3000 });
+    expect(check({ type: "video/webm", role: "canonical", fidelity: 3000, parent }).refusals).toEqual([]);
+    expect(codes(check({ type: "video/webm", role: "canonical", fidelity: 4800, parent }))).toEqual([
       "canonical-fidelity-wrong",
     ]);
   });
 
   it("takes a video canonical stand-in for a video below the size floor", () => {
-    const parent = original({ type: "video/mp4", fidelity: 1920, sizeBytes: SMALL });
-    expect(check({ type: "video/webm", role: "canonical", fidelity: 1920, parent }).refusals).toEqual([]);
+    const parent = original({ type: "video/mp4", fidelity: 4800, sizeBytes: SMALL });
+    expect(check({ type: "video/webm", role: "canonical", fidelity: 4800, parent }).refusals).toEqual([]);
   });
 
   it("refuses a smaller stand-in off the standard sizes", () => {
@@ -257,9 +273,16 @@ describe("checkStandInWrite", () => {
   });
 
   it("refuses a smaller stand-in at or above the canonical stand-in", () => {
-    const parent = original({ type: "video/mp4", fidelity: 1280 });
-    // 1280 is a standard video size, but the canonical stand-in sits at 1280.
-    expect(codes(check({ type: "video/webm", fidelity: 1280, parent }))).toEqual(["exceeds-canonical"]);
+    const parent = original({ type: "video/mp4", fidelity: 2000 });
+    // 2000 is a standard video size, but the canonical stand-in sits at 2000.
+    expect(codes(check({ type: "video/webm", fidelity: 2000, parent }))).toEqual(["exceeds-canonical"]);
+  });
+
+  it("takes a smaller video stand-in only below the original's own bitrate", () => {
+    const above = original({ type: "video/mp4", fidelity: 12000 });
+    expect(check({ type: "video/webm", fidelity: 2000, parent: above }).refusals).toEqual([]);
+    const below = original({ type: "video/mp4", fidelity: 1500 });
+    expect(codes(check({ type: "video/webm", fidelity: 2000, parent: below }))).toEqual(["exceeds-canonical"]);
   });
 
   it("measures a smaller stand-in against an existing canonical stand-in", () => {
@@ -421,8 +444,8 @@ describe("ceilingPlacement", () => {
   });
 
   it("puts every video stand-in above a ceiling of none", () => {
-    expect(place({ type: "video/webm", parentId: "o", standInRole: "smaller", fidelity: 1280 })).toBe("above");
-    expect(place({ type: "video/mp4", fidelity: 1280 })).toBe("above");
+    expect(place({ type: "video/webm", parentId: "o", standInRole: "smaller", fidelity: 2000 })).toBe("above");
+    expect(place({ type: "video/mp4", fidelity: 2000 })).toBe("above");
   });
 
   // No stand-in can replace either, so every node keeps both.

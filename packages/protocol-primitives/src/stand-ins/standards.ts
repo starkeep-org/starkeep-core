@@ -51,10 +51,40 @@ export function isStandInCategory(category: Category | string): category is Stan
 /**
  * What a category's fidelity value measures.
  *
- * Images and video use the long edge rather than a vertical resolution, so a
- * portrait 1080p clip and a landscape one rank the same.
+ * - Images use the long edge in pixels rather than a vertical resolution, so a
+ *   portrait photo and a landscape one rank the same.
+ * - Video uses the bitrate in kbps, over the whole container, audio included.
+ *   Bitrate decides a clip's quality and size far more than resolution does,
+ *   so resolution is an advisory encoder setting beside it
+ *   ({@link CategoryStandards.advisoryLongEdges}) rather than the measure.
+ *
+ * On an original the value is measured: the long edge, or the file's size in
+ * bits over its duration. On a stand-in the value is what the app asked the
+ * encoder for. A video encoder lands near its target bitrate, not on it — a
+ * 4800 kbps target measuring 4782 kbps is the ordinary case — and a measured
+ * value would almost never equal the fidelity an original expects of its
+ * canonical stand-in. The target therefore names the standard a stand-in was
+ * made to, and the stand-in's byte size, which is exact, guards against an
+ * encode that outgrows its original.
  */
-export type FidelityAxis = "long-edge-px";
+export type FidelityAxis = "long-edge-px" | "kbps";
+
+/**
+ * The largest long edge an app should encode each stand-in size at, for a
+ * category whose fidelity is not itself a long edge.
+ *
+ * Advisory: the platform never parses media and stand-ins carry no metadata
+ * row, so nothing checks it, and no rule reads it. Changing one changes the
+ * stand-ins encoded afterward and nothing else — no stand-in becomes outdated
+ * and no original changes status. An app never encodes above the original's
+ * own long edge, whatever this says.
+ */
+export interface AdvisoryLongEdges {
+  /** For the canonical stand-in. */
+  readonly canonical: number;
+  /** For each standard size, keyed by the size's fidelity. */
+  readonly bySize: Readonly<Record<number, number>>;
+}
 
 /** The minimum encoder setting, on the codec's own scale. */
 export interface MinimumQuality {
@@ -94,12 +124,14 @@ export interface CategoryStandards {
    */
   readonly sizeFloorBytes: number;
   /**
-   * Whether an original at or below the threshold may stand in for itself.
-   * False for video: a 1080p HEVC clip would sit at the threshold, never
-   * archive, and play in few browsers, so every video gets a canonical
-   * stand-in.
+   * Whether an original at or below the threshold stands in for itself by
+   * that fact alone. False for video: a clip below the threshold still takes
+   * a canonical stand-in at its own bitrate, because VP9 usually carries the
+   * same picture in fewer bytes and plays in every browser.
    */
   readonly selfCanonicalAllowed: boolean;
+  /** Null for a category whose fidelity is already a long edge. */
+  readonly advisoryLongEdges: AdvisoryLongEdges | null;
 }
 
 export type StandInStandards = Readonly<Record<StandInCategory, CategoryStandards>>;
@@ -122,17 +154,23 @@ export const DEFAULT_STAND_IN_STANDARDS: StandInStandards = {
     standardSizes: [320, 640, 1280, 2560],
     sizeFloorBytes: ARCHIVE_SIZE_FLOOR_BYTES,
     selfCanonicalAllowed: true,
+    advisoryLongEdges: null,
   },
   video: {
     category: "video",
-    fidelityAxis: "long-edge-px",
+    fidelityAxis: "kbps",
     allowedTypes: ["video/webm"],
-    minimumQuality: { setting: "libvpx-vp9 CRF, bitrate 0", value: 31, higherIsBetter: false },
-    // 1080p in either orientation.
-    canonicalThreshold: 1920,
-    standardSizes: [1280],
+    minimumQuality: {
+      setting: "libvpx-vp9 constrained quality: CRF, with the target bitrate as -b:v",
+      value: 31,
+      higherIsBetter: false,
+    },
+    canonicalThreshold: 4800,
+    standardSizes: [2000],
     sizeFloorBytes: ARCHIVE_SIZE_FLOOR_BYTES,
     selfCanonicalAllowed: false,
+    // 1080p and 720p, in either orientation.
+    advisoryLongEdges: { canonical: 1920, bySize: { 2000: 1280 } },
   },
 };
 
@@ -203,6 +241,17 @@ export function validateStandInStandards(standards: StandInStandards): string[] 
         problems.push(`${category}: standard size ${size} is not below the canonical threshold`);
       }
       previous = size;
+    }
+    if (s.advisoryLongEdges) {
+      const edges = s.advisoryLongEdges;
+      if (!isPositiveInteger(edges.canonical)) {
+        problems.push(`${category}: the canonical advisory long edge must be a positive integer`);
+      }
+      for (const size of s.standardSizes) {
+        if (!isPositiveInteger(edges.bySize[size])) {
+          problems.push(`${category}: standard size ${size} has no advisory long edge`);
+        }
+      }
     }
   }
   return problems;

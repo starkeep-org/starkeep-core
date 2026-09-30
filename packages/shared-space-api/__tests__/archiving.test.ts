@@ -102,14 +102,14 @@ describe("evaluateArchiving", () => {
   });
 
   it("keeps a video below the size floor even with a canonical stand-in", async () => {
-    const original = await put({ type: "video/mp4", fidelity: 1920, sizeBytes: 1000 });
-    await put({ type: "video/webm", parentId: original.id, standInRole: "canonical", fidelity: 1920 });
+    const original = await put({ type: "video/mp4", fidelity: 4800, sizeBytes: 1000 });
+    await put({ type: "video/webm", parentId: original.id, standInRole: "canonical", fidelity: 4800 });
     expect((await evaluate(original.id)).reasons.join()).toMatch(/video below the size floor/);
   });
 
   it("archives a video above the floor at any fidelity", async () => {
-    const original = await put({ type: "video/mp4", fidelity: 1280 });
-    await put({ type: "video/webm", parentId: original.id, standInRole: "canonical", fidelity: 1280 });
+    const original = await put({ type: "video/mp4", fidelity: 2000 });
+    await put({ type: "video/webm", parentId: original.id, standInRole: "canonical", fidelity: 2000 });
     expect((await evaluate(original.id)).decision).toBe("archive");
   });
 
@@ -253,7 +253,7 @@ describe("pageBacklog", () => {
     const done = await put({ fidelity: 6000 });
     await canonicalFor(done);
     await put({ fidelity: 3000 }); // self-canonical: never waiting
-    const video = await put({ type: "video/mp4", fidelity: 1920, sizeBytes: 1000 }); // below the floor, still waiting
+    const video = await put({ type: "video/mp4", fidelity: 4800, sizeBytes: 1000 }); // below the floor, still waiting
     const page = await pageBacklog(db, grants, { kind: "missing-canonical" }, STD);
     expect(page.records.map((r) => r.id).sort()).toEqual([waiting.id, video.id].sort());
   });

@@ -61,7 +61,7 @@ export interface DataRecord extends BaseRecord {
   standInRole: StandInRole | null;
   /**
    * Reported fidelity on the category's axis — the long edge in pixels for
-   * images and video, the bitrate in kbps for audio.
+   * images, the bitrate in kbps for video. See `FidelityAxis`.
    *
    * Two readings, told apart by {@link standInRole}. On a stand-in it is the
    * stand-in's own fidelity, reported by the app that wrote it. On an original
