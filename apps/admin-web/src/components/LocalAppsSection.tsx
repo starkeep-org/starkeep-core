@@ -10,7 +10,17 @@ import {
 } from "@/components/ui/dialog";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
-import type { DaemonStatus, InstallStep, LocalAppEntry } from "@/lib/app-types";
+import type { DaemonStatus, InstallStep, LocalAppEntry, ManifestSummary } from "@/lib/app-types";
+import {
+  draftOf,
+  draftProblems,
+  draftsEqual,
+  LibraryStandardsFields,
+  saveLibraryStandards,
+  type Category,
+  type LibraryStandardsDraft,
+  type LibraryStandardsResponse,
+} from "@/components/LibraryStandardsSection";
 
 export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
   apps: LocalAppEntry[] | null;
@@ -463,6 +473,21 @@ function ConsentModal({
 }) {
   const grants = entry.manifest.infraRequirements?.fileAccess ?? [];
   const allAccess = entry.manifest.infraRequirements?.fileAccessAll ?? false;
+  const quality = useQualityStep(entry.manifest);
+  const [saving, setSaving] = useState(false);
+
+  const approve = async () => {
+    if (quality && !draftsEqual(quality.draft, draftOf(quality.state.current))) {
+      setSaving(true);
+      const refused = await saveLibraryStandards(quality.draft);
+      setSaving(false);
+      if (refused.length > 0) {
+        quality.setProblems(refused);
+        return;
+      }
+    }
+    onApprove();
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -506,11 +531,88 @@ function ConsentModal({
           </ul>
         )}
 
+        {quality && (
+          <div className="border-t pt-4 flex flex-col gap-3">
+            <h4 className="text-sm font-medium">Quality kept when originals archive</h4>
+            <p className="text-xs text-muted-foreground">
+              Choose this before the app adds anything. An original larger than this archives to
+              deep storage, and a copy at this size stays instantly available. The defaults suit
+              most libraries, and you can change this later on the Storage page.
+            </p>
+            <LibraryStandardsFields
+              state={quality.state}
+              draft={quality.draft}
+              onChange={quality.setDraft}
+              categories={quality.categories}
+            />
+            {quality.problems.length > 0 && (
+              <ul className="text-sm text-destructive">
+                {quality.problems.map((p) => (
+                  <li key={p}>{p}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="outline" onClick={onCancel}>Cancel</Button>
-          <Button onClick={onApprove}>Approve &amp; Install</Button>
+          <Button
+            onClick={() => void approve()}
+            disabled={saving || (quality !== null && draftProblems(quality.draft, quality.state.ranges).length > 0)}
+          >
+            {saving ? "Saving…" : "Approve & Install"}
+          </Button>
         </div>
       </div>
     </div>
   );
+}
+
+/**
+ * The install flow's one-time quality step: shown for an app that reads photos
+ * or videos while the person has set no value and the library holds none of
+ * those originals yet. Null when the step does not apply, or while the daemon
+ * has not answered — installing never waits on it.
+ */
+function useQualityStep(manifest: ManifestSummary): {
+  state: LibraryStandardsResponse;
+  draft: LibraryStandardsDraft;
+  setDraft: (draft: LibraryStandardsDraft) => void;
+  categories: Category[];
+  problems: string[];
+  setProblems: (problems: string[]) => void;
+} | null {
+  const [state, setState] = useState<LibraryStandardsResponse | null>(null);
+  const [draft, setDraft] = useState<LibraryStandardsDraft | null>(null);
+  const [problems, setProblems] = useState<string[]>([]);
+
+  const read = mediaCategoriesRead(manifest);
+  const wanted = read.length > 0;
+  useEffect(() => {
+    if (!wanted) return;
+    let cancelled = false;
+    fetch("/api/library/stand-in-standards")
+      .then((r) => r.json())
+      .then((body: LibraryStandardsResponse) => {
+        if (cancelled || body.offline || !body.current) return;
+        setState(body);
+        setDraft(draftOf(body.current));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [wanted]);
+
+  if (!state || !draft || state.set) return null;
+  const categories = read.filter((c) => state.libraryOriginals[c].count === 0);
+  if (categories.length === 0) return null;
+  return { state, draft, setDraft, categories, problems, setProblems };
+}
+
+/** The stand-in categories an app's manifest reads, in display order. */
+function mediaCategoriesRead(manifest: ManifestSummary): Category[] {
+  const types = (manifest.infraRequirements?.fileAccess ?? []).flatMap((g) => g.types);
+  return (["image", "video"] as const).filter((c) => types.some((t) => t.startsWith(`${c}/`)));
 }
