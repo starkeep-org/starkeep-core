@@ -84,6 +84,8 @@ const FIELD_MAP: Record<string, string> = {
   originalFilename: "original_filename",
   standInRole: "stand_in_role",
   fidelity: "fidelity",
+  canonicalThreshold: "canonical_threshold",
+  selfCanonical: "self_canonical",
 };
 
 function mapField(field: string): string {

@@ -46,7 +46,14 @@ export interface StandInFacts {
   readonly fidelity: number | null;
   readonly sizeBytes: number;
   readonly deletedAt?: unknown;
+  /** The original's stamp; see `DataRecord.canonicalThreshold`. Absent reads as null. */
+  readonly canonicalThreshold?: number | null;
+  /** See `DataRecord.selfCanonical`. Absent reads as false. */
+  readonly selfCanonical?: boolean;
 }
+
+/** What the rules read off an original to place it. */
+export type OriginalFacts = Pick<StandInFacts, "type" | "sizeBytes" | "fidelity" | "canonicalThreshold" | "selfCanonical">;
 
 /** Whether a record is an original in the sense this design uses. */
 export function isStandInOriginal(record: Pick<StandInFacts, "type" | "parentId" | "standInRole">): boolean {
@@ -66,14 +73,64 @@ export function standardsFor(
 }
 
 /**
+ * The canonical threshold an original is judged by: its own stamp, or the
+ * library's value for an original with none. Null outside the stand-in
+ * categories.
+ *
+ * Reading the stamp first is what lets the person change the library's value
+ * without touching a single existing original: each keeps the threshold it was
+ * judged by, until "Replace existing canonical stand-ins" restamps it.
+ */
+export function thresholdOf(
+  original: Pick<StandInFacts, "type" | "canonicalThreshold">,
+  standards: StandInStandards,
+): number | null {
+  const s = standardsFor(original.type, standards);
+  if (!s) return null;
+  return original.canonicalThreshold ?? s.canonicalThreshold;
+}
+
+/**
+ * The standard sizes that apply to an original: the platform's sizes below the
+ * original's own threshold. A lowered threshold drops the sizes at or above it
+ * for the originals stamped with it, and leaves every older original's sizes
+ * as they were.
+ */
+export function standardSizesOf(
+  original: Pick<StandInFacts, "type" | "canonicalThreshold">,
+  standards: StandInStandards,
+): readonly number[] {
+  const s = standardsFor(original.type, standards);
+  const threshold = thresholdOf(original, standards);
+  if (!s || threshold === null) return [];
+  return s.standardSizes.filter((size) => size < threshold);
+}
+
+/**
+ * The stamp a node writes on an original whose fidelity it records now: the
+ * library's threshold for the original's category, when the node knows the
+ * library's value, and null otherwise. A null stamp is filled in later by the
+ * cloud, which always knows. Null outside the stand-in categories.
+ */
+export function stampFor(
+  type: string,
+  standards: StandInStandards,
+  knowsLibraryValue: boolean,
+): number | null {
+  if (!knowsLibraryValue) return null;
+  return standardsFor(type, standards)?.canonicalThreshold ?? null;
+}
+
+/**
  * Where an original stands with respect to archiving.
  *
  * - `archivable`: past the size floor, fidelity reported and above the
  *   threshold (or any fidelity, for video). Needs a canonical stand-in and
  *   archives once one exists in the cloud.
  * - `self-canonical`: an image original at or below the threshold, or
- *   at or below the size floor. Takes the canonical stand-in's place
- *   everywhere and never archives.
+ *   at or below the size floor, or any original whose canonical encode could
+ *   not make a smaller file. Takes the canonical stand-in's place everywhere
+ *   and never archives.
  * - `video-below-floor`: a video original too small to archive. Video is never
  *   self-canonical, so it still takes a canonical stand-in, and both stay in
  *   the instant tier.
@@ -87,11 +144,14 @@ export type OriginalStatus =
   | "fidelity-unknown";
 
 export function originalStatus(
-  original: Pick<StandInFacts, "type" | "sizeBytes" | "fidelity">,
+  original: OriginalFacts,
   standards: StandInStandards,
 ): OriginalStatus | null {
   const s = standardsFor(original.type, standards);
   if (!s) return null;
+  // Decided by the platform when a canonical encode came out no smaller than
+  // the original: keeping both would cost more than keeping the original.
+  if (original.selfCanonical) return "self-canonical";
   const belowFloor = original.sizeBytes <= s.sizeFloorBytes;
   if (!s.selfCanonicalAllowed) {
     if (original.fidelity === null) return "fidelity-unknown";
@@ -101,7 +161,7 @@ export function originalStatus(
   // it is self-canonical whatever its fidelity turns out to be.
   if (belowFloor) return "self-canonical";
   if (original.fidelity === null) return "fidelity-unknown";
-  return original.fidelity > s.canonicalThreshold ? "archivable" : "self-canonical";
+  return original.fidelity > thresholdOf(original, standards)! ? "archivable" : "self-canonical";
 }
 
 /** Whether this original takes a canonical stand-in at all. */
@@ -112,30 +172,44 @@ export function takesCanonical(status: OriginalStatus | null): boolean {
 /**
  * The fidelity a canonical stand-in for this original must report.
  *
- * The threshold, except for a video original below it, whose canonical
- * stand-in matches the original's own bitrate. Null when the original takes
- * no canonical stand-in.
+ * The original's threshold, except for a video original below it, whose
+ * canonical stand-in matches the original's own bitrate. Null when the
+ * original takes no canonical stand-in.
  */
 export function expectedCanonicalFidelity(
-  original: Pick<StandInFacts, "type" | "sizeBytes" | "fidelity">,
+  original: OriginalFacts,
   standards: StandInStandards,
 ): number | null {
-  const s = standardsFor(original.type, standards);
+  const threshold = thresholdOf(original, standards);
   const status = originalStatus(original, standards);
-  if (!s || !takesCanonical(status) || original.fidelity === null) return null;
-  return Math.min(original.fidelity, s.canonicalThreshold);
+  if (threshold === null || !takesCanonical(status) || original.fidelity === null) return null;
+  return Math.min(original.fidelity, threshold);
+}
+
+/**
+ * Whether a canonical stand-in was made for the threshold its original is
+ * judged by now. False when the original expects none, or when the fidelity
+ * differs — a canonical stand-in made under an earlier threshold, which keeps
+ * answering reads until a matching one replaces it.
+ */
+export function canonicalMatches(
+  original: OriginalFacts,
+  canonical: Pick<StandInFacts, "fidelity">,
+  standards: StandInStandards,
+): boolean {
+  const expected = expectedCanonicalFidelity(original, standards);
+  return expected !== null && canonical.fidelity === expected;
 }
 
 /**
  * The fidelity that answers every request at or above it: the canonical
  * stand-in's, or the original's own for a self-canonical original.
  *
- * An existing canonical stand-in wins over the expected value, because a
- * canonical stand-in made under an earlier threshold still stands until
- * something replaces it.
+ * An existing canonical stand-in wins over the expected value, because an
+ * outdated canonical stand-in still stands until a matching one replaces it.
  */
 export function topFidelity(
-  original: Pick<StandInFacts, "type" | "sizeBytes" | "fidelity">,
+  original: OriginalFacts,
   canonical: Pick<StandInFacts, "fidelity"> | null,
   standards: StandInStandards,
 ): number | null {
@@ -185,7 +259,8 @@ export type StandInRefusalCode =
   | "not-a-standard-size"
   | "exceeds-canonical"
   | "fidelity-on-derived-record"
-  | "fidelity-outside-stand-in-category";
+  | "fidelity-outside-stand-in-category"
+  | "canonical-matches";
 
 export interface StandInRefusal {
   readonly code: StandInRefusalCode;
@@ -206,6 +281,14 @@ export interface StandInWriteInput {
   readonly reportedParentFidelity?: unknown;
   /** The parent's live canonical stand-in, if one exists. */
   readonly existingCanonical: Pick<StandInFacts, "id" | "fidelity"> | null;
+  /** The stand-in's own size in bytes, when the write states it. */
+  readonly sizeBytes?: number;
+  /**
+   * The stamp this node would write on the parent if this write records the
+   * parent's fidelity: see {@link stampFor}. Checks read it in place of a
+   * missing stamp, so they judge the parent as it will be stored.
+   */
+  readonly parentStamp?: number | null;
 }
 
 export interface StandInWriteVerdict {
@@ -216,6 +299,18 @@ export interface StandInWriteVerdict {
    * app's record.
    */
   readonly recordParentFidelity: number | null;
+  /**
+   * True for a canonical stand-in no smaller than its original. The write
+   * stores no stand-in; the platform marks the original self-canonical
+   * instead, because an original that costs no more than its canonical
+   * stand-in is better kept than archived.
+   */
+  readonly selfCanonical: boolean;
+  /**
+   * An existing canonical stand-in this write replaces: live, and made for a
+   * threshold the parent is no longer judged by. Null otherwise.
+   */
+  readonly replacesCanonical: string | null;
 }
 
 /**
@@ -233,7 +328,12 @@ export function checkStandInWrite(
   const refuse = (code: StandInRefusalCode, status: 400 | 404 | 409, message: string) => {
     refusals.push({ code, status, message });
   };
-  const none = (): StandInWriteVerdict => ({ refusals, recordParentFidelity: null });
+  const none = (): StandInWriteVerdict => ({
+    refusals,
+    recordParentFidelity: null,
+    selfCanonical: false,
+    replacesCanonical: null,
+  });
 
   if (!isStandInRole(input.role)) {
     refuse("invalid-role", 400, `standIn.role must be one of ${STAND_IN_ROLES.join(", ")}`);
@@ -304,12 +404,20 @@ export function checkStandInWrite(
       "the original has no reported fidelity; report it as parentFidelity with the first stand-in",
     );
   }
-  if (refusals.length > 0) return { refusals, recordParentFidelity: null };
+  if (refusals.length > 0) return none();
 
   const role = input.role as StandInRole;
   const fidelity = input.fidelity as number;
-  const original = { type: parent.type, sizeBytes: parent.sizeBytes, fidelity: parentFidelity };
+  const original: OriginalFacts = {
+    type: parent.type,
+    sizeBytes: parent.sizeBytes,
+    fidelity: parentFidelity,
+    canonicalThreshold: parent.canonicalThreshold ?? input.parentStamp ?? null,
+    selfCanonical: parent.selfCanonical ?? false,
+  };
   const status = originalStatus(original, standards);
+  let selfCanonical = false;
+  let replacesCanonical: string | null = null;
 
   if (role === "canonical") {
     if (!takesCanonical(status)) {
@@ -326,14 +434,24 @@ export function checkStandInWrite(
           400,
           `the canonical stand-in for this original reports ${expected}, not ${fidelity}`,
         );
+      } else if (input.existingCanonical && input.existingCanonical.fidelity === expected) {
+        // The slot's occupant already meets the standard. The caller reuses it,
+        // which the planner answers as `StandInExists` with the occupant's id.
+        refuse("canonical-matches", 409, "a matching canonical stand-in already exists");
+      } else {
+        // An outdated occupant goes either way: replaced by this stand-in, or
+        // by the original itself when this stand-in could not shrink it.
+        replacesCanonical = input.existingCanonical?.id ?? null;
+        selfCanonical = input.sizeBytes !== undefined && input.sizeBytes >= parent.sizeBytes;
       }
     }
   } else {
-    if (!s.standardSizes.includes(fidelity)) {
+    const sizes = standardSizesOf(original, standards);
+    if (!sizes.includes(fidelity)) {
       refuse(
         "not-a-standard-size",
         400,
-        `${fidelity} is not a standard ${s.category} size (${s.standardSizes.join(", ")}); ` +
+        `${fidelity} is not a standard size for this ${s.category} original (${sizes.join(", ")}); ` +
           "a size an app wants for its own purposes is an ordinary derived record",
       );
     }
@@ -349,7 +467,8 @@ export function checkStandInWrite(
     }
   }
 
-  return { refusals, recordParentFidelity: refusals.length === 0 ? recordParentFidelity : null };
+  if (refusals.length > 0) return none();
+  return { refusals, recordParentFidelity, selfCanonical, replacesCanonical };
 }
 
 /**
@@ -415,6 +534,17 @@ export interface StandInSummary {
   readonly status: OriginalStatus;
   /** The fidelity that answers every request at or above it. Null when unknown. */
   readonly top: number | null;
+  /**
+   * The fidelity the original's canonical stand-in should report under the
+   * threshold the original is judged by. Null when it takes none, or its
+   * fidelity is unknown. An app derives a canonical stand-in at this value.
+   */
+  readonly canonicalTarget: number | null;
+  /**
+   * True when the live canonical stand-in was made for a different threshold.
+   * It still answers reads; an app replaces it with one at `canonicalTarget`.
+   */
+  readonly canonicalOutdated: boolean;
   /** Every size that exists or should exist, ascending. */
   readonly sizes: readonly StandInSize[];
   /**
@@ -455,6 +585,9 @@ export function summarizeStandIns(
   const live = standIns.filter((r) => !r.deletedAt && r.standInRole !== null && r.fidelity !== null);
   const canonical = live.find((r) => r.standInRole === "canonical") ?? null;
   const top = topFidelity(original, canonical, standards);
+  const canonicalTarget = expectedCanonicalFidelity(original, standards);
+  const canonicalOutdated =
+    canonical !== null && canonicalTarget !== null && canonical.fidelity !== canonicalTarget;
 
   const bySize = new Map<number, StandInSize>();
   for (const r of live) {
@@ -462,7 +595,7 @@ export function summarizeStandIns(
     bySize.set(r.fidelity!, sizeOf(r, r.standInRole!, placementOf(r)));
   }
   if (top !== null) {
-    for (const size of s.standardSizes) {
+    for (const size of standardSizesOf(original, standards)) {
       if (size >= top || bySize.has(size)) continue;
       bySize.set(size, missingSize(size, "smaller"));
     }
@@ -480,6 +613,8 @@ export function summarizeStandIns(
     fidelity: original.fidelity,
     status,
     top,
+    canonicalTarget,
+    canonicalOutdated,
     sizes: [...bySize.values()].sort((a, b) => a.fidelity - b.fidelity),
     originalPlacement: placementOf(original),
   };
@@ -584,7 +719,10 @@ function isPositiveInteger(value: unknown): value is number {
 export type CeilingPlacement = "within" | "above" | "keep";
 
 export function ceilingPlacement(
-  record: Pick<StandInFacts, "type" | "parentId" | "standInRole" | "fidelity" | "sizeBytes">,
+  record: Pick<
+    StandInFacts,
+    "type" | "parentId" | "standInRole" | "fidelity" | "sizeBytes" | "canonicalThreshold" | "selfCanonical"
+  >,
   ceilings: SyncDownCeilings,
   standards: StandInStandards,
 ): CeilingPlacement {

@@ -216,6 +216,8 @@ export async function initializeSharedSchema(
         c.check(sql`stand_in_role IN ('canonical', 'smaller')`),
       )
       .addColumn("fidelity", "integer")
+      .addColumn("canonical_threshold", "integer")
+      .addColumn("self_canonical", "boolean")
       .addColumn("stand_in_slot", "text")
       .execute();
 
@@ -228,6 +230,8 @@ export async function initializeSharedSchema(
     for (const [column, type] of [
       ["stand_in_role", "text"],
       ["fidelity", "integer"],
+      ["canonical_threshold", "integer"],
+      ["self_canonical", "boolean"],
       ["stand_in_slot", "text"],
     ] as const) {
       await sql

@@ -62,6 +62,10 @@ export interface BlobCandidate {
   readonly standInRole?: StandInRole | null;
   /** The record's reported fidelity; see `DataRecord.fidelity`. */
   readonly fidelity?: number | null;
+  /** The original's stamp; see `DataRecord.canonicalThreshold`. */
+  readonly canonicalThreshold?: number | null;
+  /** See `DataRecord.selfCanonical`. */
+  readonly selfCanonical?: boolean;
 }
 
 export type ResidencyDecision = "fetch" | "elide";

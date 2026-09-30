@@ -5,13 +5,17 @@ import {
   ceilingPlacement,
   DEFAULT_STAND_IN_STANDARDS as STD,
   checkOriginalFidelity,
+  canonicalMatches,
   checkStandInWrite,
   expectedCanonicalFidelity,
   isStandInOriginal,
   originalStatus,
   resolveSize,
+  stampFor,
+  standardSizesOf,
   standInSlot,
   summarizeStandIns,
+  thresholdOf,
   topFidelity,
   validateStandInStandards,
   type StandInFacts,
@@ -142,6 +146,57 @@ describe("expectedCanonicalFidelity and topFidelity", () => {
   });
 });
 
+describe("an original judged by its own stamp", () => {
+  // The library's value moved from the default to 2560 after these originals
+  // were stamped, or before the unstamped one was.
+  const LOWERED: StandInStandards = { ...STD, image: { ...STD.image, canonicalThreshold: 2560 } };
+
+  it("reads the stamp first and the library value only for an unstamped original", () => {
+    expect(thresholdOf(original({ canonicalThreshold: 4272 }), LOWERED)).toBe(4272);
+    expect(thresholdOf(original(), LOWERED)).toBe(2560);
+    expect(thresholdOf(original({ type: "document/pdf" }), LOWERED)).toBeNull();
+  });
+
+  it("keeps a stamped original's status, expected fidelity and sizes when the library value moves", () => {
+    const stamped = original({ fidelity: 4000, canonicalThreshold: 4272 });
+    expect(originalStatus(stamped, LOWERED)).toBe("self-canonical");
+    expect(standardSizesOf(stamped, LOWERED)).toEqual([320, 640, 1280, 2560]);
+
+    const unstamped = original({ fidelity: 4000 });
+    expect(originalStatus(unstamped, LOWERED)).toBe("archivable");
+    expect(expectedCanonicalFidelity(unstamped, LOWERED)).toBe(2560);
+    expect(standardSizesOf(unstamped, LOWERED)).toEqual([320, 640, 1280]);
+    expect(topFidelity(unstamped, null, LOWERED)).toBe(2560);
+  });
+
+  it("stamps with the library's value only when the node knows it", () => {
+    expect(stampFor("image/jpeg", LOWERED, true)).toBe(2560);
+    expect(stampFor("image/jpeg", LOWERED, false)).toBeNull();
+    expect(stampFor("document/pdf", LOWERED, true)).toBeNull();
+  });
+
+  it("tells a canonical stand-in made for the stamp from an outdated one", () => {
+    const stamped = original({ canonicalThreshold: 2560 });
+    expect(canonicalMatches(stamped, { fidelity: 2560 }, STD)).toBe(true);
+    expect(canonicalMatches(stamped, { fidelity: 4272 }, STD)).toBe(false);
+  });
+});
+
+describe("an original whose canonical encode could not shrink it", () => {
+  it("stands in for itself, a video included, and so never archives", () => {
+    const video = original({ type: "video/mp4", fidelity: 3000, selfCanonical: true });
+    expect(originalStatus(video, STD)).toBe("self-canonical");
+    expect(expectedCanonicalFidelity(video, STD)).toBeNull();
+    expect(topFidelity(video, null, STD)).toBe(3000);
+  });
+
+  it("sits within a ceiling at its own fidelity", () => {
+    const video = original({ type: "video/mp4", fidelity: 1500, selfCanonical: true });
+    expect(ceilingPlacement(video, { image: null, video: 2000 }, STD)).toBe("within");
+    expect(ceilingPlacement({ ...video, selfCanonical: false }, { image: null, video: 2000 }, STD)).toBe("above");
+  });
+});
+
 describe("isStandInOriginal", () => {
   it("is true only for a parentless, roleless record in a stand-in category", () => {
     expect(isStandInOriginal(original())).toBe(true);
@@ -268,6 +323,51 @@ describe("checkStandInWrite", () => {
     expect(check({ type: "video/webm", role: "canonical", fidelity: 4800, parent }).refusals).toEqual([]);
   });
 
+  it("marks the original self-canonical for a canonical stand-in no smaller than it", () => {
+    const parent = original({ type: "video/mp4", fidelity: 3000 });
+    const at = (sizeBytes: number) =>
+      check({ type: "video/webm", role: "canonical", fidelity: 3000, parent, sizeBytes });
+    expect(at(BIG)).toMatchObject({ refusals: [], selfCanonical: true });
+    expect(at(BIG + 1)).toMatchObject({ refusals: [], selfCanonical: true });
+    expect(at(BIG - 1)).toMatchObject({ refusals: [], selfCanonical: false });
+  });
+
+  it("replaces an outdated canonical stand-in, and refuses one that already matches", () => {
+    const parent = original({ canonicalThreshold: 2560 });
+    const replacing = check({
+      role: "canonical",
+      fidelity: 2560,
+      parent,
+      existingCanonical: { id: "old", fidelity: 4272 },
+    });
+    expect(replacing).toMatchObject({ refusals: [], replacesCanonical: "old", selfCanonical: false });
+    const repeat = check({
+      role: "canonical",
+      fidelity: 2560,
+      parent,
+      existingCanonical: { id: "same", fidelity: 2560 },
+    });
+    expect(codes(repeat)).toEqual(["canonical-matches"]);
+  });
+
+  it("judges a parent whose fidelity this write records by the stamp it will carry", () => {
+    const parent = original({ fidelity: null });
+    const v = check({
+      role: "canonical",
+      fidelity: 2560,
+      parent,
+      reportedParentFidelity: 6000,
+      parentStamp: 2560,
+    });
+    expect(v).toMatchObject({ refusals: [], recordParentFidelity: 6000 });
+  });
+
+  it("offers a stamped original only the standard sizes below its stamp", () => {
+    const parent = original({ canonicalThreshold: 2000 });
+    expect(codes(check({ fidelity: 2560, parent }))).toEqual(["not-a-standard-size", "exceeds-canonical"]);
+    expect(check({ fidelity: 1280, parent }).refusals).toEqual([]);
+  });
+
   it("refuses a smaller stand-in off the standard sizes", () => {
     expect(codes(check({ fidelity: 512 }))).toEqual(["not-a-standard-size"]);
   });
@@ -340,6 +440,18 @@ describe("summarizeStandIns", () => {
       [2560, "smaller", "missing"],
       [4272, "canonical", "cloud"],
     ]);
+  });
+
+  it("marks a canonical stand-in made for another threshold as outdated, and still serves it", () => {
+    const summary = summarizeStandIns(
+      original({ canonicalThreshold: 2560 }),
+      [standIn("smaller", 640), standIn("canonical", 4272)],
+      STD,
+      here,
+    )!;
+    expect(summary).toMatchObject({ top: 4272, canonicalTarget: 2560, canonicalOutdated: true });
+    const current = summarizeStandIns(original(), [standIn("canonical", 4272)], STD, here)!;
+    expect(current).toMatchObject({ canonicalTarget: 4272, canonicalOutdated: false });
   });
 
   it("says where the original's own bytes sit", () => {

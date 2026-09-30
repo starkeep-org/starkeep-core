@@ -65,6 +65,8 @@ export {
   planFidelityReport,
   reconcileReportedFidelity,
   recordOriginalFidelity,
+  retireReplacedStandIns,
+  markSelfCanonical,
   standInExists,
   liveStandIn,
   type StandInWritePlan,
