@@ -174,6 +174,74 @@ describe("the library's quality section", () => {
   });
 });
 
+describe("replacing existing canonical stand-ins", () => {
+  const IMPACT = {
+    image: { restamp: 900, promoted: 0, fromCanonical: 850, download: { count: 50, bytes: 400 * 1024 ** 2 } },
+    video: { restamp: 0, promoted: 0, fromCanonical: 0, download: { count: 0, bytes: 0 } },
+  };
+
+  function routes(impact = IMPACT) {
+    stubFetch({
+      "GET /api/library/stand-in-standards": () => ({ body: standards({ images: 1000 }) }),
+      "POST /api/library/stand-in-standards/impact": () => ({ body: { impact } }),
+      "PUT /api/library/stand-in-standards": () => ({ body: { ok: true } }),
+    });
+  }
+
+  async function openDialogFor(value: string) {
+    const user = userEvent.setup();
+    render(<LibraryStandardsSection />);
+    await user.selectOptions(await screen.findByLabelText("Threshold for Photos"), value);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByLabelText("Replace existing canonical stand-ins?");
+    return { user, dialog };
+  }
+
+  it("warns that a decrease derives from the current canonical stand-in, with both counts", async () => {
+    routes();
+    const { user, dialog } = await openDialogFor("3200");
+    await user.click(within(dialog).getByLabelText("Replace existing canonical stand-ins?"));
+    const warning = within(dialog).getByRole("alert");
+    expect(warning.textContent).toMatch(/needs no download of the original/);
+    expect(warning.textContent).toMatch(/850 photos made from their current canonical stand-in; 50 photos, 400 MiB, to download once/);
+  });
+
+  it("warns that a raise downloads every affected original, as an upper bound", async () => {
+    routes({ ...IMPACT, image: { restamp: 900, promoted: 0, fromCanonical: 0, download: { count: 900, bytes: 7 * 1024 ** 3 } } });
+    const { user, dialog } = await openDialogFor("6000");
+    await user.click(within(dialog).getByLabelText("Replace existing canonical stand-ins?"));
+    const warning = within(dialog).getByRole("alert");
+    expect(warning.textContent).toMatch(/Cloud downloads cost money/);
+    expect(warning.textContent).toMatch(/already archived keep their current canonical stand-in/);
+    expect(warning.textContent).toMatch(/Up to 900 photos, 7 GiB of originals, to download/);
+  });
+
+  it("sends the categories to replace in only when the person ticks the box", async () => {
+    routes();
+    const { user, dialog } = await openDialogFor("3200");
+    await user.click(within(dialog).getByLabelText("Replace existing canonical stand-ins?"));
+    await user.click(within(dialog).getByRole("button", { name: "Save and replace" }));
+    await screen.findByText(/picks it up at its next sync/);
+    expect(puts()[0]!.body).toMatchObject({ replaceExisting: ["image"] });
+  });
+
+  it("offers no replacement when no original carries another value", async () => {
+    routes({ ...IMPACT, image: { ...IMPACT.image, restamp: 0 } });
+    const user = userEvent.setup();
+    render(<LibraryStandardsSection />);
+    await user.selectOptions(await screen.findByLabelText("Threshold for Photos"), "3200");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const dialog = await screen.findByRole("dialog");
+    await vi.waitFor(() => expect(calls.some((c) => c.url.endsWith("/impact"))).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(within(dialog).queryByLabelText("Replace existing canonical stand-ins?")).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await screen.findByText(/picks it up at its next sync/);
+    expect(puts()[0]!.body).not.toHaveProperty("replaceExisting");
+  });
+});
+
 describe("the install flow's quality step", () => {
   const photos: LocalAppEntry = {
     appId: "photos",

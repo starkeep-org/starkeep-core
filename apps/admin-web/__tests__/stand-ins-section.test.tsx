@@ -98,6 +98,26 @@ describe("the stand-in section", () => {
     expect(screen.getByText("at least 7")).toBeTruthy();
   });
 
+  it("reports a replacement's progress and originals keeping an earlier value", async () => {
+    vi.stubGlobal(
+      "fetch",
+      stubFetch({
+        "GET /api/residency/stand-ins": () => ({
+          body: {
+            ...STAND_INS,
+            backlog: { ...STAND_INS.backlog, "canonical-outdated": { count: 12, complete: true } },
+            restamp: { running: true, categories: ["image"], total: 900, restamped: 300, promoted: 0 },
+            earlierThreshold: { image: 0, video: 4 },
+          },
+        }),
+      }),
+    );
+    render(<StandInsSection />);
+    expect(await screen.findByText(/waiting for a replacement canonical stand-in/)).toBeTruthy();
+    expect(screen.getByText("Replacing canonical stand-ins: 300 of 900 originals updated.")).toBeTruthy();
+    expect(screen.getByText(/4 videos keep the archived quality they were saved with\./)).toBeTruthy();
+  });
+
   it("offers the standard sizes and the canonical size", async () => {
     render(<StandInsSection />);
     const image = await screen.findByLabelText("Ceiling for Photos");
