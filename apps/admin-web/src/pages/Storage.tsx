@@ -1,6 +1,7 @@
 import { Link } from "react-router";
 import { Badge } from "@/components/ui/badge";
 import { StandInsSection } from "../components/StandInsSection";
+import { LibraryStandardsSection } from "../components/LibraryStandardsSection";
 
 export function StoragePage() {
   return (
@@ -22,7 +23,10 @@ export function StoragePage() {
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">
           Photos &amp; videos
         </h2>
-        <StandInsSection />
+        <div className="space-y-8">
+          <LibraryStandardsSection />
+          <StandInsSection />
+        </div>
       </div>
     </div>
   );
