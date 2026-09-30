@@ -1,6 +1,6 @@
 import type { AppManifest } from "./schema.js";
 import { appManifestSchema } from "./schema.js";
-import { isKnownType, typeCategory } from "@starkeep/protocol-primitives";
+import { isKnownType, typeCategory, isGrantableCategory } from "@starkeep/protocol-primitives";
 import {
   declaredHandlerRoutes,
   matchRoute,
@@ -57,9 +57,9 @@ export function validateManifest(raw: unknown): ValidationResult {
       // ungrantable to installable apps. Reject it explicitly — `isKnownType`
       // alone would let it through (it's in the registry), re-opening the hole
       // the old extension map closed structurally (`other` was never mappable).
-      if (typeCategory(type) === "other") {
+      if (!isGrantableCategory(typeCategory(type))) {
         errors.push(
-          `fileAccess: type "${type}" is the Drive-only "other" catch-all and cannot be granted to an installable app. Use fileAccessAll (Starkeep Drive only) for all-access.`,
+          `fileAccess: type "${type}" is in the Drive-only "${typeCategory(type)}" category and cannot be granted to an installable app. Use fileAccessAll (Starkeep Drive only) for all-access.`,
         );
         continue;
       }

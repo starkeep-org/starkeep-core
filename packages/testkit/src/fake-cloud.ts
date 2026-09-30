@@ -37,7 +37,7 @@ import {
   type AnyRecord,
 } from "@starkeep/protocol-primitives";
 import { sha256HexToBase64 } from "@starkeep/storage-adapter";
-import { createAppSpecificFactory } from "@starkeep/shared-space-api";
+import { createAppSpecificFactory, stampUnstampedOriginals } from "@starkeep/shared-space-api";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   SqliteDatabaseAdapter,
@@ -50,6 +50,7 @@ import { nodeSqliteDriver } from "@starkeep/storage-sqlite/node";
 import { FsObjectStorageAdapter } from "@starkeep/storage-fs";
 import {
   createInProcessSyncTransport,
+  createLibrarySettings,
   type SyncTransport,
   type SyncExchangeRequest,
 } from "@starkeep/sync-engine";
@@ -161,6 +162,14 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   await objectStorage.init();
 
   const clock = createHLCClock({ nodeId: `fake-cloud-${port}`, wallClockFunction: Date.now });
+  // The cloud always knows the library's value: its settings file, or the
+  // defaults. See `createLibrarySettings` in sync-engine.
+  const librarySettings = createLibrarySettings({
+    db: databaseAdapter,
+    storage: objectStorage,
+    clock,
+    cloudConfigured: () => false,
+  });
   const namespaceStore = new SqliteAppSyncableNamespaceStore(db);
   const applier = new SqliteAppSyncableApplier(db, namespaceStore);
   // Lets tests originate an app-private file write on the cloud side (as the
@@ -252,6 +261,14 @@ export async function startFakeCloud(): Promise<FakeCloud> {
             clock,
             objectStorage,
             syncSharedRecords: true,
+            standards: () => librarySettings.standards(),
+            // The real cloud's Drive channel: read an arriving settings file,
+            // then stamp what a node recorded without knowing the library's
+            // value, so the reply carries the stamp back.
+            onApplied: async ({ records }) => {
+              await librarySettings.refresh();
+              await stampUnstampedOriginals(databaseAdapter, records, librarySettings.standards(), clock);
+            },
           })
         : createInProcessSyncTransport({
             databaseAdapter,

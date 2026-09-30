@@ -11,6 +11,7 @@ import {
   type HLCClock,
   type MetadataRow,
   type StarkeepId,
+  hasMetadataTable,
 } from "@starkeep/protocol-primitives";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -254,7 +255,7 @@ export async function createStarkeepSdk(
       clock,
     );
     await databaseAdapter.put(record);
-    if (input.metadata && metadataCategory(input.type) !== "other") {
+    if (input.metadata && hasMetadataTable(metadataCategory(input.type))) {
       await databaseAdapter.putMetadata(input.type, {
         ...input.metadata,
         recordId: record.id,
@@ -362,7 +363,7 @@ export async function createStarkeepSdk(
       // caller holding only a category has to go and read the record's type.
       // The `other` category has no metadata table, so this is a no-op for it.
       async putMetadata(recordType: string, row: MetadataRow) {
-        if (metadataCategory(recordType) === "other") return;
+        if (!hasMetadataTable(metadataCategory(recordType))) return;
         await databaseAdapter.putMetadata(recordType, row);
 
         // Move the record's clock, because metadata now rides the record over
@@ -391,12 +392,12 @@ export async function createStarkeepSdk(
       },
 
       async getMetadata(typeId, recordId) {
-        if (metadataCategory(typeId) === "other") return null;
+        if (!hasMetadataTable(metadataCategory(typeId))) return null;
         return databaseAdapter.getMetadata(typeId, recordId);
       },
 
       async getMetadataByIds(typeId, recordIds) {
-        if (metadataCategory(typeId) === "other") return new Map();
+        if (!hasMetadataTable(metadataCategory(typeId))) return new Map();
         return databaseAdapter.getMetadataByIds(typeId, recordIds);
       },
 

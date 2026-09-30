@@ -33,6 +33,7 @@ import {
   typeCategory,
   type MetadataRow,
   type StarkeepId,
+  hasMetadataTable,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "./adapter.js";
 
@@ -61,7 +62,7 @@ export async function loadMetadataForRecords(
   const idsByCategory = new Map<string, StarkeepId[]>();
   for (const r of records) {
     const category = typeCategory(r.type);
-    if (category === "other") continue; // no metadata table
+    if (!hasMetadataTable(category)) continue; // no metadata table
     let ids = idsByCategory.get(category);
     if (!ids) idsByCategory.set(category, (ids = []));
     ids.push(r.id);
@@ -141,7 +142,7 @@ export async function applyRecordMetadata(
   options: { readonly detectOwedBack: boolean },
 ): Promise<boolean> {
   const category = typeCategory(record.type);
-  if (category === "other") return false;
+  if (!hasMetadataTable(category)) return false;
   if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
     return false;
   }
@@ -177,7 +178,7 @@ export async function deleteRecordMetadata(
   record: MetadataSubject,
 ): Promise<void> {
   const category = typeCategory(record.type);
-  if (category === "other") return;
+  if (!hasMetadataTable(category)) return;
   await db.deleteMetadata(category, record.id);
 }
 

@@ -14,6 +14,7 @@ import {
   typeCategory,
   type StarkeepId,
   type VariantCandidate,
+  hasMetadataTable,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "./adapter.js";
 
@@ -74,7 +75,7 @@ export async function loadVariantCandidatesForPage(
   const idsByCategory = new Map<string, StarkeepId[]>();
   for (const c of candidates) {
     const category = typeCategory(c.type);
-    if (category === "other") continue; // no metadata table, so no dimensions
+    if (!hasMetadataTable(category)) continue; // no metadata table, so no dimensions
     let ids = idsByCategory.get(category);
     if (!ids) idsByCategory.set(category, (ids = []));
     ids.push(c.id);

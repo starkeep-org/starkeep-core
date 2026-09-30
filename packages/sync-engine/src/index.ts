@@ -142,3 +142,10 @@ export {
   admitIncomingStandIn,
   yieldSlotToIncoming,
 } from "./stand-in-slots.js";
+export {
+  createLibrarySettings,
+  type LibrarySettings,
+  type LibrarySettingsIo,
+  type LibrarySettingsOptions,
+  type LibrarySettingsStatus,
+} from "./library-settings.js";

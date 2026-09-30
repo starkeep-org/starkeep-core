@@ -1,5 +1,5 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
-import type { AnyRecord } from "@starkeep/protocol-primitives";
+import type { AnyRecord, StandInStandards } from "@starkeep/protocol-primitives";
 import {
   HttpObjectStorageAdapter,
   blobCandidateForRecord,
@@ -93,6 +93,11 @@ export interface SyncSupervisorOptions {
    * acquisition pass, which fetch files a round declined and this node now
    * wants. A failure is logged and does not fail the drain.
    */
+  /**
+   * The library's stand-in standards as this node knows them now, for the
+   * Drive engine's slot resolution. Defaults to the platform's.
+   */
+  readonly standards?: () => StandInStandards;
   readonly afterDriveDrain?: (
     engine: SyncEngine,
     signal: { readonly aborted: boolean },
@@ -298,6 +303,7 @@ export function createSyncSupervisor(
     maxItems,
     residency,
     afterDriveDrain,
+    standards,
     getIdToken,
   } = options;
 
@@ -414,6 +420,7 @@ export function createSyncSupervisor(
       maxBytes,
       maxItems,
       ...(residency ? { residency } : {}),
+      ...(standards ? { standards } : {}),
       // No appSyncableSource: the Drive channel never carries app-specific rows.
     });
     makeEngineEntry(DRIVE_APP_ID, engine, syncState, baseUrl);
