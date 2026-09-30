@@ -82,8 +82,11 @@ export interface ResidencyManagerOptions {
    * ceilings. Absent: originals are received only on demand.
    */
   readonly keepOriginals?: boolean;
-  /** The stand-in standards the ceiling rule reads. Defaults to the platform's. */
-  readonly standards?: StandInStandards;
+  /**
+   * The stand-in standards the ceiling rule reads, or a function answering
+   * the library's current ones. Defaults to the platform's.
+   */
+  readonly standards?: StandInStandards | (() => StandInStandards);
   /**
    * Whether `localObjectStorage` answers for these bytes without holding them —
    * a phone's camera-roll alias, whose bytes belong to the device's media
@@ -185,8 +188,10 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
     localObjectStorage,
     isCloudNode,
     keepOriginals = false,
-    standards = DEFAULT_STAND_IN_STANDARDS,
   } = options;
+  const standardsOption = options.standards ?? DEFAULT_STAND_IN_STANDARDS;
+  const currentStandards =
+    typeof standardsOption === "function" ? standardsOption : () => standardsOption;
 
   const index = createSqliteResidentSetIndex({ db: localDb });
 
@@ -206,7 +211,7 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
         selfCanonical: candidate.selfCanonical ?? false,
       },
       ceilings,
-      standards,
+      currentStandards(),
     );
     // Only an original moves: a derived record is already kept, and a
     // stand-in above the ceiling stays on demand.
@@ -216,7 +221,7 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
 
   function groupOf(candidate: BlobCandidate): string {
     const category =
-      candidate.type === null ? null : standardsFor(candidate.type, standards)?.category ?? null;
+      candidate.type === null ? null : standardsFor(candidate.type, currentStandards())?.category ?? null;
     if (category === null || ceilingOf(candidate) === "keep") return KEPT_GROUP;
     return `${candidate.standInRole ? "stand-in" : "original"}:${category}`;
   }
@@ -315,7 +320,7 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
           databaseAdapter,
           localObjectStorage,
           ceilingOf,
-          standards,
+          standards: currentStandards(),
           ...(options.borrowsBytes ? { borrowsBytes: options.borrowsBytes } : {}),
           noteRemoved: async (candidate) => {
             if (index.get(candidate.objectStorageKey) === null) index.add(arrivalOf(candidate));

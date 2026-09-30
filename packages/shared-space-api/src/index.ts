@@ -67,6 +67,7 @@ export {
   recordOriginalFidelity,
   retireReplacedStandIns,
   markSelfCanonical,
+  stampUnstampedOriginals,
   standInExists,
   liveStandIn,
   type StandInWritePlan,

@@ -31,7 +31,7 @@ import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { IAMClient, PutRolePolicyCommand, DeleteRolePolicyCommand } from "@aws-sdk/client-iam";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
-import { CATEGORIES, pgMetadataTableName } from "@starkeep/protocol-primitives";
+import { CATEGORIES, pgMetadataTableName, hasMetadataTable } from "@starkeep/protocol-primitives";
 import { initializeSharedSchema } from "../src/dsql-schema-init";
 
 interface Creds {
@@ -123,7 +123,7 @@ async function connectAsAdminWithRetry(
 
 /** The unqualified names of the tables this script owns, from CATEGORIES. */
 function metadataTableNames(): string[] {
-  return CATEGORIES.filter((c) => c.id !== "other").map((c) =>
+  return CATEGORIES.filter((c) => hasMetadataTable(c.id)).map((c) =>
     pgMetadataTableName(c.id).replace(/^shared\./, ""),
   );
 }

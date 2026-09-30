@@ -23,6 +23,7 @@ import {
   typeCategory,
   type Category,
   pgColumnType,
+  hasMetadataTable,
 } from "@starkeep/protocol-primitives";
 import {
   FILE_RECORDS_TABLE,
@@ -79,7 +80,7 @@ function categoriesFromGrants(grants: TypeGrant[], fileAccessAll: boolean): Cate
   const byCategory = new Map<Category, CategoryGrant>();
   for (const g of grants) {
     const category = typeCategory(g.type);
-    if (category === "other") continue; // no metadata table
+    if (!hasMetadataTable(category)) continue; // no metadata table
     const existing = byCategory.get(category) ?? { category, write: false, metadataWrite: false };
     existing.write ||= g.access === "readwrite";
     existing.metadataWrite ||= g.metadataWrite || g.access === "readwrite";

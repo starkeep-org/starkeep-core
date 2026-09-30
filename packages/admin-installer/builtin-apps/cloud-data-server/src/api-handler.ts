@@ -67,9 +67,10 @@ import {
   planLabelRetractions,
   labelValueSetKey,
   parseLabelRef,
-  DEFAULT_STAND_IN_STANDARDS,
   STAND_IN_MIME_TYPES,
+  isSettingsRecord,
   stampFor,
+  hasMetadataTable,
 } from "@starkeep/protocol-primitives";
 import type {
   Category,
@@ -86,6 +87,7 @@ import type {
 } from "@starkeep/protocol-primitives";
 import {
   createInProcessSyncTransport,
+  createLibrarySettings,
   sanitizeExchangeRequest,
   InvalidExchangeRequest,
 } from "@starkeep/sync-engine";
@@ -110,6 +112,7 @@ import {
   recordOriginalFidelity,
   retireReplacedStandIns,
   markSelfCanonical,
+  stampUnstampedOriginals,
   standInExists,
   renderStandInSummary,
   resolveContentRead,
@@ -728,6 +731,14 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 const CLOUD_NODE_ID = `cloud-${process.env.AWS_LAMBDA_LOG_STREAM_NAME ?? randomUUID()}`;
 
 /**
+ * The library's settings as this warm Lambda last read them. One source per
+ * execution environment, refreshed through each request's own adapters, so a
+ * settings file is fetched from S3 only when the winning file changes. The
+ * cloud always knows the library's value: its settings file, or the defaults.
+ */
+const cloudLibrarySettings = createLibrarySettings({ cloudConfigured: () => false });
+
+/**
  * The container's one clock, built on first use and reused for its lifetime.
  *
  * **One instance per node id, and the memo is what makes that true.** An HLC's
@@ -1288,7 +1299,7 @@ async function runArchiveTriggers(
         db,
         storage,
         trigger.originalId,
-        DEFAULT_STAND_IN_STANDARDS,
+        cloudLibrarySettings.standards(),
       );
       const action = await applyArchiveEvaluation(storage, evaluation, {
         mayUntag: trigger.mayUntag,
@@ -1328,7 +1339,7 @@ async function standInSummariesForPage(
   const summaries = await loadStandInSummariesForPage(
     db,
     records,
-    DEFAULT_STAND_IN_STANDARDS,
+    cloudLibrarySettings.standards(),
     cloudPlacementOf,
   );
   const out = new Map<StarkeepId, WireStandInSummary>();
@@ -1499,7 +1510,7 @@ async function loadMetadataForPage(
   const idsByCategory = new Map<string, StarkeepId[]>();
   for (const r of records) {
     const category = typeCategory(r.type);
-    if (category === "other" || !canReadCategory(grants, category)) continue;
+    if (!hasMetadataTable(category) || !canReadCategory(grants, category)) continue;
     let ids = idsByCategory.get(category);
     if (!ids) idsByCategory.set(category, (ids = []));
     ids.push(r.id);
@@ -2159,6 +2170,31 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const grants: AccessGrants = await loadAccessGrants(grantClient, appId);
     const clock: HLCClock = await makeCloudClock(grantClient);
 
+    // The library's settings, re-read where a route writes by them: a record
+    // or fidelity write stamps originals, and the Drive exchange stamps and
+    // judges canonical stand-ins. One indexed query; the file itself is fetched
+    // through Drive's storage only when the winning file changed. Reads use
+    // the value this Lambda last read, which differs from the file only for an
+    // original no one has stamped yet — and the cloud stamps each one it
+    // applies. Only the Drive channel tombstones a losing settings file, since
+    // only Drive may write one. A failure keeps the last value rather than
+    // failing the request.
+    if (
+      (method === "POST" && (subPath === "/data/records" || /^\/data\/records\/[^/]+\/fidelity$/.test(subPath))) ||
+      (subPath === "/sync/exchange" && appId === DRIVE_APP_ID)
+    ) {
+      try {
+        await cloudLibrarySettings.refresh({
+          db,
+          clock,
+          storage: { get: async (key) => (await platformStorage()).get(key) },
+          tombstoneLosers: appId === DRIVE_APP_ID,
+        });
+      } catch (err) {
+        console.warn("[settings] refreshing the library's settings failed:", err);
+      }
+    }
+
     const query = event.queryStringParameters ?? {};
 
     // Lazy per-request app-syncable source: needed by both /sync/exchange (the
@@ -2697,8 +2733,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         }
         const metadataCategory = typeCategory(body.type);
         if (!canWriteCategory(grants, metadataCategory)) return clientErr("Forbidden", 403);
-        if (metadataCategory === "other") {
-          return clientErr(`Category "other" has no metadata table`, 400);
+        if (!hasMetadataTable(metadataCategory)) {
+          return clientErr(`Category "${metadataCategory}" has no metadata table`, 400);
         }
         const checked = checkMetadataValues(metadataCategory as Category, inlineMetadata);
         if (!checked.ok) return clientErr(checked.message, 400);
@@ -2817,7 +2853,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               existing,
               reconciled.write,
               clock,
-              stampFor(existing.type, DEFAULT_STAND_IN_STANDARDS, true),
+              stampFor(existing.type, cloudLibrarySettings.standards(), true),
             );
             return { record: updated, created: false, touched: [updated] };
           }
@@ -2841,7 +2877,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               parentFidelity: body.parentFidelity,
               sizeBytes,
             },
-            DEFAULT_STAND_IN_STANDARDS,
+            cloudLibrarySettings.standards(),
             true,
           );
           if (!plan.ok) return { refused: plan };
@@ -2885,7 +2921,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               canonicalThreshold:
                 originalFidelity.fidelity === null
                   ? null
-                  : stampFor(body.type!, DEFAULT_STAND_IN_STANDARDS, true),
+                  : stampFor(body.type!, cloudLibrarySettings.standards(), true),
             }),
           },
           clock,
@@ -3181,7 +3217,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               plan.record,
               plan.write,
               clock,
-              stampFor(plan.record.type, DEFAULT_STAND_IN_STANDARDS, true),
+              stampFor(plan.record.type, cloudLibrarySettings.standards(), true),
             );
       if (plan.write !== null) {
         await runArchiveTriggers(db, platformStorage, archiveTriggersFor([record], []));
@@ -3216,8 +3252,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
       const category = typeCategory(subject.type);
       if (!canWriteCategory(grants, category)) return clientErr("Forbidden", 403);
-      if (category === "other") {
-        return clientErr(`Category "other" has no metadata table`, 400);
+      if (!hasMetadataTable(category)) {
+        return clientErr(`Category "${category}" has no metadata table`, 400);
       }
       const checked = checkMetadataValues(category as Category, metadata);
       if (!checked.ok) return clientErr(checked.message, 400);
@@ -3273,7 +3309,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!record || record.deletedAt) return clientErr("Record not found", 404);
       if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
       const category = typeCategory(record.type);
-      if (category === "other") return ok({ metadata: null });
+      if (!hasMetadataTable(category)) return ok({ metadata: null });
       const metadata = await db.getMetadata(category, recordId);
       return ok({ metadata });
     }
@@ -3490,7 +3526,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           limit: Number.isFinite(limit) ? limit : 100,
           ...(query["page_token"] ? { cursor: query["page_token"] } : {}),
         },
-        DEFAULT_STAND_IN_STANDARDS,
+        cloudLibrarySettings.standards(),
       );
       return ok({
         kind,
@@ -3520,7 +3556,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         grants,
         decodeURIComponent(contentUrlMatch[1]!),
         query["size"],
-        DEFAULT_STAND_IN_STANDARDS,
+        cloudLibrarySettings.standards(),
         cloudPlacementOf,
       );
       if (!outcome.ok) return ok(outcome.body, outcome.status);
@@ -3938,11 +3974,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           objectStorage: storage,
           syncSharedRecords: true,
           keepLiveOnTombstone: (current, _incoming, exchange) =>
-            keepCanonicalOfArchivedOriginal(db, current, exchange, DEFAULT_STAND_IN_STANDARDS),
+            keepCanonicalOfArchivedOriginal(db, current, exchange, cloudLibrarySettings.standards()),
+          standards: () => cloudLibrarySettings.standards(),
           // The Drive channel is where most stand-ins, originals and labels
-          // reach the cloud, and its storage is already Drive's.
-          onApplied: ({ records, labels }) =>
-            runArchiveTriggers(db, async () => storage, archiveTriggersFor(records, labels)),
+          // reach the cloud, and its storage is already Drive's. A settings
+          // file that arrived is read first, then every original a node
+          // recorded without knowing the library's value is stamped under a
+          // fresh cloud clock, so this exchange's reply carries the stamp back.
+          onApplied: async ({ records, labels }) => {
+            if (records.some(isSettingsRecord)) {
+              await cloudLibrarySettings.refresh({ db, clock, storage, tombstoneLosers: true });
+            }
+            const stamped = await stampUnstampedOriginals(db, records, cloudLibrarySettings.standards(), clock);
+            await runArchiveTriggers(db, async () => storage, archiveTriggersFor([...records, ...stamped], labels));
+          },
         });
       } else {
         const source = await getAppSyncableSource();

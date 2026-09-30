@@ -280,11 +280,18 @@ describe("file access types", () => {
   it("rejects the `other/other` catch-all even though it is a registered type", () => {
     // other/other is in the registry (isKnownType is true), so the registry
     // check alone would let it through — validation must reject it as the
-    // Drive-only catch-all, keeping `other` ungrantable to installable apps.
+    // Drive-only category, keeping `other` ungrantable to installable apps.
     expect(isKnownType("other/other")).toBe(true);
     const result = validateManifest(withTypes(["other/other"]));
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes('Drive-only "other" catch-all'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('Drive-only "other" category'))).toBe(true);
+  });
+
+  it("rejects the library's settings type, which only the platform writes", () => {
+    expect(isKnownType("starkeep/settings")).toBe(true);
+    const result = validateManifest(withTypes(["starkeep/settings"]));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('Drive-only "starkeep" category'))).toBe(true);
   });
 
   it("requires at least one type per fileAccess entry", () => {

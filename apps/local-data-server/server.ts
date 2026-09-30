@@ -90,9 +90,19 @@ import {
   STAND_IN_MIME_TYPES,
   standardsFor,
   stampFor,
+  checkUserSettings,
+  serializeUserSettings,
+  settingsFromStandards,
+  standardsFromSettings,
+  CANONICAL_THRESHOLD_RANGES,
+  ADVISORY_LONG_EDGE_RANGE,
+  SETTINGS_TYPE_ID,
+  USER_SETTINGS_FILE_NAME,
+  USER_SETTINGS_MIME_TYPE,
   type StandInCategory,
   type StandInSize,
   type SyncDownCeilings,
+  hasMetadataTable,
 } from "@starkeep/protocol-primitives";
 import {
   liveStandIn,
@@ -116,6 +126,7 @@ import {
   type BacklogKind,
 } from "../../packages/shared-space-api/src/stand-ins/backlog.js";
 import { isStandInSlotConflict, loadStandInSummariesForPage } from "@starkeep/storage-adapter";
+import { createLibrarySettings } from "../../packages/sync-engine/src/library-settings.js";
 import {
   renderStandInSummary,
   resolveContentRead,
@@ -803,6 +814,30 @@ async function main() {
   const nodeClock = await createNodeClock({ nodeId: NODE_ID, syncStateStore });
   const clock = nodeClock.clock;
 
+  // The library's settings: the winning settings file, which syncs to every
+  // node over the Drive channel. Refreshed at boot, after every Drive drain,
+  // and after the person saves a change. See `settings/library-settings.ts` in
+  // shared-space-api.
+  const librarySettings = createLibrarySettings({
+    db: databaseAdapter,
+    storage: localAdapter,
+    clock,
+    cloudConfigured: () => Boolean(CLOUD_URL),
+  });
+  await librarySettings.refresh();
+
+  /** Re-read the settings, shipping any tombstones of losing settings files. */
+  async function refreshLibrarySettings(): Promise<void> {
+    const tombstones = await librarySettings.refresh();
+    if (tombstones.length > 0) {
+      changeNotifier.emit({
+        eventType: "local-change-recorded",
+        recordIds: tombstones.map((r) => r.id),
+        timestamp: tombstones[tombstones.length - 1]!.updatedAt,
+      });
+    }
+  }
+
   // Direct sqlite handle for app-identity / grant lookups. The records-layer
   // adapter operates on the same DB; we use raw access for the shared_*
   // tables (registry, grants) that have no adapter wrapper.
@@ -822,6 +857,7 @@ async function main() {
         isCloudNode: false,
         ceilings,
         keepOriginals: starkeepConfig.keepOriginals === true,
+        standards: () => librarySettings.standards(),
       });
 
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
@@ -870,6 +906,16 @@ async function main() {
   // /events is loopback-authorized with no per-app filtering and the data
   // plane (which is HMAC-authenticated and grant-checked) is the only place
   // record-shaped information should leave this process.
+  // A round that applied records may have brought a settings file, or a second
+  // one beside the first. One refresh at a time, in arrival order.
+  let settingsRefresh: Promise<void> = Promise.resolve();
+  sdk.changeNotifier.subscribe((event) => {
+    if (event.eventType !== "local-data-synced") return;
+    settingsRefresh = settingsRefresh
+      .then(refreshLibrarySettings)
+      .catch((err) => console.warn("[settings] refreshing the library's settings failed:", err));
+  });
+
   sdk.changeNotifier.subscribe((event) => {
     console.log(`[sync] ${event.eventType} records=${event.recordIds.length}`);
     for (const client of sseClients) client.write(`data: \n\n`);
@@ -937,6 +983,7 @@ async function main() {
       localObjectStorage: localAdapter,
       residency: residencyHooks(residencyManager),
       afterDriveDrain: acquireWanted,
+      standards: () => librarySettings.standards(),
       localDb: databaseAdapter.getRawDatabase(),
       cloudUrl: CLOUD_URL,
       // Outbound auth is both: the per-request HMAC identifies the app, and
@@ -1112,6 +1159,11 @@ async function main() {
       // stand-in and own bytes are proved in the cloud, which leaves nothing
       // unrecoverable, and never of a file at or below the ceiling.
       /^\/residency\/(stand-ins|free-up-space)$/,
+      // The library's canonical thresholds. Loopback-gated like the admin
+      // surface that installs apps: the person sets them from admin-web, and
+      // no installable app may, which is also why the file they are stored in
+      // sits in the Drive-only `starkeep` category.
+      /^\/library\/stand-in-standards$/,
     ];
     const TOKEN_AUTHORIZED_PATTERNS = [
       /^\/data\/files\/upload\/[^/]+$/,
@@ -1691,7 +1743,7 @@ async function main() {
           const idsByCategory = new Map<string, StarkeepId[]>();
           for (const r of readable) {
             const category = typeCategory(r.type);
-            if (category === "other") continue; // no metadata table
+            if (!hasMetadataTable(category)) continue; // no metadata table
             let ids = idsByCategory.get(category);
             if (!ids) idsByCategory.set(category, (ids = []));
             ids.push(r.id);
@@ -1801,7 +1853,7 @@ async function main() {
         const standInSummaries = await loadStandInSummariesForPage(
           databaseAdapter,
           readable,
-          DEFAULT_STAND_IN_STANDARDS,
+          librarySettings.standards(),
           localPlacementOf,
         );
 
@@ -2001,10 +2053,10 @@ async function main() {
             });
             return;
           }
-          if (metadataCategory === "other") {
+          if (!hasMetadataTable(metadataCategory)) {
             res.writeHead(400);
             json(res, {
-              error: `Category "other" has no metadata table — only mapped categories support metadata`,
+              error: `Category "${metadataCategory}" has no metadata table — only mapped categories support metadata`,
             });
             return;
           }
@@ -2150,7 +2202,7 @@ async function main() {
                     existing,
                     reconciled.write,
                     clock,
-                    stampFor(existing.type, DEFAULT_STAND_IN_STANDARDS, true),
+                    stampFor(existing.type, librarySettings.standards(), librarySettings.knowsLibraryValue()),
                   )
                 : existing;
             json(res, { record: await renderRecord(current), deduped: true });
@@ -2168,8 +2220,8 @@ async function main() {
             databaseAdapter,
             appGrants(localDb, appId!),
             { type, parentId, standIn, parentFidelity, sizeBytes },
-            DEFAULT_STAND_IN_STANDARDS,
-            true,
+            librarySettings.standards(),
+            librarySettings.knowsLibraryValue(),
           );
           if (!plan.ok) {
             res.writeHead(plan.status);
@@ -2213,7 +2265,7 @@ async function main() {
             canonicalThreshold:
               originalFidelity.fidelity === null
                 ? null
-                : stampFor(type, DEFAULT_STAND_IN_STANDARDS, true),
+                : stampFor(type, librarySettings.standards(), librarySettings.knowsLibraryValue()),
           }),
           // Written by the SDK in the same call as the record row, so the
           // record is never visible to a sync scan without it. Not atomic —
@@ -2806,7 +2858,7 @@ async function main() {
           databaseAdapter,
           appGrants(localDb, appId!),
           { kind: kind as BacklogKind, limit: Number.isFinite(limit) ? limit : 100, ...(cursor ? { cursor } : {}) },
-          DEFAULT_STAND_IN_STANDARDS,
+          librarySettings.standards(),
         );
         json(res, {
           kind,
@@ -2840,7 +2892,7 @@ async function main() {
           appGrants(localDb, appId!),
           decodeURIComponent(contentUrlMatch[1]!),
           url.searchParams.get("size"),
-          DEFAULT_STAND_IN_STANDARDS,
+          librarySettings.standards(),
           localPlacementOf,
         );
         if (!outcome.ok) {
@@ -3033,7 +3085,7 @@ async function main() {
           await Promise.all(
             BACKLOG_KINDS.map(
               async (kind) =>
-                [kind, await countBacklog(databaseAdapter, everything, kind, DEFAULT_STAND_IN_STANDARDS)] as const,
+                [kind, await countBacklog(databaseAdapter, everything, kind, librarySettings.standards())] as const,
             ),
           ),
         );
@@ -3044,10 +3096,10 @@ async function main() {
           libraryOriginals: originalBytesByCategory(localDb),
           defaults: DEFAULT_SYNC_DOWN_CEILINGS.desktop,
           standardSizes: Object.fromEntries(
-            STAND_IN_CATEGORIES.map((c) => [c, DEFAULT_STAND_IN_STANDARDS[c].standardSizes]),
+            STAND_IN_CATEGORIES.map((c) => [c, librarySettings.standards()[c].standardSizes]),
           ),
           canonicalThresholds: Object.fromEntries(
-            STAND_IN_CATEGORIES.map((c) => [c, DEFAULT_STAND_IN_STANDARDS[c].canonicalThreshold]),
+            STAND_IN_CATEGORIES.map((c) => [c, librarySettings.standards()[c].canonicalThreshold]),
           ),
           heldBytes: Object.fromEntries(
             STAND_IN_CATEGORIES.map((c) => [
@@ -3094,6 +3146,81 @@ async function main() {
           keepOriginals: updated.keepOriginals === true,
         });
         setTimeout(restartProcess, 200);
+        return;
+      }
+
+      // GET /library/stand-in-standards — the library's canonical thresholds
+      // and advisory resolutions: what is in force, the platform's defaults,
+      // whether the person has set a value, and the allowed ranges. Admin-web
+      // shows these before an app imports anything.
+      if (path === "/library/stand-in-standards" && req.method === "GET") {
+        const current = librarySettings.standards();
+        const view = (standards: typeof current) =>
+          Object.fromEntries(
+            STAND_IN_CATEGORIES.map((c) => [
+              c,
+              {
+                canonicalThreshold: standards[c].canonicalThreshold,
+                standardSizes: standards[c].standardSizes,
+                advisoryLongEdges: standards[c].advisoryLongEdges,
+              },
+            ]),
+          );
+        const status = librarySettings.status();
+        json(res, {
+          current: view(current),
+          defaults: view(DEFAULT_STAND_IN_STANDARDS),
+          set: status.set,
+          problems: status.problems,
+          knowsLibraryValue: librarySettings.knowsLibraryValue(),
+          ranges: { canonicalThreshold: CANONICAL_THRESHOLD_RANGES, advisoryLongEdge: ADVISORY_LONG_EDGE_RANGE },
+          libraryOriginals: originalBytesByCategory(localDb),
+        });
+        return;
+      }
+
+      // PUT /library/stand-in-standards — change the library's values.
+      //
+      // Body: the settings file's shape, `{ standIns: { image?, video? } }`;
+      // a value it leaves out keeps its current value. The whole result is
+      // written as a new settings file, which the Drive channel carries to
+      // every node and the cloud, and the previous file is tombstoned. Existing
+      // originals keep the threshold stamped on them. No restart is needed.
+      if (path === "/library/stand-in-standards" && req.method === "PUT") {
+        let body: unknown;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          res.writeHead(400);
+          json(res, { error: "Body is not valid JSON" });
+          return;
+        }
+        const requested = checkUserSettings(body);
+        if (!requested.ok) {
+          res.writeHead(422);
+          json(res, { error: "the settings are not valid", problems: requested.problems });
+          return;
+        }
+        const merged = standardsFromSettings(requested.settings, librarySettings.standards());
+        const checked = checkUserSettings(settingsFromStandards(merged));
+        if (!checked.ok) {
+          res.writeHead(422);
+          json(res, { error: "the settings are not valid", problems: checked.problems });
+          return;
+        }
+        const bytes = serializeUserSettings(settingsFromStandards(merged));
+        const record = await sdk.data.putWithFile(
+          {
+            type: SETTINGS_TYPE_ID,
+            originAppId: DRIVE_APP_ID,
+            originalFilename: USER_SETTINGS_FILE_NAME,
+          },
+          bytes,
+          USER_SETTINGS_MIME_TYPE,
+        );
+        // The new file is the newest, so this tombstones the one it replaces.
+        await refreshLibrarySettings();
+        json(res, { ok: true, recordId: record.id, current: settingsFromStandards(librarySettings.standards()) });
         return;
       }
 
@@ -3413,7 +3540,7 @@ async function main() {
                 plan.record,
                 plan.write,
                 clock,
-                stampFor(plan.record.type, DEFAULT_STAND_IN_STANDARDS, true),
+                stampFor(plan.record.type, librarySettings.standards(), librarySettings.knowsLibraryValue()),
               );
         if (plan.write !== null) {
           changeNotifier.emit({
@@ -3467,9 +3594,9 @@ async function main() {
           json(res, { error: "AccessDenied", detail: `app "${appId}" has no metadataWrite grant on category "${category}"` });
           return;
         }
-        if (category === "other") {
+        if (!hasMetadataTable(category)) {
           res.writeHead(400);
-          json(res, { error: `Category "other" has no metadata table — only mapped categories support metadata` });
+          json(res, { error: `Category "${category}" has no metadata table — only mapped categories support metadata` });
           return;
         }
         const checked = checkMetadataValues(category as Category, metadata);
@@ -3515,8 +3642,8 @@ async function main() {
           return;
         }
         const category = typeCategory(record.type);
-        if (category === "other") {
-          // `other` has no metadata table; nothing to read.
+        if (!hasMetadataTable(category)) {
+          // `other` and `starkeep` have no metadata table; nothing to read.
           json(res, { metadata: null });
           return;
         }
@@ -3620,7 +3747,7 @@ async function main() {
                 await loadStandInSummariesForPage(
                   databaseAdapter,
                   [record],
-                  DEFAULT_STAND_IN_STANDARDS,
+                  librarySettings.standards(),
                   localPlacementOf,
                 )
               ).get(record.id);

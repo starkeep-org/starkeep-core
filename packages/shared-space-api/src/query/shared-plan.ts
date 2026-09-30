@@ -29,6 +29,7 @@ import {
   typeCategory,
   type AccessGrants,
   type Category,
+  hasMetadataTable,
 } from "@starkeep/protocol-primitives";
 import {
   sharedQueryDiscriminant,
@@ -66,9 +67,9 @@ export function planMetadataQuery(
   grants: AccessGrants,
   params: QueryParams,
 ): SharedQueryPlan {
-  if (category === "other") {
+  if (!hasMetadataTable(category)) {
     // Drive-only, ungrantable, and it has no metadata table to query.
-    throw new ApiError(`Category "other" has no metadata table`, 400);
+    throw new ApiError(`Category "${category}" has no metadata table`, 400);
   }
   const target: SharedQueryTarget = { kind: "metadata", category };
   return plan(target, grants, params, readableTypesIn(grants, category));
