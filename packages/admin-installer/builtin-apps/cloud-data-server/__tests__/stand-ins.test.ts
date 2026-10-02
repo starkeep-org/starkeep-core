@@ -13,7 +13,7 @@ import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { S3Client, HeadObjectCommand, PutObjectTaggingCommand } from "@aws-sdk/client-s3";
-import { serializeHLC } from "@starkeep/protocol-primitives";
+import { SETTINGS_TYPE_ID, serializeHLC } from "@starkeep/protocol-primitives";
 import { signRequest } from "@starkeep/app-client";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
 import {
@@ -21,6 +21,7 @@ import {
   STAND_INS_OF_PAGE,
   fakeDsqlWithGrants,
   recordRow,
+  type FakeDsql,
   type LoggedQuery,
 } from "./fake-dsql.js";
 import { installUserTokenFixture } from "./user-token.js";
@@ -583,11 +584,113 @@ describe("POST /data/records/:id/fidelity", () => {
       canonical_threshold: 4272,
       origin_app_id: "drive",
     });
+    // The stamp is read from the library's settings first.
+    expect(db.log.some((q) => q.values.includes(SETTINGS_TYPE_ID))).toBe(true);
   });
 
   it("answers 409 for a disagreeing report", async () => {
-    setDbFactory(fakeDsqlWithGrants(GRANTS).on(GET_BY_ID, [parentRow({ fidelity: 6000 })]));
+    const db = fakeDsqlWithGrants(GRANTS).on(GET_BY_ID, [parentRow({ fidelity: 6000 })]);
+    setDbFactory(db);
     const res = await handler(report("fr2", PARENT_ID, 5000), context);
     expect(res.statusCode).toBe(409);
+    expect(db.log.some((q) => q.values.includes(SETTINGS_TYPE_ID))).toBe(false);
+  });
+});
+
+/**
+ * The cloud reads the library's settings from the database only for a request
+ * that stamps an original. Each warm Lambda caches the value, and a settings
+ * file another instance applied reaches this one only through the database,
+ * so a request that stamps reads first; every other request skips the query.
+ */
+describe("reading the library's settings", () => {
+  const SETTINGS_ID = "01SETTINGS0000000000000000";
+  /** The settings lookup, recognised by the type it asks for. */
+  const settingsReads = (db: FakeDsql) => db.log.filter((q) => q.values.includes(SETTINGS_TYPE_ID));
+  const hlc = { wallTime: Date.UTC(2026, 0, 2), counter: 0, nodeId: "peer" };
+
+  function exchange(body: unknown): APIGatewayEvent {
+    const appId = "starkeep-drive";
+    const bodyStr = JSON.stringify(body);
+    const path = "/sync/exchange";
+    return {
+      rawPath: `/apps/${appId}${path}`,
+      requestContext: { http: { method: "POST" } },
+      headers: {
+        ...signRequest({ appId, hmacSecret: `secret-${appId}`, method: "POST", path, body: bodyStr }),
+        "X-Starkeep-User-Token": userToken,
+      },
+      body: bodyStr,
+    };
+  }
+
+  /** An original as a peer ships it: a fidelity, and the stamp it knew. */
+  function shippedOriginal(canonicalThreshold: number | null) {
+    return {
+      id: SETTINGS_ID.replace("SETTINGS", "ORIGINAL"),
+      kind: "data",
+      type: "image/jpeg",
+      originAppId: "photos",
+      createdAt: hlc,
+      updatedAt: hlc,
+      deletedAt: null,
+      version: 1,
+      contentHash: HASH,
+      objectStorageKey: `shared/image/cc/${HASH}`,
+      mimeType: "image/jpeg",
+      sizeBytes: 8 * 1024 * 1024,
+      originalFilename: null,
+      parentId: null,
+      standInRole: null,
+      fidelity: 6000,
+      canonicalThreshold,
+    };
+  }
+
+  /** A store that answers every exchange query with nothing. */
+  function emptyStore(): FakeDsql {
+    const db = fakeDsqlWithGrants(GRANTS)
+      .on(RECORDS_INSERT, [])
+      .otherwise(/from "shared"\."records"/, [])
+      .otherwise(/from "shared"\."record_\w+_metadata"/, []);
+    setDbFactory(db);
+    return db;
+  }
+
+  it("reads them before a Drive exchange applies an unstamped original", async () => {
+    const db = emptyStore();
+    const res = await handler(exchange({ watermarks: {}, records: [shippedOriginal(null)] }), context);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(settingsReads(db)).toHaveLength(1);
+    expect(db.log.indexOf(settingsReads(db)[0]!)).toBeLessThan(db.log.indexOf(db.calls(RECORDS_INSERT)[0]!));
+  });
+
+  it("skips them for a Drive exchange with nothing to stamp", async () => {
+    for (const body of [{ watermarks: {} }, { watermarks: {}, records: [shippedOriginal(4272)] }]) {
+      const db = emptyStore();
+      const res = await handler(exchange(body), context);
+      expect(res.statusCode, res.body).toBe(200);
+      expect(settingsReads(db), JSON.stringify(body)).toHaveLength(0);
+    }
+  });
+
+  it("reads them for a record write that stamps, and skips them otherwise", async () => {
+    const stamping = emptyStore();
+    await handler(
+      post("rs1", { type: "image/jpeg", contentType: "image/jpeg", contentHash: HASH, sizeBytes: 3, fidelity: 4000 }),
+      context,
+    );
+    expect(settingsReads(stamping)).toHaveLength(1);
+
+    const plain = emptyStore();
+    await handler(post("rs2", { type: "image/jpeg", contentType: "image/jpeg", contentHash: HASH, sizeBytes: 3 }), context);
+    expect(settingsReads(plain)).toHaveLength(0);
+  });
+
+  it("skips them for a listing", async () => {
+    const db = emptyStore();
+    const res = await handler(request("rs3", "GET", "/data/records"), context);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(settingsReads(db)).toHaveLength(0);
   });
 });

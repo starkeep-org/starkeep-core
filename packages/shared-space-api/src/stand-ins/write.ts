@@ -395,6 +395,16 @@ export async function recordOriginalFidelity(
 }
 
 /**
+ * Whether the cloud stamps `record` when it applies it: a live original with a
+ * fidelity and no stamp. Only such an original reads the library's value, so
+ * the cloud reads its settings for an exchange only when one arrives.
+ */
+export function awaitsStamp(record: DataRecord): boolean {
+  if (record.deletedAt || record.fidelity === null || record.canonicalThreshold !== null) return false;
+  return isStandInOriginal(record);
+}
+
+/**
  * Stamp the originals among `records` that carry a fidelity and no stamp:
  * the cloud's half of the stamping rule.
  *
@@ -412,8 +422,7 @@ export async function stampUnstampedOriginals(
 ): Promise<DataRecord[]> {
   const stamped: DataRecord[] = [];
   for (const record of records) {
-    if (record.deletedAt || record.fidelity === null || record.canonicalThreshold !== null) continue;
-    if (!isStandInOriginal(record)) continue;
+    if (!awaitsStamp(record)) continue;
     const stamp = stampFor(record.type, standards, true);
     if (stamp === null) continue;
     // Re-read: the row applied may since have been superseded in this store.

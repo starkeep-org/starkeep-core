@@ -68,6 +68,7 @@ export {
   retireReplacedStandIns,
   markSelfCanonical,
   stampUnstampedOriginals,
+  awaitsStamp,
   standInExists,
   liveStandIn,
   type StandInWritePlan,

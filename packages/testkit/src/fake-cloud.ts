@@ -34,6 +34,7 @@ import {
   createHLCClock,
   appSyncableObjectKey,
   contentHashFromDataRecordObjectKey,
+  isSettingsRecord,
   type AnyRecord,
 } from "@starkeep/protocol-primitives";
 import { sha256HexToBase64 } from "@starkeep/storage-adapter";
@@ -265,9 +266,10 @@ export async function startFakeCloud(): Promise<FakeCloud> {
             reviseIncoming: (current, incoming) => vetoRaisedStamp(databaseAdapter, current, incoming, clock),
             // The real cloud's Drive channel: read an arriving settings file,
             // then stamp what a node recorded without knowing the library's
-            // value, so the reply carries the stamp back.
+            // value, so the reply carries the stamp back. One process holds
+            // one cache, so the arrival is the only read it needs.
             onApplied: async ({ records }) => {
-              await librarySettings.refresh();
+              if (records.some(isSettingsRecord)) await librarySettings.refresh();
               await stampUnstampedOriginals(databaseAdapter, records, librarySettings.standards(), clock);
             },
           })
