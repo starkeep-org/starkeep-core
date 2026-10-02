@@ -113,6 +113,7 @@ import {
   retireReplacedStandIns,
   markSelfCanonical,
   stampUnstampedOriginals,
+  awaitsStamp,
   vetoRaisedStamp,
   standInExists,
   renderStandInSummary,
@@ -2171,19 +2172,16 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const grants: AccessGrants = await loadAccessGrants(grantClient, appId);
     const clock: HLCClock = await makeCloudClock(grantClient);
 
-    // The library's settings, re-read where a route writes by them: a record
-    // or fidelity write stamps originals, and the Drive exchange stamps and
-    // judges canonical stand-ins. One indexed query; the file itself is fetched
-    // through Drive's storage only when the winning file changed. Reads use
-    // the value this Lambda last read, which differs from the file only for an
-    // original no one has stamped yet — and the cloud stamps each one it
-    // applies. Only the Drive channel tombstones a losing settings file, since
-    // only Drive may write one. A failure keeps the last value rather than
-    // failing the request.
-    if (
-      (method === "POST" && (subPath === "/data/records" || /^\/data\/records\/[^/]+\/fidelity$/.test(subPath))) ||
-      (subPath === "/sync/exchange" && appId === DRIVE_APP_ID)
-    ) {
+    // The library's settings, read from the database just before this request
+    // stamps an original. This warm Lambda's cache is one of several, and a
+    // settings file another instance applied reaches this one only through
+    // the database. A stamp is permanent, so a stamp from a stale value stays
+    // wrong. Every other use judges originals the cloud has already stamped,
+    // or names advisory resolutions, which no stamp records. One indexed query; the file itself is fetched through
+    // Drive's storage only when the winning file changed. Only the Drive
+    // channel tombstones a losing settings file, since only Drive may write
+    // one. A failure keeps the last value rather than failing the request.
+    const readLibrarySettings = async (): Promise<void> => {
       try {
         await cloudLibrarySettings.refresh({
           db,
@@ -2192,9 +2190,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           tombstoneLosers: appId === DRIVE_APP_ID,
         });
       } catch (err) {
-        console.warn("[settings] refreshing the library's settings failed:", err);
+        console.warn("[settings] reading the library's settings failed:", err);
       }
-    }
+    };
 
     const query = event.queryStringParameters ?? {};
 
@@ -2775,6 +2773,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         fidelity: body.fidelity,
       });
       if (!originalFidelity.ok) return ok(originalFidelity.body, originalFidelity.status);
+      // An original's fidelity, or a stand-in reporting its parent's, stamps.
+      if (isStandInWrite || originalFidelity.fidelity !== null) await readLibrarySettings();
 
       const contentHash = body.contentHash;
       const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
@@ -3210,6 +3210,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         (type) => canRead(grants, type) && canWriteCategory(grants, typeCategory(type)),
       );
       if (!plan.ok) return ok(plan.body, plan.status);
+      if (plan.write !== null && plan.record.canonicalThreshold === null) await readLibrarySettings();
       const record =
         plan.write === null
           ? plan.record
@@ -3969,6 +3970,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const isDriveChannel = appId === DRIVE_APP_ID;
       let transport;
       if (isDriveChannel) {
+        // An original arriving without a stamp is judged by the library's
+        // value during the apply and stamped with it after. An arriving
+        // settings file is read in `onApplied` below.
+        if (body.records?.some(awaitsStamp)) await readLibrarySettings();
         transport = createInProcessSyncTransport({
           databaseAdapter: db,
           clock,
