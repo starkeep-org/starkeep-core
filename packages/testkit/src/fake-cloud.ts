@@ -38,7 +38,7 @@ import {
   type AnyRecord,
 } from "@starkeep/protocol-primitives";
 import { sha256HexToBase64 } from "@starkeep/storage-adapter";
-import { createAppSpecificFactory, stampUnstampedOriginals, vetoRaisedStamp } from "@starkeep/shared-space-api";
+import { createAppSpecificFactory, stampUnstampedOriginals } from "@starkeep/shared-space-api";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   SqliteDatabaseAdapter,
@@ -263,7 +263,6 @@ export async function startFakeCloud(): Promise<FakeCloud> {
             objectStorage,
             syncSharedRecords: true,
             standards: () => librarySettings.standards(),
-            reviseIncoming: (current, incoming) => vetoRaisedStamp(databaseAdapter, current, incoming, clock),
             // The real cloud's Drive channel: read an arriving settings file,
             // then stamp what a node recorded without knowing the library's
             // value, so the reply carries the stamp back. One process holds

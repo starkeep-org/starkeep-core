@@ -69,12 +69,3 @@ export async function PUT_LIBRARY_STANDARDS(req: Request): Promise<Response> {
     body: await req.text(),
   });
 }
-
-/** What "Replace existing canonical stand-ins" would do under the given values. */
-export async function POST_LIBRARY_STANDARDS_IMPACT(req: Request): Promise<Response> {
-  return forward("/library/stand-in-standards/impact", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: await req.text(),
-  });
-}

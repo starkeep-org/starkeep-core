@@ -84,16 +84,6 @@ export {
   type ContentReadOutcome,
 } from "./stand-ins/read.js";
 export {
-  restampOriginal,
-  restampTarget,
-  replaceImpact,
-  originalsToRestamp,
-  pageOriginals,
-  vetoRaisedStamp,
-  type RestampResult,
-  type ReplaceImpact,
-} from "./stand-ins/restamp.js";
-export {
   planRecordDelete,
   applyRecordDelete,
   keepCanonicalOfArchivedOriginal,
