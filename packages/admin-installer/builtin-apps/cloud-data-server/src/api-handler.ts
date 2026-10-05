@@ -110,7 +110,6 @@ import {
   planStandInWrite,
   reconcileReportedFidelity,
   recordOriginalFidelity,
-  retireReplacedStandIns,
   markSelfCanonical,
   stampUnstampedOriginals,
   awaitsStamp,
@@ -2881,9 +2880,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             true,
           );
           if (!plan.ok) return { refused: plan };
-          // In the same OCC unit as the insert below, so the swap of an
-          // outdated canonical stand-in commits whole or not at all.
-          touched.push(...(await retireReplacedStandIns(db, plan, clock)));
           if (plan.selfCanonical) {
             const original = await markSelfCanonical(db, plan, clock);
             return { selfCanonical: original, touched: [...touched, original] };
@@ -3979,8 +3975,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           objectStorage: storage,
           syncSharedRecords: true,
           keepLiveOnTombstone: (current, _incoming, exchange) =>
-            keepCanonicalOfArchivedOriginal(db, current, exchange, cloudLibrarySettings.standards()),
-          standards: () => cloudLibrarySettings.standards(),
+            keepCanonicalOfArchivedOriginal(db, current, exchange),
           // The Drive channel is where most stand-ins, originals and labels
           // reach the cloud, and its storage is already Drive's. A settings
           // file that arrived is read first, then every original a node

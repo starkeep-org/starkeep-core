@@ -994,12 +994,6 @@ export interface SyncEngineOptions {
    */
   readonly syncSharedRecords?: boolean;
   /**
-   * The library's stand-in standards as this node knows them now. Read when
-   * two canonical stand-ins meet in one slot, for an original with no stamp of
-   * its own. Defaults to the platform's defaults.
-   */
-  readonly standards?: () => import("@starkeep/protocol-primitives").StandInStandards;
-  /**
    * Consulted before every inbound blob pull. Returning `"elide"` applies the
    * metadata, skips the blob, and **advances the watermark** — the record is
    * not owed and will not be re-shipped.

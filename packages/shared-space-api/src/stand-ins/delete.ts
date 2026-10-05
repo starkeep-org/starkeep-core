@@ -14,15 +14,8 @@
  * servers keeps the two answers the same.
  */
 
-import {
-  canonicalMatches,
-  type DataRecord,
-  type HLCClock,
-  type StandInStandards,
-  type StarkeepId,
-} from "@starkeep/protocol-primitives";
+import type { DataRecord, HLCClock, StarkeepId } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
-import { liveStandIn } from "./write.js";
 
 /** Upper bound on one original's children; far above any real original. */
 const MAX_CHILDREN = 1_000;
@@ -83,8 +76,7 @@ export async function applyRecordDelete(
 }
 
 /** What the keep rule reads of a record in the incoming exchange. */
-type ExchangedRecord = Pick<DataRecord, "id" | "deletedAt"> &
-  Partial<Pick<DataRecord, "parentId" | "standInRole" | "fidelity">>;
+type ExchangedRecord = Pick<DataRecord, "id" | "deletedAt">;
 
 /**
  * Whether the cloud must refuse a synced tombstone of `current`.
@@ -92,22 +84,15 @@ type ExchangedRecord = Pick<DataRecord, "id" | "deletedAt"> &
  * The canonical stand-in of an archived original is all a person can see of
  * the photograph until a restore, so the cloud keeps it: the sync transport
  * stores the live row instead and ships it back to the node that deleted it.
- * Two tombstones pass:
+ * One tombstone passes: one that arrives with its original's own tombstone in
+ * the same exchange, which is a delete of the whole item.
  *
- * - One that arrives with its original's own tombstone in the same exchange,
- *   which is a delete of the whole item.
- * - One whose original has a live canonical stand-in made for the threshold it
- *   is judged by, in this store or in the same exchange: a replacement, which
- *   the person sees in place of the one going.
- *
- * `exchange` is the incoming request, read for the original's tombstone and
- * for a replacement travelling beside the tombstone.
+ * `exchange` is the incoming request, read for the original's tombstone.
  */
 export async function keepCanonicalOfArchivedOriginal(
   db: DatabaseAdapter,
   current: DataRecord,
   exchange: { records?: ReadonlyArray<ExchangedRecord> },
-  standards: StandInStandards,
 ): Promise<boolean> {
   if (current.standInRole !== "canonical" || !current.parentId) return false;
   const parentId = current.parentId;
@@ -116,15 +101,5 @@ export async function keepCanonicalOfArchivedOriginal(
   const original = await db.get(parentId);
   if (!original || original.deletedAt || !original.objectStorageKey) return false;
   const row = (await db.getAvailability([original.objectStorageKey])).get(original.objectStorageKey);
-  if (row?.state !== "archived" && row?.state !== "restoring") return false;
-
-  const replacement = (r: ExchangedRecord) =>
-    r.id !== current.id &&
-    !r.deletedAt &&
-    r.parentId === parentId &&
-    r.standInRole === "canonical" &&
-    canonicalMatches(original, { fidelity: r.fidelity ?? null }, standards);
-  if (incoming.some(replacement)) return false;
-  const stored = await liveStandIn(db, parentId, "canonical");
-  return !(stored && replacement(stored));
+  return row?.state === "archived" || row?.state === "restoring";
 }

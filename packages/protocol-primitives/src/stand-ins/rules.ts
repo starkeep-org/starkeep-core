@@ -208,26 +208,11 @@ export function expectedCanonicalFidelity(
 }
 
 /**
- * Whether a canonical stand-in was made for the threshold its original is
- * judged by now. False when the original expects none, or when the fidelity
- * differs — a canonical stand-in made under an earlier threshold, which keeps
- * answering reads until a matching one replaces it.
- */
-export function canonicalMatches(
-  original: OriginalFacts,
-  canonical: Pick<StandInFacts, "fidelity">,
-  standards: StandInStandards,
-): boolean {
-  const expected = expectedCanonicalFidelity(original, standards);
-  return expected !== null && canonical.fidelity === expected;
-}
-
-/**
  * The fidelity that answers every request at or above it: the canonical
  * stand-in's, or the original's own for a self-canonical original.
  *
- * An existing canonical stand-in wins over the expected value, because an
- * outdated canonical stand-in still stands until a matching one replaces it.
+ * An existing canonical stand-in wins over the expected value: the stand-in
+ * that exists is what a read can actually be served from.
  */
 export function topFidelity(
   original: OriginalFacts,
@@ -328,11 +313,6 @@ export interface StandInWriteVerdict {
    * stand-in is better kept than archived.
    */
   readonly selfCanonical: boolean;
-  /**
-   * An existing canonical stand-in this write replaces: live, and made for a
-   * threshold the parent is no longer judged by. Null otherwise.
-   */
-  readonly replacesCanonical: string | null;
 }
 
 /**
@@ -354,7 +334,6 @@ export function checkStandInWrite(
     refusals,
     recordParentFidelity: null,
     selfCanonical: false,
-    replacesCanonical: null,
   });
 
   if (!isStandInRole(input.role)) {
@@ -454,11 +433,10 @@ export function checkStandInWrite(
     // fidelity this write reported would leave the original unstamped, and the
     // retry refused on the same ground, for ever. The fidelity is a fact about
     // the file and does not depend on the threshold, so it is safe to keep.
-    return { refusals, recordParentFidelity, selfCanonical: false, replacesCanonical: null };
+    return { refusals, recordParentFidelity, selfCanonical: false };
   }
 
   let selfCanonical = false;
-  let replacesCanonical: string | null = null;
 
   if (role === "canonical") {
     if (!takesCanonical(status)) {
@@ -475,14 +453,14 @@ export function checkStandInWrite(
           400,
           `the canonical stand-in for this original reports ${expected}, not ${fidelity}`,
         );
-      } else if (input.existingCanonical && input.existingCanonical.fidelity === expected) {
-        // The slot's occupant already meets the standard. The caller reuses it,
-        // which the planner answers as `StandInExists` with the occupant's id.
-        refuse("canonical-matches", 409, "a matching canonical stand-in already exists");
+      } else if (input.existingCanonical) {
+        // The slot is taken. Its occupant was checked against the same
+        // expectation as this write, because the original's stamp is settled
+        // before it can take a canonical stand-in and never moves afterwards,
+        // so the occupant is as good as this one. The caller reuses it, which
+        // the planner answers as `StandInExists` with the occupant's id.
+        refuse("canonical-matches", 409, "a canonical stand-in already exists");
       } else {
-        // An outdated occupant goes either way: replaced by this stand-in, or
-        // by the original itself when this stand-in could not shrink it.
-        replacesCanonical = input.existingCanonical?.id ?? null;
         selfCanonical = input.sizeBytes !== undefined && input.sizeBytes >= parent.sizeBytes;
       }
     }
@@ -509,7 +487,7 @@ export function checkStandInWrite(
   }
 
   if (refusals.length > 0) return none();
-  return { refusals, recordParentFidelity, selfCanonical, replacesCanonical };
+  return { refusals, recordParentFidelity, selfCanonical };
 }
 
 /**
@@ -582,11 +560,6 @@ export interface StandInSummary {
    */
   readonly canonicalTarget: number | null;
   /**
-   * True when the live canonical stand-in was made for a different threshold.
-   * It still answers reads; an app replaces it with one at `canonicalTarget`.
-   */
-  readonly canonicalOutdated: boolean;
-  /**
    * The library's advisory long edges for the category's stand-in sizes, for
    * a category whose fidelity is not itself a long edge. Null otherwise.
    */
@@ -632,8 +605,6 @@ export function summarizeStandIns(
   const canonical = live.find((r) => r.standInRole === "canonical") ?? null;
   const top = topFidelity(original, canonical, standards);
   const canonicalTarget = expectedCanonicalFidelity(original, standards);
-  const canonicalOutdated =
-    canonical !== null && canonicalTarget !== null && canonical.fidelity !== canonicalTarget;
 
   const bySize = new Map<number, StandInSize>();
   for (const r of live) {
@@ -660,7 +631,6 @@ export function summarizeStandIns(
     status,
     top,
     canonicalTarget,
-    canonicalOutdated,
     advisoryLongEdges: s.advisoryLongEdges,
     sizes: [...bySize.values()].sort((a, b) => a.fidelity - b.fidelity),
     originalPlacement: placementOf(original),

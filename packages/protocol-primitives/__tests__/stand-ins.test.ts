@@ -383,22 +383,16 @@ describe("checkStandInWrite", () => {
     expect(at(BIG - 1)).toMatchObject({ refusals: [], selfCanonical: false });
   });
 
-  it("replaces an outdated canonical stand-in, and refuses one that already matches", () => {
+  it("refuses a canonical stand-in while one holds the slot, whatever its fidelity", () => {
+    // The occupant was checked against the same expectation, because the
+    // original's stamp is settled before it can take a canonical stand-in and
+    // never moves. So the slot is simply taken.
     const parent = original({ canonicalThreshold: 2560 });
-    const replacing = check({
-      role: "canonical",
-      fidelity: 2560,
-      parent,
-      existingCanonical: { id: "old", fidelity: 4272 },
-    });
-    expect(replacing).toMatchObject({ refusals: [], replacesCanonical: "old", selfCanonical: false });
-    const repeat = check({
-      role: "canonical",
-      fidelity: 2560,
-      parent,
-      existingCanonical: { id: "same", fidelity: 2560 },
-    });
-    expect(codes(repeat)).toEqual(["canonical-matches"]);
+    for (const existingCanonical of [{ id: "same", fidelity: 2560 }, { id: "other", fidelity: 4272 }]) {
+      expect(codes(check({ role: "canonical", fidelity: 2560, parent, existingCanonical }))).toEqual([
+        "canonical-matches",
+      ]);
+    }
   });
 
   it("judges a parent whose fidelity this write records by the stamp it will carry", () => {
@@ -509,16 +503,12 @@ describe("summarizeStandIns", () => {
     ]);
   });
 
-  it("marks a canonical stand-in made for another threshold as outdated, and still serves it", () => {
-    const summary = summarizeStandIns(
-      original({ canonicalThreshold: 2560 }),
-      [standIn("smaller", 640), standIn("canonical", 4272)],
-      STD,
-      here,
-    )!;
-    expect(summary).toMatchObject({ top: 4272, canonicalTarget: 2560, canonicalOutdated: true });
-    const current = summarizeStandIns(original(), [standIn("canonical", 4272)], STD, here)!;
-    expect(current).toMatchObject({ canonicalTarget: 4272, canonicalOutdated: false });
+  it("names the canonical target the original's stamp sets", () => {
+    const summary = summarizeStandIns(original(), [standIn("canonical", 4272)], STD, here)!;
+    expect(summary).toMatchObject({ top: 4272, canonicalTarget: 4272 });
+    // An original still waiting for its stamp has no target and no sizes.
+    const waiting = summarizeStandIns(original({ canonicalThreshold: null }), [], STD, here)!;
+    expect(waiting).toMatchObject({ status: "awaiting-stamp", canonicalTarget: null, top: null, sizes: [] });
   });
 
   it("says where the original's own bytes sit", () => {

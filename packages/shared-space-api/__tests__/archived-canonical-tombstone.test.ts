@@ -13,7 +13,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   createDataRecord,
   createHLCClock,
-  DEFAULT_STAND_IN_STANDARDS as STD,
   type DataRecord,
   type StandInRole,
 } from "@starkeep/protocol-primitives";
@@ -56,8 +55,8 @@ async function record(over: {
   return r;
 }
 
-async function family(state: "archived" | "restoring" | "available" | null, canonicalThreshold?: number) {
-  const original = await record({ fidelity: 6000, ...(canonicalThreshold ? { canonicalThreshold } : {}) });
+async function family(state: "archived" | "restoring" | "available" | null) {
+  const original = await record({ fidelity: 6000, canonicalThreshold: 4272 });
   const canonical = await record({ type: "image/avif", parentId: original.id, standInRole: "canonical", fidelity: 4272 });
   const smaller = await record({ type: "image/avif", parentId: original.id, standInRole: "smaller", fidelity: 2560 });
   if (state) {
@@ -77,59 +76,48 @@ async function family(state: "archived" | "restoring" | "available" | null, cano
 describe("keepCanonicalOfArchivedOriginal", () => {
   it("keeps the canonical stand-in of an archived original", async () => {
     const { canonical } = await family("archived");
-    expect(await keepCanonicalOfArchivedOriginal(db, canonical, { records: [] }, STD)).toBe(true);
+    expect(await keepCanonicalOfArchivedOriginal(db, canonical, { records: [] })).toBe(true);
   });
 
   it("keeps it while the original is being restored, which is still not readable", async () => {
     const { canonical } = await family("restoring");
-    expect(await keepCanonicalOfArchivedOriginal(db, canonical, {}, STD)).toBe(true);
+    expect(await keepCanonicalOfArchivedOriginal(db, canonical, {})).toBe(true);
   });
 
   // A delete of the whole item: the original's own tombstone rides along.
   it("lets it go when the same exchange tombstones the original", async () => {
     const { original, canonical } = await family("archived");
     const exchange = { records: [{ id: original.id, deletedAt: clock.now() }] };
-    expect(await keepCanonicalOfArchivedOriginal(db, canonical, exchange, STD)).toBe(false);
+    expect(await keepCanonicalOfArchivedOriginal(db, canonical, exchange)).toBe(false);
   });
 
   it("does not count a live copy of the original in the exchange as its delete", async () => {
     const { original, canonical } = await family("archived");
     const exchange = { records: [{ id: original.id, deletedAt: null }] };
-    expect(await keepCanonicalOfArchivedOriginal(db, canonical, exchange, STD)).toBe(true);
+    expect(await keepCanonicalOfArchivedOriginal(db, canonical, exchange)).toBe(true);
   });
 
   it("lets it go when the original is readable, or has no availability row", async () => {
-    expect(await keepCanonicalOfArchivedOriginal(db, (await family("available")).canonical, {}, STD)).toBe(false);
-    expect(await keepCanonicalOfArchivedOriginal(db, (await family(null)).canonical, {}, STD)).toBe(false);
+    expect(await keepCanonicalOfArchivedOriginal(db, (await family("available")).canonical, {})).toBe(false);
+    expect(await keepCanonicalOfArchivedOriginal(db, (await family(null)).canonical, {})).toBe(false);
   });
 
   it("lets it go when the original is already deleted", async () => {
     const { original, canonical } = await family("archived");
     await db.delete(original.id, clock.now());
-    expect(await keepCanonicalOfArchivedOriginal(db, canonical, {}, STD)).toBe(false);
+    expect(await keepCanonicalOfArchivedOriginal(db, canonical, {})).toBe(false);
   });
 
-  // A replacement: the original was restamped, and a canonical stand-in made
-  // for the new stamp takes the outdated one's place.
-  it("lets an outdated one go beside a matching replacement in the same exchange", async () => {
-    const { original, canonical } = await family("archived", 2560);
-    const replacement = { id: "new", deletedAt: null, parentId: original.id, standInRole: "canonical" as const, fidelity: 2560 };
-    expect(await keepCanonicalOfArchivedOriginal(db, canonical, { records: [replacement] }, STD)).toBe(false);
-    // One made for yet another threshold replaces nothing.
-    const stale = { ...replacement, fidelity: 3000 };
-    expect(await keepCanonicalOfArchivedOriginal(db, canonical, { records: [stale] }, STD)).toBe(true);
-  });
-
-  it("never lets the matching one go for want of a replacement", async () => {
+  it("keeps it however the exchange describes it, short of the original's own tombstone", async () => {
     const { canonical } = await family("archived");
-    const same = { id: canonical.id, deletedAt: null, parentId: canonical.parentId, standInRole: "canonical" as const, fidelity: 4272 };
-    expect(await keepCanonicalOfArchivedOriginal(db, canonical, { records: [same] }, STD)).toBe(true);
+    const same = { id: canonical.id, deletedAt: null };
+    expect(await keepCanonicalOfArchivedOriginal(db, canonical, { records: [same] })).toBe(true);
   });
 
   it("never keeps a smaller stand-in, an original or an ordinary record", async () => {
     const { original, smaller } = await family("archived");
-    expect(await keepCanonicalOfArchivedOriginal(db, smaller, {}, STD)).toBe(false);
-    expect(await keepCanonicalOfArchivedOriginal(db, original, {}, STD)).toBe(false);
-    expect(await keepCanonicalOfArchivedOriginal(db, await record({ type: "document/pdf" }), {}, STD)).toBe(false);
+    expect(await keepCanonicalOfArchivedOriginal(db, smaller, {})).toBe(false);
+    expect(await keepCanonicalOfArchivedOriginal(db, original, {})).toBe(false);
+    expect(await keepCanonicalOfArchivedOriginal(db, await record({ type: "document/pdf" }), {})).toBe(false);
   });
 });
