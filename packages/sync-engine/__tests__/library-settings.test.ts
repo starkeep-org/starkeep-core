@@ -46,11 +46,15 @@ const source = (cloudConfigured: boolean) =>
   createLibrarySettings({ db, storage, clock, cloudConfigured: () => cloudConfigured });
 
 describe("createLibrarySettings", () => {
-  it("answers the defaults with no settings file, knowing them only without a cloud", async () => {
+  it("knows the defaults are the value when no settings file exists, cloud or not", async () => {
+    // The person has not set a value, so the defaults are the library's value
+    // and there is nothing to wait for. A host that treated this as unknown
+    // would leave every original in an untouched library waiting on the cloud
+    // before any app could derive a stand-in for it.
     const withCloud = source(true);
     await withCloud.refresh();
     expect(withCloud.standards()).toEqual(STD);
-    expect(withCloud.knowsLibraryValue()).toBe(false);
+    expect(withCloud.knowsLibraryValue()).toBe(true);
     expect(withCloud.status()).toMatchObject({ set: false, recordId: null });
 
     const alone = source(false);

@@ -8,12 +8,14 @@ import {
 } from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import {
+  awaitsStamp,
   markSelfCanonical,
   planStandInWrite,
   planOriginalFidelity,
   reconcileReportedFidelity,
   recordOriginalFidelity,
   retireReplacedStandIns,
+  stampUnstampedOriginals,
 } from "../src/stand-ins/write.js";
 
 const clock = createHLCClock({ nodeId: "test" });
@@ -230,7 +232,7 @@ describe("replacing a canonical stand-in", () => {
     expect(again).toMatchObject({ ok: false, status: 409, body: { code: "original-takes-no-canonical" } });
   });
 
-  it("stamps a parent whose fidelity it records with the library's value, or with nothing", async () => {
+  it("stamps a parent whose fidelity it records with the library's value", async () => {
     const parent = await put({ hash: "o" });
     const known = await planStandInWrite(
       db,
@@ -240,14 +242,49 @@ describe("replacing a canonical stand-in", () => {
       true,
     );
     expect(known).toMatchObject({ ok: true, recordParentFidelity: 6000, parentStamp: 4272 });
-    const unknown = await planStandInWrite(
+  });
+
+  it("refuses a stand-in for an unstamped parent, and keeps the fidelity the write reported", async () => {
+    const parent = await put({ hash: "o" });
+    // A node holding no settings file: it cannot stamp, so nothing here knows
+    // what threshold the original is judged by, and no stand-in for it can be
+    // checked. The reported fidelity is kept all the same, so the cloud can
+    // stamp the original and the caller's retry can succeed.
+    const plan = await planStandInWrite(
       db,
       grants,
       { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 }, parentFidelity: 6000 },
       STD,
       false,
     );
-    expect(unknown).toMatchObject({ ok: true, parentStamp: null });
+    expect(plan).toMatchObject({
+      ok: false,
+      status: 409,
+      body: { code: "parent-awaits-stamp" },
+      recordFidelityFirst: { fidelity: 6000 },
+    });
+    expect((plan as { recordFidelityFirst: { parent: { id: string } } }).recordFidelityFirst.parent.id).toBe(
+      parent.id,
+    );
+  });
+
+  it("accepts a canonical stand-in for an unstamped parent once the same write stamps it", async () => {
+    // The ordinary path on a node that does know the library's value: one write
+    // records the fidelity, the stamp and the stand-in together.
+    const parent = await put({ hash: "o" });
+    const plan = await planStandInWrite(
+      db,
+      grants,
+      {
+        type: "image/avif",
+        parentId: parent.id,
+        standIn: { role: "canonical", fidelity: 4272 },
+        parentFidelity: 6000,
+      },
+      STD,
+      true,
+    );
+    expect(plan).toMatchObject({ ok: true, recordParentFidelity: 6000, parentStamp: 4272 });
   });
 });
 
@@ -283,5 +320,57 @@ describe("recordOriginalFidelity", () => {
     });
     expect(updated.updatedAt.wallTime >= parent.updatedAt.wallTime).toBe(true);
     expect(back!.updatedAt).toEqual(updated.updatedAt);
+  });
+});
+
+describe("awaitsStamp and stampUnstampedOriginals", () => {
+  it("picks out the live originals that carry a fidelity and no stamp", async () => {
+    const waiting = await put({ hash: "w", fidelity: 6000 });
+    expect(awaitsStamp(waiting)).toBe(true);
+    expect(awaitsStamp(await put({ hash: "s", fidelity: 6000, canonicalThreshold: 4272 }))).toBe(false);
+    expect(awaitsStamp(await put({ hash: "u" }))).toBe(false);
+    expect(awaitsStamp(await put({ hash: "d", type: "document/pdf", fidelity: null }))).toBe(false);
+    expect(
+      awaitsStamp(
+        await put({ hash: "si", type: "image/avif", parentId: waiting.id, standInRole: "smaller", fidelity: 640 }),
+      ),
+    ).toBe(false);
+    expect(awaitsStamp({ ...waiting, deletedAt: clock.now() })).toBe(false);
+  });
+
+  it("stamps each one with the library's value under a fresh clock", async () => {
+    // The cloud's half of the stamping rule: a node that did not know the
+    // library's value recorded the fidelity with a null stamp, and the cloud,
+    // which always knows, fills it in when it applies the row. The fresh clock
+    // is what puts the stamped row above the sender's watermark, so the same
+    // exchange's reply carries it back.
+    const waiting = await put({ hash: "w", fidelity: 6000, originAppId: "drive" });
+    const video = await put({ hash: "v", type: "video/mp4", fidelity: 9000 });
+    const already = await put({ hash: "s", fidelity: 6000, canonicalThreshold: 2560 });
+
+    const stamped = await stampUnstampedOriginals(db, [waiting, video, already], STD, clock);
+
+    expect(stamped.map((r) => r.id).sort()).toEqual([video.id, waiting.id].sort());
+    expect(await db.get(waiting.id)).toMatchObject({
+      canonicalThreshold: 4272,
+      originAppId: "drive",
+      version: waiting.version + 1,
+    });
+    expect(await db.get(video.id)).toMatchObject({ canonicalThreshold: 4800 });
+    // Already stamped: left exactly as it was, whatever the library says now.
+    expect(await db.get(already.id)).toMatchObject({ canonicalThreshold: 2560, version: already.version });
+    expect(stamped[0]!.updatedAt.wallTime >= waiting.updatedAt.wallTime).toBe(true);
+  });
+
+  it("leaves an original another write stamped or tombstoned since the row was applied", async () => {
+    // The applied row is a snapshot; the store may have moved on, so each
+    // stamp re-reads before it writes.
+    const applied = await put({ hash: "w", fidelity: 6000 });
+    await recordOriginalFidelity(db, applied, 6000, clock, 2560);
+    const gone = await put({ hash: "g", fidelity: 6000 });
+    await db.delete(gone.id, clock.now());
+
+    expect(await stampUnstampedOriginals(db, [applied, gone], STD, clock)).toEqual([]);
+    expect(await db.get(applied.id)).toMatchObject({ canonicalThreshold: 2560 });
   });
 });

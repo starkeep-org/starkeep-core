@@ -14,7 +14,9 @@ import { DatabaseSync } from "node:sqlite";
 import {
   createDataRecord,
   createHLCClock,
+  DEFAULT_STAND_IN_STANDARDS,
   DEFAULT_SYNC_DOWN_CEILINGS,
+  standardsFor,
   type DataRecord,
   type StandInRole,
   type StarkeepId,
@@ -171,6 +173,7 @@ describe("a residency manager", () => {
       standInRole?: StandInRole;
       fidelity?: number | null;
       size?: number;
+      canonicalThreshold?: number | null;
     },
     where: { here?: boolean; cloud?: boolean } = { here: true, cloud: true },
   ): Promise<DataRecord> {
@@ -189,6 +192,16 @@ describe("a residency manager", () => {
         parentId: (over.parentId ?? null) as never,
         standInRole: over.standInRole ?? null,
         fidelity: over.fidelity === undefined ? null : over.fidelity,
+        // An original carries the default stamp unless the case says
+        // otherwise, as a node that knows the library's value writes it. An
+        // unstamped original is `awaiting-stamp`, which no ceiling rule can
+        // place, so leaving the stamp off would change what these cases mean.
+        canonicalThreshold:
+          over.canonicalThreshold !== undefined
+            ? over.canonicalThreshold
+            : over.standInRole || over.parentId || over.fidelity == null
+              ? null
+              : (standardsFor(type, DEFAULT_STAND_IN_STANDARDS)?.canonicalThreshold ?? null),
         originalFilename: `f-${n}`,
       },
       clock,

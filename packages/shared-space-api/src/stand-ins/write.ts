@@ -61,7 +61,22 @@ export type StandInWritePlan =
        */
       readonly retire: readonly DataRecord[];
     }
-  | { readonly ok: false; readonly status: number; readonly body: StandInWriteError };
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly body: StandInWriteError;
+      /**
+       * A fidelity to record on the original even though the stand-in is
+       * refused, with {@link recordOriginalFidelity}. Set only for
+       * `parent-awaits-stamp`: the cloud stamps an original that carries a
+       * fidelity, so keeping the reported value is what lets the retry
+       * succeed. See `checkStandInWrite`.
+       */
+      readonly recordFidelityFirst?: {
+        readonly parent: DataRecord;
+        readonly fidelity: number;
+      };
+    };
 
 export interface StandInWriteRequest {
   /** The stand-in's own Starkeep type. */
@@ -144,6 +159,17 @@ export async function planStandInWrite(
         detail: first.message,
         refusals: verdict.refusals,
       },
+      // The original is unstamped, so the stand-in cannot be checked — but the
+      // fidelity this write reported is a fact about the file, and keeping it
+      // is what lets the cloud stamp the original and the retry succeed.
+      ...(first.code === "parent-awaits-stamp" && verdict.recordParentFidelity !== null && liveParent
+        ? {
+            recordFidelityFirst: {
+              parent: liveParent,
+              fidelity: verdict.recordParentFidelity,
+            },
+          }
+        : {}),
     };
   }
 

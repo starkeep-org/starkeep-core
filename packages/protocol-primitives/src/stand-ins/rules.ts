@@ -74,28 +74,39 @@ export function standardsFor(
 }
 
 /**
- * The canonical threshold an original is judged by: its own stamp, or the
- * library's value for an original with none. Null outside the stand-in
- * categories.
+ * The canonical threshold an original is judged by: the stamp on the original,
+ * and nothing else. Null outside the stand-in categories, and null for an
+ * original no node has stamped yet.
  *
- * Reading the stamp first is what lets the person change the library's value
- * without touching a single existing original: each keeps the threshold it was
- * judged by, until "Replace existing canonical stand-ins" restamps it.
+ * The stamp is the only answer on purpose. It is written once, in the write
+ * that records the original's fidelity, so it is settled before the original
+ * can take a canonical stand-in — and it never changes afterwards. A change of
+ * the library's value therefore reaches originals stamped from then on and no
+ * others, and the fidelity a canonical stand-in must report is fixed for as
+ * long as its original lives.
+ *
+ * Falling back to the library's current value would break the second half of
+ * that. A node holding no settings file does not know the library's value, so
+ * it records a fidelity with no stamp; a fallback would have it judge such an
+ * original by its own defaults, derive a canonical stand-in at that size, and
+ * leave the cloud to stamp the real value over the top. The stand-in would
+ * then be the wrong size for good. An unstamped original waits instead, which
+ * {@link originalStatus} answers as `awaiting-stamp`.
  */
 export function thresholdOf(
   original: Pick<StandInFacts, "type" | "canonicalThreshold">,
   standards: StandInStandards,
 ): number | null {
-  const s = standardsFor(original.type, standards);
-  if (!s) return null;
-  return original.canonicalThreshold ?? s.canonicalThreshold;
+  if (!standardsFor(original.type, standards)) return null;
+  return original.canonicalThreshold ?? null;
 }
 
 /**
  * The standard sizes that apply to an original: the platform's sizes below the
  * original's own threshold. A lowered threshold drops the sizes at or above it
  * for the originals stamped with it, and leaves every older original's sizes
- * as they were.
+ * as they were. Empty for an original with no stamp, which takes no stand-in
+ * of any size until it has one.
  */
 export function standardSizesOf(
   original: Pick<StandInFacts, "type" | "canonicalThreshold">,
@@ -137,12 +148,19 @@ export function stampFor(
  *   the instant tier.
  * - `fidelity-unknown`: nobody has reported the original's fidelity. Never
  *   archives, and every node treats it as above its ceiling.
+ * - `awaiting-stamp`: the original's fidelity is known but no node has stamped
+ *   it with a canonical threshold, so no rule here can place it yet. Takes no
+ *   stand-in, never archives, and every node treats it as above its ceiling,
+ *   exactly as for `fidelity-unknown`. The cloud always knows the library's
+ *   value and stamps such an original when it applies it, so the state lasts
+ *   one exchange. See {@link thresholdOf}.
  */
 export type OriginalStatus =
   | "archivable"
   | "self-canonical"
   | "video-below-floor"
-  | "fidelity-unknown";
+  | "fidelity-unknown"
+  | "awaiting-stamp";
 
 export function originalStatus(
   original: OriginalFacts,
@@ -153,15 +171,17 @@ export function originalStatus(
   // Decided by the platform when a canonical encode came out no smaller than
   // the original: keeping both would cost more than keeping the original.
   if (original.selfCanonical) return "self-canonical";
+  // Below the floor decides on its own, and needs no threshold: such an image
+  // is not archivable, so it is self-canonical whatever its fidelity and
+  // whatever it is judged by. Kept ahead of the stamp so a file too small to
+  // take any stand-in places itself the moment it is measured, which is what
+  // the fidelity route exists for. Video below the floor still takes a
+  // canonical stand-in, so it needs a threshold and waits below.
   const belowFloor = original.sizeBytes <= s.sizeFloorBytes;
-  if (!s.selfCanonicalAllowed) {
-    if (original.fidelity === null) return "fidelity-unknown";
-    return belowFloor ? "video-below-floor" : "archivable";
-  }
-  // Below the floor decides on its own: such an original is not archivable, so
-  // it is self-canonical whatever its fidelity turns out to be.
-  if (belowFloor) return "self-canonical";
+  if (belowFloor && s.selfCanonicalAllowed) return "self-canonical";
   if (original.fidelity === null) return "fidelity-unknown";
+  if (thresholdOf(original, standards) === null) return "awaiting-stamp";
+  if (!s.selfCanonicalAllowed) return belowFloor ? "video-below-floor" : "archivable";
   return original.fidelity > thresholdOf(original, standards)! ? "archivable" : "self-canonical";
 }
 
@@ -255,6 +275,7 @@ export type StandInRefusalCode =
   | "type-not-allowed"
   | "parent-fidelity-unknown"
   | "parent-fidelity-mismatch"
+  | "parent-awaits-stamp"
   | "original-takes-no-canonical"
   | "canonical-fidelity-wrong"
   | "not-a-standard-size"
@@ -417,6 +438,25 @@ export function checkStandInWrite(
     selfCanonical: parent.selfCanonical ?? false,
   };
   const status = originalStatus(original, standards);
+
+  if (status === "awaiting-stamp") {
+    // Nothing here can say what this stand-in should be, because the threshold
+    // the original is judged by is not settled yet. The caller retries once the
+    // stamp arrives, which takes one exchange with the cloud.
+    refuse(
+      "parent-awaits-stamp",
+      409,
+      "the original has no canonical threshold yet, so no stand-in for it can be checked; " +
+        "this node does not know the library's value and the cloud will stamp the original shortly",
+    );
+    // The one refusal that keeps `recordParentFidelity`, deliberately. The
+    // cloud stamps an original that carries a fidelity, so dropping the
+    // fidelity this write reported would leave the original unstamped, and the
+    // retry refused on the same ground, for ever. The fidelity is a fact about
+    // the file and does not depend on the threshold, so it is safe to keep.
+    return { refusals, recordParentFidelity, selfCanonical: false, replacesCanonical: null };
+  }
+
   let selfCanonical = false;
   let replacesCanonical: string | null = null;
 

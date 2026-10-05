@@ -137,6 +137,10 @@ function parentRow(over: Record<string, unknown> = {}) {
     type: "image/jpeg",
     size_bytes: 8 * 1024 * 1024,
     fidelity: 6000,
+    // Stamped with the default, as the cloud stamps every original it applies.
+    // An unstamped original is `awaiting-stamp` and takes no stand-in, so the
+    // cases about that state pass `canonical_threshold: null` themselves.
+    canonical_threshold: 4272,
     ...over,
   });
 }
@@ -565,7 +569,9 @@ describe("POST /data/records/:id/fidelity", () => {
 
   it("writes the original's fidelity as a platform write", async () => {
     const db = fakeDsqlWithGrants(GRANTS)
-      .on(GET_BY_ID, [parentRow({ fidelity: null, origin_app_id: "drive" })])
+      // Unmeasured and unstamped: the report records both, so the cloud reads
+      // the library's settings to know what to stamp with.
+      .on(GET_BY_ID, [parentRow({ fidelity: null, canonical_threshold: null, origin_app_id: "drive" })])
       .on(LIVE_STAND_IN, [])
       .on(/from "shared"\."records" where "object_storage_key" = \$1 and "deleted_at" is null/, [parentRow()])
       .on(/from "shared"\."record_labels" where "record_id" in/, [])
