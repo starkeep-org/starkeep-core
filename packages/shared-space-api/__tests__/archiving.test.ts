@@ -114,21 +114,6 @@ describe("evaluateArchiving", () => {
     }
   });
 
-  it("keeps an original whose canonical stand-in was made for a different threshold", async () => {
-    // Restamped to 2560 after the canonical stand-in was made at 4272.
-    const original = await put({ fidelity: 6000, canonicalThreshold: 2560 });
-    const outdated = await canonicalFor(original);
-    const e = await evaluate(original.id);
-    expect(e).toMatchObject({ decision: "keep", archivable: true, canonicalOutdated: true });
-    expect(e.reasons.join()).toMatch(/made for a different threshold/);
-
-    // The replacement completes the condition again. The old one goes first,
-    // as the write path's swap does, because the slot holds one.
-    await db.delete(outdated.id, clock.now());
-    await put({ type: "image/avif", parentId: original.id, standInRole: "canonical", fidelity: 2560 });
-    expect(await evaluate(original.id)).toMatchObject({ decision: "archive", canonicalOutdated: false });
-  });
-
   it("keeps an original a canonical encode could not shrink, and says why", async () => {
     const original = await put({ type: "video/mp4", fidelity: 3000 });
     await db.put({ ...original, selfCanonical: true });
@@ -217,19 +202,6 @@ describe("applyArchiveEvaluation", () => {
     expect(storage.tagsOf(original.objectStorageKey)).toEqual({});
   });
 
-  it("clears the tag of an original whose canonical stand-in became outdated, whatever the event", async () => {
-    const original = await put({ fidelity: 6000, canonicalThreshold: 2560 });
-    await canonicalFor(original);
-    await storage.setTags(original.objectStorageKey, { ...ARCHIVE_TAGS });
-    // A restamp arrives as the original, which on its own may not untag.
-    const action = await applyArchiveEvaluation(storage, await evaluate(original.id), {
-      mayUntag: false,
-      ...notArchived,
-    });
-    expect(action).toBe("untagged");
-    expect(storage.tagsOf(original.objectStorageKey)).toEqual({});
-  });
-
   it("never untags an object the lifecycle rule has already moved", async () => {
     const original = await put({ fidelity: 6000 });
     await storage.setTags(original.objectStorageKey, { ...ARCHIVE_TAGS });
@@ -307,17 +279,6 @@ describe("pageBacklog", () => {
     expect(page.records.map((r) => r.id).sort()).toEqual([waiting.id, video.id].sort());
   });
 
-  it("lists originals whose canonical stand-in was made for another threshold", async () => {
-    const outdated = await put({ fidelity: 6000, canonicalThreshold: 2560 });
-    await canonicalFor(outdated);
-    const current = await put({ fidelity: 6000, canonicalThreshold: 4272 });
-    await canonicalFor(current);
-    await put({ fidelity: 6000, canonicalThreshold: 2560 }); // missing, not outdated
-    const page = await pageBacklog(db, grants, { kind: "canonical-outdated" }, STD);
-    expect(page.records.map((r) => r.id)).toEqual([outdated.id]);
-    expect(await countBacklog(db, grants, "canonical-outdated", STD)).toEqual({ count: 1, complete: true });
-  });
-
   it("lists originals with no reported fidelity", async () => {
     const unknown = await put({ fidelity: null });
     await put({ fidelity: 6000 });
@@ -333,19 +294,32 @@ describe("pageBacklog", () => {
   });
 
   it("pages, and a short page still carries the cursor", async () => {
+    // Three originals that need nothing and one that does. Which page the
+    // waiting one lands on depends on content-addressed id order, so this
+    // walks every page: the contract is "page until the cursor is null", and a
+    // page cut before the filter runs can come back short or empty.
     for (let i = 0; i < 3; i++) await canonicalFor(await put({ fidelity: 6000 }));
     const last = await put({ fidelity: 6000 });
-    const first = await pageBacklog(db, grants, { kind: "missing-canonical", limit: 2 }, STD);
-    expect(first.records).toEqual([]);
-    expect(first.nextCursor).not.toBeNull();
+
     const seen: string[] = [];
-    let cursor: string | null = first.nextCursor;
-    while (cursor) {
-      const page = await pageBacklog(db, grants, { kind: "missing-canonical", limit: 2, cursor }, STD);
+    const sizes: number[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const page = await pageBacklog(
+        db,
+        grants,
+        { kind: "missing-canonical", limit: 2, ...(cursor ? { cursor } : {}) },
+        STD,
+      );
       seen.push(...page.records.map((r) => r.id));
+      sizes.push(page.records.length);
       cursor = page.nextCursor;
-    }
+    } while (cursor);
+
     expect(seen).toEqual([last.id]);
+    // At least one page came back under its limit while a cursor remained,
+    // which is the thing a caller must not read as "done".
+    expect(sizes.slice(0, -1).some((n) => n < 2)).toBe(true);
   });
 });
 

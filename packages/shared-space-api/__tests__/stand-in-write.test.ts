@@ -14,7 +14,6 @@ import {
   planOriginalFidelity,
   reconcileReportedFidelity,
   recordOriginalFidelity,
-  retireReplacedStandIns,
   stampUnstampedOriginals,
 } from "../src/stand-ins/write.js";
 
@@ -158,7 +157,7 @@ describe("planStandInWrite", () => {
   });
 });
 
-describe("replacing a canonical stand-in", () => {
+describe("the canonical slot", () => {
   const canonicalWrite = (parentId: string, fidelity: number, sizeBytes = 1000) =>
     planStandInWrite(
       db,
@@ -168,26 +167,10 @@ describe("replacing a canonical stand-in", () => {
       true,
     );
 
-  it("retires an outdated canonical stand-in and the smaller ones at or above the new one", async () => {
-    // Stamped at 2560 after a canonical stand-in was made at the old 4272.
-    const parent = await put({ hash: "o", fidelity: 6000, canonicalThreshold: 2560 });
-    const old = await put({ hash: "c", type: "image/avif", parentId: parent.id, standInRole: "canonical", fidelity: 4272 });
-    const at = await put({ hash: "s1", type: "image/avif", parentId: parent.id, standInRole: "smaller", fidelity: 2560 });
-    const below = await put({ hash: "s2", type: "image/avif", parentId: parent.id, standInRole: "smaller", fidelity: 1280 });
-
-    const plan = await canonicalWrite(parent.id, 2560);
-    expect(plan.ok).toBe(true);
-    if (!plan.ok) return;
-    expect(plan.retire.map((r) => r.id).sort()).toEqual([old.id, at.id].sort());
-    expect(plan.selfCanonical).toBe(false);
-
-    await retireReplacedStandIns(db, plan, clock);
-    expect((await db.get(old.id))!.deletedAt).not.toBeNull();
-    expect((await db.get(at.id))!.deletedAt).not.toBeNull();
-    expect((await db.get(below.id))!.deletedAt).toBeNull();
-  });
-
-  it("answers StandInExists for a matching canonical stand-in, and retires nothing", async () => {
+  it("answers StandInExists for a canonical stand-in that already holds it", async () => {
+    // The occupant was checked against the same expectation as this write,
+    // because the original's stamp never moves, so the caller reuses it rather
+    // than producing another.
     const parent = await put({ hash: "o", fidelity: 6000, canonicalThreshold: 4272 });
     const current = await put({ hash: "c", type: "image/avif", parentId: parent.id, standInRole: "canonical", fidelity: 4272 });
     const plan = await canonicalWrite(parent.id, 4272);
@@ -215,7 +198,7 @@ describe("replacing a canonical stand-in", () => {
       STD,
       true,
     );
-    expect(plan).toMatchObject({ ok: true, selfCanonical: true, retire: [] });
+    expect(plan).toMatchObject({ ok: true, selfCanonical: true });
     if (!plan.ok) return;
     const marked = await markSelfCanonical(db, plan, clock);
     expect(marked).toMatchObject({ selfCanonical: true, fidelity: 3000, version: parent.version + 1 });

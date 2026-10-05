@@ -1,7 +1,6 @@
 import { yieldSlotToIncoming } from "./stand-in-slots.js";
 import {
   compareHLC,
-  DEFAULT_STAND_IN_STANDARDS,
   isCategoryId,
   type AnyRecord,
   type HLCTimestamp,
@@ -197,7 +196,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     appSyncableSource,
     syncSharedRecords = true,
     residency,
-    standards = () => DEFAULT_STAND_IN_STANDARDS,
   } = options;
 
   // Round budget. Bytes bind on a blob channel, item count on a row channel;
@@ -852,18 +850,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
                 // A stand-in from the cloud already won its slot there. A local
                 // stand-in holding the same slot lost, and is tombstoned before
                 // the winner lands — see `stand-in-slots.ts`.
-                let row = snapshot;
                 if (!snapshot.deletedAt) {
-                  const resolved = await yieldSlotToIncoming(
-                    localDatabaseAdapter,
-                    snapshot,
-                    clock,
-                    standards(),
-                  );
-                  if (resolved.loser) appliedIds.push(resolved.loser.id);
-                  row = resolved.row;
+                  const loser = await yieldSlotToIncoming(localDatabaseAdapter, snapshot, clock);
+                  if (loser) appliedIds.push(loser.id);
                 }
-                await localDatabaseAdapter.put(row);
+                await localDatabaseAdapter.put(snapshot);
               }
 
               // **Outside** the LWW guard, deliberately. An equal or older record

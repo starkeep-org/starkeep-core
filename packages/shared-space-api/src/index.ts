@@ -65,7 +65,6 @@ export {
   planFidelityReport,
   reconcileReportedFidelity,
   recordOriginalFidelity,
-  retireReplacedStandIns,
   markSelfCanonical,
   stampUnstampedOriginals,
   awaitsStamp,

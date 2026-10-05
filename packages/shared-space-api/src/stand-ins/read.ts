@@ -37,7 +37,6 @@ export interface WireStandInSummary {
   /** The fidelity a canonical stand-in should report now; see `StandInSummary`. */
   readonly canonical_target: number | null;
   /** True when the live canonical stand-in was made for another threshold. */
-  readonly canonical_outdated: boolean;
   /** The library's advisory long edges, for video; null for images. */
   readonly advisory_long_edges: { readonly canonical: number; readonly by_size: Readonly<Record<string, number>> } | null;
   readonly sizes: readonly WireStandInSize[];
@@ -59,7 +58,6 @@ export async function renderStandInSummary(
     status: summary.status,
     top: summary.top,
     canonical_target: summary.canonicalTarget,
-    canonical_outdated: summary.canonicalOutdated,
     advisory_long_edges: summary.advisoryLongEdges
       ? {
           canonical: summary.advisoryLongEdges.canonical,

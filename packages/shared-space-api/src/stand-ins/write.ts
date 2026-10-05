@@ -25,7 +25,6 @@ import {
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
-import { applyRecordDelete } from "./delete.js";
 
 /** The error body both servers answer a refused stand-in write with. */
 export interface StandInWriteError {
@@ -54,12 +53,6 @@ export type StandInWritePlan =
        * with {@link markSelfCanonical}.
        */
       readonly selfCanonical: boolean;
-      /**
-       * Live stand-ins this write retires, tombstoned before the stand-in is
-       * stored: an outdated canonical stand-in, and every smaller stand-in at
-       * or above the new top. Empty for an ordinary write.
-       */
-      readonly retire: readonly DataRecord[];
     }
   | {
       readonly ok: false;
@@ -175,21 +168,11 @@ export async function planStandInWrite(
 
   // The slot, checked here so the caller learns which stand-in to reuse rather
   // than meeting the unique index. The index still decides a race between two
-  // writers that both pass this check. A canonical slot's occupant was judged
-  // by the rules: a matching one answered above, and an outdated one retires.
+  // writers that both pass this check. An occupied canonical slot answered
+  // above, as `canonical-matches`.
   if (role === "smaller") {
     const occupant = await liveStandIn(db, liveParent!.id, "smaller", fidelity as number);
     if (occupant) return standInExists(occupant.id);
-  }
-
-  // Replacing an outdated canonical stand-in retires it, and with it every
-  // smaller stand-in the new top no longer sits above: the new canonical
-  // stand-in's fidelity, or the original's own when it stands in for itself.
-  let retire: DataRecord[] = [];
-  if (verdict.replacesCanonical !== null && existingCanonical) {
-    const parentFidelity = verdict.recordParentFidelity ?? liveParent!.fidelity;
-    const newTop = verdict.selfCanonical ? parentFidelity : (fidelity as number);
-    retire = [existingCanonical, ...(await smallerStandInsAtOrAbove(db, liveParent!.id, newTop))];
   }
 
   return {
@@ -200,48 +183,7 @@ export async function planStandInWrite(
     recordParentFidelity: verdict.recordParentFidelity,
     parentStamp,
     selfCanonical: verdict.selfCanonical,
-    retire,
   };
-}
-
-/** The live smaller stand-ins of one original at or above a fidelity. */
-async function smallerStandInsAtOrAbove(
-  db: DatabaseAdapter,
-  parentId: StarkeepId,
-  fidelity: number | null,
-): Promise<DataRecord[]> {
-  if (fidelity === null) return [];
-  const result = await db.query({
-    filters: [
-      { field: "parentId", operator: "eq", value: parentId },
-      { field: "standInRole", operator: "eq", value: "smaller" },
-      { field: "fidelity", operator: "gte", value: fidelity },
-      { field: "deletedAt", operator: "isNull" },
-    ],
-    limit: 100,
-  });
-  return result.records;
-}
-
-/**
- * Tombstone what a planned write retires, before the write stores its
- * stand-in: the store's slot index admits one live canonical stand-in per
- * original, so the old one has to go first.
- *
- * The cost of that order is a window. A write that fails after this leaves the
- * original with no canonical stand-in until an app makes one again, which the
- * `missing-canonical` backlog lists. The cloud never loses an archived
- * original's canonical stand-in to it: a synced tombstone of one passes only
- * beside a live matching replacement (`keepCanonicalOfArchivedOriginal`).
- */
-export async function retireReplacedStandIns(
-  db: DatabaseAdapter,
-  plan: Extract<StandInWritePlan, { ok: true }>,
-  clock: HLCClock,
-): Promise<DataRecord[]> {
-  const [canonical, ...smaller] = plan.retire;
-  if (!canonical) return [];
-  return applyRecordDelete(db, { ok: true, record: canonical, cascade: smaller }, clock);
 }
 
 /**

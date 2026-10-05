@@ -262,7 +262,6 @@ export async function startFakeCloud(): Promise<FakeCloud> {
             clock,
             objectStorage,
             syncSharedRecords: true,
-            standards: () => librarySettings.standards(),
             // The real cloud's Drive channel: read an arriving settings file,
             // then stamp what a node recorded without knowing the library's
             // value, so the reply carries the stamp back. One process holds

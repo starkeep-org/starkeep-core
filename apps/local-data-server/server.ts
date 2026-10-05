@@ -111,7 +111,6 @@ import {
   planStandInWrite,
   reconcileReportedFidelity,
   recordOriginalFidelity,
-  retireReplacedStandIns,
   markSelfCanonical,
   standInExists,
 } from "../../packages/shared-space-api/src/stand-ins/write.js";
@@ -983,7 +982,6 @@ async function main() {
       localObjectStorage: localAdapter,
       residency: residencyHooks(residencyManager),
       afterDriveDrain: acquireWanted,
-      standards: () => librarySettings.standards(),
       localDb: databaseAdapter.getRawDatabase(),
       cloudUrl: CLOUD_URL,
       // Outbound auth is both: the per-request HMAC identifies the app, and
@@ -2245,14 +2243,13 @@ async function main() {
             json(res, plan.body);
             return;
           }
-          const retired = await retireReplacedStandIns(databaseAdapter, plan, clock);
           if (plan.selfCanonical) {
             // The canonical encode could not shrink the original, so the
             // original stands in for itself and this stand-in is not stored.
             const original = await markSelfCanonical(databaseAdapter, plan, clock);
             changeNotifier.emit({
               eventType: "local-change-recorded",
-              recordIds: [original.id, ...retired.map((r) => r.id)],
+              recordIds: [original.id],
               timestamp: original.updatedAt,
             });
             json(res, { selfCanonical: true, original: await renderRecord(original) });
