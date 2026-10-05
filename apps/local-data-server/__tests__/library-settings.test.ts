@@ -100,24 +100,24 @@ afterAll(async () => {
 });
 
 describe("the library's settings", () => {
-  it("start at the defaults, unset, on a node that syncs with a cloud", async () => {
+  it("start at the defaults, unset, and known, on a node that syncs with a cloud", async () => {
+    // No settings file exists, so the defaults are the library's value and
+    // this node knows it. A node that treated an untouched library as unknown
+    // could stamp nothing, so no app could derive a stand-in for anything
+    // until the cloud answered.
     const view = await settingsOf(serverA);
-    expect(view).toMatchObject({ set: false, knowsLibraryValue: false, problems: [] });
+    expect(view).toMatchObject({ set: false, knowsLibraryValue: true, problems: [] });
     expect(view.current).toEqual(view.defaults);
   });
 
-  it("leave the stamp to the cloud on a node that does not know the value, and bring it back", async () => {
+  it("stamp with the defaults, with no cloud round, while no settings file exists", async () => {
     const { body } = await registerWithBytes(driveA, {
       type: "image/jpeg",
       sizeBytes: BIG,
       fidelity: 6000,
       fileName: "before-any-setting.jpg",
     });
-    const id = body.record!.id;
-    expect((await record(driveA, id)).canonical_threshold).toBeNull();
-    await converge();
-    expect((await record(driveA, id)).canonical_threshold).toBe(4272);
-    expect((await record(driveB, id)).canonical_threshold).toBe(4272);
+    expect((await record(driveA, body.record!.id)).canonical_threshold).toBe(4272);
   });
 
   it("refuse a value out of range and write nothing", async () => {
@@ -125,6 +125,39 @@ describe("the library's settings", () => {
     expect(res.status).toBe(422);
     expect(((await res.json()) as { problems: string[] }).problems.join()).toMatch(/1280 to 16384/);
     expect((await settingsOf(serverA)).set).toBe(false);
+  });
+
+  it("leave the stamp to the cloud on a node that cannot read the settings file, and bring it back", async () => {
+    // The one state in which a node is genuinely in the dark: a settings file
+    // exists, its row has reached this node, and its bytes have not. Built by
+    // pushing the file up from A and failing B's blob downloads, so B sees the
+    // row without the bytes.
+    expect((await putSettings(serverA, { standIns: { image: { canonicalThreshold: 5120 } } })).status).toBe(200);
+    await syncNow(driveA);
+    cloud.failures.blobGets = 6;
+    await syncNow(driveB);
+    const dark = await settingsOf(serverB);
+    expect(dark).toMatchObject({ set: true, knowsLibraryValue: false });
+    expect(dark.problems.join()).toMatch(/have not reached this machine/);
+
+    // An original registered here carries no stamp: this node must not guess,
+    // because a stamp is permanent.
+    const { body } = await registerWithBytes(driveB, {
+      type: "image/jpeg",
+      sizeBytes: BIG,
+      fidelity: 8000,
+      fileName: "while-in-the-dark.jpg",
+    });
+    const id = body.record!.id;
+    expect((await record(driveB, id)).canonical_threshold).toBeNull();
+
+    // The cloud always knows, so it stamps the original it applies, and the
+    // stamp comes back to the node that sent it.
+    cloud.failures.blobGets = 0;
+    await converge();
+    expect((await settingsOf(serverB)).knowsLibraryValue).toBe(true);
+    expect((await record(driveB, id)).canonical_threshold).toBe(5120);
+    expect((await record(driveA, id)).canonical_threshold).toBe(5120);
   });
 
   it("carry a value set on one desktop to the other, which then stamps with it", async () => {

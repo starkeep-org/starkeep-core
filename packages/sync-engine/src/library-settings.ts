@@ -10,11 +10,26 @@
  *
  * ## What a host knows
  *
- * A host knows the library's value when it holds the winning settings file's
- * bytes and they parse — or when no cloud is configured, since then this host
- * is the whole library and its own file, or the defaults, are the value. A
- * host that knows stamps originals with the value (`stampFor`); any other
- * records a null stamp, and the cloud, which always knows, fills it in.
+ * A host knows the library's value in three cases:
+ *
+ * - It holds the winning settings file's bytes and they parse.
+ * - No live settings file exists at all. The person has not set a value, so
+ *   the platform's defaults *are* the library's value and there is nothing to
+ *   wait for. A later file overrides the defaults for originals stamped after
+ *   it arrives, which is what the stamp is for.
+ * - No cloud is configured, since then this host is the whole library and its
+ *   own file, or the defaults, are the value.
+ *
+ * One case is left: a live settings file exists and this host cannot use it,
+ * because the bytes have not arrived or do not parse. Only then is the host in
+ * the dark. Such a host records a null stamp, the original waits
+ * (`awaiting-stamp`), and the cloud, which always knows, stamps it on the next
+ * exchange. Every other host stamps with the value (`stampFor`).
+ *
+ * Telling "no file" from "a file I cannot read" matters because the stamp is
+ * the only threshold any rule reads (`thresholdOf`). Treating a fresh library
+ * as unknown would leave every original in a library whose owner never touched
+ * the setting waiting on the cloud before any app could derive a stand-in.
  */
 
 import {
@@ -90,7 +105,9 @@ export function createLibrarySettings(options: LibrarySettingsOptions): LibraryS
 
   return {
     standards: () => loaded?.standards ?? DEFAULT_STAND_IN_STANDARDS,
-    knowsLibraryValue: () => loaded !== null || !cloudConfigured(),
+    // `winnerId !== null && loaded === null` is the one state that means "a
+    // settings file exists and this host cannot use it".
+    knowsLibraryValue: () => loaded !== null || winnerId === null || !cloudConfigured(),
     status: () => ({
       set: winnerId !== null,
       recordId: winnerId,

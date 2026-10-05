@@ -2224,6 +2224,23 @@ async function main() {
             librarySettings.knowsLibraryValue(),
           );
           if (!plan.ok) {
+            // A stand-in refused only because the original has no stamp yet
+            // still leaves its reported fidelity behind, so the cloud can stamp
+            // the original and the caller's retry can succeed.
+            if (plan.recordFidelityFirst) {
+              const original = await recordOriginalFidelity(
+                databaseAdapter,
+                plan.recordFidelityFirst.parent,
+                plan.recordFidelityFirst.fidelity,
+                clock,
+                null,
+              );
+              changeNotifier.emit({
+                eventType: "local-change-recorded",
+                recordIds: [original.id],
+                timestamp: original.updatedAt,
+              });
+            }
             res.writeHead(plan.status);
             json(res, plan.body);
             return;

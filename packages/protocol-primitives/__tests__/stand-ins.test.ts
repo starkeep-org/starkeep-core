@@ -5,7 +5,6 @@ import {
   ceilingPlacement,
   DEFAULT_STAND_IN_STANDARDS as STD,
   checkOriginalFidelity,
-  canonicalMatches,
   checkStandInWrite,
   expectedCanonicalFidelity,
   isStandInOriginal,
@@ -13,8 +12,10 @@ import {
   resolveSize,
   stampFor,
   standardSizesOf,
+  standardsFor,
   standInSlot,
   summarizeStandIns,
+  takesCanonical,
   thresholdOf,
   topFidelity,
   validateStandInStandards,
@@ -27,6 +28,7 @@ const BIG = ARCHIVE_SIZE_FLOOR_BYTES * 8;
 const SMALL = ARCHIVE_SIZE_FLOOR_BYTES / 2;
 
 function original(over: Partial<StandInFacts> = {}): StandInFacts & { objectStorageKey: string } {
+  const type = over.type ?? "image/jpeg";
   return {
     id: "orig",
     type: "image/jpeg",
@@ -35,6 +37,11 @@ function original(over: Partial<StandInFacts> = {}): StandInFacts & { objectStor
     fidelity: 6000,
     sizeBytes: BIG,
     objectStorageKey: "shared/image/aa/orig",
+    // Stamped with the platform's default unless the case says otherwise, which
+    // is what a node that knows the library's value writes beside the fidelity.
+    // An unstamped original is `awaiting-stamp` and takes no stand-in at all,
+    // so the cases about that state pass `canonicalThreshold: null`.
+    ...(standardsFor(type, STD) ? { canonicalThreshold: standardsFor(type, STD)!.canonicalThreshold } : {}),
     ...over,
   };
 }
@@ -165,9 +172,9 @@ describe("an original judged by its own stamp", () => {
   // were stamped, or before the unstamped one was.
   const LOWERED: StandInStandards = { ...STD, image: { ...STD.image, canonicalThreshold: 2560 } };
 
-  it("reads the stamp first and the library value only for an unstamped original", () => {
+  it("reads the stamp and never the library value, whichever way the library moved", () => {
     expect(thresholdOf(original({ canonicalThreshold: 4272 }), LOWERED)).toBe(4272);
-    expect(thresholdOf(original(), LOWERED)).toBe(2560);
+    expect(thresholdOf(original({ canonicalThreshold: null }), LOWERED)).toBeNull();
     expect(thresholdOf(original({ type: "document/pdf" }), LOWERED)).toBeNull();
   });
 
@@ -176,11 +183,11 @@ describe("an original judged by its own stamp", () => {
     expect(originalStatus(stamped, LOWERED)).toBe("self-canonical");
     expect(standardSizesOf(stamped, LOWERED)).toEqual([320, 640, 1280, 2560]);
 
-    const unstamped = original({ fidelity: 4000 });
-    expect(originalStatus(unstamped, LOWERED)).toBe("archivable");
-    expect(expectedCanonicalFidelity(unstamped, LOWERED)).toBe(2560);
-    expect(standardSizesOf(unstamped, LOWERED)).toEqual([320, 640, 1280]);
-    expect(topFidelity(unstamped, null, LOWERED)).toBe(2560);
+    const lower = original({ fidelity: 4000, canonicalThreshold: 2560 });
+    expect(originalStatus(lower, LOWERED)).toBe("archivable");
+    expect(expectedCanonicalFidelity(lower, LOWERED)).toBe(2560);
+    expect(standardSizesOf(lower, LOWERED)).toEqual([320, 640, 1280]);
+    expect(topFidelity(lower, null, LOWERED)).toBe(2560);
   });
 
   it("stamps with the library's value only when the node knows it", () => {
@@ -188,11 +195,41 @@ describe("an original judged by its own stamp", () => {
     expect(stampFor("image/jpeg", LOWERED, false)).toBeNull();
     expect(stampFor("document/pdf", LOWERED, true)).toBeNull();
   });
+});
 
-  it("tells a canonical stand-in made for the stamp from an outdated one", () => {
-    const stamped = original({ canonicalThreshold: 2560 });
-    expect(canonicalMatches(stamped, { fidelity: 2560 }, STD)).toBe(true);
-    expect(canonicalMatches(stamped, { fidelity: 4272 }, STD)).toBe(false);
+describe("an original nobody has stamped yet", () => {
+  // A node holding no settings file does not know the library's value, so it
+  // records a fidelity with no stamp. Nothing can place such an original until
+  // the stamp arrives, which the cloud writes on the next exchange.
+  const cases: Array<[string, Partial<StandInFacts>]> = [
+    ["an image above the threshold", { fidelity: 6000, canonicalThreshold: null }],
+    ["an image below the threshold", { fidelity: 3000, canonicalThreshold: null }],
+    ["a video", { type: "video/mp4", fidelity: 12000, canonicalThreshold: null }],
+    ["a video below the size floor", { type: "video/mov", fidelity: 3000, sizeBytes: SMALL, canonicalThreshold: null }],
+  ];
+  for (const [name, over] of cases) {
+    it(`waits: ${name}`, () => {
+      const o = original(over);
+      expect(originalStatus(o, STD)).toBe("awaiting-stamp");
+      expect(takesCanonical(originalStatus(o, STD))).toBe(false);
+      expect(expectedCanonicalFidelity(o, STD)).toBeNull();
+      expect(standardSizesOf(o, STD)).toEqual([]);
+      expect(topFidelity(o, null, STD)).toBeNull();
+    });
+  }
+
+  it("places an image too small to take any stand-in without waiting for a stamp", () => {
+    // Below the size floor decides on its own and needs no threshold, which is
+    // what the fidelity route exists for: a file the folder watcher registered
+    // and some app later measured.
+    const tiny = original({ fidelity: 9000, sizeBytes: SMALL, canonicalThreshold: null });
+    expect(originalStatus(tiny, STD)).toBe("self-canonical");
+    expect(topFidelity(tiny, null, STD)).toBe(9000);
+  });
+
+  it("is above every node's ceiling while it waits, as an unmeasured original is", () => {
+    const waiting = original({ fidelity: 6000, canonicalThreshold: null });
+    expect(ceilingPlacement(waiting, DEFAULT_SYNC_DOWN_CEILINGS.desktop, STD)).toBe("above");
   });
 });
 
@@ -365,7 +402,7 @@ describe("checkStandInWrite", () => {
   });
 
   it("judges a parent whose fidelity this write records by the stamp it will carry", () => {
-    const parent = original({ fidelity: null });
+    const parent = original({ fidelity: null, canonicalThreshold: null });
     const v = check({
       role: "canonical",
       fidelity: 2560,
@@ -374,6 +411,22 @@ describe("checkStandInWrite", () => {
       parentStamp: 2560,
     });
     expect(v).toMatchObject({ refusals: [], recordParentFidelity: 6000 });
+  });
+
+  it("refuses a stand-in for an unstamped parent this write cannot stamp either, keeping the fidelity", () => {
+    // The node does not know the library's value, so `parentStamp` is null and
+    // nothing here can say what the stand-in should be. The reported fidelity
+    // survives the refusal, so the cloud can stamp the original later.
+    const parent = original({ fidelity: null, canonicalThreshold: null });
+    const v = check({
+      role: "canonical",
+      fidelity: 4272,
+      parent,
+      reportedParentFidelity: 6000,
+      parentStamp: null,
+    });
+    expect(codes(v)).toEqual(["parent-awaits-stamp"]);
+    expect(v.recordParentFidelity).toBe(6000);
   });
 
   it("offers a stamped original only the standard sizes below its stamp", () => {

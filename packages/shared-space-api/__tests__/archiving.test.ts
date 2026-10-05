@@ -4,6 +4,7 @@ import {
   createDataRecord,
   createHLCClock,
   DEFAULT_STAND_IN_STANDARDS as STD,
+  standardsFor,
   type DataRecord,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
@@ -29,12 +30,21 @@ beforeEach(async () => {
 });
 
 let n = 0;
+/**
+ * An original gets the default stamp unless the case says otherwise, which is
+ * what a node that knows the library's value writes beside the fidelity. An
+ * original with a fidelity and no stamp is `awaiting-stamp` and takes no
+ * stand-in at all, so leaving the stamp off would change what every case here
+ * is about; the cases that mean the unstamped state pass it explicitly.
+ */
 async function put(
   over: Partial<Parameters<typeof createDataRecord>[0]> & { bytes?: boolean } = {},
 ): Promise<DataRecord> {
   const { bytes = true, ...rest } = over;
   const hash = `hash-${n++}`;
   const key = rest.objectStorageKey ?? `shared/image/aa/${hash}`;
+  const type = rest.type ?? "image/jpeg";
+  const stampable = rest.parentId == null && rest.standInRole == null && rest.fidelity != null;
   const r = createDataRecord(
     {
       type: "image/jpeg",
@@ -42,6 +52,9 @@ async function put(
       contentHash: hash,
       objectStorageKey: key,
       sizeBytes: BIG,
+      ...(stampable && !("canonicalThreshold" in rest) && standardsFor(type, STD)
+        ? { canonicalThreshold: standardsFor(type, STD)!.canonicalThreshold }
+        : {}),
       ...rest,
     },
     clock,
