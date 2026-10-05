@@ -151,13 +151,39 @@ describe("the library's settings", () => {
     const id = body.record!.id;
     expect((await record(driveB, id)).canonical_threshold).toBeNull();
 
-    // The cloud always knows, so it stamps the original it applies, and the
-    // stamp comes back to the node that sent it.
+    // A stand-in for an original with no stamp is refused, because nothing here
+    // can say what it should be. An unmeasured original is the case that would
+    // wedge: the refusal keeps the measurement the write reported, so the cloud
+    // has an original to stamp and the retry can succeed.
+    const unmeasured = await registerWithBytes(driveB, {
+      type: "image/jpeg",
+      sizeBytes: BIG,
+      fileName: "unmeasured-in-the-dark.jpg",
+    });
+    const unmeasuredId = unmeasured.body.record!.id;
+    expect((await record(driveB, unmeasuredId)).fidelity).toBeNull();
+    const refused = await registerWithBytes(driveB, {
+      type: "image/avif",
+      parentId: unmeasuredId,
+      standIn: { role: "canonical", fidelity: 5120 },
+      parentFidelity: 9000,
+      fileName: "canonical.avif",
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe("parent-awaits-stamp");
+    expect((await record(driveB, unmeasuredId)).fidelity).toBe(9000);
+
+    // The cloud always knows, so it stamps the originals it applies, and the
+    // stamps come back to the node that sent them.
     cloud.failures.blobGets = 0;
     await converge();
     expect((await settingsOf(serverB)).knowsLibraryValue).toBe(true);
     expect((await record(driveB, id)).canonical_threshold).toBe(5120);
     expect((await record(driveA, id)).canonical_threshold).toBe(5120);
+    // And the one whose measurement only the refusal kept is stamped too, so
+    // the retry of that stand-in write now has a threshold to be checked
+    // against.
+    expect((await record(driveB, unmeasuredId)).canonical_threshold).toBe(5120);
   });
 
   it("carry a value set on one desktop to the other, which then stamps with it", async () => {
