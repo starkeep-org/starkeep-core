@@ -58,7 +58,6 @@ import {
   isCategoryId,
   isKnownType,
   checkMetadataValues,
-  TYPES,
   type Category,
 } from "../../packages/protocol-primitives/src/types/core-types.js";
 import {
@@ -91,7 +90,6 @@ import {
   STAND_IN_MIME_TYPES,
   standardsFor,
   stampFor,
-  isStandInCategory,
   checkUserSettings,
   serializeUserSettings,
   settingsFromStandards,
@@ -129,8 +127,6 @@ import {
 } from "../../packages/shared-space-api/src/stand-ins/backlog.js";
 import { isStandInSlotConflict, loadStandInSummariesForPage } from "@starkeep/storage-adapter";
 import { createLibrarySettings } from "../../packages/sync-engine/src/library-settings.js";
-import { createRestampJob } from "./restamp-job.js";
-import { replaceImpact } from "../../packages/shared-space-api/src/stand-ins/restamp.js";
 import {
   renderStandInSummary,
   resolveContentRead,
@@ -421,19 +417,6 @@ function resolveCeilings(config: Pick<StarkeepConfig, "standInCeilings">): SyncD
  * records table. With the bytes this node holds, it tells the person roughly
  * what turning on "Keep originals here" would download.
  */
-/**
- * The categories a settings PUT asks to replace existing canonical stand-ins
- * in: `true` means both, a list names them, absence means none. Null for a
- * value that is none of these.
- */
-function replaceCategories(body: unknown): StandInCategory[] | null {
-  const raw = (body as { replaceExisting?: unknown } | null)?.replaceExisting;
-  if (raw === undefined || raw === false) return [];
-  if (raw === true) return [...STAND_IN_CATEGORIES];
-  if (!Array.isArray(raw) || !raw.every((c) => isStandInCategory(String(c)))) return null;
-  return [...new Set(raw as StandInCategory[])];
-}
-
 function originalBytesByCategory(db: RawDatabase): Record<StandInCategory, { count: number; bytes: number }> {
   const query = qb
     .selectFrom("shared_records")
@@ -923,41 +906,6 @@ async function main() {
   // /events is loopback-authorized with no per-app filtering and the data
   // plane (which is HMAC-authenticated and grant-checked) is the only place
   // record-shaped information should leave this process.
-  // "Replace existing canonical stand-ins": restamps existing originals in the
-  // background, resuming after a restart. Its writes nudge sync like any other.
-  const restampJob = createRestampJob({
-    db: localDb,
-    databaseAdapter,
-    clock,
-    onWritten: (records) =>
-      changeNotifier.emit({
-        eventType: "local-change-recorded",
-        recordIds: records.map((r) => r.id),
-        timestamp: records[records.length - 1]!.updatedAt,
-      }),
-  });
-  restampJob.resume();
-
-  /** Per category, the stamped originals whose stamp differs from the library's value. */
-  async function earlierThresholdCounts(): Promise<Record<StandInCategory, number>> {
-    const standards = librarySettings.standards();
-    const counts = {} as Record<StandInCategory, number>;
-    for (const category of STAND_IN_CATEGORIES) {
-      const types = TYPES.map((t) => t.id).filter((id) => typeCategory(id) === category);
-      counts[category] = await databaseAdapter.countRecords({
-        filters: [
-          { field: "type", operator: "in", value: types },
-          { field: "parentId", operator: "isNull" },
-          { field: "standInRole", operator: "isNull" },
-          { field: "deletedAt", operator: "isNull" },
-          { field: "canonicalThreshold", operator: "isNotNull" },
-          { field: "canonicalThreshold", operator: "neq", value: standards[category].canonicalThreshold },
-        ],
-      });
-    }
-    return counts;
-  }
-
   // A round that applied records may have brought a settings file, or a second
   // one beside the first. One refresh at a time, in arrival order.
   let settingsRefresh: Promise<void> = Promise.resolve();
@@ -1215,7 +1163,7 @@ async function main() {
       // surface that installs apps: the person sets them from admin-web, and
       // no installable app may, which is also why the file they are stored in
       // sits in the Drive-only `starkeep` category.
-      /^\/library\/stand-in-standards(\/impact)?$/,
+      /^\/library\/stand-in-standards$/,
     ];
     const TOKEN_AUTHORIZED_PATTERNS = [
       /^\/data\/files\/upload\/[^/]+$/,
@@ -3163,12 +3111,6 @@ async function main() {
             ]),
           ),
           backlog,
-          // "Replace existing canonical stand-ins": the running or last job.
-          restamp: restampJob.status(),
-          // Originals keeping a threshold other than the library's: those
-          // saved without replacing, and those the cloud kept because it had
-          // archived them.
-          earlierThreshold: await earlierThresholdCounts(),
         });
         return;
       }
@@ -3253,15 +3195,6 @@ async function main() {
           json(res, { error: "Body is not valid JSON" });
           return;
         }
-        const replace = replaceCategories(body);
-        if (replace === null) {
-          res.writeHead(422);
-          json(res, {
-            error: "the settings are not valid",
-            problems: ["replaceExisting must be true or a list of image and video"],
-          });
-          return;
-        }
         const requested = checkUserSettings(body);
         if (!requested.ok) {
           res.writeHead(422);
@@ -3287,32 +3220,7 @@ async function main() {
         );
         // The new file is the newest, so this tombstones the one it replaces.
         await refreshLibrarySettings();
-        const restamp =
-          replace.length > 0 ? await restampJob.start(replace, librarySettings.standards()) : null;
-        json(res, {
-          ok: true,
-          recordId: record.id,
-          current: settingsFromStandards(librarySettings.standards()),
-          restamp,
-        });
-        return;
-      }
-
-      // POST /library/stand-in-standards/impact — what "Replace existing
-      // canonical stand-ins" would do under the given values, per category:
-      // how many originals it restamps, how many new canonical stand-ins come
-      // from the current ones, how many are promoted from a smaller one, and
-      // how many need their original downloaded. Asked by the save dialog.
-      if (path === "/library/stand-in-standards/impact" && req.method === "POST") {
-        const requested = checkUserSettings(JSON.parse((await readBody(req)) || "{}"));
-        if (!requested.ok) {
-          res.writeHead(422);
-          json(res, { error: "the settings are not valid", problems: requested.problems });
-          return;
-        }
-        const target = standardsFromSettings(requested.settings, librarySettings.standards());
-        const types = TYPES.map((t) => t.id).filter((id) => isStandInCategory(typeCategory(id)));
-        json(res, { impact: await replaceImpact(databaseAdapter, target, types) });
+        json(res, { ok: true, recordId: record.id, current: settingsFromStandards(librarySettings.standards()) });
         return;
       }
 

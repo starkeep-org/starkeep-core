@@ -110,16 +110,6 @@ export interface InProcessTransportOptions {
    * `SyncEngineOptions.standards`. Defaults to the platform's defaults.
    */
   readonly standards?: () => StandInStandards;
-  /**
-   * Asked before a live incoming row replaces a live row this side holds.
-   * Answers the row to store instead, under this side's clock, or null to
-   * store the incoming row as it is. The replacement sits above the sender's
-   * watermark, so the same response carries it back.
-   *
-   * The cloud uses it to refuse a raised stamp on an archived original, whose
-   * replacement would need a restore nobody asked for.
-   */
-  readonly reviseIncoming?: (current: DataRecord, incoming: DataRecord) => Promise<DataRecord | null>;
   readonly keepLiveOnTombstone?: (
     current: DataRecord,
     incoming: DataRecord,
@@ -159,7 +149,6 @@ export function createInProcessSyncTransport(
     appSyncableSource,
     syncSharedRecords = true,
     keepLiveOnTombstone,
-    reviseIncoming,
     onApplied,
     standards = () => DEFAULT_STAND_IN_STANDARDS,
   } = options;
@@ -246,10 +235,6 @@ export function createInProcessSyncTransport(
           if (!rowAlreadyApplied) {
             clock.receive(snapshot.updatedAt);
             let row: DataRecord = snapshot;
-            const revised =
-              !snapshot.deletedAt && current !== null && !current.deletedAt && reviseIncoming
-                ? await reviseIncoming(current, snapshot)
-                : null;
             if (
               snapshot.deletedAt &&
               current !== null &&
@@ -259,9 +244,6 @@ export function createInProcessSyncTransport(
             ) {
               // Refused: the live row goes back out under this side's clock.
               row = { ...current, updatedAt: clock.now(), version: current.version + 1 };
-            } else if (revised) {
-              // Revised: this side keeps its own answer, which ships back.
-              row = revised;
             } else if (!snapshot.deletedAt) {
               // Two stand-ins for one slot: the one this side already holds
               // won, and the incoming one is stored as this side's tombstone so

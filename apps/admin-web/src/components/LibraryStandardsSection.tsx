@@ -19,9 +19,7 @@ import {
  * app that reads photos or videos, before the library holds any.
  *
  * A change applies to originals added from now on. Each existing original
- * keeps the threshold stamped on it, which the save dialog says before saving,
- * and the dialog offers "Replace existing canonical stand-ins" with a warning
- * shaped by the direction of the change and what it would cost.
+ * keeps the threshold stamped on it, which the save dialog says before saving.
  * Video resolution is advisory: it guides the encoder and changes nothing about
  * which originals archive, so a resolution change saves without the dialog.
  */
@@ -91,23 +89,14 @@ export function draftOf(view: Record<Category, CategoryView>): LibraryStandardsD
   };
 }
 
-/** The PUT body: the settings file's shape, and the categories to replace in. */
-export function settingsBodyOf(draft: LibraryStandardsDraft, replaceExisting: readonly Category[] = []): unknown {
+/** The PUT body: the settings file's shape. */
+export function settingsBodyOf(draft: LibraryStandardsDraft): unknown {
   return {
     standIns: {
       image: { canonicalThreshold: draft.image },
       video: { canonicalThreshold: draft.video, advisoryLongEdges: draft.videoEdges },
     },
-    ...(replaceExisting.length > 0 ? { replaceExisting } : {}),
   };
-}
-
-/** What replacing would do in one category; see `replaceImpact` in shared-space-api. */
-export interface ReplaceImpact {
-  restamp: number;
-  download: { count: number; bytes: number };
-  fromCanonical: number;
-  promoted: number;
 }
 
 /** The categories whose threshold differs between two drafts. */
@@ -313,14 +302,11 @@ export function LibraryStandardsFields({
 }
 
 /** Save a draft through the daemon. Returns the refusal's sentences, or none. */
-export async function saveLibraryStandards(
-  draft: LibraryStandardsDraft,
-  replaceExisting: readonly Category[] = [],
-): Promise<string[]> {
+export async function saveLibraryStandards(draft: LibraryStandardsDraft): Promise<string[]> {
   const res = await fetch("/api/library/stand-in-standards", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(settingsBodyOf(draft, replaceExisting)),
+    body: JSON.stringify(settingsBodyOf(draft)),
   });
   if (res.ok) return [];
   const body = (await res.json().catch(() => ({}))) as { problems?: string[]; error?: string };
@@ -333,8 +319,6 @@ export function LibraryStandardsSection() {
   const [status, setStatus] = useState<"loading" | "ready" | "offline" | "saving" | "saved">("loading");
   const [problems, setProblems] = useState<string[]>([]);
   const [confirming, setConfirming] = useState<Category[] | null>(null);
-  const [impact, setImpact] = useState<Record<Category, ReplaceImpact> | null>(null);
-  const [replace, setReplace] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -358,11 +342,11 @@ export function LibraryStandardsSection() {
     };
   }, []);
 
-  const save = useCallback(async (replaceIn: readonly Category[] = []) => {
+  const save = useCallback(async () => {
     if (!draft || !state) return;
     setConfirming(null);
     setStatus("saving");
-    const refused = await saveLibraryStandards(draft, replaceIn);
+    const refused = await saveLibraryStandards(draft);
     if (refused.length > 0) {
       setProblems(refused);
       setStatus("ready");
@@ -392,26 +376,9 @@ export function LibraryStandardsSection() {
     // A threshold change in a category that already holds originals needs the
     // person to know what happens to those originals. Nothing else does.
     const affected = changedThresholds(draft, saved).filter((c) => state.libraryOriginals[c].count > 0);
-    if (affected.length === 0) {
-      void save();
-      return;
-    }
-    setImpact(null);
-    setReplace(false);
-    setConfirming(affected);
-    fetch("/api/library/stand-in-standards/impact", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(settingsBodyOf(draft)),
-    })
-      .then((r) => r.json())
-      .then((body: { impact?: Record<Category, ReplaceImpact> }) => setImpact(body.impact ?? null))
-      .catch(() => setImpact(null));
+    if (affected.length > 0) setConfirming(affected);
+    else void save();
   };
-
-  // The categories the replacement would act on: changed here, and holding
-  // originals stamped with another value.
-  const replaceable = (confirming ?? []).filter((c) => (impact?.[c]?.restamp ?? 0) > 0);
 
   return (
     <section className="space-y-3">
@@ -455,82 +422,15 @@ export function LibraryStandardsSection() {
               on.
             </DialogDescription>
           </DialogHeader>
-          {replaceable.length > 0 && (
-            <div className="space-y-3 text-sm">
-              <label className="flex items-center gap-2 font-medium">
-                <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} />
-                Replace existing canonical stand-ins?
-              </label>
-              {replace &&
-                replaceable.map((c) => (
-                  <ReplaceWarning
-                    key={c}
-                    category={c}
-                    raise={draft[c] > saved[c]}
-                    impact={impact![c]}
-                  />
-                ))}
-            </div>
-          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirming(null)}>
               Cancel
             </Button>
-            <Button onClick={() => void save(replace ? replaceable : [])}>
-              {replace ? "Save and replace" : "Save"}
-            </Button>
+            <Button onClick={() => void save()}>Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </section>
-  );
-}
-
-/**
- * What replacing costs, by direction. A raise needs every affected original
- * brought to a device that derives; a decrease derives from the current
- * canonical stand-in, except for originals that stood in for themselves.
- */
-function ReplaceWarning({
-  category,
-  raise,
-  impact,
-}: {
-  category: Category;
-  raise: boolean;
-  impact: ReplaceImpact;
-}) {
-  const noun = CATEGORY_LABELS[category].toLowerCase();
-  if (raise) {
-    return (
-      <div role="alert" className="rounded-md border border-amber-500/50 p-3 text-xs space-y-1">
-        <p>
-          Replacing downloads every affected original to a device running an app such as Photos,
-          so the app can make a larger canonical stand-in. Cloud downloads cost money, and a large
-          library can take days. Originals below the new value stop archiving and stay in instant
-          storage, which raises the storage bill. Originals the cloud has already archived keep
-          their current canonical stand-in, because replacing those needs a paid restore.
-        </p>
-        <p className="font-medium">
-          Up to {impact.download.count.toLocaleString()} {noun}, {formatBytes(impact.download.bytes)} of
-          originals, to download.
-        </p>
-      </div>
-    );
-  }
-  return (
-    <div role="alert" className="rounded-md border p-3 text-xs space-y-1">
-      <p>
-        An app such as Photos makes each new canonical stand-in from the current one, so replacing
-        needs no download of the original. Originals that now stand in for themselves between the
-        new and the old value download once, so each can get a canonical stand-in and archive.
-      </p>
-      <p className="font-medium">
-        {(impact.fromCanonical + impact.promoted).toLocaleString()} {noun} made from their current
-        canonical stand-in; {impact.download.count.toLocaleString()} {noun}, {formatBytes(impact.download.bytes)},
-        to download once.
-      </p>
-    </div>
   );
 }
 

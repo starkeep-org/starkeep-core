@@ -37,7 +37,6 @@ describe("stand-in slot collisions across nodes", () => {
     opts: {
       syncState?: SyncStateStore;
       keepLiveOnTombstone?: Parameters<typeof createInProcessSyncTransport>[0]["keepLiveOnTombstone"];
-      reviseIncoming?: Parameters<typeof createInProcessSyncTransport>[0]["reviseIncoming"];
       onApplied?: Parameters<typeof createInProcessSyncTransport>[0]["onApplied"];
     } = {},
   ) {
@@ -47,7 +46,6 @@ describe("stand-in slot collisions across nodes", () => {
       objectStorage: cloud.storage,
       syncSharedRecords: true,
       ...(opts.keepLiveOnTombstone ? { keepLiveOnTombstone: opts.keepLiveOnTombstone } : {}),
-      ...(opts.reviseIncoming ? { reviseIncoming: opts.reviseIncoming } : {}),
       ...(opts.onApplied ? { onApplied: opts.onApplied } : {}),
     });
     return createSyncEngine({
@@ -205,20 +203,6 @@ describe("stand-in slot collisions across nodes", () => {
     expect(await liveIn(b, original.id, "smaller")).toEqual([fromA.id]);
     expect(await liveIn(cloud, original.id, "smaller")).toEqual([fromA.id]);
     expect((await cloud.db.get(fromB.id))?.deletedAt ?? null).not.toBeNull();
-  });
-
-  // The cloud's veto of a raised stamp on an archived original rides this hook.
-  it("stores the responder's revision of a live row, and ships it back", async () => {
-    const { a, cloud, stateA, original } = await withOriginalEverywhere(4272);
-    await a.db.put({ ...original, canonicalThreshold: 8192, updatedAt: a.clock.now(), version: original.version + 1 });
-    const reviseIncoming = async (current: DataRecord, incoming: DataRecord) =>
-      incoming.canonicalThreshold !== current.canonicalThreshold
-        ? { ...incoming, canonicalThreshold: current.canonicalThreshold, updatedAt: cloud.clock.now(), version: incoming.version + 1 }
-        : null;
-    await engine(a, cloud, { syncState: stateA, reviseIncoming }).exchange();
-    await engine(a, cloud, { syncState: stateA, reviseIncoming }).exchange();
-    expect((await cloud.db.get(original.id))!.canonicalThreshold).toBe(4272);
-    expect((await a.db.get(original.id))!.canonicalThreshold).toBe(4272);
   });
 
   it("keeps a live row the responder refuses to tombstone, and ships it back", async () => {

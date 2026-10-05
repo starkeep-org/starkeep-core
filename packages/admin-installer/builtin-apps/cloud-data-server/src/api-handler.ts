@@ -114,7 +114,6 @@ import {
   markSelfCanonical,
   stampUnstampedOriginals,
   awaitsStamp,
-  vetoRaisedStamp,
   standInExists,
   renderStandInSummary,
   resolveContentRead,
@@ -3982,9 +3981,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           keepLiveOnTombstone: (current, _incoming, exchange) =>
             keepCanonicalOfArchivedOriginal(db, current, exchange, cloudLibrarySettings.standards()),
           standards: () => cloudLibrarySettings.standards(),
-          // A raised stamp on an archived original would need a paid restore
-          // to act on, so the cloud keeps the prior stamp and ships it back.
-          reviseIncoming: (current, incoming) => vetoRaisedStamp(db, current, incoming, clock),
           // The Drive channel is where most stand-ins, originals and labels
           // reach the cloud, and its storage is already Drive's. A settings
           // file that arrived is read first, then every original a node
