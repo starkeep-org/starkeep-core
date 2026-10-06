@@ -3706,6 +3706,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           const plan = await planRecordDelete(db, existing);
           if (!plan.ok) return ok(plan.body, plan.status);
           const deleted = await applyRecordDelete(db, plan, clock);
+          // The archive tags have to come off. The transition is performed by a
+          // bucket lifecycle rule whose clock runs on object age with no view of
+          // any record, so a tag left behind fires on schedule and lands bytes
+          // nothing references in Deep Archive, owing a 180-day minimum. Delete
+          // time is the only moment the platform still holds that decision. Only
+          // the cloud holds the tags, which is why this is here and not in the
+          // planner. Never fails the request — see `runArchiveTriggers`.
+          await runArchiveTriggers(db, platformStorage, archiveTriggersFor(deleted, []));
           return ok({ deleted: true, ids: deleted.map((r) => r.id) });
         });
       }
