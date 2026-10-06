@@ -798,6 +798,58 @@ reason rule 2 of §9a gives. Naming a parameter this route does not have is a
 read named parameters as filters, so silently ignoring an unrecognized one would
 answer the whole library to a caller that asked for one record's children.
 
+### 9c. Finding out what was deleted
+
+The platform announces nothing to your app. When a record is deleted — by your
+app, by another app, or by the person in Drive — your app learns about it by
+asking, and the question is one more parameter on the route you already use.
+
+```
+# Every record deleted since your app last reconciled.
+GET /data/records
+  ?deleted=only
+  &updated_after=<the instant you last reconciled>
+  &limit=100
+
+# The library, and the tombstones, together.
+GET /data/records?deleted=include
+
+# How long a deleted item is kept, and therefore how often you must reconcile.
+GET /data/trash
+```
+
+`deleted` takes three values. `exclude` is the default, so a request that never
+names it answers live records exactly as it always did. `only` answers
+tombstones, and `include` answers both — which is what you need in order to tell
+"no such record" from "deliberately deleted". A misspelled value is a 400 rather
+than a silent `exclude`, because a reconciliation that asked for tombstones and
+received the live library would look like a library with nothing deleted.
+
+A tombstone is an ordinary record whose `deleted_at` carries the moment of
+deletion and whose `updated_at` carries the same clock reading, so
+`updated_after` works over it like any other row and no second feed exists to
+fall out of step with this one.
+
+**The guarantee, and its limit.** Deleted records are reaped after the library's
+retention window: the record row stays, and its files, its metadata row and its
+labels are removed. So the feed is complete for an app that reconciles **at
+least once per that window**, and an app that falls further behind must do a full
+reconcile against the live set instead — list what the library holds, and treat
+everything of yours that is not in it as gone.
+
+The window is a setting rather than a constant. `GET /data/trash` answers
+`retention_days`, and your app should read it rather than compile in the default
+of 30: a library whose owner chose a year is making a longer promise than your
+app would assume, and one who chose a week is making a shorter one.
+`retention_days: null` means that machine cannot read the library's settings file
+yet and so does not know the value; nothing is reaped while that is true, so an
+app can treat it as "no deadline right now" rather than as an error.
+
+**Your own housekeeping is yours.** The platform deletes the shared record and
+everything the platform owns about it. A row in your app's own table keyed by
+`record_id` is yours to remove, in the same route that deletes the record if your
+app is doing the deleting, and from this feed if another app or the person did.
+
 ## 10. Who authenticates the end user in your app
 
 **You do.** This is the single most important thing to know before you deploy

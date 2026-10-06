@@ -11,6 +11,35 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { StandInsSection } from "../src/components/StandInsSection";
 
+/**
+ * "Free up space"'s own panel.
+ *
+ * Three operator passes on this page each offer an "Estimate" — the right word for
+ * all three — so each one's section carries its name as a landmark and a case
+ * addresses the one it means.
+ */
+async function freeUpSpacePanel() {
+  return within(await screen.findByRole("region", { name: "Free up space" }));
+}
+
+async function panel(name: string) {
+  return within(await screen.findByRole("region", { name }));
+}
+
+/** A reap report, with only what a case cares about overridden. */
+function reapReport(over: Record<string, unknown> = {}) {
+  return {
+    keysConsidered: 3,
+    reaped: [{ objectStorageKey: "k1", sizeBytes: 2 * 1024 ** 3 }],
+    reclaimedBytes: 2 * 1024 ** 3,
+    refused: [{ objectStorageKey: "k2", reason: "live-record", detail: "" }],
+    retentionDays: 30,
+    archivedSkipped: 0,
+    dryRun: true,
+    ...over,
+  };
+}
+
 const STAND_INS = {
   ceilings: { image: 2560, video: null },
   configured: {},
@@ -83,6 +112,28 @@ describe("the stand-in section", () => {
             },
           };
         },
+        "POST /api/residency/reap": (call) => ({
+          body: reapReport({ dryRun: (call.body as { dryRun: boolean }).dryRun }),
+        }),
+        "POST /api/sync/verify": () => ({
+          body: {
+            channels: [
+              {
+                appId: "starkeep-drive",
+                result: {
+                  supported: true,
+                  localRows: 120,
+                  peerRows: 118,
+                  divergentBuckets: 1,
+                  missingLocally: 0,
+                  pendingUpload: 0,
+                  pendingDownload: 0,
+                },
+                error: null,
+              },
+            ],
+          },
+        }),
       }),
     );
   });
@@ -174,11 +225,14 @@ describe("the stand-in section", () => {
   it("frees space only from an estimate, and reports what each did", async () => {
     const user = userEvent.setup();
     render(<StandInsSection />);
-    const free = (await screen.findByRole("button", { name: "Free up space" })) as HTMLButtonElement;
+    // Scoped to its own section: three operator passes on this page each offer an
+    // "Estimate", which is the right word for all three.
+    const panel = await freeUpSpacePanel();
+    const free = panel.getByRole("button", { name: "Free up space" }) as HTMLButtonElement;
     expect(free.disabled).toBe(true);
 
-    await user.click(screen.getByRole("button", { name: "Estimate" }));
-    expect((await screen.findByRole("status")).textContent).toMatch(
+    await user.click(panel.getByRole("button", { name: "Estimate" }));
+    expect((await panel.findByRole("status")).textContent).toMatch(
       /^Would free 2 GiB from 1 file\(s\) of 3 GiB eligible\. Kept 1 that the cloud/,
     );
     expect(calls.at(-1)!.body).toEqual({ bytes: 10 * 1024 ** 3, scope: "originals", dryRun: true });
@@ -193,10 +247,11 @@ describe("the stand-in section", () => {
   it("asks for a fresh estimate when the scope changes", async () => {
     const user = userEvent.setup();
     render(<StandInsSection />);
-    await user.click(await screen.findByRole("button", { name: "Estimate" }));
-    await screen.findByRole("status");
+    const panel = await freeUpSpacePanel();
+    await user.click(panel.getByRole("button", { name: "Estimate" }));
+    await panel.findByRole("status");
     await user.selectOptions(screen.getByLabelText("What to remove"), "originals-and-above-ceiling");
-    expect((screen.getByRole("button", { name: "Free up space" }) as HTMLButtonElement).disabled).toBe(
+    expect((panel.getByRole("button", { name: "Free up space" }) as HTMLButtonElement).disabled).toBe(
       true,
     );
   });
@@ -221,8 +276,9 @@ describe("the stand-in section", () => {
     );
     const user = userEvent.setup();
     render(<StandInsSection />);
-    await user.click(await screen.findByRole("button", { name: "Estimate" }));
-    expect((await screen.findByRole("status")).textContent).toMatch(/not connected to a cloud/);
+    const panel = await freeUpSpacePanel();
+    await user.click(panel.getByRole("button", { name: "Estimate" }));
+    expect((await panel.findByRole("status")).textContent).toMatch(/not connected to a cloud/);
   });
 
   it("explains an offline data server rather than failing", async () => {
@@ -234,5 +290,130 @@ describe("the stand-in section", () => {
     );
     render(<StandInsSection />);
     expect(await screen.findByText(/isn't running/)).toBeTruthy();
+  });
+
+  describe("reclaiming deleted files", () => {
+    it("reclaims only from an estimate, like every other destructive pass", async () => {
+      const user = userEvent.setup();
+      render(<StandInsSection />);
+      const reap = await panel("Reclaim deleted files");
+      const run = reap.getByRole("button", { name: "Reclaim" }) as HTMLButtonElement;
+      expect(run.disabled).toBe(true);
+
+      await user.click(reap.getByRole("button", { name: "Estimate" }));
+      expect((await reap.findByRole("status")).textContent).toMatch(
+        /^Would reclaim 2 GiB from 1 file\(s\), of 3 deleted more than 30 days ago\. Kept 1\./,
+      );
+      expect(calls.at(-1)!.body).toEqual({ dryRun: true });
+
+      await user.click(run);
+      expect((await reap.findByRole("status")).textContent).toMatch(/^Reclaimed 2 GiB/);
+      expect(calls.at(-1)!.body).toEqual({ dryRun: false });
+      // Spent: another pass needs another estimate.
+      expect(run.disabled).toBe(true);
+    });
+
+    it("says it does not know the window rather than reporting a clean run", async () => {
+      // A host that cannot read the winning settings file reaps nothing, because
+      // reaping to the default under a library whose owner chose a year would destroy
+      // bytes the person was promised.
+      vi.stubGlobal(
+        "fetch",
+        stubFetch({
+          "GET /api/residency/stand-ins": () => ({ body: STAND_INS }),
+          "POST /api/residency/reap": () => ({
+            body: reapReport({ retentionDays: null, reaped: [], reclaimedBytes: 0, refused: [] }),
+          }),
+        }),
+      );
+      const user = userEvent.setup();
+      render(<StandInsSection />);
+      const reap = await panel("Reclaim deleted files");
+      await user.click(reap.getByRole("button", { name: "Estimate" }));
+      expect((await reap.findByRole("status")).textContent).toMatch(
+        /cannot read the library's settings file/,
+      );
+    });
+
+    it("names the deep-archive exception, so its standing cost stays visible", async () => {
+      vi.stubGlobal(
+        "fetch",
+        stubFetch({
+          "GET /api/residency/stand-ins": () => ({ body: STAND_INS }),
+          "POST /api/residency/reap": () => ({ body: reapReport({ archivedSkipped: 4 }) }),
+        }),
+      );
+      const user = userEvent.setup();
+      render(<StandInsSection />);
+      const reap = await panel("Reclaim deleted files");
+      await user.click(reap.getByRole("button", { name: "Estimate" }));
+      expect((await reap.findByRole("status")).textContent).toMatch(
+        /4 sit in deep archive, which charges a minimum storage period/,
+      );
+    });
+  });
+
+  describe("checking sync integrity", () => {
+    it("reports each channel's counts and what diverged", async () => {
+      const user = userEvent.setup();
+      render(<StandInsSection />);
+      const verify = await panel("Check sync integrity");
+      await user.click(verify.getByRole("button", { name: "Check now" }));
+      expect((await verify.findByRole("status")).textContent).toMatch(
+        /starkeep-drive — 120 rows here, 118 in the cloud — 1 the cloud is missing/,
+      );
+    });
+
+    it("says a peer that could not answer did not agree", async () => {
+      // Reporting zero divergence for a peer that cannot answer the digest would read
+      // as "verified", which is the one thing it is not.
+      vi.stubGlobal(
+        "fetch",
+        stubFetch({
+          "GET /api/residency/stand-ins": () => ({ body: STAND_INS }),
+          "POST /api/sync/verify": () => ({
+            body: {
+              channels: [
+                {
+                  appId: "photos",
+                  result: {
+                    supported: false,
+                    localRows: 0,
+                    peerRows: 0,
+                    divergentBuckets: 0,
+                    missingLocally: 0,
+                    pendingUpload: 0,
+                    pendingDownload: 0,
+                  },
+                  error: null,
+                },
+              ],
+            },
+          }),
+        }),
+      );
+      const user = userEvent.setup();
+      render(<StandInsSection />);
+      const verify = await panel("Check sync integrity");
+      await user.click(verify.getByRole("button", { name: "Check now" }));
+      expect((await verify.findByRole("status")).textContent).toMatch(
+        /did not answer the check/,
+      );
+    });
+
+    it("says so when no channel is running", async () => {
+      vi.stubGlobal(
+        "fetch",
+        stubFetch({
+          "GET /api/residency/stand-ins": () => ({ body: STAND_INS }),
+          "POST /api/sync/verify": () => ({ body: { channels: [] } }),
+        }),
+      );
+      const user = userEvent.setup();
+      render(<StandInsSection />);
+      const verify = await panel("Check sync integrity");
+      await user.click(verify.getByRole("button", { name: "Check now" }));
+      expect((await verify.findByRole("status")).textContent).toMatch(/No sync channels/);
+    });
   });
 });

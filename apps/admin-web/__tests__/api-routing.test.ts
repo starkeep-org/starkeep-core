@@ -54,7 +54,15 @@ vi.mock("../src/routes/exec-daemon-status", () => spy("exec-daemon-status", ["GE
 vi.mock("../src/routes/exec-deploy-outputs", () => spy("exec-deploy-outputs", ["GET"]));
 vi.mock("../src/routes/exec-stream", () => spy("exec-stream", ["POST"]));
 vi.mock("../src/routes/stand-ins", () =>
-  spy("stand-ins", ["GET", "PUT", "POST_FREE_UP_SPACE", "GET_LIBRARY_STANDARDS", "PUT_LIBRARY_STANDARDS"]),
+  spy("stand-ins", [
+    "GET",
+    "PUT",
+    "POST_FREE_UP_SPACE",
+    "POST_REAP",
+    "POST_VERIFY",
+    "GET_LIBRARY_STANDARDS",
+    "PUT_LIBRARY_STANDARDS",
+  ]),
 );
 vi.mock("../src/routes/runtime-config", () => spy("runtime-config", ["GET"]));
 
@@ -92,6 +100,8 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["GET", "/api/residency/stand-ins", "stand-ins", "GET"],
   ["PUT", "/api/residency/stand-ins", "stand-ins", "PUT"],
   ["POST", "/api/residency/free-up-space", "stand-ins", "POST_FREE_UP_SPACE"],
+  ["POST", "/api/residency/reap", "stand-ins", "POST_REAP"],
+  ["POST", "/api/sync/verify", "stand-ins", "POST_VERIFY"],
   ["GET", "/api/library/stand-in-standards", "stand-ins", "GET_LIBRARY_STANDARDS"],
   ["PUT", "/api/library/stand-in-standards", "stand-ins", "PUT_LIBRARY_STANDARDS"],
   ["GET", "/api/runtime-config", "runtime-config", "GET"],

@@ -1271,6 +1271,21 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     },
 
     /**
+     * See {@link SyncEngine.pushBlob}. The mirror of `fetchBlob`, with the two
+     * storages named the other way round and no arrival to record.
+     */
+    async pushBlob(manifest: FileSyncManifest): Promise<boolean> {
+      return transferBlobSafe(
+        manifest,
+        localObjectStorage,
+        remoteObjectStorage,
+        fileSyncEngine,
+        "upload",
+        manifest.objectStorageKey,
+      );
+    },
+
+    /**
      * See {@link SyncEngine.acquireBlob}.
      *
      * The same sequence `pullBlob` runs — decide, transfer, record — reached
