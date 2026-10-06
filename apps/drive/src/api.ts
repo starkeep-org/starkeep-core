@@ -10,6 +10,10 @@
  * server. `__tests__/api-routing.test.ts` drives this app instead, which is the
  * half no per-module test can cover.
  *
+ * Drive served four read routes and no writes until the Trash arrived. Restore is
+ * the one write, and it is a platform operation rather than an edit: a record's
+ * fields stay immutable, and what moves is the tombstone.
+ *
  * **Drive has no mount prefix and never will.** It carries no manifest,
  * installs nothing and never reaches Lambda, so there is no `/apps/<appId>` to
  * strip and no `honoUpstream` here.
@@ -20,6 +24,7 @@ import { Hono } from "hono";
 import * as events from "./routes/events";
 import * as records from "./routes/records";
 import * as recordFile from "./routes/record-file";
+import * as trash from "./routes/trash";
 import * as types from "./routes/types";
 
 export const api = new Hono().basePath("/api");
@@ -31,6 +36,10 @@ api.get("/records", (c) => records.GET(c.req.raw));
 // replaced handed Memo an encoded one — every deck reported "Deck not found".
 api.get("/records/:id/file", (c) => recordFile.GET(c.req.raw, c.req.param("id")));
 api.get("/types", () => types.GET());
+// The Trash, and the one write Drive has: a restore. The id arrives decoded from
+// Hono, which is what the handler needs — a record id is looked up as itself.
+api.get("/trash", () => trash.GET());
+api.post("/trash/:id/restore", (c) => trash.RESTORE(c.req.param("id")));
 
 // An unrouted `/api/*` path is a mistake in the browser half, and saying so in
 // JSON keeps it from being parsed as the shell — which is what a fallback to

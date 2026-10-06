@@ -23,6 +23,12 @@ function spy(moduleName: string) {
       seen.push({ module: moduleName, url: req?.url ?? "", id });
       return Response.json({ module: moduleName });
     },
+    // The Trash's restore: the one write Drive serves, and the only handler whose
+    // export is not `GET`.
+    RESTORE: (id: string) => {
+      seen.push({ module: `${moduleName}:restore`, url: "", id });
+      return Response.json({ module: moduleName });
+    },
   };
 }
 
@@ -30,6 +36,7 @@ vi.mock("../src/routes/events", () => spy("events"));
 vi.mock("../src/routes/records", () => spy("records"));
 vi.mock("../src/routes/record-file", () => spy("record-file"));
 vi.mock("../src/routes/types", () => spy("types"));
+vi.mock("../src/routes/trash", () => spy("trash"));
 
 const { api } = await import("../src/api");
 
@@ -49,6 +56,8 @@ const ROUTES: Array<[string, string, string]> = [
   ["GET", "/api/records", "records"],
   ["GET", "/api/records/rec-1/file", "record-file"],
   ["GET", "/api/types", "types"],
+  ["GET", "/api/trash", "trash"],
+  ["POST", "/api/trash/rec-1/restore", "trash:restore"],
 ];
 
 describe("every declared route reaches its handler", () => {
@@ -70,7 +79,6 @@ describe("every declared route reaches its handler", () => {
     const declared = ROUTES.map(([method, path]) =>
       `${method} ${path.replace("/rec-1/", "/:id/")}`,
     ).sort();
-
     expect(mounted).toEqual(declared);
   });
 });
@@ -101,6 +109,13 @@ describe("an unrouted path", () => {
     expect(res.status).toBe(404);
     expect(((await res.json()) as { error: string }).error).toContain("GET /api/nope");
     expect(seen).toEqual([]);
+  });
+
+  it("reaches the Trash's restore with the id decoded", async () => {
+    await call("POST", "/api/trash/rec%2Fwith%2Fslashes/restore");
+    expect(seen).toEqual([
+      expect.objectContaining({ module: "trash:restore", id: "rec/with/slashes" }),
+    ]);
   });
 
   it("answers 404 for a method no route declares", async () => {

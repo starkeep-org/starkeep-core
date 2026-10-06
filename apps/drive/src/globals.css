@@ -160,3 +160,29 @@ td a:hover {
   border-color: #27384a;
   background: #152130;
 }
+
+/* A small action inside a table row — the Trash's restore. */
+.row-action {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 2px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.row-action:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+/* The scheduled deletion date, which is the whole promise a Trash makes. */
+.deletes-at {
+  color: #e6c98a;
+  white-space: nowrap;
+}
+
+.deletes-at.unknown {
+  color: var(--muted);
+}

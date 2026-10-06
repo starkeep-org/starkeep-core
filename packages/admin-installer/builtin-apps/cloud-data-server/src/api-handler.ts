@@ -88,6 +88,7 @@ import type {
 import {
   createInProcessSyncTransport,
   createLibrarySettings,
+  reapDeleted,
   sanitizeExchangeRequest,
   InvalidExchangeRequest,
 } from "@starkeep/sync-engine";
@@ -3542,6 +3543,31 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         })),
         nextCursor: page.nextCursor,
       });
+    }
+
+    // POST /apps/{appId}/data/reap — reclaim the bytes of items deleted longer ago
+    // than the library's retention window.
+    //
+    // Body: { dryRun? }. Gated on `allAccess`, which is Starkeep Drive, the
+    // User-Data-Owner: this is a platform operation over the whole library rather
+    // than an app write, and the identity that holds custody of shared records is
+    // the only one that may ask for it.
+    //
+    // Manual at first, so the first version is observable: a dry run says what
+    // would go and the report names every refusal with its reason.
+    if (method === "POST" && subPath === "/data/reap") {
+      if (!grants.allAccess) return clientErr("Forbidden", 403);
+      const body = event.body ? (JSON.parse(event.body) as { dryRun?: unknown }) : {};
+      const report = await reapDeleted(
+        { databaseAdapter: db, objectStorage: storage },
+        {
+          // Null when the cloud cannot read the winning settings file, and a reaper
+          // in the dark reaps nothing.
+          retentionDays: cloudLibrarySettings.retentionDays(),
+          dryRun: body.dryRun === true,
+        },
+      );
+      return ok(report);
     }
 
     // GET /apps/{appId}/data/records/:id/content-url?size=<n|canonical>

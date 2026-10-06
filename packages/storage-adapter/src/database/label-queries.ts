@@ -262,6 +262,26 @@ export function buildRestoreLabelsForRecord(
     .compile();
 }
 
+/**
+ * Remove every label row on a record outright — the reaper's hard delete.
+ *
+ * The one place a label row is destroyed rather than tombstoned, and only at the
+ * end of the retention window, when the record's bytes go and nothing will restore
+ * it. Every other path retracts, because a retraction is what syncs.
+ *
+ * The record row itself is deliberately *not* reaped: `verify()` counts tombstone
+ * rows, so a missing record tombstone reads as a hole and gets re-shipped from a
+ * peer. A label tombstone is not counted that way, so removing it is safe — and it
+ * is what keeps the label table from growing without bound.
+ */
+export function buildDeleteLabelsForRecord(
+  k: Kysely<LabelDb>,
+  dialect: LabelDialect,
+  recordId: StarkeepId,
+): CompiledQuery {
+  return k.deleteFrom(dialect.table).where("record_id", "=", recordId).compile();
+}
+
 /** Forward path: live labels on a page of records, one PK-prefix seek. */
 export function buildLabelsByRecordIds(
   k: Kysely<LabelDb>,

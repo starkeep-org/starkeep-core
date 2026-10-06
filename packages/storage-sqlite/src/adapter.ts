@@ -67,6 +67,7 @@ import {
   buildQueryLabels,
   buildTombstoneLabelsForRecord,
   buildRestoreLabelsForRecord,
+  buildDeleteLabelsForRecord,
   groupLabelsByRecordId,
   emptyLabelPage,
   LABEL_QUERY_TARGET,
@@ -737,6 +738,11 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     hlc: HLCTimestamp,
   ): Promise<void> {
     const query = buildRestoreLabelsForRecord(qb, LABELS, recordId, deletedAt, hlc);
+    this.runStmt(query.sql, ...query.parameters);
+  }
+
+  async deleteLabelsForRecord(recordId: StarkeepId): Promise<void> {
+    const query = buildDeleteLabelsForRecord(qb, LABELS, recordId);
     this.runStmt(query.sql, ...query.parameters);
   }
 }

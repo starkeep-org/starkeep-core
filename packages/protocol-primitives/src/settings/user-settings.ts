@@ -39,6 +39,15 @@ import {
 } from "../stand-ins/standards.js";
 import { SETTINGS_TYPE_ID } from "../types/core-types.js";
 
+/**
+ * How long a deleted item stays recoverable when the settings file says nothing.
+ *
+ * Long enough that a person who notices a mistake a fortnight later still has the
+ * item, and short enough that the tombstone set stays a bounded log rather than a
+ * second copy of the library.
+ */
+export const DEFAULT_TRASH_RETENTION_DAYS = 30;
+
 /** The settings file's name, as Drive shows it. */
 export const USER_SETTINGS_FILE_NAME = "starkeep-user-settings.json";
 
@@ -51,6 +60,21 @@ export const USER_SETTINGS_MIME_TYPE = "application/json";
  * when a newer build adds a setting.
  */
 export interface UserSettings {
+  /**
+   * How long a deleted item stays recoverable, and how long its bytes stay.
+   *
+   * One window for both, deliberately. A Trash view that promised a restore date
+   * while the reaper worked to another number would be promising something the
+   * platform does not hold to, and a restore inside this window is pure row work
+   * precisely because the reaper has not touched the bytes yet.
+   *
+   * It is also the guarantee an app reads: an app that reconciles at least once
+   * per window gets a complete answer from `deleted=only&updated_after=<hlc>`,
+   * and an app that falls further behind must do a full reconcile against the
+   * live set. That is why the value is a setting an app can read rather than a
+   * constant compiled into one.
+   */
+  readonly trash?: { readonly retentionDays?: number };
   readonly standIns?: {
     readonly image?: { readonly canonicalThreshold?: number };
     readonly video?: {
@@ -62,6 +86,14 @@ export interface UserSettings {
       };
     };
   };
+}
+
+/** How long a deleted item stays recoverable under a settings file. */
+export function retentionDaysFromSettings(
+  settings: UserSettings,
+  fallback: number = DEFAULT_TRASH_RETENTION_DAYS,
+): number {
+  return settings.trash?.retentionDays ?? fallback;
 }
 
 /** The library's stand-in standards under a settings file. */
@@ -126,6 +158,15 @@ export type UserSettingsCheck =
 export function checkUserSettings(value: unknown): UserSettingsCheck {
   const problems: string[] = [];
   if (!isObject(value)) return { ok: false, problems: ["the settings must be a JSON object"] };
+  const trash = value["trash"];
+  if (trash !== undefined && !isObject(trash)) {
+    problems.push("trash must be an object");
+  } else if (isObject(trash)) {
+    const days = trash["retentionDays"];
+    if (days !== undefined && !isPositiveInteger(days)) {
+      problems.push("trash.retentionDays must be a positive whole number of days");
+    }
+  }
   const standIns = value["standIns"];
   if (standIns !== undefined && !isObject(standIns)) problems.push("standIns must be an object");
   const categories = isObject(standIns) ? standIns : {};

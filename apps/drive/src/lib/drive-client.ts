@@ -133,6 +133,8 @@ export interface DriveRecord {
   size_bytes: number | null;
   original_filename: string | null;
   parent_id: string | null;
+  /** Null on a live record; the moment of deletion on a tombstone. */
+  deleted_at?: string | null;
 }
 
 export interface DriveTypeSummary {
@@ -156,6 +158,69 @@ export async function listRecords(type?: string): Promise<DriveRecord[]> {
 export async function listTypes(): Promise<DriveTypeSummary[]> {
   const { types } = await ldsGet<{ types: DriveTypeSummary[] }>("/data/types");
   return types;
+}
+
+/**
+ * The library's promise about a deleted item: how long it stays recoverable, and
+ * how long its bytes stay.
+ *
+ * `retention_days: null` means this node cannot read the winning settings file, so
+ * it does not know the library's value. A Trash view then shows no date rather than
+ * a date it made up, and the reaper reaps nothing.
+ */
+export interface TrashPolicy {
+  retention_days: number | null;
+  default_retention_days: number;
+  knows_library_value: boolean;
+}
+
+export async function getTrashPolicy(): Promise<TrashPolicy> {
+  return ldsGet<TrashPolicy>("/data/trash");
+}
+
+/**
+ * Deleted records, newest deletion first.
+ *
+ * `deleted=only` is the server's own parameter rather than a `where` clause: no
+ * caller can name `deleted_at`, which is what keeps the reading from being
+ * contradicted. The same request with `updated_after=` is an app's delete feed.
+ */
+export async function listDeletedRecords(): Promise<DriveRecord[]> {
+  const qs = new URLSearchParams({ limit: "1000", deleted: "only" });
+  const { records } = await ldsGet<{ records: DriveRecord[] }>(
+    `/data/records?${qs.toString()}`,
+  );
+  return records;
+}
+
+/**
+ * Take one delete back, through the planner pair the delete itself used.
+ *
+ * Exact inside the retention window, because nothing was destroyed: the reaper
+ * performs every hard delete and it has not run on this item yet.
+ */
+export async function restoreRecord(id: string): Promise<{ ids: string[] }> {
+  const secret = readDriveSecret();
+  if (!secret) throw new DriveNotInstalledError();
+  const path = `/data/records/${encodeURIComponent(id)}/restore`;
+  const res = await fetch(`${LDS_URL}${path}`, {
+    method: "POST",
+    headers: {
+      ...signRequest({ appId: DRIVE_APP_ID, hmacSecret: secret, method: "POST", path, body: "" }),
+    },
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const parsed = JSON.parse(body) as { error?: string; detail?: string };
+      message = parsed.detail ?? parsed.error ?? message;
+    } catch {
+      /* non-JSON body */
+    }
+    throw new Error(message);
+  }
+  return JSON.parse(body) as { ids: string[] };
 }
 
 export interface FileUrl {
