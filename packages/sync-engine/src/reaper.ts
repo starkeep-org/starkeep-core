@@ -44,6 +44,20 @@
  * maximum on receive, can only push a tombstone's wall time *forward*, which makes
  * a reap late rather than early — the safe direction.
  *
+ * ## Borrowed bytes
+ *
+ * A node's store can answer for bytes it does not hold: a symlink into a watched
+ * folder on a laptop, a camera-roll alias on a phone. Reaping such a key unlinks
+ * the alias and frees nothing, which is why "Free up space" refuses one too.
+ *
+ * The refusal covers the key whole, including the metadata and label rows the
+ * byte deletion carries. Those rows are what a restore brings back, and they are
+ * recoverable only while they exist — a hard-deleted metadata row makes a
+ * restored photograph dimensionless for ever. On a host whose bytes are still
+ * readable the restore is still worth something, so nothing about the record is
+ * destroyed there. The person's own file is never at risk either way: `delete`
+ * unlinks the entry inside the object store and never its target.
+ *
  * ## Archived objects
  *
  * Skipped for now. An object in Deep Archive owes a 180-day minimum storage
@@ -98,7 +112,7 @@ export interface ReapedKey {
 
 export interface ReapRefusal {
   readonly objectStorageKey: string;
-  readonly reason: "live-record" | "within-window" | "archived" | "absent";
+  readonly reason: "live-record" | "within-window" | "archived" | "absent" | "borrowed";
   readonly detail: string;
 }
 
@@ -123,6 +137,13 @@ export interface ReaperDeps {
   readonly databaseAdapter: DatabaseAdapter;
   /** This host's own store: the cloud's bucket, or a node's object directory. */
   readonly objectStorage: ObjectStorageAdapter;
+  /**
+   * Whether `objectStorage` answers for these bytes without holding them. See
+   * the module note on borrowed bytes, and `ResidencyManagerOptions.borrowsBytes`
+   * for the hosts that answer yes. Absent: every key the store has is held here,
+   * which is the cloud's case.
+   */
+  readonly borrowsBytes?: (objectStorageKey: string) => boolean | Promise<boolean>;
 }
 
 /**
@@ -196,6 +217,18 @@ export async function reapDeleted(deps: ReaperDeps, request: ReapRequest): Promi
         objectStorageKey: key,
         reason: "within-window",
         detail: "a record on these bytes was deleted inside the retention window",
+      });
+      continue;
+    }
+
+    if (await deps.borrowsBytes?.(key)) {
+      // Borrowed bytes, and the whole key is left alone rather than just its
+      // removal skipped. See the module note: the bytes stay readable here, so
+      // the rows that describe them have to stay too.
+      refused.push({
+        objectStorageKey: key,
+        reason: "borrowed",
+        detail: "this host only links to these bytes, so removing the key would free nothing",
       });
       continue;
     }
